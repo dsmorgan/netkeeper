@@ -3,10 +3,10 @@ host = "127.0.0.1"
 port = 8000
 
 [me]
-name = "David Morgan"
-website = "https://dsm.tnkr.fun"
+name = "Your Name"
+website = "https://example.com"
 scheduling_link = ""
-signature = "David"
+signature = "Your first name"
 city = ""
 
 [linkedin]

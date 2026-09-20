@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import pytest
+
 from netkeeper.paths import config_candidates, data_dir, ensure_data_dir
 
 
