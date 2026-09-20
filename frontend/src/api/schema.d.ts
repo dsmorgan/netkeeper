@@ -4,6 +4,70 @@
  */
 
 export interface paths {
+    "/api/v1/contacts/{contact_id}/interactions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Interactions
+         * @description The contact's interactions, newest first.
+         */
+        get: operations["list_interactions"];
+        put?: never;
+        /**
+         * Create Interaction
+         * @description Record an interaction. An outbound kind moves the contact's `last_contacted_at`.
+         */
+        post: operations["create_interaction"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/notes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Contact Notes
+         * @description Replace the contact's notes (Markdown, stored as sent).
+         */
+        put: operations["set_contact_notes"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Timeline
+         * @description Interactions and snapshots interleaved, newest first, cursor paged by `before`.
+         */
+        get: operations["get_timeline"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -36,6 +100,30 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/interactions/{interaction_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Interaction
+         * @description Delete an interaction; the contact's `last_contacted_at` follows.
+         */
+        delete: operations["delete_interaction"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Interaction
+         * @description Change an interaction's fields; the contact's `last_contacted_at` follows.
+         */
+        patch: operations["update_interaction"];
         trace?: never;
     };
     "/api/v1/me": {
@@ -96,6 +184,16 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * ContactSource
+         * @description Where a row came from. On ``contacts`` the first source; children carry their own.
+         *
+         *     The order is the precedence for LinkedIn fields (spec 10.5): ``sync`` beats
+         *     ``archive`` beats ``csv`` beats ``manual``, except for the fields a person
+         *     owns (``preferred_name``, ``notes``, ``met``, tags), where ``manual`` wins.
+         * @enum {string}
+         */
+        ContactSource: "sync" | "archive" | "csv" | "manual";
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -110,6 +208,126 @@ export interface components {
             status: "ok";
             /** Version */
             version: string;
+        };
+        /**
+         * InteractionIn
+         * @description A new interaction. ``at`` must carry a timezone; it is stored as UTC.
+         */
+        InteractionIn: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            kind: components["schemas"]["InteractionKind"];
+            /** Message Id */
+            message_id?: number | null;
+            /** Summary */
+            summary?: string | null;
+        };
+        /**
+         * InteractionKind
+         * @description What happened between you and a contact. ``*_out`` is you reaching out.
+         * @enum {string}
+         */
+        InteractionKind: "note" | "call" | "meeting" | "email_out" | "email_in" | "li_out" | "li_in" | "li_view";
+        /** InteractionOut */
+        InteractionOut: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Contact Id */
+            contact_id: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Id */
+            id: number;
+            kind: components["schemas"]["InteractionKind"];
+            /** Message Id */
+            message_id: number | null;
+            source: components["schemas"]["ContactSource"];
+            /** Summary */
+            summary: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * InteractionPage
+         * @description One page of a contact's interactions, newest first, and the total count.
+         */
+        InteractionPage: {
+            /** Items */
+            items: components["schemas"]["InteractionOut"][];
+            /** Total */
+            total: number;
+        };
+        /**
+         * InteractionPatch
+         * @description Fields to change on an interaction; a field left out is untouched.
+         *
+         *     ``summary`` and ``message_id`` sent as ``null`` are cleared. ``kind`` and
+         *     ``at`` cannot be null, so ``null`` means "leave it".
+         */
+        InteractionPatch: {
+            /** At */
+            at?: string | null;
+            kind?: components["schemas"]["InteractionKind"] | null;
+            /** Message Id */
+            message_id?: number | null;
+            /** Summary */
+            summary?: string | null;
+        };
+        /**
+         * NotesIn
+         * @description The contact's notes, Markdown, replaced whole; ``null`` clears them.
+         */
+        NotesIn: {
+            /** Notes */
+            notes: string | null;
+        };
+        /** NotesOut */
+        NotesOut: {
+            /** Contact Id */
+            contact_id: number;
+            /** Notes */
+            notes: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * SnapshotOut
+         * @description The headline and job as they were at ``observed_at`` (spec 8.1).
+         */
+        SnapshotOut: {
+            /** Contact Id */
+            contact_id: number;
+            /** Current Company */
+            current_company: string | null;
+            /** Current Title */
+            current_title: string | null;
+            /** Headline */
+            headline: string | null;
+            /** Id */
+            id: number;
+            /** Location */
+            location: string | null;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            source: components["schemas"]["ContactSource"];
         };
         /**
          * TaskAccepted
@@ -139,6 +357,48 @@ export interface components {
              * @enum {string}
              */
             status: "pending" | "running" | "succeeded" | "failed";
+        };
+        /** TimelineInteraction */
+        TimelineInteraction: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            interaction: components["schemas"]["InteractionOut"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "interaction";
+        };
+        /**
+         * TimelinePage
+         * @description Interactions and snapshots interleaved, newest first.
+         *
+         *     ``next_before`` is the ``before`` for the next page, or ``null`` when this is
+         *     the last one. A page may run past ``limit`` when entries share a timestamp
+         *     at its end, so a cursor never skips one.
+         */
+        TimelinePage: {
+            /** Items */
+            items: (components["schemas"]["TimelineInteraction"] | components["schemas"]["TimelineSnapshot"])[];
+            /** Next Before */
+            next_before: string | null;
+        };
+        /** TimelineSnapshot */
+        TimelineSnapshot: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "snapshot";
+            snapshot: components["schemas"]["SnapshotOut"];
         };
         /**
          * UserKind
@@ -179,6 +439,176 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_interactions: {
+        parameters: {
+            query?: {
+                /** @description Items per page. */
+                limit?: number;
+                /** @description Items to skip. */
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InteractionPage"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_interaction: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InteractionIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InteractionOut"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_contact_notes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotesIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotesOut"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_timeline: {
+        parameters: {
+            query?: {
+                /** @description Items per page. */
+                limit?: number;
+                /** @description Cursor: only entries older than this timestamp. From `next_before`. */
+                before?: string | null;
+            };
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimelinePage"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     stream_events: {
         parameters: {
             query?: never;
@@ -215,6 +645,84 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthOut"];
+                };
+            };
+        };
+    };
+    delete_interaction: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                interaction_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such interaction */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_interaction: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                interaction_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InteractionPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InteractionOut"];
+                };
+            };
+            /** @description No such interaction */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
