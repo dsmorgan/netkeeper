@@ -216,8 +216,6 @@ Deferred until the local form has matured, and decided by a future ADR: login an
 netkeeper/
 ├── pyproject.toml            # package "netkeeper", console script "netkeeper"
 ├── uv.lock
-├── alembic.ini
-├── alembic/
 ├── config.example.toml
 ├── Dockerfile
 ├── docker-compose.yml
@@ -226,6 +224,9 @@ netkeeper/
 │   ├── cli.py                # Typer app
 │   ├── config.py             # TOML Settings dataclass, path resolution
 │   ├── db.py                 # engine, session_scope()
+│   ├── migrations.py         # run Alembic programmatically (db upgrade|current|revision)
+│   ├── alembic.ini
+│   ├── alembic/              # env.py, script.py.mako, versions/; shipped in the wheel
 │   ├── paths.py              # data dir resolution per platform
 │   ├── models/               # ORM: contacts.py, campaigns.py, runs.py, settings.py
 │   ├── linkedin/
