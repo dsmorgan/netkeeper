@@ -280,7 +280,8 @@ def main() -> int:
             numbers[m.group(1)] = number
 
     created: list[Item | Checkpoint] = []
-    for thing in [*wanted_items, *wanted_cps]:
+    things: list[Item | Checkpoint] = [*wanted_items, *wanted_cps]
+    for thing in things:
         if thing.id in numbers:
             print(f"exists: {thing.issue_title} (#{numbers[thing.id]})")
             continue
