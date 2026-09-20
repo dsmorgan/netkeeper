@@ -6,7 +6,7 @@ Keep your professional network warm.
 
 netkeeper pulls your 1st-degree LinkedIn connections and their contact info into a local database, helps you sort out who you actually know, and runs reconnect-and-follow-up sequences over Gmail and LinkedIn messaging. It replaces the manual workflow of exporting from LinkedIn, sorting a spreadsheet, scraping profiles with a separate tool, and mailing through a bulk-mail tool, with one application that runs on your Mac.
 
-**Status: pre-alpha.** The [architecture spec](docs/architecture.md) and the [implementation guide](docs/implementation-guide.md) are complete. There is no runnable code yet. Watch the repository or check the [changelog](CHANGELOG.md) for progress.
+**Status: pre-alpha.** The [architecture spec](docs/architecture.md) and the [implementation guide](docs/implementation-guide.md) are complete. Phase 0 (scaffold, API, frontend shell, CI, launchd) is done; phase 1 (import, CRM, triage) is in progress. See the changelog. Watch the repository or check the [changelog](CHANGELOG.md) for progress.
 
 ## What it does
 

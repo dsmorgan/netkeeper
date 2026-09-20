@@ -16,6 +16,8 @@ from typing import Any
 
 import pytest
 
+from netkeeper.paths import data_dir
+
 ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = ROOT / "scripts" / "install-launchd.sh"
 WRAPPER = ROOT / "scripts" / "serve-launchd.sh"
@@ -41,10 +43,14 @@ def run_sh(
 
 
 def run_installer(
-    *args: str, home: Path, uname: str = "Darwin", cwd: Path | None = None
+    *args: str,
+    home: Path,
+    uname: str = "Darwin",
+    cwd: Path | None = None,
+    script: Path = INSTALLER,
 ) -> subprocess.CompletedProcess[str]:
     env = {"HOME": str(home), "NETKEEPER_LAUNCHD_UNAME": uname}
-    return run_sh(INSTALLER, *args, env=env, cwd=cwd)
+    return run_sh(script, *args, env=env, cwd=cwd)
 
 
 def plist_in(stdout: str) -> dict[str, Any]:
@@ -101,11 +107,63 @@ def test_dry_run_without_data_dir_leaves_the_platform_default(tmp_path: Path) ->
     assert plist["StandardErrorPath"] == str(logs / "serve.err.log")
 
 
+def test_default_log_dir_matches_the_apps_macos_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The installer hardcodes the macOS default; this fails if paths.py moves it."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    expected = data_dir()
+    assert expected.is_relative_to(tmp_path)
+    proc = run_installer("--dry-run", home=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    plist = plist_in(proc.stdout)
+    assert plist["StandardOutPath"] == str(expected / "logs" / "serve.log")
+    assert plist["StandardErrorPath"] == str(expected / "logs" / "serve.err.log")
+
+
 def test_relative_data_dir_is_made_absolute(tmp_path: Path) -> None:
     proc = run_installer("--dry-run", "--data-dir", "nk-data", home=tmp_path, cwd=tmp_path)
     assert proc.returncode == 0, proc.stderr
     plist = plist_in(proc.stdout)
     assert plist["EnvironmentVariables"] == {"NETKEEPER_DATA": str(tmp_path / "nk-data")}
+
+
+@pytest.mark.parametrize("name", ["nk data", "nk & <data>"])
+def test_data_dir_with_spaces_and_xml_characters_round_trips(tmp_path: Path, name: str) -> None:
+    data = tmp_path / name
+    proc = run_installer("--dry-run", "--data-dir", str(data), home=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    plist = plist_in(proc.stdout)
+    assert plist["EnvironmentVariables"] == {"NETKEEPER_DATA": str(data)}
+    assert plist["StandardOutPath"] == str(data / "logs" / "serve.log")
+    assert plist["StandardErrorPath"] == str(data / "logs" / "serve.err.log")
+
+
+def test_equals_forms_are_accepted(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    proc = run_installer(
+        "--dry-run", f"--data-dir={data}", "--host=0.0.0.0", "--port=65535", home=tmp_path
+    )
+    assert proc.returncode == 0, proc.stderr
+    plist = plist_in(proc.stdout)
+    assert plist["EnvironmentVariables"] == {"NETKEEPER_DATA": str(data)}
+    assert plist["ProgramArguments"] == [str(WRAPPER), "--host", "0.0.0.0", "--port", "65535"]
+
+
+def test_installer_through_a_symlink_finds_the_real_repo(tmp_path: Path) -> None:
+    absolute = tmp_path / "bin" / "install-launchd.sh"
+    absolute.parent.mkdir()
+    absolute.symlink_to(INSTALLER)
+    relative = tmp_path / "bin" / "nested" / "install.sh"
+    relative.parent.mkdir()
+    relative.symlink_to(os.path.relpath(INSTALLER, relative.parent))
+    for link in (absolute, relative):
+        proc = run_installer("--dry-run", home=tmp_path, script=link)
+        assert proc.returncode == 0, proc.stderr
+        plist = plist_in(proc.stdout)
+        assert plist["WorkingDirectory"] == str(ROOT), link
+        assert plist["ProgramArguments"][0] == str(WRAPPER), link
 
 
 def test_help_exits_zero(tmp_path: Path) -> None:
@@ -137,9 +195,14 @@ def test_refuses_to_run_off_macos(tmp_path: Path) -> None:
     [
         ["--dry-run", "--bogus"],
         ["--dry-run", "--port", "eighty"],
+        ["--dry-run", "--port", "0"],
+        ["--dry-run", "--port", "65536"],
+        ["--dry-run", "--port=99999999999999999999"],
         ["--dry-run", "--port"],
         ["--dry-run", "--data-dir"],
+        ["--dry-run", "--data-dir="],
         ["--dry-run", "--host"],
+        ["--dry-run", "--host="],
     ],
 )
 def test_bad_arguments_exit_2_with_usage(tmp_path: Path, args: list[str]) -> None:
@@ -167,3 +230,22 @@ def test_wrapper_fails_clearly_without_the_venv(tmp_path: Path) -> None:
     proc = run_sh(WRAPPER, env={"NETKEEPER_BIN": str(tmp_path / "missing")})
     assert proc.returncode == 1
     assert "make install" in proc.stderr
+
+
+def test_wrapper_through_a_symlink_resolves_the_real_repo(tmp_path: Path) -> None:
+    """A copy of the wrapper in a repo-shaped tmp dir, reached through a relative symlink.
+
+    Without a .venv there, the error names the venv path under the copy's repo, not
+    under the symlink's directory, which shows the resolver followed the link.
+    """
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    real = repo / "scripts" / "serve-launchd.sh"
+    shutil.copy(WRAPPER, real)
+    link = tmp_path / "elsewhere" / "serve.sh"
+    link.parent.mkdir()
+    link.symlink_to(os.path.relpath(real, link.parent))
+    proc = run_sh(link, env={})
+    assert proc.returncode == 1
+    assert str(repo.resolve() / ".venv" / "bin" / "netkeeper") in proc.stderr
+    assert "elsewhere" not in proc.stderr
