@@ -233,7 +233,7 @@ Done when: fixtures cover each path, including the candidate path; merge is tran
 
 **P1-03 LinkedIn archive importer** · lane core · M
 Goal: read the archive zip or individual CSVs; skip the preamble lines; import `Connections.csv` with provenance `archive`; import `messages.csv` and `Invitations.csv` as interactions and triage evidence.
-Depends on: P1-02.
+Depends on: P1-02, P1-18.
 Done when: a sanitized sample archive imports with correct counts; re-import is idempotent; email is only set where present.
 
 **P1-04 Generic CSV importer with mapping and review** · lane core · L
@@ -243,8 +243,8 @@ Done when: the LinkedHelper sample imports and enriches existing contacts withou
 
 **P1-05 Contacts API** · lane core · M
 Goal: list with filter, sort, pagination, and column selection; get with children and timeline; patch; bulk actions on a filter with a count confirmation token; archive.
-Depends on: P1-01, P1-06.
-Done when: OpenAPI is complete; the isolation test covers list and bulk; 10,000 contacts list in under 300 ms.
+Depends on: P1-01, P1-06, P1-18.
+Done when: OpenAPI is complete; the isolation test covers list and bulk; 10,000 contacts list in under 300 ms; a field edit sticks and can be reverted to the synced value.
 
 **P1-06 Filter language and compiler** · lane core · M
 Goal: the filter tree from spec 10.4 as Pydantic models, compiled to SQLAlchemy, with every predicate listed there.
@@ -305,6 +305,11 @@ Done when: each command mirrors its API counterpart.
 Goal: run the migration diff test against the service container from P0-07.
 Depends on: P0-07, P1-01.
 Done when: a deliberately SQLite-only construct fails CI.
+
+**P1-18 Manual overrides stick, with revert to the synced value** · lane core · S
+Goal: CP1 decision. A manual edit of a LinkedIn field outranks every later source until the user reverts it. Every non-manual observation of a provenance field is recorded in `contacts.synced_values` (JSON, field → value, source, observed_at) whether or not it was written to the live column, so the "last synced value" is always available. `revert_to_synced(contact, field)` restores that value and its provenance; `set_manual_field` records the override. Migration 0003 adds the column.
+Depends on: P1-02.
+Done when: a sync after a manual edit leaves the edit in place and updates `synced_values`; revert restores the synced value and clears the override; the provenance matrix tests cover manual-then-sync, sync-then-manual, revert, and a field never synced (revert refused).
 
 **CP1** · checkpoint · after P1-01, P1-02, P1-06 merge.
 **CP2** · checkpoint · closes phase 1.
