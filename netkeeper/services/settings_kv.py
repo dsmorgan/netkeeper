@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from sqlalchemy import CursorResult
+from sqlalchemy import CursorResult, Insert
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session
 
 from netkeeper.models import JsonValue, SettingKV, User
-from netkeeper.scoping import scoped, scoped_delete
+from netkeeper.models.base import utcnow
+from netkeeper.scoping import SCOPE_OPTION, scoped, scoped_delete
 
 
 def get_setting(session: Session, user: User, key: str, default: JsonValue = None) -> JsonValue:
@@ -25,16 +27,15 @@ def get_setting(session: Session, user: User, key: str, default: JsonValue = Non
 def set_setting(session: Session, user: User, key: str, value: JsonValue) -> SettingKV:
     """Store ``value`` under ``key`` for ``user``, creating or updating the row.
 
-    Flushes, so the row has an id and the ``(user_id, key)`` unique constraint has
-    been checked when this returns.
+    One ``INSERT ... ON CONFLICT DO UPDATE`` on the ``(user_id, key)`` unique, so
+    two writers racing on the same key both succeed and the last one wins, where
+    a select-then-insert would hand one of them an ``IntegrityError``. Returns
+    the row as the database now has it.
     """
-    row = _find(session, user, key)
+    session.execute(_upsert(session, user, key, value))
+    row = _find(session, user, key, refresh=True)
     if row is None:
-        row = SettingKV(user_id=user.id, key=key, value=value)
-        session.add(row)
-    else:
-        row.value = value
-    session.flush()
+        raise RuntimeError(f"setting {key!r} for user {user.id} vanished after its upsert")
     return row
 
 
@@ -46,5 +47,31 @@ def delete_setting(session: Session, user: User, key: str) -> bool:
     return result.rowcount > 0
 
 
-def _find(session: Session, user: User, key: str) -> SettingKV | None:
-    return session.scalars(scoped(user, SettingKV).where(SettingKV.key == key)).one_or_none()
+def _upsert(session: Session, user: User, key: str, value: JsonValue) -> Insert:
+    """The dialect's upsert. Marked with the scope option: the guard does not inspect
+    inserts, but the mark keeps the convention visible in one place."""
+    dialect = session.get_bind().dialect.name
+    changes = {"value": value, "updated_at": utcnow()}
+    conflict = ["user_id", "key"]
+    statement: Insert
+    if dialect == "sqlite":
+        statement = sqlite.insert(SettingKV).on_conflict_do_update(
+            index_elements=conflict, set_=changes
+        )
+    elif dialect == "postgresql":
+        statement = postgresql.insert(SettingKV).on_conflict_do_update(
+            index_elements=conflict, set_=changes
+        )
+    else:
+        raise NotImplementedError(f"settings_kv upsert is not implemented for {dialect}")
+    return statement.values(user_id=user.id, key=key, value=value).execution_options(
+        **{SCOPE_OPTION: user.id}
+    )
+
+
+def _find(session: Session, user: User, key: str, *, refresh: bool = False) -> SettingKV | None:
+    statement = scoped(user, SettingKV).where(SettingKV.key == key)
+    if refresh:
+        # After a Core upsert the identity map may hold the row with its old value.
+        statement = statement.execution_options(populate_existing=True)
+    return session.scalars(statement).one_or_none()
