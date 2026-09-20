@@ -29,6 +29,28 @@ The workflow is a five-stage reconnect method: validate your network, enrich it,
 - A Gmail account and your own Google Cloud OAuth client for the email steps. The spec explains the setup.
 - Optional: an Anthropic API key for the LLM features. They are off unless you configure one.
 
+## Running
+
+```sh
+make install                # create .venv and install the package with dev extras
+.venv/bin/netkeeper serve   # http://127.0.0.1:8000
+```
+
+### Run at login (macOS)
+
+`scripts/install-launchd.sh` installs a user LaunchAgent, `fun.tnkr.netkeeper`, that starts `netkeeper serve` when you log in and restarts it if it crashes. It runs the copy in this repository's `.venv`, so run `make install` first. Re-running the script replaces the agent.
+
+```sh
+scripts/install-launchd.sh                     # install or replace the agent
+scripts/install-launchd.sh --port 8080         # --host and --port pass through to serve
+scripts/install-launchd.sh --data-dir ~/nk     # another data directory (sets NETKEEPER_DATA)
+launchctl print gui/$UID/fun.tnkr.netkeeper    # status, including the PID
+tail -f "$HOME/Library/Application Support/netkeeper/logs/serve.err.log"   # application log
+scripts/install-launchd.sh --uninstall         # stop the agent and remove the plist
+```
+
+Logs live under `<data_dir>/logs/`: `serve.log` for stdout and `serve.err.log` for stderr, which is where the application logs. Add `--dry-run` to any invocation to see the plist and the `launchctl` commands without changing anything. Chrome is not managed by launchd; the dashboard tells you when it is not reachable.
+
 ## A plain note about LinkedIn's terms
 
 LinkedIn's User Agreement prohibits automated access, including reading data it already shows you. netkeeper reads only your own 1st-degree connections, ships conservative defaults, warms up slowly, backs off when LinkedIn pushes back, and never retries a security checkpoint. Those safeguards reduce the risk of an account restriction; they do not remove it. Read [the security and terms section](docs/architecture.md#18-security-privacy-and-terms-of-service) before you run it, and treat the daily budgets as the ceiling, not a target.
