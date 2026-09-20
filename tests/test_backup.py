@@ -351,9 +351,16 @@ def test_backup_list_with_nothing_says_so(cli_env: Path) -> None:
 # --- help ---------------------------------------------------------------------
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
 def _listed_commands(help_text: str) -> set[str]:
-    """Names in the Commands panel of a rich-formatted Typer help page (options start with -)."""
-    return set(re.findall(r"^│ ([^-\s]\S*)\s{2,}\S", help_text, flags=re.MULTILINE))
+    """Names in the Commands panel of a rich-formatted Typer help page (options start with -).
+
+    Rich forces color when it detects CI, so escape codes are stripped before parsing.
+    """
+    plain = _ANSI.sub("", help_text)
+    return set(re.findall(r"^│ ([^-\s]\S*)\s{2,}\S", plain, flags=re.MULTILINE))
 
 
 def test_help_lists_every_command_group() -> None:
