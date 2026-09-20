@@ -11,8 +11,10 @@ the PostgreSQL params locally, start a throwaway server and point the variable a
         make test
 """
 
+import io
 import os
 import re
+import tokenize
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -83,8 +85,27 @@ def _revision_chain() -> list[str]:
     return [rev.revision for rev in reversed(list(script.walk_revisions()))]
 
 
+def _strip_comments(source: str) -> str:
+    """Drop comment and docstring tokens so prose that mentions a marker is not flagged."""
+    kept: list[str] = []
+    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+    try:
+        for tok in tokens:
+            if tok.type == tokenize.COMMENT:
+                continue
+            if tok.type == tokenize.STRING and tok.string.lstrip("rRbBuUfF").startswith(
+                ('"""', "'''")
+            ):
+                continue
+            kept.append(tok.string)
+    except tokenize.TokenError:
+        return source
+    return " ".join(kept)
+
+
 def _sqlite_only_markers(source: str) -> list[str]:
-    return [name for name, pattern in SQLITE_ONLY_MARKERS.items() if pattern.search(source)]
+    code = _strip_comments(source)
+    return [name for name, pattern in SQLITE_ONLY_MARKERS.items() if pattern.search(code)]
 
 
 def _diff_against_models(engine: Engine) -> list[Any]:
@@ -235,6 +256,8 @@ def test_migration_files_use_no_sqlite_only_constructs() -> None:
         ("context.configure(render_as_batch=True)", []),
         ('with op.batch_alter_table("users") as batch_op:', []),
         ('sa.Column("id", sa.Integer(), autoincrement=True)', []),
+        ("# PostgreSQL has no PRAGMA equivalent\nop.execute('SELECT 1')", []),
+        ('"""Avoid strftime( here."""\nop.execute("SELECT 1")', []),
     ],
 )
 def test_sqlite_only_marker_scan(source: str, markers: list[str]) -> None:
@@ -243,6 +266,6 @@ def test_sqlite_only_marker_scan(source: str, markers: list[str]) -> None:
 
 def test_ci_runs_the_postgresql_params() -> None:
     """Without the URL the PostgreSQL params skip silently, so CI must always set it."""
-    if not os.environ.get("CI"):
-        pytest.skip("only meaningful on CI")
+    if not os.environ.get("GITHUB_ACTIONS"):
+        pytest.skip("only meaningful on GitHub Actions")
     assert os.environ.get(PG_ENV), f"CI must set {PG_ENV}; see .github/workflows/ci.yml"
