@@ -49,7 +49,10 @@ from netkeeper.models import (
     ContactMet,
     ContactSnapshot,
     ContactSource,
+    ContactTag,
     EmailStatus,
+    Tag,
+    TagSource,
     User,
     UserKind,
     UTCDateTime,
@@ -309,7 +312,7 @@ def test_field_sets_agree_with_fields_and_with_the_contact_columns() -> None:
 def test_every_op_has_one_node_type_and_placeholders_are_ops() -> None:
     assert len(OPS) == len(set(OPS)) == len(NODE_TYPES) == 27
     assert set(PLACEHOLDERS) < set(OPS)
-    assert set(PLACEHOLDERS.values()) == {"P1-07", "P1-08", "P3-04"}
+    assert set(PLACEHOLDERS.values()) == {"P1-08", "P3-04"}
 
 
 def test_examples_cover_every_op() -> None:
@@ -651,9 +654,6 @@ def test_archived_contacts_need_include_archived_and_merged_never_appear(
 # --- placeholders -----------------------------------------------------------
 
 PLACEHOLDER_NODES: dict[str, dict[str, Any]] = {
-    "tag_any": {"op": "tag_any", "names": ["vp"]},
-    "tag_all": {"op": "tag_all", "names": ["vp", "founder"]},
-    "tag_none": {"op": "tag_none", "names": ["recruiter"]},
     "list_member": {"op": "list_member", "list_id": 3},
     "enrolled_in": {"op": "enrolled_in", "campaign_id": 2},
     "replied_in": {"op": "replied_in", "campaign_id": 2},
@@ -677,8 +677,56 @@ def test_placeholders_parse_but_do_not_compile(user: User, op: str) -> None:
     )
 
 
-def test_placeholder_set_is_exactly_the_six(user: User) -> None:
+def test_placeholder_set_is_exactly_the_three(user: User) -> None:
     assert set(PLACEHOLDER_NODES) == set(PLACEHOLDERS)
+
+
+# --- tags -------------------------------------------------------------------
+
+
+def _tag(session: Session, user: User, name: str) -> Tag:
+    tag = Tag(user_id=user.id, name=name)
+    session.add(tag)
+    session.flush()
+    return tag
+
+
+def _assign(
+    session: Session, user: User, contact: Contact, tag: Tag, source: TagSource = TagSource.MANUAL
+) -> None:
+    session.add(ContactTag(user_id=user.id, contact_id=contact.id, tag_id=tag.id, source=source))
+    session.flush()
+
+
+def test_tag_any_all_none_by_name_case_insensitively(
+    session: Session, user: User, other: User
+) -> None:
+    vp, founder = _tag(session, user, "VP"), _tag(session, user, "founder")
+    both = factories.make_contact(session, user)
+    only_vp = factories.make_contact(session, user)
+    untagged = factories.make_contact(session, user)
+    _assign(session, user, both, vp)
+    _assign(session, user, both, founder, TagSource.RULE)  # the source never matters
+    _assign(session, user, only_vp, vp)
+    # The other user's same-named tag never leaks across.
+    theirs = factories.make_contact(session, other)
+    _assign(session, other, theirs, _tag(session, other, "vp"))
+
+    def one(node: dict[str, Any], for_user: User = user) -> list[int]:
+        return matching(session, for_user, node)
+
+    assert one({"op": "tag_any", "names": ["vp"]}) == [both.id, only_vp.id]
+    assert one({"op": "tag_any", "names": ["Vp", "FOUNDER"]}) == [both.id, only_vp.id]
+    assert one({"op": "tag_any", "names": ["nope"]}) == []
+    assert one({"op": "tag_all", "names": ["vp", "Founder"]}) == [both.id]
+    assert one({"op": "tag_all", "names": ["vp", "vp"]}) == [both.id, only_vp.id]
+    assert one({"op": "tag_all", "names": ["vp", "nope"]}) == []
+    assert one({"op": "tag_none", "names": ["vp"]}) == [untagged.id]
+    assert one({"op": "tag_none", "names": ["founder"]}) == [only_vp.id, untagged.id]
+    assert one({"op": "tag_none", "names": ["nope"]}) == [both.id, only_vp.id, untagged.id]
+    assert one({"op": "not", "child": {"op": "tag_any", "names": ["vp"]}}) == [untagged.id]
+    assert one({"op": "tag_any", "names": ["vp"]}, other) == [theirs.id]
+    assert one({"op": "tag_any", "names": ["founder"]}, other) == []
 
 
 # --- invalid trees ----------------------------------------------------------
@@ -908,6 +956,9 @@ BROAD: dict[str, Any] = {
         {"op": "email_contains", "value": "example"},
         {"op": "changed_jobs_within_days", "days": 30},
         {"op": "eq", "field": "met", "value": "met"},
+        {"op": "tag_any", "names": ["vp"]},
+        {"op": "tag_all", "names": ["vp", "founder"]},
+        {"op": "tag_none", "names": ["recruiter"]},
     ],
 }
 
@@ -956,7 +1007,14 @@ def test_compiled_statements_are_scoped_and_every_subquery_names_the_user(user: 
     for statement in (compile_filter(user, tree, now=NOW), compile_count(user, tree, now=NOW)):
         assert statement.get_execution_options()[SCOPE_OPTION] == user.id
         sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
-        for table in ("contact_emails", "contact_phones", "contact_positions", "contact_snapshots"):
+        for table in (
+            "contact_emails",
+            "contact_phones",
+            "contact_positions",
+            "contact_snapshots",
+            "contact_tags",
+            "tags",
+        ):
             assert f"{table}.user_id = {user.id}" in sql, table
         assert f"contacts.user_id = {user.id}" in sql
 

@@ -912,6 +912,7 @@
     },
     "TagAll": {
       "additionalProperties": false,
+      "description": "Carries every tag named (case-insensitive).",
       "properties": {
         "op": {
           "const": "tag_all",
@@ -936,6 +937,7 @@
     },
     "TagAny": {
       "additionalProperties": false,
+      "description": "Carries at least one of the tags named (case-insensitive), whatever its source.",
       "properties": {
         "op": {
           "const": "tag_any",
@@ -960,6 +962,7 @@
     },
     "TagNone": {
       "additionalProperties": false,
+      "description": "Carries none of the tags named (case-insensitive).",
       "properties": {
         "op": {
           "const": "tag_none",

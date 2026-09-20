@@ -10,8 +10,9 @@ from typing import Any
 import factories
 from sqlalchemy.orm import Session
 
+from netkeeper.crm import tags as tag_service
 from netkeeper.crm.interactions import add_interaction
-from netkeeper.models import Contact, ContactSnapshot, InteractionKind, User
+from netkeeper.models import Contact, ContactSnapshot, InteractionKind, RuleField, User
 from netkeeper.scoping import scoped
 from netkeeper.web.app import API_PREFIX
 
@@ -87,6 +88,17 @@ def _seed_timeline(session: Session, user: User) -> int:
     return 2
 
 
+def _seed_tags(session: Session, user: User) -> int:
+    tag_service.create_tag(session, user, "seeded")
+    return 1
+
+
+def _seed_autotag_rules(session: Session, user: User) -> int:
+    tag = tag_service.create_tag(session, user, "seeded")
+    tag_service.create_rule(session, user, tag.id, RuleField.TITLE, r"\bseeded\b")
+    return 1
+
+
 REGISTRY: list[ListEndpoint] = [
     ListEndpoint(
         f"{API_PREFIX}/contacts/{{contact_id}}/interactions",
@@ -100,4 +112,6 @@ REGISTRY: list[ListEndpoint] = [
         paged_count,
         path_params=own_contact,
     ),
+    ListEndpoint(f"{API_PREFIX}/tags", _seed_tags, array_count),
+    ListEndpoint(f"{API_PREFIX}/autotag-rules", _seed_autotag_rules, array_count),
 ]

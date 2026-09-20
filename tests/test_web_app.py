@@ -31,6 +31,16 @@ API_PATHS = {
     "/api/v1/contacts/{contact_id}/timeline",
     "/api/v1/contacts/{contact_id}/notes",
     "/api/v1/interactions/{interaction_id}",
+    "/api/v1/tags",
+    "/api/v1/tags/{tag_id}",
+    "/api/v1/contacts/{contact_id}/tags",
+    "/api/v1/contacts/{contact_id}/tags/{tag_id}",
+    "/api/v1/autotag-rules",
+    "/api/v1/autotag-rules/{rule_id}",
+    "/api/v1/autotag-rules/{rule_id}/run",
+    "/api/v1/autotag-rules/reorder",
+    "/api/v1/autotag-rules/run",
+    "/api/v1/autotag-rules/preview",
 }
 
 
@@ -132,10 +142,12 @@ def test_dev_app_sets_up_logging_then_builds_the_app(
 
 def test_known_api_modules_are_discovered() -> None:
     assert [name for name, _ in discover_routers()] == [
+        "autotag_rules",
         "events",
         "health",
         "interactions",
         "me",
+        "tags",
         "tasks",
     ]
 

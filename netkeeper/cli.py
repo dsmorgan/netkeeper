@@ -1,4 +1,4 @@
-"""Command-line entry point: serve, db, config, backup, openapi, version."""
+"""Command-line entry point: serve, db, config, backup, openapi, tags, version."""
 
 from __future__ import annotations
 
@@ -11,13 +11,18 @@ from typing import Annotated
 
 import typer
 import uvicorn
+from sqlalchemy import select
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session
 
 from netkeeper import __version__, migrations
 from netkeeper.config import ConfigError, Settings, load_settings, render_toml
+from netkeeper.crm.tags import ensure_default_rules, list_tags, run_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.logging_setup import setup_logging
+from netkeeper.models import User, UserKind
 from netkeeper.paths import CONFIG_ENV, data_dir
+from netkeeper.scoping import install_scope_guard
 from netkeeper.services.backup import (
     BACKUPS_DIRNAME,
     BackupError,
@@ -37,10 +42,12 @@ openapi_app = typer.Typer(help="Work with the API schema.", no_args_is_help=True
 # No help= here: the group description comes from backup_group's docstring so that
 # `netkeeper backup --help` also carries the note about the default subcommand.
 backup_app = typer.Typer(invoke_without_command=True)
+tags_app = typer.Typer(help="Tags and auto-tag rules.", no_args_is_help=True)
 app.add_typer(config_app, name="config")
 app.add_typer(db_app, name="db")
 app.add_typer(openapi_app, name="openapi")
 app.add_typer(backup_app, name="backup")
+app.add_typer(tags_app, name="tags")
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +258,59 @@ def _backup_create(ctx: typer.Context) -> None:
     typer.echo(f"wrote {written} ({_human_size(written.stat().st_size)})")
     noun = "backup" if len(removed) == 1 else "backups"
     typer.echo(f"pruned {len(removed)} older {noun} (keeping the newest {keep})")
+
+
+@tags_app.command("list")
+def tags_list() -> None:
+    """List the local user's tags with kind, color, and how many contacts carry each."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            tags = list_tags(session, user)
+    finally:
+        engine.dispose()
+    if not tags:
+        typer.echo("no tags")
+        return
+    rows = [
+        (row.tag.name, row.tag.kind.value, row.tag.color or "-", str(row.contact_count))
+        for row in tags
+    ]
+    typer.echo(_format_table(("NAME", "KIND", "COLOR", "CONTACTS"), rows), nl=False)
+
+
+@tags_app.command("run-rules")
+def tags_run_rules() -> None:
+    """Apply every enabled auto-tag rule to every live contact (seeding the defaults first)."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            seeded = ensure_default_rules(session, user)
+            result = run_rules(session, user)
+    finally:
+        engine.dispose()
+    if seeded:
+        typer.echo(f"seeded {len(seeded)} default rules")
+    typer.echo(
+        f"{result.contacts} contacts: {result.added} tags added, {result.removed} removed, "
+        f"{result.updated} re-credited"
+    )
+
+
+def _local_user_or_exit(session: Session) -> User:
+    user = session.scalars(
+        select(User).where(User.kind == UserKind.LOCAL).order_by(User.id)
+    ).first()
+    if user is None:
+        typer.echo("error: no local user exists; run `netkeeper db upgrade` first", err=True)
+        raise typer.Exit(code=1)
+    return user
 
 
 def _format_table(headers: tuple[str, ...], rows: Sequence[tuple[str, ...]]) -> str:
