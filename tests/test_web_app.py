@@ -260,3 +260,31 @@ def test_committed_frontend_schema_is_current() -> None:
     """`make gen-client` must be rerun when the API changes; CI diffs this too."""
     committed = (REPO_ROOT / "frontend" / "openapi.json").read_text()
     assert committed == openapi_json(create_app(Settings()))
+
+
+async def test_built_frontend_never_serves_files_outside_dist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bare_engine: Engine
+) -> None:
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>netkeeper</title>")
+    (tmp_path / "secret.txt").write_text("OUTSIDE-DIST-MARKER")
+    monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", str(dist))
+    app = create_app(Settings(), engine=bare_engine)
+
+    attempts = (
+        "/..%2fsecret.txt",
+        "/assets/..%2f..%2fsecret.txt",
+        "/assets/../../secret.txt",
+        "/../secret.txt",
+        "/%2e%2e/secret.txt",
+        "//secret.txt",
+    )
+    async with _static_client(app) as client:
+        for path in attempts:
+            response = await client.get(path)
+            # A rejected path is a 404; a path that normalizes to an SPA route gets the
+            # index page. Either way nothing outside dist is ever served.
+            served_index = response.text == "<!doctype html><title>netkeeper</title>"
+            assert response.status_code in (400, 404) or served_index, path
+            assert "OUTSIDE-DIST-MARKER" not in response.text, path
