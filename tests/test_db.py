@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError, StatementError
 from sqlalchemy.orm import Session
 
 from netkeeper.db import (
+    SQLITE_BUSY_TIMEOUT_MS,
     database_url,
     make_engine,
     make_session_factory,
@@ -55,6 +56,12 @@ def test_make_engine_creates_the_parent_directory_and_sets_pragmas(tmp_path: Pat
             assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
     finally:
         engine.dispose()
+
+
+def test_sqlite_connections_wait_for_a_busy_database(engine: Engine) -> None:
+    with engine.connect() as connection:
+        timeout = connection.exec_driver_sql("PRAGMA busy_timeout").scalar()
+    assert timeout == SQLITE_BUSY_TIMEOUT_MS == 5000
 
 
 def test_foreign_keys_are_enforced(session: Session) -> None:

@@ -23,6 +23,10 @@ from netkeeper import paths
 
 DATABASE_URL_ENV = "NETKEEPER_DATABASE_URL"
 DATABASE_FILENAME = "netkeeper.sqlite3"
+# How long a SQLite connection waits for a writer to finish before failing with
+# "database is locked". Two request handlers, or a request and the scheduler,
+# writing at once is normal; failing at once is not.
+SQLITE_BUSY_TIMEOUT_MS = 5000
 
 log = logging.getLogger(__name__)
 
@@ -43,9 +47,10 @@ def database_url(data_dir: Path | None = None) -> str:
 def make_engine(url: str) -> Engine:
     """Create an engine for ``url``.
 
-    For SQLite this also creates the database file's parent directory, turns on WAL
-    and foreign-key enforcement on every connection, and takes over transaction
-    control from pysqlite so that DDL is transactional and savepoints work.
+    For SQLite this also creates the database file's parent directory, turns on WAL,
+    foreign-key enforcement, and a busy timeout on every connection, and takes over
+    transaction control from pysqlite so that DDL is transactional and savepoints
+    work.
     """
     parsed = make_url(url)
     log.debug("creating engine for %s", parsed.render_as_string(hide_password=True))
@@ -71,6 +76,7 @@ def _sqlite_on_connect(dbapi_connection: DBAPIConnection, _record: ConnectionPoo
     try:
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     finally:
         cursor.close()
 
