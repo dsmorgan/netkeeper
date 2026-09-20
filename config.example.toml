@@ -1,0 +1,61 @@
+[web]
+host = "127.0.0.1"
+port = 8000
+
+[me]
+name = "David Morgan"
+website = "https://dsm.tnkr.fun"
+scheduling_link = ""
+signature = "David"
+city = ""
+
+[linkedin]
+cdp_url = "http://127.0.0.1:9222"
+timezone = "America/New_York"
+active_hours = ["08:30", "21:30"]
+weekend_multiplier = 0.5
+enrich_stale_days = 180
+disconnect_after_misses = 2
+
+[linkedin.budget]
+connection_pages_per_day = 150
+profile_visits_per_day = 60
+profile_visits_per_week = 300
+inbox_polls_per_day = 8
+li_messages_auto_per_day = 15
+warmup_start = 20
+warmup_step = 10
+
+[linkedin.pacing]
+profile_delay_median_s = 25
+profile_delay_sigma = 0.6
+distraction_p = 0.08
+distraction_range_s = [120, 480]
+burst_size = [8, 15]
+burst_break_s = [300, 1200]
+
+[linkedin.heat]
+per_block = 1.0
+half_life_hours = 6
+skip_threshold = 2.5
+
+[campaigns]
+send_window_days = ["Tue", "Wed", "Thu"]
+send_window_hours = ["09:00", "16:30"]
+mailbox_daily_cap = 80
+send_spacing_median_s = 240
+send_spacing_floor_s = 90
+contacted_within_days_guard = 30
+linkedin_auto_send = false
+reply_poll_minutes = 10
+holidays = []
+
+[llm]
+enabled = false
+model = "claude-sonnet-5"
+bulk_model = "claude-haiku-4-5-20251001"
+daily_call_cap = 200
+
+[backup]
+nightly = true
+keep = 14
