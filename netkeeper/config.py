@@ -43,10 +43,10 @@ class WebSettings:
 class MeSettings:
     """Merge fields describing the operator. Extra string keys land in ``extra``."""
 
-    name: str = "David Morgan"
-    website: str = "https://dsm.tnkr.fun"
+    name: str = ""
+    website: str = ""
     scheduling_link: str = ""
-    signature: str = "David"
+    signature: str = ""
     city: str = ""
     extra: dict[str, str] = field(default_factory=dict, metadata=_EXTRA)
 

@@ -3,6 +3,7 @@ import re
 from collections.abc import Iterator
 
 import pytest
+
 from netkeeper.logging_setup import HANDLER_NAME, setup_logging
 
 

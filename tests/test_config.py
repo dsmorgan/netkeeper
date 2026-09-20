@@ -4,6 +4,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
+
 from netkeeper.cli import app
 from netkeeper.config import (
     ConfigError,
@@ -14,9 +16,12 @@ from netkeeper.config import (
     render_toml,
 )
 from netkeeper.paths import data_dir
-from typer.testing import CliRunner
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# The identity the example file ships with; the built-in defaults are blank.
+EXAMPLE_ME = MeSettings(
+    name="Your Name", website="https://example.com", signature="Your first name"
+)
 
 
 @pytest.fixture
@@ -44,13 +49,35 @@ def test_defaults_when_no_file_exists(isolated: Path) -> None:
     assert settings.source_path is None
 
 
-def test_example_config_matches_built_in_defaults(caplog: pytest.LogCaptureFixture) -> None:
+def _appendix_b() -> str:
+    """The ```toml block under Appendix B in docs/architecture.md."""
+    lines = (REPO_ROOT / "docs" / "architecture.md").read_text().splitlines(keepends=True)
+    heading = next(i for i, line in enumerate(lines) if line.startswith("## Appendix B"))
+    fence = next(i for i in range(heading, len(lines)) if lines[i].startswith("```toml"))
+    end = next(i for i in range(fence + 1, len(lines)) if lines[i].startswith("```"))
+    return "".join(lines[fence + 1 : end])
+
+
+def test_example_config_is_appendix_b_verbatim() -> None:
+    assert (REPO_ROOT / "config.example.toml").read_text() == _appendix_b()
+
+
+def test_example_config_loads_cleanly_with_placeholder_identity(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     example = REPO_ROOT / "config.example.toml"
     with caplog.at_level(logging.WARNING, logger="netkeeper.config"):
         settings = load_settings(example)
     assert settings.source_path == example
-    assert replace(settings, source_path=None) == Settings()
+    assert settings.me == EXAMPLE_ME
+    assert replace(settings, source_path=None, me=MeSettings()) == Settings()
     assert caplog.records == []
+
+
+def test_built_in_identity_defaults_are_blank() -> None:
+    assert MeSettings() == MeSettings(
+        name="", website="", scheduling_link="", signature="", city="", extra={}
+    )
 
 
 def test_explicit_path_wins(isolated: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -263,7 +290,8 @@ def test_render_toml_round_trips_through_load_settings(isolated: Path) -> None:
 
 def test_render_toml_of_defaults_matches_example_file() -> None:
     example = (REPO_ROOT / "config.example.toml").read_text()
-    assert tomllib.loads(render_toml(Settings())) == tomllib.loads(example)
+    rendered = render_toml(replace(Settings(), me=EXAMPLE_ME))
+    assert tomllib.loads(rendered) == tomllib.loads(example)
 
 
 def test_config_show_prints_settings_and_paths(isolated: Path) -> None:
