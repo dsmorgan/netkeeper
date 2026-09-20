@@ -21,14 +21,14 @@
             "title": "Status",
             "type": "string"
           },
-          "app_version": {
+          "version": {
             "title": "Version",
             "type": "string"
           }
         },
         "required": [
           "status",
-          "app_version"
+          "version"
         ],
         "title": "HealthOut",
         "type": "object"
