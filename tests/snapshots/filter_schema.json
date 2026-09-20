@@ -1,0 +1,1259 @@
+{
+  "$defs": {
+    "And": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "and",
+          "title": "Op",
+          "type": "string"
+        },
+        "children": {
+          "items": {
+            "$ref": "#/$defs/FilterNode"
+          },
+          "minItems": 1,
+          "title": "Children",
+          "type": "array"
+        }
+      },
+      "required": [
+        "op",
+        "children"
+      ],
+      "title": "And",
+      "type": "object"
+    },
+    "Between": {
+      "additionalProperties": false,
+      "description": "``low <= field <= high``, both ends included.",
+      "properties": {
+        "op": {
+          "const": "between",
+          "title": "Op",
+          "type": "string"
+        },
+        "field": {
+          "enum": [
+            "degree",
+            "connected_on",
+            "last_contacted_at",
+            "last_enriched_at",
+            "triaged_at",
+            "li_disconnected_at",
+            "archived_at",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "low": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Low"
+        },
+        "high": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "High"
+        }
+      },
+      "required": [
+        "op",
+        "field",
+        "low",
+        "high"
+      ],
+      "title": "Between",
+      "type": "object"
+    },
+    "ChangedJobsWithinDays": {
+      "additionalProperties": false,
+      "description": "A ``contact_snapshots`` row observed in the last ``days`` days (spec 9.8).",
+      "properties": {
+        "op": {
+          "const": "changed_jobs_within_days",
+          "title": "Op",
+          "type": "string"
+        },
+        "days": {
+          "minimum": 0,
+          "title": "Days",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "op",
+        "days"
+      ],
+      "title": "ChangedJobsWithinDays",
+      "type": "object"
+    },
+    "ConnectedWithinDays": {
+      "additionalProperties": false,
+      "description": "``connected_on`` on or after today (in the user's timezone) minus ``days``.",
+      "properties": {
+        "op": {
+          "const": "connected_within_days",
+          "title": "Op",
+          "type": "string"
+        },
+        "days": {
+          "minimum": 0,
+          "title": "Days",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "op",
+        "days"
+      ],
+      "title": "ConnectedWithinDays",
+      "type": "object"
+    },
+    "Contains": {
+      "additionalProperties": false,
+      "description": "Case-insensitive substring; ``%`` and ``_`` in ``value`` match themselves.",
+      "properties": {
+        "op": {
+          "const": "contains",
+          "title": "Op",
+          "type": "string"
+        },
+        "field": {
+          "enum": [
+            "first_name",
+            "last_name",
+            "preferred_name",
+            "headline",
+            "current_title",
+            "current_company",
+            "location",
+            "li_public_id"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "value": {
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "field",
+        "value"
+      ],
+      "title": "Contains",
+      "type": "object"
+    },
+    "EmailContains": {
+      "additionalProperties": false,
+      "description": "Any of the contact's emails contains ``value`` (case-insensitive, literal).",
+      "properties": {
+        "op": {
+          "const": "email_contains",
+          "title": "Op",
+          "type": "string"
+        },
+        "value": {
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "value"
+      ],
+      "title": "EmailContains",
+      "type": "object"
+    },
+    "EmailStatus": {
+      "enum": [
+        "ok",
+        "bounced",
+        "invalid"
+      ],
+      "title": "EmailStatus",
+      "type": "string"
+    },
+    "EnrolledIn": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "enrolled_in",
+          "title": "Op",
+          "type": "string"
+        },
+        "campaign_id": {
+          "title": "Campaign Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "op",
+        "campaign_id"
+      ],
+      "title": "EnrolledIn",
+      "type": "object"
+    },
+    "Eq": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "eq",
+          "title": "Op",
+          "type": "string"
+        },
+        "field": {
+          "enum": [
+            "first_name",
+            "last_name",
+            "preferred_name",
+            "headline",
+            "current_title",
+            "current_company",
+            "location",
+            "li_public_id",
+            "met",
+            "source",
+            "degree",
+            "connected_on",
+            "last_contacted_at",
+            "last_enriched_at",
+            "triaged_at",
+            "li_disconnected_at",
+            "archived_at",
+            "created_at",
+            "updated_at",
+            "do_not_contact"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "op",
+        "field",
+        "value"
+      ],
+      "title": "Eq",
+      "type": "object"
+    },
+    "FilterNode": {
+      "discriminator": {
+        "mapping": {
+          "and": "#/$defs/And",
+          "between": "#/$defs/Between",
+          "changed_jobs_within_days": "#/$defs/ChangedJobsWithinDays",
+          "connected_within_days": "#/$defs/ConnectedWithinDays",
+          "contains": "#/$defs/Contains",
+          "email_contains": "#/$defs/EmailContains",
+          "enrolled_in": "#/$defs/EnrolledIn",
+          "eq": "#/$defs/Eq",
+          "gt": "#/$defs/Gt",
+          "gte": "#/$defs/Gte",
+          "has_email": "#/$defs/HasEmail",
+          "has_li_url": "#/$defs/HasLiUrl",
+          "has_phone": "#/$defs/HasPhone",
+          "has_position": "#/$defs/HasPosition",
+          "is_empty": "#/$defs/IsEmpty",
+          "last_contacted": "#/$defs/LastContacted",
+          "list_member": "#/$defs/ListMember",
+          "lt": "#/$defs/Lt",
+          "lte": "#/$defs/Lte",
+          "neq": "#/$defs/Neq",
+          "not": "#/$defs/Not",
+          "or": "#/$defs/Or",
+          "replied_in": "#/$defs/RepliedIn",
+          "starts_with": "#/$defs/StartsWith",
+          "tag_all": "#/$defs/TagAll",
+          "tag_any": "#/$defs/TagAny",
+          "tag_none": "#/$defs/TagNone"
+        },
+        "propertyName": "op"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/And"
+        },
+        {
+          "$ref": "#/$defs/Or"
+        },
+        {
+          "$ref": "#/$defs/Not"
+        },
+        {
+          "$ref": "#/$defs/Eq"
+        },
+        {
+          "$ref": "#/$defs/Neq"
+        },
+        {
+          "$ref": "#/$defs/Contains"
+        },
+        {
+          "$ref": "#/$defs/StartsWith"
+        },
+        {
+          "$ref": "#/$defs/IsEmpty"
+        },
+        {
+          "$ref": "#/$defs/Gt"
+        },
+        {
+          "$ref": "#/$defs/Gte"
+        },
+        {
+          "$ref": "#/$defs/Lt"
+        },
+        {
+          "$ref": "#/$defs/Lte"
+        },
+        {
+          "$ref": "#/$defs/Between"
+        },
+        {
+          "$ref": "#/$defs/HasEmail"
+        },
+        {
+          "$ref": "#/$defs/HasPhone"
+        },
+        {
+          "$ref": "#/$defs/HasLiUrl"
+        },
+        {
+          "$ref": "#/$defs/HasPosition"
+        },
+        {
+          "$ref": "#/$defs/EmailContains"
+        },
+        {
+          "$ref": "#/$defs/LastContacted"
+        },
+        {
+          "$ref": "#/$defs/ConnectedWithinDays"
+        },
+        {
+          "$ref": "#/$defs/ChangedJobsWithinDays"
+        },
+        {
+          "$ref": "#/$defs/TagAny"
+        },
+        {
+          "$ref": "#/$defs/TagAll"
+        },
+        {
+          "$ref": "#/$defs/TagNone"
+        },
+        {
+          "$ref": "#/$defs/ListMember"
+        },
+        {
+          "$ref": "#/$defs/EnrolledIn"
+        },
+        {
+          "$ref": "#/$defs/RepliedIn"
+        }
+      ]
+    },
+    "Gt": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "gt",
+          "title": "Op",
+          "type": "string"
+        },
+        "field": {
+          "enum": [
+            "degree",
+            "connected_on",
+            "last_contacted_at",
+            "last_enriched_at",
+            "triaged_at",
+            "li_disconnected_at",
+            "archived_at",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "op",
+        "field",
+        "value"
+      ],
+      "title": "Gt",
+      "type": "object"
+    },
+    "Gte": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "gte",
+          "title": "Op",
+          "type": "string"
+        },
+        "field": {
+          "enum": [
+            "degree",
+            "connected_on",
+            "last_contacted_at",
+            "last_enriched_at",
+            "triaged_at",
+            "li_disconnected_at",
+            "archived_at",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "op",
+        "field",
+        "value"
+      ],
+      "title": "Gte",
+      "type": "object"
+    },
+    "HasEmail": {
+      "additionalProperties": false,
+      "description": "At least one email row, optionally with the given ``status``.",
+      "properties": {
+        "op": {
+          "const": "has_email",
+          "title": "Op",
+          "type": "string"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmailStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "title": "HasEmail",
+      "type": "object"
+    },
+    "HasLiUrl": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "has_li_url",
+          "title": "Op",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "title": "HasLiUrl",
+      "type": "object"
+    },
+    "HasPhone": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "has_phone",
+          "title": "Op",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "title": "HasPhone",
+      "type": "object"
+    },
+    "HasPosition": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "has_position",
+          "title": "Op",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "title": "HasPosition",
+      "type": "object"
+    },
+    "IsEmpty": {
+      "additionalProperties": false,
+      "description": "NULL, or the empty string for a string column.",
+      "properties": {
+        "op": {
+          "const": "is_empty",
+          "title": "Op",
+          "type": "string"
+        },
+        "field": {
+          "enum": [
+            "first_name",
+            "last_name",
+            "preferred_name",
+            "headline",
+            "current_title",
+            "current_company",
+            "location",
+            "li_public_id",
+            "connected_on",
+            "last_contacted_at",
+            "last_enriched_at",
+            "triaged_at",
+            "li_disconnected_at",
+            "archived_at",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "Field",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "field"
+      ],
+      "title": "IsEmpty",
+      "type": "object"
+    },
+    "LastContacted": {
+      "additionalProperties": false,
+      "description": "Exactly one of ``within_days``, ``older_than_days``, ``never``.\n\n``older_than_days`` needs a value: never-contacted people do not count as\ncontacted long ago. Combine with ``never`` under ``or`` for both.",
+      "properties": {
+        "op": {
+          "const": "last_contacted",
+          "title": "Op",
+          "type": "string"
+        },
+        "within_days": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Within Days"
+        },
+        "older_than_days": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Older Than Days"
+        },
+        "never": {
+          "default": false,
+          "title": "Never",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "title": "LastContacted",
+      "type": "object"
+    },
+    "ListMember": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "list_member",
+          "title": "Op",
+          "type": "string"
+        },
+        "list_id": {
+          "title": "List Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "op",
+        "list_id"
+      ],
+      "title": "ListMember",
+      "type": "object"
+    },
+    "Lt": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "lt",
+          "title": "Op",
+          "type": "string"
+        },
+        "field": {
+          "enum": [
+            "degree",
+            "connected_on",
+            "last_contacted_at",
+            "last_enriched_at",
+            "triaged_at",
+            "li_disconnected_at",
+            "archived_at",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "op",
+        "field",
+        "value"
+      ],
+      "title": "Lt",
+      "type": "object"
+    },
+    "Lte": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "lte",
+          "title": "Op",
+          "type": "string"
+        },
+        "field": {
+          "enum": [
+            "degree",
+            "connected_on",
+            "last_contacted_at",
+            "last_enriched_at",
+            "triaged_at",
+            "li_disconnected_at",
+            "archived_at",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "op",
+        "field",
+        "value"
+      ],
+      "title": "Lte",
+      "type": "object"
+    },
+    "Neq": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "neq",
+          "title": "Op",
+          "type": "string"
+        },
+        "field": {
+          "enum": [
+            "first_name",
+            "last_name",
+            "preferred_name",
+            "headline",
+            "current_title",
+            "current_company",
+            "location",
+            "li_public_id",
+            "met",
+            "source",
+            "degree",
+            "connected_on",
+            "last_contacted_at",
+            "last_enriched_at",
+            "triaged_at",
+            "li_disconnected_at",
+            "archived_at",
+            "created_at",
+            "updated_at",
+            "do_not_contact"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "op",
+        "field",
+        "value"
+      ],
+      "title": "Neq",
+      "type": "object"
+    },
+    "Not": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "not",
+          "title": "Op",
+          "type": "string"
+        },
+        "child": {
+          "$ref": "#/$defs/FilterNode"
+        }
+      },
+      "required": [
+        "op",
+        "child"
+      ],
+      "title": "Not",
+      "type": "object"
+    },
+    "Or": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "or",
+          "title": "Op",
+          "type": "string"
+        },
+        "children": {
+          "items": {
+            "$ref": "#/$defs/FilterNode"
+          },
+          "minItems": 1,
+          "title": "Children",
+          "type": "array"
+        }
+      },
+      "required": [
+        "op",
+        "children"
+      ],
+      "title": "Or",
+      "type": "object"
+    },
+    "RepliedIn": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "replied_in",
+          "title": "Op",
+          "type": "string"
+        },
+        "campaign_id": {
+          "title": "Campaign Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "op",
+        "campaign_id"
+      ],
+      "title": "RepliedIn",
+      "type": "object"
+    },
+    "StartsWith": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "starts_with",
+          "title": "Op",
+          "type": "string"
+        },
+        "field": {
+          "enum": [
+            "first_name",
+            "last_name",
+            "preferred_name",
+            "headline",
+            "current_title",
+            "current_company",
+            "location",
+            "li_public_id"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "value": {
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "field",
+        "value"
+      ],
+      "title": "StartsWith",
+      "type": "object"
+    },
+    "TagAll": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "tag_all",
+          "title": "Op",
+          "type": "string"
+        },
+        "names": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Names",
+          "type": "array"
+        }
+      },
+      "required": [
+        "op",
+        "names"
+      ],
+      "title": "TagAll",
+      "type": "object"
+    },
+    "TagAny": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "tag_any",
+          "title": "Op",
+          "type": "string"
+        },
+        "names": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Names",
+          "type": "array"
+        }
+      },
+      "required": [
+        "op",
+        "names"
+      ],
+      "title": "TagAny",
+      "type": "object"
+    },
+    "TagNone": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "tag_none",
+          "title": "Op",
+          "type": "string"
+        },
+        "names": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Names",
+          "type": "array"
+        }
+      },
+      "required": [
+        "op",
+        "names"
+      ],
+      "title": "TagNone",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The root: a predicate (or none) and the archived-contacts switch.\n\nThe JSON schema carries ``x-netkeeper-fields``: each field's kind, label,\nthe ops it takes, and the values of an enum, for the builder.",
+  "properties": {
+    "where": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FilterNode"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "include_archived": {
+      "default": false,
+      "title": "Include Archived",
+      "type": "boolean"
+    }
+  },
+  "title": "FilterTree",
+  "type": "object",
+  "x-netkeeper-fields": {
+    "archived_at": {
+      "kind": "datetime",
+      "label": "archived",
+      "ops": [
+        "eq",
+        "neq",
+        "is_empty",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between"
+      ]
+    },
+    "connected_on": {
+      "kind": "date",
+      "label": "connected on",
+      "ops": [
+        "eq",
+        "neq",
+        "is_empty",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between"
+      ]
+    },
+    "created_at": {
+      "kind": "datetime",
+      "label": "created",
+      "ops": [
+        "eq",
+        "neq",
+        "is_empty",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between"
+      ]
+    },
+    "current_company": {
+      "kind": "string",
+      "label": "company",
+      "ops": [
+        "eq",
+        "neq",
+        "contains",
+        "starts_with",
+        "is_empty"
+      ]
+    },
+    "current_title": {
+      "kind": "string",
+      "label": "title",
+      "ops": [
+        "eq",
+        "neq",
+        "contains",
+        "starts_with",
+        "is_empty"
+      ]
+    },
+    "degree": {
+      "kind": "int",
+      "label": "degree",
+      "ops": [
+        "eq",
+        "neq",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between"
+      ]
+    },
+    "do_not_contact": {
+      "kind": "bool",
+      "label": "do not contact",
+      "ops": [
+        "eq",
+        "neq"
+      ]
+    },
+    "first_name": {
+      "kind": "string",
+      "label": "first name",
+      "ops": [
+        "eq",
+        "neq",
+        "contains",
+        "starts_with",
+        "is_empty"
+      ]
+    },
+    "headline": {
+      "kind": "string",
+      "label": "headline",
+      "ops": [
+        "eq",
+        "neq",
+        "contains",
+        "starts_with",
+        "is_empty"
+      ]
+    },
+    "last_contacted_at": {
+      "kind": "datetime",
+      "label": "last contacted",
+      "ops": [
+        "eq",
+        "neq",
+        "is_empty",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between"
+      ]
+    },
+    "last_enriched_at": {
+      "kind": "datetime",
+      "label": "last enriched",
+      "ops": [
+        "eq",
+        "neq",
+        "is_empty",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between"
+      ]
+    },
+    "last_name": {
+      "kind": "string",
+      "label": "last name",
+      "ops": [
+        "eq",
+        "neq",
+        "contains",
+        "starts_with",
+        "is_empty"
+      ]
+    },
+    "li_disconnected_at": {
+      "kind": "datetime",
+      "label": "disconnected on LinkedIn",
+      "ops": [
+        "eq",
+        "neq",
+        "is_empty",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between"
+      ]
+    },
+    "li_public_id": {
+      "kind": "string",
+      "label": "LinkedIn id",
+      "ops": [
+        "eq",
+        "neq",
+        "contains",
+        "starts_with",
+        "is_empty"
+      ]
+    },
+    "location": {
+      "kind": "string",
+      "label": "location",
+      "ops": [
+        "eq",
+        "neq",
+        "contains",
+        "starts_with",
+        "is_empty"
+      ]
+    },
+    "met": {
+      "kind": "enum",
+      "label": "met",
+      "ops": [
+        "eq",
+        "neq"
+      ],
+      "values": [
+        "unknown",
+        "met",
+        "not_met",
+        "skip"
+      ]
+    },
+    "preferred_name": {
+      "kind": "string",
+      "label": "preferred name",
+      "ops": [
+        "eq",
+        "neq",
+        "contains",
+        "starts_with",
+        "is_empty"
+      ]
+    },
+    "source": {
+      "kind": "enum",
+      "label": "source",
+      "ops": [
+        "eq",
+        "neq"
+      ],
+      "values": [
+        "sync",
+        "archive",
+        "csv",
+        "manual"
+      ]
+    },
+    "triaged_at": {
+      "kind": "datetime",
+      "label": "triaged",
+      "ops": [
+        "eq",
+        "neq",
+        "is_empty",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between"
+      ]
+    },
+    "updated_at": {
+      "kind": "datetime",
+      "label": "updated",
+      "ops": [
+        "eq",
+        "neq",
+        "is_empty",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between"
+      ]
+    }
+  }
+}
