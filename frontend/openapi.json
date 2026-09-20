@@ -1,71 +1,343 @@
 {
-  "openapi": "3.1.0",
-  "info": {
-    "title": "netkeeper",
-    "version": "0.0.1",
-    "description": "Hand-written stub. P0-04 replaces this file with the schema FastAPI exports (`make gen-client` at the repo root). Keep it minimal until then."
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthOut": {
+        "properties": {
+          "status": {
+            "const": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "version"
+        ],
+        "title": "HealthOut",
+        "type": "object"
+      },
+      "TaskAccepted": {
+        "description": "The ``202`` body of every route that enqueues work and returns.",
+        "properties": {
+          "task_id": {
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id"
+        ],
+        "title": "TaskAccepted",
+        "type": "object"
+      },
+      "TaskOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "error",
+          "created_at",
+          "finished_at"
+        ],
+        "title": "TaskOut",
+        "type": "object"
+      },
+      "UserKind": {
+        "enum": [
+          "local",
+          "hosted"
+        ],
+        "title": "UserKind",
+        "type": "string"
+      },
+      "UserOut": {
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/UserKind"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "display_name",
+          "email",
+          "timezone"
+        ],
+        "title": "UserOut",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
   },
+  "info": {
+    "description": "Keep your professional network warm.",
+    "title": "netkeeper",
+    "version": "0.0.1"
+  },
+  "openapi": "3.1.0",
   "paths": {
-    "/api/v1/health": {
+    "/api/v1/events": {
       "get": {
-        "tags": ["health"],
-        "summary": "Health",
-        "operationId": "health_api_v1_health_get",
+        "operationId": "stream_events",
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "An SSE stream; each message is named by the event type."
+          }
+        },
+        "summary": "Server-sent events: task progress, run status, and health",
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "operationId": "get_health",
+        "responses": {
+          "200": {
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Health" }
+                "schema": {
+                  "$ref": "#/components/schemas/HealthOut"
+                }
               }
-            }
+            },
+            "description": "Successful Response"
           }
-        }
+        },
+        "summary": "Get Health",
+        "tags": [
+          "health"
+        ]
       }
     },
     "/api/v1/me": {
       "get": {
-        "tags": ["me"],
-        "summary": "Me",
-        "operationId": "me_api_v1_me_get",
+        "operationId": "get_me",
         "responses": {
           "200": {
-            "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Me" }
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
               }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Me",
+        "tags": [
+          "me"
+        ]
+      }
+    },
+    "/api/v1/tasks/ping": {
+      "post": {
+        "description": "Submit a tiny task that reports progress twice, and return its id at once.",
+        "operationId": "ping_task",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ping Task",
+        "tags": [
+          "tasks"
+        ]
+      }
+    },
+    "/api/v1/tasks/{task_id}": {
+      "get": {
+        "operationId": "get_task",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
             }
           }
-        }
-      }
-    }
-  },
-  "components": {
-    "schemas": {
-      "Health": {
-        "type": "object",
-        "title": "Health",
-        "required": ["status", "version"],
-        "properties": {
-          "status": { "type": "string", "const": "ok", "title": "Status" },
-          "version": { "type": "string", "title": "Version" }
-        }
-      },
-      "Me": {
-        "type": "object",
-        "title": "Me",
-        "required": ["id", "kind", "display_name", "email", "timezone"],
-        "properties": {
-          "id": { "type": "integer", "title": "Id" },
-          "kind": { "type": "string", "enum": ["local", "hosted"], "title": "Kind" },
-          "display_name": {
-            "anyOf": [{ "type": "string" }, { "type": "null" }],
-            "title": "Display Name"
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskOut"
+                }
+              }
+            },
+            "description": "Successful Response"
           },
-          "email": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Email" },
-          "timezone": { "type": "string", "title": "Timezone" }
-        }
+          "404": {
+            "description": "No such task"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Task",
+        "tags": [
+          "tasks"
+        ]
       }
     }
   }

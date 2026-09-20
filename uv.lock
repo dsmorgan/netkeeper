@@ -784,7 +784,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
-    { name = "fastapi", specifier = ">=0.115" },
+    { name = "fastapi", specifier = ">=0.121" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "keyring", specifier = ">=25" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },

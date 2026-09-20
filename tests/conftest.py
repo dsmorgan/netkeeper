@@ -1,12 +1,16 @@
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
+import httpx
 import pytest
+from fastapi import FastAPI
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
+from netkeeper.config import Settings
 from netkeeper.db import database_url, make_engine, make_session_factory
 from netkeeper.models import Base
+from netkeeper.web.app import create_app
 
 
 @pytest.fixture(autouse=True)
@@ -17,6 +21,7 @@ def _clean_netkeeper_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "NETKEEPER_CONFIG",
         "NETKEEPER_LOG_LEVEL",
         "NETKEEPER_DATABASE_URL",
+        "NETKEEPER_FRONTEND_DIST",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -39,3 +44,33 @@ def session(engine: Engine) -> Iterator[Session]:
     """A session on ``engine``. Work left uncommitted is discarded at teardown."""
     with make_session_factory(engine)() as session:
         yield session
+
+
+@pytest.fixture
+def bare_engine(tmp_path: Path) -> Iterator[Engine]:
+    """A tmp_path SQLite database with no schema, for code that runs the migrations itself."""
+    engine = make_engine(database_url(tmp_path / "bare"))
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def app(bare_engine: Engine, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FastAPI:
+    """The application on ``bare_engine`` with no frontend build, not yet started."""
+    monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", str(tmp_path / "no-dist"))
+    return create_app(Settings(), engine=bare_engine)
+
+
+@pytest.fixture
+async def running_app(app: FastAPI) -> AsyncIterator[FastAPI]:
+    """``app`` inside its lifespan: migrated, local user present, bus and runner live."""
+    async with app.router.lifespan_context(app):
+        yield app
+
+
+@pytest.fixture
+async def client(running_app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    """An in-process HTTP client. State-changing requests need the CSRF header."""
+    transport = httpx.ASGITransport(app=running_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        yield client

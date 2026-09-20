@@ -18,7 +18,7 @@ React 19, TypeScript, Vite, TanStack Router and Query, Tailwind CSS v4, and shad
 
 `src/api/schema.d.ts` is generated from `openapi.json` by `pnpm gen` and committed; never edit it by hand. `src/api/client.ts` wraps it with `openapi-fetch` and adds the `X-Netkeeper-Client: 1` header the backend's CSRF rule requires.
 
-Until P0-04 merges, `openapi.json` is a hand-written stub with `GET /api/v1/health` and `GET /api/v1/me`. P0-04 replaces the stub with `make gen-client` at the repo root, which exports the schema from FastAPI and reruns `pnpm gen`.
+`openapi.json` is exported from the FastAPI app by `make gen-client` at the repo root (`netkeeper openapi export --out frontend/openapi.json`, then `pnpm gen`). Rerun it whenever the API changes; the backend test suite fails when the committed file is stale.
 
 ## Where things are
 
