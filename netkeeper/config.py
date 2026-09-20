@@ -2,7 +2,8 @@
 
 Resolution order (spec section 15): ``--config``, ``$NETKEEPER_CONFIG``,
 ``./config.toml``, ``<data_dir>/config.toml``, then the built-in defaults below.
-Unknown sections and keys are logged and ignored; wrong types raise
+Unknown sections and keys are logged and ignored, except under ``[me]``, where
+unknown keys are kept as extra merge fields on purpose; wrong types raise
 :class:`ConfigError`.
 """
 
@@ -138,8 +139,10 @@ def load_settings(explicit: Path | None = None) -> Settings:
     ``explicit`` is the ``--config`` path. Because the user asked for that file by
     name, a missing one is an error rather than a silent fall-through.
     """
-    if explicit is not None and not explicit.is_file():
-        raise ConfigError(f"{explicit}: config file not found")
+    if explicit is not None:
+        explicit = explicit.expanduser()
+        if not explicit.is_file():
+            raise ConfigError(f"{explicit}: config file not found")
     for candidate in config_candidates(explicit):
         if candidate.is_file():
             return _load_file(candidate)

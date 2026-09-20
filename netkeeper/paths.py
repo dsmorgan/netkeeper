@@ -51,7 +51,7 @@ def config_candidates(explicit: Path | None = None) -> list[Path]:
     """
     candidates: list[Path] = []
     if explicit is not None:
-        candidates.append(explicit)
+        candidates.append(explicit.expanduser())
     override = os.environ.get(CONFIG_ENV)
     if override:
         candidates.append(Path(override).expanduser())
