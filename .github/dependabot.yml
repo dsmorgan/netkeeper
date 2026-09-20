@@ -1,0 +1,12 @@
+# Keeps the workflow's pinned action majors current, one grouped pull request a
+# week. pip and npm are left out until uv.lock and pnpm-lock.yaml settle; add
+# their ecosystems here when they do.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]

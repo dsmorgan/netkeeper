@@ -1,0 +1,117 @@
+# The checks that gate every pull request and every push to main. Each job runs
+# the same commands a contributor runs locally (make lint|typecheck|test, the
+# frontend scripts, make gen-client), so a green local run predicts a green CI run.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch or pull request cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python (ruff, mypy, pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      # tests/test_migrations.py runs the migration diff tests on SQLite always and
+      # on PostgreSQL when NETKEEPER_TEST_DATABASE_URL is set, so a SQLite-only
+      # construct fails here instead of on a hosted install.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: netkeeper
+          POSTGRES_PASSWORD: netkeeper
+          POSTGRES_DB: netkeeper_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U netkeeper -d netkeeper_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NETKEEPER_TEST_DATABASE_URL: postgresql+psycopg://netkeeper:netkeeper@localhost:5432/netkeeper_test
+    steps:
+      - uses: actions/checkout@v7
+      # setup-uv publishes no floating major tag past v7, so this is the exact release;
+      # Dependabot keeps it current.
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+      # With no argument, uv installs the interpreter pinned in .python-version.
+      - run: uv python install
+      - run: uv sync --all-extras
+      - run: make lint
+      - run: make typecheck
+      - run: make test
+
+  frontend:
+    name: Frontend (eslint, tsc, vitest, build, prettier)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      # Installs the pnpm version from the packageManager field.
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: frontend/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm format:check
+
+  client-drift:
+    name: Generated client is current
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      # setup-uv publishes no floating major tag past v7, so this is the exact release;
+      # Dependabot keeps it current.
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: frontend/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: uv python install
+      - run: uv sync --all-extras
+      - run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      - run: make gen-client
+      - name: Compare the committed client with the regenerated one
+        run: |
+          if git diff --exit-code -- frontend/openapi.json frontend/src/api/schema.d.ts; then
+            echo "The committed API client matches the backend's OpenAPI schema." >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## The generated API client is out of date"
+              echo
+              echo "The backend's OpenAPI schema no longer matches \`frontend/openapi.json\` and \`frontend/src/api/schema.d.ts\`."
+              echo "Run \`make gen-client\` at the repository root and commit both files."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
