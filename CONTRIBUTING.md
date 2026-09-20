@@ -48,6 +48,7 @@ These come straight from the spec and from production incidents on the sibling p
 - Budgets are enforced between units of work, never mid-unit.
 - Every protection defaults to on, and the posture page highlights anything that is off.
 - Message bodies, cookies, and tokens never appear in logs.
+- Migrations run on SQLite and PostgreSQL in CI; a construct that only one of them accepts is a CI failure.
 
 ## Code of conduct
 
