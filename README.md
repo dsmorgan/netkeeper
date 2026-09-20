@@ -1,5 +1,7 @@
 # netkeeper
 
+[![CI](https://github.com/dsmorgan/netkeeper/actions/workflows/ci.yml/badge.svg)](https://github.com/dsmorgan/netkeeper/actions/workflows/ci.yml)
+
 Keep your professional network warm.
 
 netkeeper pulls your 1st-degree LinkedIn connections and their contact info into a local database, helps you sort out who you actually know, and runs reconnect-and-follow-up sequences over Gmail and LinkedIn messaging. It replaces the manual workflow of exporting from LinkedIn, sorting a spreadsheet, scraping profiles with a separate tool, and mailing through a bulk-mail tool, with one application that runs on your Mac.
