@@ -2,41 +2,56 @@
 
 ``contacts.field_sources`` maps a scalar column of ``contacts`` to the source
 that last wrote it. The rule: an imported value never overwrites a value from a
-more authoritative source. For LinkedIn fields, ``sync`` beats ``archive``
-beats ``csv`` beats ``manual``. The fields a person owns (``preferred_name``,
+more authoritative source. For LinkedIn fields a person's own edit is the most
+authoritative: once ``manual`` is recorded, only another manual edit or a
+revert changes the field (CP1, #28). Among the automated sources ``sync`` beats
+``archive`` beats ``csv``. The fields a person owns (``preferred_name``,
 ``notes``, ``met``, and tags) are never in ``field_sources``: ``manual`` always
 wins there, and no import touches them.
 
-This module is the rule, and :func:`set_manual_field` for a person's own edits.
-Applying the rule to an incoming row, and recording the source that wins, is
-identity resolution and import (:mod:`netkeeper.crm.identity`).
+So that an override can be undone, ``contacts.synced_values`` keeps the last
+value each automated source reported for every LinkedIn field, whether or not
+that value reached the live column (:class:`~netkeeper.models.SyncedValue`).
+:func:`record_synced_value` writes that ledger, :func:`revert_to_synced` puts
+the recorded value and its source back on the contact, and
+:func:`overridden_fields` names the fields where an edit hides a different
+synced value.
+
+This module is the rule, :func:`set_manual_field` for a person's own edits, and
+the ledger. Applying the rule to an incoming row, and recording the source that
+wins, is identity resolution and import (:mod:`netkeeper.crm.identity`).
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Final
 
-from netkeeper.models import Contact, ContactMet, ContactSource
+from sqlalchemy import Date, inspect
 
-# Higher wins. Equal rank may overwrite: a newer sync updates an older one.
-SOURCE_RANK: Final[dict[str, int]] = {"sync": 3, "archive": 2, "csv": 1, "manual": 0}
+from netkeeper.models import Contact, ContactMet, ContactSource, SyncedValue
 
-# The scalar columns of ``contacts`` that ``field_sources`` tracks.
-PROVENANCE_FIELDS: Final[frozenset[str]] = frozenset(
-    {
-        "li_urn",
-        "li_public_id",
-        "li_url",
-        "first_name",
-        "last_name",
-        "headline",
-        "current_title",
-        "current_company",
-        "location",
-        "connected_on",
-    }
+# Higher wins. Equal rank may overwrite: a newer sync updates an older one, and a
+# later edit replaces an earlier one. ``manual`` ranks highest for a LinkedIn
+# field, so an override sticks until revert_to_synced() (CP1, #28).
+SOURCE_RANK: Final[dict[str, int]] = {"manual": 4, "sync": 3, "archive": 2, "csv": 1}
+
+# The scalar columns of ``contacts`` that ``field_sources`` tracks, in the order
+# apply() writes them: identity first, so the li_public_id validator has derived
+# li_url before li_url itself is assigned.
+PROVENANCE_ORDER: Final[tuple[str, ...]] = (
+    "li_urn",
+    "li_public_id",
+    "li_url",
+    "first_name",
+    "last_name",
+    "headline",
+    "current_title",
+    "current_company",
+    "location",
+    "connected_on",
 )
+PROVENANCE_FIELDS: Final[frozenset[str]] = frozenset(PROVENANCE_ORDER)
 
 # Owned by the person, never by an import; tags (P1-07) join them outside ``contacts``.
 PERSON_OWNED_FIELDS: Final[frozenset[str]] = frozenset({"preferred_name", "notes", "met"})
@@ -48,8 +63,11 @@ def may_overwrite(field: str, incoming_source: str, contact: Contact) -> bool:
     A person-owned field takes ``manual`` and nothing else. A provenance field
     with no value yet (``None`` or an empty string), or with no recorded source,
     is free to any source. Otherwise the incoming source must rank at least as
-    high as the one that last wrote the field. ``ValueError`` for a field that
-    carries no provenance or a source that is not a :class:`ContactSource`.
+    high as the one that last wrote the field, and ``manual`` ranks highest: a
+    field a person edited is closed to the sync and to every import until
+    :func:`revert_to_synced`, and open only to another edit. ``ValueError`` for
+    a field that carries no provenance or a source that is not a
+    :class:`ContactSource`.
     """
     source = ContactSource(incoming_source)
     if field in PERSON_OWNED_FIELDS:
@@ -70,15 +88,15 @@ def set_manual_field(contact: Contact, field: str, value: str | date | ContactMe
     """Write ``field`` on ``contact`` as a person's own edit, unconditionally.
 
     The contacts PATCH endpoint (P1-05) uses this for every editable column and
-    never :func:`netkeeper.crm.identity.apply`, which is for imports and the sync
-    and would refuse a lower-ranked source. A provenance field takes the value
-    and records ``manual`` in ``field_sources``, and that is the lowest rank for
-    a LinkedIn field (spec 10.5): a later sync, archive, or CSV import may
-    overwrite the edit again, by design, because LinkedIn is the authority on
-    what LinkedIn shows. A person-owned field (``preferred_name``, ``notes``,
-    ``met``) is just written; no import touches those. ``ValueError`` for any
-    other column. A slug written here records no alias; that is
-    :func:`~netkeeper.crm.identity.apply`'s job.
+    never :func:`netkeeper.crm.identity.apply`, which is for imports and the sync.
+    A provenance field takes the value and records ``manual`` in
+    ``field_sources``, the highest rank for a LinkedIn field (spec 10.5, CP1
+    #28): from then on no sync, archive, or CSV import overwrites it. Those still
+    note what they saw in ``synced_values``, so :func:`revert_to_synced` can put
+    LinkedIn's value back whenever the person asks. A person-owned field
+    (``preferred_name``, ``notes``, ``met``) is just written; no import touches
+    those. ``ValueError`` for any other column. A slug written here records no
+    alias; that is :func:`~netkeeper.crm.identity.apply`'s job.
     """
     if field in PERSON_OWNED_FIELDS:
         setattr(contact, field, value)
@@ -86,8 +104,107 @@ def set_manual_field(contact: Contact, field: str, value: str | date | ContactMe
     if field not in PROVENANCE_FIELDS:
         raise ValueError(f"{field!r} is neither a provenance nor a person-owned field")
     setattr(contact, field, value)
+    _set_source(contact, field, ContactSource.MANUAL)
+
+
+# --- the synced-values ledger -----------------------------------------------
+
+
+def record_synced_value(
+    contact: Contact,
+    field: str,
+    value: str | date | None,
+    *,
+    source: str | ContactSource,
+    observed_at: datetime,
+) -> bool:
+    """Note that ``source`` reported ``value`` for ``field`` at ``observed_at``.
+
+    Writes ``contact.synced_values[field]`` whether or not the live column takes
+    the value (:func:`may_overwrite` decides that separately), so the last synced
+    value is always there to revert to. The ledger is chronological, not ranked:
+    an observation older than the one recorded is dropped, as a child row's is,
+    and False says so; one at the same instant or later replaces it. A date is
+    stored in ISO form and ``observed_at`` as an ISO datetime in UTC.
+    ``ValueError`` for a field that carries no provenance, for ``manual`` (a
+    person's edit is what the ledger exists to undo, never an entry in it), for a
+    source that is not a :class:`ContactSource`, and for a naive ``observed_at``.
+    """
+    if field not in PROVENANCE_FIELDS:
+        raise ValueError(f"{field!r} carries no provenance; see PROVENANCE_FIELDS")
+    reported = ContactSource(source)
+    if reported is ContactSource.MANUAL:
+        raise ValueError("manual is not a synced source")
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("observed_at must be timezone-aware")
+    existing = (contact.synced_values or {}).get(field)
+    if existing is not None and observed_at < datetime.fromisoformat(existing["observed_at"]):
+        return False
+    entry: SyncedValue = {
+        "value": value.isoformat() if isinstance(value, date) else value,
+        "source": reported.value,
+        "observed_at": observed_at.astimezone(UTC).isoformat(),
+    }
+    if not contact.synced_values:  # unset before the first flush, or empty
+        contact.synced_values = {field: entry}
+    else:
+        contact.synced_values[field] = entry
+    return True
+
+
+def revert_to_synced(contact: Contact, field: str) -> None:
+    """Put the last synced value of ``field`` back on ``contact``, with its source.
+
+    The undo for :func:`set_manual_field`: the live column takes the value the
+    ledger holds and ``field_sources[field]`` becomes the source that reported
+    it, so that source and any higher-ranked one may write the field again. The
+    ledger entry stays. ``ValueError`` for a field that carries no provenance and
+    for one no automated source has reported (``"<field> has no synced value to
+    revert to"``). As with any direct write, a slug reverted here records no
+    alias, and a slug or URN another contact holds fails at flush.
+    """
+    if field not in PROVENANCE_FIELDS:
+        raise ValueError(f"{field!r} carries no provenance; see PROVENANCE_FIELDS")
+    synced = (contact.synced_values or {}).get(field)
+    if synced is None:
+        raise ValueError(f"{field} has no synced value to revert to")
+    setattr(contact, field, _column_value(field, synced["value"]))
+    _set_source(contact, field, ContactSource(synced["source"]))
+
+
+def overridden_fields(contact: Contact) -> list[str]:
+    """The provenance fields a person edited that hide a different synced value.
+
+    In :data:`PROVENANCE_ORDER`. What the UI marks "overridden" with a revert
+    control: the recorded source is ``manual`` and the ledger holds a value
+    other than the live one. An edit that matches what LinkedIn last reported,
+    or one on a field no automated source has reported, is not listed; there is
+    nothing to revert to.
+    """
+    sources = contact.field_sources or {}
+    synced = contact.synced_values or {}
+    return [
+        field
+        for field in PROVENANCE_ORDER
+        if sources.get(field) == ContactSource.MANUAL.value
+        and field in synced
+        and getattr(contact, field) != _column_value(field, synced[field]["value"])
+    ]
+
+
+def _set_source(contact: Contact, field: str, source: ContactSource) -> None:
     sources = contact.field_sources
     if not sources:  # unset before the first flush (the column default fills it), or empty
-        contact.field_sources = {field: ContactSource.MANUAL.value}
+        contact.field_sources = {field: source.value}
     else:
-        sources[field] = ContactSource.MANUAL.value
+        sources[field] = source.value
+
+
+def _column_value(field: str, raw: str | None) -> str | date | None:
+    """A ledger value as the column stores it: a date parsed, an empty name ``''``."""
+    column = inspect(Contact).columns[field]
+    if raw is None:
+        return None if column.nullable else ""  # names are '' when unknown, never NULL
+    if isinstance(column.type, Date):
+        return date.fromisoformat(raw)
+    return raw

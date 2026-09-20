@@ -14,8 +14,10 @@ Moments are ``UTCDateTime``; calendar dates that LinkedIn reports without a time
 
 Provenance is per field, not per row (spec 10.5): ``contacts.source`` is the
 first source, ``contacts.field_sources`` says which source last wrote each
-LinkedIn field, and every child row carries its own ``source``. The rule that
-decides whether a value may be overwritten is :mod:`netkeeper.crm.provenance`.
+LinkedIn field, ``contacts.synced_values`` keeps the last value an automated
+source reported for each (what a manual override reverts to), and every child
+row carries its own ``source``. The rule that decides whether a value may be
+overwritten, and the ledger's reads and writes, are :mod:`netkeeper.crm.provenance`.
 
 A child row needs its own ``user_id``: the scope guard rejects a flush of an
 owned row without one, and nothing copies it from the parent.
@@ -25,7 +27,7 @@ from __future__ import annotations
 
 import enum
 from datetime import date, datetime
-from typing import Any
+from typing import Any, TypedDict
 
 from sqlalchemy import (
     JSON,
@@ -38,6 +40,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     inspect,
+    text,
 )
 from sqlalchemy.engine.default import DefaultExecutionContext
 from sqlalchemy.ext.mutable import MutableDict
@@ -60,15 +63,31 @@ class ContactMet(enum.StrEnum):
 class ContactSource(enum.StrEnum):
     """Where a row came from. On ``contacts`` the first source; children carry their own.
 
-    The order is the precedence for LinkedIn fields (spec 10.5): ``sync`` beats
-    ``archive`` beats ``csv`` beats ``manual``, except for the fields a person
-    owns (``preferred_name``, ``notes``, ``met``, tags), where ``manual`` wins.
+    For a LinkedIn field (spec 10.5) a recorded ``manual`` outranks everything
+    until the person reverts it; among the automated sources ``sync`` beats
+    ``archive`` beats ``csv``. The fields a person owns (``preferred_name``,
+    ``notes``, ``met``, tags) take ``manual`` and nothing else.
     """
 
     SYNC = "sync"
     ARCHIVE = "archive"
     CSV = "csv"
     MANUAL = "manual"
+
+
+class SyncedValue(TypedDict):
+    """One entry of ``contacts.synced_values``: what an automated source last reported.
+
+    ``value`` is the field's text, a date in ISO form, or ``None`` for a field
+    the source reported empty. ``source`` is a :class:`ContactSource` value other
+    than ``manual``. ``observed_at`` is an ISO datetime in UTC. Stored as plain
+    JSON, so the types are the JSON ones; :mod:`netkeeper.crm.provenance`
+    converts on the way in and out.
+    """
+
+    value: str | None
+    source: str
+    observed_at: str
 
 
 class EmailKind(enum.StrEnum):
@@ -208,6 +227,17 @@ class Contact(UserOwned, TimestampMixin, Base):
     # ``contact.field_sources["headline"] = "sync"`` is flushed like any other change.
     field_sources: Mapped[dict[str, str]] = mapped_column(
         MutableDict.as_mutable(JSON()), nullable=False, default=dict
+    )
+    # The last value each automated source (``sync``, ``archive``, ``csv``) reported
+    # for a LinkedIn field, kept whether or not it reached the column, so a manual
+    # override can be reverted (spec 10.5, CP1 #28). Keys are provenance fields,
+    # values :class:`SyncedValue`. The database default is what migration 0003
+    # filled existing rows with; the ORM sends ``{}`` itself.
+    synced_values: Mapped[dict[str, SyncedValue]] = mapped_column(
+        MutableDict.as_mutable(JSON()),
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
     )
     # Set on the loser of a merge (spec 8.2). Losing the winner leaves the loser alone.
     merged_into_id: Mapped[int | None] = mapped_column(

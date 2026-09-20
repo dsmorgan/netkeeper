@@ -47,7 +47,7 @@ from urllib.parse import unquote, urlsplit
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from netkeeper.crm.provenance import may_overwrite
+from netkeeper.crm.provenance import PROVENANCE_ORDER, may_overwrite, record_synced_value
 from netkeeper.db import is_writer
 from netkeeper.models import (
     Contact,
@@ -72,21 +72,6 @@ from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped, scoped
 
 log = logging.getLogger(__name__)
-
-# The provenance fields in the order apply() writes them: identity first, so the
-# li_public_id validator has derived li_url before li_url itself is assigned.
-PROVENANCE_ORDER: Final[tuple[str, ...]] = (
-    "li_urn",
-    "li_public_id",
-    "li_url",
-    "first_name",
-    "last_name",
-    "headline",
-    "current_title",
-    "current_company",
-    "location",
-    "connected_on",
-)
 
 # A change to any of these on an existing contact writes a contact_snapshot (spec 8.1, 9.8).
 JOB_FIELDS: Final[tuple[str, ...]] = ("headline", "current_title", "current_company", "location")
@@ -535,7 +520,12 @@ def apply(
     ``field_sources`` for every provided field. An existing contact takes each
     provided field only when :func:`~netkeeper.crm.provenance.may_overwrite`
     allows it; a slug change keeps the old slug in ``contact_aliases``; a change
-    to any job field writes a ``contact_snapshot`` of the values before it.
+    to any job field writes a ``contact_snapshot`` of the values before it. Either
+    way, a row from any source but ``manual`` also notes every provided field in
+    ``synced_values`` with its source and ``observed_at``, whether or not the
+    live column took it (unless a newer observation is already noted), so a
+    manual override always has a synced value to revert to
+    (:func:`~netkeeper.crm.provenance.revert_to_synced`).
     Children are upserted by natural key (email; phone digits; link URL;
     company, title, and start date), never duplicated, with ``source`` and
     ``observed_at`` refreshed unless the row was observed more recently, an
@@ -585,10 +575,11 @@ def _no_decision(decision: Decision | None) -> None:
 def _create(session: Session, user: User, incoming: IncomingContact) -> Contact:
     provided = incoming.provided_fields()
     _assert_identities_free(session, user, None, provided)
-    contact = Contact(user_id=user.id, source=incoming.source, field_sources={})
+    contact = Contact(user_id=user.id, source=incoming.source, field_sources={}, synced_values={})
     for name, value in provided.items():
         setattr(contact, name, value)
         contact.field_sources[name] = incoming.source.value
+    _record_synced(contact, incoming)
     session.add(contact)
     _upsert_children(user, contact, incoming)
     session.flush()
@@ -615,6 +606,7 @@ def _update(session: Session, user: User, contact: Contact, incoming: IncomingCo
                 _retire_slug(session, user, contact, old=old, new=value, incoming=incoming)
         if may_overwrite(name, incoming.source, contact):
             _record(contact, name, incoming.source)
+    _record_synced(contact, incoming)
     if any(
         before[name] not in (None, "") and before[name] != getattr(contact, name)
         for name in JOB_FIELDS
@@ -636,6 +628,16 @@ def _update(session: Session, user: User, contact: Contact, incoming: IncomingCo
 def _record(contact: Contact, name: str, source: ContactSource) -> None:
     if contact.field_sources.get(name) != source.value:
         contact.field_sources[name] = source.value
+
+
+def _record_synced(contact: Contact, incoming: IncomingContact) -> None:
+    """Note every provided field in the ledger, whether or not the column took it."""
+    if incoming.source is ContactSource.MANUAL:
+        return
+    for name, value in incoming.provided_fields().items():
+        record_synced_value(
+            contact, name, value, source=incoming.source, observed_at=incoming.observed_at
+        )
 
 
 def _assert_identities_free(
@@ -824,7 +826,8 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     are deduplicated by natural key (the survivor's row stays, the loser's
     duplicate goes), snapshots, aliases, and interactions all move. The
     survivor's empty provenance fields take the loser's values with the loser's
-    recorded source. The loser's URN and slug move to the survivor when it lacks
+    recorded source, and its ``synced_values`` fill in from the loser's for the
+    fields it has none for. The loser's URN and slug move to the survivor when it lacks
     them; otherwise the slug becomes an alias of the survivor and the URN is
     dropped. Both are cleared on the loser, whose ``merged_into_id`` points at
     the survivor. ``met`` takes the more decided value, ``do_not_contact`` is
@@ -858,6 +861,7 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     _merge_identity(session, user, survivor, loser)
     _merge_children(survivor, loser)
     _merge_scalars(survivor, loser)
+    _merge_synced_values(survivor, loser)
     loser.merged_into_id = survivor.id
     session.flush()
     return survivor
@@ -975,3 +979,10 @@ def _merge_scalars(survivor: Contact, loser: Contact) -> None:
         survivor.last_contacted_at = loser.last_contacted_at
     if loser.archived_at is None:
         survivor.archived_at = None
+
+
+def _merge_synced_values(survivor: Contact, loser: Contact) -> None:
+    """The survivor learns what was synced for the loser, where it knows nothing itself."""
+    for name, synced in loser.synced_values.items():
+        if name not in survivor.synced_values:
+            survivor.synced_values[name] = synced.copy()
