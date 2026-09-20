@@ -25,6 +25,7 @@ Frontend: `cd frontend && pnpm install && pnpm dev | build | lint | test`.
 - **Extractor boundary.** Nothing under `netkeeper/linkedin/` imports `netkeeper.models` or opens a session. Job specs in, result dataclasses out; `linkedin/apply.py` is the only module that touches the database. ADR 0005, spec 9.10.
 - **Browser identity.** Attach mode only, never launch a browser, never retry a checkpoint, budgets enforced between units of work, never `await` browser work inside a request handler, one activity lock per LinkedIn account. ADR 0002, spec section 9.
 - **Datetimes** are stored naive UTC and returned timezone-aware through `UTCDateTime`. Never store a naive local time.
+- **Writer sessions.** Any session that reads and then writes must be marked for write (`session_scope(factory, write=True)`, or the request dependency, which marks non-GET requests). On SQLite that emits `BEGIN IMMEDIATE`; an unmarked read-then-write can fail instantly with "database is locked" and `busy_timeout` does not help. Scheduler jobs and CLI commands are writers too.
 - **Migrations** are linear and PostgreSQL-portable (no SQLite-only constructs). The migration diff test runs on both databases.
 - **API modules** live in `netkeeper/web/api/<name>.py` and expose `router`; the app factory discovers them, so adding an endpoint never edits `app.py`.
 - **Config** is TOML (`config.py` dataclasses); runtime-adjustable values live in `settings_kv`, seeded from config on first start.
@@ -37,6 +38,7 @@ Frontend: `cd frontend && pnpm install && pnpm dev | build | lint | test`.
 
 - One implementation-guide item per PR. Branch from `origin/main`, named `p<phase>-<nn>-<slug>`. Title `[P1-04] Generic CSV importer`. Body follows the template and contains `Closes #<issue>`.
 - `make check` green before pushing. Frontend PRs also `pnpm lint && pnpm build`.
+- Rebase onto `origin/main` before asking for review, especially when the branch touches shared files (`tests/conftest.py`, `tests/test_migrations.py`, `pyproject.toml`). A conflicting PR gets no CI run.
 - Add a `changelog.d/<issue>.<type>.md` fragment when behavior changed.
 - A review agent checks every PR for bugs, test coverage against the item's "done when", and alignment with the spec and ADRs. The maintainer merges; agents never merge.
 - Parallel lanes work in sibling worktrees: `git worktree add ../netkeeper-<lane>`. Never create worktrees inside the repository.
