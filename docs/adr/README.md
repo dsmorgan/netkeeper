@@ -12,3 +12,4 @@ An ADR records one decision, the context that forced it, and its consequences. T
 | [0002](0002-attach-only-browser-mode.md) | Attach-only browser mode for LinkedIn | Accepted |
 | [0003](0003-gmail-api-over-smtp.md) | Gmail API with OAuth instead of SMTP | Accepted |
 | [0004](0004-manual-linkedin-sends-by-default.md) | LinkedIn messages are prefilled, not sent, by default | Accepted |
+| [0005](0005-user-boundary-from-the-first-migration.md) | Carry a user boundary from the first migration | Accepted |

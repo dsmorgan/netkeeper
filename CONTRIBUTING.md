@@ -8,10 +8,14 @@ Thanks for your interest. This page explains how the project works so your time 
 - Read the [architecture decision records](docs/adr/). If your change reverses one of them, open an issue first and propose a new ADR. Discussion is welcome; silent reversals are not.
 - Check the [non-goals](docs/architecture.md#non-goals). Features outside them need an issue and a maintainer's agreement before code.
 
+## Picking something to build
+
+The [implementation guide](docs/implementation-guide.md) is the backlog: every work item there is, or will be, an issue with the item ID in its title. Pick an open one whose dependencies are closed, comment that you are taking it, and go. Items labeled `checkpoint` are for the maintainer.
+
 ## How to propose work
 
 1. **Bugs:** open an issue with the bug template. Include the run notes from the Settings or LinkedIn page when the bug involves the sidecar; never include cookies, tokens, or other people's contact data.
-2. **Features:** open an issue with the feature template and say which hp step or spec section it serves.
+2. **Features:** open an issue with the feature template and say which stage of the [reconnect workflow](docs/networking-workflow.md) or which spec section it serves.
 3. **Small fixes** (typos, docs, obvious one-liners): send a pull request directly.
 
 ## Pull requests
@@ -36,7 +40,9 @@ These come straight from the spec and from production incidents on the sibling p
 
 - Only `attach` browser mode. No code path may launch a second browser identity.
 - No `await` on browser work inside a request handler.
-- Every browser-touching path takes the single activity lock.
+- Every browser-touching path takes the activity lock for its LinkedIn account.
+- Nothing under `linkedin/` imports ORM models or opens a database session.
+- Every query against a user-owned table goes through the scoping helper, and every list endpoint has an isolation test.
 - A security checkpoint is never retried.
 - Budgets are enforced between units of work, never mid-unit.
 - Every protection defaults to on, and the posture page highlights anything that is off.

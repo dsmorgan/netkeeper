@@ -7,5 +7,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 ### Added
 
 - Architecture spec v0.1 (`docs/architecture.md`) covering the LinkedIn extractor, the CRM, and the campaign engine, with delivery phases.
-- Architecture decision records for the four decisions contributors are most likely to question.
+- Architecture decision records for the five decisions contributors are most likely to question, including the user boundary carried from the first migration.
+- Implementation guide (`docs/implementation-guide.md`): work items for the backlog, lanes that run in parallel, and human checkpoints.
+- Generic description of the reconnect workflow (`docs/networking-workflow.md`), replacing the copied training text.
 - Open-source scaffolding: MIT license, README, contributing guide, code of conduct, security policy, issue and pull request templates.

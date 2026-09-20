@@ -2,9 +2,9 @@
 
 Keep your professional network warm.
 
-netkeeper pulls your 1st-degree LinkedIn connections and their contact info into a local database, helps you sort out who you actually know, and runs reconnect-and-follow-up sequences over Gmail and LinkedIn messaging. It replaces the manual workflow of exporting from LinkedIn, sorting a spreadsheet, scraping with LinkedHelper, and mailing through Phello with one tool that runs on your Mac.
+netkeeper pulls your 1st-degree LinkedIn connections and their contact info into a local database, helps you sort out who you actually know, and runs reconnect-and-follow-up sequences over Gmail and LinkedIn messaging. It replaces the manual workflow of exporting from LinkedIn, sorting a spreadsheet, scraping profiles with a separate tool, and mailing through a bulk-mail tool, with one application that runs on your Mac.
 
-**Status: pre-alpha.** The [architecture spec](docs/architecture.md) is complete. There is no runnable code yet. Watch the repository or check the [changelog](CHANGELOG.md) for progress.
+**Status: pre-alpha.** The [architecture spec](docs/architecture.md) and the [implementation guide](docs/implementation-guide.md) are complete. There is no runnable code yet. Watch the repository or check the [changelog](CHANGELOG.md) for progress.
 
 ## What it does
 
@@ -14,11 +14,11 @@ netkeeper is three tools in one, and they only make sense together:
 2. **Organize.** A local CRM with a triage screen for "have I actually met this person", manual and rule-based tags, static and smart lists, CSV import with column mapping, and export presets. LinkedIn stays the source of truth through periodic re-sync.
 3. **Reach out.** Multi-step sequences: an email, a follow-up a week later into the same thread, and a LinkedIn message after that, each skipped automatically when the person replies. Draft mode writes into Gmail for you to send by hand; send mode sends for you inside a daily cap and a send window.
 
-Everything stays on your machine: one SQLite file, tokens in the macOS Keychain, a web UI on `127.0.0.1`.
+Everything stays on your machine: one SQLite file, tokens in the macOS Keychain, a web UI on `127.0.0.1`. v1 is for one person, but the schema carries a user boundary from the start so a self-hosted or hosted multi-user deployment can follow later without a rewrite.
 
 ## Where the method comes from
 
-The workflow is the one taught by [hellophello](https://hellophello.com): validate your network, enrich it, reconnect in batches of 100, follow up a week later, keep going weekly. Steps 6 through 10 of that training are in [docs/hp-training.md](docs/hp-training.md), and [the spec](docs/architecture.md#3-mapping-to-the-hp-workflow) maps every manual step to a netkeeper feature.
+The workflow is a five-stage reconnect method: validate your network, enrich it, reconnect in batches of about 100, handle responses, follow up a week later, and keep going weekly. It is described generically in [docs/networking-workflow.md](docs/networking-workflow.md), and [the spec](docs/architecture.md#3-mapping-to-the-reference-workflow) maps every manual step to a netkeeper feature. The method comes from [hellophello](https://hellophello.com)'s job-search networking program, which is acknowledged here as the inspiration and appears nowhere in the implementation.
 
 ## Requirements
 
@@ -45,9 +45,16 @@ LinkedIn's User Agreement prohibits automated access, including reading data it 
 
 Details and exit criteria are in [the spec](docs/architecture.md#19-delivery-phases).
 
+## Documentation
+
+- [Architecture spec](docs/architecture.md): design, data model, safety rules, phases.
+- [Implementation guide](docs/implementation-guide.md): the backlog, what runs in parallel, and the human checkpoints.
+- [Reconnect workflow](docs/networking-workflow.md): the method the tool automates.
+- [Architecture decision records](docs/adr/): why the contested parts are the way they are.
+
 ## Contributing
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for how the project works, and the [architecture decision records](docs/adr/) before proposing a change to the browser, Gmail, or messaging design. This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for how the project works, and the [architecture decision records](docs/adr/) before proposing a change to the browser, Gmail, messaging, or user-scoping design. This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
 
 ## License
 

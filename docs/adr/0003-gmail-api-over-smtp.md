@@ -16,7 +16,7 @@ Use the Gmail API with the `gmail.modify` scope, refresh tokens in the macOS Key
 
 ## Consequences
 
-- Reply suppression is automatic, which is the single biggest reduction in weekly manual work compared to the Phello workflow.
+- Reply suppression is automatic, which is the single biggest reduction in weekly manual work compared to the reference workflow's mailing tool.
 - Setup takes about fifteen minutes the first time. The guide has to be good.
 - The tool holds a broad scope on the mailbox. It never deletes mail, logs every call's purpose, and keeps the token out of the database.
 - Non-Gmail providers are out of scope until someone proposes an ADR with a provider abstraction and a reply-detection story.

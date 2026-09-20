@@ -5,11 +5,11 @@
 | Status | Draft v0.1 |
 | Date | 2026-09-20 |
 | Name | `netkeeper`, at [github.com/dsmorgan/netkeeper](https://github.com/dsmorgan/netkeeper) |
-| Related | [hp-training.md](hp-training.md), the manual workflow this tool replaces; [adr/](adr/), the reasoning behind contested decisions |
+| Related | [networking-workflow.md](networking-workflow.md), the method this tool automates; [implementation-guide.md](implementation-guide.md), the backlog and checkpoints; [adr/](adr/), the reasoning behind contested decisions |
 
 ## 1. Summary
 
-netkeeper is a single-user, local-first application that keeps your professional network warm. It replaces the LinkedIn export, spreadsheet, LinkedHelper, and Phello pipeline in [hp-training.md](hp-training.md) with one tool that does three things:
+netkeeper is a local-first application that keeps your professional network warm. It automates the reconnect method in [networking-workflow.md](networking-workflow.md), which today takes a LinkedIn data export, a spreadsheet, a profile-scraping tool, and a bulk-mail tool. The method comes from hellophello's job-search networking program; that name is an acknowledgement, and it appears nowhere in the implementation. netkeeper does the whole thing in one tool with three parts:
 
 1. **Extract.** Pull your 1st-degree LinkedIn connections and their contact info through a browser sidecar attached to the Chrome you already use, with human-like pacing and hard daily budgets.
 2. **Organize.** Store, deduplicate, triage, tag, and segment those contacts in a local CRM with CSV import and export and periodic re-sync against LinkedIn.
@@ -17,46 +17,50 @@ netkeeper is a single-user, local-first application that keeps your professional
 
 It runs natively on macOS as one Python process (FastAPI plus a scheduler) that serves a React frontend on `127.0.0.1`. A container image exists for Linux hosts. The LinkedIn steps require Chrome running on the same machine.
 
+v1 serves one person on one machine. The schema and service boundaries carry a user boundary from the first migration so that a self-hosted or hosted multi-user deployment is an addition later, not a rewrite. See [Multi-user readiness](#multi-user-readiness).
+
 ## 2. Goals and non-goals
 
 ### Goals
 
-- Replace hp steps 6 through 10 end to end, so a weekly outreach cycle takes minutes of your attention, not hours.
-- Never put your LinkedIn account at more risk than the LinkedHelper workflow the training already recommends. Default budgets are conservative and every protection is on by default.
+- Automate all five stages of the reference workflow end to end, so a weekly outreach cycle takes minutes of your attention, not hours.
+- Never put your LinkedIn account at more risk than the profile-scraping tools the reference workflow already recommends. Default budgets are conservative and every protection is on by default.
 - Keep all data on your machine. No hosted service, no telemetry.
 - Make every automated action reviewable before it happens and traceable after it happens.
 - Reuse the browser-sidecar patterns that igtracker proved against Instagram: CDP attach, in-page fetch, lognormal pacing, daily budgets, heat-based backoff, cooperative cancel, resumable runs.
+- Keep a user boundary in the schema and the service layer from day one, so multi-user deployment later is an addition rather than a migration of every table.
 
-### Non-goals
+### Non-goals for v1
 
-- Multi-user or hosted operation. One person, one LinkedIn account, one Gmail mailbox.
+- Login, hosting, or serving more than one person. v1 runs for one person, one LinkedIn account, one Gmail mailbox. The design still carries `user_id` everywhere (see [Multi-user readiness](#multi-user-readiness)); what is deferred is the operational work, not the data model.
 - 2nd- and 3rd-degree connections, connection requests, InMail, or Sales Navigator. The extractor keeps a `degree` field so this can be added later, but v1 only reads people you are already connected to.
-- Email open tracking. It needs a public pixel endpoint and hurts deliverability. Reply rate is the metric that matters in the hp method anyway.
+- Email open tracking. It needs a public pixel endpoint and hurts deliverability. Reply rate is the metric that matters in the reference workflow anyway.
 - Cold outreach to people outside your network. The tool is built for reconnecting, and its guards assume that.
 - A general-purpose CRM (deals, pipelines, companies as first-class objects).
 
-## 3. Mapping to the hp workflow
+## 3. Mapping to the reference workflow
 
-The table shows each manual step in the training and what netkeeper does instead.
+The table shows each manual step in [networking-workflow.md](networking-workflow.md) and what netkeeper does instead. Stage numbers refer to that document.
 
-| hp step | Manual today | netkeeper |
+| Workflow step | Manual today | netkeeper |
 |---|---|---|
-| 6.1 Export connections | Request LinkedIn data archive, wait up to 24 h, unzip, open CSV | **Import** the official archive (zero risk seed) and/or **Connections sync** through the sidecar (minutes, no wait) |
-| 6.2 Mark people you have met | Add an X column in a spreadsheet | **Triage** screen: keyboard-driven met / not met / skip, with evidence (message history, connected-on date, notes) |
-| 6.3 Sort and save validated list | Sort by X, delete rows, save a copy | `met = true` is a field; the original data is never deleted. A smart list "Validated" is built in |
-| 7 Extract contact info | Paste each URL into LinkedHelper, 100 at a time, clean CSV | **Enrichment** job visits profiles under a daily budget, harvests email, phone, location, current position in one visit, prioritized by who you plan to contact |
-| 7 Clean and format columns | Delete columns in Excel | Not needed. Export presets produce any column layout, including the 9-column Phello layout |
-| 8.1 Prep 9 columns, remove headers | Manual | Not needed |
-| 8.2 Import to Phello, map columns | Manual mapping | Contacts are already in the CRM. CSV import has saved mappings for other sources |
-| 8.2 Phello auto-tags by title | Phello feature | **Auto-tag rules** (regex on title and company), optional LLM classification |
-| 8.3 Set up a contact list of 100 | Manual list | Static and smart **lists**, with "remove contacts without email" as a filter |
-| 8.4 Craft and send first campaign | Phello template, review request | **Templates** with merge fields, **review gate** with rendered previews, **test send** to yourself |
-| 8.5 Follow up a week later | New campaign built by hand | **Sequences**: step 2 fires N days after step 1 unless a reply was detected |
-| 9.2 Folder for campaign replies | Manual Gmail folder | Gmail **label** per campaign applied to outbound and detected replies |
-| 9.5 Track who responded | Notes and calendar reminders | **Reply detection** on Gmail threads and the LinkedIn inbox; interaction timeline per contact; follow-up reminders |
-| 10.2 Remove responders from follow-up list | Spreadsheet surgery | Automatic suppression when an enrollment reaches `replied` |
-| 10.5 Weekly cadence | Remember to do it | Send windows (Tue–Thu by default), daily caps, and a dashboard showing what fires next |
-| 10.6 Keep scraping 100 per day | LinkedHelper batches | Enrichment runs on a schedule inside the budget; new connections are picked up by incremental sync |
+| 1.1 Export connections | Request the LinkedIn data archive, wait up to 24 h, unzip, open CSV | **Import** the official archive (zero-risk seed) and/or **Connections sync** through the sidecar (minutes, no wait) |
+| 1.2 Mark people you have met | Add a column in a spreadsheet | **Triage** screen: keyboard-driven met / not met / skip, with evidence (message history, connected-on date, notes) |
+| 1.3 Keep the validated list | Sort, delete rows, save a copy | `met = true` is a field; nothing is deleted. A built-in smart list "Validated" |
+| 2 Enrich contact info | Paste URLs into a scraping tool, 100 at a time, clean the CSV | **Enrichment** job visits profiles under a daily budget, harvests email, phone, location, and current position in one visit, prioritized by who you plan to contact |
+| 2 Keep the essential fields | Delete columns in a spreadsheet | Not needed. Export presets produce any column layout, including the nine-column layout in Appendix A |
+| 3.1 Build a list of 100, drop no-email | Manual list | Static and smart **lists**; `has_email` is a filter |
+| 3.2 Tag by role | The mailing tool tags by title on import | **Auto-tag rules** (regex on title and company), optional LLM classification |
+| 3.3 Write the message | Template in the mailing tool | **Templates** with merge fields and lint |
+| 3.4 Test send | Send to yourself | **Test send** is required before activation |
+| 3.5 Have it reviewed | Ask a coach | **Review gate** with rendered previews of real contacts |
+| 4 Folder for campaign replies | Create a mail folder by hand | Gmail **label** per campaign, applied to outbound and detected replies |
+| 4 Track who responded | Notes and calendar reminders | **Reply detection** on Gmail threads and the LinkedIn inbox; interaction timeline per contact; follow-up reminders |
+| 5.1 Remove responders from the follow-up list | Spreadsheet surgery | Automatic suppression when an enrollment reaches `replied` |
+| 5.2 Follow up a week later, in the same conversation | A second campaign built by hand | **Sequences**: step 2 fires N days after step 1 unless a reply was detected, threaded under the first email |
+| 5.3 Send Tuesday to Thursday | Remember to | **Send windows** and daily caps, with the next fire shown on the dashboard |
+| 5 Weekly cadence, new batch or follow-up | Remember to | Dashboard shows what fired and what fires next; overlapping campaigns are supported |
+| 5 Keep enriching 100 per day | Scraping tool batches | Enrichment runs on a schedule inside the budget; new connections arrive through incremental sync |
 
 ## 4. Requirements
 
@@ -79,8 +83,8 @@ The table shows each manual step in the training and what netkeeper does instead
 - F10. Triage workflow to mark contacts as met, not met, or skipped, with keyboard navigation and evidence panels.
 - F11. Manual tags and rule-based auto-tags. Auto-tags never overwrite manual ones and are visibly distinct.
 - F12. Static lists and smart lists (saved filters). A filter language that covers tags, fields, met status, last contacted, campaign membership, and data completeness.
-- F13. CSV import with a column-mapping UI, saved presets (LinkedIn archive, LinkedHelper, Phello), duplicate detection with a review step, and provenance per imported field.
-- F14. Export to CSV, JSON, and vCard with saved column presets, including the 9-column Phello layout.
+- F13. CSV import with a column-mapping UI, saved presets (LinkedIn archive, LinkedHelper CSV, generic nine-column), duplicate detection with a review step, and provenance per imported field.
+- F14. Export to CSV, JSON, and vCard with saved column presets, including the nine-column layout in Appendix A.
 - F15. `do_not_contact` flag that every send path honors.
 
 **Campaigns**
@@ -105,7 +109,8 @@ The table shows each manual step in the training and what netkeeper does instead
 - N1. macOS 14+ is the primary platform. Linux via container is supported for everything; the LinkedIn steps need Chrome on the same host as the backend.
 - N2. Chrome (or any Chromium browser) is the only supported browser for LinkedIn steps. Firefox and Safari have no CDP.
 - N3. All data lives in one SQLite file plus a secrets store in the macOS Keychain. Backups are one command.
-- N4. The web UI binds `127.0.0.1` only and needs no login, but state-changing API calls are protected against cross-site requests from other local pages.
+- N4. The web UI binds `127.0.0.1` only and needs no login in local mode, but state-changing API calls are protected against cross-site requests from other local pages.
+- N8. Every user-owned row carries `user_id`, every query is scoped through one helper, and a two-user isolation test covers every list endpoint. Nothing in v1 needs this; retrofitting it is what would be expensive.
 - N5. Tests run offline. Browser-touching code has an opt-in smoke suite against a loopback site.
 - N6. Handles a network of 10,000 contacts with sub-second list and filter responses.
 - N7. Every automated outbound message is stored with the exact rendered body, timestamp, and channel identifiers, so you can answer "what did I send this person and when" forever.
@@ -167,6 +172,21 @@ These are the parts of `~/code/igtracker` that transfer directly, with the reaso
 | Tab-loss recovery: reopen in the same context, at most one reattach per run | Closing the sidecar tab is a one-click accident |
 | `rehearse` against a neutral site, `simulate` against a virtual clock, `preflight` on the real host | Verification without touching the real site |
 | Posture page that highlights every protection that is off | A page that only displays values presents an unhardened install as configured |
+
+### Multi-user readiness
+
+netkeeper v1 runs for one person on one machine. A self-hosted deployment serving a household or a small team, or a hosted service, is a plausible future once the local form has matured. The constraints below apply from the first migration because retrofitting them later means touching every table, query, and job. Everything else about multi-user is deferred and listed at the end.
+
+- **Users are a table, not an assumption.** A `user` row is created at first start (`kind = local`). Every user-owned table has a `user_id` foreign key, `NOT NULL`, indexed, and every uniqueness constraint includes it (`tag.name` is unique per user, `contact.li_urn` is unique per user).
+- **Scoping happens in one place.** Routes resolve the current user through a `CurrentUser` dependency and pass it down. Services take `user` explicitly; the query helper applies `WHERE user_id = :id`. No route or service issues an unscoped query against a user-owned table. A two-user fixture in the test suite asserts isolation for every list endpoint.
+- **Authentication is a provider interface.** `AuthProvider.current_user(request)` has one v1 implementation, `LocalSingleUser`, which returns the only row. A hosted deployment adds a session or OIDC provider without changing routes.
+- **Per-user resources are rows.** `mailbox` and `linkedin_account` (section 8.4) belong to a user. `settings_kv` is keyed by `(user_id, key)`. Secrets are stored under `netkeeper/<user_id>/<name>`. Exports and backups live under a per-user subdirectory.
+- **Concurrency is per account, not global.** The browser activity lock belongs to a `linkedin_account`. Scheduler jobs carry `user_id`. Budgets and heat are keyed by the LinkedIn account.
+- **The extractor is a separable agent.** In a hosted deployment the browser sits on the user's laptop while the server is elsewhere, so the extractor must not depend on the database. It talks to the core only through explicit contracts: job specs in (`SyncJobSpec`, `EnrichJobSpec` carrying the contacts to visit and the budget), results out (`ConnectionsPage`, `ProfileHarvest`, `InboxDelta`), and a progress event stream. In v1 both sides run in one process, but no module under `linkedin/` imports ORM models or opens a session. A later `netkeeper agent` command can run the same jobs on a laptop and post results to a server. See section 9.10.
+- **The database is portable.** SQLite in v1, but migrations use only constructs SQLAlchemy renders the same on PostgreSQL (portable types, `JSON` rather than text blobs, no SQLite pragmas in the schema). From phase 1, CI runs the migration test against a PostgreSQL service as well.
+- **The frontend has a current-user context** from `GET /api/v1/me`, and component state holds mailboxes and LinkedIn accounts as lists, even when the list has one item.
+
+Deferred until the local form has matured, and decided by a future ADR: login and session handling, sharing contacts across users, fairness of LinkedIn and Gmail budgets across tenants, a verified Google OAuth app, encryption at rest per tenant, an admin surface, and billing. Whether that future is self-hosted, hosted, or both is an open question (section 21).
 
 ## 6. Technology choices
 
@@ -272,13 +292,26 @@ netkeeper/
 │   └── launch-chrome.sh
 └── docs/
     ├── architecture.md       # this document
-    ├── hp-training.md
-    └── adr/                  # architecture decision records; 0001–0004 exist
+    ├── networking-workflow.md
+    ├── implementation-guide.md
+    └── adr/                  # architecture decision records; 0001–0005 exist
 ```
 
 ## 8. Data model
 
 SQLite, one file. All datetimes stored as naive UTC and returned timezone-aware (igtracker's `UTCDateTime`). Soft deletes nowhere; contacts are archived, never deleted, because messages reference them.
+
+**Every user-owned table below carries `user_id`** (FK to `user`, `NOT NULL`, indexed) and every unique constraint includes it. The column is omitted from the tables that follow to keep them readable. Tables that are not user-owned: `user`, `alembic_version`.
+
+`user`
+
+| Column | Notes |
+|---|---|
+| `id` | integer PK |
+| `kind` | `local` in v1; later `hosted` |
+| `display_name`, `email` | Used for `me.*` merge-field defaults |
+| `timezone` | Default for send windows and active hours |
+| `created_at` | |
 
 ### 8.1 Contacts and identity
 
@@ -338,7 +371,8 @@ Merging two contacts is a first-class operation that re-points every child row a
 
 - `sync_run` (`kind` connections_full/connections_incremental/enrich/inbox/message_send, `status` running/completed/aborted/failed, `started_at`, `completed_at`, `progress_json`, `counts_json`, `browser_mode`, `notes`, `resume_of_id`).
 - `import_run` (`source_kind` archive/csv, `filename`, `preset`, `mapping_json`, `status`, counts) and `import_row` (`raw_json`, `resolution` matched/created/candidate/skipped, `contact_id`, `decision_json`).
-- `settings_kv` (string key, JSON value) for runtime-adjustable settings, budget counters, heat state, next-fire times, session flags.
+- `linkedin_account` (`user_id`, `label`, `cdp_url`, `timezone`, `active_hours_json`, `session_status` ok/checkpoint/logged_out, `session_flag_at`). One row in v1. Budget counters and heat state are keyed by this row's id in `settings_kv`, and the browser activity lock belongs to it.
+- `settings_kv` (`user_id`, string key, JSON value) for runtime-adjustable settings, budget counters, heat state, next-fire times, session flags.
 
 ### 8.5 Campaigns
 
@@ -394,7 +428,7 @@ All jobs take the activity lock, hold one tab, and write progress to `sync_run.p
 
 **Enrichment.** Pick contacts by priority (9.6), and for each:
 
-1. Navigate to the profile page (a real page view; the hp training treats "viewed your profile" as a feature).
+1. Navigate to the profile page (a real page view; the reference workflow treats "viewed your profile" as a feature).
 2. Scroll like a person (9.5), dwell.
 3. Fetch contact info and profile details through the in-page API, falling back to the overlay DOM.
 4. Upsert emails, phones, links, positions, location. Write a snapshot if headline, title, company, or location changed.
@@ -423,7 +457,7 @@ Counters live in `settings_kv`, keyed by local day and week, per action class:
 | Class | Default per day | Hard max | Notes |
 |---|---|---|---|
 | `connection_pages` | 150 | 400 | About 6,000 contacts per day at 40 per page |
-| `profile_visits` | 60 | 100 | The number that matters. LinkedHelper's guidance is 100 |
+| `profile_visits` | 60 | 100 | The number that matters. The reference workflow's guidance for scraping tools is 100 |
 | `contact_info_fetches` | tied to `profile_visits` | | One per visit |
 | `inbox_polls` | 8 | 24 | |
 | `li_messages_auto` | 15 | 30 | Only when auto-send is enabled |
@@ -463,6 +497,21 @@ Unlike Instagram's follower lists, LinkedIn's connections list is complete, so r
 - Resume: an aborted enrichment run stores its plan; `netkeeper linkedin enrich --resume <run_id>` skips what completed. The original plan is reused, never re-planned.
 - Tab loss: `_ensure_page()` before every navigation; reopen in the same context at the last profile URL; at most one full reattach per run, then `BrowserUnavailable` aborts the run and the scheduler parks a retry 20 to 50 minutes out.
 
+### 9.10 Boundary with the core
+
+Nothing under `linkedin/` imports ORM models or opens a database session. The core hands a job a spec and receives results and events:
+
+| Direction | Type | Contents |
+|---|---|---|
+| In | `SyncJobSpec` | mode full/incremental, known URNs (incremental only), page budget |
+| In | `EnrichJobSpec` | ordered list of `(contact_ref, li_public_id)` to visit, visit budget, pacing profile, heat multiplier |
+| In | `InboxJobSpec` | conversations since timestamp |
+| In | `MessageJobSpec` | recipient, rendered body, mode prefill/auto_send |
+| Out | `ConnectionsPage`, `ProfileHarvest`, `InboxDelta`, `MessageOutcome` | Plain dataclasses; the core's `linkedin/apply.py` maps them onto contacts, snapshots, and messages inside a session |
+| Out | `ProgressEvent` | For `sync_run.progress_json` and the SSE stream |
+
+The reason is in [Multi-user readiness](#multi-user-readiness): in a hosted deployment the browser and the database are on different machines. Keeping the boundary explicit now costs one mapping module and buys a `netkeeper agent` later. It also makes the extractor testable with fixtures and no database.
+
 ## 10. CRM
 
 ### 10.1 Contacts page
@@ -501,7 +550,7 @@ Field-level provenance: an imported value never overwrites a value from a more a
 
 ### 10.6 Export
 
-Presets: `phello-9-column`, `linkedin-archive`, `full`, `campaign-audience`. Formats: CSV, JSON, vCard 4.0. Exports respect the current filter and strip internal counters.
+Presets: `nine-column`, `linkedin-archive`, `full`, `campaign-audience`. Formats: CSV, JSON, vCard 4.0. Exports respect the current filter and strip internal counters.
 
 ## 11. Campaign engine
 
@@ -633,14 +682,14 @@ Cost controls: a per-day call cap, batch size limits, and a token estimate shown
 
 ### 14.1 API
 
-- JSON under `/api/v1`. Resources: `contacts`, `tags`, `autotag-rules`, `lists`, `triage`, `imports`, `exports`, `linkedin` (`status`, `runs`, `budget`, `heat`, `pins`), `templates`, `campaigns` (with `steps`, `preview`, `test-send`, `activate`, `pause`), `enrollments`, `messages`, `mailboxes` (`oauth/start`, `oauth/callback`, `status`), `settings`, `posture`, `llm`, `events`.
+- JSON under `/api/v1`. Every route resolves the current user through the `CurrentUser` dependency; `GET /api/v1/me` returns it. Resources: `contacts`, `tags`, `autotag-rules`, `lists`, `triage`, `imports`, `exports`, `linkedin` (`status`, `runs`, `budget`, `heat`, `pins`), `templates`, `campaigns` (with `steps`, `preview`, `test-send`, `activate`, `pause`), `enrollments`, `messages`, `mailboxes` (`oauth/start`, `oauth/callback`, `status`), `settings`, `posture`, `llm`, `events`.
 - `GET /api/v1/events` is an SSE stream of task progress, run status, and mailbox and browser health. The UI subscribes once.
 - Every browser-touching route enqueues through `services/tasks.py` and returns `202` with a task id.
 - OpenAPI schema is exported in CI and the TypeScript client is regenerated from it; a diff fails the build.
 
 ### 14.2 Local security
 
-- Bind `127.0.0.1` only; no login.
+- Bind `127.0.0.1` only; no login in local mode (`LocalSingleUser` provider).
 - State-changing requests must carry `X-Netkeeper-Client: 1` and pass a same-origin check on `Origin` or `Sec-Fetch-Site`. A page on another site cannot POST to the local API from your browser.
 - The OAuth callback is the one route reachable from a browser navigation without the header; it validates the `state` parameter.
 
@@ -664,7 +713,7 @@ Cost controls: a per-day call cap, batch size limits, and a token estimate shown
 - Config: `config.toml`, resolved as `--config`, then `$NETKEEPER_CONFIG`, then `./config.toml`, then `<data_dir>/config.toml`. Example in Appendix B.
 - Data dir: `$NETKEEPER_DATA`, else `~/Library/Application Support/netkeeper` on macOS, else `./data`. Holds `netkeeper.sqlite3`, `chrome-profile/`, `backups/`, `exports/`, logs.
 - Runtime-adjustable settings (budgets, windows, pacing, active hours) are in `settings_kv` and edited on the Settings page; config values only seed them on first start.
-- Secrets: Keychain via `keyring` (`netkeeper` service). In the container, `keyring`'s file backend under the data volume with `0600` permissions.
+- Secrets: Keychain via `keyring`, service `netkeeper`, key `<user_id>/<name>`. In the container, `keyring`'s file backend under the data volume with `0600` permissions.
 - Logs: structured, one line per event, `NETKEEPER_LOG_LEVEL`. Bodies of messages are never logged.
 - Backups: `netkeeper backup` runs `VACUUM INTO` to `backups/netkeeper-<timestamp>.sqlite3`, keeps the last 14 by default, and is scheduled nightly.
 
@@ -695,7 +744,8 @@ Docker Desktop and `podman machine` run a Linux VM. `127.0.0.1:9222` inside it i
 - **Unit and service tests** run offline against in-memory SQLite. Cover identity resolution, the filter DSL, guards, the enrollment state machine, render and lint, budget and heat math, pacing distributions (statistical bounds, seeded), and classification.
 - **Fixture tests** for every Voyager parser and archive importer, using sanitized captures in `tests/fixtures/`. A parser change without a fixture update fails review.
 - **Gmail** is tested against a fake service object that records calls and replays canned responses; one opt-in test hits the real API with your own account (`NETKEEPER_GMAIL_TESTS=1`).
-- **Migration test** migrates from the previous revision and diffs against `Base.metadata`, so a forgotten migration fails on upgraded installs in CI, not on yours.
+- **Migration test** migrates from the previous revision and diffs against `Base.metadata`, so a forgotten migration fails on upgraded installs in CI, not on yours. From phase 1 it also runs against a PostgreSQL service container, so SQLite-only constructs are caught early.
+- **Isolation test**: a two-user fixture calls every list endpoint as each user and asserts neither sees the other's rows. Every new list endpoint registers itself with this test.
 - **Browser smoke** (`NETKEEPER_BROWSER_TESTS=1`) attaches to a real Chrome and drives a loopback site, verifying headers, client hints, scroll events, and tab recovery. Nothing external.
 - **`netkeeper rehearse`** drives the whole enrichment path against a neutral site. **`netkeeper simulate`** replays sync and campaign schedules against a virtual clock with injected throttles, so backoff and window logic can be seen before they matter.
 - **Frontend**: `vitest` for components and the filter builder; three Playwright flows (import a CSV, triage ten contacts, build and approve a campaign) against a backend seeded with fixtures.
@@ -703,7 +753,7 @@ Docker Desktop and `podman machine` run a Linux VM. `127.0.0.1:9222` inside it i
 
 ## 18. Security, privacy, and terms of service
 
-- **LinkedIn's User Agreement** prohibits automated access and scraping. Reading your own 1st-degree connections' contact info is data LinkedIn already shows you, but the method is still automation, and LinkedIn can restrict or close the account. The README states this, describes the safeguards, and recommends the conservative defaults. This is the same risk the hp training accepts by recommending LinkedHelper.
+- **LinkedIn's User Agreement** prohibits automated access and scraping. Reading your own 1st-degree connections' contact info is data LinkedIn already shows you, but the method is still automation, and LinkedIn can restrict or close the account. The README states this, describes the safeguards, and recommends the conservative defaults. This is the same risk the reference workflow accepts by recommending a scraping tool.
 - **Your contacts' data** is personal data. Keep it local, back it up encrypted if you sync the data directory anywhere, honor `do_not_contact`, and delete on request. The tool never sends contact data anywhere except Gmail (as recipients) and, if enabled, the Claude API (for the contacts you act on).
 - **Gmail**: the `gmail.modify` scope is broad. Tokens live in Keychain, the tool never deletes mail, and every API call is logged with its purpose.
 - **Local API**: loopback bind plus the CSRF header and same-origin check. No secrets in the SQLite file.
@@ -715,13 +765,13 @@ Each phase ends with a usable tool. Estimates assume evenings and weekends with 
 
 | Phase | Scope | Exit criterion |
 |---|---|---|
-| 0. Scaffold | Repo, `pyproject`, config, DB and migrations, CLI skeleton, FastAPI app, frontend shell with generated client, CI, launchd script | `netkeeper serve` shows an empty dashboard; CI green |
-| 1. Import and CRM | Archive and CSV import with mapping and dedupe review, contacts table and detail, tags and auto-tag rules, static and smart lists, triage screen, exports with the Phello preset | You can import your archive, triage your network, and export the 9-column CSV Phello wants. Already replaces hp steps 6 and 8.1 |
-| 2. LinkedIn extractor | Attach, preflight, connections full and incremental sync, enrichment with pacing, budgets, heat, classification, snapshots, pins, runs page with live progress, `rehearse` and `simulate` | A week of scheduled runs completes without a throttle; contacts have emails |
+| 0. Scaffold | Repo, `pyproject`, config, DB and migrations with the `user` table, `CurrentUser` and `LocalSingleUser`, CLI skeleton, FastAPI app, frontend shell with generated client, CI, launchd script | `netkeeper serve` shows an empty dashboard; CI green; the isolation test harness exists |
+| 1. Import and CRM | Archive and CSV import with mapping and dedupe review, contacts table and detail, tags and auto-tag rules, static and smart lists, triage screen, exports with the nine-column preset | You can import your archive, triage your network, and export the nine-column CSV a mailing tool imports. Already replaces workflow stages 1 and 3.1 |
+| 2. LinkedIn extractor | Attach, preflight, connections full and incremental sync, enrichment with pacing, budgets, heat, classification, snapshots, pins, runs page with live progress, `rehearse` and `simulate`, job contracts with no database access | A week of scheduled runs completes without a throttle; contacts have emails |
 | 3. Email campaigns | Gmail OAuth, templates and lint, sequences, enrollment guards, review gate, test send, scheduler and windows, draft and send modes, threading, labels, reply and bounce detection, inbox page | First "First 100" campaign runs start to finish with automatic follow-up suppression |
 | 4. LinkedIn messaging | Prefill step, inbox poll and reply detection, waiting-for-you list, opt-in auto-send with its own budget | Step 3 of the default sequence works |
 | 5. LLM module | Personal line, classification, call prep, triage suggestions, cost controls | Optional and off by default |
-| 6. Polish and reach | Google Contacts push, vCard export, container image, backups UI, posture page, docs | Public-ready |
+| 6. Polish and reach | Google Contacts push, vCard export, container image, backups UI, posture page, docs, hosted-mode ADR and spike | Public-ready; the multi-user path is decided, not built |
 
 ## 20. Risks
 
@@ -732,8 +782,9 @@ Each phase ends with a usable tool. Estimates assume evenings and weekends with 
 | Chrome changes CDP or profile rules again | Low | Medium | Attach is the only dependency; `preflight` catches it; docs pin the launch flags |
 | Gmail flags outbound as bulk | Low at 80 per day with personalization | Medium | Lint for missing merge fields, cap, spacing, same-thread follow-ups, no tracking pixels or link wrappers |
 | OAuth token expiry every 7 days in Testing mode | Certain if not published | Low | Detect, pause, banner; docs recommend publishing |
-| Scope creep into a general CRM | Medium | Medium | Non-goals list; every feature maps to an hp step |
+| Scope creep into a general CRM | Medium | Medium | Non-goals list; every feature maps to a workflow step |
 | Data loss | Low | High | Nightly `VACUUM INTO` backups, retention, restore command |
+| Multi-user retrofit cost | Certain if not designed for | High | `user_id` from the first migration, one scoping helper, isolation tests, extractor contracts with no database access, PostgreSQL in CI |
 
 ## 21. Open questions
 
@@ -742,10 +793,13 @@ Each phase ends with a usable tool. Estimates assume evenings and weekends with 
 3. **Interaction logging from your side.** Should netkeeper read your own outbound Gmail to contacts outside campaigns, so "last contacted" is true rather than campaign-only? It needs no new scope but widens what the tool reads.
 4. **Calendar.** A "schedule a call" outcome could create a placeholder event through the Google Calendar API. Worth a scope, or leave it to your scheduling link?
 5. **Name.** Resolved: `netkeeper`, under `dsmorgan/netkeeper`.
+6. **Shape of multi-user.** Self-hosted single-tenant (a family or a small team on one server), a hosted service, or both? The answer decides whether the extractor agent needs an installer and an authenticated channel, and whether the Google OAuth app must be verified. Deferred until the local form has matured; the readiness constraints in section 5 hold either way.
 
-## Appendix A: Phello 9-column export preset
+## Appendix A: Nine-column export preset
 
-| Phello column | netkeeper field |
+This is the layout the reference workflow's mailing tool imports. It exists so someone partway through that workflow can move data in either direction.
+
+| Column | netkeeper field |
 |---|---|
 | LinkedIn Profile URL | `li_url` |
 | Email Address | primary `contact_email` |
@@ -756,7 +810,7 @@ Each phase ends with a usable tool. Estimates assume evenings and weekends with 
 | Current Job Title | `current_title` |
 | Phone Number | primary `contact_phone` |
 
-No header row when the `phello` option is set, matching the training's reminder.
+The `headerless` option omits the header row, which some mailing tools require.
 
 ## Appendix B: `config.example.toml`
 
@@ -828,12 +882,12 @@ keep = 14
 
 | Knob | Default | Reasoning |
 |---|---|---|
-| Profile visits per day | 60 (max 100) | Below the 100-per-day guidance the training gives for LinkedHelper, leaving room for your own browsing |
+| Profile visits per day | 60 (max 100) | Below the 100-per-day guidance the reference workflow gives for scraping tools, leaving room for your own browsing |
 | Delay between profiles | lognormal, median 25 s, sigma 0.6 | Median matches a person reading a profile; sigma gives a long tail without absurd waits |
 | Distraction pause | 8% chance, 2 to 8 minutes | People get interrupted |
 | Burst | 8 to 15 profiles, then 5 to 20 minutes off | Sessions, not streams |
 | Warm-up | 20 per day, +10 per day | New profile, new device: ramp |
-| Email sends per day | 80 | Well under Gmail's 500 recipient limit; the hp batch of 100 spans two days |
+| Email sends per day | 80 | Well under Gmail's 500 recipient limit; a batch of 100 spans two days |
 | Email spacing | median 4 minutes, floor 90 s | 80 sends fit inside a 7.5-hour window with room |
 | Reply poll | every 10 minutes | Fast enough to suppress a follow-up scheduled the same day |
 | Heat half-life | 6 hours | One throttle stretches the rest of the day; a clean day resets |
