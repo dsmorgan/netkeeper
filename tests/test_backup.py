@@ -380,3 +380,26 @@ def test_backup_help_lists_create_and_list() -> None:
     assert result.exit_code == 0, result.output
     assert _listed_commands(result.stdout) == {"create", "list"}
     assert "backup create" in result.stdout
+
+
+def test_a_failed_vacuum_leaves_no_partial_file(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one branch that guarantees "no partial file on failure" needs a real sqlite3.Error."""
+    backups_dir = data / "backups"
+    real_connect = sqlite3.connect
+
+    class Exploding:
+        def execute(self, *_args: object) -> None:
+            raise sqlite3.OperationalError("disk I/O error")
+
+        def close(self) -> None:
+            pass
+
+    def fake_connect(*args: object, **kwargs: object) -> object:
+        return Exploding() if kwargs.get("uri") else real_connect(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sqlite3, "connect", fake_connect)
+    with pytest.raises(BackupError, match=r"VACUUM INTO .* failed: disk I/O error"):
+        create_backup(database_url(data), backups_dir, now=OLD)
+    assert list(backups_dir.iterdir()) == []
