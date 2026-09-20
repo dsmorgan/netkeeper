@@ -23,6 +23,15 @@ URN, spec 8.2 step 2), so the session must be a writer:
 :func:`merge` flushes between its steps so the unique constraints on ``li_urn``
 and ``li_public_id`` never see the value on both rows at once; those flushes
 are still inside the caller's transaction, and a rollback undoes them all.
+
+The candidate rule rests on one assumption: a URN is a stable identifier for one
+LinkedIn profile. So two rows with different URNs are two people, and a row
+whose URN matches nobody is not the contact a slug or an address finds when that
+contact carries a URN of its own. URNs are compared as stored (trimmed,
+case-sensitive), and nothing here derives a URN from any other field. Should
+LinkedIn change the URN scheme (``urn:li:fsd_profile/...`` today), every stored
+URN would need a one-off re-normalization before the next sync; no such path
+exists today.
 """
 
 from __future__ import annotations
@@ -39,6 +48,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from netkeeper.crm.provenance import may_overwrite
+from netkeeper.db import is_writer
 from netkeeper.models import (
     Contact,
     ContactAlias,
@@ -224,14 +234,18 @@ class IncomingLink:
 
 @dataclass(frozen=True, slots=True)
 class IncomingPosition:
-    """A position as a source reports it. Needs a title or a company."""
+    """A position as a source reports it. Needs a title or a company.
+
+    ``is_current`` is tri-state: None means the source did not say, and an
+    existing row keeps its own value; a new row starts as not current.
+    """
 
     title: str | None = None
     company: str | None = None
     company_urn: str | None = None
     started_on: date | None = None
     ended_on: date | None = None
-    is_current: bool = False
+    is_current: bool | None = None
 
     def __post_init__(self) -> None:
         title, company = _clean(self.title), _clean(self.company)
@@ -361,8 +375,20 @@ Decision = MergeInto | CreateNew
 # --- resolve ----------------------------------------------------------------
 
 
+def _require_writer(session: Session) -> None:
+    """Fail at once rather than with "database is locked" on the first write (CLAUDE.md)."""
+    if not is_writer(session):
+        raise RuntimeError(
+            "identity operations need a writer session; use session_scope(factory, write=True)"
+        )
+
+
 def resolve(session: Session, user: User, incoming: IncomingContact) -> Resolution:
-    """Which of ``user``'s contacts ``incoming`` is (spec 8.2). See the module docstring."""
+    """Which of ``user``'s contacts ``incoming`` is (spec 8.2). See the module docstring.
+
+    ``RuntimeError`` when ``session`` is not a writer.
+    """
+    _require_writer(session)
     resolution = (
         _resolve_identity(session, user, incoming)
         or _resolve_email(session, user, incoming)
@@ -512,14 +538,20 @@ def apply(
     to any job field writes a ``contact_snapshot`` of the values before it.
     Children are upserted by natural key (email; phone digits; link URL;
     company, title, and start date), never duplicated, with ``source`` and
-    ``observed_at`` refreshed unless the row was observed more recently, and an
-    existing row's ``is_primary`` kept.
+    ``observed_at`` refreshed unless the row was observed more recently, an
+    existing row's ``is_primary`` kept, and a position's ``is_current`` changed
+    only when the row says so.
 
     A :class:`Candidate` needs ``decision``; any other resolution refuses one.
     ``ValueError`` for a missing or misplaced decision, for a contact that is not
     ``user``'s, and for a URN or slug that another contact of ``user`` holds
     (merge the two first: nothing here takes an identity away from a contact).
+    Every check runs before the first write, so a ``ValueError`` leaves the
+    contact exactly as it was: a caller that catches it per row and commits the
+    rest commits nothing of that row. ``RuntimeError`` when ``session`` is not a
+    writer.
     """
+    _require_writer(session)
     match resolution:
         case Matched(contact_id=contact_id):
             _no_decision(decision)
@@ -551,10 +583,10 @@ def _no_decision(decision: Decision | None) -> None:
 
 
 def _create(session: Session, user: User, incoming: IncomingContact) -> Contact:
+    provided = incoming.provided_fields()
+    _assert_identities_free(session, user, None, provided)
     contact = Contact(user_id=user.id, source=incoming.source, field_sources={})
-    for name, value in incoming.provided_fields().items():
-        if name in ("li_urn", "li_public_id"):
-            _assert_identity_free(session, user, None, name, value)
+    for name, value in provided.items():
         setattr(contact, name, value)
         contact.field_sources[name] = incoming.source.value
     session.add(contact)
@@ -565,18 +597,24 @@ def _create(session: Session, user: User, incoming: IncomingContact) -> Contact:
 
 
 def _update(session: Session, user: User, contact: Contact, incoming: IncomingContact) -> Contact:
+    writable = {
+        name: value
+        for name, value in incoming.provided_fields().items()
+        if may_overwrite(name, incoming.source, contact) and getattr(contact, name) != value
+    }
+    # Every check comes before the first setattr: the row applies fully or not at all.
+    # A setattr first would be autoflushed by the next check's query, and a caller
+    # that catches the ValueError per row would commit that half of the row.
+    _assert_identities_free(session, user, contact.id, writable)
     before = {name: getattr(contact, name) for name in JOB_FIELDS}
     for name, value in incoming.provided_fields().items():
-        if not may_overwrite(name, incoming.source, contact):
-            continue
-        current: str | date | None = getattr(contact, name)
-        if current != value:
-            if name in ("li_urn", "li_public_id"):
-                _assert_identity_free(session, user, contact.id, name, value)
+        if name in writable:
+            old: str | date | None = getattr(contact, name)
             setattr(contact, name, value)
             if name == "li_public_id" and isinstance(value, str):
-                _retire_slug(session, user, contact, old=current, new=value, incoming=incoming)
-        _record(contact, name, incoming.source)
+                _retire_slug(session, user, contact, old=old, new=value, incoming=incoming)
+        if may_overwrite(name, incoming.source, contact):
+            _record(contact, name, incoming.source)
     if any(
         before[name] not in (None, "") and before[name] != getattr(contact, name)
         for name in JOB_FIELDS
@@ -600,19 +638,27 @@ def _record(contact: Contact, name: str, source: ContactSource) -> None:
         contact.field_sources[name] = source.value
 
 
-def _assert_identity_free(
-    session: Session, user: User, contact_id: int | None, name: str, value: str | date
+def _assert_identities_free(
+    session: Session, user: User, contact_id: int | None, values: dict[str, str | date]
 ) -> None:
-    """``ValueError`` when another contact of ``user`` already holds ``value`` in ``name``."""
-    column = Contact.li_urn if name == "li_urn" else Contact.li_public_id
-    statement = scoped(user, Contact).where(column == value)
-    if contact_id is not None:
-        statement = statement.where(Contact.id != contact_id)
-    holder = session.scalars(statement.limit(1)).first()
-    if holder is not None:
-        raise ValueError(
-            f"{name} {value!r} already belongs to contact {holder.id}; merge the two contacts first"
-        )
+    """``ValueError`` when another contact of ``user`` holds the URN or slug in ``values``.
+
+    Runs before anything is written, so the error leaves the contact untouched.
+    """
+    for name in ("li_urn", "li_public_id"):
+        value = values.get(name)
+        if value is None:
+            continue
+        column = Contact.li_urn if name == "li_urn" else Contact.li_public_id
+        statement = scoped(user, Contact).where(column == value)
+        if contact_id is not None:
+            statement = statement.where(Contact.id != contact_id)
+        holder = session.scalars(statement.limit(1)).first()
+        if holder is not None:
+            raise ValueError(
+                f"{name} {value!r} already belongs to contact {holder.id}; "
+                "merge the two contacts first"
+            )
 
 
 def _retire_slug(
@@ -753,7 +799,7 @@ def _upsert_positions(user: User, contact: Contact, incoming: IncomingContact) -
                 company_urn=position.company_urn,
                 started_on=position.started_on,
                 ended_on=position.ended_on,
-                is_current=position.is_current,
+                is_current=bool(position.is_current),
                 source=incoming.source,
                 observed_at=incoming.observed_at,
             )
@@ -764,7 +810,8 @@ def _upsert_positions(user: User, contact: Contact, incoming: IncomingContact) -
                 row.company_urn = position.company_urn
             if position.ended_on is not None:
                 row.ended_on = position.ended_on
-            row.is_current = position.is_current
+            if position.is_current is not None:
+                row.is_current = position.is_current
 
 
 # --- merge ------------------------------------------------------------------
@@ -790,7 +837,9 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     is a no-op. A survivor that was itself merged away stands for its own
     survivor. ``ValueError`` for the same id twice, a contact that is not
     ``user``'s, or a loser already merged into a different contact.
+    ``RuntimeError`` when ``session`` is not a writer.
     """
+    _require_writer(session)
     if survivor_id == loser_id:
         raise ValueError("a contact cannot be merged into itself")
     survivor = resolve_survivor(session, user, survivor_id)

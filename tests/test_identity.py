@@ -32,7 +32,7 @@ from netkeeper.crm.identity import (
     resolve_survivor,
 )
 from netkeeper.crm.provenance import PROVENANCE_FIELDS
-from netkeeper.db import session_scope
+from netkeeper.db import is_writer, session_scope
 from netkeeper.models import (
     CONTACT_CHILDREN,
     Contact,
@@ -82,6 +82,11 @@ def counts(session: Session, user: User) -> dict[str, int]:
         assert isinstance(table, Table)
         result[table.name] = session.scalar(scoped_count(user, model)) or 0
     return result
+
+
+def columns_of(contact: Contact) -> dict[str, object]:
+    """Every column value of ``contact``, provenance and timestamps included."""
+    return {column.key: getattr(contact, column.key) for column in Contact.__table__.c}
 
 
 def aliases_of(contact: Contact) -> list[str]:
@@ -627,6 +632,7 @@ def test_child_upsert_is_idempotent_and_keeps_is_primary(
                 started_on=date(2020, 1, 1),
                 ended_on=date(2024, 1, 1),
                 company_urn="urn:li:company/1",
+                is_current=False,
             ),
             IncomingPosition(
                 title="Lead", company="Acme", started_on=date(2024, 1, 1), is_current=True
@@ -825,6 +831,100 @@ def test_a_job_change_writes_a_snapshot_of_the_previous_values(
         "c2",
         "Berlin",
     )
+
+
+def test_a_positions_current_status_changes_only_when_the_row_says_so(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    alice, _ = users
+    contact = factories.make_contact(writer, alice, positions=[{"title": "CTO", "company": "Acme"}])
+    (position,) = contact.positions
+    position.observed_at = EARLIER
+    writer.flush()
+    assert (position.is_current, position.observed_at) == (True, EARLIER)
+    silent = IncomingPosition(title="CTO", company="Acme")
+    assert silent.is_current is None
+    apply(writer, alice, incoming(positions=(silent,)), Matched(contact.id, by="urn"))
+    assert (position.is_current, position.observed_at) == (True, NOW)  # refreshed, kept
+    ended = IncomingPosition(title="CTO", company="Acme", is_current=False)
+    apply(
+        writer,
+        alice,
+        incoming(observed_at=LATER, positions=(ended,)),
+        Matched(contact.id, by="urn"),
+    )
+    assert (position.is_current, position.observed_at) == (False, LATER)
+    back = IncomingPosition(title="CTO", company="Acme", is_current=True)
+    apply(
+        writer, alice, incoming(observed_at=LATER, positions=(back,)), Matched(contact.id, by="urn")
+    )
+    assert (position.is_current, position.observed_at) == (True, LATER)
+    # A new position that does not say starts as not current.
+    new = IncomingPosition(title="Dev", company="Other")
+    apply(
+        writer, alice, incoming(observed_at=LATER, positions=(new,)), Matched(contact.id, by="urn")
+    )
+    assert [(p.title, p.is_current) for p in contact.positions] == [("CTO", True), ("Dev", False)]
+
+
+def test_apply_changes_nothing_when_an_identity_field_is_held(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The URN is free and the slug is held: the row applies not at all, not by half.
+
+    An importer catches the ValueError per row and commits the rest of its batch,
+    so a half-applied row would be committed with it.
+    """
+    with session_scope(session_factory, write=True) as session:
+        alice = factories.make_user(session)
+        factories.make_contact(session, alice, li_public_id="held")
+        mine = factories.make_contact(
+            session, alice, li_urn=None, li_public_id="mine", emails=["mine@a.test"]
+        )
+        user_id, mine_id = alice.id, mine.id
+    row = incoming(
+        li_urn="urn:li:fsd_profile/FREE",
+        li_public_id="held",
+        headline="changed",
+        emails=(IncomingEmail("new@a.test"),),
+        positions=(IncomingPosition(title="New", company="Co"),),
+    )
+    with session_scope(session_factory, write=True) as session:
+        alice = session.get_one(User, user_id)
+        mine = session.scalars(scoped(alice, Contact).where(Contact.id == mine_id)).one()
+        before, before_counts = columns_of(mine), counts(session, alice)
+        with pytest.raises(ValueError, match="li_public_id 'held' already belongs"):
+            apply(session, alice, row, Matched(mine_id, by="email"))
+        assert not session.new
+        assert not any(session.is_modified(obj) for obj in session.dirty)
+        # A fresh select in the same transaction (it autoflushes anything pending).
+        mine = session.scalars(scoped(alice, Contact).where(Contact.id == mine_id)).one()
+        assert columns_of(mine) == before
+        assert counts(session, alice) == before_counts
+        # ... and the importer commits the rest of its batch.
+    with session_scope(session_factory) as session:
+        alice = session.get_one(User, user_id)
+        mine = session.scalars(scoped(alice, Contact).where(Contact.id == mine_id)).one()
+        assert columns_of(mine) == before
+        assert counts(session, alice) == before_counts
+        free = scoped(alice, Contact).where(Contact.li_urn == "urn:li:fsd_profile/FREE")
+        assert session.scalars(free).first() is None
+
+
+def test_identity_operations_need_a_writer_session(session: Session) -> None:
+    """A reader would fail later with "database is locked" on its first write; fail at once."""
+    alice = factories.make_user(session)
+    a, b = factories.make_contact(session, alice), factories.make_contact(session, alice)
+    row = incoming(li_urn="urn:li:fsd_profile/X")
+    assert not is_writer(session)
+    with pytest.raises(RuntimeError, match="writer session"):
+        resolve(session, alice, row)
+    with pytest.raises(RuntimeError, match="writer session"):
+        apply(session, alice, row, New())
+    with pytest.raises(RuntimeError, match="writer session"):
+        merge(session, alice, a.id, b.id)
+    assert session.scalar(scoped_count(alice, Contact)) == 2
+    assert b.merged_into_id is None
 
 
 # --- merge ------------------------------------------------------------------
