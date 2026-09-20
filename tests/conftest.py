@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
+import factories
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -12,6 +13,12 @@ from netkeeper.db import database_url, make_engine, make_session_factory
 from netkeeper.models import Base
 from netkeeper.scoping import install_scope_guard
 from netkeeper.web.app import create_app
+
+
+@pytest.fixture(autouse=True)
+def _reset_factory_counters() -> None:
+    """Every test's first factory rows are ``User 1`` and ``First1 Last1``."""
+    factories.reset_counters()
 
 
 @pytest.fixture(autouse=True)

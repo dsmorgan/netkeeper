@@ -153,7 +153,7 @@ def db_upgrade(ctx: typer.Context) -> None:
     engine = make_engine(url)
     try:
         migrations.upgrade(engine)
-        with session_scope(make_session_factory(engine)) as session:
+        with session_scope(make_session_factory(engine), write=True) as session:
             user = ensure_local_user(session, settings=settings)
         revision = migrations.current_revision(engine)
     finally:

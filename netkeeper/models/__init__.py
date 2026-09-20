@@ -1,16 +1,59 @@
 """ORM models. Importing this package registers every table on ``Base.metadata``."""
 
-from netkeeper.models.base import Base, TimestampMixin, UserOwned, UTCDateTime
+from netkeeper.models.base import Base, TimestampMixin, UserOwned, UTCDateTime, string_enum
+from netkeeper.models.contacts import (
+    CONTACT_CHILDREN,
+    Contact,
+    ContactAlias,
+    ContactChild,
+    ContactEmail,
+    ContactLink,
+    ContactMet,
+    ContactPhone,
+    ContactPosition,
+    ContactSnapshot,
+    ContactSource,
+    EmailKind,
+    EmailStatus,
+    Interaction,
+    InteractionKind,
+    LinkKind,
+    PhoneKind,
+    linkedin_profile_url,
+    normalize_email,
+    normalize_public_id,
+)
 from netkeeper.models.settings import JsonValue, SettingKV
 from netkeeper.models.user import User, UserKind
 
 __all__ = [
+    "CONTACT_CHILDREN",
     "Base",
+    "Contact",
+    "ContactAlias",
+    "ContactChild",
+    "ContactEmail",
+    "ContactLink",
+    "ContactMet",
+    "ContactPhone",
+    "ContactPosition",
+    "ContactSnapshot",
+    "ContactSource",
+    "EmailKind",
+    "EmailStatus",
+    "Interaction",
+    "InteractionKind",
     "JsonValue",
+    "LinkKind",
+    "PhoneKind",
     "SettingKV",
     "TimestampMixin",
     "UTCDateTime",
     "User",
     "UserKind",
     "UserOwned",
+    "linkedin_profile_url",
+    "normalize_email",
+    "normalize_public_id",
+    "string_enum",
 ]

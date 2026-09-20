@@ -1,17 +1,21 @@
+import threading
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, event, func, select
 from sqlalchemy.dialects import sqlite
-from sqlalchemy.exc import IntegrityError, StatementError
+from sqlalchemy.exc import IntegrityError, OperationalError, StatementError
 from sqlalchemy.orm import Session
 
 from netkeeper.db import (
     SQLITE_BUSY_TIMEOUT_MS,
     database_url,
+    is_writer,
     make_engine,
     make_session_factory,
+    mark_for_write,
     session_scope,
     sqlite_foreign_keys_disabled,
 )
@@ -135,6 +139,96 @@ def test_session_scope_returns_readable_objects_after_commit(engine: Engine) -> 
         session.add(user)
     assert user.id == 1
     assert user.timezone == "UTC"
+
+
+# --- writer sessions: BEGIN IMMEDIATE ---------------------------------------
+
+
+def _record_begins(engine: Engine) -> list[str]:
+    """Every BEGIN statement the engine emits from now on, in order."""
+    seen: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def record(*args: Any) -> None:
+        statement: str = args[2]
+        if statement.startswith("BEGIN"):
+            seen.append(statement)
+
+    return seen
+
+
+def test_writer_session_begins_every_transaction_immediate(engine: Engine) -> None:
+    factory = make_session_factory(engine)
+    begins = _record_begins(engine)
+    with session_scope(factory, write=True) as writer:
+        assert is_writer(writer)
+        writer.add(User(kind=UserKind.LOCAL))
+        writer.commit()  # the mark outlives a commit inside the block
+        writer.add(User(kind=UserKind.HOSTED))
+    with session_scope(factory) as reader:
+        assert not is_writer(reader)
+        assert reader.scalar(select(func.count()).select_from(User)) == 2
+    assert begins == ["BEGIN IMMEDIATE", "BEGIN IMMEDIATE", "BEGIN"]
+
+
+def test_mark_for_write_precedes_the_first_statement_and_is_idempotent(engine: Engine) -> None:
+    factory = make_session_factory(engine)
+    with factory() as session:
+        mark_for_write(session)
+        mark_for_write(session)  # no-op
+        session.execute(select(User))
+        mark_for_write(session)  # already marked: still a no-op
+    with factory() as late:
+        late.execute(select(User))
+        with pytest.raises(RuntimeError, match="before the session's first statement"):
+            mark_for_write(late)
+
+
+def test_writer_read_then_write_waits_for_a_concurrent_writer(engine: Engine) -> None:
+    """The point of BEGIN IMMEDIATE: A waits at BEGIN while B holds the lock, then sees B's
+    row and writes its own. Under plain BEGIN, A would read first and fail at its write."""
+    factory = make_session_factory(engine)
+    holder = factory()
+    mark_for_write(holder)
+    holder.add(User(kind=UserKind.LOCAL, display_name="from B"))
+    holder.flush()  # B holds the write lock, uncommitted
+    read_done = threading.Event()
+    failures: list[BaseException] = []
+
+    def a_reads_then_writes() -> None:
+        try:
+            with session_scope(factory, write=True) as a:
+                before = a.scalar(select(func.count()).select_from(User))  # blocks at BEGIN
+                read_done.set()
+                a.add(User(kind=UserKind.HOSTED, display_name=f"A saw {before}"))
+        except BaseException as exc:  # collected for the assertion below
+            failures.append(exc)
+
+    thread = threading.Thread(target=a_reads_then_writes)
+    thread.start()
+    assert not read_done.wait(0.3), "A read before B committed: it did not take the lock first"
+    holder.commit()
+    holder.close()
+    thread.join(SQLITE_BUSY_TIMEOUT_MS / 1000 + 5)
+    assert not thread.is_alive()
+    assert failures == []
+    with factory() as check:
+        names = sorted(u.display_name or "" for u in check.scalars(select(User)))
+    assert names == ["A saw 1", "from B"]
+
+
+def test_plain_read_then_write_fails_after_a_concurrent_commit(engine: Engine) -> None:
+    """Documented, not wanted: a reader that turns writer after another commit gets
+    SQLITE_BUSY_SNAPSHOT at once, and busy_timeout never enters into it. This is why
+    session_scope(write=True) exists; the test above is the same sequence as a writer."""
+    factory = make_session_factory(engine)
+    with factory() as a:
+        assert a.scalar(select(func.count()).select_from(User)) == 0  # A's snapshot
+        with session_scope(factory, write=True) as b:
+            b.add(User(kind=UserKind.LOCAL))  # commits at once: a reader blocks no writer
+        a.add(User(kind=UserKind.HOSTED))
+        with pytest.raises(OperationalError, match="database is locked"):
+            a.flush()
 
 
 # --- UTCDateTime ------------------------------------------------------------

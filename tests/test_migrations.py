@@ -23,7 +23,7 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Engine, MetaData, inspect, text
+from sqlalchemy import Connection, Engine, MetaData, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from netkeeper import migrations
@@ -207,6 +207,176 @@ def test_deleting_a_user_cascades_to_its_settings(migration_engine: Engine) -> N
         connection.execute(text("DELETE FROM users WHERE id = 1"))
         remaining = connection.execute(text("SELECT count(*) FROM settings_kv")).scalar()
     assert remaining == 0
+
+
+# --- contacts (0002) --------------------------------------------------------
+
+STAMP = "2026-09-20 12:00:00"
+
+
+def _seed_users(connection: Connection, *ids: int) -> None:
+    for user_id in ids:
+        connection.execute(
+            text(
+                "INSERT INTO users (id, kind, timezone, created_at)"
+                " VALUES (:id, 'local', 'UTC', :t)"
+            ),
+            {"id": user_id, "t": STAMP},
+        )
+
+
+def _insert_contact(
+    connection: Connection,
+    *,
+    id: int,
+    user_id: int,
+    li_urn: str | None = None,
+    met: str = "unknown",
+    source: str = "manual",
+    merged_into_id: int | None = None,
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO contacts (id, user_id, li_urn, first_name, last_name, preferred_name,"
+            " degree, met, do_not_contact, li_missing_count, enrich_priority, source,"
+            " merged_into_id, created_at, updated_at)"
+            " VALUES (:id, :user_id, :li_urn, 'F', 'L', 'F', 1, :met, false, 0, 0, :source,"
+            " :merged_into_id, :t, :t)"
+        ),
+        {
+            "id": id,
+            "user_id": user_id,
+            "li_urn": li_urn,
+            "met": met,
+            "source": source,
+            "merged_into_id": merged_into_id,
+            "t": STAMP,
+        },
+    )
+
+
+# The columns each child table needs beyond the shared ones, with portable literals.
+CHILD_ROWS = {
+    "contact_emails": ("email, kind, is_primary, status", "'a@example.test', 'work', true, 'ok'"),
+    "contact_phones": ("raw, kind, is_primary", "'+15550100', 'mobile', true"),
+    "contact_links": ("url, kind", "'https://example.test', 'website'"),
+    "contact_positions": ("is_current", "true"),
+    "contact_snapshots": ("headline", "'then'"),
+    "contact_aliases": ("li_public_id", ":slug"),  # unique per user
+    "interactions": ("kind, at", "'note', :t"),
+}
+
+
+def _insert_children(connection: Connection, *, user_id: int, contact_id: int) -> None:
+    for table, (columns, values) in CHILD_ROWS.items():
+        connection.execute(
+            text(
+                f"INSERT INTO {table} (user_id, contact_id, {columns}, source, observed_at,"
+                f" created_at, updated_at)"
+                f" VALUES (:user_id, :contact_id, {values}, 'manual', :t, :t, :t)"
+            ),
+            {
+                "user_id": user_id,
+                "contact_id": contact_id,
+                "slug": f"old-slug-{contact_id}",
+                "t": STAMP,
+            },
+        )
+
+
+def _count(connection: Connection, table: str) -> int:
+    return int(connection.execute(text(f"SELECT count(*) FROM {table}")).scalar_one())
+
+
+def test_migration_creates_every_contact_table(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    names = set(inspect(migration_engine).get_table_names())
+    assert {"contacts", *CHILD_ROWS} <= names
+
+
+def test_contact_li_urn_is_unique_per_user(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        _insert_contact(connection, id=1, user_id=1, li_urn="urn:li:fsd_profile/X")
+        _insert_contact(connection, id=2, user_id=2, li_urn="urn:li:fsd_profile/X")  # fine
+        _insert_contact(connection, id=3, user_id=1, li_urn=None)
+        _insert_contact(connection, id=4, user_id=1, li_urn=None)  # NULLs never collide
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_contact(connection, id=5, user_id=1, li_urn="urn:li:fsd_profile/X")
+
+
+@pytest.mark.parametrize("column", ["met", "source"])
+def test_contact_enums_are_checked_by_the_database(migration_engine: Engine, column: str) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+    bad: dict[str, Any] = {column: "bogus"}
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_contact(connection, id=2, user_id=1, **bad)
+
+
+def test_child_enums_are_checked_by_the_database(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+    insert = text(
+        "INSERT INTO contact_emails (user_id, contact_id, email, kind, is_primary, status,"
+        " source, observed_at, created_at, updated_at)"
+        " VALUES (1, 1, 'a@example.test', :kind, false, 'ok', :source, :t, :t, :t)"
+    )
+    with migration_engine.begin() as connection:
+        connection.execute(insert, {"kind": "work", "source": "sync", "t": STAMP})
+    for bad in ({"kind": "bogus", "source": "sync"}, {"kind": "work", "source": "bogus"}):
+        with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+            connection.execute(insert, {**bad, "t": STAMP})
+
+
+def test_deleting_a_contact_cascades_to_every_child_table(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_contact(connection, id=2, user_id=1)
+        _insert_children(connection, user_id=1, contact_id=1)
+        _insert_children(connection, user_id=1, contact_id=2)
+        connection.execute(text("DELETE FROM contacts WHERE id = 1"))
+        for table in CHILD_ROWS:
+            assert _count(connection, table) == 1, table
+        connection.execute(text("DELETE FROM users WHERE id = 1"))  # user -> contacts -> children
+        assert _count(connection, "contacts") == 0
+        for table in CHILD_ROWS:
+            assert _count(connection, table) == 0, table
+
+
+def test_deleting_a_merge_winner_clears_merged_into(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_contact(connection, id=2, user_id=1, merged_into_id=1)
+        connection.execute(text("DELETE FROM contacts WHERE id = 1"))
+        rows = connection.execute(text("SELECT id, merged_into_id FROM contacts")).all()
+    assert [tuple(row) for row in rows] == [(2, None)]
+
+
+def test_alias_slug_is_unique_per_user(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    insert = text(
+        "INSERT INTO contact_aliases (user_id, contact_id, li_public_id, source, observed_at,"
+        " created_at, updated_at) VALUES (:user_id, :contact_id, 'old-slug', 'sync', :t, :t, :t)"
+    )
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_contact(connection, id=2, user_id=1)
+        _insert_contact(connection, id=3, user_id=2)
+        connection.execute(insert, {"user_id": 1, "contact_id": 1, "t": STAMP})
+        connection.execute(insert, {"user_id": 2, "contact_id": 3, "t": STAMP})  # other user
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(insert, {"user_id": 1, "contact_id": 2, "t": STAMP})
 
 
 # --- script directory -------------------------------------------------------
