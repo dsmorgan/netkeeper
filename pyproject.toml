@@ -50,6 +50,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["netkeeper"]
 
+# Ship the migrations inside the wheel so `netkeeper db upgrade` works from an
+# installed package. netkeeper.migrations.alembic_root() prefers the checkout's
+# copies, so the ones an editable install also gets under site-packages are inert.
+[tool.hatch.build.targets.wheel.force-include]
+"alembic.ini" = "netkeeper/alembic.ini"
+"alembic" = "netkeeper/alembic"
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
@@ -58,6 +65,11 @@ src = ["."]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ANN", "ASYNC", "S", "T20", "PTH", "ERA"]
 ignore = ["ANN401", "S101", "RUF012"]
+
+[tool.ruff.lint.isort]
+# The repo has an alembic/ directory at the root, which ruff would otherwise read
+# as a first-party package named alembic.
+known-third-party = ["alembic"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN", "S", "PTH", "T20"]
