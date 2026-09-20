@@ -8,6 +8,14 @@ on a session factory that rejects any select, update, or delete touching an owne
 table without that mark. :func:`unscoped` is the explicit escape hatch for the few
 legitimate cross-user statements (the scheduler iterating users, admin tooling).
 
+The rule that makes the guard sufficient: owned rows are reached from the
+current user through :func:`scoped`, never through a relationship on ``User``.
+A ``User.mailboxes`` relationship would hand out every user's rows through a
+lazy load, ``selectinload()``, or ``joinedload()`` on a statement that only
+names ``users``. So no relationship whose parent is not ``UserOwned`` may target
+a ``UserOwned`` class; a mapper-inspection test enforces that, and the guard
+rejects such a load if one ever exists anyway.
+
 What the guard covers:
 
 - Everything that goes through ``Session.execute()`` and its shorthands
@@ -15,16 +23,23 @@ What the guard covers:
   ``delete()``, and Core ``select(table)``. The statement tree is walked for
   tables, so joins, subqueries, CTEs, aliases, and unions are covered wherever
   the owned table appears.
+- Relationship loads (lazy, ``selectinload()``, ``subqueryload()``) and loader
+  options on any statement (including ``joinedload()``) that reach an owned
+  class from one that is not owned.
 - A flush that would insert an owned row with no ``user_id`` (``before_flush``),
   so the error names the model instead of surfacing as an ``IntegrityError``.
 
 What it does not:
 
-- Column refreshes and relationship lazy loads. They load by the identity of a
-  row the session already holds, which arrived through a scoped statement, and
-  the scope option does not propagate to them.
+- Column refreshes, and relationship loads whose parent is itself owned. They
+  load by the identity of a row the session already holds, which arrived
+  through a scoped statement, and the scope option does not propagate to them.
 - Unit-of-work flushes of tracked objects (their INSERT, UPDATE, and DELETE).
   Those rows came from scoped statements too; new rows are checked as above.
+- ``Session.bulk_save_objects()``, ``bulk_insert_mappings()``, and
+  ``bulk_update_mappings()``. They bypass ``do_orm_execute`` and the flush
+  hook; a test fails any use of them under ``netkeeper/``. Use ORM
+  ``insert(Model)`` with ``user_id`` in every row instead.
 - ``text()`` statements, and anything executed on a ``Connection`` rather than a
   ``Session``. Neither can be inspected. Keep them out of services.
 - Whether a ``netkeeper_scope`` mark is honest. Only the helpers here set it;
@@ -36,10 +51,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import Delete, Select, Update, delete, event, inspect, select, update
+from sqlalchemy import Delete, Select, Update, delete, event, func, inspect, select, update
 from sqlalchemy.orm import (
     InstanceState,
+    Load,
     ORMExecuteState,
+    RelationshipProperty,
     Session,
     UOWTransaction,
     class_mapper,
@@ -78,6 +95,19 @@ def scoped_update[T: UserOwned](user: User, model: type[T]) -> Update:
 def scoped_delete[T: UserOwned](user: User, model: type[T]) -> Delete:
     """``delete(model)`` filtered to ``user``'s rows and marked for the guard."""
     return delete(model).where(model.user_id == user.id).execution_options(**_scope_of(user))
+
+
+def scoped_count[T: UserOwned](user: User, model: type[T]) -> Select[tuple[int]]:
+    """``select(count(*))`` over ``user``'s rows of ``model``, marked for the guard.
+
+    For paged list endpoints: ``session.scalar(scoped_count(user, Contact).where(...))``.
+    """
+    return (
+        select(func.count())
+        .select_from(model)
+        .where(model.user_id == user.id)
+        .execution_options(**_scope_of(user))
+    )
 
 
 def get_scoped[T: UserOwned](session: Session, user: User, model: type[T], id: int) -> T | None:
@@ -164,8 +194,12 @@ class _ScopeGuard:
     def on_execute(self, state: ORMExecuteState) -> None:
         if not (state.is_select or state.is_update or state.is_delete):
             return  # inserts carry user_id by construction; on_flush checks new rows
-        if state.is_column_load or state.is_relationship_load:
-            return  # loads by the identity of a row the session already holds
+        if state.is_relationship_load:
+            self._check_relationship_load(state)
+            return  # otherwise a load by the identity of a row the session already holds
+        if state.is_column_load:
+            return  # a refresh by primary key of a row the session already holds
+        self._check_loader_options(state)
         options = state.execution_options
         if options.get(UNSCOPED_OPTION) or SCOPE_OPTION in options:
             return
@@ -179,6 +213,39 @@ class _ScopeGuard:
             "scoped_update(), scoped_delete(), or get_scoped() in place of Session.get(); "
             "wrap a deliberate cross-user statement in unscoped()"
         )
+
+    def _check_relationship_load(self, state: ORMExecuteState) -> None:
+        """A lazy, selectin, or subquery load must not reach an owned class from an unowned one."""
+        path = state.loader_strategy_path
+        if path is None:
+            return
+        for item in reversed(path.path):
+            if isinstance(item, RelationshipProperty):
+                self._check_relationship(item)
+                return
+
+    def _check_loader_options(self, state: ORMExecuteState) -> None:
+        """Loader options (``joinedload()`` above all) are checked on the statement they ride on.
+
+        ``joinedload()`` adds its JOIN at compile time, after this listener runs, so
+        the table walk cannot see it. ``_with_options`` is what ``.options()`` fills.
+        """
+        for option in state.statement._with_options:
+            if not isinstance(option, Load):
+                continue
+            for element in option.context:
+                for item in element.path.path:
+                    if isinstance(item, RelationshipProperty):
+                        self._check_relationship(item)
+
+    def _check_relationship(self, prop: RelationshipProperty[Any]) -> None:
+        parent, target = prop.parent.class_, prop.mapper.class_
+        if issubclass(target, UserOwned) and not issubclass(parent, UserOwned):
+            self._violation(
+                f"relationship {parent.__name__}.{prop.key} reaches {target.__name__} from a "
+                "class that is not UserOwned: owned rows are reached from the current user "
+                "through scoped(), never through a relationship on User (ADR 0005)"
+            )
 
     def on_flush(
         self, session: Session, flush_context: UOWTransaction, instances: object | None

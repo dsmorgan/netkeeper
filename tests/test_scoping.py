@@ -1,13 +1,28 @@
 import logging
+import threading
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from sqlalchemy import Engine, delete, func, select, text, update
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    Session,
+    aliased,
+    configure_mappers,
+    joinedload,
+    relationship,
+    selectinload,
+    subqueryload,
+)
 from sqlalchemy.sql.base import Executable
 
-from netkeeper.db import make_session_factory
-from netkeeper.models import SettingKV, User, UserKind
+import netkeeper
+from netkeeper.db import make_session_factory, session_scope
+from netkeeper.models import Base, SettingKV, User, UserKind, UserOwned
 from netkeeper.scoping import (
     SCOPE_OPTION,
     UNSCOPED_OPTION,
@@ -16,11 +31,13 @@ from netkeeper.scoping import (
     install_scope_guard,
     owned_models_in,
     scoped,
+    scoped_count,
     scoped_delete,
     scoped_update,
     unscoped,
 )
 from netkeeper.services.settings_kv import delete_setting, get_setting, set_setting
+from netkeeper.services.users import ensure_local_user
 
 
 @pytest.fixture
@@ -124,12 +141,22 @@ def test_scoped_update_and_delete_touch_only_the_users_rows(
     assert session.scalars(scoped(bob, SettingKV)).one().value == "dark"
 
 
+def test_scoped_count(session: Session, users: tuple[User, User]) -> None:
+    alice, bob = users
+    session.add(SettingKV(user_id=alice.id, key="pace", value=1))
+    assert session.scalar(scoped_count(alice, SettingKV)) == 2
+    assert session.scalar(scoped_count(bob, SettingKV)) == 1
+    assert session.scalar(scoped_count(alice, SettingKV).where(SettingKV.key == "pace")) == 1
+    assert session.scalar(scoped_count(alice, SettingKV).where(SettingKV.key == "nope")) == 0
+
+
 def test_scoped_statements_carry_the_marker(users: tuple[User, User]) -> None:
     alice, _ = users
     for statement in (
         scoped(alice, SettingKV),
         scoped_update(alice, SettingKV),
         scoped_delete(alice, SettingKV),
+        scoped_count(alice, SettingKV),
     ):
         assert statement.get_execution_options() == {SCOPE_OPTION: alice.id}
 
@@ -159,6 +186,23 @@ def test_get_scoped_never_loads_another_users_row(
     assert list(session) == []  # the filter is in the SQL, so nothing entered the identity map
 
 
+def test_session_get_with_a_hand_set_mark_loads_the_row(
+    session: Session, users: tuple[User, User]
+) -> None:
+    """Tripwire, not a feature: the mark passes the guard and get() has no user filter.
+
+    Only the helpers set the mark; a hand-set one is a review matter. If SQLAlchemy
+    ever stops routing get() through do_orm_execute, or starts propagating the
+    option differently, this test is what changes.
+    """
+    alice, bob = users
+    bobs_id = session.scalars(scoped(bob, SettingKV)).one().id
+    session.expunge_all()
+    row = session.get(SettingKV, bobs_id, execution_options={SCOPE_OPTION: alice.id})
+    assert row is not None
+    assert row.user_id == bob.id
+
+
 # --- the escape hatch and what the guard ignores ----------------------------
 
 
@@ -185,13 +229,15 @@ def test_statements_on_user_are_unaffected(session: Session, users: tuple[User, 
     assert [u.display_name for u in session.scalars(select(User))] == ["A"]
 
 
-def test_refresh_and_lazy_loads_are_exempt(session: Session, users: tuple[User, User]) -> None:
+def test_refresh_and_owned_parent_lazy_loads_are_exempt(
+    session: Session, users: tuple[User, User]
+) -> None:
     alice, _ = users
     row = session.scalars(scoped(alice, SettingKV)).one()
     session.refresh(row)
     session.expire(row)
     assert row.key == "theme"  # an expired attribute loads by primary key
-    assert row.user is alice  # a relationship lazy load
+    assert row.user is alice  # a lazy load whose parent is owned
 
 
 def test_text_statements_are_not_inspected(session: Session, users: tuple[User, User]) -> None:
@@ -204,6 +250,83 @@ def test_owned_models_in_finds_tables_anywhere() -> None:
     assert owned_models_in(select(User).join(SettingKV)) == [SettingKV]
     assert owned_models_in(select(select(SettingKV.id).subquery())) == [SettingKV]
     assert owned_models_in(text("SELECT 1")) == []
+
+
+# --- owned rows are never reached through a relationship on an unowned class -
+
+
+def test_no_relationship_reaches_an_owned_model_from_an_unowned_one() -> None:
+    """Structural: a User.mailboxes relationship would hand out every user's rows."""
+    configure_mappers()
+    offenders = sorted(
+        f"{mapper.class_.__name__}.{rel.key} -> {rel.mapper.class_.__name__}"
+        for mapper in Base.registry.mappers
+        if not issubclass(mapper.class_, UserOwned)
+        for rel in mapper.relationships
+        if issubclass(rel.mapper.class_, UserOwned)
+    )
+    assert offenders == [], (
+        f"relationships that reach a UserOwned model from a class that is not: {offenders}. "
+        "Owned rows are reached from the current user through scoped(), never through a "
+        "relationship on User (ADR 0005). Drop the relationship."
+    )
+
+
+class _Throwaway(DeclarativeBase):
+    """A registry of its own, so the class above never sees these mappers."""
+
+
+class Owner(_Throwaway):
+    """Maps the users table with the relationship the rule forbids, to test the guard."""
+
+    __table__ = User.__table__
+    id: Mapped[int]
+    settings: Mapped[list[SettingKV]] = relationship(SettingKV, viewonly=True)
+
+
+def test_guard_rejects_a_lazy_load_from_an_unowned_parent(
+    session: Session, users: tuple[User, User]
+) -> None:
+    alice, _ = users
+    owner = session.scalars(select(Owner).where(Owner.id == alice.id)).one()
+    with pytest.raises(UnscopedQueryError, match=r"relationship Owner\.settings reaches SettingKV"):
+        _ = owner.settings
+
+
+@pytest.mark.parametrize("strategy", [selectinload, subqueryload, joinedload])
+def test_guard_rejects_eager_loads_from_an_unowned_parent(
+    session: Session, users: tuple[User, User], strategy: Callable[..., Any]
+) -> None:
+    with pytest.raises(UnscopedQueryError, match=r"relationship Owner\.settings reaches SettingKV"):
+        session.scalars(select(Owner).options(strategy(Owner.settings))).unique().all()
+    # The same option on an unscoped statement is still rejected: the rule is structural.
+    with pytest.raises(UnscopedQueryError, match=r"Owner\.settings"):
+        session.scalars(unscoped(select(Owner).options(strategy(Owner.settings)))).unique().all()
+
+
+def test_the_throwaway_mapper_stays_out_of_the_models_registry() -> None:
+    assert Owner not in {mapper.class_ for mapper in Base.registry.mappers}
+
+
+# --- bulk operations bypass the guard; keep them out of the package ---------
+
+BULK_BYPASSES = ("bulk_save_objects", "bulk_insert_mappings", "bulk_update_mappings")
+
+
+def test_no_bulk_session_operations_in_the_package() -> None:
+    package = Path(netkeeper.__file__).parent
+    guard_module = package / "scoping.py"  # the only place allowed to name them
+    hits = sorted(
+        f"{path.relative_to(package.parent)}: {name}"
+        for path in package.rglob("*.py")
+        if path != guard_module
+        for name in BULK_BYPASSES
+        if name in path.read_text()
+    )
+    assert hits == [], (
+        f"Session bulk operations bypass the scope guard and the flush check: {hits}. "
+        "Use ORM insert(Model) with user_id in every row, or scoped_update(), instead."
+    )
 
 
 # --- flush check ------------------------------------------------------------
@@ -277,8 +400,12 @@ def test_set_setting_creates_then_updates(session: Session, users: tuple[User, U
     row = set_setting(session, alice, "pace", {"per_day": 20})
     assert row.id is not None
     assert row.user_id == alice.id
+    created_at, updated_at = row.created_at, row.updated_at
     again = set_setting(session, alice, "pace", {"per_day": 30})
     assert again is row
+    assert row.value == {"per_day": 30}
+    assert row.created_at == created_at
+    assert row.updated_at >= updated_at
     assert get_setting(session, alice, "pace") == {"per_day": 30}
     assert session.scalar(unscoped(select(func.count()).select_from(SettingKV))) == 3
     assert get_setting(session, bob, "pace") is None
@@ -300,3 +427,36 @@ def test_delete_setting(session: Session, users: tuple[User, User]) -> None:
     assert delete_setting(session, alice, "theme") is False
     assert get_setting(session, alice, "theme") is None
     assert get_setting(session, bob, "theme") == "dark"
+
+
+def test_concurrent_writers_on_one_key_both_succeed(engine: Engine) -> None:
+    """Two threads upsert the same key at once: neither fails, the last one wins."""
+    factory = make_session_factory(engine)
+    install_scope_guard(factory)
+    with session_scope(factory) as setup:
+        user_id = ensure_local_user(setup).id
+    barrier = threading.Barrier(2)
+    failures: list[BaseException] = []
+
+    def write(value: int) -> None:
+        try:
+            with session_scope(factory) as session:
+                user = session.get(User, user_id)
+                assert user is not None
+                session.commit()  # end the read transaction before racing for the write lock
+                barrier.wait()
+                set_setting(session, user, "contended", value)
+        except BaseException as exc:  # collected for the assertion below
+            failures.append(exc)
+
+    writers = [threading.Thread(target=write, args=(n,)) for n in (1, 2)]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join()
+    assert failures == []
+    with session_scope(factory) as check:
+        user = check.get(User, user_id)
+        assert user is not None
+        assert get_setting(check, user, "contended") in (1, 2)
+        assert check.scalar(scoped_count(user, SettingKV)) == 1
