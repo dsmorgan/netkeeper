@@ -12,4 +12,4 @@
 - [ ] Browser-touching change: the opt-in smoke suite passes on a real Chrome (say which version).
 - [ ] No captured LinkedIn data, cookies, tokens, or real contact details in the diff or fixtures.
 - [ ] Docs updated where behavior changed.
-- [ ] `CHANGELOG.md` has an entry under Unreleased.
+- [ ] A fragment exists in `changelog.d/` if behavior changed.

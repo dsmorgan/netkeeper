@@ -25,6 +25,7 @@ The [implementation guide](docs/implementation-guide.md) is the backlog: every w
 - Tests must run offline. Nothing in the test suite may touch linkedin.com, Gmail, or the Anthropic API. Browser-touching changes need the opt-in smoke suite to pass on a real Chrome; say so in the PR.
 - Fixtures captured from LinkedIn responses must be sanitized: fake names, fake URNs, no real emails or phone numbers.
 - Commit messages: an imperative subject line under 72 characters, a blank line, then the why. The what is in the diff.
+- Add a changelog fragment in `changelog.d/` (see its README) when behavior changed. Do not edit `CHANGELOG.md` directly; it is assembled at release time.
 
 ## Development setup
 

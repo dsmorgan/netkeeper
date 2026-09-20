@@ -2,7 +2,7 @@
 PY := .venv/bin/python
 UV := uv
 
-.PHONY: install lint typecheck test check serve dev build-ui gen-client backup clean
+.PHONY: install lint fmt typecheck test check serve dev build-ui gen-client changelog-draft backup clean help
 
 install:            ## Create .venv and install the package with dev extras (from uv.lock)
 	$(UV) sync --all-extras
@@ -35,6 +35,9 @@ build-ui:           ## Production frontend build into frontend/dist
 gen-client:         ## Export the OpenAPI schema and regenerate the TypeScript client
 	$(PY) -m netkeeper.cli openapi export --out frontend/openapi.json
 	cd frontend && pnpm gen
+
+changelog-draft:    ## Preview the unreleased changelog assembled from changelog.d/
+	$(PY) -m towncrier build --draft --version unreleased
 
 backup:             ## Snapshot the database into the data directory's backups/
 	$(PY) -m netkeeper.cli backup
