@@ -28,6 +28,7 @@ htmlcov/
 node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/.tanstack/
 *.tsbuildinfo
 
 # Editors and OS
