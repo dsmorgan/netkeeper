@@ -12,6 +12,11 @@ Enums are strings plus a CHECK (:func:`netkeeper.models.base.string_enum`).
 Moments are ``UTCDateTime``; calendar dates that LinkedIn reports without a time
 (``connected_on``, position spans) are plain ``Date``.
 
+Provenance is per field, not per row (spec 10.5): ``contacts.source`` is the
+first source, ``contacts.field_sources`` says which source last wrote each
+LinkedIn field, and every child row carries its own ``source``. The rule that
+decides whether a value may be overwritten is :mod:`netkeeper.crm.provenance`.
+
 A child row needs its own ``user_id``: the scope guard rejects a flush of an
 owned row without one, and nothing copies it from the parent.
 """
@@ -23,6 +28,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Date,
     ForeignKey,
@@ -34,6 +40,7 @@ from sqlalchemy import (
     inspect,
 )
 from sqlalchemy.engine.default import DefaultExecutionContext
+from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship, validates
 
 from netkeeper.models.base import Base, TimestampMixin, UserOwned, UTCDateTime, string_enum, utcnow
@@ -152,6 +159,7 @@ class Contact(UserOwned, TimestampMixin, Base):
         Index("ix_contacts_user_id_current_company", "user_id", "current_company"),
         Index("ix_contacts_user_id_met", "user_id", "met"),
         Index("ix_contacts_user_id_archived_at", "user_id", "archived_at"),
+        Index("ix_contacts_user_id_last_contacted_at", "user_id", "last_contacted_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, sort_order=-100)
@@ -184,10 +192,22 @@ class Contact(UserOwned, TimestampMixin, Base):
     # Enrichment scheduling (spec 9.6).
     last_enriched_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     enrich_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Denormalized: the ``at`` of the newest outbound interaction, so the
+    # ``last_contacted`` filter and sort (spec 10.4) never scan ``interactions``.
+    # Whoever writes an outbound interaction keeps it current (P1-10, then the
+    # campaign engine); nothing here recomputes it.
+    last_contacted_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     notes: Mapped[str | None] = mapped_column(Text)
     archived_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     source: Mapped[ContactSource] = mapped_column(
         string_enum(ContactSource, "contact_source"), nullable=False, default=ContactSource.MANUAL
+    )
+    # Per-field provenance (spec 10.5): a LinkedIn field's column name to the
+    # ``ContactSource`` value that last wrote it; the fields a person owns are never
+    # in here. ``source`` above stays the first source. A ``MutableDict``, so
+    # ``contact.field_sources["headline"] = "sync"`` is flushed like any other change.
+    field_sources: Mapped[dict[str, str]] = mapped_column(
+        MutableDict.as_mutable(JSON()), nullable=False, default=dict
     )
     # Set on the loser of a merge (spec 8.2). Losing the winner leaves the loser alone.
     merged_into_id: Mapped[int | None] = mapped_column(
