@@ -1,0 +1,72 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "netkeeper",
+    "version": "0.0.1",
+    "description": "Hand-written stub. P0-04 replaces this file with the schema FastAPI exports (`make gen-client` at the repo root). Keep it minimal until then."
+  },
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Health",
+        "operationId": "health_api_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Health" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "tags": ["me"],
+        "summary": "Me",
+        "operationId": "me_api_v1_me_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Me" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Health": {
+        "type": "object",
+        "title": "Health",
+        "required": ["status", "version"],
+        "properties": {
+          "status": { "type": "string", "const": "ok", "title": "Status" },
+          "version": { "type": "string", "title": "Version" }
+        }
+      },
+      "Me": {
+        "type": "object",
+        "title": "Me",
+        "required": ["id", "kind", "display_name", "email", "timezone"],
+        "properties": {
+          "id": { "type": "integer", "title": "Id" },
+          "kind": { "type": "string", "enum": ["local", "hosted"], "title": "Kind" },
+          "display_name": {
+            "anyOf": [{ "type": "string" }, { "type": "null" }],
+            "title": "Display Name"
+          },
+          "email": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Email" },
+          "timezone": { "type": "string", "title": "Timezone" }
+        }
+      }
+    }
+  }
+}
