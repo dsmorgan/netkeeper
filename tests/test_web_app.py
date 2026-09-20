@@ -1,0 +1,262 @@
+import asyncio
+import importlib
+import json
+import logging
+import re
+import sys
+from pathlib import Path
+
+import httpx
+import pytest
+from fastapi import APIRouter, FastAPI
+from fastapi.routing import APIRoute
+from sqlalchemy import Engine, delete, select
+from typer.testing import CliRunner
+
+from netkeeper import __version__, migrations
+from netkeeper.cli import app as cli
+from netkeeper.config import LinkedInSettings, Settings
+from netkeeper.db import make_session_factory
+from netkeeper.models import User, UserKind
+from netkeeper.web.app import API_PREFIX, create_app, dev_app, discover_routers, openapi_json
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+API_PATHS = {
+    "/api/v1/health",
+    "/api/v1/me",
+    "/api/v1/events",
+    "/api/v1/tasks/ping",
+    "/api/v1/tasks/{task_id}",
+}
+
+
+# --- routes -----------------------------------------------------------------
+
+
+async def test_health(client: httpx.AsyncClient) -> None:
+    response = await client.get("/api/v1/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "version": __version__}
+
+
+async def test_me_returns_the_local_user(client: httpx.AsyncClient) -> None:
+    response = await client.get("/api/v1/me")
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": 1,
+        "kind": "local",
+        "display_name": None,
+        "email": None,
+        "timezone": LinkedInSettings().timezone,
+    }
+
+
+async def test_me_without_a_local_user_is_a_clear_500(
+    client: httpx.AsyncClient, bare_engine: Engine
+) -> None:
+    with make_session_factory(bare_engine)() as session:
+        session.execute(delete(User))
+        session.commit()
+    response = await client.get("/api/v1/me")
+    assert response.status_code == 500
+    assert "netkeeper db upgrade" in response.json()["detail"]
+
+
+# --- lifespan ---------------------------------------------------------------
+
+
+async def test_lifespan_migrates_and_creates_the_user(
+    running_app: FastAPI, bare_engine: Engine
+) -> None:
+    assert migrations.current_revision(bare_engine) == migrations.head_revision()
+    with make_session_factory(bare_engine)() as session:
+        users = list(session.scalars(select(User)))
+    assert [user.kind for user in users] == [UserKind.LOCAL]
+
+    state = running_app.state
+    assert state.engine is bare_engine
+    assert state.settings == Settings()
+    assert state.bus.subscriber_count == 0
+    assert state.tasks.get("nope") is None
+    assert type(state.auth).__name__ == "LocalSingleUser"
+
+
+async def test_startup_is_idempotent(app: FastAPI, bare_engine: Engine) -> None:
+    async with app.router.lifespan_context(app):
+        pass
+    async with app.router.lifespan_context(app):
+        pass
+    with make_session_factory(bare_engine)() as session:
+        assert len(list(session.scalars(select(User)))) == 1
+
+
+async def test_shutdown_cancels_running_tasks(app: FastAPI) -> None:
+    async with app.router.lifespan_context(app):
+        runner = app.state.tasks
+        started = asyncio.Event()
+
+        async def forever() -> None:
+            started.set()
+            await asyncio.sleep(3600)
+
+        info = runner.submit("forever", forever, user_id=1)
+        await started.wait()
+    done = runner.get(info.id)
+    assert done is not None
+    assert done.status == "failed"
+    assert done.error == "cancelled"
+
+
+def test_dev_app_sets_up_logging_then_builds_the_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The --reload worker imports this factory without going through the CLI callback."""
+    monkeypatch.chdir(tmp_path)  # no config.toml in reach
+    monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", str(tmp_path / "no-dist"))
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        app = dev_app()
+        assert isinstance(app, FastAPI)
+        assert any(handler.get_name() == "netkeeper" for handler in root.handlers)
+    finally:
+        root.handlers[:] = before
+
+
+# --- router discovery -------------------------------------------------------
+
+
+def test_known_api_modules_are_discovered() -> None:
+    assert [name for name, _ in discover_routers()] == ["events", "health", "me", "tasks"]
+
+
+def test_discovery_finds_routers_in_any_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package_dir = tmp_path / "fake_api"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("")
+    (package_dir / "alpha.py").write_text(
+        "from fastapi import APIRouter\n"
+        "router = APIRouter()\n"
+        "@router.get('/alpha')\n"
+        "def alpha() -> dict[str, str]:\n"
+        "    return {}\n"
+    )
+    (package_dir / "beta.py").write_text("router = 'not a router'\n")
+    (package_dir / "gamma.py").write_text("x = 1\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        found = discover_routers(importlib.import_module("fake_api"))
+    finally:
+        for name in [n for n in sys.modules if n == "fake_api" or n.startswith("fake_api.")]:
+            del sys.modules[name]
+    assert [name for name, _ in found] == ["alpha"]
+    assert isinstance(found[0][1], APIRouter)
+    route = found[0][1].routes[0]
+    assert isinstance(route, APIRoute)
+    assert route.path == "/alpha"
+
+
+def test_every_discovered_router_is_mounted_under_the_prefix(app: FastAPI) -> None:
+    # The SPA catch-all is a route too, but include_in_schema=False keeps it out.
+    paths = set(app.openapi()["paths"])
+    assert paths == API_PATHS
+    assert all(path.startswith(API_PREFIX) for path in paths)
+
+
+def test_operation_ids_are_snake_case(app: FastAPI) -> None:
+    schema = app.openapi()
+    ids = [op["operationId"] for path in schema["paths"].values() for op in path.values()]
+    assert ids
+    assert all(re.fullmatch(r"[a-z][a-z0-9_]*", op_id) for op_id in ids), ids
+    assert len(ids) == len(set(ids))
+
+
+# --- frontend ---------------------------------------------------------------
+
+
+def _static_client(app: FastAPI) -> httpx.AsyncClient:
+    # No lifespan: the static routes do not touch the database.
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
+
+
+async def test_serves_the_built_frontend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bare_engine: Engine
+) -> None:
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>netkeeper</title>")
+    (dist / "assets" / "app.js").write_text("console.log(1)")
+    (dist / "favicon.svg").write_text("<svg/>")
+    monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", str(dist))
+    app = create_app(Settings(), engine=bare_engine)
+
+    async with _static_client(app) as client:
+        for path in ("/", "/contacts", "/contacts/42", "/settings"):
+            response = await client.get(path)
+            assert response.status_code == 200, path
+            assert response.headers["content-type"].startswith("text/html")
+            assert response.text == "<!doctype html><title>netkeeper</title>"
+
+        asset = await client.get("/assets/app.js")
+        assert asset.status_code == 200
+        assert asset.text == "console.log(1)"
+        assert "javascript" in asset.headers["content-type"]
+
+        favicon = await client.get("/favicon.svg")
+        assert favicon.status_code == 200
+        assert favicon.text == "<svg/>"
+
+        assert (await client.get("/missing.png")).status_code == 404
+        assert (await client.get("/assets/missing.js")).status_code == 404
+
+        # Never shadow the API: an unknown API path is a JSON 404, not the SPA page.
+        missing_api = await client.get("/api/v1/nope")
+        assert missing_api.status_code == 404
+        assert missing_api.json() == {"detail": "Not Found"}
+        assert (await client.get("/api")).status_code == 404
+
+        assert (await client.get("/docs")).status_code == 200
+
+
+async def test_not_built_page_when_the_build_is_missing(app: FastAPI) -> None:
+    async with _static_client(app) as client:
+        response = await client.get("/")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+        assert "not built" in response.text
+        assert "make build-ui" in response.text
+        assert "no-dist" in response.text
+
+        assert (await client.get("/contacts")).status_code == 200
+        assert (await client.get("/api/v1/nope")).status_code == 404
+        assert (await client.get("/assets/app.js")).status_code == 404
+
+
+# --- openapi export ---------------------------------------------------------
+
+
+def test_openapi_export_writes_the_app_schema(tmp_path: Path) -> None:
+    out = tmp_path / "schema" / "openapi.json"
+    result = CliRunner().invoke(cli, ["openapi", "export", "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    assert str(out) in result.stdout
+
+    text = out.read_text()
+    assert text.endswith("\n")
+    assert text == openapi_json(create_app(Settings()))
+    parsed = json.loads(text)
+    assert list(parsed) == sorted(parsed)
+    assert parsed["info"] == {
+        "title": "netkeeper",
+        "version": __version__,
+        "description": "Keep your professional network warm.",
+    }
+    assert set(parsed["paths"]) == API_PATHS
+
+
+def test_committed_frontend_schema_is_current() -> None:
+    """`make gen-client` must be rerun when the API changes; CI diffs this too."""
+    committed = (REPO_ROOT / "frontend" / "openapi.json").read_text()
+    assert committed == openapi_json(create_app(Settings()))

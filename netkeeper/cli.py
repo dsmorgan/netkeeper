@@ -2,25 +2,32 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
 import typer
+import uvicorn
 from sqlalchemy.engine import make_url
 
 from netkeeper import __version__, migrations
 from netkeeper.config import ConfigError, Settings, load_settings, render_toml
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.logging_setup import setup_logging
-from netkeeper.paths import data_dir
+from netkeeper.paths import CONFIG_ENV, data_dir
 from netkeeper.services.users import ensure_local_user
+from netkeeper.web.app import create_app, openapi_json
+
+APP_FACTORY = "netkeeper.web.app:dev_app"
 
 app = typer.Typer(help="netkeeper: keep your professional network warm.", no_args_is_help=True)
 config_app = typer.Typer(help="Inspect the resolved configuration.", no_args_is_help=True)
 db_app = typer.Typer(help="Create and migrate the database.", no_args_is_help=True)
+openapi_app = typer.Typer(help="Work with the API schema.", no_args_is_help=True)
 app.add_typer(config_app, name="config")
 app.add_typer(db_app, name="db")
+app.add_typer(openapi_app, name="openapi")
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +76,47 @@ def _display_url(url: str) -> str:
 def version() -> None:
     """Print the installed version."""
     typer.echo(__version__)
+
+
+@app.command()
+def serve(
+    ctx: typer.Context,
+    host: Annotated[
+        str | None,
+        typer.Option(
+            "--host",
+            help="Interface to bind (default: web.host from the config).",
+            show_default=False,
+        ),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(
+            "--port", help="Port to bind (default: web.port from the config).", show_default=False
+        ),
+    ] = None,
+    reload: Annotated[
+        bool, typer.Option("--reload", help="Restart when the code changes (development).")
+    ] = False,
+) -> None:
+    """Run the web server: the API, the event stream, and the built frontend."""
+    state = ctx.ensure_object(CliState)
+    settings = _load_settings_or_exit(state)
+    bind_host = settings.web.host if host is None else host
+    bind_port = settings.web.port if port is None else port
+    # log_config=None keeps uvicorn's records on the root logger set up in main().
+    if reload:
+        # The reloader imports the factory in a worker process it restarts on change,
+        # so the app and its lifespan are built there and only there; dev_app() sets
+        # up logging there too. --config travels through the environment because
+        # that process does not see our arguments.
+        if state.config is not None:
+            os.environ[CONFIG_ENV] = str(state.config.expanduser().resolve())
+        uvicorn.run(
+            APP_FACTORY, factory=True, reload=True, host=bind_host, port=bind_port, log_config=None
+        )
+        return
+    uvicorn.run(create_app(settings), host=bind_host, port=bind_port, log_config=None)
 
 
 @config_app.command("show")
@@ -126,6 +174,19 @@ def db_revision(
         engine.dispose()
     for path in written:
         typer.echo(str(path))
+
+
+@openapi_app.command("export")
+def openapi_export(
+    ctx: typer.Context,
+    out: Annotated[Path, typer.Option("--out", help="File to write the JSON schema to.")],
+) -> None:
+    """Write the OpenAPI schema as JSON with sorted keys (the input to `make gen-client`)."""
+    state = ctx.ensure_object(CliState)
+    settings = _load_settings_or_exit(state)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(openapi_json(create_app(settings)), encoding="utf-8")
+    typer.echo(f"wrote {out}")
 
 
 if __name__ == "__main__":
