@@ -12,7 +12,13 @@ from sqlalchemy.orm import Session
 
 from netkeeper.db import make_session_factory
 from netkeeper.models import JsonValue, SettingKV, User
-from netkeeper.scoping import UnscopedQueryError, install_scope_guard, scoped, unscoped
+from netkeeper.scoping import (
+    UnscopedQueryError,
+    get_scoped,
+    install_scope_guard,
+    scoped,
+    unscoped,
+)
 from netkeeper.services.settings_kv import set_setting
 from netkeeper.web.app import API_PREFIX
 from netkeeper.web.deps import CurrentUser, LocalSingleUser, SessionDep
@@ -33,6 +39,7 @@ class SettingPage(BaseModel):
 
 
 Lister = Callable[[Session, User], Sequence[SettingKV]]
+ParentLookup = Callable[[Session, User, int], SettingKV | None]
 
 
 def _scoped_rows(session: Session, user: User) -> Sequence[SettingKV]:
@@ -49,12 +56,28 @@ def _bare_rows(session: Session, user: User) -> Sequence[SettingKV]:
     return session.scalars(select(SettingKV)).all()
 
 
-def _probe_app(engine: Engine, lister: Lister, *, missing_is_404: bool = False) -> FastAPI:
+def _scoped_parent(session: Session, user: User, setting_id: int) -> SettingKV | None:
+    return get_scoped(session, user, SettingKV, setting_id)
+
+
+def _unscoped_parent(session: Session, user: User, setting_id: int) -> SettingKV | None:
+    """Wrong on purpose: finds the parent whoever owns it, let through with the escape hatch."""
+    return session.scalars(unscoped(select(SettingKV).where(SettingKV.id == setting_id))).first()
+
+
+def _probe_app(
+    engine: Engine,
+    lister: Lister,
+    *,
+    missing_is_404: bool = False,
+    parent: ParentLookup = _scoped_parent,
+) -> FastAPI:
     """A bare app with the state the harness needs and list routes over settings_kv.
 
-    ``missing_is_404`` makes the parameterized route answer ``404`` when the user
-    has no key under the prefix, the way a route under a parent resource does
-    when the parent is not the user's.
+    ``missing_is_404`` makes the prefix route answer ``404`` when the user has no
+    key under the prefix, the way a route under a parent resource does when the
+    parent is not the user's. ``parent`` is how the settings route finds the
+    setting named in its path.
     """
     router = APIRouter(prefix="/probe")
 
@@ -78,6 +101,21 @@ def _probe_app(engine: Engine, lister: Lister, *, missing_is_404: bool = False) 
         if not keys and missing_is_404:
             raise HTTPException(status_code=404, detail="no such prefix")
         return keys
+
+    @router.get("/settings/{setting_id}/siblings", operation_id="probe_list_siblings")
+    def list_siblings(setting_id: int, user: CurrentUser, session: SessionDep) -> list[str]:
+        """The other keys of whoever owns ``setting_id``: children filtered by the parent.
+
+        The shape of a route under a parent resource. Only the parent lookup can
+        keep another user's rows out, so a ``parent`` that is not scoped leaks.
+        """
+        found = parent(session, user, setting_id)
+        if found is None:
+            raise HTTPException(status_code=404, detail="no such setting")
+        siblings = select(SettingKV).where(
+            SettingKV.user_id == found.user_id, SettingKV.id != found.id
+        )
+        return [row.key for row in session.scalars(unscoped(siblings))]
 
     app = FastAPI()
     app.include_router(router, prefix=API_PREFIX)
@@ -104,6 +142,14 @@ def _theme_prefix(session: Session, user: User) -> dict[str, str]:
     return {"prefix": "the"}
 
 
+def _own_setting(session: Session, user: User) -> dict[str, str]:
+    """The user's first setting; a fresh one when they have none (the unseeded user)."""
+    row = session.scalars(scoped(user, SettingKV).order_by(SettingKV.id)).first()
+    if row is None:
+        row = set_setting(session, user, "own", None)
+    return {"setting_id": str(row.id)}
+
+
 PROBE_PAGED = ListEndpoint(f"{API_PREFIX}/probe/settings", _seed_two_settings, paged_count)
 PROBE_ARRAY = ListEndpoint(f"{API_PREFIX}/probe/keys", _seed_two_settings, array_count)
 PROBE_PREFIXED = ListEndpoint(
@@ -111,6 +157,12 @@ PROBE_PREFIXED = ListEndpoint(
     _seed_one_themed,
     array_count,
     path_params=_theme_prefix,
+)
+PROBE_SIBLINGS = ListEndpoint(
+    f"{API_PREFIX}/probe/settings/{{setting_id}}/siblings",
+    _seed_one_themed,  # two settings; the first is the parent, the other its one sibling
+    array_count,
+    path_params=_own_setting,
 )
 
 
@@ -120,6 +172,7 @@ def test_discovery_finds_the_probe_lists(engine: Engine) -> None:
         PROBE_PAGED.path,
         PROBE_ARRAY.path,
         PROBE_PREFIXED.path,
+        PROBE_SIBLINGS.path,
     }
 
 
@@ -200,3 +253,27 @@ async def test_harness_requires_a_value_for_every_placeholder(engine: Engine) ->
     )
     with pytest.raises(AssertionError, match=r"no value for \['prefix'\]"):
         await assert_isolated(_probe_app(engine, _scoped_rows), endpoint)
+
+
+# --- the parent lookup ------------------------------------------------------
+
+
+async def test_harness_passes_a_scoped_parent_lookup(engine: Engine) -> None:
+    """Each user sees one sibling, the unseeded user's fresh setting none, and A gets 404 at B's."""
+    app = _probe_app(engine, _scoped_rows, parent=_scoped_parent)
+    await assert_isolated(app, PROBE_SIBLINGS)
+
+
+async def test_harness_fails_an_unscoped_parent_lookup(engine: Engine) -> None:
+    """Per user the counts are right; only A asking for B's setting shows the leak."""
+    app = _probe_app(engine, _scoped_rows, parent=_unscoped_parent)
+    with pytest.raises(
+        AssertionError,
+        match=r"as user \d+ at user \d+'s .*/siblings: expected 404 or 0 items, got 1",
+    ):
+        await assert_isolated(app, PROBE_SIBLINGS)
+
+
+async def test_harness_does_not_cross_when_the_paths_are_the_same(engine: Engine) -> None:
+    """A prefix names no resource: both users' paths are equal, so there is nothing to cross."""
+    await assert_isolated(_probe_app(engine, _scoped_rows), PROBE_PREFIXED)
