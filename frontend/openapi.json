@@ -1,6 +1,17 @@
 {
   "components": {
     "schemas": {
+      "ContactSource": {
+        "description": "Where a row came from. On ``contacts`` the first source; children carry their own.\n\nThe order is the precedence for LinkedIn fields (spec 10.5): ``sync`` beats\n``archive`` beats ``csv`` beats ``manual``, except for the fields a person\nowns (``preferred_name``, ``notes``, ``met``, tags), where ``manual`` wins.",
+        "enum": [
+          "sync",
+          "archive",
+          "csv",
+          "manual"
+        ],
+        "title": "ContactSource",
+        "type": "string"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -31,6 +42,332 @@
           "version"
         ],
         "title": "HealthOut",
+        "type": "object"
+      },
+      "InteractionIn": {
+        "description": "A new interaction. ``at`` must carry a timezone; it is stored as UTC.",
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/InteractionKind"
+          },
+          "message_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          }
+        },
+        "required": [
+          "kind",
+          "at"
+        ],
+        "title": "InteractionIn",
+        "type": "object"
+      },
+      "InteractionKind": {
+        "description": "What happened between you and a contact. ``*_out`` is you reaching out.",
+        "enum": [
+          "note",
+          "call",
+          "meeting",
+          "email_out",
+          "email_in",
+          "li_out",
+          "li_in",
+          "li_view"
+        ],
+        "title": "InteractionKind",
+        "type": "string"
+      },
+      "InteractionOut": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/InteractionKind"
+          },
+          "message_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ContactSource"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "contact_id",
+          "kind",
+          "at",
+          "summary",
+          "message_id",
+          "source",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "InteractionOut",
+        "type": "object"
+      },
+      "InteractionPage": {
+        "description": "One page of a contact's interactions, newest first, and the total count.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/InteractionOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "InteractionPage",
+        "type": "object"
+      },
+      "InteractionPatch": {
+        "description": "Fields to change on an interaction; a field left out is untouched.\n\n``summary`` and ``message_id`` sent as ``null`` are cleared. ``kind`` and\n``at`` cannot be null, so ``null`` means \"leave it\".",
+        "properties": {
+          "at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InteractionKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          }
+        },
+        "title": "InteractionPatch",
+        "type": "object"
+      },
+      "NotesIn": {
+        "description": "The contact's notes, Markdown, replaced whole; ``null`` clears them.",
+        "properties": {
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          }
+        },
+        "required": [
+          "notes"
+        ],
+        "title": "NotesIn",
+        "type": "object"
+      },
+      "NotesOut": {
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contact_id",
+          "notes",
+          "updated_at"
+        ],
+        "title": "NotesOut",
+        "type": "object"
+      },
+      "SnapshotOut": {
+        "description": "The headline and job as they were at ``observed_at`` (spec 8.1).",
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "current_company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Company"
+          },
+          "current_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Title"
+          },
+          "headline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headline"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ContactSource"
+          }
+        },
+        "required": [
+          "id",
+          "contact_id",
+          "observed_at",
+          "headline",
+          "current_title",
+          "current_company",
+          "location",
+          "source"
+        ],
+        "title": "SnapshotOut",
         "type": "object"
       },
       "TaskAccepted": {
@@ -105,6 +442,98 @@
           "finished_at"
         ],
         "title": "TaskOut",
+        "type": "object"
+      },
+      "TimelineInteraction": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "interaction": {
+            "$ref": "#/components/schemas/InteractionOut"
+          },
+          "kind": {
+            "const": "interaction",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "at",
+          "interaction"
+        ],
+        "title": "TimelineInteraction",
+        "type": "object"
+      },
+      "TimelinePage": {
+        "description": "Interactions and snapshots interleaved, newest first.\n\n``next_before`` is the ``before`` for the next page, or ``null`` when this is\nthe last one. A page may run past ``limit`` when entries share a timestamp\nat its end, so a cursor never skips one.",
+        "properties": {
+          "items": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "interaction": "#/components/schemas/TimelineInteraction",
+                  "snapshot": "#/components/schemas/TimelineSnapshot"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/TimelineInteraction"
+                },
+                {
+                  "$ref": "#/components/schemas/TimelineSnapshot"
+                }
+              ]
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_before": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before"
+          }
+        },
+        "required": [
+          "items",
+          "next_before"
+        ],
+        "title": "TimelinePage",
+        "type": "object"
+      },
+      "TimelineSnapshot": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "kind": {
+            "const": "snapshot",
+            "title": "Kind",
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/SnapshotOut"
+          }
+        },
+        "required": [
+          "kind",
+          "at",
+          "snapshot"
+        ],
+        "title": "TimelineSnapshot",
         "type": "object"
       },
       "UserKind": {
@@ -210,6 +639,268 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/contacts/{contact_id}/interactions": {
+      "get": {
+        "description": "The contact's interactions, newest first.",
+        "operationId": "list_interactions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items per page.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Items per page.",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Items to skip.",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InteractionPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Interactions",
+        "tags": [
+          "interactions"
+        ]
+      },
+      "post": {
+        "description": "Record an interaction. An outbound kind moves the contact's `last_contacted_at`.",
+        "operationId": "create_interaction",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InteractionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InteractionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Interaction",
+        "tags": [
+          "interactions"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/notes": {
+      "put": {
+        "description": "Replace the contact's notes (Markdown, stored as sent).",
+        "operationId": "set_contact_notes",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotesIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotesOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Contact Notes",
+        "tags": [
+          "interactions"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/timeline": {
+      "get": {
+        "description": "Interactions and snapshots interleaved, newest first, cursor paged by `before`.",
+        "operationId": "get_timeline",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items per page.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Items per page.",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Cursor: only entries older than this timestamp. From `next_before`.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Cursor: only entries older than this timestamp. From `next_before`.",
+              "title": "Before"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimelinePage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Timeline",
+        "tags": [
+          "interactions"
+        ]
+      }
+    },
     "/api/v1/events": {
       "get": {
         "operationId": "stream_events",
@@ -249,6 +940,99 @@
         "summary": "Get Health",
         "tags": [
           "health"
+        ]
+      }
+    },
+    "/api/v1/interactions/{interaction_id}": {
+      "delete": {
+        "description": "Delete an interaction; the contact's `last_contacted_at` follows.",
+        "operationId": "delete_interaction",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "interaction_id",
+            "required": true,
+            "schema": {
+              "title": "Interaction Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such interaction"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Interaction",
+        "tags": [
+          "interactions"
+        ]
+      },
+      "patch": {
+        "description": "Change an interaction's fields; the contact's `last_contacted_at` follows.",
+        "operationId": "update_interaction",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "interaction_id",
+            "required": true,
+            "schema": {
+              "title": "Interaction Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InteractionPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InteractionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such interaction"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Interaction",
+        "tags": [
+          "interactions"
         ]
       }
     },

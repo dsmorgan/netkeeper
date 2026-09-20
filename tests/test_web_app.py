@@ -27,6 +27,10 @@ API_PATHS = {
     "/api/v1/events",
     "/api/v1/tasks/ping",
     "/api/v1/tasks/{task_id}",
+    "/api/v1/contacts/{contact_id}/interactions",
+    "/api/v1/contacts/{contact_id}/timeline",
+    "/api/v1/contacts/{contact_id}/notes",
+    "/api/v1/interactions/{interaction_id}",
 }
 
 
@@ -127,7 +131,13 @@ def test_dev_app_sets_up_logging_then_builds_the_app(
 
 
 def test_known_api_modules_are_discovered() -> None:
-    assert [name for name, _ in discover_routers()] == ["events", "health", "me", "tasks"]
+    assert [name for name, _ in discover_routers()] == [
+        "events",
+        "health",
+        "interactions",
+        "me",
+        "tasks",
+    ]
 
 
 def test_discovery_finds_routers_in_any_package(
