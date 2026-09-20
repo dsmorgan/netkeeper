@@ -51,6 +51,10 @@ async def assert_isolated(app: FastAPI, endpoint: ListEndpoint) -> None:
     user, the unseeded one included. That user's request may answer ``404``
     (their resource does not exist) or ``200`` with no items (it exists and is
     empty); the seeded users' requests must answer ``200`` with their counts.
+    Then each seeded user calls the other's formatted path, which must answer
+    ``404`` or ``200`` with no items: an endpoint whose parent lookup is not
+    scoped would hand A the rows under B's resource. When the parameter names no
+    resource (both users' paths are the same) there is nothing to cross.
     """
     factory: sessionmaker[Session] = app.state.session_factory
     with session_scope(factory, write=True) as session:  # seeds read, then write
@@ -67,6 +71,11 @@ async def assert_isolated(app: FastAPI, endpoint: ListEndpoint) -> None:
         calls.append(_Call(nobody.id, _url(endpoint, session, nobody), 0, seeded=False))
     for call in calls:
         await _check(app, endpoint, call)
+    seeded_calls = [call for call in calls if call.seeded]
+    for viewer in seeded_calls:
+        for owner in seeded_calls:
+            if viewer is not owner and viewer.url != owner.url:
+                await _check_crossed(app, endpoint, viewer, owner)
 
 
 def path_fields(path: str) -> list[str]:
@@ -97,6 +106,19 @@ async def _check(app: FastAPI, endpoint: ListEndpoint, call: _Call) -> None:
     assert response.status_code == 200, f"{where}: {response.status_code} {response.text}"
     got = endpoint.count(response.json())
     assert got == call.want, f"{where}: expected {call.want} items, got {got}"
+
+
+async def _check_crossed(app: FastAPI, endpoint: ListEndpoint, viewer: _Call, owner: _Call) -> None:
+    """``viewer`` asks for ``owner``'s resource: nothing of ``owner``'s may come back."""
+    response = await _get_as(app, viewer.user_id, owner.url)
+    where = f"{endpoint.path} as user {viewer.user_id} at user {owner.user_id}'s {owner.url}"
+    if response.status_code == 404:
+        return
+    assert response.status_code == 200, f"{where}: {response.status_code} {response.text}"
+    got = endpoint.count(response.json())
+    assert got == 0, (
+        f"{where}: expected 404 or 0 items, got {got}; is the parent lookup scoped to the user?"
+    )
 
 
 async def _get_as(app: FastAPI, user_id: int, url: str) -> httpx.Response:

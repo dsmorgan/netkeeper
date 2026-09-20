@@ -333,6 +333,7 @@ SQLite, one file. All datetimes stored as naive UTC and returned timezone-aware 
 | `do_not_contact` | boolean, with `do_not_contact_reason` |
 | `li_missing_count`, `li_disconnected_at` | Debounced removal, see 9.8 |
 | `last_enriched_at`, `enrich_priority` | Enrichment scheduling |
+| `last_contacted_at` | Denormalized: the `at` of the newest outbound `interaction` (`email_out`, `li_out`, `call`, `meeting`), so the `last_contacted` filter and sort never scan the timeline. Maintained by the interaction service and the campaign engine, recomputed from the rows on edit or delete |
 | `notes` | Markdown |
 | `archived_at` | |
 | `source` | `sync`, `archive`, `csv`, `manual` (first source; per-field provenance lives in `field_sources`, and each child row carries its own `source`) |
