@@ -134,7 +134,7 @@ def serve(
 
 @config_app.command("show")
 def config_show(ctx: typer.Context) -> None:
-    """Print the resolved settings as TOML, followed by a [paths] block."""
+    """Print the resolved settings as TOML, followed by a paths table."""
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
     source = "defaults" if settings.source_path is None else str(settings.source_path)
