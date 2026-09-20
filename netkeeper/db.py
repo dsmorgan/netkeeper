@@ -26,7 +26,19 @@ DATABASE_FILENAME = "netkeeper.sqlite3"
 # How long a SQLite connection waits for a writer to finish before failing with
 # "database is locked". Two request handlers, or a request and the scheduler,
 # writing at once is normal; failing at once is not.
+#
+# This covers writer-versus-writer contention only: a transaction that wants the
+# write lock while another holds it waits. It does not cover a transaction that
+# reads first and writes second. If another writer commits between that read and
+# that write, SQLite refuses the upgrade at once (SQLITE_BUSY_SNAPSHOT) and never
+# consults the busy handler, because the read snapshot is stale and waiting cannot
+# make it fresh. Writer sessions therefore start every transaction with
+# BEGIN IMMEDIATE (see mark_for_write), taking the write lock before their first
+# read, so they wait at BEGIN under this timeout instead of failing at the write.
 SQLITE_BUSY_TIMEOUT_MS = 5000
+# Execution option on a connection that makes the SQLite ``begin`` listener emit
+# BEGIN IMMEDIATE. Set through mark_for_write, never by hand.
+IMMEDIATE_OPTION = "netkeeper_immediate"
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +94,11 @@ def _sqlite_on_connect(dbapi_connection: DBAPIConnection, _record: ConnectionPoo
 
 
 def _sqlite_on_begin(connection: Connection) -> None:
-    connection.exec_driver_sql("BEGIN")
+    # A writer takes the write lock here; a reader takes no lock until its first read.
+    if connection.get_execution_options().get(IMMEDIATE_OPTION):
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+    else:
+        connection.exec_driver_sql("BEGIN")
 
 
 @contextmanager
@@ -124,10 +140,48 @@ def make_session_factory(engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(engine, expire_on_commit=False)
 
 
+def mark_for_write(session: Session) -> None:
+    """Make every transaction ``session`` starts begin as a writer.
+
+    On SQLite that is ``BEGIN IMMEDIATE``: the write lock is taken up front, so a
+    transaction that reads and then writes waits for a concurrent writer (up to
+    ``SQLITE_BUSY_TIMEOUT_MS``) instead of failing at once with
+    ``SQLITE_BUSY_SNAPSHOT`` when that writer commits between the read and the
+    write. PostgreSQL ignores the mark; its MVCC never refuses an upgrade.
+
+    The mark rides on the session's bind, an engine carrying the
+    ``IMMEDIATE_OPTION`` execution option, so it outlives ``commit()``: a block
+    that commits and goes on is still a writer. It has to be set before the
+    session's first statement, because that statement starts the transaction.
+    A read-only session is left unmarked so it never waits for the write lock.
+    """
+    if session.info.get(IMMEDIATE_OPTION):
+        return
+    if session.in_transaction():
+        raise RuntimeError("mark_for_write() must run before the session's first statement")
+    bind = session.get_bind()
+    if not isinstance(bind, Engine):
+        raise TypeError("mark_for_write() needs a session bound to an Engine, not a Connection")
+    session.bind = bind.execution_options(**{IMMEDIATE_OPTION: True})
+    session.info[IMMEDIATE_OPTION] = True
+
+
+def is_writer(session: Session) -> bool:
+    """True when :func:`mark_for_write` was applied to ``session``."""
+    return bool(session.info.get(IMMEDIATE_OPTION))
+
+
 @contextmanager
-def session_scope(factory: sessionmaker[Session]) -> Iterator[Session]:
-    """A session that commits on success, rolls back and re-raises on error, and always closes."""
+def session_scope(factory: sessionmaker[Session], *, write: bool = False) -> Iterator[Session]:
+    """A session that commits on success, rolls back and re-raises on error, and always closes.
+
+    ``write=True`` marks the session as a writer (:func:`mark_for_write`). Use it
+    for any block that may write, above all one that reads first; leave it off
+    for a read-only block so it never waits for the SQLite write lock.
+    """
     session = factory()
+    if write:
+        mark_for_write(session)
     try:
         yield session
         session.commit()

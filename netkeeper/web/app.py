@@ -91,7 +91,7 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     migrations.upgrade(engine)
     factory = make_session_factory(engine)
     install_scope_guard(factory)
-    with session_scope(factory) as session:
+    with session_scope(factory, write=True) as session:  # reads, then may insert the user
         user = ensure_local_user(session, settings=settings)
         log.info(
             "database at revision %s, local user %d", migrations.current_revision(engine), user.id

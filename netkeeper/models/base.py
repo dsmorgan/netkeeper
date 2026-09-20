@@ -2,16 +2,19 @@
 
 Spec section 8 and ADR 0005: datetimes are stored naive UTC and returned aware
 (:class:`UTCDateTime`); every user-owned table carries a non-null, indexed
-``user_id`` (:class:`UserOwned`); constraint names follow one convention so
-Alembic batch mode on SQLite can find and drop them.
+``user_id`` (:class:`UserOwned`); enums are strings plus a CHECK constraint
+(:func:`string_enum`) so the schema is the same on SQLite and PostgreSQL;
+constraint names follow one convention so Alembic batch mode on SQLite can find
+and drop them.
 """
 
 from __future__ import annotations
 
+import enum
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, MetaData
+from sqlalchemy import DateTime, Enum, ForeignKey, MetaData
 from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
@@ -59,6 +62,30 @@ class UTCDateTime(TypeDecorator[datetime]):
         if value.tzinfo is not None:
             return value.astimezone(UTC)
         return value.replace(tzinfo=UTC)
+
+
+def _enum_values(kind: type[enum.Enum]) -> list[str]:
+    return [str(member.value) for member in kind]
+
+
+def string_enum(kind: type[enum.StrEnum], name: str, *, length: int = 16) -> Enum:
+    """A ``StrEnum`` column stored as ``VARCHAR(length)`` plus a CHECK constraint.
+
+    Never a native enum type: PostgreSQL's ``CREATE TYPE`` has no SQLite
+    counterpart, and a string column with a CHECK renders the same on both. The
+    values stored are the members' values, not their names. ``name`` becomes the
+    CHECK constraint's name through the naming convention
+    (``ck_<table>_<name>``), so it must be unique within a table. SQLAlchemy
+    refuses a ``length`` shorter than the longest value.
+    """
+    return Enum(
+        kind,
+        name=name,
+        native_enum=False,
+        length=length,
+        create_constraint=True,
+        values_callable=_enum_values,
+    )
 
 
 class Base(DeclarativeBase):

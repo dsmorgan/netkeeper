@@ -40,15 +40,24 @@ class LocalSingleUser:
         return user
 
 
+# Methods that never write (RFC 9110 "safe methods"). Every other request gets a
+# writer session, so on SQLite it takes the write lock before its first read.
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
 def get_session(request: Request) -> Iterator[Session]:
     """One session per request: commits when the handler returns, rolls back on error.
+
+    A request whose method may write (anything but the safe methods) gets a writer
+    session (:func:`netkeeper.db.mark_for_write`); a safe request's session stays a
+    reader and never waits for the SQLite write lock.
 
     Declared with ``scope="function"`` below so the session closes before the
     response is sent. A streaming response (the SSE stream) would otherwise hold a
     SQLite read transaction open for as long as the client stays connected.
     """
     factory: sessionmaker[Session] = request.app.state.session_factory
-    with session_scope(factory) as session:
+    with session_scope(factory, write=request.method not in SAFE_METHODS) as session:
         yield session
 
 
