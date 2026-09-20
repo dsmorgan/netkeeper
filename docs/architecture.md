@@ -221,7 +221,7 @@ netkeeper/
 ├── config.example.toml
 ├── Dockerfile
 ├── docker-compose.yml
-├── justfile                  # dev, test, build-ui, serve, backup
+├── Makefile                  # dev, test, lint, build-ui, serve, backup
 ├── netkeeper/
 │   ├── cli.py                # Typer app
 │   ├── config.py             # TOML Settings dataclass, path resolution

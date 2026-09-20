@@ -98,7 +98,7 @@ Drift signals to watch for at every checkpoint:
 
 ### CP0: scaffold review
 
-- **Demo:** `netkeeper serve` on a clean checkout; the dashboard renders; `just test` and CI are green; `netkeeper db upgrade` from empty.
+- **Demo:** `netkeeper serve` on a clean checkout; the dashboard renders; `make test` and CI are green; `netkeeper db upgrade` from empty.
 - **Questions:** Does every API route go through `CurrentUser`? Does the two-user test harness exist even though it has nothing to test yet? Is the frontend client generated, not hand-written? Are secrets in Keychain, never in the data directory?
 - **Re-read:** spec section 5 (process model, multi-user readiness), section 14.2.
 
@@ -173,9 +173,9 @@ Drift signals to watch for at every checkpoint:
 ### Phase 0: scaffold
 
 **P0-01 Python project tooling** · lane core · S
-Goal: `pyproject.toml` with the `netkeeper` package and console script, `uv.lock`, `ruff`, `mypy`, `pytest` config, a `justfile` with `dev`, `test`, `lint`, `serve`, `build-ui`.
+Goal: `pyproject.toml` with the `netkeeper` package and console script, `uv.lock`, `ruff`, `mypy`, `pytest` config, a `Makefile` with `dev`, `test`, `lint`, `serve`, `build-ui`.
 Depends on: nothing.
-Done when: `uv venv && uv pip install -e '.[dev]'` works on a clean clone; `just lint test` passes with one placeholder test.
+Done when: `uv venv && uv pip install -e '.[dev]'` works on a clean clone; `make lint test` passes with one placeholder test.
 
 **P0-02 Configuration, paths, logging** · lane core · S
 Goal: TOML `Settings` with the resolution order in spec section 15; data-dir resolution per platform; structured logging with `NETKEEPER_LOG_LEVEL` and a bad value that logs and falls back.
