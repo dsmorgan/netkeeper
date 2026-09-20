@@ -239,9 +239,9 @@ def _insert_contact(
         text(
             "INSERT INTO contacts (id, user_id, li_urn, first_name, last_name, preferred_name,"
             " degree, met, do_not_contact, li_missing_count, enrich_priority, source,"
-            " merged_into_id, created_at, updated_at)"
+            " field_sources, merged_into_id, created_at, updated_at)"
             " VALUES (:id, :user_id, :li_urn, 'F', 'L', 'F', 1, :met, false, 0, 0, :source,"
-            " :merged_into_id, :t, :t)"
+            " '{}', :merged_into_id, :t, :t)"
         ),
         {
             "id": id,

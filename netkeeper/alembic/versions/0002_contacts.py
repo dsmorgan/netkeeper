@@ -105,9 +105,11 @@ def upgrade() -> None:
         sa.Column("li_disconnected_at", sa.DateTime(), nullable=True),
         sa.Column("last_enriched_at", sa.DateTime(), nullable=True),
         sa.Column("enrich_priority", sa.Integer(), nullable=False),
+        sa.Column("last_contacted_at", sa.DateTime(), nullable=True),
         sa.Column("notes", sa.Text(), nullable=True),
         sa.Column("archived_at", sa.DateTime(), nullable=True),
         sa.Column("source", sa.String(length=16), nullable=False),
+        sa.Column("field_sources", sa.JSON(), nullable=False),
         sa.Column("merged_into_id", sa.Integer(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
@@ -148,6 +150,12 @@ def upgrade() -> None:
         op.f("ix_contacts_user_id_last_name_first_name"),
         "contacts",
         ["user_id", "last_name", "first_name"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("ix_contacts_user_id_last_contacted_at"),
+        "contacts",
+        ["user_id", "last_contacted_at"],
         unique=False,
     )
     op.create_index(op.f("ix_contacts_user_id_met"), "contacts", ["user_id", "met"], unique=False)
