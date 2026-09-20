@@ -429,6 +429,149 @@ def test_synced_values_fills_existing_contacts_and_downgrades_cleanly(
     assert _diff_against_models(migration_engine) == []
 
 
+# --- tags (0004) ------------------------------------------------------------
+
+TAG_TABLES = ("tags", "autotag_rules", "contact_tags", "contact_tag_suppressions")
+
+
+def _insert_tag(
+    connection: Connection, *, id: int, user_id: int, name: str, kind: str = "auto"
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO tags (id, user_id, name, name_key, color, kind, created_at, updated_at)"
+            " VALUES (:id, :user_id, :name, :key, NULL, :kind, :t, :t)"
+        ),
+        {"id": id, "user_id": user_id, "name": name, "key": name.lower(), "kind": kind, "t": STAMP},
+    )
+
+
+def _insert_rule(
+    connection: Connection, *, id: int, user_id: int, tag_id: int, field: str = "title"
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO autotag_rules (id, user_id, tag_id, field, pattern, enabled, position,"
+            " created_at, updated_at) VALUES (:id, :user_id, :tag_id, :field, 'x', true, 0, :t, :t)"
+        ),
+        {"id": id, "user_id": user_id, "tag_id": tag_id, "field": field, "t": STAMP},
+    )
+
+
+def _insert_contact_tag(
+    connection: Connection,
+    *,
+    user_id: int,
+    contact_id: int,
+    tag_id: int,
+    source: str = "rule",
+    rule_id: int | None = None,
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO contact_tags (user_id, contact_id, tag_id, source, rule_id, created_at,"
+            " updated_at) VALUES (:user_id, :contact_id, :tag_id, :source, :rule_id, :t, :t)"
+        ),
+        {
+            "user_id": user_id,
+            "contact_id": contact_id,
+            "tag_id": tag_id,
+            "source": source,
+            "rule_id": rule_id,
+            "t": STAMP,
+        },
+    )
+
+
+def _insert_suppression(
+    connection: Connection, *, user_id: int, contact_id: int, tag_id: int
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO contact_tag_suppressions (user_id, contact_id, tag_id, created_at,"
+            " updated_at) VALUES (:user_id, :contact_id, :tag_id, :t, :t)"
+        ),
+        {"user_id": user_id, "contact_id": contact_id, "tag_id": tag_id, "t": STAMP},
+    )
+
+
+def test_migration_creates_every_tag_table(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    assert set(TAG_TABLES) <= set(inspect(migration_engine).get_table_names())
+
+
+def test_tag_name_key_is_unique_per_user(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        _insert_tag(connection, id=1, user_id=1, name="VP")
+        _insert_tag(connection, id=2, user_id=2, name="vp")  # other user: fine
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_tag(connection, id=3, user_id=1, name="vp")
+
+
+def test_tag_enums_are_checked_by_the_database(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_tag(connection, id=1, user_id=1, name="a")
+        _insert_rule(connection, id=1, user_id=1, tag_id=1)
+        _insert_contact_tag(connection, user_id=1, contact_id=1, tag_id=1, rule_id=1)
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_tag(connection, id=2, user_id=1, name="b", kind="bogus")
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_rule(connection, id=2, user_id=1, tag_id=1, field="bogus")
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_contact_tag(connection, user_id=1, contact_id=1, tag_id=1, source="bogus")
+
+
+def test_an_assignment_and_a_suppression_are_unique_per_contact_and_tag(
+    migration_engine: Engine,
+) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_tag(connection, id=1, user_id=1, name="a")
+        _insert_contact_tag(connection, user_id=1, contact_id=1, tag_id=1)
+        _insert_suppression(connection, user_id=1, contact_id=1, tag_id=1)
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_contact_tag(connection, user_id=1, contact_id=1, tag_id=1, source="manual")
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_suppression(connection, user_id=1, contact_id=1, tag_id=1)
+
+
+def test_deleting_a_tag_cascades_and_deleting_a_rule_clears_rule_id(
+    migration_engine: Engine,
+) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        for tag_id in (1, 2):
+            _insert_tag(connection, id=tag_id, user_id=1, name=f"tag{tag_id}")
+            _insert_rule(connection, id=tag_id, user_id=1, tag_id=tag_id)
+            _insert_contact_tag(connection, user_id=1, contact_id=1, tag_id=tag_id, rule_id=tag_id)
+            _insert_suppression(connection, user_id=1, contact_id=1, tag_id=tag_id)
+        connection.execute(text("DELETE FROM autotag_rules WHERE id = 1"))
+        rows = connection.execute(
+            text("SELECT tag_id, rule_id FROM contact_tags ORDER BY tag_id")
+        ).all()
+        assert [tuple(row) for row in rows] == [(1, None), (2, 2)]
+        connection.execute(text("DELETE FROM tags WHERE id = 2"))
+        assert _count(connection, "autotag_rules") == 0
+        assert _count(connection, "contact_tags") == 1
+        assert _count(connection, "contact_tag_suppressions") == 1
+        connection.execute(text("DELETE FROM contacts WHERE id = 1"))
+        assert _count(connection, "contact_tags") == 0
+        assert _count(connection, "contact_tag_suppressions") == 0
+        assert _count(connection, "tags") == 1
+        connection.execute(text("DELETE FROM users WHERE id = 1"))
+        for table in TAG_TABLES:
+            assert _count(connection, table) == 0, table
+
+
 # --- script directory -------------------------------------------------------
 
 

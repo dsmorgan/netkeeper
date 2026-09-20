@@ -5,9 +5,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
-from netkeeper.models import ContactSource, InteractionKind, UserKind
+from netkeeper.crm.tags import PATTERN_MAX_LENGTH, InvalidPattern, compile_pattern
+from netkeeper.models import (
+    TAG_NAME_MAX_LENGTH,
+    ContactSource,
+    InteractionKind,
+    RuleField,
+    TagKind,
+    TagSource,
+    UserKind,
+)
 from netkeeper.services.tasks import TaskStatus
 
 
@@ -141,3 +150,113 @@ class NotesOut(BaseModel):
     contact_id: int
     notes: str | None
     updated_at: datetime
+
+
+# --- tags and auto-tag rules (spec 8.3, 10.3) --------------------------------
+
+TagName = Annotated[str, Field(min_length=1, max_length=TAG_NAME_MAX_LENGTH)]
+HexColor = Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")]
+
+
+def _valid_pattern(pattern: str) -> str:
+    """A rule pattern must compile; the service checks again when it stores one."""
+    try:
+        compile_pattern(pattern)
+    except InvalidPattern as exc:
+        raise ValueError(str(exc)) from None
+    return pattern
+
+
+RulePattern = Annotated[
+    str, Field(min_length=1, max_length=PATTERN_MAX_LENGTH), AfterValidator(_valid_pattern)
+]
+
+
+class TagOut(BaseModel):
+    id: int
+    name: str
+    color: str | None
+    kind: TagKind
+    contact_count: int
+    """Live contacts (not merged away, not archived) carrying the tag."""
+    created_at: datetime
+    updated_at: datetime
+
+
+class TagCreate(BaseModel):
+    name: TagName
+    color: HexColor | None = None
+    kind: TagKind = TagKind.MANUAL
+
+
+class TagPatch(BaseModel):
+    """Fields left out are left alone; ``color: null`` clears the color."""
+
+    name: TagName | None = None
+    color: HexColor | None = None
+
+
+class ContactTagCreate(BaseModel):
+    tag_id: int
+
+
+class ContactTagOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    contact_id: int
+    tag_id: int
+    source: TagSource
+    rule_id: int | None
+    created_at: datetime
+
+
+class AutotagRuleOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    tag_id: int
+    field: RuleField
+    pattern: str
+    enabled: bool
+    position: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class AutotagRuleCreate(BaseModel):
+    tag_id: int
+    field: RuleField
+    pattern: RulePattern
+    enabled: bool = True
+
+
+class AutotagRulePatch(BaseModel):
+    tag_id: int | None = None
+    field: RuleField | None = None
+    pattern: RulePattern | None = None
+    enabled: bool | None = None
+
+
+class AutotagRuleReorder(BaseModel):
+    """``rule_ids`` go first, in this order; the rules left out keep their order after them."""
+
+    rule_ids: list[int] = Field(min_length=1)
+
+
+class AutotagRulePreviewIn(BaseModel):
+    field: RuleField
+    pattern: RulePattern
+
+
+class AutotagRulePreviewOut(BaseModel):
+    count: int
+    contact_ids: list[int]
+    """The first matching contacts, by id, up to ten."""
+
+
+class AutotagRuleRunOut(BaseModel):
+    contacts: int
+    added: int
+    removed: int
+    updated: int

@@ -25,10 +25,25 @@ from netkeeper.models.contacts import (
     normalize_public_id,
 )
 from netkeeper.models.settings import JsonValue, SettingKV
+from netkeeper.models.tags import (
+    TAG_NAME_MAX_LENGTH,
+    TAG_TABLES,
+    AutotagRule,
+    ContactTag,
+    ContactTagSuppression,
+    RuleField,
+    Tag,
+    TagKind,
+    TagSource,
+    tag_name_key,
+)
 from netkeeper.models.user import User, UserKind
 
 __all__ = [
     "CONTACT_CHILDREN",
+    "TAG_NAME_MAX_LENGTH",
+    "TAG_TABLES",
+    "AutotagRule",
     "Base",
     "Contact",
     "ContactAlias",
@@ -40,6 +55,8 @@ __all__ = [
     "ContactPosition",
     "ContactSnapshot",
     "ContactSource",
+    "ContactTag",
+    "ContactTagSuppression",
     "EmailKind",
     "EmailStatus",
     "Interaction",
@@ -47,8 +64,12 @@ __all__ = [
     "JsonValue",
     "LinkKind",
     "PhoneKind",
+    "RuleField",
     "SettingKV",
     "SyncedValue",
+    "Tag",
+    "TagKind",
+    "TagSource",
     "TimestampMixin",
     "UTCDateTime",
     "User",
@@ -58,4 +79,5 @@ __all__ = [
     "normalize_email",
     "normalize_public_id",
     "string_enum",
+    "tag_name_key",
 ]

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import enum
 from datetime import date, datetime
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from sqlalchemy import (
     JSON,
@@ -47,6 +47,9 @@ from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship, validates
 
 from netkeeper.models.base import Base, TimestampMixin, UserOwned, UTCDateTime, string_enum, utcnow
+
+if TYPE_CHECKING:
+    from netkeeper.models.tags import ContactTag, Tag
 
 LINKEDIN_PROFILE_URL = "https://www.linkedin.com/in/{public_id}/"
 
@@ -290,6 +293,20 @@ class Contact(UserOwned, TimestampMixin, Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by=lambda: (Interaction.at.desc(), Interaction.id.desc()),
+    )
+    # Tags (spec 8.3). ``tag_assignments`` are the rows with their provenance;
+    # ``tags`` is the read-only view through them. Owned to owned, as the scope
+    # guard requires. The targets are named as strings because ``models.tags``
+    # imports this module.
+    tag_assignments: Mapped[list[ContactTag]] = relationship(
+        "ContactTag",
+        back_populates="contact",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ContactTag.id",
+    )
+    tags: Mapped[list[Tag]] = relationship(
+        "Tag", secondary="contact_tags", viewonly=True, order_by="Tag.name_key"
     )
 
     @validates("li_public_id")

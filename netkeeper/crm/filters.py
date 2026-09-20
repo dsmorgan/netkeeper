@@ -21,11 +21,13 @@ says what it is:
   ``has_li_url``, ``has_position``, ``email_contains``.
 - Relative time: ``last_contacted`` (``within_days``, ``older_than_days``, or
   ``never``), ``connected_within_days``, ``changed_jobs_within_days``.
-- Placeholders for tables that do not exist yet: ``tag_any``, ``tag_all``,
-  ``tag_none`` (P1-07), ``list_member`` (P1-08), ``enrolled_in`` and
-  ``replied_in`` (P3-04). They parse, so the builder's schema is complete, and
-  compiling one raises :class:`UnsupportedPredicate` naming the item that
-  delivers it.
+- Tags (spec 8.3, 10.3): ``tag_any``, ``tag_all``, ``tag_none`` over tag
+  ``names``, matched without regard to case; a name the user has no tag for
+  matches no contact.
+- Placeholders for tables that do not exist yet: ``list_member`` (P1-08),
+  ``enrolled_in`` and ``replied_in`` (P3-04). They parse, so the builder's
+  schema is complete, and compiling one raises :class:`UnsupportedPredicate`
+  naming the item that delivers it.
 
 Semantics
 ---------
@@ -43,9 +45,9 @@ Semantics
   ``within_days`` includes the cutoff instant; ``older_than_days`` excludes it.
 - Merged-away contacts (``merged_into_id`` set) never appear. Archived contacts
   appear only with ``include_archived``.
-- Every subquery on a child table also constrains ``user_id``, and the compiled
-  statements are built on :func:`netkeeper.scoping.scoped`, so they pass the
-  scope guard.
+- Every subquery on a child table (and on ``contact_tags`` and ``tags``) also
+  constrains ``user_id``, and the compiled statements are built on
+  :func:`netkeeper.scoping.scoped`, so they pass the scope guard.
 
 Errors
 ------
@@ -91,8 +93,11 @@ from netkeeper.models import (
     ContactPosition,
     ContactSnapshot,
     ContactSource,
+    ContactTag,
     EmailStatus,
+    Tag,
     User,
+    tag_name_key,
 )
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import scoped, scoped_count, scoped_update
@@ -531,16 +536,22 @@ class ChangedJobsWithinDays(_Node):
 
 
 class TagAny(_Node):
+    """Carries at least one of the tags named (case-insensitive), whatever its source."""
+
     op: Literal["tag_any"]
     names: list[StrictStr] = Field(min_length=1)
 
 
 class TagAll(_Node):
+    """Carries every tag named (case-insensitive)."""
+
     op: Literal["tag_all"]
     names: list[StrictStr] = Field(min_length=1)
 
 
 class TagNone(_Node):
+    """Carries none of the tags named (case-insensitive)."""
+
     op: Literal["tag_none"]
     names: list[StrictStr] = Field(min_length=1)
 
@@ -592,9 +603,6 @@ type FilterNode = Annotated[
 ]
 
 PLACEHOLDERS: Final[dict[str, str]] = {
-    "tag_any": "P1-07",
-    "tag_all": "P1-07",
-    "tag_none": "P1-07",
     "list_member": "P1-08",
     "enrolled_in": "P3-04",
     "replied_in": "P3-04",
@@ -924,7 +932,15 @@ class _Compiler:
                     .where(ContactSnapshot.observed_at >= self._ago(node.days))
                     .exists()
                 )
-            case TagAny() | TagAll() | TagNone() | ListMember() | EnrolledIn() | RepliedIn():
+            case TagAny():
+                return self._tagged(node.names).exists()
+            case TagAll():
+                # One EXISTS per distinct name: a contact must carry each of them.
+                keys = sorted({tag_name_key(name) for name in node.names})
+                return and_(*(self._tagged([key]).exists() for key in keys))
+            case TagNone():
+                return not_(self._tagged(node.names).exists())
+            case ListMember() | EnrolledIn() | RepliedIn():
                 raise UnsupportedPredicate(node.op, path, PLACEHOLDERS[node.op])
             case _ as unreachable:
                 assert_never(unreachable)
@@ -950,6 +966,26 @@ class _Compiler:
         return (
             select(model.id)
             .where(model.contact_id == Contact.id, model.user_id == self.user.id)
+            .correlate(Contact)
+        )
+
+    def _tagged(self, names: Sequence[str]) -> Select[tuple[int]]:
+        """``contact_tags`` rows of this contact whose tag is named in ``names``.
+
+        Names match ``tags.name_key`` (the lowercased name), so the comparison is
+        case-insensitive. Both tables carry the ``user_id`` term, as every child
+        subquery does.
+        """
+        keys = {tag_name_key(name) for name in names}
+        return (
+            select(ContactTag.id)
+            .join(Tag, Tag.id == ContactTag.tag_id)
+            .where(
+                ContactTag.contact_id == Contact.id,
+                ContactTag.user_id == self.user.id,
+                Tag.user_id == self.user.id,
+                Tag.name_key.in_(keys),
+            )
             .correlate(Contact)
         )
 

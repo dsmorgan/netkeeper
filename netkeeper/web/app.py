@@ -1,11 +1,11 @@
 """The FastAPI application factory (spec sections 5 and 14).
 
 :func:`create_app` builds the app. Its lifespan builds the engine (or takes the
-one passed in), migrates the database to head, makes sure the local user exists,
-installs the scope guard on the session factory, and starts the event bus and
-the task runner, all kept on ``app.state``. API modules under
-:mod:`netkeeper.web.api` are discovered, so adding an endpoint never edits this
-file.
+one passed in), migrates the database to head, makes sure the local user exists
+with the default auto-tag rules seeded, installs the scope guard on the session
+factory, and starts the event bus and the task runner, all kept on
+``app.state``. API modules under :mod:`netkeeper.web.api` are discovered, so
+adding an endpoint never edits this file.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from sqlalchemy import Engine
 
 from netkeeper import __version__, migrations
 from netkeeper.config import Settings, load_settings
+from netkeeper.crm.tags import ensure_default_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.logging_setup import setup_logging
 from netkeeper.scoping import install_scope_guard
@@ -93,6 +94,7 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     install_scope_guard(factory)
     with session_scope(factory, write=True) as session:  # reads, then may insert the user
         user = ensure_local_user(session, settings=settings)
+        ensure_default_rules(session, user)  # once per user; a deleted default stays deleted
         log.info(
             "database at revision %s, local user %d", migrations.current_revision(engine), user.id
         )

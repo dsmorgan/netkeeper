@@ -4,6 +4,134 @@
  */
 
 export interface paths {
+    "/api/v1/autotag-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Autotag Rules
+         * @description Every rule in position order.
+         */
+        get: operations["list_autotag_rules"];
+        put?: never;
+        /**
+         * Create Autotag Rule
+         * @description Add a rule at the end of the order. The pattern is validated, not run.
+         */
+        post: operations["create_autotag_rule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/autotag-rules/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Autotag Rule
+         * @description How many live contacts a pattern matches in a field, and the first ten. Writes nothing.
+         */
+        post: operations["preview_autotag_rule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/autotag-rules/reorder": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reorder Autotag Rules
+         * @description Put the given rules first, in that order; the rest keep their order after them.
+         */
+        post: operations["reorder_autotag_rules"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/autotag-rules/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run Autotag Rules
+         * @description Apply every enabled rule to every live contact (seeding the defaults on first use).
+         */
+        post: operations["run_autotag_rules"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/autotag-rules/{rule_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Autotag Rule
+         * @description Delete a rule. Its assignments stay until the next run finds no rule for their tag.
+         */
+        delete: operations["delete_autotag_rule"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Autotag Rule
+         * @description Change a rule's tag, field, pattern, or enabled flag. Fields left out are left alone.
+         */
+        patch: operations["update_autotag_rule"];
+        trace?: never;
+    };
+    "/api/v1/autotag-rules/{rule_id}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run Autotag Rule
+         * @description Reconcile the tag this rule feeds, using every enabled rule for that tag.
+         */
+        post: operations["run_autotag_rule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/contacts/{contact_id}/interactions": {
         parameters: {
             query?: never;
@@ -43,6 +171,46 @@ export interface paths {
         put: operations["set_contact_notes"];
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/tags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Tag Contact
+         * @description Put a tag on a contact by hand. Answers the existing assignment when there is one.
+         */
+        post: operations["tag_contact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/tags/{tag_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Untag Contact
+         * @description Take a tag off a contact. Removing an automatic tag keeps rules from re-adding it.
+         */
+        delete: operations["untag_contact"];
         options?: never;
         head?: never;
         patch?: never;
@@ -143,6 +311,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Tags
+         * @description Every tag with the number of live contacts carrying it, by name.
+         */
+        get: operations["list_tags"];
+        put?: never;
+        /** Create Tag */
+        post: operations["create_tag"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tags/{tag_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Tag
+         * @description Delete a tag and, with it, its assignments, suppressions, and rules.
+         */
+        delete: operations["delete_tag"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Tag
+         * @description Rename or recolor. A field left out is left alone; ``color: null`` clears it.
+         */
+        patch: operations["update_tag"];
+        trace?: never;
+    };
     "/api/v1/tasks/ping": {
         parameters: {
             query?: never;
@@ -184,6 +397,85 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AutotagRuleCreate */
+        AutotagRuleCreate: {
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            field: components["schemas"]["RuleField"];
+            /** Pattern */
+            pattern: string;
+            /** Tag Id */
+            tag_id: number;
+        };
+        /** AutotagRuleOut */
+        AutotagRuleOut: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Enabled */
+            enabled: boolean;
+            field: components["schemas"]["RuleField"];
+            /** Id */
+            id: number;
+            /** Pattern */
+            pattern: string;
+            /** Position */
+            position: number;
+            /** Tag Id */
+            tag_id: number;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** AutotagRulePatch */
+        AutotagRulePatch: {
+            /** Enabled */
+            enabled?: boolean | null;
+            field?: components["schemas"]["RuleField"] | null;
+            /** Pattern */
+            pattern?: string | null;
+            /** Tag Id */
+            tag_id?: number | null;
+        };
+        /** AutotagRulePreviewIn */
+        AutotagRulePreviewIn: {
+            field: components["schemas"]["RuleField"];
+            /** Pattern */
+            pattern: string;
+        };
+        /** AutotagRulePreviewOut */
+        AutotagRulePreviewOut: {
+            /** Contact Ids */
+            contact_ids: number[];
+            /** Count */
+            count: number;
+        };
+        /**
+         * AutotagRuleReorder
+         * @description ``rule_ids`` go first, in this order; the rules left out keep their order after them.
+         */
+        AutotagRuleReorder: {
+            /** Rule Ids */
+            rule_ids: number[];
+        };
+        /** AutotagRuleRunOut */
+        AutotagRuleRunOut: {
+            /** Added */
+            added: number;
+            /** Contacts */
+            contacts: number;
+            /** Removed */
+            removed: number;
+            /** Updated */
+            updated: number;
+        };
         /**
          * ContactSource
          * @description Where a row came from. On ``contacts`` the first source; children carry their own.
@@ -195,6 +487,28 @@ export interface components {
          * @enum {string}
          */
         ContactSource: "sync" | "archive" | "csv" | "manual";
+        /** ContactTagCreate */
+        ContactTagCreate: {
+            /** Tag Id */
+            tag_id: number;
+        };
+        /** ContactTagOut */
+        ContactTagOut: {
+            /** Contact Id */
+            contact_id: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Id */
+            id: number;
+            /** Rule Id */
+            rule_id: number | null;
+            source: components["schemas"]["TagSource"];
+            /** Tag Id */
+            tag_id: number;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -307,6 +621,12 @@ export interface components {
             updated_at: string;
         };
         /**
+         * RuleField
+         * @description The contact field a rule's pattern is searched in (spec 8.3).
+         * @enum {string}
+         */
+        RuleField: "title" | "headline" | "company";
+        /**
          * SnapshotOut
          * @description The headline and job as they were at ``observed_at`` (spec 8.1).
          */
@@ -330,6 +650,59 @@ export interface components {
             observed_at: string;
             source: components["schemas"]["ContactSource"];
         };
+        /** TagCreate */
+        TagCreate: {
+            /** Color */
+            color?: string | null;
+            /** @default manual */
+            kind: components["schemas"]["TagKind"];
+            /** Name */
+            name: string;
+        };
+        /**
+         * TagKind
+         * @description How a tag came to exist: made by hand, by the default rule set, or by the LLM module.
+         * @enum {string}
+         */
+        TagKind: "manual" | "auto" | "llm";
+        /** TagOut */
+        TagOut: {
+            /** Color */
+            color: string | null;
+            /** Contact Count */
+            contact_count: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Id */
+            id: number;
+            kind: components["schemas"]["TagKind"];
+            /** Name */
+            name: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * TagPatch
+         * @description Fields left out are left alone; ``color: null`` clears the color.
+         */
+        TagPatch: {
+            /** Color */
+            color?: string | null;
+            /** Name */
+            name?: string | null;
+        };
+        /**
+         * TagSource
+         * @description Who assigned a tag to a contact. Rules never touch a ``manual`` assignment.
+         * @enum {string}
+         */
+        TagSource: "manual" | "rule" | "llm";
         /**
          * TaskAccepted
          * @description The ``202`` body of every route that enqueues work and returns.
@@ -440,6 +813,267 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_autotag_rules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutotagRuleOut"][];
+                };
+            };
+        };
+    };
+    create_autotag_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AutotagRuleCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutotagRuleOut"];
+                };
+            };
+            /** @description No such tag, rule, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A name, color, pattern, or reorder request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    preview_autotag_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AutotagRulePreviewIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutotagRulePreviewOut"];
+                };
+            };
+            /** @description A name, color, pattern, or reorder request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    reorder_autotag_rules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AutotagRuleReorder"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutotagRuleOut"][];
+                };
+            };
+            /** @description No such tag, rule, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A name, color, pattern, or reorder request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    run_autotag_rules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutotagRuleRunOut"];
+                };
+            };
+        };
+    };
+    delete_autotag_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                rule_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such tag, rule, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_autotag_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                rule_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AutotagRulePatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutotagRuleOut"];
+                };
+            };
+            /** @description No such tag, rule, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A name, color, pattern, or reorder request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    run_autotag_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                rule_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutotagRuleRunOut"];
+                };
+            };
+            /** @description No such tag, rule, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_interactions: {
         parameters: {
             query?: {
@@ -550,6 +1184,85 @@ export interface operations {
                 };
             };
             /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    tag_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactTagCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactTagOut"];
+                };
+            };
+            /** @description No such tag, rule, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    untag_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+                tag_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such tag, rule, or contact for this user */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -745,6 +1458,147 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["UserOut"];
                 };
+            };
+        };
+    };
+    list_tags: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TagOut"][];
+                };
+            };
+        };
+    };
+    create_tag: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TagCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TagOut"];
+                };
+            };
+            /** @description A tag by that name exists (names are case-insensitive) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A name, color, pattern, or reorder request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_tag: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tag_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such tag, rule, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_tag: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tag_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TagPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TagOut"];
+                };
+            };
+            /** @description No such tag, rule, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A tag by that name exists (names are case-insensitive) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A name, color, pattern, or reorder request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

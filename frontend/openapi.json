@@ -1,6 +1,221 @@
 {
   "components": {
     "schemas": {
+      "AutotagRuleCreate": {
+        "properties": {
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "field": {
+            "$ref": "#/components/schemas/RuleField"
+          },
+          "pattern": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Pattern",
+            "type": "string"
+          },
+          "tag_id": {
+            "title": "Tag Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tag_id",
+          "field",
+          "pattern"
+        ],
+        "title": "AutotagRuleCreate",
+        "type": "object"
+      },
+      "AutotagRuleOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "field": {
+            "$ref": "#/components/schemas/RuleField"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "pattern": {
+            "title": "Pattern",
+            "type": "string"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "tag_id": {
+            "title": "Tag Id",
+            "type": "integer"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tag_id",
+          "field",
+          "pattern",
+          "enabled",
+          "position",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AutotagRuleOut",
+        "type": "object"
+      },
+      "AutotagRulePatch": {
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "field": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuleField"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pattern": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pattern"
+          },
+          "tag_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Id"
+          }
+        },
+        "title": "AutotagRulePatch",
+        "type": "object"
+      },
+      "AutotagRulePreviewIn": {
+        "properties": {
+          "field": {
+            "$ref": "#/components/schemas/RuleField"
+          },
+          "pattern": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Pattern",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "pattern"
+        ],
+        "title": "AutotagRulePreviewIn",
+        "type": "object"
+      },
+      "AutotagRulePreviewOut": {
+        "properties": {
+          "contact_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Contact Ids",
+            "type": "array"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count",
+          "contact_ids"
+        ],
+        "title": "AutotagRulePreviewOut",
+        "type": "object"
+      },
+      "AutotagRuleReorder": {
+        "description": "``rule_ids`` go first, in this order; the rules left out keep their order after them.",
+        "properties": {
+          "rule_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "minItems": 1,
+            "title": "Rule Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "rule_ids"
+        ],
+        "title": "AutotagRuleReorder",
+        "type": "object"
+      },
+      "AutotagRuleRunOut": {
+        "properties": {
+          "added": {
+            "title": "Added",
+            "type": "integer"
+          },
+          "contacts": {
+            "title": "Contacts",
+            "type": "integer"
+          },
+          "removed": {
+            "title": "Removed",
+            "type": "integer"
+          },
+          "updated": {
+            "title": "Updated",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "contacts",
+          "added",
+          "removed",
+          "updated"
+        ],
+        "title": "AutotagRuleRunOut",
+        "type": "object"
+      },
       "ContactSource": {
         "description": "Where a row came from. On ``contacts`` the first source; children carry their own.\n\nFor a LinkedIn field (spec 10.5) a recorded ``manual`` outranks everything\nuntil the person reverts it; among the automated sources ``sync`` beats\n``archive`` beats ``csv``. The fields a person owns (``preferred_name``,\n``notes``, ``met``, tags) take ``manual`` and nothing else.",
         "enum": [
@@ -11,6 +226,64 @@
         ],
         "title": "ContactSource",
         "type": "string"
+      },
+      "ContactTagCreate": {
+        "properties": {
+          "tag_id": {
+            "title": "Tag Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tag_id"
+        ],
+        "title": "ContactTagCreate",
+        "type": "object"
+      },
+      "ContactTagOut": {
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "rule_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule Id"
+          },
+          "source": {
+            "$ref": "#/components/schemas/TagSource"
+          },
+          "tag_id": {
+            "title": "Tag Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "contact_id",
+          "tag_id",
+          "source",
+          "rule_id",
+          "created_at"
+        ],
+        "title": "ContactTagOut",
+        "type": "object"
       },
       "HTTPValidationError": {
         "properties": {
@@ -293,6 +566,16 @@
         "title": "NotesOut",
         "type": "object"
       },
+      "RuleField": {
+        "description": "The contact field a rule's pattern is searched in (spec 8.3).",
+        "enum": [
+          "title",
+          "headline",
+          "company"
+        ],
+        "title": "RuleField",
+        "type": "string"
+      },
       "SnapshotOut": {
         "description": "The headline and job as they were at ``observed_at`` (spec 8.1).",
         "properties": {
@@ -369,6 +652,140 @@
         ],
         "title": "SnapshotOut",
         "type": "object"
+      },
+      "TagCreate": {
+        "properties": {
+          "color": {
+            "anyOf": [
+              {
+                "pattern": "^#[0-9a-fA-F]{6}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TagKind",
+            "default": "manual"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "TagCreate",
+        "type": "object"
+      },
+      "TagKind": {
+        "description": "How a tag came to exist: made by hand, by the default rule set, or by the LLM module.",
+        "enum": [
+          "manual",
+          "auto",
+          "llm"
+        ],
+        "title": "TagKind",
+        "type": "string"
+      },
+      "TagOut": {
+        "properties": {
+          "color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color"
+          },
+          "contact_count": {
+            "title": "Contact Count",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TagKind"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "color",
+          "kind",
+          "contact_count",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "TagOut",
+        "type": "object"
+      },
+      "TagPatch": {
+        "description": "Fields left out are left alone; ``color: null`` clears the color.",
+        "properties": {
+          "color": {
+            "anyOf": [
+              {
+                "pattern": "^#[0-9a-fA-F]{6}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "TagPatch",
+        "type": "object"
+      },
+      "TagSource": {
+        "description": "Who assigned a tag to a contact. Rules never touch a ``manual`` assignment.",
+        "enum": [
+          "manual",
+          "rule",
+          "llm"
+        ],
+        "title": "TagSource",
+        "type": "string"
       },
       "TaskAccepted": {
         "description": "The ``202`` body of every route that enqueues work and returns.",
@@ -639,6 +1056,299 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/autotag-rules": {
+      "get": {
+        "description": "Every rule in position order.",
+        "operationId": "list_autotag_rules",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AutotagRuleOut"
+                  },
+                  "title": "Response List Autotag Rules",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Autotag Rules",
+        "tags": [
+          "autotag-rules"
+        ]
+      },
+      "post": {
+        "description": "Add a rule at the end of the order. The pattern is validated, not run.",
+        "operationId": "create_autotag_rule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutotagRuleCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutotagRuleOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such tag, rule, or contact for this user"
+          },
+          "422": {
+            "description": "A name, color, pattern, or reorder request that cannot be stored"
+          }
+        },
+        "summary": "Create Autotag Rule",
+        "tags": [
+          "autotag-rules"
+        ]
+      }
+    },
+    "/api/v1/autotag-rules/preview": {
+      "post": {
+        "description": "How many live contacts a pattern matches in a field, and the first ten. Writes nothing.",
+        "operationId": "preview_autotag_rule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutotagRulePreviewIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutotagRulePreviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "A name, color, pattern, or reorder request that cannot be stored"
+          }
+        },
+        "summary": "Preview Autotag Rule",
+        "tags": [
+          "autotag-rules"
+        ]
+      }
+    },
+    "/api/v1/autotag-rules/reorder": {
+      "post": {
+        "description": "Put the given rules first, in that order; the rest keep their order after them.",
+        "operationId": "reorder_autotag_rules",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutotagRuleReorder"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AutotagRuleOut"
+                  },
+                  "title": "Response Reorder Autotag Rules",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such tag, rule, or contact for this user"
+          },
+          "422": {
+            "description": "A name, color, pattern, or reorder request that cannot be stored"
+          }
+        },
+        "summary": "Reorder Autotag Rules",
+        "tags": [
+          "autotag-rules"
+        ]
+      }
+    },
+    "/api/v1/autotag-rules/run": {
+      "post": {
+        "description": "Apply every enabled rule to every live contact (seeding the defaults on first use).",
+        "operationId": "run_autotag_rules",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutotagRuleRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Run Autotag Rules",
+        "tags": [
+          "autotag-rules"
+        ]
+      }
+    },
+    "/api/v1/autotag-rules/{rule_id}": {
+      "delete": {
+        "description": "Delete a rule. Its assignments stay until the next run finds no rule for their tag.",
+        "operationId": "delete_autotag_rule",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rule_id",
+            "required": true,
+            "schema": {
+              "title": "Rule Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such tag, rule, or contact for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Autotag Rule",
+        "tags": [
+          "autotag-rules"
+        ]
+      },
+      "patch": {
+        "description": "Change a rule's tag, field, pattern, or enabled flag. Fields left out are left alone.",
+        "operationId": "update_autotag_rule",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rule_id",
+            "required": true,
+            "schema": {
+              "title": "Rule Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutotagRulePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutotagRuleOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such tag, rule, or contact for this user"
+          },
+          "422": {
+            "description": "A name, color, pattern, or reorder request that cannot be stored"
+          }
+        },
+        "summary": "Update Autotag Rule",
+        "tags": [
+          "autotag-rules"
+        ]
+      }
+    },
+    "/api/v1/autotag-rules/{rule_id}/run": {
+      "post": {
+        "description": "Reconcile the tag this rule feeds, using every enabled rule for that tag.",
+        "operationId": "run_autotag_rule",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rule_id",
+            "required": true,
+            "schema": {
+              "title": "Rule Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutotagRuleRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such tag, rule, or contact for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Autotag Rule",
+        "tags": [
+          "autotag-rules"
+        ]
+      }
+    },
     "/api/v1/contacts/{contact_id}/interactions": {
       "get": {
         "description": "The contact's interactions, newest first.",
@@ -819,6 +1529,110 @@
         "summary": "Set Contact Notes",
         "tags": [
           "interactions"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/tags": {
+      "post": {
+        "description": "Put a tag on a contact by hand. Answers the existing assignment when there is one.",
+        "operationId": "tag_contact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContactTagCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactTagOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such tag, rule, or contact for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Tag Contact",
+        "tags": [
+          "tags"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/tags/{tag_id}": {
+      "delete": {
+        "description": "Take a tag off a contact. Removing an automatic tag keeps rules from re-adding it.",
+        "operationId": "untag_contact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tag_id",
+            "required": true,
+            "schema": {
+              "title": "Tag Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such tag, rule, or contact for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Untag Contact",
+        "tags": [
+          "tags"
         ]
       }
     },
@@ -1054,6 +1868,156 @@
         "summary": "Get Me",
         "tags": [
           "me"
+        ]
+      }
+    },
+    "/api/v1/tags": {
+      "get": {
+        "description": "Every tag with the number of live contacts carrying it, by name.",
+        "operationId": "list_tags",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TagOut"
+                  },
+                  "title": "Response List Tags",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Tags",
+        "tags": [
+          "tags"
+        ]
+      },
+      "post": {
+        "operationId": "create_tag",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "A tag by that name exists (names are case-insensitive)"
+          },
+          "422": {
+            "description": "A name, color, pattern, or reorder request that cannot be stored"
+          }
+        },
+        "summary": "Create Tag",
+        "tags": [
+          "tags"
+        ]
+      }
+    },
+    "/api/v1/tags/{tag_id}": {
+      "delete": {
+        "description": "Delete a tag and, with it, its assignments, suppressions, and rules.",
+        "operationId": "delete_tag",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tag_id",
+            "required": true,
+            "schema": {
+              "title": "Tag Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such tag, rule, or contact for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Tag",
+        "tags": [
+          "tags"
+        ]
+      },
+      "patch": {
+        "description": "Rename or recolor. A field left out is left alone; ``color: null`` clears it.",
+        "operationId": "update_tag",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tag_id",
+            "required": true,
+            "schema": {
+              "title": "Tag Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such tag, rule, or contact for this user"
+          },
+          "409": {
+            "description": "A tag by that name exists (names are case-insensitive)"
+          },
+          "422": {
+            "description": "A name, color, pattern, or reorder request that cannot be stored"
+          }
+        },
+        "summary": "Update Tag",
+        "tags": [
+          "tags"
         ]
       }
     },
