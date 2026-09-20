@@ -10,7 +10,25 @@ set -eu
 (set -o pipefail) 2>/dev/null && set -o pipefail
 
 LABEL="fun.tnkr.netkeeper"
-script_dir=$(cd "$(dirname "$0")" && pwd -P)
+
+# Follow symlinks to the script's real location so the repo root is right when
+# the script is invoked through a link. Relative link targets resolve against
+# the link's directory. Bounded so a symlink loop cannot hang us.
+resolve_script_path() {
+  rsp_path=$1
+  rsp_hops=0
+  while [ -L "$rsp_path" ] && [ "$rsp_hops" -lt 40 ]; do
+    rsp_target=$(readlink "$rsp_path")
+    case $rsp_target in
+      /*) rsp_path=$rsp_target ;;
+      *) rsp_path=$(dirname "$rsp_path")/$rsp_target ;;
+    esac
+    rsp_hops=$((rsp_hops + 1))
+  done
+  printf '%s\n' "$rsp_path"
+}
+
+script_dir=$(cd "$(dirname "$(resolve_script_path "$0")")" && pwd -P)
 repo_root=$(cd "$script_dir/.." && pwd -P)
 wrapper="$repo_root/scripts/serve-launchd.sh"
 netkeeper_bin="$repo_root/.venv/bin/netkeeper"
@@ -32,10 +50,12 @@ Options:
   --data-dir PATH  Data directory for the agent (sets NETKEEPER_DATA). Default: the
                    app's platform default, ~/Library/Application Support/netkeeper.
   --host HOST      Interface for \`serve\` (default: web.host from the config).
-  --port N         Port for \`serve\` (default: web.port from the config).
+  --port N         Port for \`serve\`, 1 to 65535 (default: web.port from the config).
   --uninstall      Stop the agent and remove its plist.
   --dry-run        Print the plist and the launchctl commands; change nothing.
   --help           This text.
+
+Options that take a value also accept --name=value.
 
 Logs:   <data_dir>/logs/serve.log and serve.err.log
 Status: launchctl print $service
@@ -49,6 +69,27 @@ die() {
   exit 2
 }
 
+set_data_dir() {
+  [ -n "$1" ] || die "--data-dir needs a path"
+  data_dir=$1
+}
+
+set_host() {
+  [ -n "$1" ] || die "--host needs a value"
+  host=$1
+}
+
+set_port() {
+  case $1 in
+    '' | *[!0-9]*) die "--port needs a number from 1 to 65535, got '$1'" ;;
+  esac
+  # The length check keeps the numeric comparisons inside the shell's integer range.
+  if [ ${#1} -gt 5 ] || [ "$1" -lt 1 ] || [ "$1" -gt 65535 ]; then
+    die "--port needs a number from 1 to 65535, got '$1'"
+  fi
+  port=$1
+}
+
 data_dir=""
 host=""
 port=""
@@ -58,22 +99,22 @@ while [ $# -gt 0 ]; do
   case $1 in
     --data-dir)
       [ $# -ge 2 ] || die "--data-dir needs a path"
-      data_dir=$2
+      set_data_dir "$2"
       shift 2
       ;;
+    --data-dir=*) set_data_dir "${1#*=}"; shift ;;
     --host)
       [ $# -ge 2 ] || die "--host needs a value"
-      host=$2
+      set_host "$2"
       shift 2
       ;;
+    --host=*) set_host "${1#*=}"; shift ;;
     --port)
       [ $# -ge 2 ] || die "--port needs a number"
-      case $2 in
-        *[!0-9]* | '') die "--port needs a number, got '$2'" ;;
-      esac
-      port=$2
+      set_port "$2"
       shift 2
       ;;
+    --port=*) set_port "${1#*=}"; shift ;;
     --dry-run) dry_run=1; shift ;;
     --uninstall) uninstall=1; shift ;;
     -h | --help) usage; exit 0 ;;
