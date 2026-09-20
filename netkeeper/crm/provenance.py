@@ -61,10 +61,12 @@ def may_overwrite(field: str, incoming_source: str, contact: Contact) -> bool:
     """True when a value from ``incoming_source`` may replace ``contact``'s ``field``.
 
     A person-owned field takes ``manual`` and nothing else. A provenance field
-    with no value yet (``None`` or an empty string), or with no recorded source,
-    is free to any source. Otherwise the incoming source must rank at least as
-    high as the one that last wrote the field, and ``manual`` ranks highest: a
-    field a person edited is closed to the sync and to every import until
+    with no recorded source is free to any source, and so is one whose value is
+    empty (``None`` or an empty string), unless that emptiness is a person's
+    doing: a field cleared by hand carries ``manual`` and sticks like any other
+    edit. Otherwise the incoming source must rank at least as high as the one
+    that last wrote the field, and ``manual`` ranks highest: a field a person
+    edited is closed to the sync and to every import until
     :func:`revert_to_synced`, and open only to another edit. ``ValueError`` for
     a field that carries no provenance or a source that is not a
     :class:`ContactSource`.
@@ -74,13 +76,13 @@ def may_overwrite(field: str, incoming_source: str, contact: Contact) -> bool:
         return source is ContactSource.MANUAL
     if field not in PROVENANCE_FIELDS:
         raise ValueError(f"{field!r} carries no provenance; see PROVENANCE_FIELDS")
-    current = getattr(contact, field)
-    if current is None or current == "":
-        return True
     # Unset on a contact that was never flushed: the column default fills it at insert.
     recorded = (contact.field_sources or {}).get(field)
     if recorded is None:
         return True
+    current = getattr(contact, field)
+    if (current is None or current == "") and ContactSource(recorded) is not ContactSource.MANUAL:
+        return True  # nothing to protect, unless a person emptied it on purpose
     return SOURCE_RANK[source.value] >= SOURCE_RANK[ContactSource(recorded).value]
 
 
@@ -91,9 +93,10 @@ def set_manual_field(contact: Contact, field: str, value: str | date | ContactMe
     never :func:`netkeeper.crm.identity.apply`, which is for imports and the sync.
     A provenance field takes the value and records ``manual`` in
     ``field_sources``, the highest rank for a LinkedIn field (spec 10.5, CP1
-    #28): from then on no sync, archive, or CSV import overwrites it. Those still
-    note what they saw in ``synced_values``, so :func:`revert_to_synced` can put
-    LinkedIn's value back whenever the person asks. A person-owned field
+    #28): from then on no sync, archive, or CSV import overwrites it, and that
+    holds for a field cleared to ``None`` or ``""`` just the same. Those sources
+    still note what they saw in ``synced_values``, so :func:`revert_to_synced`
+    can put LinkedIn's value back whenever the person asks. A person-owned field
     (``preferred_name``, ``notes``, ``met``) is just written; no import touches
     those. ``ValueError`` for any other column. A slug written here records no
     alias; that is :func:`~netkeeper.crm.identity.apply`'s job.

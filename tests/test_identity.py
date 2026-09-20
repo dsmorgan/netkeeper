@@ -672,6 +672,61 @@ def test_a_manual_edit_after_a_sync_wins_and_keeps_the_synced_value(
     assert overridden_fields(contact) == ["first_name", "headline"]
 
 
+def test_a_manual_clear_sticks_like_any_other_edit(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    alice, _ = users
+    contact = apply(
+        writer,
+        alice,
+        incoming(li_urn="urn:li:fsd_profile/A", headline="from sync", location="Berlin"),
+        New(),
+    )
+    set_manual_field(contact, "headline", "")
+    set_manual_field(contact, "location", None)
+    day = timedelta(days=1)
+    for n, source in enumerate((ContactSource.SYNC, ContactSource.ARCHIVE, ContactSource.CSV), 1):
+        at = NOW + n * day
+        apply(
+            writer,
+            alice,
+            incoming(source, headline=f"from {source.value}", location="Paris", observed_at=at),
+            Matched(contact.id, by="urn"),
+        )
+        assert (contact.headline, contact.location) == ("", None), source
+        assert (contact.field_sources["headline"], contact.field_sources["location"]) == (
+            "manual",
+            "manual",
+        ), source
+        assert contact.synced_values["headline"] == synced(f"from {source.value}", source.value, at)
+    assert overridden_fields(contact) == ["headline", "location"]
+    revert_to_synced(contact, "headline")
+    assert (contact.headline, contact.field_sources["headline"]) == ("from csv", "csv")
+
+
+def test_apply_decides_each_field_once_from_the_state_before_it_writes(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """An empty field with sync provenance is free to a csv row, and the row's source is
+    recorded: the decision is not made again after the write, when csv would rank below sync."""
+    alice, _ = users
+    contact = factories.make_contact(
+        writer,
+        alice,
+        headline=None,
+        location="",
+        field_sources={"headline": "sync", "location": "archive"},
+    )
+    apply(
+        writer,
+        alice,
+        incoming(ContactSource.CSV, headline="from csv", location="Paris"),
+        Matched(contact.id, by="urn"),
+    )
+    assert (contact.headline, contact.location) == ("from csv", "Paris")
+    assert (contact.field_sources["headline"], contact.field_sources["location"]) == ("csv", "csv")
+
+
 def test_an_older_observation_never_replaces_a_newer_synced_value(
     writer: Session, users: tuple[User, User]
 ) -> None:
