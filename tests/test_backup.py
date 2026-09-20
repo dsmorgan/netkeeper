@@ -6,6 +6,7 @@ import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -396,8 +397,8 @@ def test_a_failed_vacuum_leaves_no_partial_file(
         def close(self) -> None:
             pass
 
-    def fake_connect(*args: object, **kwargs: object) -> object:
-        return Exploding() if kwargs.get("uri") else real_connect(*args, **kwargs)  # type: ignore[arg-type]
+    def fake_connect(*args: Any, **kwargs: Any) -> Any:
+        return Exploding() if kwargs.get("uri") else real_connect(*args, **kwargs)
 
     monkeypatch.setattr(sqlite3, "connect", fake_connect)
     with pytest.raises(BackupError, match=r"VACUUM INTO .* failed: disk I/O error"):
