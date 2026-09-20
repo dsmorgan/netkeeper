@@ -188,9 +188,10 @@ export interface components {
          * ContactSource
          * @description Where a row came from. On ``contacts`` the first source; children carry their own.
          *
-         *     The order is the precedence for LinkedIn fields (spec 10.5): ``sync`` beats
-         *     ``archive`` beats ``csv`` beats ``manual``, except for the fields a person
-         *     owns (``preferred_name``, ``notes``, ``met``, tags), where ``manual`` wins.
+         *     For a LinkedIn field (spec 10.5) a recorded ``manual`` outranks everything
+         *     until the person reverts it; among the automated sources ``sync`` beats
+         *     ``archive`` beats ``csv``. The fields a person owns (``preferred_name``,
+         *     ``notes``, ``met``, tags) take ``manual`` and nothing else.
          * @enum {string}
          */
         ContactSource: "sync" | "archive" | "csv" | "manual";

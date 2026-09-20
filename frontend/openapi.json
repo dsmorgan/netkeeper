@@ -2,7 +2,7 @@
   "components": {
     "schemas": {
       "ContactSource": {
-        "description": "Where a row came from. On ``contacts`` the first source; children carry their own.\n\nThe order is the precedence for LinkedIn fields (spec 10.5): ``sync`` beats\n``archive`` beats ``csv`` beats ``manual``, except for the fields a person\nowns (``preferred_name``, ``notes``, ``met``, tags), where ``manual`` wins.",
+        "description": "Where a row came from. On ``contacts`` the first source; children carry their own.\n\nFor a LinkedIn field (spec 10.5) a recorded ``manual`` outranks everything\nuntil the person reverts it; among the automated sources ``sync`` beats\n``archive`` beats ``csv``. The fields a person owns (``preferred_name``,\n``notes``, ``met``, tags) take ``manual`` and nothing else.",
         "enum": [
           "sync",
           "archive",
