@@ -311,6 +311,11 @@ Goal: CP1 decision. A manual edit of a LinkedIn field outranks every later sourc
 Depends on: P1-02.
 Done when: a sync after a manual edit leaves the edit in place and updates `synced_values`; revert restores the synced value and clears the override; the provenance matrix tests cover manual-then-sync, sync-then-manual, revert, and a field never synced (revert refused).
 
+**P1-19 Merge carries tags and suppressions** · lane core · S
+Goal: `identity.merge()` re-points `contact_tags` and `contact_tag_suppressions` from the loser to the survivor, deduplicating by tag with `tag_contact`'s precedence (manual beats rule and llm; on a tie keep the survivor's row), so a merged-away contact's tags do not silently vanish.
+Depends on: P1-02, P1-07.
+Done when: merging two tagged contacts yields the union of their tags on the survivor with the right sources, suppressions carry over, and the loser has no assignments left.
+
 **CP1** · checkpoint · after P1-01, P1-02, P1-06 merge.
 **CP2** · checkpoint · closes phase 1.
 
