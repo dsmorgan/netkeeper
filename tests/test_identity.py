@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session, class_mapper, sessionmaker
 
 from netkeeper.crm.identity import (
     JOB_FIELDS,
-    PROVENANCE_ORDER,
     Candidate,
     CreateNew,
     IncomingContact,
@@ -31,7 +30,13 @@ from netkeeper.crm.identity import (
     resolve,
     resolve_survivor,
 )
-from netkeeper.crm.provenance import PROVENANCE_FIELDS
+from netkeeper.crm.provenance import (
+    PROVENANCE_FIELDS,
+    PROVENANCE_ORDER,
+    overridden_fields,
+    revert_to_synced,
+    set_manual_field,
+)
 from netkeeper.db import is_writer, session_scope
 from netkeeper.models import (
     CONTACT_CHILDREN,
@@ -54,6 +59,11 @@ from netkeeper.scoping import scoped, scoped_count
 NOW = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 LATER = NOW + timedelta(days=1)
 EARLIER = NOW - timedelta(days=1)
+
+
+def synced(value: str | None, source: str = "sync", at: datetime = NOW) -> dict[str, str | None]:
+    """A ``synced_values`` entry as the ledger stores it."""
+    return {"value": value, "source": source, "observed_at": at.isoformat()}
 
 
 @pytest.fixture
@@ -474,6 +484,14 @@ def test_apply_new_creates_a_contact_with_provenance_and_children(
         "current_company": "archive",
         "connected_on": "archive",
     }
+    assert contact.synced_values == {  # the archive counts as synced; a date is stored ISO
+        "li_public_id": synced("ann-lee", "archive"),
+        "li_url": synced("https://www.linkedin.com/in/ann-lee/", "archive"),
+        "first_name": synced("Ann", "archive"),
+        "last_name": synced("Lee", "archive"),
+        "current_company": synced("Acme", "archive"),
+        "connected_on": synced("2024-05-06", "archive"),
+    }
     assert [(e.email, e.kind, e.is_primary) for e in contact.emails] == [
         ("ann@a.test", EmailKind.WORK, True),
         ("b@a.test", EmailKind.OTHER, False),  # one primary: the first flagged wins
@@ -529,9 +547,18 @@ def test_apply_update_follows_the_provenance_matrix(
         "first_name": "sync",  # equal value, but sync now vouches for it
         "location": "sync",  # was empty: free to any source
     }
+    assert contact.synced_values == {  # every field the row carried, as the row said
+        "headline": synced("from sync"),
+        "location": synced("Berlin"),
+        "first_name": synced("First1"),
+    }
     assert len(contact.snapshots) == 1  # the headline changed from a real value
     by_csv = incoming(
-        ContactSource.CSV, headline="csv again", location="Paris", current_title="new csv title"
+        ContactSource.CSV,
+        headline="csv again",
+        location="Paris",
+        current_title="new csv title",
+        observed_at=LATER,
     )
     apply(writer, alice, by_csv, Matched(contact.id, by="urn"))
     assert (contact.headline, contact.location) == ("from sync", "Berlin")  # csv over sync: skipped
@@ -540,14 +567,30 @@ def test_apply_update_follows_the_provenance_matrix(
         contact.field_sources["headline"] == "sync"
         and contact.field_sources["current_title"] == "csv"
     )
+    # The ledger is chronological and takes what the column refused, too.
+    assert contact.synced_values == {
+        "headline": synced("csv again", "csv", LATER),
+        "location": synced("Paris", "csv", LATER),
+        "first_name": synced("First1"),
+        "current_title": synced("new csv title", "csv", LATER),
+    }
     assert len(contact.snapshots) == 2  # current_title changed
     by_manual = incoming(
         ContactSource.MANUAL, headline="typed", current_title="typed", connected_on=date(2020, 1, 1)
     )
     apply(writer, alice, by_manual, Matched(contact.id, by="urn"))
-    assert (contact.headline, contact.current_title) == ("from sync", "new csv title")  # skipped
-    assert contact.connected_on == date(2020, 1, 1)  # was empty: manual may fill it
+    # manual outranks every source (CP1): written, recorded, and never a ledger entry
+    assert (contact.headline, contact.current_title) == ("typed", "typed")
+    assert contact.connected_on == date(2020, 1, 1)
+    assert {name: contact.field_sources[name] for name in ("headline", "current_title")} == {
+        "headline": "manual",
+        "current_title": "manual",
+    }
     assert contact.field_sources["connected_on"] == "manual"
+    assert "connected_on" not in contact.synced_values
+    assert contact.synced_values["headline"] == synced("csv again", "csv", LATER)
+    assert overridden_fields(contact) == ["headline", "current_title"]
+    assert len(contact.snapshots) == 3  # a manual row through apply() snapshots like any other
     # The person-owned fields are never touched by an import, whatever its source.
     assert (contact.notes, contact.preferred_name, contact.met) == (
         "my notes",
@@ -555,6 +598,101 @@ def test_apply_update_follows_the_provenance_matrix(
         ContactMet.MET,
     )
     assert contact.source is ContactSource.CSV  # the first source stays
+
+
+def test_a_manual_edit_sticks_and_every_later_source_still_records_what_it_saw(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    alice, _ = users
+    contact = apply(
+        writer, alice, incoming(li_urn="urn:li:fsd_profile/A", headline="from sync"), New()
+    )
+    set_manual_field(contact, "headline", "typed")
+    day = timedelta(days=1)
+    apply(
+        writer,
+        alice,
+        incoming(headline="newer from sync", current_title="VP", observed_at=LATER),
+        Matched(contact.id, by="urn"),
+    )
+    assert (contact.headline, contact.field_sources["headline"]) == ("typed", "manual")
+    assert contact.synced_values["headline"] == synced("newer from sync", "sync", LATER)
+    assert contact.current_title == "VP"  # the other fields still flow
+    assert overridden_fields(contact) == ["headline"]
+    for source, at in ((ContactSource.ARCHIVE, LATER + day), (ContactSource.CSV, LATER + 2 * day)):
+        apply(
+            writer,
+            alice,
+            incoming(source, headline=f"from {source.value}", observed_at=at),
+            Matched(contact.id, by="urn"),
+        )
+        assert contact.headline == "typed"
+        assert contact.synced_values["headline"] == synced(f"from {source.value}", source.value, at)
+    writer.flush()
+    writer.expire_all()
+    assert (contact.headline, contact.field_sources["headline"]) == ("typed", "manual")
+    revert_to_synced(contact, "headline")
+    writer.flush()
+    assert (contact.headline, contact.field_sources["headline"]) == ("from csv", "csv")
+    assert overridden_fields(contact) == []
+    apply(
+        writer,
+        alice,
+        incoming(headline="back in sync", observed_at=LATER + 3 * day),
+        Matched(contact.id, by="urn"),
+    )
+    assert (contact.headline, contact.field_sources["headline"]) == ("back in sync", "sync")
+
+
+def test_a_manual_edit_after_a_sync_wins_and_keeps_the_synced_value(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    alice, _ = users
+    contact = apply(
+        writer,
+        alice,
+        incoming(li_urn="urn:li:fsd_profile/A", first_name="Ann", headline="from sync"),
+        New(),
+    )
+    set_manual_field(contact, "headline", "typed")
+    assert (contact.headline, contact.field_sources["headline"]) == ("typed", "manual")
+    assert contact.synced_values["headline"] == synced("from sync")  # retained for the revert
+    assert overridden_fields(contact) == ["headline"]
+    # A manual row through apply() (an "add contact" form) wins the same way and
+    # leaves the ledger alone.
+    apply(
+        writer,
+        alice,
+        incoming(ContactSource.MANUAL, headline="typed again", first_name="Annie"),
+        Matched(contact.id, by="urn"),
+    )
+    assert (contact.headline, contact.first_name) == ("typed again", "Annie")
+    assert contact.field_sources["first_name"] == "manual"
+    assert contact.synced_values["first_name"] == synced("Ann")
+    assert overridden_fields(contact) == ["first_name", "headline"]
+
+
+def test_an_older_observation_never_replaces_a_newer_synced_value(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    alice, _ = users
+    contact = apply(writer, alice, incoming(li_urn="urn:li:fsd_profile/A", headline="today"), New())
+    set_manual_field(contact, "headline", "typed")
+    apply(
+        writer,
+        alice,
+        incoming(ContactSource.ARCHIVE, headline="yesterday", observed_at=EARLIER),
+        Matched(contact.id, by="urn"),
+    )
+    assert contact.synced_values["headline"] == synced("today")
+    apply(
+        writer,
+        alice,
+        incoming(ContactSource.CSV, headline="tomorrow", observed_at=LATER),
+        Matched(contact.id, by="urn"),
+    )
+    assert contact.synced_values["headline"] == synced("tomorrow", "csv", LATER)  # newer wins
+    assert contact.headline == "typed"
 
 
 def test_a_slug_change_records_an_alias_and_renaming_back_removes_it(
@@ -1073,6 +1211,32 @@ def test_merge_fills_empty_fields_with_the_losers_source(
         "first_name": "archive",
     }
     assert survivor.preferred_name == "Ann"  # the default followed the filled first_name
+
+
+def test_merge_fills_the_survivors_missing_synced_values_from_the_loser(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    alice, _ = users
+    survivor = apply(
+        writer, alice, incoming(li_urn="urn:li:fsd_profile/S", headline="s-headline"), New()
+    )
+    loser = apply(
+        writer,
+        alice,
+        incoming(
+            ContactSource.CSV,
+            li_public_id="loser",
+            headline="l-headline",
+            location="Paris",
+            observed_at=LATER,
+        ),
+        New(),
+    )
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+    assert survivor.synced_values["headline"] == synced("s-headline")  # its own stays
+    assert survivor.synced_values["location"] == synced("Paris", "csv", LATER)
+    assert (survivor.location, survivor.field_sources["location"]) == ("Paris", "csv")
 
 
 def test_merge_takes_the_losers_identity_when_the_survivor_has_none(

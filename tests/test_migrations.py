@@ -12,6 +12,7 @@ the PostgreSQL params locally, start a throwaway server and point the variable a
 """
 
 import io
+import json
 import os
 import re
 import tokenize
@@ -239,9 +240,9 @@ def _insert_contact(
         text(
             "INSERT INTO contacts (id, user_id, li_urn, first_name, last_name, preferred_name,"
             " degree, met, do_not_contact, li_missing_count, enrich_priority, source,"
-            " field_sources, merged_into_id, created_at, updated_at)"
+            " field_sources, synced_values, merged_into_id, created_at, updated_at)"
             " VALUES (:id, :user_id, :li_urn, 'F', 'L', 'F', 1, :met, false, 0, 0, :source,"
-            " '{}', :merged_into_id, :t, :t)"
+            " '{}', '{}', :merged_into_id, :t, :t)"
         ),
         {
             "id": id,
@@ -377,6 +378,55 @@ def test_alias_slug_is_unique_per_user(migration_engine: Engine) -> None:
         connection.execute(insert, {"user_id": 2, "contact_id": 3, "t": STAMP})  # other user
     with pytest.raises(IntegrityError), migration_engine.begin() as connection:
         connection.execute(insert, {"user_id": 1, "contact_id": 2, "t": STAMP})
+
+
+# --- synced values (0003) ---------------------------------------------------
+
+
+def _json(value: Any) -> Any:
+    """A JSON column read through ``text()``: a string on SQLite, parsed already on psycopg."""
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def test_synced_values_fills_existing_contacts_and_downgrades_cleanly(
+    migration_engine: Engine,
+) -> None:
+    """0003 adds a NOT NULL column to a table that may hold rows; the database default fills it."""
+    migrations.upgrade(migration_engine, "0002")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        connection.execute(
+            text(
+                "INSERT INTO contacts (id, user_id, first_name, last_name, preferred_name, degree,"
+                " met, do_not_contact, li_missing_count, enrich_priority, source, field_sources,"
+                " created_at, updated_at)"
+                " VALUES (1, 1, 'F', 'L', 'F', 1, 'unknown', false, 0, 0, 'manual', '{}', :t, :t)"
+            ),
+            {"t": STAMP},
+        )
+    migrations.upgrade(migration_engine, "0003")
+    select = text("SELECT synced_values FROM contacts WHERE id = 1")
+    with migration_engine.begin() as connection:
+        assert _json(connection.execute(select).scalar_one()) == {}
+        _insert_contact(connection, id=2, user_id=1)  # a new row names the column
+        connection.execute(  # and one that leaves it out gets the default
+            text(
+                "INSERT INTO contacts (id, user_id, first_name, last_name, preferred_name, degree,"
+                " met, do_not_contact, li_missing_count, enrich_priority, source, field_sources,"
+                " created_at, updated_at)"
+                " VALUES (3, 1, 'F', 'L', 'F', 1, 'unknown', false, 0, 0, 'manual', '{}', :t, :t)"
+            ),
+            {"t": STAMP},
+        )
+        rows = connection.execute(text("SELECT synced_values FROM contacts ORDER BY id")).all()
+    assert [_json(row[0]) for row in rows] == [{}, {}, {}]
+    migrations.downgrade(migration_engine, "0002")
+    columns = {column["name"] for column in inspect(migration_engine).get_columns("contacts")}
+    assert "synced_values" not in columns and "field_sources" in columns
+    with migration_engine.connect() as connection:
+        assert _count(connection, "contacts") == 3  # the rows survive the round trip
+    migrations.upgrade(migration_engine)
+    assert _diff_against_models(migration_engine) == []
 
 
 # --- script directory -------------------------------------------------------
