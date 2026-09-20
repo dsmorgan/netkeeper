@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import factories
 import pytest
@@ -14,8 +14,9 @@ from netkeeper.crm.provenance import (
     PROVENANCE_FIELDS,
     SOURCE_RANK,
     may_overwrite,
+    set_manual_field,
 )
-from netkeeper.models import Contact, ContactSource
+from netkeeper.models import Contact, ContactMet, ContactSource
 from netkeeper.scoping import scoped
 
 
@@ -108,3 +109,41 @@ def test_last_contacted_at_starts_empty_and_round_trips_aware(session: Session) 
     session.expire_all()
     assert contact.last_contacted_at == datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
     assert contact.last_contacted_at.tzinfo is UTC
+
+
+# --- set_manual_field -------------------------------------------------------
+
+
+def test_set_manual_field_writes_and_stamps_manual(session: Session) -> None:
+    user = factories.make_user(session)
+    contact = factories.make_contact(
+        session, user, field_sources={"headline": "sync"}, notes=None, preferred_name=""
+    )
+    set_manual_field(contact, "headline", "typed")
+    set_manual_field(contact, "connected_on", date(2020, 1, 2))
+    assert (contact.headline, contact.connected_on) == ("typed", date(2020, 1, 2))
+    assert contact.field_sources == {"headline": "manual", "connected_on": "manual"}
+    # By design (spec 10.5) any import may overwrite a manual LinkedIn-field edit.
+    assert may_overwrite("headline", "csv", contact)
+    set_manual_field(contact, "notes", "hello")
+    set_manual_field(contact, "met", ContactMet.MET)
+    set_manual_field(contact, "preferred_name", "Bob")
+    assert (contact.notes, contact.met, contact.preferred_name) == ("hello", ContactMet.MET, "Bob")
+    assert contact.field_sources == {"headline": "manual", "connected_on": "manual"}
+    assert not may_overwrite("notes", "sync", contact)
+    session.flush()
+    session.expire_all()
+    assert (contact.headline, contact.field_sources["headline"]) == ("typed", "manual")
+    assert (contact.notes, contact.met, contact.preferred_name) == ("hello", ContactMet.MET, "Bob")
+    set_manual_field(contact, "notes", None)
+    assert contact.notes is None
+
+
+def test_set_manual_field_before_the_first_flush_and_for_other_columns() -> None:
+    fresh = Contact()  # field_sources is unset until the column default runs at insert
+    set_manual_field(fresh, "headline", "x")
+    set_manual_field(fresh, "location", "Berlin")
+    assert fresh.field_sources == {"headline": "manual", "location": "manual"}
+    for field in ("degree", "source", "field_sources", "archived_at", "do_not_contact", "bogus"):
+        with pytest.raises(ValueError, match="neither a provenance nor a person-owned"):
+            set_manual_field(fresh, field, "x")

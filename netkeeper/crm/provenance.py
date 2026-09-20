@@ -7,15 +7,17 @@ beats ``csv`` beats ``manual``. The fields a person owns (``preferred_name``,
 ``notes``, ``met``, and tags) are never in ``field_sources``: ``manual`` always
 wins there, and no import touches them.
 
-This module is the rule alone. Applying it to an incoming row, and recording
-the source that wins, is identity resolution and import (P1-02 onward).
+This module is the rule, and :func:`set_manual_field` for a person's own edits.
+Applying the rule to an incoming row, and recording the source that wins, is
+identity resolution and import (:mod:`netkeeper.crm.identity`).
 """
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Final
 
-from netkeeper.models import Contact, ContactSource
+from netkeeper.models import Contact, ContactMet, ContactSource
 
 # Higher wins. Equal rank may overwrite: a newer sync updates an older one.
 SOURCE_RANK: Final[dict[str, int]] = {"sync": 3, "archive": 2, "csv": 1, "manual": 0}
@@ -62,3 +64,30 @@ def may_overwrite(field: str, incoming_source: str, contact: Contact) -> bool:
     if recorded is None:
         return True
     return SOURCE_RANK[source.value] >= SOURCE_RANK[ContactSource(recorded).value]
+
+
+def set_manual_field(contact: Contact, field: str, value: str | date | ContactMet | None) -> None:
+    """Write ``field`` on ``contact`` as a person's own edit, unconditionally.
+
+    The contacts PATCH endpoint (P1-05) uses this for every editable column and
+    never :func:`netkeeper.crm.identity.apply`, which is for imports and the sync
+    and would refuse a lower-ranked source. A provenance field takes the value
+    and records ``manual`` in ``field_sources``, and that is the lowest rank for
+    a LinkedIn field (spec 10.5): a later sync, archive, or CSV import may
+    overwrite the edit again, by design, because LinkedIn is the authority on
+    what LinkedIn shows. A person-owned field (``preferred_name``, ``notes``,
+    ``met``) is just written; no import touches those. ``ValueError`` for any
+    other column. A slug written here records no alias; that is
+    :func:`~netkeeper.crm.identity.apply`'s job.
+    """
+    if field in PERSON_OWNED_FIELDS:
+        setattr(contact, field, value)
+        return
+    if field not in PROVENANCE_FIELDS:
+        raise ValueError(f"{field!r} is neither a provenance nor a person-owned field")
+    setattr(contact, field, value)
+    sources = contact.field_sources
+    if not sources:  # unset before the first flush (the column default fills it), or empty
+        contact.field_sources = {field: ContactSource.MANUAL.value}
+    else:
+        sources[field] = ContactSource.MANUAL.value
