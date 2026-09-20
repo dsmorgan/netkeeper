@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose something new or a change to how something works.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or impossible today? Which step of the workflow does it affect?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should netkeeper do instead?
+    validations:
+      required: true
+  - type: input
+    id: spec
+    attributes:
+      label: Spec section or ADR
+      description: Which part of docs/architecture.md or docs/adr/ does this touch? If it reverses an ADR, say so.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I checked the non-goals in the spec and this is not one of them, or I am arguing it should stop being one.
+          required: true

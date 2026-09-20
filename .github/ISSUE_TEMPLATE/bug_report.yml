@@ -1,0 +1,45 @@
+name: Bug report
+description: Something does not work as the spec or docs say it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste cookies, OAuth tokens, or other people's names, emails, or phone numbers. Redact run notes before attaching them.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - LinkedIn extractor (sync, enrichment, browser attach)
+        - CRM (contacts, triage, tags, lists, import, export)
+        - Campaigns (templates, sequences, Gmail, LinkedIn messaging, replies)
+        - LLM module
+        - Web UI
+        - CLI
+        - Install / container / launchd
+        - Docs
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: netkeeper version or commit
+      placeholder: "0.1.0 or git SHA"
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "macOS 15.1, Chrome 150 / Ubuntu 24.04 container"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or run notes
+      render: text
