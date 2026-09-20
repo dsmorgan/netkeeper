@@ -335,8 +335,9 @@ SQLite, one file. All datetimes stored as naive UTC and returned timezone-aware 
 | `last_enriched_at`, `enrich_priority` | Enrichment scheduling |
 | `notes` | Markdown |
 | `archived_at` | |
-| `source` | `sync`, `archive`, `csv`, `manual` (first source; per-field provenance lives on the child tables) |
+| `source` | `sync`, `archive`, `csv`, `manual` (first source; per-field provenance lives in `field_sources`, and each child row carries its own `source`) |
 | `synced_values` | JSON, per LinkedIn field: the last value an automated source (`sync`, `archive`, `csv`) reported, with its source and `observed_at`, kept whether or not it reached the column. What a manual override reverts to (10.5) |
+| `field_sources` | JSON, per LinkedIn field: the source that last wrote it, which decides who may overwrite it (10.5). `manual` here is an override until reverted |
 | `created_at`, `updated_at` | |
 
 Child tables, all `contact_id` FK with `source` and `observed_at`:
@@ -548,7 +549,7 @@ Static lists are explicit membership with an `added_at`, for the "First 100" sty
 4. Resolve candidates one by one or accept all creates.
 5. Commit inside one transaction. `import_row` keeps the raw row and the decision, so any import can be audited or rolled back by run.
 
-Field-level provenance: an imported value never overwrites a value from a more authoritative source. For a LinkedIn field a manual edit sticks: once you edit it, no later sync, archive, or CSV import overwrites it until you revert it (CP1 decision, #28). The last value each automated source reported is kept per field in `contacts.synced_values` (value, source, `observed_at`), whether or not it reached the live column, so a revert restores LinkedIn's value and its provenance. Among the automated sources, sync > archive > csv. For `preferred_name`, `notes`, `met`, and tags, manual wins and no import touches them.
+Field-level provenance: an imported value never overwrites a value from a more authoritative source. For a LinkedIn field a manual edit sticks: once you edit it, no later sync, archive, or CSV import overwrites it until you revert it (CP1 decision, #28). Clearing a field by hand is an edit too and sticks the same way. The last value each automated source reported is kept per field in `contacts.synced_values` (value, source, `observed_at`), whether or not it reached the live column, so a revert restores LinkedIn's value and its provenance. Among the automated sources, sync > archive > csv. For `preferred_name`, `notes`, `met`, and tags, manual wins and no import touches them.
 
 ### 10.6 Export
 

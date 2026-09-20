@@ -588,23 +588,28 @@ def _create(session: Session, user: User, incoming: IncomingContact) -> Contact:
 
 
 def _update(session: Session, user: User, contact: Contact, incoming: IncomingContact) -> Contact:
+    provided = incoming.provided_fields()
+    # Decided once per field, from the state before any write: the rule reads the
+    # live value, and an empty field that a lower-ranked row is free to fill would
+    # look protected again the moment it held that row's value.
+    overwrite = {name: may_overwrite(name, incoming.source, contact) for name in provided}
     writable = {
         name: value
-        for name, value in incoming.provided_fields().items()
-        if may_overwrite(name, incoming.source, contact) and getattr(contact, name) != value
+        for name, value in provided.items()
+        if overwrite[name] and getattr(contact, name) != value
     }
     # Every check comes before the first setattr: the row applies fully or not at all.
     # A setattr first would be autoflushed by the next check's query, and a caller
     # that catches the ValueError per row would commit that half of the row.
     _assert_identities_free(session, user, contact.id, writable)
     before = {name: getattr(contact, name) for name in JOB_FIELDS}
-    for name, value in incoming.provided_fields().items():
+    for name, value in provided.items():
         if name in writable:
             old: str | date | None = getattr(contact, name)
             setattr(contact, name, value)
             if name == "li_public_id" and isinstance(value, str):
                 _retire_slug(session, user, contact, old=old, new=value, incoming=incoming)
-        if may_overwrite(name, incoming.source, contact):
+        if overwrite[name]:
             _record(contact, name, incoming.source)
     _record_synced(contact, incoming)
     if any(

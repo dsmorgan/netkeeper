@@ -78,6 +78,21 @@ def test_unrecorded_or_empty_fields_are_free_to_any_source() -> None:
     assert may_overwrite("connected_on", "csv", Contact(field_sources={"connected_on": "sync"}))
 
 
+@pytest.mark.parametrize("cleared", [None, ""])
+def test_a_field_cleared_by_hand_is_an_override_too(cleared: str | None) -> None:
+    contact = Contact(headline="from sync", field_sources={"headline": "sync"})
+    set_manual_field(contact, "headline", cleared)
+    assert (contact.headline, contact.field_sources["headline"]) == (cleared, "manual")
+    for source in ("sync", "archive", "csv"):
+        assert not may_overwrite("headline", source, contact), source
+    assert may_overwrite("headline", "manual", contact)
+    # Emptied by anything but a person (a revert to a null synced value), it is free again.
+    record_synced_value(contact, "headline", None, source="sync", observed_at=OBSERVED)
+    revert_to_synced(contact, "headline")
+    assert (contact.headline, contact.field_sources["headline"]) == (None, "sync")
+    assert may_overwrite("headline", "csv", contact)
+
+
 def test_person_owned_fields_take_manual_and_nothing_else() -> None:
     contact = Contact(preferred_name="Bob", notes="n")
     for field in PERSON_OWNED_FIELDS:
