@@ -139,10 +139,12 @@ def test_deleting_a_user_cascades_to_its_settings(migration_engine: Engine) -> N
 # --- script directory -------------------------------------------------------
 
 
-def test_alembic_root_is_the_repository_root() -> None:
-    assert migrations.alembic_root() == REPO_ROOT
-    assert (REPO_ROOT / "alembic.ini").is_file()
-    assert (REPO_ROOT / "alembic" / "env.py").is_file()
+def test_alembic_root_is_the_package_directory() -> None:
+    root = migrations.alembic_root()
+    assert root == REPO_ROOT / "netkeeper"
+    assert (root / "alembic.ini").is_file()
+    assert (root / "alembic" / "env.py").is_file()
+    assert (root / "alembic" / "script.py.mako").is_file()
 
 
 def test_revision_ids_are_sequential() -> None:
@@ -153,5 +155,5 @@ def test_revision_ids_are_sequential() -> None:
 
 def test_migration_files_do_not_import_netkeeper() -> None:
     """Migrations are frozen history; they must not track the models module."""
-    for path in (REPO_ROOT / "alembic" / "versions").glob("*.py"):
+    for path in (migrations.alembic_root() / "alembic" / "versions").glob("*.py"):
         assert "netkeeper" not in path.read_text(), path

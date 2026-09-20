@@ -2,7 +2,7 @@
 
 The CLI and the tests go through here rather than the ``alembic`` command so the
 database URL is resolved once, by :func:`netkeeper.db.database_url`, and so the
-scripts are found from any working directory.
+scripts (``netkeeper/alembic/``) are found from any working directory.
 """
 
 from __future__ import annotations
@@ -16,25 +16,18 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import Engine
 
 INI_FILENAME = "alembic.ini"
-SCRIPTS_DIRNAME = "alembic"
 ENGINE_ATTRIBUTE = "engine"  # key in Config.attributes that env.py reads
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 
 
 def alembic_root() -> Path:
-    """The directory holding ``alembic.ini`` and ``alembic/``.
+    """The directory holding ``alembic.ini`` and ``alembic/``: the package itself.
 
-    That is the repository root in a checkout or editable install, and the package
-    directory in an installed wheel, where the build copies both (see
-    ``[tool.hatch.build.targets.wheel.force-include]`` in ``pyproject.toml``).
+    Keeping the scripts inside the package means a checkout, an editable install,
+    and an installed wheel all find them the same way.
     """
-    for candidate in (_PACKAGE_DIR.parent, _PACKAGE_DIR):
-        if (candidate / INI_FILENAME).is_file() and (candidate / SCRIPTS_DIRNAME).is_dir():
-            return candidate
-    raise FileNotFoundError(
-        f"{INI_FILENAME} and {SCRIPTS_DIRNAME}/ not found beside {_PACKAGE_DIR}"
-    )
+    return _PACKAGE_DIR
 
 
 def alembic_config(engine: Engine | None = None) -> Config:
