@@ -5,11 +5,12 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from sqlalchemy import Engine
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import Settings
 from netkeeper.db import database_url, make_engine, make_session_factory
 from netkeeper.models import Base
+from netkeeper.scoping import install_scope_guard
 from netkeeper.web.app import create_app
 
 
@@ -40,9 +41,17 @@ def engine(tmp_path: Path) -> Iterator[Engine]:
 
 
 @pytest.fixture
-def session(engine: Engine) -> Iterator[Session]:
-    """A session on ``engine``. Work left uncommitted is discarded at teardown."""
-    with make_session_factory(engine)() as session:
+def session_factory(engine: Engine) -> sessionmaker[Session]:
+    """A factory on ``engine`` with the scope guard installed, as the app has it."""
+    factory = make_session_factory(engine)
+    install_scope_guard(factory)
+    return factory
+
+
+@pytest.fixture
+def session(session_factory: sessionmaker[Session]) -> Iterator[Session]:
+    """A guarded session on ``engine``. Work left uncommitted is discarded at teardown."""
+    with session_factory() as session:
         yield session
 
 

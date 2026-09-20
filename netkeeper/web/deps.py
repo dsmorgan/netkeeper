@@ -1,7 +1,7 @@
 """Request-scoped dependencies: the session, the current user, the bus, the runner.
 
-The auth provider here is the P0-09 slice this app needs for ``/me``; the scoping
-helper and the runtime query guard follow in that item (spec section 5, ADR 0005).
+The auth provider is the request-side half of P0-09 (spec section 5, ADR 0005);
+the scoping helper and the runtime query guard are :mod:`netkeeper.scoping`.
 """
 
 from __future__ import annotations

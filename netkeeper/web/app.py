@@ -2,9 +2,10 @@
 
 :func:`create_app` builds the app. Its lifespan builds the engine (or takes the
 one passed in), migrates the database to head, makes sure the local user exists,
-and starts the event bus and the task runner, all kept on ``app.state``. API
-modules under :mod:`netkeeper.web.api` are discovered, so adding an endpoint never
-edits this file.
+installs the scope guard on the session factory, and starts the event bus and
+the task runner, all kept on ``app.state``. API modules under
+:mod:`netkeeper.web.api` are discovered, so adding an endpoint never edits this
+file.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from netkeeper import __version__, migrations
 from netkeeper.config import Settings, load_settings
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.logging_setup import setup_logging
+from netkeeper.scoping import install_scope_guard
 from netkeeper.services.events import EventBus
 from netkeeper.services.tasks import TaskRunner
 from netkeeper.services.users import ensure_local_user
@@ -85,9 +87,10 @@ def dev_app() -> FastAPI:
 
 
 def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
-    """Migrate, make sure the local user exists, and put the shared objects on ``app.state``."""
+    """Migrate, ensure the local user, guard the session factory, and fill ``app.state``."""
     migrations.upgrade(engine)
     factory = make_session_factory(engine)
+    install_scope_guard(factory)
     with session_scope(factory) as session:
         user = ensure_local_user(session, settings=settings)
         log.info(
