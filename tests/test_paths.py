@@ -93,3 +93,10 @@ def test_config_candidates_env_var_expands_home(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("NETKEEPER_CONFIG", "~/nk.toml")
     assert config_candidates(None)[0] == tmp_path / "nk.toml"
+
+
+def test_config_candidates_explicit_expands_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert config_candidates(Path("~/nk.toml"))[0] == tmp_path / "nk.toml"
