@@ -7,6 +7,7 @@
  * a changed reference and a smart list's live membership is never read from a
  * stale one.
  */
+import { fieldSpec } from './fields'
 import { predicateOrThrow } from './predicates'
 import type { FilterNode, FilterTree } from './types'
 
@@ -81,31 +82,121 @@ export function pathKey(path: FilterPath): string {
   return path.length === 0 ? 'root' : path.join('.')
 }
 
+/**
+ * Which of two different things is wrong with a node.
+ *
+ * `incomplete` is a box still to be filled in — normal, expected, and the only
+ * thing a freshly added condition should ever report. `invalid` is a value the
+ * server would refuse, which the builder should never be able to produce and
+ * which is worth telling apart in a test. Both stop a save; `unavailable` is
+ * the third predicate kind, which no amount of typing fixes.
+ */
+export type FilterIssueKind = 'incomplete' | 'invalid' | 'unavailable'
+
 export interface FilterIssue {
   readonly path: FilterPath
   readonly message: string
+  readonly kind: FilterIssueKind
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+const ISO_OFFSET = /([zZ]|[+-]\d{2}:?\d{2})$/
+
+interface ValueProblem {
+  message: string
+  kind: FilterIssueKind
 }
 
 /**
- * What still has to be filled in before the API would accept the tree.
+ * Why `value` is not something `field` can be compared against, or null.
  *
- * These are the constraints the Pydantic models carry (a non-empty group, a
- * value of at least one character, exactly one `last_contacted` option, an
- * ordered `between`) plus the three predicates the compiler refuses. Showing
- * them here means the save button can say why it is off instead of the server
- * answering 422 after the click.
+ * This mirrors `filters.typed_value`, which is what the server runs, and it
+ * judges the value that is in the tree rather than trusting whatever put it
+ * there. That distinction matters: a value carried across a field change used
+ * to land on a column of another kind — text in a number column, a company
+ * name in the `met` enum, one enum's value in another enum — and an emptiness
+ * check saw nothing wrong with it, so Save and Download stayed lit and the
+ * server answered 422. An enum was the worst of it, because a `<select>` whose
+ * value is not among its options displays the first one, so the row read back
+ * as something the tree did not hold.
+ */
+function valueIssue(
+  field: string,
+  value: string | number | boolean,
+  label: string,
+): ValueProblem | null {
+  const bad = (message: string): ValueProblem => ({ message, kind: 'invalid' })
+  const empty = (message: string): ValueProblem => ({ message, kind: 'incomplete' })
+  const spec = fieldSpec(field)
+  if (spec === undefined) return bad(`${field} is not a column this build can filter on.`)
+  switch (spec.kind) {
+    case 'string':
+      if (typeof value !== 'string') return bad(`${spec.label} takes text.`)
+      return value === '' ? empty(`“${label}” needs a value.`) : null
+    case 'enum':
+      return typeof value === 'string' && (spec.values ?? []).includes(value)
+        ? null
+        : bad(`${spec.label} takes one of: ${(spec.values ?? []).join(', ')}.`)
+    case 'int':
+      return typeof value === 'number' && Number.isInteger(value)
+        ? null
+        : bad(`${spec.label} takes a whole number.`)
+    case 'bool':
+      return typeof value === 'boolean' ? null : bad(`${spec.label} takes yes or no.`)
+    case 'date':
+      if (value === '') return empty(`“${label}” needs a date.`)
+      if (typeof value !== 'string' || !ISO_DATE.test(value)) {
+        return bad(`${spec.label} takes a date.`)
+      }
+      return Number.isNaN(Date.parse(value)) ? bad(`${value} is not a real date.`) : null
+    case 'datetime':
+      if (value === '') return empty(`“${label}” needs a date and time.`)
+      if (typeof value !== 'string' || !ISO_OFFSET.test(value) || Number.isNaN(Date.parse(value))) {
+        return bad(`${spec.label} takes a date and time with a timezone.`)
+      }
+      return null
+  }
+}
+
+/**
+ * Whether `field` would accept `value` — the one predicate that decides both
+ * what the builder reports and what survives a change of column.
+ *
+ * Deciding the carry with this rather than with a type or even a kind
+ * comparison is what keeps the two answers from disagreeing: two enums are the
+ * same kind and still do not share a value, and a date and a datetime are both
+ * strings. If the value would not be accepted, it does not travel.
+ */
+export function valueFits(field: string, value: string | number | boolean): boolean {
+  const problem = valueIssue(field, value, '')
+  return problem === null || problem.kind === 'incomplete'
+}
+
+/**
+ * What still has to be filled in, or put right, before the API would accept the tree.
+ *
+ * These are the constraints the Pydantic models carry — a non-empty group, a
+ * value of at least one character, a value of the field's own kind, exactly one
+ * `last_contacted` option, an ordered `between` — plus the three predicates the
+ * compiler refuses. Showing them here means the save button can say why it is
+ * off instead of the server answering 422 after the click, which for an export
+ * arrives as a blank tab the browser has already navigated to.
  */
 export function validate(node: FilterNode, path: FilterPath = []): FilterIssue[] {
   const issues: FilterIssue[] = []
   const spec = predicateOrThrow(node.op)
   if (spec.unavailable !== undefined) {
-    issues.push({ path, message: `${spec.label}: ${spec.unavailable}` })
+    issues.push({ path, message: `${spec.label}: ${spec.unavailable}`, kind: 'unavailable' })
   }
   switch (node.op) {
     case 'and':
     case 'or':
       if (node.children.length === 0) {
-        issues.push({ path, message: `“${spec.label}” needs at least one condition.` })
+        issues.push({
+          path,
+          message: `“${spec.label}” needs at least one condition.`,
+          kind: 'incomplete',
+        })
       }
       node.children.forEach((child, index) => issues.push(...validate(child, [...path, index])))
       break
@@ -116,44 +207,60 @@ export function validate(node: FilterNode, path: FilterPath = []): FilterIssue[]
     case 'starts_with':
     case 'email_contains':
       if (node.value.trim() === '') {
-        issues.push({ path, message: `“${spec.label}” needs something to look for.` })
+        issues.push({
+          path,
+          message: `“${spec.label}” needs something to look for.`,
+          kind: 'incomplete',
+        })
       }
       break
     case 'tag_any':
     case 'tag_all':
     case 'tag_none':
       if (node.names.length === 0) {
-        issues.push({ path, message: `“${spec.label}” needs at least one tag.` })
+        issues.push({
+          path,
+          message: `“${spec.label}” needs at least one tag.`,
+          kind: 'incomplete',
+        })
       }
       break
     case 'eq':
     case 'neq':
-      if (typeof node.value === 'string' && node.value === '') {
-        issues.push({ path, message: `“${spec.label}” needs a value.` })
-      }
-      break
     case 'gt':
     case 'gte':
     case 'lt':
-    case 'lte':
-      if (node.value === '') {
-        issues.push({ path, message: `“${spec.label}” needs a value.` })
-      }
+    case 'lte': {
+      const problem = valueIssue(node.field, node.value, spec.label)
+      if (problem !== null) issues.push({ path, ...problem })
       break
-    case 'between':
-      if (node.low === '' || node.high === '') {
-        issues.push({ path, message: '“is between” needs both ends.' })
+    }
+    case 'between': {
+      const problem =
+        valueIssue(node.field, node.low, spec.label) ??
+        valueIssue(node.field, node.high, spec.label)
+      if (problem !== null) {
+        issues.push({ path, ...problem })
       } else if (comparable(node.low) > comparable(node.high)) {
-        issues.push({ path, message: 'The high end of “is between” is below the low one.' })
+        issues.push({
+          path,
+          message: 'The high end of “is between” is below the low one.',
+          kind: 'invalid',
+        })
       }
       break
+    }
     case 'last_contacted': {
       const chosen =
         (node.within_days !== null && node.within_days !== undefined ? 1 : 0) +
         (node.older_than_days !== null && node.older_than_days !== undefined ? 1 : 0) +
         (node.never ? 1 : 0)
       if (chosen !== 1) {
-        issues.push({ path, message: 'Choose exactly one “last contacted” option.' })
+        issues.push({
+          path,
+          message: 'Choose exactly one “last contacted” option.',
+          kind: 'invalid',
+        })
       }
       break
     }

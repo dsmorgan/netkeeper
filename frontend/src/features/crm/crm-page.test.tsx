@@ -87,6 +87,43 @@ describe('saved views', () => {
     })
   })
 
+  it('keeps the sort when an existing view is edited', async () => {
+    // `SavedViewPatch` leaves out what it is not sent, so a field missing from
+    // the request is a field that vanishes with no error at all: the panel
+    // closes, the list refreshes, and the sort is silently the old one (#82 was
+    // the same shape). Every field the editor can change has to be in the body.
+    const seen = mockApi(routes({ 'PATCH /api/v1/views/3': () => jsonResponse(VIEW) }))
+    renderWithClient(<SavedViewsPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Untriaged engineers' }))
+
+    fireEvent.change(screen.getByLabelText('Sort direction 1'), { target: { value: 'desc' } })
+    fireEvent.change(screen.getByLabelText('Sort field 1'), { target: { value: 'connected_on' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save view' }))
+
+    await waitFor(() => expect(requestsTo(seen, 'PATCH', '/api/v1/views/3')).toHaveLength(1))
+    expect(requestsTo(seen, 'PATCH', '/api/v1/views/3')[0]?.body).toEqual({
+      name: 'Untriaged engineers',
+      columns: ['preferred_name', 'last_name', 'current_title'],
+      sort: [{ field: 'connected_on', direction: 'desc' }],
+      filter: { where: { op: 'has_email' }, include_archived: false },
+    })
+  })
+
+  it('keeps a sort it was not asked to change', async () => {
+    const seen = mockApi(routes({ 'PATCH /api/v1/views/3': () => jsonResponse(VIEW) }))
+    renderWithClient(<SavedViewsPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Untriaged engineers' }))
+
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Renamed' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save view' }))
+
+    await waitFor(() => expect(requestsTo(seen, 'PATCH', '/api/v1/views/3')).toHaveLength(1))
+    expect(requestsTo(seen, 'PATCH', '/api/v1/views/3')[0]?.body).toMatchObject({
+      name: 'Renamed',
+      sort: [{ field: 'last_name', direction: 'asc' }],
+    })
+  })
+
   it('opens an existing view with its filter in the builder', async () => {
     mockApi(routes())
     const { container } = renderWithClient(<SavedViewsPanel />)

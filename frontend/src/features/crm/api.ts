@@ -13,15 +13,11 @@
 import { queryOptions } from '@tanstack/react-query'
 
 import { api } from '@/api/client'
+import type { paths } from '@/api/schema'
 
 import type {
   AutotagRuleOut,
   AutotagRulePreviewOut,
-  BulkAction,
-  BulkCountOut,
-  BulkSelection,
-  ContactMet,
-  ContactSummaryOut,
   ExportFormat,
   ExportPreset,
   FilterTree,
@@ -220,22 +216,26 @@ export async function deleteList(listId: number): Promise<void> {
   if (!response.ok) fail(error, response.status, 'could not delete the list')
 }
 
-export interface MembersPage {
-  items: ContactSummaryOut[]
-  total: number
-}
+/** One page of a list's members, as `/lists/{id}/members` returns it. */
+export type MembersPage = NonNullable<
+  paths['/api/v1/lists/{list_id}/members']['get']['responses'][200]['content']['application/json']
+>
 
 /**
  * One page of a list's members.
  *
- * The query key carries the list's `updated_at`, so editing a smart list's
- * filter asks for membership again instead of showing what the previous filter
- * matched: membership is computed on every request and is never materialized
- * (spec 10.4), and a cache that outlived the filter would be a lie.
+ * A smart list's membership is computed from its filter on every request and is
+ * never materialized (spec 10.4), so a page of it must not outlive the filter
+ * that produced it. Two things keep that true, and it is worth being exact
+ * about which does the work: the key sits under the `['lists']` prefix, and
+ * every write in this feature invalidates that prefix, so saving a filter,
+ * adding a member, or applying a bulk action all ask again. `gcTime: 0` then
+ * makes sure an unmounted page is dropped rather than replayed on the way back.
+ * Nothing here caches membership across an edit.
  */
-export function membersQuery(listId: number, version: string, offset = 0, limit = 25) {
+export function membersQuery(listId: number, offset = 0, limit = 25) {
   return queryOptions({
-    queryKey: ['lists', listId, 'members', version, offset, limit],
+    queryKey: ['lists', listId, 'members', offset, limit],
     queryFn: async ({ signal }): Promise<MembersPage> => {
       const { data, error, response } = await api.GET('/api/v1/lists/{list_id}/members', {
         params: { path: { list_id: listId }, query: { limit, offset } },
@@ -286,9 +286,22 @@ export async function createView(body: {
   return data
 }
 
+/**
+ * Replace any of a view's name, columns, sort, and filter.
+ *
+ * Every field the editor can change is spelled out here, `sort` included. The
+ * endpoint leaves out what it is not sent, so a field missing from this type is
+ * a field the editor silently discards — with no error, because the request
+ * succeeds (#82 was the same shape).
+ */
 export async function updateView(
   viewId: number,
-  body: { name?: string | null; columns?: string[] | null; filter?: FilterTree | null },
+  body: {
+    name?: string | null
+    columns?: string[] | null
+    sort?: SortKey[] | null
+    filter?: FilterTree | null
+  },
 ): Promise<SavedViewOut> {
   const { data, error, response } = await api.PATCH('/api/v1/views/{view_id}', {
     params: { path: { view_id: viewId } },
@@ -330,49 +343,23 @@ export async function countFilter(tree: FilterTree, signal?: AbortSignal): Promi
 }
 
 // --- bulk actions -----------------------------------------------------------
+//
+// The count-confirmation flow lives in `features/contacts/api.ts`, which the
+// Contacts table already drives: `BulkConfirmable`, `countBulk`, `applyBulk`,
+// and `readBulkRefusal`, which sorts a refusal into the four kinds the server
+// distinguishes. A second copy here would be a second dialect of the same
+// conversation, and the two would drift on the day one of them learned
+// something. This module re-exports them so the rest of this feature has one
+// import site, and nothing is redefined.
 
-export interface BulkRequest {
-  selection: BulkSelection
-  action: BulkAction
-  value?: ContactMet | boolean | null
-  reason?: string | null
-}
-
-/** The count to confirm and the token bound to it. */
-export async function countBulk(request: BulkRequest): Promise<BulkCountOut> {
-  const { data, error, response } = await api.POST('/api/v1/contacts/bulk/count', {
-    body: request,
-  })
-  if (data === undefined) fail(error, response.status, 'could not count the selection')
-  return data
-}
-
-/** Raised when the server refuses a confirmation token: re-count, do not error out. */
-export class ConfirmationStale extends ApiError {
-  constructor(message: string, status: number, body: unknown) {
-    super(message, status, body)
-    this.name = 'ConfirmationStale'
-  }
-}
-
-/**
- * Apply a bulk action with the token from `countBulk`.
- *
- * A `409` means the world moved between the count and the click — the token
- * expired, or the selection no longer counts what the person saw. That is not
- * an error to show and stop on: the caller counts again and asks once more.
- */
-export async function applyBulk(request: BulkRequest & { token: string }): Promise<number> {
-  const { data, error, response } = await api.POST('/api/v1/contacts/bulk', { body: request })
-  if (data === undefined) {
-    const message = errorMessage(error, response.status, 'could not apply the action')
-    if (response.status === 409) {
-      throw new ConfirmationStale(message, response.status, error)
-    }
-    throw new ApiError(message, response.status, error)
-  }
-  return data.affected
-}
+export {
+  applyBulk,
+  countBulk,
+  readBulkRefusal,
+  refusalMessage,
+  type BulkConfirmable,
+  type BulkRefusal,
+} from '@/features/contacts/api'
 
 // --- exports ----------------------------------------------------------------
 

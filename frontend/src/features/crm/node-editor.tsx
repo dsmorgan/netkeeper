@@ -12,14 +12,15 @@ import { ChevronRight, X } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 
-import { Callout, NativeSelect } from './controls'
+import { Callout } from './controls'
 import { FIELDS, OPS_BY_KIND, fieldSpec } from './fields'
 import type { FieldKind } from './fields'
 import { predicateOrThrow } from './predicates'
 import type { FilterPath } from './tree'
-import { pathKey } from './tree'
+import { pathKey, valueFits } from './tree'
 import type { FilterField, FilterNode, TagOut } from './types'
 
 /** The ops that compare a column, all of which carry a `field`. */
@@ -59,7 +60,16 @@ function blankValue(kind: FieldKind, values: readonly string[] | undefined): Sca
 }
 
 /**
- * A comparison node for `op` on `field`, keeping `previous` where the kinds still agree.
+ * A comparison node for `op` on `field`, keeping `previous` only if `field` would accept it.
+ *
+ * `valueFits` is the same predicate the validator runs, so the value that
+ * survives a change of column is exactly the value the builder would then call
+ * valid — the two cannot disagree. Neither a `typeof` test nor a comparison of
+ * kinds would do: text, an enum value, a date and a datetime are all
+ * JavaScript strings, and two enums are the same kind while sharing no value,
+ * so `met`'s `unknown` would land in `source`. The server refuses all of those,
+ * and a `<select>` given a value that is not one of its options shows the first
+ * one instead, so the row read back as something the tree did not hold.
  *
  * The generated types give each op its own narrower field union — `contains`
  * takes only text columns, `is_empty` only the ones that can be empty — and
@@ -70,7 +80,7 @@ function blankValue(kind: FieldKind, values: readonly string[] | undefined): Sca
 function buildComparison(op: ComparisonOp, field: FilterField, previous?: Scalar): ComparisonNode {
   const spec = fieldSpec(field)
   const blank = blankValue(spec?.kind ?? 'string', spec?.values)
-  const keep = previous !== undefined && typeof previous === typeof blank ? previous : blank
+  const keep = previous !== undefined && valueFits(field, previous) ? previous : blank
   switch (op) {
     case 'is_empty':
       return { op, field } as ComparisonNode
@@ -128,7 +138,7 @@ function ScalarEditor({ kind, values, value, label, onChange }: ScalarEditorProp
   switch (kind) {
     case 'enum':
       return (
-        <NativeSelect
+        <Select
           aria-label={label}
           value={String(value)}
           onChange={(event) => onChange(event.target.value)}
@@ -138,18 +148,18 @@ function ScalarEditor({ kind, values, value, label, onChange }: ScalarEditorProp
               {option.replace(/_/g, ' ')}
             </option>
           ))}
-        </NativeSelect>
+        </Select>
       )
     case 'bool':
       return (
-        <NativeSelect
+        <Select
           aria-label={label}
           value={value === true ? 'true' : 'false'}
           onChange={(event) => onChange(event.target.value === 'true')}
         >
           <option value="true">yes</option>
           <option value="false">no</option>
-        </NativeSelect>
+        </Select>
       )
     case 'int':
       return (
@@ -281,7 +291,7 @@ export function NodeEditor(props: NodeEditorProps) {
         className="space-y-2 rounded-lg border bg-muted/20 p-2"
       >
         <div className="flex items-center gap-2">
-          <NativeSelect
+          <Select
             aria-label="Group"
             value={node.op}
             onChange={(event) =>
@@ -290,7 +300,7 @@ export function NodeEditor(props: NodeEditorProps) {
           >
             <option value="and">All of</option>
             <option value="or">Any of</option>
-          </NativeSelect>
+          </Select>
           <span className="text-xs text-muted-foreground">{spec.hint}</span>
           <RemoveButton label={spec.label} onClick={() => props.onRemove(path)} />
         </div>
@@ -385,7 +395,7 @@ function LeafControls({ node, path, tags, onChange }: LeafProps) {
     const ops = OPS_BY_KIND[kind] as readonly ComparisonOp[]
     return (
       <>
-        <NativeSelect
+        <Select
           aria-label="Field"
           value={node.field}
           onChange={(event) => {
@@ -401,8 +411,8 @@ function LeafControls({ node, path, tags, onChange }: LeafProps) {
               {candidate.label}
             </option>
           ))}
-        </NativeSelect>
-        <NativeSelect
+        </Select>
+        <Select
           aria-label="Comparison"
           value={node.op}
           onChange={(event) =>
@@ -417,7 +427,7 @@ function LeafControls({ node, path, tags, onChange }: LeafProps) {
               {predicateOrThrow(candidate).label}
             </option>
           ))}
-        </NativeSelect>
+        </Select>
         {node.op === 'between' ? (
           <>
             <ScalarEditor
@@ -463,7 +473,7 @@ function LeafControls({ node, path, tags, onChange }: LeafProps) {
       return (
         <>
           {label}
-          <NativeSelect
+          <Select
             aria-label="Email status"
             value={node.status ?? 'any'}
             onChange={(event) => {
@@ -480,7 +490,7 @@ function LeafControls({ node, path, tags, onChange }: LeafProps) {
             <option value="ok">that works</option>
             <option value="bounced">that bounced</option>
             <option value="invalid">that is invalid</option>
-          </NativeSelect>
+          </Select>
         </>
       )
     case 'has_phone':
@@ -509,7 +519,7 @@ function LeafControls({ node, path, tags, onChange }: LeafProps) {
       return (
         <>
           {label}
-          <NativeSelect
+          <Select
             aria-label="Window"
             value={mode}
             onChange={(event) => {
@@ -526,7 +536,7 @@ function LeafControls({ node, path, tags, onChange }: LeafProps) {
             <option value="within">in the last</option>
             <option value="older_than">more than</option>
             <option value="never">never</option>
-          </NativeSelect>
+          </Select>
           {mode !== 'never' && (
             <>
               <Input

@@ -24,6 +24,7 @@ import {
   applyBulk,
   countBulk,
   readBulkRefusal,
+  refusalMessage,
   type BulkConfirmable,
   type BulkRefusal,
 } from './api'
@@ -285,20 +286,4 @@ function BulkConfirmDialog({
       </DialogContent>
     </Dialog>
   )
-}
-
-function refusalMessage(refusal: BulkRefusal): string {
-  switch (refusal.kind) {
-    case 'count_mismatch':
-      return (
-        `The selection changed while the confirmation was open: it now matches ` +
-        `${refusal.actual.toLocaleString()} contacts, not the ${refusal.expected.toLocaleString()} you confirmed.`
-      )
-    case 'expired':
-      return 'This confirmation expired; a count is good for five minutes.'
-    case 'rejected':
-      return `The confirmation was refused: ${refusal.detail}.`
-    case 'failed':
-      return `The action could not be applied: ${refusal.detail}.`
-  }
 }

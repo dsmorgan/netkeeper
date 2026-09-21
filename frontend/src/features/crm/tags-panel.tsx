@@ -15,6 +15,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 
 import {
   createRule,
@@ -28,7 +29,7 @@ import {
   updateTag,
 } from './api'
 import type { RuleInput } from './api'
-import { Callout, EmptyState, ErrorNote, LoadingNote, NativeSelect } from './controls'
+import { Callout, EmptyState, ErrorNote, LoadingNote } from './controls'
 import { RulePreview } from './rule-preview'
 import type { AutotagRuleOut, RuleField, TagOut } from './types'
 
@@ -288,7 +289,7 @@ function NewRuleForm({ tags, onSaved }: { tags: readonly TagOut[]; onSaved: () =
       <div className="flex flex-wrap items-end gap-2">
         <div className="grid gap-1">
           <Label htmlFor="rule-tag">Tag</Label>
-          <NativeSelect
+          <Select
             id="rule-tag"
             value={chosen === null ? '' : String(chosen)}
             onChange={(event) => setTagId(Number(event.target.value))}
@@ -299,11 +300,11 @@ function NewRuleForm({ tags, onSaved }: { tags: readonly TagOut[]; onSaved: () =
                 {tag.name}
               </option>
             ))}
-          </NativeSelect>
+          </Select>
         </div>
         <div className="grid gap-1">
           <Label htmlFor="rule-field">Field</Label>
-          <NativeSelect
+          <Select
             id="rule-field"
             value={field}
             onChange={(event) => setField(event.target.value as RuleField)}
@@ -313,7 +314,7 @@ function NewRuleForm({ tags, onSaved }: { tags: readonly TagOut[]; onSaved: () =
                 {candidate}
               </option>
             ))}
-          </NativeSelect>
+          </Select>
         </div>
         <div className="grid flex-1 gap-1">
           <Label htmlFor="rule-pattern">Pattern</Label>

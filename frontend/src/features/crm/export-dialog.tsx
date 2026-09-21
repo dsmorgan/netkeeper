@@ -34,9 +34,10 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 
 import { countFilter, exportUrl } from './api'
-import { Callout, NativeSelect } from './controls'
+import { Callout } from './controls'
 import { EXPORT_PRESETS } from './export-presets'
 import { emptyTree, validateTree } from './tree'
 import type { ExportFormat, ExportPreset, FilterTree } from './types'
@@ -126,7 +127,7 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
 
       <div className="grid gap-1">
         <Label htmlFor="export-preset">Preset</Label>
-        <NativeSelect
+        <Select
           id="export-preset"
           className="w-full"
           value={preset}
@@ -137,7 +138,7 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
               {candidate.label}
             </option>
           ))}
-        </NativeSelect>
+        </Select>
         <p className="text-xs text-muted-foreground">{chosen?.description}</p>
       </div>
 
@@ -155,7 +156,7 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
 
       <div className="grid gap-1">
         <Label htmlFor="export-format">Format</Label>
-        <NativeSelect
+        <Select
           id="export-format"
           className="w-full"
           value={format}
@@ -166,7 +167,7 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
               {candidate.label}
             </option>
           ))}
-        </NativeSelect>
+        </Select>
         <p className="text-xs text-muted-foreground">{chosenFormat?.note}</p>
       </div>
 

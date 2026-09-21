@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 
 import {
@@ -28,7 +29,7 @@ import {
   updateList,
 } from './api'
 import { BulkActionBar } from './bulk-actions'
-import { Callout, EmptyState, ErrorNote, LoadingNote, NativeSelect } from './controls'
+import { Callout, EmptyState, ErrorNote, LoadingNote } from './controls'
 import { ExportDialog } from './export-dialog'
 import { FilterBuilder } from './filter-builder'
 import { emptyTree, validateTree } from './tree'
@@ -128,14 +129,14 @@ function NewListForm() {
         </div>
         <div className="grid gap-1">
           <Label htmlFor="new-list-kind">Kind</Label>
-          <NativeSelect
+          <Select
             id="new-list-kind"
             value={kind}
             onChange={(event) => setKind(event.target.value as ListKind)}
           >
             <option value="static">static</option>
             <option value="smart">smart</option>
-          </NativeSelect>
+          </Select>
         </div>
         <Button type="submit" disabled={name.trim() === '' || create.isPending}>
           Create
@@ -335,7 +336,7 @@ function StaticListMembers({ list, onChanged }: { list: ListOut; onChanged: () =
 }
 
 function StaticBulkActions({ list, onApplied }: { list: ListOut; onApplied: () => void }) {
-  const members = useQuery(membersQuery(list.id, list.updated_at, 0, 200))
+  const members = useQuery(membersQuery(list.id, 0, 200))
   if (members.isPending) return <LoadingNote label="Loading members…" />
   if (members.isError) return <ErrorNote label="Could not load the members" error={members.error} />
   if (members.data.items.length === 0) {
@@ -362,7 +363,7 @@ function StaticBulkActions({ list, onApplied }: { list: ListOut; onApplied: () =
 
 function MemberTable({ list }: { list: ListOut }) {
   const client = useQueryClient()
-  const members = useQuery(membersQuery(list.id, list.updated_at))
+  const members = useQuery(membersQuery(list.id))
   const drop = useMutation({
     mutationFn: (contactId: number) => removeMember(list.id, contactId),
     onSuccess: () => {

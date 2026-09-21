@@ -1,36 +1,16 @@
 /**
- * The small controls this feature reuses, in the base-nova shapes.
+ * The small standing notes this feature reuses, in the base-nova shapes.
  *
- * `NativeSelect` is a real `<select>` rather than the popup listbox in
- * `components/ui/select.tsx`. The filter builder puts a picker on every row —
- * twenty fields, up to eight ops — and a native control gets the keyboard, the
- * platform's own long-list behaviour, and the screen reader's list semantics
- * for free, which a popup would have to re-earn.
+ * The pickers here are `@/components/ui/select`, which is already a styled
+ * native `<select>` for the same reasons the filter builder wants one: a row
+ * offers twenty fields and up to eight ops, and a native control keeps the
+ * keyboard, the platform's long-list behaviour, and the list semantics a
+ * screen reader reads, at no cost in portals.
  */
 import type * as React from 'react'
-import { AlertTriangle, ChevronDown, Info, TriangleAlert } from 'lucide-react'
+import { AlertTriangle, Info, TriangleAlert } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
-
-export function NativeSelect({ className, ...props }: React.ComponentProps<'select'>) {
-  return (
-    <span data-slot="native-select" className={cn('relative inline-flex max-w-full', className)}>
-      <select
-        className={cn(
-          'h-8 w-full appearance-none rounded-lg border border-input bg-transparent py-1 pr-7 pl-2.5',
-          'text-sm transition-colors outline-none',
-          'focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50',
-          'disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30',
-        )}
-        {...props}
-      />
-      <ChevronDown
-        aria-hidden
-        className="pointer-events-none absolute top-1/2 right-2 size-3.5 -translate-y-1/2 text-muted-foreground"
-      />
-    </span>
-  )
-}
 
 interface CalloutProps extends React.ComponentProps<'div'> {
   tone?: 'info' | 'warning' | 'danger'
