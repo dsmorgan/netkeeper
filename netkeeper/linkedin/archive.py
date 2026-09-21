@@ -41,7 +41,7 @@ import io
 import logging
 import re
 import zipfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -51,9 +51,10 @@ from urllib.parse import unquote
 
 log = logging.getLogger(__name__)
 
-# Records to look through for a header before giving up on a table. LinkedIn's
-# preamble is three records; the allowance leaves room for it to grow.
-MAX_PREAMBLE_RECORDS: Final = 10
+# How many records to look through for a header before giving up on a table.
+# The header is one of them, so this tolerates a preamble one record shorter.
+# LinkedIn's is three records; the allowance leaves room for it to grow.
+MAX_HEADER_SEARCH_RECORDS: Final = 10
 # A message body is a CSV field; the module default (128 KiB) is too small for
 # the longest ones.
 FIELD_SIZE_LIMIT: Final = 16 * 1024 * 1024
@@ -88,11 +89,23 @@ class ArchiveFormatError(ValueError):
 
 
 class ArchiveKind(enum.StrEnum):
-    """The three tables the importer reads."""
+    """The tables this reader recognizes.
+
+    The first three carry the rows an import writes. ``PROFILE`` is the
+    archive's own owner, which no import writes but which names whose archive
+    this is when the message traffic cannot say.
+    """
 
     CONNECTIONS = "connections"
     MESSAGES = "messages"
     INVITATIONS = "invitations"
+    PROFILE = "profile"
+
+
+IMPORTABLE_KINDS: Final[frozenset[ArchiveKind]] = frozenset(
+    {ArchiveKind.CONNECTIONS, ArchiveKind.MESSAGES, ArchiveKind.INVITATIONS}
+)
+"""The kinds that carry rows to import. An archive with none of them is useless."""
 
 
 class InvitationDirection(enum.StrEnum):
@@ -171,7 +184,27 @@ class InvitationRow:
     invitee_public_id: str | None
 
 
-ArchiveRow = ConnectionRow | MessageRow | InvitationRow
+@dataclass(frozen=True, slots=True)
+class ProfileRow:
+    """One line of ``Profile.csv``: the archive owner's own profile.
+
+    LinkedIn writes exactly one. It carries no profile URL, so the only thing
+    here that identifies the owner is their name.
+    """
+
+    row_number: int
+    first_name: str
+    last_name: str
+    headline: str | None
+
+    @property
+    def full_name(self) -> str | None:
+        """``"First Last"`` as the owner's messages show it, or ``None`` when unnamed."""
+        name = f"{self.first_name} {self.last_name}".strip()
+        return name or None
+
+
+ArchiveRow = ConnectionRow | MessageRow | InvitationRow | ProfileRow
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +214,9 @@ class ArchiveMember:
     ``name`` is the member's path inside the zip or the unpacked directory, or
     the file name of a single CSV. ``modified_at`` is the member's timestamp as
     UTC when it is plausible (after :data:`EARLIEST_EXPORT` and not in the
-    future), else ``None``; a single CSV read from a stream has none.
+    future), else ``None``; a single CSV read from a stream has none. A zip
+    member's is approximate, to the exporting machine's UTC offset: see
+    :func:`_zip_time`.
     """
 
     name: str
@@ -291,8 +326,12 @@ class _Layout:
     required: frozenset[str]
 
 
-# The signatures are disjoint from every other file in the archive: Profile.csv
-# has First Name and Last Name too, but no Connected On.
+# The signatures are disjoint from every other file in a real archive, which
+# was checked against all thirty-odd members of one. Several carry First Name
+# and Last Name (Receipts, Verifications, the endorsement tables); only
+# Connections.csv adds Connected On, and only Profile.csv adds Headline.
+# Connections comes first, so a table that somehow had both reads as the one
+# with rows worth importing.
 LAYOUTS: Final[tuple[_Layout, ...]] = (
     _Layout(
         ArchiveKind.CONNECTIONS,
@@ -308,6 +347,11 @@ LAYOUTS: Final[tuple[_Layout, ...]] = (
         ArchiveKind.INVITATIONS,
         signature=frozenset({"direction", "sent at"}),
         required=frozenset({"from", "to"}),
+    ),
+    _Layout(
+        ArchiveKind.PROFILE,
+        signature=frozenset({"first name", "last name", "headline"}),
+        required=frozenset(),
     ),
 )
 
@@ -334,7 +378,7 @@ def _find_header(records: Iterator[list[str]], name: str) -> _Header | None:
     needs is that table, malformed: an :class:`ArchiveFormatError`.
     """
     for index, record in enumerate(records):
-        if index >= MAX_PREAMBLE_RECORDS:
+        if index >= MAX_HEADER_SEARCH_RECORDS:
             break
         names = [_normalize(cell) for cell in record]
         present = set(names)
@@ -465,6 +509,23 @@ def _dated[T](parsed: T | None, raw: str | None, name: str, row_number: int) -> 
     return parsed
 
 
+def read_profile(text: TextIO, name: str = "Profile.csv") -> Iterator[ProfileRow]:
+    """Stream :class:`ProfileRow` from a ``Profile.csv`` text stream.
+
+    ``ArchiveFormatError`` when ``text`` is not that table.
+    """
+    header, records = _table(text, name)
+    header = _expect(header, ArchiveKind.PROFILE, name)
+    for row_number, record in _data_rows(records):
+        fields = _Fields(header.columns, record)
+        yield ProfileRow(
+            row_number=row_number,
+            first_name=fields.text("first name"),
+            last_name=fields.text("last name"),
+            headline=fields.get("headline"),
+        )
+
+
 def _expect(header: _Header | None, kind: ArchiveKind, name: str) -> _Header:
     if header is None:
         raise ArchiveFormatError(f"{name}: no LinkedIn {kind.value} table header found")
@@ -528,6 +589,25 @@ class Archive:
         """Stream the rows of an ``invitations`` member. ``ValueError`` for another kind."""
         return self._stream(member, ArchiveKind.INVITATIONS, read_invitations)
 
+    def profile(self, member: ArchiveMember) -> Iterator[ProfileRow]:
+        """Stream the rows of a ``profile`` member. ``ValueError`` for another kind."""
+        return self._stream(member, ArchiveKind.PROFILE, read_profile)
+
+    def owner_name(self) -> str | None:
+        """The owner's name as ``Profile.csv`` writes it, or ``None`` when it is absent.
+
+        The archive's only statement about whose it is;
+        :mod:`netkeeper.linkedin.conversations` uses it to settle who the owner
+        is when the message traffic alone cannot.
+        """
+        for member in self.members:
+            if member.kind is not ArchiveKind.PROFILE:
+                continue
+            for row in self.profile(member):
+                if (name := row.full_name) is not None:
+                    return name
+        return None
+
     def _stream[R](
         self,
         member: ArchiveMember,
@@ -550,6 +630,7 @@ _KIND_ORDER: Final[dict[ArchiveKind, int]] = {
     ArchiveKind.CONNECTIONS: 0,
     ArchiveKind.MESSAGES: 1,
     ArchiveKind.INVITATIONS: 2,
+    ArchiveKind.PROFILE: 3,
 }
 
 
@@ -632,7 +713,7 @@ def _open_zip(handle: IO[bytes], name: str) -> Archive:
     except BaseException:
         zf.close()
         raise
-    if not members:
+    if not _has_rows_to_import(members):
         zf.close()
         raise ArchiveFormatError(
             f"{name}: no Connections.csv, messages.csv, or Invitations.csv table in the archive"
@@ -660,7 +741,7 @@ def _open_dir(root: Path, name: str) -> Archive:
             log.debug("%s: skipping %s, not a table the importer reads", name, relative)
             continue
         members.append((ArchiveMember(relative, header.kind, _file_time(path)), opener))
-    if not members:
+    if not _has_rows_to_import(members):
         raise ArchiveFormatError(
             f"{name}: no Connections.csv, messages.csv, or Invitations.csv table in the directory"
         )
@@ -671,12 +752,22 @@ def _open_csv(handle: IO[bytes], name: str) -> Archive:
     opener = _stream_opener(handle, name)
     with opener() as text:
         header, _ = _table(text, name)
-    if header is None:
+    if header is None or header.kind not in IMPORTABLE_KINDS:
+        # Profile.csv on its own is recognizable but holds nothing to import.
         raise ArchiveFormatError(
             f"{name}: not a LinkedIn archive zip, and no Connections.csv, messages.csv, or "
             "Invitations.csv header in its first lines"
         )
     return Archive(name, [(ArchiveMember(name, header.kind, None), opener)], lambda: None)
+
+
+def _has_rows_to_import(members: Sequence[tuple[ArchiveMember, _TextOpener]]) -> bool:
+    """True when at least one member carries rows an import writes.
+
+    Profile.csv alone is not an archive worth opening: it names the owner and
+    holds nothing else.
+    """
+    return any(member.kind in IMPORTABLE_KINDS for member, _ in members)
 
 
 def _looks_like_csv(path: str) -> bool:
@@ -691,6 +782,17 @@ def _looks_like_csv(path: str) -> bool:
 
 
 def _zip_time(info: zipfile.ZipInfo) -> datetime | None:
+    """A zip member's timestamp, read as UTC although the format does not say.
+
+    Zip stores MS-DOS local time with no zone, so this is out by whatever
+    offset the machine that wrote the archive was on. Converting would only
+    trade that for the offset of the machine reading it, and would make
+    ``exported_at`` depend on the reader's clock settings. It is left as it is
+    because the one thing that consumes it, ``observed_at`` on an import, needs
+    the export times of successive archives to be ordered rather than exact,
+    and a constant offset keeps that order. A caller that needs an exact
+    instant passes its own ``observed_at``.
+    """
     try:
         return _plausible(datetime(*info.date_time, tzinfo=UTC))
     except (TypeError, ValueError):

@@ -34,10 +34,12 @@ Who the owner is: the archive never labels them. ``Profile.csv`` gives their
 name but no URL, so :func:`detect_owner` uses the traffic instead. The owner is
 in every conversation and nobody else is in many, so the profile URL that
 appears in the most conversations wins, provided it appears in more than one
-and no other URL ties it. On a tie the name from ``Profile.csv`` breaks it, and
-failing that the owner is unknown and no message is attributed at all, which is
-the right outcome: guessing the owner wrong reverses the direction of every
-interaction in the import.
+and no other URL ties it. A tie means an archive small enough that both parties
+are in every conversation, and there the name from ``Profile.csv`` settles it;
+:func:`netkeeper.crm.archive.import_archive` passes that name in. Failing both,
+the owner is unknown and no message is attributed at all, which is the right
+outcome: guessing the owner wrong reverses the direction of every interaction
+in the import.
 """
 
 from __future__ import annotations
@@ -144,19 +146,28 @@ class _Group:
     addressed_to_several: bool = False
 
 
-def group(rows: Iterable[MessageRow], *, owner: Owner | str | None = None) -> Threads:
+def group(
+    rows: Iterable[MessageRow],
+    *,
+    owner: Owner | str | None = None,
+    profile_name: str | None = None,
+) -> Threads:
     """Group message rows by conversation and attribute each to one counterpart.
 
     ``owner`` may be given as an :class:`Owner` or a profile slug when the
     caller already knows whose archive this is; otherwise :func:`detect_owner`
-    reads it out of the traffic. Rows keep the order they arrived in, which for
-    an archive is LinkedIn's own, and conversations come out in the order their
-    first row did, so two runs over the same file produce the same result.
+    reads it out of the traffic, with ``profile_name`` (the owner's name as
+    ``Profile.csv`` writes it) to settle a tie. Rows keep the order they arrived
+    in, which for an archive is LinkedIn's own, and conversations come out in
+    the order their first row did, so two runs over the same file produce the
+    same result.
     """
     groups = _collect(rows)
     row_count = sum(len(entry.rows) for entry in groups)
     undated = sum(1 for entry in groups for row in entry.rows if row.sent_at is None)
-    resolved = owner if isinstance(owner, Owner) else _owner_from(groups, owner)
+    resolved = (
+        owner if isinstance(owner, Owner) else _owner_from(groups, owner, profile_name=profile_name)
+    )
     if resolved is None:
         log.warning(
             "archive: owner not identified, %d conversations left unattributed", len(groups)
@@ -217,9 +228,15 @@ def _collect(rows: Iterable[MessageRow]) -> list[_Group]:
         if row.sender_public_id is not None:
             entry.slugs.add(row.sender_public_id)
         entry.slugs.update(row.recipient_public_ids)
-        # A row addressed to several people is a group thread even when the
-        # export gave a profile URL for only one of them, or for none.
-        if len(row.recipient_public_ids) > 1 or len(row.recipients) > 1:
+        # A row addressed to several people is a group thread. Count the URLs,
+        # not the names: ``TO`` and ``RECIPIENT PROFILE URLS`` are parallel
+        # lists split on commas, and display names carry commas all the time
+        # ("Firstname Lastname, PhD"), so more names than URLs means a comma
+        # inside one name, not another recipient. Names decide only when the
+        # export gave no URL at all, which is the one case they are all there is.
+        if len(row.recipient_public_ids) > 1 or (
+            not row.recipient_urls and len(row.recipients) > 1
+        ):
             entry.addressed_to_several = True
     return list(groups.values())
 
