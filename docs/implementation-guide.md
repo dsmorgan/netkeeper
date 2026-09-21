@@ -391,6 +391,11 @@ Goal: an import-linter test that fails if anything under `linkedin/` imports `mo
 Depends on: P2-06.
 Done when: the test exists and passes; `linkedin/apply.py` is the only module that touches a session.
 
+**P2-15 Prior campaign history import** · lane core · M · `safety`
+Goal: import the outreach history from the previous mailing tool so netkeeper knows who was already contacted before it sends anything. The export is one `.xlsx` workbook, one tab per campaign, laid out as a report rather than a table: a campaign summary row, then side-by-side blocks of openers, clickers, and bounced addresses at column offsets that differ between tabs. Match recipients through `crm/identity.py` on email address, write one `email_out` interaction per recipient per campaign dated from the campaign start so `last_contacted_at` becomes correct, mark bounced addresses so the phase 3 enrollment guard in F18 has something to read, and decide where opens and clicks live alongside the phase 3 campaign tables rather than ahead of them. The source records delivery only: replies, positive responses, and unsubscribes are not in it and come from the phase 3 Gmail reply detection run backwards over the historical threads. Do not infer a decline from a non-open.
+Depends on: P1-03, P1-04, P1-10. Decide the opens and clicks shape with P3-05.
+Done when: the import is idempotent, unmatched addresses are reported rather than dropped, bounces show on the contact, and the fixtures are hand-built and sanitized. Real exports stay in `~/code/netkeeper-private`, never in the repo.
+
 **CP3** · checkpoint · after P2-01 to P2-05, P2-11.
 **CP4** · checkpoint · closes phase 2, after one week of scheduled runs.
 

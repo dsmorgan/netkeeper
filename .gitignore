@@ -36,3 +36,15 @@ frontend/.tanstack/
 .idea/
 .vscode/
 *.swp
+
+# Personal data used for testing. Real exports live in ~/code/netkeeper-private,
+# outside every worktree; these patterns are a second line of defense in case one
+# lands here anyway. Test fixtures are sanitized and committed under tests/fixtures.
+*.xlsx
+*.zip
+Basic_LinkedInDataExport*
+Connections.csv
+Contacts.csv
+messages.csv
+Invitations.csv
+*Campaign Statistics*
