@@ -156,3 +156,10 @@ def test_the_digest_separates_different_selections() -> None:
 
 def test_generated_signers_do_not_share_a_key() -> None:
     assert Signer.generated().key != Signer.generated().key
+
+
+def test_the_key_never_reaches_a_repr() -> None:
+    """The signer sits on ``app.state``, which turns up in tracebacks (CLAUDE.md)."""
+    signer = Signer(key=b"sekrit-signing-key-not-for-logs!")
+    assert "sekrit" not in repr(signer)
+    assert "Signer" in repr(signer) and "ttl" in repr(signer)

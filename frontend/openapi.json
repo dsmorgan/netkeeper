@@ -314,7 +314,7 @@
       },
       "BulkCountIn": {
         "additionalProperties": false,
-        "description": "Ask how many contacts an action would touch, and for the token that confirms it.",
+        "description": "Ask how many contacts an action would touch, and for the token that confirms it.\n\nIt carries the ``value`` and ``reason`` the action would write, not only the\nselection, because those are part of what the person confirms: \"mark 214\npeople do-not-contact\" and \"clear do-not-contact on 214 people\" are two\ndifferent sentences at the same count.",
         "properties": {
           "action": {
             "enum": [
@@ -326,8 +326,33 @@
             "title": "Action",
             "type": "string"
           },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
           "selection": {
             "$ref": "#/components/schemas/BulkSelection"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContactMet"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
           }
         },
         "required": [
@@ -369,7 +394,7 @@
       },
       "BulkIn": {
         "additionalProperties": false,
-        "description": "A bulk action and the confirmation token that carries the count (spec 10.1).\n\n``token`` comes from ``POST /contacts/bulk/count``. The server re-counts the\nselection inside the writer transaction and refuses with ``409`` when the\ncount has moved, so an action never lands on rows the person did not see.\n``value`` is the ``met`` value for ``set_met`` and a boolean for\n``set_do_not_contact`` (with ``reason``); ``archive`` and ``unarchive`` take\nnone.",
+        "description": "A bulk action and the confirmation token that carries the count (spec 10.1).\n\n``token`` comes from ``POST /contacts/bulk/count`` and must have been issued\nfor this same selection, action, value and reason. The server re-counts the\nselection inside the writer transaction and refuses with ``409`` when the\ncount has moved, so an action never lands on rows the person did not see.\n``value`` is the ``met`` value for ``set_met`` and a boolean for\n``set_do_not_contact`` (with ``reason``); ``archive`` and ``unarchive`` take\nnone.",
         "properties": {
           "action": {
             "enum": [
@@ -5237,7 +5262,7 @@
     },
     "/api/v1/contacts/{contact_id}/merge": {
       "post": {
-        "description": "Fold `loser_id` into this contact (spec 8.2); the loser resolves here from then on.",
+        "description": "Fold `loser_id` into this contact (spec 8.2); the loser resolves here from then on.\n\nMerging into a merged-away id answers `409 merged` like every other write to\none, so the client retries against the survivor it names.",
         "operationId": "merge_contacts",
         "parameters": [
           {

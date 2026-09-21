@@ -602,38 +602,12 @@ class BulkSelection(BaseModel):
         return self
 
 
-class BulkCountIn(BaseModel):
-    """Ask how many contacts an action would touch, and for the token that confirms it."""
+class BulkConfirmable(BaseModel):
+    """Everything a confirmation token binds: the selection and exactly what would be written.
 
-    model_config = ConfigDict(extra="forbid")
-
-    selection: BulkSelection
-    action: BulkAction
-
-
-class BulkCountOut(BaseModel):
-    """The count to put in the confirmation dialog, and the token that makes it binding.
-
-    Send ``token`` back with the action. It is bound to this user, this action,
-    this selection, and this count, and it expires at ``expires_at`` (five
-    minutes). ``describe`` reads the selection back in words for the dialog.
-    """
-
-    count: int
-    describe: str
-    token: str
-    expires_at: datetime
-
-
-class BulkIn(BaseModel):
-    """A bulk action and the confirmation token that carries the count (spec 10.1).
-
-    ``token`` comes from ``POST /contacts/bulk/count``. The server re-counts the
-    selection inside the writer transaction and refuses with ``409`` when the
-    count has moved, so an action never lands on rows the person did not see.
-    ``value`` is the ``met`` value for ``set_met`` and a boolean for
-    ``set_do_not_contact`` (with ``reason``); ``archive`` and ``unarchive`` take
-    none.
+    ``BulkCountIn`` and ``BulkIn`` are this plus nothing and this plus the
+    token, so the two cannot drift: a field the count does not see is a field
+    the action could change after the person confirmed it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -642,7 +616,6 @@ class BulkIn(BaseModel):
     action: BulkAction
     value: ContactMet | bool | None = None
     reason: str | None = None
-    token: str = Field(min_length=1, description="The count confirmation token.")
 
     @model_validator(mode="after")
     def _value_fits_action(self) -> Self:
@@ -659,6 +632,45 @@ class BulkIn(BaseModel):
         if self.reason is not None and self.action != "set_do_not_contact":
             raise ValueError("reason goes with set_do_not_contact only")
         return self
+
+
+class BulkCountIn(BulkConfirmable):
+    """Ask how many contacts an action would touch, and for the token that confirms it.
+
+    It carries the ``value`` and ``reason`` the action would write, not only the
+    selection, because those are part of what the person confirms: "mark 214
+    people do-not-contact" and "clear do-not-contact on 214 people" are two
+    different sentences at the same count.
+    """
+
+
+class BulkCountOut(BaseModel):
+    """The count to put in the confirmation dialog, and the token that makes it binding.
+
+    Send ``token`` back with the action. It is bound to this user, this action,
+    this selection, and this count, and it expires at ``expires_at`` (five
+    minutes). ``describe`` reads the selection back in words for the dialog.
+    """
+
+    count: int
+    describe: str
+    token: str
+    expires_at: datetime
+
+
+class BulkIn(BulkConfirmable):
+    """A bulk action and the confirmation token that carries the count (spec 10.1).
+
+    ``token`` comes from ``POST /contacts/bulk/count`` and must have been issued
+    for this same selection, action, value and reason. The server re-counts the
+    selection inside the writer transaction and refuses with ``409`` when the
+    count has moved, so an action never lands on rows the person did not see.
+    ``value`` is the ``met`` value for ``set_met`` and a boolean for
+    ``set_do_not_contact`` (with ``reason``); ``archive`` and ``unarchive`` take
+    none.
+    """
+
+    token: str = Field(min_length=1, description="The count confirmation token.")
 
 
 class BulkOut(BaseModel):

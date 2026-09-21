@@ -386,6 +386,9 @@ export interface paths {
         /**
          * Merge Contacts
          * @description Fold `loser_id` into this contact (spec 8.2); the loser resolves here from then on.
+         *
+         *     Merging into a merged-away id answers `409 merged` like every other write to
+         *     one, so the client retries against the survivor it names.
          */
         post: operations["merge_contacts"];
         delete?: never;
@@ -826,6 +829,11 @@ export interface components {
         /**
          * BulkCountIn
          * @description Ask how many contacts an action would touch, and for the token that confirms it.
+         *
+         *     It carries the ``value`` and ``reason`` the action would write, not only the
+         *     selection, because those are part of what the person confirms: "mark 214
+         *     people do-not-contact" and "clear do-not-contact on 214 people" are two
+         *     different sentences at the same count.
          */
         BulkCountIn: {
             /**
@@ -833,7 +841,11 @@ export interface components {
              * @enum {string}
              */
             action: "set_met" | "archive" | "unarchive" | "set_do_not_contact";
+            /** Reason */
+            reason?: string | null;
             selection: components["schemas"]["BulkSelection"];
+            /** Value */
+            value?: components["schemas"]["ContactMet"] | boolean | null;
         };
         /**
          * BulkCountOut
@@ -860,7 +872,8 @@ export interface components {
          * BulkIn
          * @description A bulk action and the confirmation token that carries the count (spec 10.1).
          *
-         *     ``token`` comes from ``POST /contacts/bulk/count``. The server re-counts the
+         *     ``token`` comes from ``POST /contacts/bulk/count`` and must have been issued
+         *     for this same selection, action, value and reason. The server re-counts the
          *     selection inside the writer transaction and refuses with ``409`` when the
          *     count has moved, so an action never lands on rows the person did not see.
          *     ``value`` is the ``met`` value for ``set_met`` and a boolean for

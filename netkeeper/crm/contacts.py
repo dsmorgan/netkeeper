@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Final, Literal, cast
 
-from sqlalchemy import CursorResult, Select, Update
+from sqlalchemy import CursorResult, Select, Update, func
 from sqlalchemy.orm import Session, selectinload
 
 from netkeeper.crm.filters import (
@@ -357,13 +357,19 @@ def unarchive_contact(session: Session, user: User, contact_id: int) -> Contact:
 def merge_contacts(session: Session, user: User, survivor_id: int, loser_id: int) -> Contact:
     """Fold ``loser_id`` into ``survivor_id`` (:func:`netkeeper.crm.identity.merge`).
 
-    :class:`NotFound` when either id is not ``user``'s; :class:`Conflict` for
-    the same id twice or a loser already merged elsewhere.
+    The survivor must be live. :func:`merge` would happily resolve a merged-away
+    survivor id to its own survivor and fold the loser into that, but the caller
+    asked to merge into a row nothing will show again, so they get the same
+    :class:`Merged` every other write to one gets and can retry against the id
+    it names. A loser already merged away is the other case and stays a
+    :class:`Conflict`: it names where the loser went, which is a different
+    sentence. :class:`NotFound` when either id is not ``user``'s;
+    :class:`Conflict` for the same id twice.
     """
     _require_writer(session)
-    for contact_id in (survivor_id, loser_id):
-        if get_scoped(session, user, Contact, contact_id) is None:
-            raise NotFound("no such contact")
+    live_contact(session, user, survivor_id)
+    if get_scoped(session, user, Contact, loser_id) is None:
+        raise NotFound("no such contact")
     try:
         return merge(session, user, survivor_id, loser_id)
     except ValueError as exc:
@@ -432,11 +438,16 @@ def bulk_update(
     not a writer.
     """
     _require_writer(session)
-    values = _bulk_values(action, value, reason, utcnow() if now is None else now)
-    actual = count_selection(session, user, selection, now=now)
+    # One instant for the count and for the write. A relative window
+    # ("last_contacted within 30 days") compiles its own clock every time
+    # compile_where() runs, so two resolutions could count one set of rows and
+    # update another -- the drift the confirmation token exists to prevent.
+    moment = utcnow() if now is None else now
+    values = _bulk_values(action, value, reason, moment)
+    actual = count_selection(session, user, selection, now=moment)
     if actual != expected_count:
         raise CountMismatch(expected_count, actual)
-    statement = _selection_update(user, selection, now).values(**values)
+    statement = _selection_update(user, selection, moment).values(**values)
     # Session.execute() is typed as the plain Result; DML gets a CursorResult.
     result = cast(CursorResult[Any], session.execute(statement))
     session.expire_all()
@@ -454,7 +465,13 @@ def _bulk_values(
                 raise ValueError("set_met needs a ContactMet value")
             return {"met": value, "triaged_at": now}
         case "archive":
-            return {"archived_at": now}
+            # Keep the stamp a row already carries, as archive_contact() does:
+            # archived_at records when the contact left the table, and a row
+            # already archived did not leave it again. An ids selection, or a
+            # filter with include_archived, reaches such rows. COALESCE rather
+            # than narrowing the WHERE, so the rows written still match the
+            # count the person confirmed.
+            return {"archived_at": func.coalesce(Contact.archived_at, now)}
         case "unarchive":
             return {"archived_at": None}
         case "set_do_not_contact":
