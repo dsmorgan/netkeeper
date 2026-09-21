@@ -482,7 +482,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List Contact Tags
+         * @description The tags on a contact, by name, each with the source that put it there.
+         */
+        get: operations["list_contact_tags"];
         put?: never;
         /**
          * Tag Contact
@@ -4569,6 +4573,44 @@ export interface operations {
             };
             /** @description Nothing synced to revert to, or the contact was merged */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_contact_tags: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactTagOut"][];
+                };
+            };
+            /** @description No such tag, rule, or contact for this user */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

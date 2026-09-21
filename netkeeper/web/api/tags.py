@@ -91,6 +91,20 @@ def delete_tag(tag_id: int, user: CurrentUser, session: SessionDep) -> None:
         service.delete_tag(session, user, tag_id)
 
 
+@router.get(
+    "/contacts/{contact_id}/tags",
+    operation_id="list_contact_tags",
+    responses=NOT_FOUND,
+)
+def list_contact_tags(
+    contact_id: int, user: CurrentUser, session: SessionDep
+) -> list[ContactTagOut]:
+    """The tags on a contact, by name, each with the source that put it there."""
+    with translate_errors():
+        rows = service.contact_tags(session, user, contact_id)
+    return [ContactTagOut.model_validate(row) for row in rows]
+
+
 @router.post(
     "/contacts/{contact_id}/tags",
     operation_id="tag_contact",

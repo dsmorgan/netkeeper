@@ -135,6 +135,28 @@ async def test_tag_and_untag_a_contact(client: httpx.AsyncClient, contact_ids: l
     assert (await _tags_by_name(client))["vp"]["contact_count"] == 0
 
 
+async def test_listing_a_contacts_tags(client: httpx.AsyncClient, contact_ids: list[int]) -> None:
+    """The detail screen reads a contact's tags here; a row carries none (spec 10.1)."""
+    tags = await _tags_by_name(client)
+    contact_id = contact_ids[2]
+    url = f"/api/v1/contacts/{contact_id}/tags"
+    assert (await client.get(url)).json() == []
+
+    for name in ("vp", "founder"):
+        assert (
+            await client.post(url, json={"tag_id": tags[name]["id"]}, headers=CSRF)
+        ).status_code == 201
+    listed = await client.get(url)
+    assert listed.status_code == 200, listed.text
+    by_id = {tags[name]["id"]: name for name in ("vp", "founder")}
+    assert [by_id[row["tag_id"]] for row in listed.json()] == ["founder", "vp"]
+    assert {row["source"] for row in listed.json()} == {"manual"}
+
+    assert (await client.delete(f"{url}/{tags['vp']['id']}", headers=CSRF)).status_code == 204
+    assert [row["tag_id"] for row in (await client.get(url)).json()] == [tags["founder"]["id"]]
+    assert (await client.get("/api/v1/contacts/999999/tags")).status_code == 404
+
+
 async def test_rules_crud_reorder_run_and_preview(
     client: httpx.AsyncClient, contact_ids: list[int]
 ) -> None:
