@@ -1,0 +1,30 @@
+import { screen } from '@testing-library/react'
+import { describe, expect, it } from 'vitest'
+
+import { jsonResponse, mockFetch } from './fetch'
+import { renderApp } from './render'
+
+// Moved out of dashboard.test.tsx when P1-24 gave the dashboard its own setup
+// path: the raw /me payload was only ever settings' own thing (spec 14.3),
+// and the dashboard no longer queries /me at all.
+describe('settings', () => {
+  it('shows the raw /me payload', async () => {
+    mockFetch((request) => {
+      const { pathname } = new URL(request.url)
+      if (pathname === '/api/v1/me') {
+        return jsonResponse({
+          id: 7,
+          kind: 'local',
+          display_name: null,
+          email: null,
+          timezone: 'America/New_York',
+        })
+      }
+      return jsonResponse({ status: 'ok', version: '0.0.1-test' })
+    })
+
+    await renderApp('/settings')
+    const pre = await screen.findByText(/"timezone": "America\/New_York"/)
+    expect(pre.tagName).toBe('PRE')
+  })
+})

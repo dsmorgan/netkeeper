@@ -709,7 +709,7 @@ Cost controls: a per-day call cap, batch size limits, and a token estimate shown
 
 | Route | Purpose |
 |---|---|
-| `/` | Dashboard: next fires, budgets, heat, mailbox and browser health, replies this week, changed-jobs prompts |
+| `/` | Dashboard: the setup path (P1-24) |
 | `/contacts`, `/contacts/:id` | Table with saved views; detail with fields, tags, timeline, snapshots, messages, LLM brief |
 | `/triage` | Step 6 workflow |
 | `/lists` | Static and smart lists, filter builder |
@@ -719,6 +719,8 @@ Cost controls: a per-day call cap, batch size limits, and a token estimate shown
 | `/campaigns`, `/campaigns/:id` | Builder, review gate, progress per step, replies, waiting-for-you prefill list |
 | `/inbox` | Detected replies across campaigns, with mark-handled and add-note |
 | `/settings` | Gmail auth, pacing, budgets, send windows, LLM, `[me]` merge fields, backups, posture summary |
+
+The dashboard is the setup path, not a status board: import your data, review what was tagged automatically, triage, build a list, export. Each step shows a real count and one of four states — done, in progress, not started, or, where nothing tracks it yet, an honest "not tracked" rather than a guess — and the control that advances it, so someone who has just installed netkeeper and imported nothing is told exactly what to do first. `GET /contacts/stats` (10.1) drives the import, review, and triage steps; the list step reads `GET /lists`; the open-imports query on `GET /imports?status=draft` (10.5, #90) tells the import step whether a draft is mid-flight rather than letting a finished-looking count hide unfinished work. Nothing tracks whether a person has looked at an auto-tag or run an export, so those two steps never claim "done" — only the count. The steps are a plain array a later phase extends (phase 2 adds "connect LinkedIn", phase 3 "connect Gmail") rather than a page a later phase rewrites.
 
 ## 15. Configuration, secrets, and data locations
 
