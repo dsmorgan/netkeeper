@@ -5,18 +5,53 @@ Four presets:
 - ``nine-column`` (and its ``headerless`` CSV variant): the eight columns of
   Appendix A, in that exact order, headed by the labels the reference
   workflow's mailing tool expects on import. This is the preset whose CSV
-  form must round-trip through that tool's importer unchanged (P1-11's "done
-  when"; the netkeeper-side importer for it is P1-04, issue #13).
+  form must round-trip through ``netkeeper.crm.importer``'s ``nine-column``
+  preset unchanged (P1-11's "done when"; see ``tests/test_exports.py``, whose
+  round-trip test drives the real importer, not a stand-in for it).
+
+  Two things it drops on the way out rather than produce a file that silently
+  fails to come back:
+
+  * A contact with nothing identifying in any of the eight columns — no
+    LinkedIn URL, no email, no name (``preferred_name`` *and* ``last_name``
+    both empty), no phone — is not written as a row at all. The importer's
+    own ``IDENTIFYING_FIELDS`` rule refuses exactly such a row ("the row
+    identifies nobody") and skips it, so exporting one would produce a file
+    that silently loses a row on its own round trip; better to never claim it
+    round-tripped in the first place. Company, title, and location alone
+    never make a contact "identified" here, matching the importer.
+  * A phone number with no digits at all (someone typed "ask reception" into
+    the field) is exported as no phone rather than as that text, because the
+    importer's ``IncomingPhone`` refuses a raw value with no digits and drops
+    the cell. This one is judgment, not derived from a fixed rule: a phone
+    column holding un-dialable text is already not doing its job, so leaving
+    it out costs nothing a mail tool would have used anyway.
+
+  What it does *not* try to make symmetric: Appendix A's "First Name" is
+  ``preferred_name`` on the way out, but ``importer.PRESETS["nine-column"]``
+  reads "First Name" back into ``first_name`` on the way in, not
+  ``preferred_name``. A contact with ``first_name="Robert",
+  preferred_name="Bob"`` exports "Bob", reimports with ``first_name="Bob"``
+  (and ``preferred_name`` defaulting to it, spec 8.1), and exports "Bob"
+  again — **the file round-trips byte for byte; the contact behind it does
+  not** keep both names. That is correct, not a bug: the file has one name
+  column, a mail merge wants the name you actually address someone by, and a
+  contact carrying two names cannot fit through a format with one column
+  without a decision being made somewhere. Do not "fix" this by switching the
+  column to ``first_name`` — that would break the mail-merge case the preset
+  exists for instead.
 - ``linkedin-archive``: the columns of LinkedIn's own ``Connections.csv``
   (``First Name, Last Name, URL, Email Address, Company, Position, Connected
-  On``), so a re-import through the archive importer (also P1-04) sees values
-  shaped the way LinkedIn itself reports them. ``First Name``/``Last Name``
-  here are the LinkedIn-sourced ``contacts.first_name``/``last_name``, not the
-  triaged ``preferred_name`` nine-column uses, because this preset's job is to
-  look like LinkedIn's own file. The three-line "Notes:" preamble LinkedIn
-  puts above its own header carries no column of its own, so it is not
-  reproduced; an importer that wants it should look for the header row rather
-  than assume a fixed line offset.
+  On``), so a re-import through the archive importer (also
+  ``netkeeper.crm.importer``) sees values shaped the way LinkedIn itself
+  reports them. ``First Name``/``Last Name`` here are the LinkedIn-sourced
+  ``contacts.first_name``/``last_name``, not the triaged ``preferred_name``
+  nine-column uses, because this preset's job is to look like LinkedIn's own
+  file. The three-line "Notes:" preamble LinkedIn puts above its own header
+  carries no column of its own, so it is not reproduced; an importer that
+  wants it should look for the header row rather than assume a fixed line
+  offset. Like nine-column, a contact identifying nobody in these columns is
+  not written as a row.
 - ``full``: every user-facing field, including the child tables (emails,
   phones, links, positions, tags) — but not the database ids, foreign keys,
   and sync-internal bookkeeping (``field_sources``, ``synced_values``,
@@ -25,6 +60,10 @@ Four presets:
   tool's implementation into a file sent elsewhere.
 - ``campaign-audience``: the campaign engine's merge fields (spec 11.1) plus
   the recipient email, so the file is directly usable as a mail-merge source.
+  A contact with ``do_not_contact`` set is never in it: producing a mail-merge
+  file is a send path by proxy (spec F15's "every send path" includes the
+  paths outside this tool, once the file leaves it), and the whole point of
+  the preset is that someone pastes it straight into a mailing tool.
 
 Every export goes through :func:`netkeeper.crm.filters.compile_filter` and
 :func:`netkeeper.crm.filters.apply_sort` — the same compiler the contacts
@@ -45,9 +84,11 @@ from datetime import UTC, date, datetime, tzinfo
 from typing import Any, Final, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from sqlalchemy import ColumnElement
 from sqlalchemy.orm import Session, selectinload
 
 from netkeeper.crm.filters import FilterTree, SortKey, apply_sort, compile_filter, paginate
+from netkeeper.crm.identity import phone_key
 from netkeeper.models import Contact, User
 
 ExportFormat = Literal["csv", "json", "vcard"]
@@ -72,7 +113,13 @@ def filename_for(preset: ExportPreset, output_format: ExportFormat) -> str:
 
 
 def _iter_contacts(
-    session: Session, user: User, tree: FilterTree, sort: Sequence[SortKey], *, now: datetime
+    session: Session,
+    user: User,
+    tree: FilterTree,
+    sort: Sequence[SortKey],
+    *,
+    now: datetime,
+    extra_where: ColumnElement[bool] | None = None,
 ) -> Iterator[Contact]:
     """Every contact ``tree`` selects, ordered by ``sort``, fetched in bounded batches.
 
@@ -82,8 +129,16 @@ def _iter_contacts(
     cursor), so eager-loading the child collections below is safe on every
     backend: nothing here shares a cursor with a lazy or ``selectin`` load the
     way a straight ``yield_per`` stream would.
+
+    ``extra_where`` ANDs onto the compiled filter before sorting and paging —
+    ``campaign-audience`` uses it to hold out ``do_not_contact`` rows regardless
+    of what the caller's own filter says, so that preset can never produce a
+    mail-merge file containing someone who asked to be left alone.
     """
-    base = apply_sort(compile_filter(user, tree, now=now), sort).options(
+    statement = compile_filter(user, tree, now=now)
+    if extra_where is not None:
+        statement = statement.where(extra_where)
+    base = apply_sort(statement, sort).options(
         selectinload(Contact.emails),
         selectinload(Contact.phones),
         selectinload(Contact.links),
@@ -116,7 +171,18 @@ def _primary_email(contact: Contact) -> str | None:
 
 
 def _primary_phone(contact: Contact) -> str | None:
-    return contact.phones[0].raw if contact.phones else None
+    """The primary phone's raw text, or None if there isn't one or it has no digits to dial.
+
+    ``netkeeper.crm.identity.IncomingPhone`` refuses a raw value with no digits
+    (free text like "ask reception" typed into the field) and the importer
+    drops that cell; exporting it anyway would produce a nine-column file that
+    silently loses the number on its own round trip, so it is treated as no
+    phone here instead.
+    """
+    if not contact.phones:
+        return None
+    raw = contact.phones[0].raw
+    return raw if phone_key(raw) else None
 
 
 def _iso_date(value: date | None) -> str | None:
@@ -221,6 +287,27 @@ _COLUMN_PRESETS: Final[dict[ExportPreset, tuple[_Column, ...] | None]] = {
     "campaign-audience": CAMPAIGN_AUDIENCE,
     "full": None,  # full has its own row shape (nested children); see below
 }
+
+# nine-column and linkedin-archive round-trip through netkeeper.crm.importer, whose
+# IDENTIFYING_FIELDS rule refuses a row with none of these; company, title, and
+# location alone never identify anyone there either, so they are not roles here.
+_IDENTIFYING_ROLES: Final[frozenset[str]] = frozenset({"given", "family", "email", "phone", "url"})
+_REIMPORTABLE_PRESETS: Final[frozenset[ExportPreset]] = frozenset(
+    {"nine-column", "linkedin-archive"}
+)
+
+
+def _is_identified(columns: tuple[_Column, ...], contact: Contact, today: date) -> bool:
+    """Whether any identifying column of ``columns`` has a value for ``contact``.
+
+    A row with nothing identifying in it is not importable (the importer's
+    "the row identifies nobody" refusal), so :func:`export_stream` drops it
+    before it is ever rendered for a re-importable preset, rather than write a
+    file that would silently lose the row on its own round trip.
+    """
+    return any(
+        column.get(contact, today) for column in columns if column.role in _IDENTIFYING_ROLES
+    )
 
 
 class _Echo:
@@ -498,7 +585,8 @@ def export_stream(
     call so a long export is internally consistent.
     """
     today = _local_today(user, now)
-    contacts = _iter_contacts(session, user, tree, sort, now=now)
+    extra_where = Contact.do_not_contact.is_(False) if preset == "campaign-audience" else None
+    contacts = _iter_contacts(session, user, tree, sort, now=now, extra_where=extra_where)
     columns = _COLUMN_PRESETS[preset]
     if columns is None:  # "full"
         if output_format == "csv":
@@ -509,6 +597,8 @@ def export_stream(
             for contact in contacts:
                 yield _full_vcard(contact)
         return
+    if preset in _REIMPORTABLE_PRESETS:
+        contacts = (c for c in contacts if _is_identified(columns, c, today))
     if output_format == "csv":
         yield from _columns_csv(columns, contacts, headerless=headerless, today=today)
     elif output_format == "json":

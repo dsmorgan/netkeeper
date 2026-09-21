@@ -17,7 +17,9 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from isolation.harness import FixedUser
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import QueuePool
 
 from netkeeper.db import session_scope
 from netkeeper.models import User, UserKind
@@ -34,6 +36,30 @@ def _local_user(session: Session) -> User:
     user = session.get(User, LOCAL_USER_ID)
     assert user is not None
     return user
+
+
+async def test_export_does_not_leak_a_pooled_connection(
+    client: httpx.AsyncClient, running_app: FastAPI, bare_engine: Engine
+) -> None:
+    """``StreamingSessionDep`` must check its connection back in once the body is sent.
+
+    Regression: swapping ``StreamingSessionDep`` for the ordinary per-request
+    ``SessionDep`` left the whole suite green (nothing else exercises the pool),
+    but every streamed export leaked one checked-out connection forever —
+    ``Session.close()`` before the body starts sending does not stop the
+    generator from opening a fresh transaction nobody is left to close. Pool
+    size is 5 by default, so this would wedge the app after five exports.
+    """
+    pool = bare_engine.pool
+    assert isinstance(pool, QueuePool)  # SQLite's default pool for a file-based engine
+    with session_scope(_factory(running_app), write=True) as session:
+        factories.make_contact(session, _local_user(session))
+    before = pool.checkedout()
+    for _ in range(3):
+        response = await client.get("/api/v1/exports")
+        assert response.status_code == 200
+        assert response.json()  # fully drain the streamed body
+    assert pool.checkedout() == before
 
 
 async def test_get_needs_no_csrf_header(client: httpx.AsyncClient, running_app: FastAPI) -> None:

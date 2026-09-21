@@ -93,43 +93,43 @@ def writes(request: Request) -> bool:
     return not getattr(endpoint, READ_ONLY_ATTR, False)
 
 
-def get_session(request: Request) -> Iterator[Session]:
-    """One session per request: commits when the handler returns, rolls back on error.
+def _session(request: Request) -> Iterator[Session]:
+    """One session for the request: a writer unless :func:`writes` says otherwise.
 
-    A request whose method may write (anything but the safe methods, unless the
-    handler is :func:`read_only`) gets a writer session
-    (:func:`netkeeper.db.mark_for_write`); every other request's session stays a
-    reader and never waits for the SQLite write lock.
+    Two dependencies share this body, :data:`SessionDep` and
+    :data:`StreamingSessionDep`, because write-ness (:func:`writes`) and how long
+    the session lives (``scope=``) are independent: most handlers return their
+    response in one step, so their session can end the moment the handler does
+    (``scope="function"``) — before the response is sent back to the client.
 
-    Declared with ``scope="function"`` below so the session closes before the
-    response is sent. A streaming response (the SSE stream) would otherwise hold a
-    SQLite read transaction open for as long as the client stays connected.
+    A handler that returns a ``StreamingResponse`` (an export, P1-11) cannot use
+    that: it reads from the database *while* the response is sending, as the
+    generator is pulled. ``Session.close()`` does not invalidate the session —
+    it does not raise on the next statement — it silently opens a fresh
+    transaction that this dependency never gets a chance to close, one per
+    streaming request, forever; the pool's connections fill up with sessions
+    nobody is coming back for until the app wedges. ``scope="request"``
+    (:data:`StreamingSessionDep`) keeps the one session that started reading
+    open until the response has finished sending, so it is also the one that
+    finishes reading, and closes exactly once.
+
+    That lifetime has a second benefit: it makes an offset-paginated stream
+    snapshot-consistent. SQLite (and PostgreSQL, at the default isolation) reads
+    a consistent view for the life of a transaction, so a row inserted or
+    deleted by someone else after the export's transaction began is invisible
+    to every page the export fetches — no page skips a row that moved past its
+    offset or repeats one that moved into it.
+
+    Neither dependency is ever a writer for a safe method or a
+    :func:`read_only`-marked one; an export in particular is always a read.
     """
     factory: sessionmaker[Session] = request.app.state.session_factory
     with session_scope(factory, write=writes(request)) as session:
         yield session
 
 
-SessionDep = Annotated[Session, Depends(get_session, scope="function")]
-
-
-def get_reader_session(request: Request) -> Iterator[Session]:
-    """A read-only session kept open for the whole response, including while it streams.
-
-    :func:`get_session` closes before the response is sent (``scope="function"``),
-    which is wrong for an endpoint that streams its body from the database as it
-    goes (an export, P1-11): the generator a ``StreamingResponse`` iterates would
-    be reading through an already-closed session. This dependency instead uses
-    ``scope="request"``, so it stays open until the response has finished sending.
-    It is never marked for write (:func:`netkeeper.db.session_scope`'s default):
-    a read has no business taking the SQLite write lock.
-    """
-    factory: sessionmaker[Session] = request.app.state.session_factory
-    with session_scope(factory) as session:
-        yield session
-
-
-ReaderSessionDep = Annotated[Session, Depends(get_reader_session, scope="request")]
+SessionDep = Annotated[Session, Depends(_session, scope="function")]
+StreamingSessionDep = Annotated[Session, Depends(_session, scope="request")]
 
 
 def current_user(request: Request, session: SessionDep) -> User:

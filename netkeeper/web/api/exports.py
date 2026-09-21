@@ -1,10 +1,12 @@
 """``/exports``: CSV, JSON, and vCard downloads of the current filter (spec 10.6).
 
-An export is a read, so it depends on :data:`netkeeper.web.deps.ReaderSessionDep`
-rather than the ordinary per-request session, which closes before a streaming
-response starts sending (see that dependency's docstring): the whole point of
-streaming here is to write rows to the client as the query yields them, without
-materializing the file or the result set in memory (:mod:`netkeeper.crm.exports`).
+An export streams from the database as the response sends, so it depends on
+:data:`netkeeper.web.deps.StreamingSessionDep` rather than the ordinary
+per-request :data:`~netkeeper.web.deps.SessionDep` (see that dependency's
+docstring for why: the short version is a leaked connection per request, not a
+closed-session error). The whole point of streaming here is to write rows to
+the client as the query yields them, without materializing the file or the
+result set in memory (:mod:`netkeeper.crm.exports`). It is always a read.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from netkeeper.crm.exports import (
     filename_for,
 )
 from netkeeper.crm.filters import FilterError, FilterTree, SortKey, parse_filter, parse_sort
-from netkeeper.web.deps import CurrentUser, ReaderSessionDep
+from netkeeper.web.deps import CurrentUser, StreamingSessionDep
 
 router = APIRouter(tags=["exports"])
 
@@ -57,7 +59,7 @@ FormatParam = Annotated[ExportFormat, Query(alias="format")]
 )
 def export_contacts(
     user: CurrentUser,
-    session: ReaderSessionDep,
+    session: StreamingSessionDep,
     preset: ExportPreset = "full",
     output_format: FormatParam = "json",
     headerless: bool = False,
