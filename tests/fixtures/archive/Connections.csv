@@ -1,0 +1,14 @@
+Notes:
+"This file opens with a preamble the way a real export does: a marker line, one long quoted paragraph, and a blank line before the header. The paragraph exists because most rows carry no email address; LinkedIn shows one only for people who chose to share it with their connections. Its wording and its length have changed between exports and older exports have no preamble at all, so the reader looks for the header rather than counting lines."
+
+First Name,Last Name,URL,Email Address,Company,Position,Connected On
+Ada,Fictional,https://www.linkedin.com/in/ada-fictional,Ada@Example.test,Fictional Works,Staff Engineer,12 Mar 2019
+"Bo, Jr.",Placeholder,https://www.linkedin.com/in/Bo-Placeholder,,Placeholder Ltd,Operations Manager,05 Jan 2021
+Cyd,Invented,https://www.linkedin.com/in/cyd-invented,,Invented Inc,Designer,
+Dee,Notional,https://www.linkedin.com/in/dee-notional,,Notional Group,Analyst,09 Jul 17
+Ada,Fictional,https://www.linkedin.com/in/ada-fictional,ada@example.test,Fictional Works,Staff Engineer,12 Mar 2019
+Eli,Imaginary,https://www.linkedin.com/in/eli-imaginary,,,,30 Nov 2022
+
+Fen,Pretend,,,Pretend Co,Advisor,32 Frob 2020
+,,,,Ghost Co,Ghost Role,03 Feb 2020
+Gus,Nobody,https://www.linkedin.com/in/gus-nobody,,Nobody LLC,Intern,01 Apr 2018

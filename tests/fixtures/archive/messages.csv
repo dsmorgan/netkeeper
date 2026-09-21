@@ -1,0 +1,13 @@
+"CONVERSATION ID","CONVERSATION TITLE","FROM","SENDER PROFILE URL","TO","RECIPIENT PROFILE URLS","DATE","SUBJECT","CONTENT","FOLDER","ATTACHMENTS"
+"conv-aa","","Nettie Keeperton","https://www.linkedin.com/in/nettie-keeperton","Ada Fictional","https://www.linkedin.com/in/ada-fictional","2023-05-01 14:22:10 UTC","","Made-up opener so the fixture has a body to trim.","INBOX",""
+"conv-aa","","Ada Fictional","","Nettie Keeperton","","2023-05-02 09:00:00 UTC","","Reply with no profile URL on the row at all.
+Second line, so the body spans two.","INBOX",""
+"conv-aa","","Nettie Keeperton","","Ada Fictional","","2023-05-03 09:30:00 UTC","","Third row, also unlabelled; only the display name says who sent it.","ARCHIVE",""
+"conv-bb","","Nettie Keeperton","https://www.linkedin.com/in/nettie-keeperton","Bo Placeholder","","2023-06-01 10:00:00 UTC","","Bo never appears with a profile URL anywhere in this conversation.","INBOX",""
+"conv-bb","","Bo Placeholder","","Nettie Keeperton","","2023-06-02 10:00:00 UTC","","So the whole conversation is unattributable and gets reported as such.","INBOX",""
+"conv-cc","Three of us","Nettie Keeperton","https://www.linkedin.com/in/nettie-keeperton","Cyd Invented, Dee Notional","https://www.linkedin.com/in/cyd-invented, https://www.linkedin.com/in/dee-notional","2023-06-10 10:00:00 UTC","Coffee?","A group thread: more than one other party, so it is skipped.","INBOX",""
+"conv-dd","","Hal Stranger","https://www.linkedin.com/in/hal-stranger","Nettie Keeperton","https://www.linkedin.com/in/nettie-keeperton","2023-07-01 08:00:00 UTC","","Hal is in the message history but is not a connection.","INBOX",""
+"conv-ee","","Cyd Invented","https://www.linkedin.com/in/cyd-invented","Nettie Keeperton","https://www.linkedin.com/in/nettie-keeperton","2023-08-01 08:00:00 UTC","","A dated row, which becomes an interaction.","INBOX",""
+"conv-ee","","Nettie Keeperton","https://www.linkedin.com/in/nettie-keeperton","Cyd Invented","https://www.linkedin.com/in/cyd-invented","not a date","","An undated row, which cannot become one.","INBOX",""
+"conv-ff","","Eli Imaginary","https://www.linkedin.com/in/eli-imaginary","Nettie Keeperton","https://www.linkedin.com/in/nettie-keeperton","2023-09-01 08:00:00 UTC","","Two rows that are identical: the file really does say it twice.","INBOX",""
+"conv-ff","","Eli Imaginary","https://www.linkedin.com/in/eli-imaginary","Nettie Keeperton","https://www.linkedin.com/in/nettie-keeperton","2023-09-01 08:00:00 UTC","","Two rows that are identical: the file really does say it twice.","INBOX",""
