@@ -2842,8 +2842,15 @@ export interface components {
          * SharedCompanyOut
          * @description A company this contact is at or was at, and the overlap with the address book.
          *
-         *     ``contact_count`` is how many *other* live contacts are at that company now,
-         *     ``met_count`` how many of those you have already marked met.
+         *     Overlap with **the rest of your contacts**, not with you: nothing in the data
+         *     model records your own positions, so "you both worked at X" is not something
+         *     netkeeper can say, and a panel must not label it that way (spec 10.2).
+         *     ``contact_count`` is how many *other* live contacts are at that company now
+         *     and ``met_count`` how many of those you have already marked met, so the
+         *     reading is "you know four people there, three of whom you have met".
+         *
+         *     Every company the contact has is returned, including one where nobody else
+         *     is, as ``contact_count: 0``; a client that only wants overlap filters those.
          */
         SharedCompanyOut: {
             /** Company */

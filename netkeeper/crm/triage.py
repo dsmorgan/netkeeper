@@ -122,6 +122,12 @@ _RECORDED_FIELDS: Final[frozenset[str]] = frozenset(
 )
 
 
+_DIVERGED_FIELD: Final[str] = (
+    "something changed it after the decision, so undo would overwrite that change"
+)
+"""Why a recorded field that has moved on stops an undo. See :class:`UndoConflict`."""
+
+
 # --- errors -----------------------------------------------------------------
 
 
@@ -138,24 +144,33 @@ class NothingToUndo(LookupError):
 
 
 class UndoConflict(RuntimeError):
-    """The contact no longer holds what the decision left, so undo would overwrite an edit.
+    """Undo cannot put this contact back the way the decision found it.
 
-    ``field``, ``expected``, and ``found`` say what diverged, all as the decision
-    log stores them. ``force`` on :func:`undo` writes the recorded previous state
-    anyway.
+    Either a field the decision changed no longer holds what the decision left
+    it holding, or the contact has left the queue since (archived, or merged
+    into another). ``field``, ``expected``, and ``found`` say what diverged, as
+    the decision log stores them, and ``reason`` says why that stops the undo.
+    ``force`` on :func:`undo` restores the recorded previous state anyway.
     """
 
     def __init__(
-        self, decision_id: int, contact_id: int, field: str, expected: str | None, found: str | None
+        self,
+        decision_id: int,
+        contact_id: int,
+        field: str,
+        expected: str | None,
+        found: str | None,
+        reason: str = _DIVERGED_FIELD,
     ) -> None:
         self.decision_id = decision_id
         self.contact_id = contact_id
         self.field = field
         self.expected = expected
         self.found = found
+        self.reason = reason
         super().__init__(
-            f"contact {contact_id} has {field}={found!r} where the decision left {expected!r}; "
-            "something changed it after the decision, so undo would overwrite that change"
+            f"contact {contact_id} has {field}={found!r} where the decision left "
+            f"{expected!r}; {reason}"
         )
 
 
@@ -182,8 +197,18 @@ class SharedCompany:
     positions), so "shared" means shared with the rest of your contacts, which is
     the evidence that actually helps in triage: you know four people at a
     company, three of whom you have already marked met, so you were probably in
-    the same room. ``company`` is the contact's own spelling; the overlap is
-    counted without regard to case against other live contacts' current company.
+    the same room. It is **not** the LinkedIn "you both worked at X" signal that
+    spec 10.2 reads like, and 10.2 now records that divergence; a panel must not
+    label it that way.
+
+    ``company`` is the contact's own spelling; the overlap is counted without
+    regard to case against other live contacts' current company. Two asymmetries
+    follow: this contact's side counts their current company and every one of
+    their positions, while the other side is matched on ``current_company``
+    alone, so someone who was there with them and has moved on is not counted;
+    and a company where nobody else is comes back with ``contact_count`` 0
+    rather than being dropped, so the client sees the whole employment history
+    and filters what it does not want.
     """
 
     company: str
@@ -264,7 +289,8 @@ class Undone:
     ``contact`` is the contact to show next when a single decision was undone;
     a batch has no single contact, so it is ``None`` and ``decisions`` says how
     many rows were restored. ``forced`` lists the contacts whose state had moved
-    on and was overwritten anyway.
+    on and was overwritten anyway; a contact named there may have been archived
+    or merged away, so it is restored but not back in the queue.
     """
 
     kind: TriageDecisionKind
@@ -408,12 +434,13 @@ def undo(session: Session, user: User, *, force: bool = False) -> Undone:
     """Undo the newest triage action of ``user``, restoring the previous state exactly.
 
     The newest decision that has not been undone yet, or every row of its batch
-    when it came from a bulk apply. Each contact must still hold what the
-    decision left it holding; otherwise nothing is written and
-    :class:`UndoConflict` says what diverged, because an edit that arrived
-    afterwards is not this decision's to overwrite. ``force=True`` restores
-    anyway and reports which contacts it overrode. The decisions are marked
-    spent either way, so the next undo reaches the one before.
+    when it came from a bulk apply. Each contact must still be in the queue and
+    still hold what the decision left it holding; otherwise nothing is written
+    and :class:`UndoConflict` says what diverged (see :func:`_diverged` for the
+    two ways that happens, an edit in between and a contact that was archived or
+    merged away). ``force=True`` restores anyway and reports which contacts it
+    overrode. The decisions it does undo are marked spent, so the next undo
+    reaches the one before.
 
     :class:`NothingToUndo` when the stack is empty; ``RuntimeError`` when
     ``session`` is not a writer.
@@ -678,12 +705,52 @@ def _decode(name: str, raw: str | None) -> Any:
     raise ValueError(f"{name!r} is not a field the triage log records")
 
 
-def _diverged(row: TriageDecision, contact: Contact) -> tuple[str, str | None, str | None] | None:
-    """The first field where ``contact`` no longer holds what ``row`` left, or ``None``."""
+type Divergence = tuple[str, str | None, str | None, str]
+
+
+def _diverged(row: TriageDecision, contact: Contact) -> Divergence | None:
+    """The first thing that stops undo from putting ``contact`` back, or ``None``.
+
+    Two kinds. A field ``row`` changed that no longer holds what the decision
+    left it holding: something edited it in between, and that edit is not this
+    decision's to overwrite.
+
+    And a contact that has left the queue since, which the fields alone never
+    show, because neither archiving nor merging touches one of them:
+
+    - Merged away. :func:`netkeeper.crm.identity.merge` copies the loser's
+      ``met`` and ``triaged_at`` onto the survivor and leaves the loser's
+      columns as they were, so the loser still holds exactly what the decision
+      left. Restoring it would clear the decision on a row nobody reads while
+      the survivor quietly keeps it, and mark the row spent, so no second undo
+      could reach it.
+    - Archived. Restoring ``met`` would report a contact back in the queue that
+      :func:`next_contact` will never serve again, which is the one promise undo
+      makes about position.
+
+    Either way the state the decision found no longer exists to be restored, so
+    undo says so instead of half-doing it. A contact decided while it was
+    already archived (only reachable by hand: the queue never serves one) is
+    refused too, which is the conservative side of the same rule.
+    """
+    if contact.merged_into_id is not None:
+        return (
+            "merged_into_id",
+            None,
+            str(contact.merged_into_id),
+            "it was merged away after the decision, and the survivor carries that decision now",
+        )
+    if contact.archived_at is not None:
+        return (
+            "archived_at",
+            None,
+            contact.archived_at.isoformat(),
+            "it was archived after the decision, so undo cannot put it back in the queue",
+        )
     for name, expected in row.after_state.items():
         found = _encode(name, getattr(contact, name))
         if found != expected:
-            return name, expected, found
+            return name, expected, found, _DIVERGED_FIELD
     return None
 
 

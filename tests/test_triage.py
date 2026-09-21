@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.crm import triage as module
-from netkeeper.crm.identity import IncomingContact, apply, resolve
+from netkeeper.crm.identity import IncomingContact, apply, merge, resolve
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.crm.triage import (
     CountChanged,
@@ -37,6 +37,9 @@ from netkeeper.scoping import scoped
 NOW = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 EARLIER = NOW - timedelta(days=30)
 LONG_AGO = NOW - timedelta(days=400)
+
+# Far above any queue a test builds, low enough to fail fast when the cursor sticks.
+_QUEUE_WALK_LIMIT = 1000
 
 
 @pytest.fixture
@@ -73,15 +76,24 @@ def _message(
 def _queue_ids(
     writer: Session, user: User, states: Sequence[ContactMet] = module.DEFAULT_QUEUE_STATES
 ) -> list[int]:
-    """Every contact the queue would hand out, in order, by walking the cursor."""
+    """Every contact the queue would hand out, in order, by walking the cursor.
+
+    Bounded rather than ``while True``: a cursor that stopped advancing would
+    otherwise hang the whole suite instead of failing, and under a random test
+    order that is a CI timeout with nothing to read.
+    """
     ids: list[int] = []
     after: int | None = None
-    while True:
+    for _ in range(_QUEUE_WALK_LIMIT):
         contact = module.next_contact(writer, user, states=states, after_id=after)
         if contact is None:
             return ids
         ids.append(contact.id)
         after = contact.id
+    raise AssertionError(
+        f"the queue cursor did not reach the end in {_QUEUE_WALK_LIMIT} steps; "
+        f"it is not advancing (last ids: {ids[-5:]})"
+    )
 
 
 # --- the queue --------------------------------------------------------------
@@ -374,6 +386,70 @@ def test_undo_refuses_when_the_contact_changed_after_the_decision(
     assert (caught.value.expected, caught.value.found) == ("met", "not_met")
     assert contact.met is ContactMet.NOT_MET  # nothing was written
     assert _open_decisions(writer, user) == 1  # and the decision is still on the stack
+
+
+def test_undo_refuses_when_the_contact_was_merged_away_after_the_decision(
+    writer: Session, user: User
+) -> None:
+    """The loser still holds what the decision left, but the survivor carries the decision.
+
+    ``merge`` copies ``met`` and ``triaged_at`` onto the survivor and leaves the
+    loser's columns alone, so comparing the recorded fields alone sees nothing
+    wrong. Restoring the loser would clear the decision on a row nobody reads
+    while the survivor kept it, and spend the row so no second undo could reach
+    it.
+    """
+    survivor, loser = _contacts(writer, user, 2)
+    module.decide(writer, user, loser.id, ContactMet.MET, at=NOW)
+    merge(writer, user, survivor.id, loser.id)
+    assert survivor.met is ContactMet.MET  # the decision now lives on the survivor
+    with pytest.raises(UndoConflict) as caught:
+        module.undo(writer, user)
+    assert caught.value.field == "merged_into_id"
+    assert _met(survivor) is ContactMet.MET
+    assert _met(loser) is ContactMet.MET
+    assert _open_decisions(writer, user) == 1  # still there to undo once the merge is dealt with
+
+
+def test_undo_refuses_when_the_contact_was_archived_after_the_decision(
+    writer: Session, user: User
+) -> None:
+    """Restoring it would claim a queue position that ``next_contact`` never serves."""
+    first, second, third = _contacts(writer, user, 3)
+    module.decide(writer, user, second.id, ContactMet.MET, at=NOW)
+    second.archived_at = NOW
+    writer.flush()
+    with pytest.raises(UndoConflict) as caught:
+        module.undo(writer, user)
+    assert caught.value.field == "archived_at"
+    assert "queue" in caught.value.reason
+    assert _met(second) is ContactMet.MET
+    assert _queue_ids(writer, user) == [first.id, third.id]
+
+
+def test_a_forced_undo_restores_an_archived_contact_and_names_it(
+    writer: Session, user: User
+) -> None:
+    """``force`` still gets through; ``forced`` is how the client knows it is not in the queue."""
+    first, second, third = _contacts(writer, user, 3)
+    module.decide(writer, user, second.id, ContactMet.MET, at=NOW)
+    second.archived_at = NOW
+    writer.flush()
+    undone = module.undo(writer, user, force=True)
+    assert undone.forced == [second.id]
+    assert _met(second) is ContactMet.UNKNOWN
+    assert second.triaged_at is None
+    assert _queue_ids(writer, user) == [first.id, third.id]  # restored, but still archived
+
+
+def test_a_forced_undo_restores_a_merged_away_contact(writer: Session, user: User) -> None:
+    survivor, loser = _contacts(writer, user, 2)
+    module.decide(writer, user, loser.id, ContactMet.MET, at=NOW)
+    merge(writer, user, survivor.id, loser.id)
+    undone = module.undo(writer, user, force=True)
+    assert undone.forced == [loser.id]
+    assert _met(loser) is ContactMet.UNKNOWN
+    assert _met(survivor) is ContactMet.MET  # forcing never reaches the survivor
 
 
 def test_a_forced_undo_restores_anyway_and_says_so(writer: Session, user: User) -> None:

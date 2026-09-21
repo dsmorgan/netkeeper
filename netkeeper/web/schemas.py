@@ -113,6 +113,17 @@ class InteractionOut(BaseModel):
     kind: InteractionKind
     at: datetime
     summary: str | None
+    """Verbatim, exactly as stored, and for a message that is someone else's words.
+
+    The archive importer keeps LinkedIn message bodies here (#75): InMail
+    arrives as HTML, and a body cut at the stored length can end mid-tag. The
+    API escapes nothing and strips nothing on the way out, by decision — the
+    evidence panel is worth more when it shows what was actually written — so
+    **whatever renders this must escape it**. Never `dangerouslySetInnerHTML`,
+    and no Markdown renderer with HTML passthrough.
+    ``tests/test_web_triage.py::test_message_summaries_and_notes_come_back_verbatim``
+    pins the contract, so no renderer can assume the API cleaned it.
+    """
     message_id: int | None
     source: ContactSource
     created_at: datetime
@@ -1071,7 +1082,11 @@ class TriageContactOut(BaseModel):
     triaged_at: datetime | None
     do_not_contact: bool
     notes: str | None
-    """Markdown, part of the evidence panel."""
+    """Markdown, part of the evidence panel, stored and returned exactly as written.
+
+    Rendered with HTML passthrough it would run whatever is in it, as
+    `InteractionOut.summary` would.
+    """
     tags: list[TriageTagOut]
     updated_at: datetime
 
@@ -1079,8 +1094,15 @@ class TriageContactOut(BaseModel):
 class SharedCompanyOut(BaseModel):
     """A company this contact is at or was at, and the overlap with the address book.
 
-    ``contact_count`` is how many *other* live contacts are at that company now,
-    ``met_count`` how many of those you have already marked met.
+    Overlap with **the rest of your contacts**, not with you: nothing in the data
+    model records your own positions, so "you both worked at X" is not something
+    netkeeper can say, and a panel must not label it that way (spec 10.2).
+    ``contact_count`` is how many *other* live contacts are at that company now
+    and ``met_count`` how many of those you have already marked met, so the
+    reading is "you know four people there, three of whom you have met".
+
+    Every company the contact has is returned, including one where nobody else
+    is, as ``contact_count: 0``; a client that only wants overlap filters those.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -1101,6 +1123,7 @@ class TriageMessagesOut(BaseModel):
     first_at: datetime | None
     last_at: datetime | None
     recent: list[InteractionOut]
+    """Newest first. Their `summary` is a message body, returned verbatim: escape it."""
 
 
 class TriageEvidenceOut(BaseModel):
