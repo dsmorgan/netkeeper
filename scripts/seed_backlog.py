@@ -104,9 +104,9 @@ class Checkpoint:
 
 
 ITEM_RE = re.compile(r"^\*\*(P\d-\d\d) (.+?)\*\* · lane (\w+) · (S|M|L)(?: · `safety`)?$")
-CP_MARK_RE = re.compile(r"^\*\*(CP\d+)\*\* · checkpoint · (.+?)\.?$")
+CP_MARK_RE = re.compile(r"^\*\*(CP\d+(?:\.\d+)?)\*\* · checkpoint · (.+?)\.?$")
 PHASE_RE = re.compile(r"^### Phase (\d): (.+)$")
-CP_HEAD_RE = re.compile(r"^### (CP\d+): (.+)$")
+CP_HEAD_RE = re.compile(r"^### (CP\d+(?:\.\d+)?): (.+)$")
 
 
 def anchor_for(heading: str) -> str:
@@ -194,7 +194,7 @@ def link_dependencies(text: str, numbers: dict[str, int]) -> str:
         key = m.group(0)
         return f"#{numbers[key]} ({key})" if key in numbers else key
 
-    return re.sub(r"\b(?:P\d-\d\d|CP\d+)\b", repl, text)
+    return re.sub(r"\b(?:P\d-\d\d|CP\d+(?:\.\d+)?)\b", repl, text)
 
 
 def item_body(item: Item, numbers: dict[str, int]) -> str:

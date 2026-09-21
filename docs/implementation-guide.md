@@ -87,6 +87,7 @@ Drift signals to watch for at every checkpoint:
 | CP0 | Phase 0 | The scaffold runs end to end; the user boundary is real |
 | CP1 | Mid phase 1 | Data model and filter language, before UI is built on them |
 | CP2 | Phase 1 | Your own archive imported, triaged, exported |
+| CP2.5 | CP2's feedback | The same demo again, with buttons, automation, and a way back |
 | CP3 | Mid phase 2 | Pacing, budgets, classification, posture, before the first live run |
 | CP4 | Phase 2 | One week of scheduled runs against your real account |
 | CP5 | Mid phase 3 | Gmail OAuth setup by following the guide cold |
@@ -115,6 +116,13 @@ Drift signals to watch for at every checkpoint:
 - **Questions:** Did triage feel faster than the spreadsheet? Did the evidence panel help decide? Did anything get created as a duplicate? Is the export usable by a mailing tool as-is?
 - **Re-read:** workflow stages 1 and 2; the non-goals.
 - **Outcome:** Phase 1 alone already replaces two stages. If it does not feel like a win here, stop and fix before building the extractor UI on the same components.
+
+### CP2.5: the triage pass, after the first real use
+
+- **Demo:** Import the archive from the downloaded zip with no terminal and no extraction; read what was tagged and decided automatically; triage the rest with the mouse as well as the keyboard, going back when you change your mind; build a static list and export it.
+- **Questions:** Is it clear where you are, both in the setup and in the queue? Does the automatic pass leave enough judgement to be worth reviewing, and not so much that it decided for you? Does employer overlap change a decision that the address-book count alone did not? Would you finish the 616?
+- **Re-read:** workflow stages 1 and 2; spec 10.2.
+- **Why now:** CP2 produced feedback rather than a sign-off. This is the same demo with that feedback built in.
 
 ### CP3: extractor safety review, before the first live run
 
@@ -316,8 +324,54 @@ Goal: `identity.merge()` re-points `contact_tags` and `contact_tag_suppressions`
 Depends on: P1-02, P1-07.
 Done when: merging two tagged contacts yields the union of their tags on the survivor with the right sources, suppressions carry over, and the loser has no assignments left.
 
+**P1-20 Archive import through the API** · lane core · M
+Goal: `POST /api/v1/imports/archive` takes the LinkedIn export zip itself — upload, unpack, reuse `crm.archive.import_archive`, answer with the per-file counts (connections, messages, invitations, positions, files ignored). Guards for size, member count, compression ratio, and path traversal. A directory path stays available to the CLI.
+Depends on: P1-03, P1-04.
+Done when: the real archive imports through the API with the counts the CLI reports, a second run adds nothing, and a zip that is not a LinkedIn export answers 422 naming the file it expected.
+
+**P1-21 Frontend: import the archive, and how to get one** · lane frontend · M
+Goal: the wizard takes the downloaded zip with no extraction step; it recognises an archive, a LinkedIn CSV, and a generic CSV, and says which it found; a panel explains how to request the export from LinkedIn, that it arrives by email in 1 to 24 hours, and which file to pick when doing it by hand; the result says what each file contributed.
+Depends on: P1-20.
+Done when: CP2.5's import runs from the downloaded zip without a terminal, an extraction, or a guess about which CSV to choose.
+
+**P1-22 Triage starts from what netkeeper already decided** · lane core · M
+Goal: auto-tag rules run on the contacts an import touched, inside the same writer transaction, with the counts in the run summary (#64). The suggestion catalogue grows past the single message-history batch — an invitation with a note, a tag a rule applied, no evidence at all — each with a preview of who it covers, a count checked before it applies, and one batch id undo takes back. A queue filter serves the contacts whose latest decision was automatic, so the manual pass reviews that work instead of starting cold.
+Depends on: P1-07, P1-09.
+Done when: importing the real archive tags contacts with no button press, every offered batch can be previewed before it applies, and the queue can serve exactly the contacts a batch decided.
+
+**P1-23 Frontend: triage controls, position, and going back** · lane frontend · M
+Goal: every action in the keymap gets an on-screen button labelled with its key; the card shows its position in the queue and what is left; the queue is visible and a contact in it can be opened; a person can walk back through cards they already passed, see the decision each carries, and change it — separate from undo, which stays "take back the last write". Carries the #92 fixes.
+Depends on: P1-14.
+Done when: fifty contacts can be triaged with the mouse alone as well as the keyboard alone, the position is always on screen, and stepping back one contact changes nothing until a decision is made.
+
+**P1-24 Frontend: the dashboard says where you are** · lane frontend · S
+Goal: the scaffold cards give way to the setup path — import your data, review what was tagged, triage, build a list, export — each step with its real count, its state, and the control that advances it. Later phases add their own steps (LinkedIn, Gmail) to the same list.
+Depends on: P1-25.
+Done when: someone opening netkeeper for the first time is told what to do next without reading this guide, and every number on the page comes from the API.
+
+**P1-25 Contact stats endpoint, and the import drafts nobody can see** · lane core · S
+Goal: `GET /api/v1/contacts/stats` over `contact_stats()`, with a parity test against the CLI and the triage progress counters; a way to list and remove orphaned draft import runs, and a resume by run id so a refused commit is finished rather than re-read (#90).
+Depends on: P1-05, P1-16.
+Done when: the CLI, the dashboard, and the triage screen take their counts from one place, and three dry runs leave nothing behind that cannot be seen or removed.
+
+**P1-26 Your own positions, and the overlap that comes from them** · lane core · M
+Goal: `Positions.csv` in the archive fills a table of the user's own job history, editable by hand; the triage card carries genuine you-and-them overlap with its date range, named apart from the address-book count, which stays (#84). Message bodies are stored as plain text rather than raw HTML fragments (#75).
+Depends on: P1-03, P1-09.
+Done when: a contact who worked where you worked says so with the years, the address-book count keeps its own name, and no stored summary contains markup.
+
+**P1-27 The list_member predicate, its 500, and merge** · lane core · M
+Goal: `list_member` compiles — a subquery over `list_members` for a static list, the stored tree inlined for a smart one, with a visited-set guard so two lists cannot reference each other forever; `GET /exports` turns an unavailable predicate into a 422 before the first chunk (#95); `identity.merge` re-points `list_members`, and `ListMember` joins `CONTACT_CHILDREN` (#81).
+Depends on: P1-08.
+Done when: a static list exports its own members, an unavailable predicate is never a 500 or a truncated 200, and merging keeps the survivor in every list the loser belonged to.
+
+**P1-28 Frontend: the automatic pass, and exporting a static list** · lane frontend · S
+Goal: triage opens on what was decided automatically — what the rules tagged during the import, which batches are on offer, who each covers, and a review queue of the decisions already applied; `/lists` gains the Export button P1-27 makes truthful.
+Depends on: P1-22, P1-23, P1-27.
+Done when: the first thing a person sees after an import is the work already done for them, and a static list exports its members rather than everyone.
+
 **CP1** · checkpoint · after P1-01, P1-02, P1-06 merge.
 **CP2** · checkpoint · closes phase 1.
+**CP2.5** · checkpoint · closes CP2's feedback.
 
 ### Phase 2: LinkedIn extractor
 
@@ -395,6 +449,11 @@ Done when: the test exists and passes; `linkedin/apply.py` is the only module th
 Goal: import the outreach history from the previous mailing tool so netkeeper knows who was already contacted before it sends anything. The export is one `.xlsx` workbook, one tab per campaign, laid out as a report rather than a table: a campaign summary row, then side-by-side blocks of openers, clickers, and bounced addresses at column offsets that differ between tabs. Match recipients through `crm/identity.py` on email address, write one `email_out` interaction per recipient per campaign dated from the campaign start so `last_contacted_at` becomes correct, mark bounced addresses so the phase 3 enrollment guard in F18 has something to read, and decide where opens and clicks live alongside the phase 3 campaign tables rather than ahead of them. The source records delivery only: replies, positive responses, and unsubscribes are not in it and come from the phase 3 Gmail reply detection run backwards over the historical threads. Do not infer a decline from a non-open.
 Depends on: P1-03, P1-04, P1-10. Decide the opens and clicks shape with P3-05.
 Done when: the import is idempotent, unmatched addresses are reported rather than dropped, bounces show on the contact, and the fixtures are hand-built and sanitized. Real exports stay in `~/code/netkeeper-private`, never in the repo.
+
+**P2-16 Request the archive for the user** · lane extractor · M · `safety`
+Goal: netkeeper asks LinkedIn for the data export in the attached session, then waits — the export takes 1 to 24 hours and arrives as a notification. The run records which step it is on, the dashboard shows it, and when the file is ready netkeeper downloads and imports it. Manual mode stays first-class — request it yourself, download it yourself, drop the zip in — and one status list covers both.
+Depends on: P2-01, P1-20.
+Done when: both modes reach an imported archive from the same screen, the automated one survives a restart mid-wait, and a changed LinkedIn page stops the run with `RouteChanged` rather than a guess.
 
 **CP3** · checkpoint · after P2-01 to P2-05, P2-11.
 **CP4** · checkpoint · closes phase 2, after one week of scheduled runs.
