@@ -10,6 +10,8 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
+import { jsonResponse } from '@/test/fetch'
+
 import { currentName, renderTriage } from './test-render'
 
 function press(key: string) {
@@ -179,8 +181,67 @@ describe('undo', () => {
     await waitFor(() => expect(backend.byId(1).met).toBe('unknown'))
     // Restored, but an archived contact is not one the queue serves, so it is
     // reported rather than put in front of the person as the next card.
-    expect(await screen.findByText(/no longer in this queue/i)).toBeInTheDocument()
+    expect(await screen.findByText(/archived or merged away since/i)).toBeInTheDocument()
     expect(await currentName()).toContain('Bo')
+  })
+
+  it('keeps the card when a force only overrode an edited field', async () => {
+    // `forced` is appended to for any divergence the force overrode, an
+    // ordinary field edit included — which is the common case, since an archive
+    // or a merge needs another actor. Reading it as "this contact left the
+    // queue" would drop a card that is still in the queue and still on screen.
+    const { backend } = renderTriage({ contacts: 4 })
+    await currentName()
+
+    press('p')
+    const field = await screen.findByLabelText('Preferred name')
+    fireEvent.change(field, { target: { value: 'Addie' } })
+    fireEvent.submit(field.closest('form')!)
+    await waitFor(() => expect(backend.byId(1).preferred_name).toBe('Addie'))
+
+    // Something else renames them behind the screen's back.
+    backend.diverge(1, { preferred_name: 'Adelaide' })
+    press('u')
+
+    const prompt = await screen.findByRole('alertdialog')
+    expect(prompt).toHaveTextContent(/changed since you decided/i)
+    fireEvent.click(await screen.findByTestId('undo-force'))
+
+    await waitFor(() => expect(backend.byId(1).preferred_name).toBe('Ada'))
+    // Still the card, and showing what the server now holds.
+    expect(await currentName()).toBe('Ada Example-1')
+    expect(screen.queryByText(/not in this queue/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/archived or merged away/i)).not.toBeInTheDocument()
+  })
+
+  it('does not reach past a decision whose write never landed', async () => {
+    // `u` pressed underneath a decision that is still in flight means "take
+    // back that decision". If it never reached the server's stack, sending the
+    // undo anyway would revert the contact before it — silently, because both
+    // sit behind the frontier and neither is served again.
+    const { backend } = renderTriage({
+      contacts: 5,
+      latencyMs: 30,
+      intercept: async (request, next) => {
+        const { pathname } = new URL(request.url)
+        if (request.method === 'POST' && pathname === '/api/v1/triage/decisions') {
+          const body = (await request.clone().json()) as { contact_id: number }
+          if (body.contact_id === 2) return jsonResponse({ detail: 'the database is locked' }, 500)
+        }
+        return next(request)
+      },
+    })
+    await currentName()
+
+    press('m') // contact 1, lands
+    press('n') // contact 2, fails
+    press('u') // pressed while contact 2's write is still in flight
+
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+    await screen.findByText(/never reached the server/i)
+    // The decision that did land is untouched, and nothing was undone.
+    expect(backend.byId(1).met).toBe('met')
+    expect(backend.decisions.filter((decision) => decision.undone_at !== null)).toHaveLength(0)
   })
 
   it('says so when there is nothing left to undo', async () => {

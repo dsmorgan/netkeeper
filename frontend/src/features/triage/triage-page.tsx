@@ -31,6 +31,25 @@ import type { TriageAction } from './keymap'
 
 type Overlay = 'none' | 'help' | 'name' | 'tags'
 
+/**
+ * Which overlay is open, and for whom.
+ *
+ * `contactId` is the whole point. The `p` editor and the `t` picker are about
+ * one person: they hold that person's name in their own state and send it to
+ * that person's id. Leaving one open across a card change — which is easy,
+ * because they do not hold focus and `m` still works while they are up — would
+ * let a name typed for one contact be submitted against the next. Tying the
+ * overlay to the contact it was opened for closes it by derivation when the
+ * card moves, with no effect and nothing to forget. The help overlay is about
+ * the screen rather than a contact, so it carries `null` and stays up.
+ */
+interface OpenOverlay {
+  kind: Overlay
+  contactId: number | null
+}
+
+const CLOSED: OpenOverlay = { kind: 'none', contactId: null }
+
 const FILTERS: ReadonlyArray<{ value: QueueFilter; label: string }> = [
   { value: 'unknown', label: 'Untriaged' },
   { value: 'skip', label: 'Skipped' },
@@ -39,7 +58,7 @@ const FILTERS: ReadonlyArray<{ value: QueueFilter; label: string }> = [
 
 export function TriagePage() {
   const [filter, setFilter] = useState<QueueFilter>('unknown')
-  const [overlay, setOverlay] = useState<Overlay>('none')
+  const [overlay, setOverlay] = useState<OpenOverlay>(CLOSED)
   const queue = useTriageQueue(filter)
   const client = useQueryClient()
   /** Anything that may have moved the suggestion's count re-runs its preview. */
@@ -75,17 +94,21 @@ export function TriagePage() {
         case 'next':
           current.skipAhead()
           return
-        case 'tag':
-          if (current.current !== null) setOverlay('tags')
+        case 'tag': {
+          const open = current.current
+          if (open !== null) setOverlay({ kind: 'tags', contactId: open.contact.id })
           return
-        case 'preferred-name':
-          if (current.current !== null) setOverlay('name')
+        }
+        case 'preferred-name': {
+          const open = current.current
+          if (open !== null) setOverlay({ kind: 'name', contactId: open.contact.id })
           return
+        }
         case 'help':
-          setOverlay((open) => (open === 'help' ? 'none' : 'help'))
+          setOverlay((open) => (open.kind === 'help' ? CLOSED : { kind: 'help', contactId: null }))
           return
         case 'dismiss':
-          setOverlay('none')
+          setOverlay(CLOSED)
           current.dismissConflict()
           current.dismissError()
       }
@@ -96,6 +119,11 @@ export function TriagePage() {
   useTriageKeys({ enabled: true, onAction })
 
   const card = queue.current
+  // Derived rather than stored: an overlay opened for a contact closes itself
+  // the moment the card moves on, so a name typed for one person can never be
+  // submitted against the next.
+  const open: Overlay =
+    overlay.contactId === null || overlay.contactId === card?.contact.id ? overlay.kind : 'none'
   const progress = queue.progress
   const triaged = (progress?.triaged ?? 0) + queue.pendingDecisions
   const total = progress?.total ?? 0
@@ -152,13 +180,18 @@ export function TriagePage() {
         />
       )}
 
-      {queue.actionError !== null && (
-        <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          {queue.actionError}{' '}
-          <Button size="xs" variant="ghost" onClick={queue.dismissError}>
-            Dismiss
+      {queue.actionErrors.length > 0 && (
+        <div
+          role="alert"
+          className="flex flex-col gap-1 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          {queue.actionErrors.map((failure, index) => (
+            <p key={`${index}-${failure}`}>{failure}</p>
+          ))}
+          <Button size="xs" variant="ghost" className="w-fit" onClick={queue.dismissError}>
+            {queue.actionErrors.length === 1 ? 'Dismiss' : 'Dismiss all'}
           </Button>
-        </p>
+        </div>
       )}
 
       {queue.restored !== null && (
@@ -205,22 +238,24 @@ export function TriagePage() {
             <EvidencePanel card={card} />
           </div>
 
-          {overlay === 'name' && (
+          {open === 'name' && (
             <PreferredNameEditor
+              key={card.contact.id}
               contactId={card.contact.id}
               initial={card.contact.preferred_name}
               firstName={card.contact.first_name}
               onSave={queue.rename}
-              onClose={() => setOverlay('none')}
+              onClose={() => setOverlay(CLOSED)}
             />
           )}
 
-          {overlay === 'tags' && (
+          {open === 'tags' && (
             <TagPicker
+              key={card.contact.id}
               applied={card.contact.tags}
               onAdd={(tag) => void queue.addTag(card.contact.id, tag)}
               onRemove={(tagId) => void queue.removeTag(card.contact.id, tagId)}
-              onClose={() => setOverlay('none')}
+              onClose={() => setOverlay(CLOSED)}
             />
           )}
         </>
@@ -248,7 +283,7 @@ export function TriagePage() {
         </p>
       </div>
 
-      {overlay === 'help' && <KeyboardHelp onClose={() => setOverlay('none')} />}
+      {open === 'help' && <KeyboardHelp onClose={() => setOverlay(CLOSED)} />}
     </div>
   )
 }

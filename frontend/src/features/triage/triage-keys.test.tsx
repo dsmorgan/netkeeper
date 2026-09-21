@@ -99,6 +99,38 @@ describe('the triage keyboard map (spec 10.2)', () => {
     expect(picker).toHaveTextContent(/not on the triage undo stack/i)
   })
 
+  it('closes the p editor when the card moves on, so a name cannot land on the wrong contact', async () => {
+    const { backend } = renderTriage({ contacts: 4 })
+    await currentName()
+
+    press('p')
+    const field = await screen.findByLabelText('Preferred name')
+    fireEvent.change(field, { target: { value: 'Addie' } })
+    // Focus leaves the field, so the global map is live again.
+    screen.getByRole('button', { name: 'Untriaged' }).focus()
+    press('m')
+
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+    expect(await currentName()).toContain('Bo')
+    // The editor belonged to Ada; it is not sitting over Bo holding her name.
+    expect(screen.queryByLabelText('Preferred name')).not.toBeInTheDocument()
+    expect(backend.byId(2).preferred_name).toBe('Bo')
+    expect(backend.byId(1).preferred_name).toBe('Ada')
+  })
+
+  it('closes the tag picker when the card moves on', async () => {
+    const { backend } = renderTriage({ contacts: 4 })
+    await currentName()
+
+    press('t')
+    await screen.findByRole('group', { name: 'Tag this contact' })
+    screen.getByRole('button', { name: 'Untriaged' }).focus()
+    press('m')
+
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+    expect(screen.queryByRole('group', { name: 'Tag this contact' })).not.toBeInTheDocument()
+  })
+
   it('p edits the preferred name, and typing in it does not decide', async () => {
     const { backend } = renderTriage({ contacts: 2 })
     await currentName()
@@ -150,6 +182,57 @@ describe('the triage keyboard map (spec 10.2)', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(backend.byId(1).met).toBe('unknown')
     expect(backend.countOf('/api/v1/triage/decisions')).toBe(0)
+  })
+
+  it('ignores an auto-repeat, so a resting finger decides one contact and not thirty', async () => {
+    const { backend } = renderTriage({ contacts: 20 })
+    await currentName()
+
+    // One real press, then the key held down.
+    press('m')
+    for (let index = 0; index < 19; index += 1) {
+      fireEvent.keyDown(window, { key: 'm', repeat: true })
+    }
+
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+    expect(backend.contacts.filter((contact) => contact.met !== 'unknown')).toHaveLength(1)
+    expect(backend.countOf('/api/v1/triage/decisions', 'POST')).toBe(1)
+  })
+
+  it('ignores an auto-repeat on → too, which would skim past unread contacts', async () => {
+    const { backend } = renderTriage({ contacts: 20 })
+    await currentName()
+
+    for (let index = 0; index < 10; index += 1) {
+      fireEvent.keyDown(window, { key: 'ArrowRight', repeat: true })
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(await currentName()).toContain('Ada')
+    expect(backend.countOf('/api/v1/triage/next')).toBe(1)
+  })
+
+  it('asks for the contact past the frontier when → outruns the refill', async () => {
+    // The cursor is the furthest contact the server has handed over, remembered
+    // rather than read off the buffer. Pressed twice before the first refill
+    // lands, a buffer-derived cursor asks past a card that is no longer there
+    // and hands back somebody already passed over.
+    const { backend } = renderTriage({ contacts: 8, latencyMs: 40 })
+    expect(await currentName()).toContain('Ada')
+
+    press('ArrowRight') // past Ada; the buffer still holds Bo
+    press('ArrowRight') // past Bo, before the refill for Cleo has landed
+
+    await waitFor(async () => expect(await currentName()).toContain('Cleo'))
+    await waitFor(() => expect(backend.countOf('/api/v1/triage/next')).toBe(3))
+
+    // The mount, then past contact 2, then past contact 3. Never past 2 twice.
+    const cursors = backend.seen
+      .filter((entry) => entry.path === '/api/v1/triage/next')
+      .map((entry) => entry.search.get('after_id'))
+    expect(cursors).toEqual([null, '2', '3'])
+    // Nobody was decided, and nobody was shown twice.
+    expect(backend.decisions).toHaveLength(0)
   })
 
   it('prevents the default for a key it handles, so nothing scrolls', async () => {
