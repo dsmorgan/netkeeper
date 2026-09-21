@@ -57,6 +57,7 @@ from netkeeper.models import (
     LinkKind,
     ListKind,
     ListMember,
+    MetSource,
     RuleField,
     Tag,
     TagSource,
@@ -1388,6 +1389,17 @@ def test_merge_met_takes_the_more_decided_value(
     merge(writer, alice, survivor.id, loser.id)
     assert survivor.met is expected
     assert survivor.triaged_at == (LATER if expected is theirs and theirs is not mine else NOW)
+
+
+def test_merge_carries_who_decided_met(writer: Session, users: tuple[User, User]) -> None:
+    """A batch's decision stays a batch's decision when it moves to the survivor (spec 10.2)."""
+    alice, _ = users
+    survivor = factories.make_contact(writer, alice, met=ContactMet.UNKNOWN)
+    loser = factories.make_contact(
+        writer, alice, met=ContactMet.MET, met_source=MetSource.AUTOMATIC, triaged_at=LATER
+    )
+    merge(writer, alice, survivor.id, loser.id)
+    assert (survivor.met, survivor.met_source) == (ContactMet.MET, MetSource.AUTOMATIC)
 
 
 def test_merge_person_fields(writer: Session, users: tuple[User, User]) -> None:

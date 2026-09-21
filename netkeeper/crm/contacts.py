@@ -60,6 +60,7 @@ from netkeeper.crm.provenance import (
     PROVENANCE_FIELDS,
     revert_to_synced,
     set_manual_field,
+    set_met,
 )
 from netkeeper.db import is_writer
 from netkeeper.models import (
@@ -75,6 +76,7 @@ from netkeeper.models import (
     EmailKind,
     EmailStatus,
     LinkKind,
+    MetSource,
     PhoneKind,
     TagSource,
     User,
@@ -372,7 +374,9 @@ def update_contact(
         if field == "li_public_id":
             _set_public_id(session, user, contact, value)
         elif field == "met":
-            set_manual_field(contact, "met", ContactMet(value))
+            # The person's own answer, which takes a contact a batch decided
+            # out of the review queue (spec 10.2).
+            set_met(contact, ContactMet(value), source=MetSource.MANUAL)
             contact.triaged_at = utcnow()
         elif field == "do_not_contact":
             contact.do_not_contact = bool(value)
@@ -574,7 +578,9 @@ def _bulk_values(
         case "set_met":
             if not isinstance(value, ContactMet):
                 raise ValueError("set_met needs a ContactMet value")
-            return {"met": value, "triaged_at": now}
+            # met_source, so a bulk edit by hand is a decision by hand and
+            # leaves the review queue (spec 10.2).
+            return {"met": value, "met_source": MetSource.MANUAL, "triaged_at": now}
         case "archive":
             # Keep the stamp a row already carries, as archive_contact() does:
             # archived_at records when the contact left the table, and a row

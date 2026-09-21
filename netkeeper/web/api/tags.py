@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from netkeeper.crm import tags as service
-from netkeeper.models import Tag
+from netkeeper.models import Tag, TagMetSignal
 from netkeeper.web.deps import CurrentUser, SessionDep
 from netkeeper.web.schemas import ContactTagCreate, ContactTagOut, TagCreate, TagOut, TagPatch
 
@@ -49,6 +49,7 @@ def tag_out(tag: Tag, contact_count: int) -> TagOut:
         name=tag.name,
         color=tag.color,
         kind=tag.kind,
+        met_signal=tag.met_signal,
         contact_count=contact_count,
         created_at=tag.created_at,
         updated_at=tag.updated_at,
@@ -64,7 +65,14 @@ def list_tags(user: CurrentUser, session: SessionDep) -> list[TagOut]:
 @router.post("/tags", operation_id="create_tag", status_code=201, responses={**CONFLICT, **INVALID})
 def create_tag(body: TagCreate, user: CurrentUser, session: SessionDep) -> TagOut:
     with translate_errors():
-        tag = service.create_tag(session, user, body.name, color=body.color, kind=body.kind)
+        tag = service.create_tag(
+            session,
+            user,
+            body.name,
+            color=body.color,
+            kind=body.kind,
+            met_signal=body.met_signal,
+        )
     return tag_out(tag, 0)
 
 
@@ -74,12 +82,23 @@ def create_tag(body: TagCreate, user: CurrentUser, session: SessionDep) -> TagOu
     responses={**NOT_FOUND, **CONFLICT, **INVALID},
 )
 def update_tag(tag_id: int, body: TagPatch, user: CurrentUser, session: SessionDep) -> TagOut:
-    """Rename or recolor. A field left out is left alone; ``color: null`` clears it."""
+    """Rename, recolor, or say what the tag means for triage.
+
+    A field left out is left alone; `color: null` and `met_signal: null` clear
+    them. `met_signal` is what carrying this tag says about having met someone
+    (spec 10.2): it puts a triage batch on offer, which is still previewed and
+    accepted by hand.
+    """
     color: str | service.Unset | None = (
         body.color if "color" in body.model_fields_set else service.UNSET
     )
+    signal: TagMetSignal | service.Unset | None = (
+        body.met_signal if "met_signal" in body.model_fields_set else service.UNSET
+    )
     with translate_errors():
-        tag = service.update_tag(session, user, tag_id, name=body.name, color=color)
+        tag = service.update_tag(
+            session, user, tag_id, name=body.name, color=color, met_signal=signal
+        )
     count = service.contact_counts(session, user, [tag.id]).get(tag.id, 0)
     return tag_out(tag, count)
 

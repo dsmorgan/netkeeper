@@ -5,8 +5,9 @@ columns and the mapping a preset gives them without storing anything;
 ``POST /imports`` reads the file into a draft run and counts the whole file;
 ``POST /imports/{id}/preview`` resolves the first rows against the database as it
 is now and says what each one would change and what provenance would refuse;
-``POST /imports/{id}/commit`` applies the run in the request's one transaction;
-``POST /imports/{id}/rollback`` undoes a committed run.
+``POST /imports/{id}/commit`` applies the run in the request's one transaction
+and runs the auto-tag rules over the contacts it wrote, answering with their
+counts (#64); ``POST /imports/{id}/rollback`` undoes a committed run.
 
 A draft that is never finished — a ``--dry-run``, or a commit refused for
 undecided candidates — is not silently lost: ``GET /imports?status=draft``
@@ -133,6 +134,9 @@ def run_out(run: ImportRun) -> ImportRunOut:
         created_count=run.created_count,
         candidate_count=run.candidate_count,
         skipped_count=run.skipped_count,
+        tagged_contacts=run.tagged_contacts,
+        tags_added=run.tags_added,
+        tags_removed=run.tags_removed,
         committed_at=run.committed_at,
         rolled_back_at=run.rolled_back_at,
         created_at=run.created_at,

@@ -1,9 +1,31 @@
-"""Triage: the queue, its evidence, decisions, undo, and the bulk suggestion (spec 10.2).
+"""Triage: the queue, its evidence, decisions, undo, and the bulk batches (spec 10.2).
 
 Triage is the screen where you go through the people LinkedIn says you are
 connected to and answer one question about each: have you actually met them?
 Fifty contacts in ten minutes with the keyboard alone (P1-14), which sets the
 shape of everything here.
+
+Starting from what is already decided
+-------------------------------------
+An imported archive is six hundred cold cards, and answering six hundred
+questions by hand is the failure this module exists to avoid. So the work goes
+the other way round: the import tags what it can (:mod:`netkeeper.crm.archive`,
+#64), :func:`suggestions` offers the batches those tags and the message history
+make defensible, and the manual pass reviews what was decided instead of
+starting from nothing.
+
+Three rules hold that together:
+
+* **Nothing applies itself.** :func:`suggestions` and
+  :func:`suggestion_contacts` write nothing; a batch is a count and a list of
+  names until :func:`apply_suggestion` is called, and it refuses when the set
+  has moved since the count the person was shown (:class:`CountChanged`).
+* **An automatic decision says so.** Every contact a batch decides carries
+  ``met_source = automatic`` and a decision row with the batch id and the key of
+  the suggestion behind it, so it is never mistaken for an answer the person
+  gave and the log can always say what was decided, when, and why.
+* **One batch, one undo.** The rows of a batch share a ``batch_id``, so undo
+  takes the whole thing back in one step, each contact to exactly where it was.
 
 The queue
 ---------
@@ -12,6 +34,11 @@ address book. Nothing in the order depends on a decision, so a contact that is
 put back by undo lands exactly where it was. :func:`next_contact` takes
 ``after_id`` as its cursor, so the ``→`` key ("show me the next one, I am not
 deciding this one") moves forward without writing anything.
+
+``decided_by=MetSource.AUTOMATIC`` over :data:`REVIEW_QUEUE_STATES` is the
+review pass: the same queue and the same cards, holding the contacts a batch
+decided and nobody has corrected. Deciding one by hand makes it ``manual``,
+which is how a contact leaves that queue.
 
 Evidence in the same response
 -----------------------------
@@ -36,10 +63,10 @@ somewhere else, then writes the recorded ``before`` back and marks the decision
 spent. So the second undo reaches the decision before, a bulk apply undoes as
 one batch, and a contact that was decided twice walks back one step at a time.
 
-The writes go through :func:`netkeeper.crm.provenance.set_manual_field`, for a
-decision and for undoing one: ``met`` and ``preferred_name`` are fields the
-person owns, and an edit made here outranks every later sync and import
-(spec 10.5).
+The writes go through :mod:`netkeeper.crm.provenance`, for a decision and for
+undoing one: ``met`` (with ``met_source``, through :func:`~netkeeper.crm.
+provenance.set_met`) and ``preferred_name`` are fields the person owns, and an
+edit made here outranks every later sync and import (spec 10.5).
 
 Transactions belong to the caller. Nothing here commits. Every writer reads
 before it writes, so it needs a writer session (``session_scope(factory,
@@ -55,17 +82,27 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from sqlalchemy import ColumnElement, Select, case, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import ColumnElement, Select, and_, case, func, or_, select
+from sqlalchemy.orm import Session, aliased, selectinload
 
-from netkeeper.crm.interactions import OUTBOUND_KINDS, TimelineEntry, timeline
-from netkeeper.crm.provenance import set_manual_field
+from netkeeper.crm.interactions import (
+    OUTBOUND_KINDS,
+    TimelineEntry,
+    has_invitation_note,
+    is_invitation,
+    timeline,
+)
+from netkeeper.crm.provenance import set_manual_field, set_met
 from netkeeper.db import is_writer
 from netkeeper.models import (
     Contact,
     ContactMet,
+    ContactTag,
     Interaction,
     InteractionKind,
+    MetSource,
+    Tag,
+    TagMetSignal,
     TriageDecision,
     TriageDecisionKind,
     User,
@@ -106,8 +143,27 @@ TIMELINE_LIMIT: Final[int] = 20
 RECENT_MESSAGES: Final[int] = 5
 """Message interactions quoted on a card, newest first; the counts cover the rest."""
 
+SUGGESTION_PAGE: Final[int] = 50
+"""Contacts per page when a suggestion is previewed before it is applied."""
+
+REVIEW_QUEUE_STATES: Final[tuple[ContactMet, ...]] = (
+    ContactMet.MET,
+    ContactMet.NOT_MET,
+    ContactMet.SKIP,
+)
+"""The states the review queue covers: everything a batch can have decided."""
+
 SUGGESTION_MET_WITH_MESSAGES: Final[str] = "met_with_messages"
-"""The one bulk suggestion of v1: "mark everyone with message history as met"."""
+"""Message history in either direction, which is the strongest evidence there is."""
+
+SUGGESTION_MET_INVITATION_NOTE: Final[str] = "met_invitation_note"
+"""An invitation that carried a note either way, and no message thread since."""
+
+SUGGESTION_NOT_MET_NO_EVIDENCE: Final[str] = "not_met_no_evidence"
+"""Nothing on file at all: the large "not met" tail of an imported address book."""
+
+TAG_KEY_PREFIX: Final[str] = "tag:"
+"""``tag:<id>``: the batch for one tag the user gave a meaning (``Tag.met_signal``)."""
 
 # Contacts per statement when a bulk apply walks its matches.
 _CHUNK: Final[int] = 500
@@ -115,11 +171,18 @@ _CHUNK: Final[int] = 500
 # The contact columns a decision may change, and how each one is stored in
 # ``before_state`` and ``after_state``. Text, so one JSON map holds them all.
 _MET_FIELD: Final[str] = "met"
+_MET_SOURCE_FIELD: Final[str] = "met_source"
 _TRIAGED_AT_FIELD: Final[str] = "triaged_at"
 _PREFERRED_NAME_FIELD: Final[str] = "preferred_name"
 _RECORDED_FIELDS: Final[frozenset[str]] = frozenset(
-    {_MET_FIELD, _TRIAGED_AT_FIELD, _PREFERRED_NAME_FIELD}
+    {_MET_FIELD, _MET_SOURCE_FIELD, _TRIAGED_AT_FIELD, _PREFERRED_NAME_FIELD}
 )
+_MET_FIELDS: Final[tuple[str, ...]] = (_MET_FIELD, _MET_SOURCE_FIELD, _TRIAGED_AT_FIELD)
+"""What a met decision writes, and therefore what it records and undo restores."""
+
+# Columns restored by assignment rather than through ``set_manual_field``:
+# neither carries provenance and neither is a field a person edits directly.
+_DIRECTLY_RESTORED: Final[frozenset[str]] = frozenset({_MET_SOURCE_FIELD, _TRIAGED_AT_FIELD})
 
 
 _DIVERGED_FIELD: Final[str] = (
@@ -251,12 +314,17 @@ class Card:
 
 @dataclass(frozen=True, slots=True)
 class Progress:
-    """Triaged against total, and how much of the current queue is left (spec 10.2)."""
+    """Triaged against total, and how much of the current queue is left (spec 10.2).
+
+    ``automatic`` counts the live contacts a batch decided and nobody has
+    changed since: the size of the review pass, whatever queue is being served.
+    """
 
     total: int
     triaged: int
     remaining: int
     by_state: dict[ContactMet, int]
+    automatic: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,13 +332,17 @@ class Suggestion:
     """A bulk action offered to the user, with the count it would apply to.
 
     Never applied on its own: :func:`apply_suggestion` is a separate call, and
-    what it does is one undoable batch.
+    what it does is one undoable batch. ``met`` is the value it would write, so
+    a client can say which way a batch decides without parsing its key;
+    ``tag_id`` names the tag a tag batch is built on, and is ``None`` otherwise.
     """
 
     key: str
     title: str
     description: str
     count: int
+    met: ContactMet
+    tag_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +352,7 @@ class Applied:
     key: str
     applied: int
     batch_id: str
+    met: ContactMet
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +382,7 @@ def next_contact(
     *,
     states: Sequence[ContactMet] = DEFAULT_QUEUE_STATES,
     after_id: int | None = None,
+    decided_by: MetSource | None = None,
 ) -> Contact | None:
     """The next contact to triage, or ``None`` when the queue is empty.
 
@@ -317,8 +391,14 @@ def next_contact(
     how "next without deciding" moves on. Membership depends only on ``met`` and
     the order only on ``id``, so undoing a decision puts a contact back exactly
     where it stood.
+
+    ``decided_by`` narrows further, and ``MetSource.AUTOMATIC`` with
+    :data:`REVIEW_QUEUE_STATES` is the review pass: the contacts a batch decided
+    and nobody has touched since, in the same order, on the same cards, with the
+    same keys. Deciding one by hand takes it out of that queue, because deciding
+    by hand is what ``manual`` means.
     """
-    statement = _queue(user, states).order_by(Contact.id).limit(1)
+    statement = _queue(user, states, decided_by=decided_by).order_by(Contact.id).limit(1)
     if after_id is not None:
         statement = statement.where(Contact.id > after_id)
     return session.scalars(statement).first()
@@ -330,9 +410,10 @@ def next_card(
     *,
     states: Sequence[ContactMet] = DEFAULT_QUEUE_STATES,
     after_id: int | None = None,
+    decided_by: MetSource | None = None,
 ) -> Card | None:
     """:func:`next_contact` with its evidence loaded, ready to render."""
-    contact = next_contact(session, user, states=states, after_id=after_id)
+    contact = next_contact(session, user, states=states, after_id=after_id, decided_by=decided_by)
     return None if contact is None else load_card(session, user, contact)
 
 
@@ -347,25 +428,41 @@ def load_card(session: Session, user: User, contact: Contact) -> Card:
 
 
 def progress(
-    session: Session, user: User, *, states: Sequence[ContactMet] = DEFAULT_QUEUE_STATES
+    session: Session,
+    user: User,
+    *,
+    states: Sequence[ContactMet] = DEFAULT_QUEUE_STATES,
+    decided_by: MetSource | None = None,
 ) -> Progress:
-    """How far triage has got, from one grouped count over the live contacts."""
+    """How far triage has got, from one grouped count over the live contacts.
+
+    Still one query: the group is ``(met, met_source)``, which gives both the
+    per-state counts and ``automatic``, the size of the review pass.
+    ``remaining`` follows the queue being served, so it counts only the
+    automatic contacts when ``decided_by`` says so.
+    """
     statement = (
         scoped(user, Contact)
-        .with_only_columns(Contact.met, func.count())
+        .with_only_columns(Contact.met, Contact.met_source, func.count())
         .where(Contact.archived_at.is_(None), Contact.merged_into_id.is_(None))
-        .group_by(Contact.met)
+        .group_by(Contact.met, Contact.met_source)
     )
     by_state = dict.fromkeys(ContactMet, 0)
-    for met, count in session.execute(statement).all():
-        by_state[ContactMet(met)] = count
+    automatic = dict.fromkeys(ContactMet, 0)
+    for met, source, count in session.execute(statement).all():
+        state = ContactMet(met)
+        by_state[state] += count
+        if MetSource(source) is MetSource.AUTOMATIC:
+            automatic[state] += count
     total = sum(by_state.values())
     wanted = _states(states)
+    counted = automatic if decided_by is MetSource.AUTOMATIC else by_state
     return Progress(
         total=total,
         triaged=total - by_state[ContactMet.UNKNOWN],
-        remaining=sum(by_state[state] for state in wanted),
+        remaining=sum(counted[state] for state in wanted),
         by_state=by_state,
+        automatic=sum(automatic.values()),
     )
 
 
@@ -399,8 +496,10 @@ def decide(
     contact = _owned_contact(session, user, contact_id)
     moment = at if at is not None else utcnow()
     _require_aware(moment)
-    before = _snapshot(contact, (_MET_FIELD, _TRIAGED_AT_FIELD))
-    set_manual_field(contact, _MET_FIELD, decided)
+    before = _snapshot(contact, _MET_FIELDS)
+    # The person's own answer, whatever a batch decided before: that is what
+    # takes a contact out of the review queue.
+    set_met(contact, decided, source=MetSource.MANUAL)
     contact.triaged_at = moment
     return _log(
         session,
@@ -487,7 +586,35 @@ def undo(session: Session, user: User, *, force: bool = False) -> Undone:
     )
 
 
-# --- the bulk suggestion ----------------------------------------------------
+# --- the bulk suggestions ---------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Batch:
+    """One offer in the catalogue: what it covers, what it decides, how it reads.
+
+    ``where`` narrows the queue to the contacts it covers, and the same clauses
+    serve the count, the preview, and the apply, so the three can never disagree
+    about who is in it. ``template`` takes ``count`` and ``people``.
+    """
+
+    key: str
+    met: ContactMet
+    kind: TriageDecisionKind
+    title: str
+    template: str
+    where: tuple[ColumnElement[bool], ...]
+    tag_id: int | None = None
+
+    def offer(self, count: int) -> Suggestion:
+        return Suggestion(
+            key=self.key,
+            title=self.title,
+            description=self.template.format(count=count, people=_people(count)),
+            count=count,
+            met=self.met,
+            tag_id=self.tag_id,
+        )
 
 
 def suggestions(
@@ -495,24 +622,57 @@ def suggestions(
 ) -> list[Suggestion]:
     """The bulk actions worth offering right now, with their counts (spec 10.2).
 
-    A suggestion whose count is zero is left out, so the banner appears only when
+    Strongest evidence first, and the batch that assumes the most last. A
+    suggestion whose count is zero is left out, so the banner appears only when
     there is something to accept. Nothing here writes: the count is a preview,
-    and :func:`apply_suggestion` is a separate, explicit call.
+    :func:`suggestion_contacts` shows who it covers, and
+    :func:`apply_suggestion` is a separate, explicit call.
+
+    Every count is taken against the queue as it stands, so accepting one batch
+    shrinks the others: a contact only ever belongs to whichever batch reaches
+    them first, and the counts refresh after each apply.
     """
-    count = session.scalar(_with_messages(_queue_count(user, states), user)) or 0
-    if count == 0:
-        return []
-    return [
-        Suggestion(
-            key=SUGGESTION_MET_WITH_MESSAGES,
-            title="Mark everyone with message history as met",
-            description=(
-                f"You have message threads with {count} untriaged "
-                f"{'person' if count == 1 else 'people'}."
-            ),
-            count=count,
-        )
-    ]
+    offers: list[Suggestion] = []
+    for batch in _catalogue(session, user):
+        count = session.scalar(_queue_count(user, states).where(*batch.where)) or 0
+        if count:
+            offers.append(batch.offer(count))
+    return offers
+
+
+def suggestion_contacts(
+    session: Session,
+    user: User,
+    key: str,
+    *,
+    states: Sequence[ContactMet] = DEFAULT_QUEUE_STATES,
+    limit: int = SUGGESTION_PAGE,
+    offset: int = 0,
+) -> tuple[list[Contact], int]:
+    """One page of the contacts a suggestion covers, in queue order, and the total.
+
+    The preview the count alone cannot give: a batch that decides hundreds of
+    people at once has to be readable as a list of names before anyone says yes.
+    The page is narrowed by the same clauses the apply uses, so what is shown is
+    what would be decided. Three queries whatever the page holds: the count, the
+    contacts, and their tags in one go rather than one query per row (a tag is
+    why some of these batches exist, so the rows carry them). Writes nothing.
+    :class:`InvalidDecision` for an unknown key, a limit under 1, or a negative
+    offset.
+    """
+    batch = _batch_by_key(session, user, key)
+    if limit < 1 or offset < 0:
+        raise InvalidDecision("limit must be at least 1 and offset cannot be negative")
+    total = session.scalar(_queue_count(user, states).where(*batch.where)) or 0
+    page = session.scalars(
+        _queue(user, states)
+        .where(*batch.where)
+        .order_by(Contact.id)
+        .limit(limit)
+        .offset(offset)
+        .options(selectinload(Contact.tags))
+    ).all()
+    return list(page), total
 
 
 def apply_suggestion(
@@ -529,37 +689,184 @@ def apply_suggestion(
     ``expected_count`` is the count the user was shown: when the set has moved on
     since, nothing is written and :class:`CountChanged` says so, so a click never
     applies to more people than the banner named. Every contact gets its own
-    decision row with its own previous state, so undo restores each one exactly,
-    including a contact that was already ``not_met``. :class:`InvalidDecision`
-    for an unknown key; ``RuntimeError`` when ``session`` is not a writer.
+    decision row carrying its own previous state, the batch id, and the key of
+    the suggestion that decided it, so undo restores each one exactly — including
+    a contact that was already ``not_met`` — and the log can always say what
+    netkeeper decided and why. Each contact is left with ``met_source`` set to
+    ``automatic``, which is what the review queue serves and what keeps this from
+    passing as a decision the person made. :class:`InvalidDecision` for an
+    unknown key; ``RuntimeError`` when ``session`` is not a writer.
     """
     _require_writer(session)
-    if key != SUGGESTION_MET_WITH_MESSAGES:
-        raise InvalidDecision(f"no bulk suggestion named {key!r}")
+    batch = _batch_by_key(session, user, key)
     moment = at if at is not None else utcnow()
     _require_aware(moment)
-    statement = _with_messages(_queue(user, states), user).order_by(Contact.id)
+    statement = _queue(user, states).where(*batch.where).order_by(Contact.id)
     matches = list(session.scalars(statement).all())
     if expected_count is not None and expected_count != len(matches):
         raise CountChanged(expected_count, len(matches))
     batch_id = uuid.uuid4().hex
     for contact in matches:
-        before = _snapshot(contact, (_MET_FIELD, _TRIAGED_AT_FIELD))
-        set_manual_field(contact, _MET_FIELD, ContactMet.MET)
+        before = _snapshot(contact, _MET_FIELDS)
+        set_met(contact, batch.met, source=MetSource.AUTOMATIC)
         contact.triaged_at = moment
         _log(
             session,
             user,
             contact,
-            TriageDecisionKind.BULK_MET,
+            batch.kind,
             before=before,
             at=moment,
             batch_id=batch_id,
+            reason=batch.key,
             flush=False,
         )
     session.flush()
-    log.info("bulk suggestion %s marked %d contacts met for user %d", key, len(matches), user.id)
-    return Applied(key=key, applied=len(matches), batch_id=batch_id)
+    log.info(
+        "bulk suggestion %s marked %d contacts %s for user %d (batch %s)",
+        key,
+        len(matches),
+        batch.met.value,
+        user.id,
+        batch_id,
+    )
+    return Applied(key=key, applied=len(matches), batch_id=batch_id, met=batch.met)
+
+
+# --- the catalogue ----------------------------------------------------------
+
+
+def _catalogue(session: Session, user: User) -> list[_Batch]:
+    """Every batch that exists for this user, strongest evidence first.
+
+    Why each one earns its place, and what it assumes:
+
+    * **Message history.** You and this person wrote to each other. Nothing else
+      in an archive comes close, and it is the batch that was here first.
+      Invitations are excluded, which they were not before: the importer stores
+      an invitation as an ``li_in``/``li_out`` row like any message, so the old
+      count quietly swept in everyone who had ever clicked Connect.
+    * **An invitation note.** One of you wrote something personal with the
+      invitation. Weaker than a thread and much rarer, so it is its own offer
+      rather than a widening of the first, and it covers only people with no
+      message thread — a person who has both is already in the batch above.
+    * **A tag the user gave a meaning.** Only tags carrying
+      :class:`~netkeeper.models.TagMetSignal` count, one batch per tag, so
+      "everyone I tagged *recruiter* is someone I have not met" is one decision
+      the user makes once and then previews against the handful it covers rather
+      than the whole address book.
+      The tag may have been applied by a rule or by hand: the tag means what the
+      user says it means however it got there, and a tag they placed themselves
+      is the stronger evidence of the two. A rule never decides ``met`` on its
+      own — it tags, and a batch the person accepts turns tags into decisions.
+    * **No evidence at all.** No interaction of any kind on file, no tag the
+      user has given a meaning, and nobody at their company you have met or
+      written to. This is the one batch that argues from absence, so it is
+      offered last, described plainly, and hedged everywhere it can be: the
+      shared-company test keeps back the people an evidence panel would have
+      something to say about, even though it leaves them for the manual pass.
+    """
+    return [
+        _Batch(
+            key=SUGGESTION_MET_WITH_MESSAGES,
+            met=ContactMet.MET,
+            kind=TriageDecisionKind.BULK_MET,
+            title="Mark everyone with message history as met",
+            template="You have message threads with {count} untriaged {people}.",
+            where=(_messaged(user),),
+        ),
+        _Batch(
+            key=SUGGESTION_MET_INVITATION_NOTE,
+            met=ContactMet.MET,
+            kind=TriageDecisionKind.BULK_MET,
+            title="Mark everyone who swapped an invitation note as met",
+            template=(
+                "An invitation carried a personal note one way or the other with "
+                "{count} untriaged {people}, and no message thread followed."
+            ),
+            where=(_invited_with_a_note(user), ~_messaged(user)),
+        ),
+        *_tag_batches(session, user),
+        _Batch(
+            key=SUGGESTION_NOT_MET_NO_EVIDENCE,
+            met=ContactMet.NOT_MET,
+            kind=TriageDecisionKind.BULK_NOT_MET,
+            title="Mark everyone there is no evidence about as not met",
+            template=(
+                "There is nothing on file for {count} untriaged {people}: no messages, "
+                "no invitation, no tag you have given a meaning, and nobody you have met "
+                "or written to at their company."
+            ),
+            where=(
+                _has_no_interactions(user),
+                ~_carries_a_meaningful_tag(user),
+                ~_shares_a_company_with_someone_known(user),
+            ),
+        ),
+    ]
+
+
+def _tag_batches(session: Session, user: User) -> list[_Batch]:
+    """One batch per tag the user has given a met signal, met before not met."""
+    tags = session.scalars(
+        scoped(user, Tag).where(Tag.met_signal.is_not(None)).order_by(Tag.met_signal, Tag.name_key)
+    ).all()
+    return [_tag_batch(tag) for tag in tags]
+
+
+def _tag_batch(tag: Tag) -> _Batch:
+    """The batch for one tag the user has given a meaning."""
+    if tag.met_signal is None:  # pragma: no cover - every caller filters on it first
+        raise InvalidDecision(f"the tag {tag.name!r} says nothing about having met someone")
+    decides_met = TagMetSignal(tag.met_signal) is TagMetSignal.MET
+    met = ContactMet.MET if decides_met else ContactMet.NOT_MET
+    reading = "have met" if decides_met else "have not met"
+    return _Batch(
+        key=f"{TAG_KEY_PREFIX}{tag.id}",
+        met=met,
+        kind=TriageDecisionKind.BULK_MET if decides_met else TriageDecisionKind.BULK_NOT_MET,
+        title=f"Mark everyone tagged {tag.name} as {'met' if decides_met else 'not met'}",
+        template=(
+            f"{{count}} untriaged {{people}} carry the tag {tag.name}, "
+            f"which you have said means you {reading} them."
+        ),
+        where=(_carries_tag(tag),),
+        tag_id=tag.id,
+    )
+
+
+def _batch_by_key(session: Session, user: User, key: str) -> _Batch:
+    """The batch called ``key``, or :class:`InvalidDecision`.
+
+    A tag batch is looked up by id rather than found in the catalogue, so the
+    error for a tag that is not the user's, or that carries no signal, says
+    which of the two it is.
+    """
+    if key.startswith(TAG_KEY_PREFIX):
+        return _tag_batch(_signalled_tag(session, user, key))
+    for batch in _catalogue(session, user):
+        if batch.key == key:
+            return batch
+    raise InvalidDecision(f"no bulk suggestion named {key!r}")
+
+
+def _signalled_tag(session: Session, user: User, key: str) -> Tag:
+    raw = key[len(TAG_KEY_PREFIX) :]
+    if not raw.isdigit():
+        raise InvalidDecision(f"no bulk suggestion named {key!r}")
+    tag = get_scoped(session, user, Tag, int(raw))
+    if tag is None:
+        raise InvalidDecision(f"no bulk suggestion named {key!r}")
+    if tag.met_signal is None:
+        raise InvalidDecision(
+            f"the tag {tag.name!r} says nothing about having met someone; "
+            "give it a meaning before triaging by it"
+        )
+    return tag
+
+
+def _people(count: int) -> str:
+    return "person" if count == 1 else "people"
 
 
 # --- evidence ---------------------------------------------------------------
@@ -650,6 +957,7 @@ def _log(
     before: dict[str, str | None],
     at: datetime | None = None,
     batch_id: str | None = None,
+    reason: str | None = None,
     flush: bool = True,
 ) -> TriageDecision:
     """Write the decision row for a change already made to ``contact``.
@@ -665,6 +973,7 @@ def _log(
         before_state=before,
         after_state=_snapshot(contact, before),
         batch_id=batch_id,
+        reason=reason,
         decided_at=at if at is not None else utcnow(),
     )
     session.add(row)
@@ -698,6 +1007,10 @@ def _encode(name: str, value: Any) -> str | None:
 def _decode(name: str, raw: str | None) -> Any:
     if name == _MET_FIELD:
         return None if raw is None else ContactMet(raw)
+    if name == _MET_SOURCE_FIELD:
+        # A row written before met_source existed records none; a contact whose
+        # decision predates the column was decided by hand or not at all.
+        return MetSource.MANUAL if raw is None else MetSource(raw)
     if name == _TRIAGED_AT_FIELD:
         return None if raw is None else datetime.fromisoformat(raw)
     if name == _PREFERRED_NAME_FIELD:
@@ -759,12 +1072,16 @@ def _restore(contact: Contact, row: TriageDecision) -> None:
 
     ``met`` and ``preferred_name`` go through
     :func:`~netkeeper.crm.provenance.set_manual_field`, as the decision did:
-    undoing an edit is an edit, and the field stays the person's.
+    undoing an edit is an edit, and the field stays the person's. ``met_source``
+    and ``triaged_at`` are assigned: neither carries provenance, and
+    ``met_source`` records who decided, which undo restores rather than claims —
+    so undoing a hand-made decision over a batch's puts the contact back in the
+    review queue exactly as the batch left it.
     """
     for name, raw in row.before_state.items():
         value = _decode(name, raw)
-        if name == _TRIAGED_AT_FIELD:
-            contact.triaged_at = value
+        if name in _DIRECTLY_RESTORED:
+            setattr(contact, name, value)
         else:
             set_manual_field(contact, name, value)
 
@@ -798,36 +1115,130 @@ def _contacts_by_id(session: Session, user: User, ids: Sequence[int]) -> dict[in
 # --- queue helpers ----------------------------------------------------------
 
 
-def _queue(user: User, states: Sequence[ContactMet]) -> Select[tuple[Contact]]:
+def _queue(
+    user: User, states: Sequence[ContactMet], *, decided_by: MetSource | None = None
+) -> Select[tuple[Contact]]:
     """``scoped(user, Contact)`` narrowed to the live contacts in ``states``."""
-    return scoped(user, Contact).where(*_queue_where(states))
+    return scoped(user, Contact).where(*_queue_where(states, decided_by))
 
 
-def _queue_count(user: User, states: Sequence[ContactMet]) -> Select[tuple[int]]:
-    return scoped_count(user, Contact).where(*_queue_where(states))
+def _queue_count(
+    user: User, states: Sequence[ContactMet], *, decided_by: MetSource | None = None
+) -> Select[tuple[int]]:
+    return scoped_count(user, Contact).where(*_queue_where(states, decided_by))
 
 
-def _queue_where(states: Sequence[ContactMet]) -> list[ColumnElement[bool]]:
-    return [
+def _queue_where(
+    states: Sequence[ContactMet], decided_by: MetSource | None = None
+) -> list[ColumnElement[bool]]:
+    where: list[ColumnElement[bool]] = [
         Contact.met.in_(_states(states)),
         Contact.archived_at.is_(None),
         Contact.merged_into_id.is_(None),
     ]
+    if decided_by is not None:
+        where.append(Contact.met_source == MetSource(decided_by))
+    return where
 
 
-def _with_messages[T: (Select[tuple[Contact]], Select[tuple[int]])](statement: T, user: User) -> T:
-    """Narrow a contacts statement to the contacts with at least one message interaction.
+# --- what a batch covers ----------------------------------------------------
+#
+# Every one of these is a single ``ColumnElement[bool]`` over ``Contact``, so a
+# batch narrows the count, the preview, and the apply with the same clauses, and
+# a clause can be negated (``~``) to build the complement. Each is an ``IN`` over
+# a scoped subquery rather than a join, so the outer statement still returns one
+# row per contact however much history there is. Every subquery carries its own
+# ``user_id``, as one on an owned table must (ADR 0005); the outer statement
+# carries the scope mark for the guard.
 
-    An ``IN`` over a scoped subquery rather than a join, so the outer statement
-    still returns one row per contact however many messages there are. The
-    subquery carries its own ``user_id``, as every subquery on an owned table
-    must (ADR 0005); the outer statement carries the scope mark for the guard.
-    """
-    messages = select(Interaction.contact_id).where(
-        Interaction.user_id == user.id, Interaction.kind.in_(sorted(MESSAGE_KINDS))
+
+def _message_senders(user: User) -> Select[tuple[int]]:
+    """The ids of the contacts with at least one real message, either direction."""
+    return select(Interaction.contact_id).where(
+        Interaction.user_id == user.id,
+        Interaction.kind.in_(sorted(MESSAGE_KINDS)),
+        ~is_invitation(),
     )
-    narrowed: T = statement.where(Contact.id.in_(messages))
-    return narrowed
+
+
+def _messaged(user: User) -> ColumnElement[bool]:
+    """The contacts you and they have actually written to each other.
+
+    Invitations are excluded. The importer writes one as an ``li_in``/``li_out``
+    row like any message, so without this the batch would count a bare "they
+    clicked Connect" as a conversation; against the reference archive that was 7
+    people out of 178.
+    """
+    return Contact.id.in_(_message_senders(user))
+
+
+def _invited_with_a_note(user: User) -> ColumnElement[bool]:
+    """The contacts an invitation note passed between, in either direction."""
+    return Contact.id.in_(
+        select(Interaction.contact_id).where(
+            Interaction.user_id == user.id,
+            Interaction.kind.in_(sorted(MESSAGE_KINDS)),
+            has_invitation_note(),
+        )
+    )
+
+
+def _has_no_interactions(user: User) -> ColumnElement[bool]:
+    """The contacts with no interaction of any kind: no message, no invitation, no note."""
+    return Contact.id.not_in(select(Interaction.contact_id).where(Interaction.user_id == user.id))
+
+
+def _carries_a_meaningful_tag(user: User) -> ColumnElement[bool]:
+    """The contacts carrying any tag the user has given a met signal."""
+    return Contact.id.in_(
+        select(ContactTag.contact_id)
+        .join(Tag, Tag.id == ContactTag.tag_id)
+        .where(
+            ContactTag.user_id == user.id,
+            Tag.user_id == user.id,
+            Tag.met_signal.is_not(None),
+        )
+    )
+
+
+def _carries_tag(tag: Tag) -> ColumnElement[bool]:
+    """The contacts carrying one tag, however it was assigned.
+
+    A rule, the LLM module, or the user's own hand: the tag means what the user
+    said it means whichever put it there, and the one they placed themselves is
+    the more trustworthy of the two.
+    """
+    return Contact.id.in_(
+        select(ContactTag.contact_id).where(
+            ContactTag.user_id == tag.user_id, ContactTag.tag_id == tag.id
+        )
+    )
+
+
+def _shares_a_company_with_someone_known(user: User) -> ColumnElement[bool]:
+    """The contacts at a company where you have met, or written to, somebody else.
+
+    The weakest of the signals and the only one used to *withhold* a decision
+    rather than make one: the "no evidence" batch keeps these people back for the
+    manual pass, because their evidence panel has something to show and a batch
+    should not decide over the top of it. Matched on the current company only,
+    without regard to case or surrounding space, as
+    :func:`_shared_companies` counts it.
+    """
+    other = aliased(Contact)
+    named = func.trim(func.coalesce(Contact.current_company, "")) != ""
+    known = (
+        select(func.lower(func.trim(other.current_company)))
+        .where(
+            other.user_id == user.id,
+            other.archived_at.is_(None),
+            other.merged_into_id.is_(None),
+            func.trim(func.coalesce(other.current_company, "")) != "",
+            or_(other.met == ContactMet.MET, other.id.in_(_message_senders(user))),
+        )
+        .distinct()
+    )
+    return and_(named, func.lower(func.trim(Contact.current_company)).in_(known))
 
 
 def _states(states: Sequence[ContactMet]) -> list[ContactMet]:

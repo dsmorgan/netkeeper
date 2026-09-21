@@ -1077,7 +1077,12 @@ export interface paths {
         head?: never;
         /**
          * Update Tag
-         * @description Rename or recolor. A field left out is left alone; ``color: null`` clears it.
+         * @description Rename, recolor, or say what the tag means for triage.
+         *
+         *     A field left out is left alone; `color: null` and `met_signal: null` clear
+         *     them. `met_signal` is what carrying this tag says about having met someone
+         *     (spec 10.2): it puts a triage batch on offer, which is still previewed and
+         *     accepted by hand.
          */
         patch: operations["update_tag"];
         trace?: never;
@@ -1156,7 +1161,10 @@ export interface paths {
          * @description Record `met`, `not_met`, or `skip` on a contact and return the next card with it.
          *
          *     The response carries the contact after `prefetch_after_id` (or after the one
-         *     just decided), so triaging a run costs one request per contact.
+         *     just decided), so triaging a run costs one request per contact. Pass the
+         *     `decided_by` the queue is being served with, so a review pass hands back the
+         *     next contact still waiting to be reviewed; the one just decided has left that
+         *     queue, because deciding by hand is what `manual` means.
          */
         post: operations["decide_triage"];
         delete?: never;
@@ -1177,7 +1185,8 @@ export interface paths {
          * @description The next contact to triage with its evidence, the one after it, and the progress.
          *
          *     `after_id` moves on without deciding (the `→` key). Both cards are `null`
-         *     when the queue is empty.
+         *     when the queue is empty. `decided_by=automatic` serves the review pass: the
+         *     contacts a batch decided and nobody has corrected.
          */
         get: operations["get_next_triage_contact"];
         put?: never;
@@ -1199,8 +1208,10 @@ export interface paths {
          * List Triage Suggestions
          * @description The bulk actions worth offering, with the count each would apply to.
          *
-         *     A suggestion that matches nobody is left out, so the banner shows only when
-         *     there is something to accept. Nothing is applied until `apply`.
+         *     Strongest evidence first, and the batch that assumes the most last. A
+         *     suggestion that matches nobody is left out, so the banner shows only when
+         *     there is something to accept. Every count is against the queue as it stands,
+         *     so accepting one batch shrinks the rest. Nothing is applied until `apply`.
          */
         get: operations["list_triage_suggestions"];
         put?: never;
@@ -1225,9 +1236,36 @@ export interface paths {
          * @description Apply a bulk suggestion as one batch that a single undo takes back.
          *
          *     Send the `expected_count` the banner showed: a set that has moved on since
-         *     answers `409` rather than touching more people than the banner named.
+         *     answers `409` rather than touching more people than the banner named. Every
+         *     contact it touches is left marked `automatic`, so `/triage/next` with
+         *     `decided_by=automatic` serves exactly this batch's work back for review.
          */
         post: operations["apply_triage_suggestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/triage/suggestions/{key}/contacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Triage Suggestion Contacts
+         * @description Who a suggestion covers, a page at a time, in the order the queue holds them.
+         *
+         *     The preview a count alone cannot give: a batch that decides hundreds of
+         *     people at once should be readable as a list of names before anyone says yes.
+         *     Writes nothing, and the page is served from the same query the apply uses,
+         *     so what is shown is what would be decided.
+         */
+        get: operations["list_triage_suggestion_contacts"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2653,6 +2691,12 @@ export interface components {
             skipped_count: number;
             source_kind: components["schemas"]["ImportSourceKind"];
             status: components["schemas"]["ImportStatus"];
+            /** Tagged Contacts */
+            tagged_contacts: number;
+            /** Tags Added */
+            tags_added: number;
+            /** Tags Removed */
+            tags_removed: number;
             /** Total Rows */
             total_rows: number;
             /**
@@ -2924,6 +2968,19 @@ export interface components {
             /** Merged Into Id */
             merged_into_id: number;
         };
+        /**
+         * MetSource
+         * @description Who decided ``met``: the person, or netkeeper on their behalf (spec 10.2).
+         *
+         *     ``manual`` is the resting state and covers a contact nobody has decided yet.
+         *     ``automatic`` is set only by a triage batch the person accepted
+         *     (:func:`netkeeper.crm.triage.apply_suggestion`), so a decision netkeeper made
+         *     never reads as one the person made by hand, and the review queue can serve
+         *     exactly those contacts back for checking. No import writes either: ``met``
+         *     stays a field the person owns.
+         * @enum {string}
+         */
+        MetSource: "manual" | "automatic";
         /** Neq */
         Neq: {
             /**
@@ -3218,6 +3275,7 @@ export interface components {
             color?: string | null;
             /** @default manual */
             kind: components["schemas"]["TagKind"];
+            met_signal?: components["schemas"]["TagMetSignal"] | null;
             /** Name */
             name: string;
         };
@@ -3227,6 +3285,19 @@ export interface components {
          * @enum {string}
          */
         TagKind: "manual" | "auto" | "llm";
+        /**
+         * TagMetSignal
+         * @description What carrying a tag says about having met the person (spec 10.2).
+         *
+         *     The user's own reading of their own label: "everyone I tagged *recruiter* is
+         *     someone I have not met", "everyone I tagged *colleague* is someone I have".
+         *     A tag says nothing until the user sets this, and setting it decides nobody
+         *     on its own: it only makes a triage batch worth offering, which the user then
+         *     previews and accepts. NULL is the default and means the tag carries no
+         *     signal.
+         * @enum {string}
+         */
+        TagMetSignal: "met" | "not_met";
         /**
          * TagNone
          * @description Carries none of the tags named (case-insensitive).
@@ -3254,6 +3325,7 @@ export interface components {
             /** Id */
             id: number;
             kind: components["schemas"]["TagKind"];
+            met_signal: components["schemas"]["TagMetSignal"] | null;
             /** Name */
             name: string;
             /**
@@ -3264,11 +3336,12 @@ export interface components {
         };
         /**
          * TagPatch
-         * @description Fields left out are left alone; ``color: null`` clears the color.
+         * @description Fields left out are left alone; ``color: null`` and ``met_signal: null`` clear them.
          */
         TagPatch: {
             /** Color */
             color?: string | null;
+            met_signal?: components["schemas"]["TagMetSignal"] | null;
             /** Name */
             name?: string | null;
         };
@@ -3385,6 +3458,7 @@ export interface components {
             /** Location */
             location: string | null;
             met: components["schemas"]["ContactMet"];
+            met_source: components["schemas"]["MetSource"];
             /** Notes */
             notes: string | null;
             /** Preferred Name */
@@ -3419,7 +3493,7 @@ export interface components {
          * @description What a decision was. The kind steers nothing in undo; it is for the history.
          * @enum {string}
          */
-        TriageDecisionKind: "decide" | "preferred_name" | "bulk_met";
+        TriageDecisionKind: "decide" | "preferred_name" | "bulk_met" | "bulk_not_met";
         /**
          * TriageDecisionOut
          * @description One row of the triage log: what changed, as it was and as the decision left it.
@@ -3445,6 +3519,8 @@ export interface components {
             /** Id */
             id: number;
             kind: components["schemas"]["TriageDecisionKind"];
+            /** Reason */
+            reason: string | null;
             /** Undone At */
             undone_at: string | null;
         };
@@ -3491,6 +3567,8 @@ export interface components {
          * @description Triaged against total, and how many are left in the queue that was asked for.
          */
         TriageProgressOut: {
+            /** Automatic */
+            automatic: number;
             /** By State */
             by_state: {
                 [key: string]: number;
@@ -3533,6 +3611,7 @@ export interface components {
             batch_id: string;
             /** Key */
             key: string;
+            met: components["schemas"]["ContactMet"];
             progress: components["schemas"]["TriageProgressOut"];
         };
         /**
@@ -3549,8 +3628,25 @@ export interface components {
             description: string;
             /** Key */
             key: string;
+            met: components["schemas"]["ContactMet"];
+            /** Tag Id */
+            tag_id: number | null;
             /** Title */
             title: string;
+        };
+        /**
+         * TriageSuggestionPage
+         * @description One page of the contacts a suggestion covers, so it can be read before it is taken.
+         */
+        TriageSuggestionPage: {
+            /** Items */
+            items: components["schemas"]["TriageContactOut"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total */
+            total: number;
         };
         /**
          * TriageTagOut
@@ -6230,8 +6326,10 @@ export interface operations {
     decide_triage: {
         parameters: {
             query?: {
-                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit. */
+                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided. */
                 states?: components["schemas"]["ContactMet"][] | null;
+                /** @description Narrow the queue to the contacts whose current `met` was decided this way. `automatic` is the review pass: what netkeeper decided for you, on the same cards, so you can check it. Deciding one by hand makes it `manual` and takes it out of that queue. */
+                decided_by?: components["schemas"]["MetSource"] | null;
             };
             header?: never;
             path?: never;
@@ -6273,12 +6371,14 @@ export interface operations {
     get_next_triage_contact: {
         parameters: {
             query?: {
-                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit. */
+                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided. */
                 states?: components["schemas"]["ContactMet"][] | null;
                 /** @description Cursor: the first contact past this id, for moving on without deciding. */
                 after_id?: number | null;
                 /** @description Also return the contact after this one, so the client never waits. */
                 prefetch?: boolean;
+                /** @description Narrow the queue to the contacts whose current `met` was decided this way. `automatic` is the review pass: what netkeeper decided for you, on the same cards, so you can check it. Deciding one by hand makes it `manual` and takes it out of that queue. */
+                decided_by?: components["schemas"]["MetSource"] | null;
             };
             header?: never;
             path?: never;
@@ -6309,7 +6409,7 @@ export interface operations {
     list_triage_suggestions: {
         parameters: {
             query?: {
-                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit. */
+                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided. */
                 states?: components["schemas"]["ContactMet"][] | null;
             };
             header?: never;
@@ -6341,7 +6441,7 @@ export interface operations {
     apply_triage_suggestion: {
         parameters: {
             query?: {
-                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit. */
+                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided. */
                 states?: components["schemas"]["ContactMet"][] | null;
             };
             header?: never;
@@ -6390,10 +6490,55 @@ export interface operations {
             };
         };
     };
+    list_triage_suggestion_contacts: {
+        parameters: {
+            query?: {
+                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided. */
+                states?: components["schemas"]["ContactMet"][] | null;
+                /** @description Contacts per page of a preview. */
+                limit?: number;
+                /** @description How many contacts to skip. */
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TriageSuggestionPage"];
+                };
+            };
+            /** @description No suggestion by that key */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     undo_triage: {
         parameters: {
             query?: {
-                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit. */
+                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided. */
                 states?: components["schemas"]["ContactMet"][] | null;
             };
             header?: never;

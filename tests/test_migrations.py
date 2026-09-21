@@ -880,7 +880,7 @@ def _insert_decision(
 
 
 def test_a_triage_decision_kind_is_checked_by_the_database(migration_engine: Engine) -> None:
-    """The three kinds and nothing else.
+    """The four kinds and nothing else.
 
     ``compare_metadata`` does not diff CHECK constraints (see the portability
     note above), so without this nothing notices if a later migration drops it
@@ -890,10 +890,11 @@ def test_a_triage_decision_kind_is_checked_by_the_database(migration_engine: Eng
     with migration_engine.begin() as connection:
         _seed_users(connection, 1)
         _insert_contact(connection, id=1, user_id=1)
-        for index, kind in enumerate(("decide", "preferred_name", "bulk_met"), start=1):
+        kinds = ("decide", "preferred_name", "bulk_met", "bulk_not_met")
+        for index, kind in enumerate(kinds, start=1):
             _insert_decision(connection, id=index, user_id=1, contact_id=1, kind=kind)
     with pytest.raises(IntegrityError), migration_engine.begin() as connection:
-        _insert_decision(connection, id=4, user_id=1, contact_id=1, kind="bogus")
+        _insert_decision(connection, id=5, user_id=1, contact_id=1, kind="bogus")
 
 
 def test_deleting_a_contact_or_its_user_takes_the_triage_log_with_it(
@@ -935,3 +936,69 @@ def test_ci_runs_the_postgresql_params() -> None:
     if not os.environ.get("GITHUB_ACTIONS"):
         pytest.skip("only meaningful on GitHub Actions")
     assert os.environ.get(PG_ENV), f"CI must set {PG_ENV}; see .github/workflows/ci.yml"
+
+
+# --- the automatic first pass (0008) ----------------------------------------
+
+
+def test_met_source_fills_existing_contacts_and_is_checked(migration_engine: Engine) -> None:
+    """0008 rebuilds ``contacts`` on SQLite to add a checked column; rows already there keep up."""
+    migrations.upgrade(migration_engine, "0007")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1, met="met")
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        source = connection.execute(text("SELECT met_source FROM contacts WHERE id = 1")).scalar()
+        # A contact decided before the column existed was decided by hand or not at all.
+        assert source == "manual"
+        assert connection.execute(text("SELECT met FROM contacts WHERE id = 1")).scalar() == "met"
+        connection.execute(text("UPDATE contacts SET met_source = 'automatic' WHERE id = 1"))
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(text("UPDATE contacts SET met_source = 'bogus' WHERE id = 1"))
+
+
+def test_a_tag_met_signal_is_checked_by_the_database(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_tag(connection, id=1, user_id=1, name="recruiter")
+        assert connection.execute(text("SELECT met_signal FROM tags WHERE id = 1")).scalar() is None
+        for signal in ("met", "not_met"):
+            connection.execute(
+                text("UPDATE tags SET met_signal = :signal WHERE id = 1"), {"signal": signal}
+            )
+        connection.execute(text("UPDATE tags SET met_signal = NULL WHERE id = 1"))
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(text("UPDATE tags SET met_signal = 'maybe' WHERE id = 1"))
+
+
+def test_an_import_run_starts_with_no_tagging_counts(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0007")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_import_run(connection, id=1, user_id=1)
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        counts = connection.execute(
+            text("SELECT tagged_contacts, tags_added, tags_removed FROM import_runs WHERE id = 1")
+        ).one()
+    assert tuple(counts) == (0, 0, 0)
+
+
+def test_downgrading_drops_the_decisions_the_old_schema_cannot_hold(
+    migration_engine: Engine,
+) -> None:
+    """A ``bulk_not_met`` row fails 0007's CHECK, so the downgrade removes those and no others."""
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_decision(connection, id=1, user_id=1, contact_id=1)
+        _insert_decision(
+            connection, id=2, user_id=1, contact_id=1, kind="bulk_not_met", batch_id="b1"
+        )
+    migrations.downgrade(migration_engine, "0007")
+    with migration_engine.begin() as connection:
+        kept = connection.execute(text("SELECT id FROM triage_decisions ORDER BY id")).scalars()
+        assert list(kept) == [1]

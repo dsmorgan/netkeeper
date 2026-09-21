@@ -79,6 +79,7 @@ API_PATHS = {
     "/api/v1/triage/undo",
     "/api/v1/triage/contacts/{contact_id}/preferred-name",
     "/api/v1/triage/suggestions",
+    "/api/v1/triage/suggestions/{key}/contacts",
     "/api/v1/triage/suggestions/{key}/apply",
 }
 

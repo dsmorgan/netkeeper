@@ -17,9 +17,15 @@ the recorded value and its source back on the contact, and
 :func:`overridden_fields` names the fields where an edit hides a different
 synced value.
 
-This module is the rule, :func:`set_manual_field` for a person's own edits, and
-the ledger. Applying the rule to an incoming row, and recording the source that
-wins, is identity resolution and import (:mod:`netkeeper.crm.identity`).
+``met`` is a person-owned field with a second column beside it: ``met_source``
+says whether the person decided it or a triage batch they accepted did, and
+:func:`set_met` is the only way either is written (spec 10.2). No import touches
+either one.
+
+This module is the rule, :func:`set_manual_field` and :func:`set_met` for what a
+person owns, and the ledger. Applying the rule to an incoming row, and recording
+the source that wins, is identity resolution and import
+(:mod:`netkeeper.crm.identity`).
 """
 
 from __future__ import annotations
@@ -29,7 +35,7 @@ from typing import Final
 
 from sqlalchemy import Date, inspect
 
-from netkeeper.models import Contact, ContactMet, ContactSource, SyncedValue
+from netkeeper.models import Contact, ContactMet, ContactSource, MetSource, SyncedValue
 
 # Higher wins. Equal rank may overwrite: a newer sync updates an older one, and a
 # later edit replaces an earlier one. ``manual`` ranks highest for a LinkedIn
@@ -84,6 +90,24 @@ def may_overwrite(field: str, incoming_source: str, contact: Contact) -> bool:
     if (current is None or current == "") and ContactSource(recorded) is not ContactSource.MANUAL:
         return True  # nothing to protect, unless a person emptied it on purpose
     return SOURCE_RANK[source.value] >= SOURCE_RANK[ContactSource(recorded).value]
+
+
+def set_met(contact: Contact, value: ContactMet, *, source: MetSource) -> None:
+    """Write ``met`` and record who decided it (spec 10.2).
+
+    ``met`` is a field the person owns: no sync, archive, or CSV import writes
+    it, and :func:`may_overwrite` says so. But the person is not the only one who
+    decides it any more — a triage batch they accepted decides in bulk — so the
+    contact carries ``met_source`` beside the value, and every write of one goes
+    through here. ``MetSource.AUTOMATIC`` is netkeeper's own answer, waiting to
+    be reviewed; ``MetSource.MANUAL`` is the person's, and replacing an automatic
+    answer with a manual one is what closes the review.
+
+    The decision log records both columns, so undo puts the pair back together
+    (:mod:`netkeeper.crm.triage`).
+    """
+    contact.met = ContactMet(value)
+    contact.met_source = MetSource(source)
 
 
 def set_manual_field(contact: Contact, field: str, value: str | date | ContactMet | None) -> None:

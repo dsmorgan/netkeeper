@@ -68,6 +68,21 @@ class ContactMet(enum.StrEnum):
     SKIP = "skip"
 
 
+class MetSource(enum.StrEnum):
+    """Who decided ``met``: the person, or netkeeper on their behalf (spec 10.2).
+
+    ``manual`` is the resting state and covers a contact nobody has decided yet.
+    ``automatic`` is set only by a triage batch the person accepted
+    (:func:`netkeeper.crm.triage.apply_suggestion`), so a decision netkeeper made
+    never reads as one the person made by hand, and the review queue can serve
+    exactly those contacts back for checking. No import writes either: ``met``
+    stays a field the person owns.
+    """
+
+    MANUAL = "manual"
+    AUTOMATIC = "automatic"
+
+
 class ContactSource(enum.StrEnum):
     """Where a row came from. On ``contacts`` the first source; children carry their own.
 
@@ -185,6 +200,8 @@ class Contact(UserOwned, TimestampMixin, Base):
         Index("ix_contacts_user_id_last_name_first_name", "user_id", "last_name", "first_name"),
         Index("ix_contacts_user_id_current_company", "user_id", "current_company"),
         Index("ix_contacts_user_id_met", "user_id", "met"),
+        # The review queue: the contacts a batch decided, waiting to be checked.
+        Index("ix_contacts_user_id_met_source", "user_id", "met_source"),
         Index("ix_contacts_user_id_archived_at", "user_id", "archived_at"),
         Index("ix_contacts_user_id_last_contacted_at", "user_id", "last_contacted_at"),
     )
@@ -209,6 +226,12 @@ class Contact(UserOwned, TimestampMixin, Base):
     degree: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     met: Mapped[ContactMet] = mapped_column(
         string_enum(ContactMet, "contact_met"), nullable=False, default=ContactMet.UNKNOWN
+    )
+    # Who put that value there (spec 10.2). ``automatic`` means a triage batch
+    # the person accepted decided it and it is waiting to be reviewed; the
+    # decision log says which batch and when.
+    met_source: Mapped[MetSource] = mapped_column(
+        string_enum(MetSource, "contact_met_source"), nullable=False, default=MetSource.MANUAL
     )
     triaged_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     do_not_contact: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

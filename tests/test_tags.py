@@ -60,6 +60,7 @@ from netkeeper.models import (
     RuleField,
     Tag,
     TagKind,
+    TagMetSignal,
     TagSource,
     User,
     UserKind,
@@ -212,6 +213,21 @@ def test_update_tag_renames_recolors_and_clears(writer: Session, user: User) -> 
     assert update_tag(writer, user, vp.id, name="vp").name == "vp"
     with pytest.raises(TagNotFound):
         update_tag(writer, user, vp.id + 100, name="x")
+
+
+def test_a_tag_carries_the_meaning_the_user_gives_it(writer: Session, user: User) -> None:
+    """``met_signal`` is what puts a tag's triage batch on offer (spec 10.2)."""
+    plain = create_tag(writer, user, "vp")
+    assert plain.met_signal is None
+    recruiters = create_tag(writer, user, "recruiter", met_signal=TagMetSignal.NOT_MET)
+    assert recruiters.met_signal is TagMetSignal.NOT_MET
+    assert update_tag(writer, user, plain.id, met_signal=TagMetSignal.MET).met_signal is (
+        TagMetSignal.MET
+    )
+    assert update_tag(writer, user, plain.id, name="VP").met_signal is TagMetSignal.MET, (
+        "a field left out is left alone"
+    )
+    assert update_tag(writer, user, plain.id, met_signal=None).met_signal is None
 
 
 def test_delete_tag_takes_its_assignments_suppressions_and_rules_with_it(

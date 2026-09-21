@@ -38,9 +38,11 @@ from netkeeper.models import (
     InteractionKind,
     LinkKind,
     ListKind,
+    MetSource,
     PhoneKind,
     RuleField,
     TagKind,
+    TagMetSignal,
     TagSource,
     TriageDecisionKind,
     UserKind,
@@ -236,6 +238,13 @@ class TagOut(BaseModel):
     name: str
     color: str | None
     kind: TagKind
+    met_signal: TagMetSignal | None
+    """What carrying this tag says about having met the person (spec 10.2).
+
+    The user's own reading of their own label, and ``null`` until they give one.
+    A tag with a signal is offered as a triage batch, previewed and accepted like
+    any other; it decides nobody on its own.
+    """
     contact_count: int
     """Live contacts (not merged away, not archived) carrying the tag."""
     created_at: datetime
@@ -246,13 +255,15 @@ class TagCreate(BaseModel):
     name: TagName
     color: HexColor | None = None
     kind: TagKind = TagKind.MANUAL
+    met_signal: TagMetSignal | None = None
 
 
 class TagPatch(BaseModel):
-    """Fields left out are left alone; ``color: null`` clears the color."""
+    """Fields left out are left alone; ``color: null`` and ``met_signal: null`` clear them."""
 
     name: TagName | None = None
     color: HexColor | None = None
+    met_signal: TagMetSignal | None = None
 
 
 class ContactTagCreate(BaseModel):
@@ -864,6 +875,10 @@ class ImportRunOut(BaseModel):
     created_count: int
     candidate_count: int
     skipped_count: int
+    tagged_contacts: int
+    """Contacts the auto-tag rules looked at when this run committed (#64)."""
+    tags_added: int
+    tags_removed: int
     committed_at: datetime | None
     rolled_back_at: datetime | None
     created_at: datetime
@@ -1197,6 +1212,12 @@ class TriageContactOut(BaseModel):
     location: str | None
     connected_on: date | None
     met: ContactMet
+    met_source: MetSource
+    """Who decided ``met``: the person, or a batch they accepted (spec 10.2).
+
+    ``automatic`` is netkeeper's own answer waiting to be checked, which is what
+    the review queue serves; deciding the contact by hand makes it ``manual``.
+    """
     triaged_at: datetime | None
     do_not_contact: bool
     notes: str | None
@@ -1266,6 +1287,8 @@ class TriageProgressOut(BaseModel):
     triaged: int
     remaining: int
     by_state: dict[ContactMet, int]
+    automatic: int
+    """Live contacts a batch decided and nobody has corrected: the review pass."""
 
 
 class TriageQueueOut(BaseModel):
@@ -1304,6 +1327,8 @@ class TriageDecisionOut(BaseModel):
     before_state: dict[str, str | None]
     after_state: dict[str, str | None]
     batch_id: str | None
+    reason: str | None
+    """The key of the suggestion a batch came from; ``null`` for a decision by hand."""
     decided_at: datetime
     undone_at: datetime | None
 
@@ -1369,6 +1394,19 @@ class TriageSuggestionOut(BaseModel):
     title: str
     description: str
     count: int
+    met: ContactMet
+    """What the batch would write: ``met`` or ``not_met``."""
+    tag_id: int | None
+    """The tag a tag batch is built on; ``null`` for the other batches."""
+
+
+class TriageSuggestionPage(BaseModel):
+    """One page of the contacts a suggestion covers, so it can be read before it is taken."""
+
+    items: list[TriageContactOut]
+    total: int
+    limit: int
+    offset: int
 
 
 class TriageSuggestionApplyIn(BaseModel):
@@ -1383,4 +1421,5 @@ class TriageSuggestionApplyOut(BaseModel):
     key: str
     applied: int
     batch_id: str
+    met: ContactMet
     progress: TriageProgressOut

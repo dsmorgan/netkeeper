@@ -21,14 +21,17 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.crm import identity, import_runs
 from netkeeper.crm.identity import CreateNew, MergeInto
 from netkeeper.crm.provenance import may_overwrite, set_manual_field
+from netkeeper.crm.tags import create_rule, create_tag
 from netkeeper.db import mark_for_write, session_scope
 from netkeeper.models import (
     Contact,
     ContactEmail,
     ContactSource,
+    ContactTag,
     ImportResolution,
     ImportRow,
     ImportStatus,
+    RuleField,
     User,
 )
 from netkeeper.scoping import scoped, unscoped
@@ -123,6 +126,37 @@ def import_sample(
     run = import_runs.create_run(session, user, filename="sample.csv", content=content, **kwargs)
     import_runs.commit(session, user, run.id, skip_undecided=True)
     return run.id
+
+
+# --- the rules run with the commit ------------------------------------------
+
+
+def test_committing_tags_the_contacts_it_wrote_and_counts_them(writer: Session, user: User) -> None:
+    """#64: the rules run inside the commit, over the rows it wrote and no others."""
+    seed_existing(writer, user)
+    heads = create_tag(writer, user, "head-of")
+    create_rule(writer, user, heads.id, RuleField.TITLE, r"\bhead of\b")
+    stranger = factories.make_contact(
+        writer, user, li_public_id="not-in-the-file", current_title="Head of Nothing"
+    )
+
+    run = import_runs.create_run(writer, user, filename="sample.csv", content=LINKEDHELPER)
+    assert (run.tagged_contacts, run.tags_added) == (0, 0), "a draft writes nothing to tag"
+    committed = import_runs.commit(writer, user, run.id, skip_undecided=True)
+
+    # Every row that wrote a contact, counted per person: the file names Imogen
+    # twice, and the second row matches the contact the first one created.
+    assert committed.tagged_contacts == committed.matched_count + committed.created_count - 1
+    assert committed.tags_added == 2  # Fern, "Head of Kites", and Imogen, "Head of Pickles"
+    tagged = {
+        row.contact_id
+        for row in writer.scalars(scoped(user, ContactTag).where(ContactTag.tag_id == heads.id))
+    }
+    fern = by_slug(writer, user, "fern-oglethorpe-qz")
+    imogen = by_slug(writer, user, "imogen-thistlewhite-qz")
+    assert fern is not None and imogen is not None
+    assert tagged == {fern.id, imogen.id}
+    assert stranger.id not in tagged, "a contact the file never named was not examined"
 
 
 # --- rollback ---------------------------------------------------------------

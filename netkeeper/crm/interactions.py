@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final, Literal, cast
 
-from sqlalchemy import CursorResult, func
+from sqlalchemy import ColumnElement, CursorResult, func
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
@@ -61,6 +61,41 @@ A note is a record, not a contact; an inbound message is them reaching you; a
 profile view is neither. A call or a meeting takes two, and either counts as
 having been in touch.
 """
+
+
+INVITATION_SUMMARY: Final = "LinkedIn invitation"
+"""What marks an ``li_in``/``li_out`` interaction as an invitation, not a message.
+
+The schema has one kind for both directions of LinkedIn traffic and no column
+for the distinction, so the archive importer writes the marker at the head of
+the summary (``"LinkedIn invitation"``, or ``"LinkedIn invitation: <note>"``
+when the invitation carried one) and this is where everything that has to tell
+them apart reads it from. It matters to triage: "we wrote to each other" is
+evidence you have met someone, and "they clicked Connect" is not.
+
+A discriminator in the text is not one a schema can enforce, and a message whose
+body happens to start with these two words reads as an invitation. The cost is
+bounded — a batch scoped slightly wrong, previewable and undoable in one step —
+and the alternative, a pair of new interaction kinds, rewrites every row the
+importer has ever written. :func:`is_invitation` is the one reader.
+"""
+
+
+def is_invitation() -> ColumnElement[bool]:
+    """SQL: this interaction is an invitation rather than a message.
+
+    ``substr`` rather than ``LIKE``: ``LIKE`` ignores case on SQLite and honors
+    it on PostgreSQL, and the marker is written in one spelling, so an exact
+    comparison is both the intent and the portable rendering. A NULL summary
+    compares NULL and so is not an invitation.
+    """
+    return func.substr(Interaction.summary, 1, len(INVITATION_SUMMARY)) == INVITATION_SUMMARY
+
+
+def has_invitation_note() -> ColumnElement[bool]:
+    """SQL: this interaction is an invitation that carried a note someone wrote."""
+    marker = f"{INVITATION_SUMMARY}: "
+    return func.substr(Interaction.summary, 1, len(marker)) == marker
 
 
 class NotFound(LookupError):

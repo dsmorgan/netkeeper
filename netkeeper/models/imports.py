@@ -151,6 +151,12 @@ class ImportRun(UserOwned, TimestampMixin, Base):
     created_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     skipped_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # What the auto-tag rules did to the contacts this run touched, inside the
+    # same transaction as the import itself (spec 10.3, #64). Zero on a draft
+    # run: the rules run at commit, over the contacts the commit wrote.
+    tagged_contacts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tags_added: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tags_removed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     committed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     rolled_back_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 

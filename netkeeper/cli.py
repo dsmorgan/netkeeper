@@ -407,7 +407,7 @@ def import_archive_cmd(
 
 
 def _archive_report(report: ArchiveImport) -> str:
-    c, m, i = report.connections, report.messages, report.invitations
+    c, m, i, t = report.connections, report.messages, report.invitations, report.tagging
     return "\n".join(
         (
             f"connections: {c.rows} rows, {c.created} created, {c.updated} updated, "
@@ -417,6 +417,8 @@ def _archive_report(report: ArchiveImport) -> str:
             f"{m.group_threads} group, {m.unknown_contact} not a contact); "
             f"{m.added} interactions added",
             f"invitations: {i.rows} rows; {i.added} interactions added",
+            f"auto-tag rules: {t.contacts} contacts examined, {t.added} tags added, "
+            f"{t.removed} removed",
         )
     )
 
@@ -503,6 +505,8 @@ class _RunSnapshot:
     created_count: int
     candidate_count: int
     skipped_count: int
+    tagged_contacts: int = 0
+    tags_added: int = 0
     candidate_rows: tuple[int, ...] = ()
 
 
@@ -516,6 +520,8 @@ def _snapshot_of(run: ImportRun, *, candidate_rows: tuple[int, ...] = ()) -> _Ru
         created_count=run.created_count,
         candidate_count=run.candidate_count,
         skipped_count=run.skipped_count,
+        tagged_contacts=run.tagged_contacts,
+        tags_added=run.tags_added,
         candidate_rows=candidate_rows,
     )
 
@@ -625,12 +631,17 @@ def _refuse_undecided(run_id: int, row_numbers: Sequence[int]) -> NoReturn:
 
 
 def _run_report(label: str, run: _RunSnapshot) -> str:
-    return (
+    report = (
         f"{label} run {run.id}: {run.total_rows} rows from {run.filename!r} "
         f"({run.preset or 'custom mapping'}); {run.matched_count} matched, "
         f"{run.created_count} created, {run.candidate_count} candidate(s), "
         f"{run.skipped_count} skipped"
     )
+    # The rules run at commit, over the contacts the commit wrote (#64), so a
+    # draft has nothing to report here.
+    if run.tagged_contacts:
+        report += f"; {run.tags_added} tags added over {run.tagged_contacts} contacts"
+    return report
 
 
 @import_app.command("resume")

@@ -5,6 +5,12 @@ answer that advances the queue prefetches the contact after it, so a run of
 fifty is fifty requests, not fifty plus two hundred for the evidence panels.
 ``tests/test_web_triage.py`` counts the requests and the queries a run costs.
 
+The screens in the order they are used after an import: ``GET
+/triage/suggestions`` says what netkeeper can decide in bulk and how many people
+each batch covers, ``GET /triage/suggestions/{key}/contacts`` shows who, ``POST
+/triage/suggestions/{key}/apply`` decides them as one undoable batch, and ``GET
+/triage/next?decided_by=automatic`` walks that work back for review.
+
 The rules live in :mod:`netkeeper.crm.triage`; this module is the shape of the
 request and the status codes. A contact that is not the current user's answers
 ``404``, never ``403``: a ``403`` would confirm that the id exists for someone.
@@ -20,7 +26,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from netkeeper.crm import triage as service
 from netkeeper.crm.triage import Card, Progress
-from netkeeper.models import ContactMet, TriageDecision
+from netkeeper.models import ContactMet, MetSource, TriageDecision
 from netkeeper.web.deps import CurrentUser, SessionDep
 from netkeeper.web.schemas import (
     InteractionOut,
@@ -39,6 +45,7 @@ from netkeeper.web.schemas import (
     TriageSuggestionApplyIn,
     TriageSuggestionApplyOut,
     TriageSuggestionOut,
+    TriageSuggestionPage,
     TriageUndoIn,
     TriageUndoOut,
     timeline_entry_out,
@@ -58,9 +65,26 @@ NO_SUCH_SUGGESTION: Responses = {404: {"description": "No suggestion by that key
 States = Annotated[
     list[ContactMet] | None,
     Query(
-        description="The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit."
+        description=(
+            "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, "
+            "or both to walk the two together. With `decided_by=automatic` and no states, "
+            "the queue defaults to everything a batch can have decided."
+        )
     ),
 ]
+DecidedBy = Annotated[
+    MetSource | None,
+    Query(
+        description=(
+            "Narrow the queue to the contacts whose current `met` was decided this way. "
+            "`automatic` is the review pass: what netkeeper decided for you, on the same "
+            "cards, so you can check it. Deciding one by hand makes it `manual` and takes "
+            "it out of that queue."
+        )
+    ),
+]
+Limit = Annotated[int, Query(ge=1, le=200, description="Contacts per page of a preview.")]
+Offset = Annotated[int, Query(ge=0, description="How many contacts to skip.")]
 AfterId = Annotated[
     int | None,
     Query(
@@ -94,21 +118,27 @@ def get_next_triage_contact(
     states: States = None,
     after_id: AfterId = None,
     prefetch: Prefetch = True,
+    decided_by: DecidedBy = None,
 ) -> TriageQueueOut:
     """The next contact to triage with its evidence, the one after it, and the progress.
 
     `after_id` moves on without deciding (the `→` key). Both cards are `null`
-    when the queue is empty.
+    when the queue is empty. `decided_by=automatic` serves the review pass: the
+    contacts a batch decided and nobody has corrected.
     """
-    wanted = _states(states)
+    wanted = _states(states, decided_by)
     with translate_errors():
-        card = service.next_card(session, user, states=wanted, after_id=after_id)
+        card = service.next_card(
+            session, user, states=wanted, after_id=after_id, decided_by=decided_by
+        )
         following = (
-            service.next_card(session, user, states=wanted, after_id=card.contact.id)
+            service.next_card(
+                session, user, states=wanted, after_id=card.contact.id, decided_by=decided_by
+            )
             if prefetch and card is not None
             else None
         )
-        counters = service.progress(session, user, states=wanted)
+        counters = service.progress(session, user, states=wanted, decided_by=decided_by)
     return TriageQueueOut(
         card=_card_out(card), next=_card_out(following), progress=_progress_out(counters)
     )
@@ -121,19 +151,28 @@ def get_next_triage_contact(
     responses={**NO_SUCH_CONTACT},
 )
 def decide_triage(
-    body: TriageDecisionIn, user: CurrentUser, session: SessionDep, states: States = None
+    body: TriageDecisionIn,
+    user: CurrentUser,
+    session: SessionDep,
+    states: States = None,
+    decided_by: DecidedBy = None,
 ) -> TriageDecisionResult:
     """Record `met`, `not_met`, or `skip` on a contact and return the next card with it.
 
     The response carries the contact after `prefetch_after_id` (or after the one
-    just decided), so triaging a run costs one request per contact.
+    just decided), so triaging a run costs one request per contact. Pass the
+    `decided_by` the queue is being served with, so a review pass hands back the
+    next contact still waiting to be reviewed; the one just decided has left that
+    queue, because deciding by hand is what `manual` means.
     """
-    wanted = _states(states)
+    wanted = _states(states, decided_by)
     with translate_errors():
         decision = service.decide(session, user, body.contact_id, body.met)
         after = body.prefetch_after_id if body.prefetch_after_id is not None else body.contact_id
-        following = service.next_card(session, user, states=wanted, after_id=after)
-        counters = service.progress(session, user, states=wanted)
+        following = service.next_card(
+            session, user, states=wanted, after_id=after, decided_by=decided_by
+        )
+        counters = service.progress(session, user, states=wanted, decided_by=decided_by)
     return TriageDecisionResult(
         decision=_decision_out(decision),
         next=_card_out(following),
@@ -202,12 +241,48 @@ def list_triage_suggestions(
 ) -> list[TriageSuggestionOut]:
     """The bulk actions worth offering, with the count each would apply to.
 
-    A suggestion that matches nobody is left out, so the banner shows only when
-    there is something to accept. Nothing is applied until `apply`.
+    Strongest evidence first, and the batch that assumes the most last. A
+    suggestion that matches nobody is left out, so the banner shows only when
+    there is something to accept. Every count is against the queue as it stands,
+    so accepting one batch shrinks the rest. Nothing is applied until `apply`.
     """
     with translate_errors():
         found = service.suggestions(session, user, states=_states(states))
     return [TriageSuggestionOut.model_validate(item) for item in found]
+
+
+@router.get(
+    "/triage/suggestions/{key}/contacts",
+    operation_id="list_triage_suggestion_contacts",
+    responses=NO_SUCH_SUGGESTION,
+)
+def list_triage_suggestion_contacts(
+    key: str,
+    user: CurrentUser,
+    session: SessionDep,
+    states: States = None,
+    limit: Limit = service.SUGGESTION_PAGE,
+    offset: Offset = 0,
+) -> TriageSuggestionPage:
+    """Who a suggestion covers, a page at a time, in the order the queue holds them.
+
+    The preview a count alone cannot give: a batch that decides hundreds of
+    people at once should be readable as a list of names before anyone says yes.
+    Writes nothing, and the page is served from the same query the apply uses,
+    so what is shown is what would be decided.
+    """
+    try:
+        page, total = service.suggestion_contacts(
+            session, user, key, states=_states(states), limit=limit, offset=offset
+        )
+    except service.InvalidDecision as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return TriageSuggestionPage(
+        items=[TriageContactOut.model_validate(contact) for contact in page],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post(
@@ -225,7 +300,9 @@ def apply_triage_suggestion(
     """Apply a bulk suggestion as one batch that a single undo takes back.
 
     Send the `expected_count` the banner showed: a set that has moved on since
-    answers `409` rather than touching more people than the banner named.
+    answers `409` rather than touching more people than the banner named. Every
+    contact it touches is left marked `automatic`, so `/triage/next` with
+    `decided_by=automatic` serves exactly this batch's work back for review.
     """
     wanted = _states(states)
     expected = body.expected_count if body is not None else None
@@ -242,12 +319,25 @@ def apply_triage_suggestion(
         key=applied.key,
         applied=applied.applied,
         batch_id=applied.batch_id,
+        met=applied.met,
         progress=_progress_out(counters),
     )
 
 
-def _states(states: Sequence[ContactMet] | None) -> Sequence[ContactMet]:
-    return service.DEFAULT_QUEUE_STATES if not states else list(states)
+def _states(
+    states: Sequence[ContactMet] | None, decided_by: MetSource | None = None
+) -> Sequence[ContactMet]:
+    """What the client asked for, or the default for the queue it is asking for.
+
+    The review pass covers every state a batch can leave behind, so asking for
+    it without naming states would otherwise serve the untriaged, which a batch
+    never decides, and the queue would always be empty.
+    """
+    if states:
+        return list(states)
+    if decided_by is MetSource.AUTOMATIC:
+        return service.REVIEW_QUEUE_STATES
+    return service.DEFAULT_QUEUE_STATES
 
 
 def _card_out(card: Card | None) -> TriageCardOut | None:
@@ -283,4 +373,5 @@ def _progress_out(counters: Progress) -> TriageProgressOut:
         triaged=counters.triaged,
         remaining=counters.remaining,
         by_state=counters.by_state,
+        automatic=counters.automatic,
     )

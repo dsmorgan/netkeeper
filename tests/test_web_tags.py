@@ -78,10 +78,11 @@ async def test_tag_crud(client: httpx.AsyncClient) -> None:
     )
     assert created.status_code == 201, created.text
     tag = created.json()
-    assert {k: tag[k] for k in ("name", "color", "kind", "contact_count")} == {
+    assert {k: tag[k] for k in ("name", "color", "kind", "met_signal", "contact_count")} == {
         "name": "Warm",
         "color": "#aabbcc",
         "kind": "manual",
+        "met_signal": None,
         "contact_count": 0,
     }
     assert (
@@ -101,6 +102,14 @@ async def test_tag_crud(client: httpx.AsyncClient) -> None:
     assert cleared.json()["name"] == "Hot"
     assert (await client.patch(url, json={"name": "VP"}, headers=CSRF)).status_code == 409
     assert (await client.patch(url, json={"color": "nope"}, headers=CSRF)).status_code == 422
+    # What the tag means for triage: set, left alone, and cleared (spec 10.2).
+    signalled = await client.patch(url, json={"met_signal": "not_met"}, headers=CSRF)
+    assert signalled.status_code == 200 and signalled.json()["met_signal"] == "not_met"
+    kept = await client.patch(url, json={"color": "#001122"}, headers=CSRF)
+    assert kept.json()["met_signal"] == "not_met"
+    unsignalled = await client.patch(url, json={"met_signal": None}, headers=CSRF)
+    assert unsignalled.json()["met_signal"] is None
+    assert (await client.patch(url, json={"met_signal": "maybe"}, headers=CSRF)).status_code == 422
     assert "Hot" in await _tags_by_name(client)
 
     assert (await client.delete(url, headers=CSRF)).status_code == 204

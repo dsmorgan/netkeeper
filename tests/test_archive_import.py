@@ -16,21 +16,23 @@ import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.crm.archive import (
-    INVITATION_SUMMARY,
     SUMMARY_MAX_CHARS,
     ArchiveImport,
     import_archive,
 )
-from netkeeper.crm.interactions import add_interaction
+from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
 from netkeeper.crm.provenance import SOURCE_RANK, revert_to_synced, set_manual_field
+from netkeeper.crm.tags import create_rule, create_tag
 from netkeeper.db import session_scope
 from netkeeper.linkedin.archive import Archive, open_archive
 from netkeeper.models import (
     Contact,
     ContactPosition,
     ContactSource,
+    ContactTag,
     Interaction,
     InteractionKind,
+    RuleField,
     User,
 )
 from netkeeper.scoping import scoped
@@ -124,6 +126,36 @@ def test_the_sample_imports_with_the_expected_counts(
     # Decision: the archive gives Company and Position with no dates, so it
     # writes the scalars under provenance and no position history at all.
     assert list(writer.scalars(scoped(user, ContactPosition))) == []
+
+
+def test_the_rules_run_over_what_the_import_touched(
+    writer: Session, user: User, archive: Archive
+) -> None:
+    """#64: an imported address book is tagged when the import returns, not when a button is.
+
+    And only what the import touched: a contact that was already there and is not
+    in the file is left exactly as it was, so a re-import of one file cannot
+    quietly reconcile the whole address book.
+    """
+    engineers = create_tag(writer, user, "engineering")
+    create_rule(writer, user, engineers.id, RuleField.TITLE, r"\bengineer\b")
+    untouched = factories.make_contact(
+        writer, user, li_public_id="not-in-the-file", current_title="Staff Engineer"
+    )
+
+    report = _run(writer, user, archive)
+
+    # The duplicate row of Ada resolves to the contact the first one created, so
+    # a person repeated in the file is examined once, not once per row.
+    assert report.tagging.contacts == report.connections.created
+    assert report.tagging.added == 1  # Ada, the one Staff Engineer in the file
+    tagged = {
+        row.contact_id
+        for row in writer.scalars(scoped(user, ContactTag).where(ContactTag.tag_id == engineers.id))
+    }
+    ada = _contacts(writer, user)["ada-fictional"]
+    assert tagged == {ada.id}, "the contact the file named, and nobody else"
+    assert untouched.id not in tagged
 
 
 def test_observed_at_defaults_to_the_export_time(
