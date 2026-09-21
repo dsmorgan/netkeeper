@@ -29,12 +29,13 @@ describe('app shell', () => {
   })
 
   it('marks the current section active and shows its placeholder', async () => {
-    // A route that is still a placeholder: /contacts is real from P1-12 on and
-    // /triage from P1-14 on, so this walks forward as the phase lands.
-    await renderApp('/lists')
+    // A route that is still a placeholder: /contacts is real from P1-12 on,
+    // /triage from P1-14, and /lists and /exports from P1-15, so this walks
+    // forward as each phase lands.
+    await renderApp('/imports')
 
     const nav = screen.getByRole('navigation', { name: 'Primary' })
-    expect(within(nav).getByRole('link', { name: 'Lists' })).toHaveAttribute(
+    expect(within(nav).getByRole('link', { name: 'Imports' })).toHaveAttribute(
       'data-status',
       'active',
     )

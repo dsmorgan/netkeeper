@@ -13,9 +13,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 
 import { createView, deleteView, tagsQuery, updateView, viewsQuery } from './api'
-import { EmptyState, ErrorNote, LoadingNote, NativeSelect } from './controls'
+import { EmptyState, ErrorNote, LoadingNote } from './controls'
 import { CONTACT_COLUMNS, FIELDS } from './fields'
 import { FilterBuilder } from './filter-builder'
 import { emptyTree, validateTree } from './tree'
@@ -129,7 +130,12 @@ function ViewEditor({
     mutationFn: () =>
       view === null
         ? createView({ name: name.trim(), columns: [...columns], sort: [...sort], filter })
-        : updateView(view.id, { name: name.trim(), columns: [...columns], filter }),
+        : updateView(view.id, {
+            name: name.trim(),
+            columns: [...columns],
+            sort: [...sort],
+            filter,
+          }),
     onSuccess: onSaved,
   })
 
@@ -170,7 +176,7 @@ function ViewEditor({
           <legend className="text-sm font-medium">Sort</legend>
           {sort.map((key, index) => (
             <div key={`${key.field}-${index}`} className="flex items-center gap-2">
-              <NativeSelect
+              <Select
                 aria-label={`Sort field ${index + 1}`}
                 value={key.field}
                 onChange={(event) =>
@@ -188,8 +194,8 @@ function ViewEditor({
                     {field.label}
                   </option>
                 ))}
-              </NativeSelect>
-              <NativeSelect
+              </Select>
+              <Select
                 aria-label={`Sort direction ${index + 1}`}
                 value={key.direction ?? 'asc'}
                 onChange={(event) =>
@@ -207,7 +213,7 @@ function ViewEditor({
               >
                 <option value="asc">ascending</option>
                 <option value="desc">descending</option>
-              </NativeSelect>
+              </Select>
               <Button
                 variant="ghost"
                 size="xs"

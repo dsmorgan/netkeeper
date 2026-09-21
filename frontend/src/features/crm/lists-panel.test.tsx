@@ -220,18 +220,13 @@ describe('a smart list', () => {
     })
   })
 
-  it('asks for membership again after the filter changes, never reusing the old page', async () => {
-    let version = '2026-01-01T00:00:00Z'
-    const seen = mockApi(
-      routes({
-        'GET /api/v1/lists': () =>
-          jsonResponse([STATIC_LIST, { ...SMART_LIST, updated_at: version }]),
-        'PATCH /api/v1/lists/2': () => {
-          version = '2026-02-02T00:00:00Z'
-          return jsonResponse({ ...SMART_LIST, updated_at: version })
-        },
-      }),
-    )
+  it('asks for membership again after any list write, never reusing the old page', async () => {
+    // The mechanism is prefix invalidation: the members key sits under
+    // ['lists'], and every write in this feature invalidates that prefix. The
+    // list's `updated_at` is deliberately NOT part of the key, so this fixture
+    // holds it still — a backend does not have to bump it for an identical
+    // save, and membership must be re-read either way.
+    const seen = mockApi(routes({ 'PATCH /api/v1/lists/2': () => jsonResponse(SMART_LIST) }))
     renderWithClient(<ListsPanel />)
     await openList('Warm engineers')
     await screen.findByText('Ada Quill')
@@ -264,16 +259,19 @@ describe('a smart list', () => {
 })
 
 describe('bulk actions', () => {
+  function countRoutes(body: Record<string, unknown>) {
+    return { 'POST /api/v1/contacts/bulk/count': () => jsonResponse(body) }
+  }
+
   it('confirms a count before it does anything', async () => {
     const seen = mockApi(
       routes({
-        'POST /api/v1/contacts/bulk/count': () =>
-          jsonResponse({
-            count: 40,
-            describe: 'has email',
-            token: 'token-1',
-            expires_at: '2030-01-01T00:00:00Z',
-          }),
+        ...countRoutes({
+          count: 40,
+          describe: 'has email',
+          token: 'token-1',
+          expires_at: '2030-01-01T00:00:00Z',
+        }),
         'POST /api/v1/contacts/bulk': () => jsonResponse({ affected: 40 }),
       }),
     )
@@ -283,7 +281,7 @@ describe('bulk actions', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Count first' }))
     expect(await screen.findByText(/This affects/)).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Apply to 40' }))
     await waitFor(() => expect(requestsTo(seen, 'POST', '/api/v1/contacts/bulk')).toHaveLength(1))
     expect(requestsTo(seen, 'POST', '/api/v1/contacts/bulk')[0]?.body).toMatchObject({
       action: 'archive',
@@ -292,9 +290,57 @@ describe('bulk actions', () => {
     expect(await screen.findByText('Applied to 40 contacts.')).toBeInTheDocument()
   })
 
-  it('counts again instead of erroring when the selection moved', async () => {
+  it('applies the selection the token was minted for, not the one on screen now', async () => {
+    // A static list's selection is the ids of a members query, and any list
+    // write re-reads it. The token is bound to the ids that were counted, so
+    // the action has to carry those ids — not whatever the query holds by the
+    // time the button is clicked.
+    let members = {
+      items: [MEMBERS.items[0], MEMBERS.items[1]],
+      total: 2,
+    }
+    const seen = mockApi(
+      routes({
+        'GET /api/v1/lists/1/members': () => jsonResponse(members),
+        ...countRoutes({
+          count: 2,
+          describe: '2 contacts',
+          token: 'token-for-11-12',
+          expires_at: '2030-01-01T00:00:00Z',
+        }),
+        'POST /api/v1/lists/1/members': () => jsonResponse({ added: 1 }, 201),
+        'POST /api/v1/contacts/bulk': () => jsonResponse({ affected: 2 }),
+      }),
+    )
+    renderWithClient(<ListsPanel />)
+    await openList('First 100')
+    await screen.findByText('Ada Quill')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Count first' }))
+    await screen.findByRole('button', { name: 'Apply to 2' })
+    expect(requestsTo(seen, 'POST', '/api/v1/contacts/bulk/count')[0]?.body).toMatchObject({
+      selection: { ids: [11, 12] },
+    })
+
+    // The list gains a member while the confirmation is on screen.
+    members = {
+      items: [...MEMBERS.items, { ...MEMBERS.items[0]!, id: 13, preferred_name: 'Cy' }],
+      total: 3,
+    }
+    fireEvent.change(screen.getByLabelText('Add contacts by id'), { target: { value: '13' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+    await waitFor(() => expect(screen.getByText('Added 1 contacts.')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Apply to 2' }))
+    await waitFor(() => expect(requestsTo(seen, 'POST', '/api/v1/contacts/bulk')).toHaveLength(1))
+    expect(requestsTo(seen, 'POST', '/api/v1/contacts/bulk')[0]?.body).toMatchObject({
+      token: 'token-for-11-12',
+      selection: { ids: [11, 12] },
+    })
+  })
+
+  it('says the selection moved, and nothing else, on a count mismatch', async () => {
     let count = 40
-    let applied = false
     const seen = mockApi(
       routes({
         'POST /api/v1/contacts/bulk/count': () =>
@@ -305,15 +351,11 @@ describe('bulk actions', () => {
             expires_at: '2030-01-01T00:00:00Z',
           }),
         'POST /api/v1/contacts/bulk': () => {
-          if (!applied) {
-            applied = true
-            count = 38
-            return jsonResponse(
-              { detail: 'count mismatch', expected_count: 40, actual_count: 38 },
-              409,
-            )
-          }
-          return jsonResponse({ affected: 38 })
+          count = 38
+          return jsonResponse(
+            { detail: 'count mismatch', expected_count: 40, actual_count: 38 },
+            409,
+          )
         },
       }),
     )
@@ -321,16 +363,83 @@ describe('bulk actions', () => {
     await openList('Warm engineers')
 
     fireEvent.click(await screen.findByRole('button', { name: 'Count first' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Apply' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Apply to 40' }))
 
-    expect(await screen.findByText('The selection moved')).toBeInTheDocument()
-    expect(screen.getByText(/38/)).toBeInTheDocument()
+    expect(
+      await screen.findByText(/The selection changed while the confirmation was open/),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Nothing was changed')).toBeInTheDocument()
     expect(screen.queryByText('Could not apply the action')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm the new count' }))
-    await waitFor(() => expect(requestsTo(seen, 'POST', '/api/v1/contacts/bulk')).toHaveLength(2))
-    expect(requestsTo(seen, 'POST', '/api/v1/contacts/bulk')[1]?.body).toMatchObject({
-      token: 'token-38',
-    })
+    fireEvent.click(screen.getByRole('button', { name: 'Count again' }))
+    await screen.findByRole('button', { name: 'Apply to 38' })
+    await waitFor(() =>
+      expect(requestsTo(seen, 'POST', '/api/v1/contacts/bulk/count')).toHaveLength(2),
+    )
+  })
+
+  it('says a confirmation expired, and does not claim the selection moved', async () => {
+    mockApi(
+      routes({
+        ...countRoutes({
+          count: 40,
+          describe: 'has email',
+          token: 'token-1',
+          expires_at: '2030-01-01T00:00:00Z',
+        }),
+        'POST /api/v1/contacts/bulk': () =>
+          jsonResponse({ detail: 'the confirmation expired', reason: 'expired' }, 409),
+      }),
+    )
+    renderWithClient(<ListsPanel />)
+    await openList('Warm engineers')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Count first' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Apply to 40' }))
+
+    expect(await screen.findByText(/This confirmation expired/)).toBeInTheDocument()
+    expect(screen.queryByText(/The selection changed/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Count again' })).toBeEnabled()
+  })
+
+  it('offers a fresh count when the token itself is refused', async () => {
+    mockApi(
+      routes({
+        ...countRoutes({
+          count: 40,
+          describe: 'has email',
+          token: 'token-1',
+          expires_at: '2030-01-01T00:00:00Z',
+        }),
+        'POST /api/v1/contacts/bulk': () =>
+          jsonResponse({ detail: 'the token is for another selection', reason: 'selection' }, 422),
+      }),
+    )
+    renderWithClient(<ListsPanel />)
+    await openList('Warm engineers')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Count first' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Apply to 40' }))
+
+    expect(await screen.findByText(/another selection/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Count again' })).toBeEnabled()
+  })
+
+  it('does not offer to apply an action to nobody', async () => {
+    mockApi(
+      routes({
+        ...countRoutes({
+          count: 0,
+          describe: 'has email',
+          token: 'token-0',
+          expires_at: '2030-01-01T00:00:00Z',
+        }),
+      }),
+    )
+    renderWithClient(<ListsPanel />)
+    await openList('Warm engineers')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Count first' }))
+    expect(await screen.findByRole('button', { name: 'Nothing to apply' })).toBeDisabled()
   })
 })
