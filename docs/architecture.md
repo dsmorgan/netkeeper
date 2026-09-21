@@ -511,7 +511,7 @@ Nothing under `linkedin/` imports ORM models or opens a database session. The co
 | In | `EnrichJobSpec` | ordered list of `(contact_ref, li_public_id)` to visit, visit budget, pacing profile, heat multiplier |
 | In | `InboxJobSpec` | conversations since timestamp |
 | In | `MessageJobSpec` | recipient, rendered body, mode prefill/auto_send |
-| Out | `ConnectionsPage`, `ProfileHarvest`, `InboxDelta`, `MessageOutcome` | Plain dataclasses; the core's `linkedin/apply.py` maps them onto contacts, snapshots, and messages inside a session |
+| Out | `ConnectionsPage`, `ProfileHarvest`, `InboxDelta`, `MessageOutcome` | Plain dataclasses; the core's `crm/apply.py` maps them onto contacts, snapshots, and messages inside a session |
 | Out | `ProgressEvent` | For `sync_run.progress_json` and the SSE stream |
 
 The reason is in [Multi-user readiness](#multi-user-readiness): in a hosted deployment the browser and the database are on different machines. Keeping the boundary explicit now costs one mapping module and buys a `netkeeper agent` later. It also makes the extractor testable with fixtures and no database.
