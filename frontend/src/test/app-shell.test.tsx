@@ -45,8 +45,9 @@ describe('app shell', () => {
   })
 
   it('renders every placeholder route with its phase', async () => {
+    // `/triage` is not here: P1-14 replaced its placeholder with the real
+    // screen, which has its own tests under `features/triage/`.
     const phases: Array<[string, number]> = [
-      ['/triage', 1],
       ['/lists', 1],
       ['/imports', 1],
       ['/exports', 1],
