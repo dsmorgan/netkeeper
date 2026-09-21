@@ -200,13 +200,22 @@ def search(session: Session, user: User, q: str, *, limit: int, offset: int = 0)
 
 @dataclass(frozen=True, slots=True)
 class ContactStats:
-    """Triage progress and counts across every one of ``user``'s contacts.
+    """Triage progress and counts over ``user``'s *live* contacts, for ``netkeeper contacts stats``.
 
-    Unlike :func:`query`, this counts everything: a merged-away contact and an
-    archived one are never left out, because knowing how many of each there
-    are is the whole point. ``met``, ``not_met``, ``skipped``, and
-    ``untriaged`` are the four states of :class:`~netkeeper.models.ContactMet`
-    and always add up to ``total``.
+    ``total``, ``met``, ``not_met``, ``skipped``, and ``untriaged`` share the
+    live-rows baseline :func:`netkeeper.crm.triage.progress` counts from
+    (``archived_at IS NULL AND merged_into_id IS NULL``): the four
+    :class:`~netkeeper.models.ContactMet` states always add up to ``total``,
+    and ``total`` is the same number the triage queue would call "how many
+    contacts". A merged-away contact keeps whatever ``met`` it had at the
+    merge, so counting it too would double-count one person under two rows;
+    excluding it here is what keeps a merge from inflating ``met``.
+
+    ``archived`` and ``merged_away`` are *not* part of ``total`` — they count
+    the rows outside the live set, one line each for the two ways a contact
+    leaves it. ``with_email``, ``with_phone``, and ``tagged`` are also over the
+    live set, so every number in the table is a count out of the same
+    ``total``.
     """
 
     total: int
@@ -222,11 +231,20 @@ class ContactStats:
 
 
 def contact_stats(session: Session, user: User) -> ContactStats:
-    """Counts for ``user``'s contacts, for ``netkeeper contacts stats``."""
+    """Counts for ``user``'s contacts, for ``netkeeper contacts stats``.
 
-    def count(clause: ColumnElement[bool] | None = None) -> int:
+    The four :class:`~netkeeper.models.ContactMet` counts and ``total`` match
+    :func:`netkeeper.crm.triage.progress` exactly (same live-rows predicate),
+    so the CLI and the triage queue can never quietly disagree on what "how
+    many contacts" means.
+    """
+    live = (Contact.archived_at.is_(None), Contact.merged_into_id.is_(None))
+
+    def count(*clauses: ColumnElement[bool]) -> int:
         statement = scoped_count(user, Contact)
-        return session.scalar(statement if clause is None else statement.where(clause)) or 0
+        if clauses:
+            statement = statement.where(*clauses)
+        return session.scalar(statement) or 0
 
     def has_child(model: type[ContactEmail] | type[ContactPhone]) -> ColumnElement[bool]:
         return (
@@ -243,16 +261,16 @@ def contact_stats(session: Session, user: User) -> ContactStats:
         .exists()
     )
     return ContactStats(
-        total=count(),
-        met=count(Contact.met == ContactMet.MET),
-        not_met=count(Contact.met == ContactMet.NOT_MET),
-        skipped=count(Contact.met == ContactMet.SKIP),
-        untriaged=count(Contact.met == ContactMet.UNKNOWN),
+        total=count(*live),
+        met=count(*live, Contact.met == ContactMet.MET),
+        not_met=count(*live, Contact.met == ContactMet.NOT_MET),
+        skipped=count(*live, Contact.met == ContactMet.SKIP),
+        untriaged=count(*live, Contact.met == ContactMet.UNKNOWN),
         archived=count(Contact.archived_at.is_not(None)),
         merged_away=count(Contact.merged_into_id.is_not(None)),
-        with_email=count(has_child(ContactEmail)),
-        with_phone=count(has_child(ContactPhone)),
-        tagged=count(has_tag),
+        with_email=count(*live, has_child(ContactEmail)),
+        with_phone=count(*live, has_child(ContactPhone)),
+        tagged=count(*live, has_tag),
     )
 
 

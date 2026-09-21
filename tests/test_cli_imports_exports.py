@@ -1,10 +1,15 @@
 """CLI counterparts of import, export, and contacts stats (P1-16, issue #25).
 
-Each command drives the same service functions the API (or, for ``contacts
-stats``, which has no API counterpart yet, the ORM) would use, so most tests
-assert on the exact fixture-derived counts the service layer's own tests use
-(``tests/test_archive_import.py``) or compare the CLI's output against a
-direct call to the service function on the same database.
+Each command drives the same service functions its API counterpart does, so
+most tests assert on the exact fixture-derived counts the service layer's own
+tests use (``tests/test_archive_import.py``) or compare the CLI's output
+against a direct call to the service function on the same database.
+``netkeeper contacts stats`` has no ``GET /contacts/stats`` route of its own,
+but it is not exempt from this: it shares ``netkeeper.crm.triage.progress()``'s
+live-rows baseline (``archived_at IS NULL AND merged_into_id IS NULL``) for its
+four ``ContactMet`` counts and ``total``, the same numbers ``GET /triage/next``
+et al. surface as ``TriageProgressOut``, and a dedicated test below pins the
+two together so they cannot quietly drift apart.
 """
 
 from __future__ import annotations
@@ -22,7 +27,7 @@ from typer.testing import CliRunner
 
 from netkeeper import migrations
 from netkeeper.cli import app as cli
-from netkeeper.crm import import_runs
+from netkeeper.crm import import_runs, triage
 from netkeeper.crm.contacts import contact_stats, merge_contacts
 from netkeeper.crm.exports import export_stream
 from netkeeper.crm.filters import FilterTree
@@ -40,8 +45,17 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def _plain(text: str) -> str:
-    """``text`` with escape codes stripped: Rich forces color when it detects CI."""
-    return _ANSI.sub("", text)
+    """``text`` with escape codes and Rich panel wrapping stripped.
+
+    Rich forces color when it detects CI (stripped here too), and it word-wraps
+    a usage-error panel to 80 columns, which can break a literal phrase across
+    two lines depending on how long the path in it is (a real failure: on CI's
+    ~67-column path "does not exist" broke between "does" and "not exist",
+    passing locally only because tmp_path there is longer). Collapsing
+    whitespace and dropping the panel's box-drawing border undoes the wrap
+    without weakening what a test asserts.
+    """
+    return " ".join(_ANSI.sub("", text).replace("│", " ").split())
 
 
 def _run_id(output: str, label: str) -> int:
@@ -101,7 +115,7 @@ def test_cli_import_archive_of_a_missing_path_is_a_usage_error(
     result = CliRunner().invoke(cli, ["import", "archive", str(tmp_path / "nope")])
     assert result.exit_code != 0
     assert "Traceback" not in result.output
-    assert "does not exist" in result.output
+    assert "does not exist" in _plain(result.output)
 
 
 # --- import csv -----------------------------------------------------------
@@ -158,13 +172,20 @@ def test_cli_import_csv_refuses_undecided_candidates_and_still_leaves_a_draft(
     result = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE)])
     assert result.exit_code == 1
     assert "Traceback" not in result.output
-    assert "1 row(s) match more than one contact" in result.output
-    assert "rows 3" in result.output
-    assert "import run 1" in result.output
-    assert "--on-candidate" in result.output
-    # The refused commit rolled back, but the draft it names is a separate,
-    # already-committed transaction (POST /imports vs. POST /imports/{id}/commit):
-    # it is really there to decide, in the app or with a second CLI call.
+    # The exact error line, not just "import run 1" anywhere in the output: the
+    # service's own INFO log line ("import run 1 for user 1: ...") also contains
+    # that phrase and would satisfy a looser assertion without proving the CLI's
+    # own message threads draft.id through correctly.
+    assert (
+        "error: 1 row(s) match more than one contact and have no decision "
+        "(rows 3); decide them in the app (import run 1), "
+        "or re-run with --on-candidate new or --on-candidate skip"
+    ) in result.output
+    # _refuse_undecided runs before _commit_draft is ever called, so no commit
+    # is attempted and nothing is rolled back; the draft it names comes from its
+    # own, already-committed transaction (POST /imports vs. POST
+    # /imports/{id}/commit), so it is really there to decide, in the app or with
+    # a second CLI call.
     with cli_db() as session:
         user = ensure_local_user(session)
         run = import_runs.get_run(session, user, 1)
@@ -331,7 +352,14 @@ def test_cli_export_writes_to_a_file_and_reports_it(
     )
     assert result.exit_code == 0, result.output
     assert f"wrote {out}" in result.stdout
-    content = out.read_text()
+    raw = out.read_bytes()
+    # The real, untranslated bytes: csv.writer's line terminator is "\r\n", and
+    # export_cmd's `newline=""` on the open() call is what keeps it that way
+    # instead of collapsing to "\n". Path.read_text() would hide a regression
+    # here (it applies universal-newline translation on read), which is exactly
+    # why this asserts on read_bytes() instead.
+    assert b"\r\n" in raw
+    content = raw.decode("utf-8")
     assert content.splitlines()[0].startswith("https://www.linkedin.com/in/first1-last1/")
     assert "LinkedIn Profile URL" not in content  # --headerless
 
@@ -376,15 +404,23 @@ def test_cli_contacts_stats_matches_a_direct_call_to_the_service(
         factories.make_contact(session, user, met=ContactMet.NOT_MET)
         factories.make_contact(session, user, met=ContactMet.SKIP)
         untriaged = factories.make_contact(session, user, met=ContactMet.UNKNOWN)
-        archived = factories.make_contact(session, user, archived_at=None)
+        # met=MET on purpose: archived and merged-away are excluded from the
+        # live-rows baseline, so neither should add to `met` even though both
+        # carry it. This is the regression the API review caught: a merge
+        # copies `met` onto the survivor while the loser keeps its own, so
+        # counting every row (not just live ones) double-counted one person.
+        archived = factories.make_contact(session, user, met=ContactMet.MET)
         archived.archived_at = archived.created_at
         with_email = factories.make_contact(session, user, emails=["b@example.test"])
         with_phone = factories.make_contact(session, user, phones=["+15550100001"])
         tagged = factories.make_contact(session, user)
         tag = create_tag(session, user, "vp")
         tag_contact(session, user, tagged.id, tag.id)
-        loser = factories.make_contact(session, user)
-        survivor = factories.make_contact(session, user)
+        # Both MET, so identity.MET_RANK ties and the merge leaves survivor.met
+        # as it already was: MET either way, so the loser's own MET is what
+        # would have added a spurious second "met" for one person pre-fix.
+        loser = factories.make_contact(session, user, met=ContactMet.MET)
+        survivor = factories.make_contact(session, user, met=ContactMet.MET)
         merge_contacts(session, user, survivor.id, loser.id)
         _ = (untriaged, with_email, with_phone)
 
@@ -396,7 +432,8 @@ def test_cli_contacts_stats_matches_a_direct_call_to_the_service(
     assert result.exit_code == 0, result.output
     lines = result.stdout.splitlines()
     assert lines[0].split() == ["METRIC", "COUNT"]
-    rows = {" ".join(line.split()[:-1]): line.split()[-1] for line in lines[1:]}
+    *data_lines, footer = lines[1:]
+    rows = {" ".join(line.split()[:-1]): line.split()[-1] for line in data_lines}
     assert rows["total"] == str(expected.total)
     assert rows["met"] == str(expected.met)
     assert rows["not met"] == str(expected.not_met)
@@ -407,13 +444,20 @@ def test_cli_contacts_stats_matches_a_direct_call_to_the_service(
     assert rows["with email"] == str(expected.with_email)
     assert rows["with phone"] == str(expected.with_phone)
     assert rows["tagged"] == str(expected.tagged)
-    # And the numbers actually mean what they say (spec: the four ContactMet
-    # states, plus survivor + loser + merged contacts among the totals).
-    assert expected.total == 10
-    assert expected.met == 1
+    assert footer == (
+        f"total ({expected.total}) counts live contacts only: not archived, not merged away. "
+        "archived and merged away are separate counts of what total leaves out."
+    )
+    # And the numbers actually mean what they say: 10 contacts made, 2 outside
+    # the live set (archived, merged away), so total is 8; met is the plain
+    # MET contact plus the survivor (also MET) — the archived MET and the
+    # loser's own MET, both outside the live set, add nothing.
+    assert expected.total == 8
+    assert expected.met == 2
     assert expected.not_met == 1
     assert expected.skipped == 1
-    assert expected.untriaged == expected.total - 3
+    assert expected.untriaged == 4
+    assert expected.met + expected.not_met + expected.skipped + expected.untriaged == expected.total
     assert expected.archived == 1
     assert expected.merged_away == 1
     assert expected.with_email == 1
@@ -421,11 +465,91 @@ def test_cli_contacts_stats_matches_a_direct_call_to_the_service(
     assert expected.tagged == 1
 
 
+def test_contact_stats_agrees_with_triage_progress_on_the_four_states(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """The regression the API review asked for: these two can never quietly drift.
+
+    ``netkeeper contacts stats`` has a real API counterpart after all —
+    ``netkeeper.crm.triage.progress()``, surfaced through ``GET /triage/next``
+    et al. — and it counts live contacts only. This pins ``contact_stats()`` to
+    the same four counts on the same seed ``triage.progress()`` would see.
+    """
+    with session_scope(cli_db, write=True) as session:
+        user = ensure_local_user(session)
+        factories.make_contact(session, user, met=ContactMet.MET)
+        factories.make_contact(session, user, met=ContactMet.NOT_MET)
+        factories.make_contact(session, user, met=ContactMet.SKIP)
+        factories.make_contact(session, user, met=ContactMet.UNKNOWN)
+        archived = factories.make_contact(session, user, met=ContactMet.MET)
+        archived.archived_at = archived.created_at
+        # Both survivor and loser are MET (identity.MET_RANK ties: the merge
+        # leaves survivor.met as it already was, MET). The pre-fix bug counted
+        # every row unconditionally, so the loser's own MET would have added a
+        # third "met" here on top of the plain MET contact and the survivor;
+        # met == 2, not 3, is what proves the loser is excluded.
+        loser = factories.make_contact(session, user, met=ContactMet.MET)
+        survivor = factories.make_contact(session, user, met=ContactMet.MET)
+        merge_contacts(session, user, survivor.id, loser.id)
+
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        stats = contact_stats(session, user)
+        progress = triage.progress(session, user)
+
+    assert stats.total == progress.total
+    assert stats.met == progress.by_state[ContactMet.MET]
+    assert stats.not_met == progress.by_state[ContactMet.NOT_MET]
+    assert stats.skipped == progress.by_state[ContactMet.SKIP]
+    assert stats.untriaged == progress.by_state[ContactMet.UNKNOWN]
+    # Concretely, not just "whatever progress() says": 7 contacts made, 2
+    # outside the live set (the archived one and the merged-away loser), so 5
+    # live; met is the plain MET contact plus the survivor, not the loser too.
+    assert stats.total == 5
+    assert stats.met == 2
+    assert stats.not_met == 1
+
+
+def test_cli_contacts_stats_does_not_leak_across_users(cli_db: sessionmaker[Session]) -> None:
+    """The EXISTS subqueries in contact_stats() carry a user_id term of their own
+
+    (defense in depth, per netkeeper.crm.filters._child_rows), because the scope
+    guard only inspects the outer statement and cannot see into a correlated
+    subquery. This is what proves that term does something: the same counts
+    before and after a second user gets contacts, emails, phones, and a tag.
+    """
+    with session_scope(cli_db, write=True) as session:
+        user = ensure_local_user(session)
+        factories.make_contact(session, user, met=ContactMet.MET, emails=["mine@example.test"])
+        mine = factories.make_contact(session, user, phones=["+15550100004"])
+        tag = create_tag(session, user, "vp")
+        tag_contact(session, user, mine.id, tag.id)
+
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        before = contact_stats(session, user)
+
+    with session_scope(cli_db, write=True) as session:
+        other = factories.make_user(session)
+        factories.make_contact(session, other, met=ContactMet.MET, emails=["theirs@example.test"])
+        theirs = factories.make_contact(session, other, phones=["+15550100005"])
+        other_tag = create_tag(session, other, "director")
+        tag_contact(session, other, theirs.id, other_tag.id)
+
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        after = contact_stats(session, user)
+
+    assert after == before
+
+
 def test_cli_contacts_stats_with_no_contacts_is_all_zero(cli_db: sessionmaker[Session]) -> None:
     result = CliRunner().invoke(cli, ["contacts", "stats"])
     assert result.exit_code == 0, result.output
     lines = result.stdout.splitlines()
-    assert all(line.split()[-1] == "0" for line in lines[1:])
+    *data_lines, footer = lines[1:]
+    assert all(line.split()[-1] == "0" for line in data_lines)
+    assert "total (0) counts live contacts only" in footer
 
 
 # --- help --------------------------------------------------------------------
