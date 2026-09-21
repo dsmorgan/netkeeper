@@ -849,6 +849,87 @@ def test_a_list_name_is_unique_per_user_and_its_rows_cascade(migration_engine: E
         )
 
 
+# --- triage (0007) ----------------------------------------------------------
+
+
+def _insert_decision(
+    connection: Connection,
+    *,
+    id: int,
+    user_id: int,
+    contact_id: int,
+    kind: str = "decide",
+    batch_id: str | None = None,
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO triage_decisions (id, user_id, contact_id, kind, before_state,"
+            " after_state, batch_id, decided_at, undone_at, created_at, updated_at)"
+            " VALUES (:id, :user_id, :contact_id, :kind, '{}', '{}', :batch_id, :now, NULL,"
+            " :now, :now)"
+        ),
+        {
+            "id": id,
+            "user_id": user_id,
+            "contact_id": contact_id,
+            "kind": kind,
+            "batch_id": batch_id,
+            "now": STAMP,
+        },
+    )
+
+
+def test_a_triage_decision_kind_is_checked_by_the_database(migration_engine: Engine) -> None:
+    """The three kinds and nothing else.
+
+    ``compare_metadata`` does not diff CHECK constraints (see the portability
+    note above), so without this nothing notices if a later migration drops it
+    and the undo log starts taking kinds no reader knows.
+    """
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        for index, kind in enumerate(("decide", "preferred_name", "bulk_met"), start=1):
+            _insert_decision(connection, id=index, user_id=1, contact_id=1, kind=kind)
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_decision(connection, id=4, user_id=1, contact_id=1, kind="bogus")
+
+
+def test_deleting_a_contact_or_its_user_takes_the_triage_log_with_it(
+    migration_engine: Engine,
+) -> None:
+    """Both cascades are the database's, and ``ondelete`` is not diffed either.
+
+    ``scoped_delete`` is a Core delete, which runs no ORM cascade, so a decision
+    row left behind would point at a contact that no longer exists (spec 8.1,
+    ADR 0005).
+    """
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_contact(connection, id=2, user_id=1)
+        _insert_contact(connection, id=3, user_id=2)
+        _insert_decision(connection, id=1, user_id=1, contact_id=1)
+        _insert_decision(connection, id=2, user_id=1, contact_id=2, kind="bulk_met", batch_id="b1")
+        _insert_decision(connection, id=3, user_id=2, contact_id=3)
+
+    with migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM contacts WHERE id = 1"))
+        remaining = connection.execute(
+            text("SELECT id FROM triage_decisions ORDER BY id")
+        ).scalars()
+        assert list(remaining) == [2, 3]
+
+    with migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM users WHERE id = 1"))
+        remaining = connection.execute(
+            text("SELECT id FROM triage_decisions ORDER BY id")
+        ).scalars()
+        assert list(remaining) == [3]
+
+
 def test_ci_runs_the_postgresql_params() -> None:
     """Without the URL the PostgreSQL params skip silently, so CI must always set it."""
     if not os.environ.get("GITHUB_ACTIONS"):

@@ -5178,7 +5178,7 @@
         "type": "object"
       },
       "SharedCompanyOut": {
-        "description": "A company this contact is at or was at, and the overlap with the address book.\n\n``contact_count`` is how many *other* live contacts are at that company now,\n``met_count`` how many of those you have already marked met.",
+        "description": "A company this contact is at or was at, and the overlap with the address book.\n\nOverlap with **the rest of your contacts**, not with you: nothing in the data\nmodel records your own positions, so \"you both worked at X\" is not something\nnetkeeper can say, and a panel must not label it that way (spec 10.2).\n``contact_count`` is how many *other* live contacts are at that company now\nand ``met_count`` how many of those you have already marked met, so the\nreading is \"you know four people there, three of whom you have met\".\n\nEvery company the contact has is returned, including one where nobody else\nis, as ``contact_count: 0``; a client that only wants overlap filters those.",
         "properties": {
           "company": {
             "title": "Company",

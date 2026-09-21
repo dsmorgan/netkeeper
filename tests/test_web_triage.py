@@ -51,6 +51,10 @@ MAX_QUERIES_PER_CONTACT = 16
 # that also prefetches) happens several times over.
 RUN_LENGTH = 6
 
+# An invented fragment in the shape of what an InMail body can carry (#75). Nothing
+# on the way out escapes it, and the test below is what says so out loud.
+UNSAFE_MARKUP = '<p class="editor">hello</p><img src=x onerror=alert(1)>'
+
 
 def _factory(app: FastAPI) -> sessionmaker[Session]:
     factory: sessionmaker[Session] = app.state.session_factory
@@ -316,6 +320,39 @@ async def test_deciding_a_contact_that_is_not_yours_is_not_found(
     assert response.json()["detail"] == "no such contact"
 
 
+async def test_message_summaries_and_notes_come_back_verbatim(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """The API escapes nothing, on any of the three paths that carry someone else's words.
+
+    A LinkedIn message body is written by somebody else and the archive stores it
+    as it came (#75), HTML and all. The decision for the API is to return it
+    unchanged and leave escaping to whatever renders it, so this test pins the
+    contract: if the API ever starts cleaning, or ever stops, a renderer built
+    on the other assumption has to be told.
+    """
+    with session_scope(_factory(running_app), write=True) as session:
+        user = _local_user(session)
+        contact = factories.make_contact(session, user, notes=UNSAFE_MARKUP)
+        add_interaction(
+            session,
+            user,
+            contact.id,
+            InteractionKind.LI_IN,
+            EARLIER,
+            UNSAFE_MARKUP,
+            source=ContactSource.ARCHIVE,
+        )
+        contact_id = contact.id
+    card = (await _get(client, f"{TRIAGE}/next"))["card"]
+    assert card["contact"]["id"] == contact_id
+    assert card["contact"]["notes"] == UNSAFE_MARKUP
+    assert card["evidence"]["messages"]["recent"][0]["summary"] == UNSAFE_MARKUP
+    timeline = card["evidence"]["timeline"][0]
+    assert timeline["kind"] == "interaction"
+    assert timeline["interaction"]["summary"] == UNSAFE_MARKUP
+
+
 # --- undo -------------------------------------------------------------------
 
 
@@ -364,6 +401,29 @@ async def test_undo_refuses_to_overwrite_a_change_that_arrived_after_the_decisio
     assert forced.status_code == 200, forced.text
     assert forced.json()["forced"] == [contact_id]
     assert _contact_row(running_app, LOCAL_USER_ID, contact_id).met is ContactMet.UNKNOWN
+
+
+async def test_undo_refuses_a_contact_that_left_the_queue_and_says_so(
+    running_app: FastAPI, client: httpx.AsyncClient, run_contacts: list[int]
+) -> None:
+    """Archived after the decision: `409`, not a card for a contact the queue never serves."""
+    before = await _get(client, f"{TRIAGE}/next")
+    await _decide(client, run_contacts[0], "met")
+    with session_scope(_factory(running_app), write=True) as session:
+        contact = get_scoped(session, _local_user(session), Contact, run_contacts[0])
+        assert contact is not None
+        contact.archived_at = NOW
+    response = await _undo(client)
+    assert response.status_code == 409, response.text
+    assert "archived" in response.json()["detail"]
+    forced = await _undo(client, force=True)
+    assert forced.status_code == 200, forced.text
+    assert forced.json()["forced"] == [run_contacts[0]]
+    after = await _get(client, f"{TRIAGE}/next")
+    assert after["card"]["contact"]["id"] == run_contacts[1], (
+        "the archived contact stays out of the queue, whatever undo did to its met"
+    )
+    assert before["card"]["contact"]["id"] == run_contacts[0]
 
 
 # --- the preferred-name edit ------------------------------------------------
@@ -498,7 +558,8 @@ async def test_another_user_is_never_served_or_allowed_to_act_on_these_contacts(
         headers=CSRF,
     )
     assert rename.status_code == 404
-    assert await client.get(f"{TRIAGE}/suggestions") is not None
+    suggestions = await client.get(f"{TRIAGE}/suggestions")
+    assert suggestions.json() == [], "A's message history suggests nothing to B"
     apply_response = await client.post(
         f"{TRIAGE}/suggestions/met_with_messages/apply", json={}, headers=CSRF
     )
