@@ -8,33 +8,47 @@ REF_PREFIX = "#/components/schemas/"
 
 
 def list_operations(openapi: dict[str, Any]) -> set[str]:
-    """Paths of every ``GET`` whose ``200`` JSON response is an array or a paged object.
+    """Paths of every list operation: a ``GET`` returning rows, or a ``POST`` returning a page.
 
-    A paged object has an ``items`` property of type array, the convention for
-    paged lists. ``$ref`` schemas are resolved against ``components/schemas``.
+    A ``GET`` counts when its ``200`` JSON response is an array or a paged
+    object — an object with an ``items`` property of type array, the convention
+    for paged lists.
+
+    A ``POST`` counts only when that response is a *page*. A query whose filter
+    does not fit a query string (``POST /contacts/query``) is a list like any
+    other and has to have an isolation test; a command that happens to answer
+    with an array (``POST /autotag-rules/reorder`` returns the new order) is
+    not one, and the harness, which only reads, could not test it anyway. So the
+    convention is that a query pages. A create answers ``201``, so it is never
+    mistaken for either.
+
+    ``$ref`` schemas are resolved against ``components/schemas``.
     """
     found: set[str] = set()
     for path, item in openapi.get("paths", {}).items():
-        operation = item.get("get")
-        if operation is None:
-            continue
-        schema = _response_schema(operation)
-        if schema is not None and _is_list(openapi, schema):
+        lists = _is_list(openapi, _response_schema(item.get("get")), pages_only=False) or _is_list(
+            openapi, _response_schema(item.get("post")), pages_only=True
+        )
+        if lists:
             found.add(path)
     return found
 
 
-def _response_schema(operation: dict[str, Any]) -> dict[str, Any] | None:
+def _response_schema(operation: dict[str, Any] | None) -> dict[str, Any] | None:
+    if operation is None:
+        return None
     response = operation.get("responses", {}).get("200", {})
     content = response.get("content", {}).get("application/json", {})
     schema = content.get("schema")
     return schema if isinstance(schema, dict) else None
 
 
-def _is_list(openapi: dict[str, Any], schema: dict[str, Any]) -> bool:
+def _is_list(openapi: dict[str, Any], schema: dict[str, Any] | None, *, pages_only: bool) -> bool:
+    if schema is None:
+        return False
     resolved = _resolve(openapi, schema)
     if resolved.get("type") == "array":
-        return True
+        return not pages_only
     if resolved.get("type") != "object":
         return False
     items = resolved.get("properties", {}).get("items")

@@ -8,7 +8,15 @@ from .discovery import list_operations
 
 
 def _get_json(schema: dict[str, Any]) -> dict[str, Any]:
-    return {"get": {"responses": {"200": {"content": {"application/json": {"schema": schema}}}}}}
+    return {"get": _json_200(schema)}
+
+
+def _post_json(schema: dict[str, Any]) -> dict[str, Any]:
+    return {"post": _json_200(schema)}
+
+
+def _json_200(schema: dict[str, Any]) -> dict[str, Any]:
+    return {"responses": {"200": {"content": {"application/json": {"schema": schema}}}}}
 
 
 def _ref(name: str) -> dict[str, str]:
@@ -25,13 +33,10 @@ HANDWRITTEN: dict[str, Any] = {
             **_get_json(_ref("Contact")),
             "delete": {"responses": {"204": {"description": "Deleted"}}},
         },
-        "/api/v1/contacts/import": {
-            "post": {
-                "responses": {
-                    "200": {"content": {"application/json": {"schema": {"type": "array"}}}}
-                }
-            }
-        },
+        # A POST answering with a bare array is a command, not a list.
+        "/api/v1/contacts/import": _post_json({"type": "array"}),
+        # A POST answering with a page is a query, and needs an isolation test.
+        "/api/v1/contacts/query": _post_json(_ref("ContactPage")),
         "/api/v1/stats": _get_json(
             {"type": "object", "properties": {"items": {"type": "integer"}}}
         ),
@@ -60,7 +65,12 @@ HANDWRITTEN: dict[str, Any] = {
 
 
 def test_list_operations_on_a_handwritten_schema() -> None:
-    assert list_operations(HANDWRITTEN) == {"/api/v1/contacts", "/api/v1/tags", "/api/v1/lists"}
+    assert list_operations(HANDWRITTEN) == {
+        "/api/v1/contacts",
+        "/api/v1/contacts/query",
+        "/api/v1/tags",
+        "/api/v1/lists",
+    }
 
 
 def test_list_operations_on_an_empty_schema() -> None:

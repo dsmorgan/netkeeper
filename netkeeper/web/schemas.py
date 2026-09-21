@@ -2,16 +2,33 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Annotated, Literal
+from datetime import date, datetime
+from typing import Annotated, Any, Literal, Self, get_args
 
-from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_validator,
+)
 
+from netkeeper.crm.confirmation import InvalidReason
+from netkeeper.crm.filters import FilterTree, SortKey
+from netkeeper.crm.interactions import TimelineEntry
 from netkeeper.crm.tags import PATTERN_MAX_LENGTH, InvalidPattern, compile_pattern
 from netkeeper.models import (
     TAG_NAME_MAX_LENGTH,
+    ContactMet,
+    ContactSnapshot,
     ContactSource,
+    EmailKind,
+    EmailStatus,
+    Interaction,
     InteractionKind,
+    LinkKind,
+    PhoneKind,
     RuleField,
     TagKind,
     TagSource,
@@ -140,6 +157,23 @@ class TimelinePage(BaseModel):
     next_before: datetime | None
 
 
+def timeline_entry_out(entry: TimelineEntry) -> TimelineEntryOut:
+    """One :class:`~netkeeper.crm.interactions.TimelineEntry` as the tagged union above.
+
+    Both the timeline endpoint and the contact detail render entries with it, so
+    the two can never drift.
+    """
+    if isinstance(entry.row, Interaction):
+        return TimelineInteraction(
+            kind="interaction", at=entry.at, interaction=InteractionOut.model_validate(entry.row)
+        )
+    if isinstance(entry.row, ContactSnapshot):
+        return TimelineSnapshot(
+            kind="snapshot", at=entry.at, snapshot=SnapshotOut.model_validate(entry.row)
+        )
+    raise TypeError(f"timeline entry of unexpected type {type(entry.row).__name__}")
+
+
 class NotesIn(BaseModel):
     """The contact's notes, Markdown, replaced whole; ``null`` clears them."""
 
@@ -266,3 +300,447 @@ class AutotagRuleRunOut(BaseModel):
     updated: int
     timeouts: int
     """Searches that hit the 50 ms timeout; each left its tag as it was."""
+
+
+# --- contacts (P1-05) --------------------------------------------------------
+
+ContactColumn = Literal[
+    "li_urn",
+    "li_public_id",
+    "li_url",
+    "first_name",
+    "last_name",
+    "preferred_name",
+    "headline",
+    "current_title",
+    "current_company",
+    "location",
+    "connected_on",
+    "degree",
+    "met",
+    "triaged_at",
+    "do_not_contact",
+    "do_not_contact_reason",
+    "li_missing_count",
+    "li_disconnected_at",
+    "last_enriched_at",
+    "enrich_priority",
+    "last_contacted_at",
+    "notes",
+    "archived_at",
+    "source",
+    "created_at",
+    "updated_at",
+]
+"""The scalar columns of ``contacts`` a table row may carry, and ``columns`` may name."""
+
+CONTACT_COLUMNS: tuple[str, ...] = get_args(ContactColumn)
+
+ProvenanceField = Literal[
+    "li_urn",
+    "li_public_id",
+    "li_url",
+    "first_name",
+    "last_name",
+    "headline",
+    "current_title",
+    "current_company",
+    "location",
+    "connected_on",
+]
+"""The LinkedIn fields with per-field provenance; the same set as ``PROVENANCE_ORDER``."""
+
+
+class ContactQuery(BaseModel):
+    """The body of ``POST /contacts/query``: a filter, a sort, a page, and the columns wanted.
+
+    ``columns`` names the scalar fields each row carries (``id`` always does);
+    ``null`` means every one of them. ``primary_email`` and ``primary_phone`` are
+    always present.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    filter: FilterTree | None = None
+    sort: list[SortKey] = Field(default_factory=list)
+    limit: int = Field(50, ge=1, le=200)
+    offset: int = Field(0, ge=0)
+    columns: list[ContactColumn] | None = None
+
+
+class ContactRow(BaseModel):
+    """One row of the Contacts table (spec 10.1), compact.
+
+    The scalar fields are present when the query asked for them, and every one
+    of them when it named no columns; a field that was not asked for is absent
+    from the JSON, not ``null``. ``primary_email`` and ``primary_phone`` are the
+    primary child, or the first one when none is marked primary.
+
+    Tags are not on a row yet. Carrying them means a third preloaded collection
+    per page, and the Contacts table (P1-12) decides whether it wants them as
+    names or as ids; until it does, a row that needs them asks
+    ``GET /contacts/{id}`` or the tags API.
+    """
+
+    id: int
+    li_urn: str | None = None
+    li_public_id: str | None = None
+    li_url: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    preferred_name: str | None = None
+    headline: str | None = None
+    current_title: str | None = None
+    current_company: str | None = None
+    location: str | None = None
+    connected_on: date | None = None
+    degree: int | None = None
+    met: ContactMet | None = None
+    triaged_at: datetime | None = None
+    do_not_contact: bool | None = None
+    do_not_contact_reason: str | None = None
+    li_missing_count: int | None = None
+    li_disconnected_at: datetime | None = None
+    last_enriched_at: datetime | None = None
+    enrich_priority: int | None = None
+    last_contacted_at: datetime | None = None
+    notes: str | None = None
+    archived_at: datetime | None = None
+    source: ContactSource | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    primary_email: str | None
+    primary_phone: str | None
+
+
+class ContactPage(BaseModel):
+    """One page of contacts, the count of every match, and a reading of the selection."""
+
+    items: list[ContactRow]
+    total: int
+    describe: str
+
+
+class ContactEmailOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: str
+    kind: EmailKind
+    is_primary: bool
+    status: EmailStatus
+    source: ContactSource
+    observed_at: datetime
+
+
+class ContactPhoneOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    number_e164: str | None
+    raw: str
+    kind: PhoneKind
+    is_primary: bool
+    source: ContactSource
+    observed_at: datetime
+
+
+class ContactLinkOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    url: str
+    kind: LinkKind
+    source: ContactSource
+    observed_at: datetime
+
+
+class ContactPositionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str | None
+    company: str | None
+    company_urn: str | None
+    started_on: date | None
+    ended_on: date | None
+    is_current: bool
+    source: ContactSource
+    observed_at: datetime
+
+
+class SyncedValueOut(BaseModel):
+    """What an automated source last reported for one field: what a revert restores."""
+
+    value: str | None
+    source: ContactSource
+    observed_at: datetime
+
+
+class ContactDetail(BaseModel):
+    """A contact in full: every scalar, its children, and its provenance (spec 8.1, 10.5).
+
+    ``timeline`` is the newest page of interactions and snapshots interleaved,
+    the same shape ``GET /contacts/{id}/timeline`` pages through, so the detail
+    screen renders in one request; ask that endpoint for older entries.
+
+    ``field_sources`` says which source last wrote each LinkedIn field;
+    ``synced_values`` what the automated sources last reported;
+    ``overridden_fields`` the ones a manual edit hides a different synced value
+    on, each with a revert available. ``resolved_from`` is set when the id asked
+    for belongs to a merged-away contact and this is its survivor.
+    """
+
+    id: int
+    li_urn: str | None
+    li_public_id: str | None
+    li_url: str | None
+    first_name: str
+    last_name: str
+    preferred_name: str
+    headline: str | None
+    current_title: str | None
+    current_company: str | None
+    location: str | None
+    connected_on: date | None
+    degree: int
+    met: ContactMet
+    triaged_at: datetime | None
+    do_not_contact: bool
+    do_not_contact_reason: str | None
+    li_missing_count: int
+    li_disconnected_at: datetime | None
+    last_enriched_at: datetime | None
+    enrich_priority: int
+    last_contacted_at: datetime | None
+    notes: str | None
+    archived_at: datetime | None
+    source: ContactSource
+    created_at: datetime
+    updated_at: datetime
+    merged_into_id: int | None
+    emails: list[ContactEmailOut]
+    phones: list[ContactPhoneOut]
+    links: list[ContactLinkOut]
+    positions: list[ContactPositionOut]
+    snapshots: list[SnapshotOut]
+    timeline: list[TimelineEntryOut]
+    field_sources: dict[str, ContactSource]
+    synced_values: dict[str, SyncedValueOut]
+    overridden_fields: list[str]
+    resolved_from: int | None
+
+
+class ContactPatch(BaseModel):
+    """Fields to change on a contact; a field left out is untouched.
+
+    A LinkedIn field (``li_public_id`` through ``connected_on``) sent here is a
+    manual override that sticks until reverted; ``null`` clears it and sticks
+    the same way. ``li_public_id`` also sets ``li_url`` to the canonical profile
+    URL, and is refused when another contact holds the slug. ``preferred_name``
+    sent empty or ``null`` falls back to ``first_name``. ``met`` stamps
+    ``triaged_at``. ``met`` and ``do_not_contact`` cannot be null, so ``null``
+    means "leave it".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    li_public_id: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    headline: str | None = None
+    current_title: str | None = None
+    current_company: str | None = None
+    location: str | None = None
+    connected_on: date | None = None
+    preferred_name: str | None = None
+    notes: str | None = None
+    met: ContactMet | None = None
+    do_not_contact: bool | None = None
+    do_not_contact_reason: str | None = None
+
+
+class RevertFieldIn(BaseModel):
+    """The field to put back to its last synced value (spec 10.5, CP1 #28)."""
+
+    field: ProvenanceField
+
+
+class MergeIn(BaseModel):
+    """Fold ``loser_id`` into the contact in the path (spec 8.2)."""
+
+    loser_id: int
+
+
+class MergedConflict(BaseModel):
+    """The ``409`` body of a write to a merged-away contact: where it went."""
+
+    detail: Literal["merged"]
+    merged_into_id: int
+
+
+BulkAction = Literal["set_met", "archive", "unarchive", "set_do_not_contact"]
+
+
+class BulkSelection(BaseModel):
+    """Which contacts a bulk action applies to: a filter, or explicit ids (one of the two).
+
+    A filter selects what the Contacts table shows for it: live contacts, and
+    archived ones only with ``include_archived``. Ids select those contacts,
+    archived or not; a merged-away id is never selected.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    filter: FilterTree | None = None
+    ids: list[int] | None = Field(None, min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def _one_of(self) -> Self:
+        if (self.filter is None) == (self.ids is None):
+            raise ValueError("give exactly one of filter, ids")
+        return self
+
+
+class BulkCountIn(BaseModel):
+    """Ask how many contacts an action would touch, and for the token that confirms it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    selection: BulkSelection
+    action: BulkAction
+
+
+class BulkCountOut(BaseModel):
+    """The count to put in the confirmation dialog, and the token that makes it binding.
+
+    Send ``token`` back with the action. It is bound to this user, this action,
+    this selection, and this count, and it expires at ``expires_at`` (five
+    minutes). ``describe`` reads the selection back in words for the dialog.
+    """
+
+    count: int
+    describe: str
+    token: str
+    expires_at: datetime
+
+
+class BulkIn(BaseModel):
+    """A bulk action and the confirmation token that carries the count (spec 10.1).
+
+    ``token`` comes from ``POST /contacts/bulk/count``. The server re-counts the
+    selection inside the writer transaction and refuses with ``409`` when the
+    count has moved, so an action never lands on rows the person did not see.
+    ``value`` is the ``met`` value for ``set_met`` and a boolean for
+    ``set_do_not_contact`` (with ``reason``); ``archive`` and ``unarchive`` take
+    none.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    selection: BulkSelection
+    action: BulkAction
+    value: ContactMet | bool | None = None
+    reason: str | None = None
+    token: str = Field(min_length=1, description="The count confirmation token.")
+
+    @model_validator(mode="after")
+    def _value_fits_action(self) -> Self:
+        match self.action:
+            case "set_met":
+                if not isinstance(self.value, ContactMet):
+                    raise ValueError("set_met needs value: one of unknown, met, not_met, skip")
+            case "set_do_not_contact":
+                if not isinstance(self.value, bool):
+                    raise ValueError("set_do_not_contact needs value: true or false")
+            case "archive" | "unarchive":
+                if self.value is not None or self.reason is not None:
+                    raise ValueError(f"{self.action} takes no value or reason")
+        if self.reason is not None and self.action != "set_do_not_contact":
+            raise ValueError("reason goes with set_do_not_contact only")
+        return self
+
+
+class BulkOut(BaseModel):
+    affected: int
+
+
+class CountMismatch(BaseModel):
+    """The ``409`` body of a bulk action whose selection no longer counts what the UI showed."""
+
+    detail: Literal["count mismatch"]
+    expected_count: int
+    actual_count: int
+
+
+class ConfirmationRejected(BaseModel):
+    """The body of a bulk action whose confirmation token does not hold up.
+
+    ``409`` when the token expired (ask for the count again); ``422`` when it is
+    unreadable, was issued to someone else, or is for another action or another
+    selection.
+    """
+
+    detail: str
+    reason: InvalidReason
+
+
+class ContactEmailIn(BaseModel):
+    """A new address. The first address on a contact becomes primary whether or not asked."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=1)
+    kind: EmailKind = EmailKind.OTHER
+    is_primary: bool = False
+    status: EmailStatus = EmailStatus.OK
+
+
+class ContactEmailPatch(BaseModel):
+    """Fields to change on an address; ``is_primary: true`` demotes the others."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str | None = Field(None, min_length=1)
+    kind: EmailKind | None = None
+    is_primary: bool | None = None
+    status: EmailStatus | None = None
+
+
+class ContactPhoneIn(BaseModel):
+    """A new number. ``number_e164`` is derived from a ``+``-prefixed ``raw`` when not given."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    raw: str = Field(min_length=1)
+    number_e164: str | None = None
+    kind: PhoneKind = PhoneKind.OTHER
+    is_primary: bool = False
+
+
+class ContactPhonePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    raw: str | None = Field(None, min_length=1)
+    number_e164: str | None = None
+    kind: PhoneKind | None = None
+    is_primary: bool | None = None
+
+
+class ContactLinkIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1)
+    kind: LinkKind = LinkKind.OTHER
+
+
+class ContactLinkPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str | None = Field(None, min_length=1)
+    kind: LinkKind | None = None
+
+
+def given_fields(body: BaseModel) -> dict[str, Any]:
+    """The fields a patch body carried, by name, ``null`` included: what to change."""
+    return {name: getattr(body, name) for name in body.model_fields_set}

@@ -40,7 +40,11 @@ export interface paths {
         put?: never;
         /**
          * Preview Autotag Rule
-         * @description How many live contacts a pattern matches in a field, and the first ten. Writes nothing.
+         * @description How many live contacts a pattern matches in a field, and the first ten.
+         *
+         *     Writes nothing, and its session is a reader, so the rule editor's live
+         *     preview never takes the SQLite write lock while it scans the address book
+         *     (#62).
          */
         post: operations["preview_autotag_rule"];
         delete?: never;
@@ -133,6 +137,184 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/contacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Contacts
+         * @description Quick search, by last name then first name; blank ``q`` lists every live contact.
+         */
+        get: operations["search_contacts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/bulk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bulk Update Contacts
+         * @description One action on every contact a filter or an id list selects, count confirmed (spec 10.1).
+         *
+         *     `token` comes from `POST /contacts/bulk/count`. The selection is counted
+         *     again here, inside the writer transaction, and the action is refused when
+         *     the count has moved.
+         */
+        post: operations["bulk_update_contacts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/bulk/count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Count Bulk Contacts
+         * @description How many contacts the action would touch, and the token that confirms that count.
+         *
+         *     Put `count` in the confirmation dialog and send `token` back with the
+         *     action. The token is bound to this user, this action, this selection, and
+         *     this count, and expires in five minutes; a selection that has moved by then
+         *     is refused rather than applied to rows nobody saw. Writes nothing.
+         */
+        post: operations["count_bulk_contacts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Query Contacts
+         * @description The Contacts table: filter, sort, page, and the columns to carry (spec 10.1, 10.4).
+         *
+         *     A `POST` because the filter tree does not fit a query string; it reads only,
+         *     and its session never takes the write lock. `total` counts every match;
+         *     `describe` reads the filter for the table header.
+         */
+        post: operations["query_contacts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Contact
+         * @description The contact in full. A merged-away id answers with its survivor and `resolved_from`.
+         */
+        get: operations["get_contact"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Contact
+         * @description Edit fields by hand. A LinkedIn field edited here sticks until reverted (spec 10.5).
+         */
+        patch: operations["update_contact"];
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive Contact
+         * @description Archive. Contacts are never deleted (spec 8); an archived one leaves the table.
+         */
+        post: operations["archive_contact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/emails": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add Contact Email
+         * @description Add an address. The first one is primary; `is_primary` on a later one demotes the rest.
+         */
+        post: operations["add_contact_email"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/emails/{email_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Contact Email
+         * @description Remove an address; when it was primary, the first remaining one takes over.
+         */
+        delete: operations["delete_contact_email"];
+        options?: never;
+        head?: never;
+        /** Update Contact Email */
+        patch: operations["update_contact_email"];
+        trace?: never;
+    };
     "/api/v1/contacts/{contact_id}/interactions": {
         parameters: {
             query?: never;
@@ -157,6 +339,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/contacts/{contact_id}/links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add Contact Link */
+        post: operations["add_contact_link"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/links/{link_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Contact Link */
+        delete: operations["delete_contact_link"];
+        options?: never;
+        head?: never;
+        /** Update Contact Link */
+        patch: operations["update_contact_link"];
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/merge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Merge Contacts
+         * @description Fold `loser_id` into this contact (spec 8.2); the loser resolves here from then on.
+         */
+        post: operations["merge_contacts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/contacts/{contact_id}/notes": {
         parameters: {
             query?: never;
@@ -171,6 +408,64 @@ export interface paths {
          */
         put: operations["set_contact_notes"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/phones": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add Contact Phone
+         * @description Add a number. The first one is primary; `is_primary` on a later one demotes the rest.
+         */
+        post: operations["add_contact_phone"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/phones/{phone_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Contact Phone */
+        delete: operations["delete_contact_phone"];
+        options?: never;
+        head?: never;
+        /** Update Contact Phone */
+        patch: operations["update_contact_phone"];
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/revert-field": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revert Contact Field
+         * @description Put a LinkedIn field back to its last synced value and provenance (CP1, #28).
+         */
+        post: operations["revert_contact_field"];
         delete?: never;
         options?: never;
         head?: never;
@@ -231,6 +526,23 @@ export interface paths {
         get: operations["get_timeline"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/unarchive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Unarchive Contact */
+        post: operations["unarchive_contact"];
         delete?: never;
         options?: never;
         head?: never;
@@ -398,6 +710,16 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** And */
+        And: {
+            /** Children */
+            children: components["schemas"]["FilterNode"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "and";
+        };
         /** AutotagRuleCreate */
         AutotagRuleCreate: {
             /**
@@ -482,6 +804,543 @@ export interface components {
             updated: number;
         };
         /**
+         * Between
+         * @description ``low <= field <= high``, both ends included.
+         */
+        Between: {
+            /**
+             * Field
+             * @enum {string}
+             */
+            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at";
+            /** High */
+            high: string | number | boolean;
+            /** Low */
+            low: string | number | boolean;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "between";
+        };
+        /**
+         * BulkCountIn
+         * @description Ask how many contacts an action would touch, and for the token that confirms it.
+         */
+        BulkCountIn: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "set_met" | "archive" | "unarchive" | "set_do_not_contact";
+            selection: components["schemas"]["BulkSelection"];
+        };
+        /**
+         * BulkCountOut
+         * @description The count to put in the confirmation dialog, and the token that makes it binding.
+         *
+         *     Send ``token`` back with the action. It is bound to this user, this action,
+         *     this selection, and this count, and it expires at ``expires_at`` (five
+         *     minutes). ``describe`` reads the selection back in words for the dialog.
+         */
+        BulkCountOut: {
+            /** Count */
+            count: number;
+            /** Describe */
+            describe: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Token */
+            token: string;
+        };
+        /**
+         * BulkIn
+         * @description A bulk action and the confirmation token that carries the count (spec 10.1).
+         *
+         *     ``token`` comes from ``POST /contacts/bulk/count``. The server re-counts the
+         *     selection inside the writer transaction and refuses with ``409`` when the
+         *     count has moved, so an action never lands on rows the person did not see.
+         *     ``value`` is the ``met`` value for ``set_met`` and a boolean for
+         *     ``set_do_not_contact`` (with ``reason``); ``archive`` and ``unarchive`` take
+         *     none.
+         */
+        BulkIn: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "set_met" | "archive" | "unarchive" | "set_do_not_contact";
+            /** Reason */
+            reason?: string | null;
+            selection: components["schemas"]["BulkSelection"];
+            /**
+             * Token
+             * @description The count confirmation token.
+             */
+            token: string;
+            /** Value */
+            value?: components["schemas"]["ContactMet"] | boolean | null;
+        };
+        /** BulkOut */
+        BulkOut: {
+            /** Affected */
+            affected: number;
+        };
+        /**
+         * BulkSelection
+         * @description Which contacts a bulk action applies to: a filter, or explicit ids (one of the two).
+         *
+         *     A filter selects what the Contacts table shows for it: live contacts, and
+         *     archived ones only with ``include_archived``. Ids select those contacts,
+         *     archived or not; a merged-away id is never selected.
+         */
+        BulkSelection: {
+            filter?: components["schemas"]["FilterTree"] | null;
+            /** Ids */
+            ids?: number[] | null;
+        };
+        /**
+         * ChangedJobsWithinDays
+         * @description A ``contact_snapshots`` row observed in the last ``days`` days (spec 9.8).
+         */
+        ChangedJobsWithinDays: {
+            /** Days */
+            days: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "changed_jobs_within_days";
+        };
+        /**
+         * ConfirmationRejected
+         * @description The body of a bulk action whose confirmation token does not hold up.
+         *
+         *     ``409`` when the token expired (ask for the count again); ``422`` when it is
+         *     unreadable, was issued to someone else, or is for another action or another
+         *     selection.
+         */
+        ConfirmationRejected: {
+            /** Detail */
+            detail: string;
+            /**
+             * Reason
+             * @enum {string}
+             */
+            reason: "malformed" | "expired" | "user" | "action" | "selection";
+        };
+        /**
+         * ConnectedWithinDays
+         * @description ``connected_on`` on or after today (in the user's timezone) minus ``days``.
+         */
+        ConnectedWithinDays: {
+            /** Days */
+            days: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "connected_within_days";
+        };
+        /**
+         * ContactDetail
+         * @description A contact in full: every scalar, its children, and its provenance (spec 8.1, 10.5).
+         *
+         *     ``timeline`` is the newest page of interactions and snapshots interleaved,
+         *     the same shape ``GET /contacts/{id}/timeline`` pages through, so the detail
+         *     screen renders in one request; ask that endpoint for older entries.
+         *
+         *     ``field_sources`` says which source last wrote each LinkedIn field;
+         *     ``synced_values`` what the automated sources last reported;
+         *     ``overridden_fields`` the ones a manual edit hides a different synced value
+         *     on, each with a revert available. ``resolved_from`` is set when the id asked
+         *     for belongs to a merged-away contact and this is its survivor.
+         */
+        ContactDetail: {
+            /** Archived At */
+            archived_at: string | null;
+            /** Connected On */
+            connected_on: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Current Company */
+            current_company: string | null;
+            /** Current Title */
+            current_title: string | null;
+            /** Degree */
+            degree: number;
+            /** Do Not Contact */
+            do_not_contact: boolean;
+            /** Do Not Contact Reason */
+            do_not_contact_reason: string | null;
+            /** Emails */
+            emails: components["schemas"]["ContactEmailOut"][];
+            /** Enrich Priority */
+            enrich_priority: number;
+            /** Field Sources */
+            field_sources: {
+                [key: string]: components["schemas"]["ContactSource"];
+            };
+            /** First Name */
+            first_name: string;
+            /** Headline */
+            headline: string | null;
+            /** Id */
+            id: number;
+            /** Last Contacted At */
+            last_contacted_at: string | null;
+            /** Last Enriched At */
+            last_enriched_at: string | null;
+            /** Last Name */
+            last_name: string;
+            /** Li Disconnected At */
+            li_disconnected_at: string | null;
+            /** Li Missing Count */
+            li_missing_count: number;
+            /** Li Public Id */
+            li_public_id: string | null;
+            /** Li Url */
+            li_url: string | null;
+            /** Li Urn */
+            li_urn: string | null;
+            /** Links */
+            links: components["schemas"]["ContactLinkOut"][];
+            /** Location */
+            location: string | null;
+            /** Merged Into Id */
+            merged_into_id: number | null;
+            met: components["schemas"]["ContactMet"];
+            /** Notes */
+            notes: string | null;
+            /** Overridden Fields */
+            overridden_fields: string[];
+            /** Phones */
+            phones: components["schemas"]["ContactPhoneOut"][];
+            /** Positions */
+            positions: components["schemas"]["ContactPositionOut"][];
+            /** Preferred Name */
+            preferred_name: string;
+            /** Resolved From */
+            resolved_from: number | null;
+            /** Snapshots */
+            snapshots: components["schemas"]["SnapshotOut"][];
+            source: components["schemas"]["ContactSource"];
+            /** Synced Values */
+            synced_values: {
+                [key: string]: components["schemas"]["SyncedValueOut"];
+            };
+            /** Timeline */
+            timeline: (components["schemas"]["TimelineInteraction"] | components["schemas"]["TimelineSnapshot"])[];
+            /** Triaged At */
+            triaged_at: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * ContactEmailIn
+         * @description A new address. The first address on a contact becomes primary whether or not asked.
+         */
+        ContactEmailIn: {
+            /** Email */
+            email: string;
+            /**
+             * Is Primary
+             * @default false
+             */
+            is_primary: boolean;
+            /** @default other */
+            kind: components["schemas"]["EmailKind"];
+            /** @default ok */
+            status: components["schemas"]["EmailStatus"];
+        };
+        /** ContactEmailOut */
+        ContactEmailOut: {
+            /** Email */
+            email: string;
+            /** Id */
+            id: number;
+            /** Is Primary */
+            is_primary: boolean;
+            kind: components["schemas"]["EmailKind"];
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            source: components["schemas"]["ContactSource"];
+            status: components["schemas"]["EmailStatus"];
+        };
+        /**
+         * ContactEmailPatch
+         * @description Fields to change on an address; ``is_primary: true`` demotes the others.
+         */
+        ContactEmailPatch: {
+            /** Email */
+            email?: string | null;
+            /** Is Primary */
+            is_primary?: boolean | null;
+            kind?: components["schemas"]["EmailKind"] | null;
+            status?: components["schemas"]["EmailStatus"] | null;
+        };
+        /** ContactLinkIn */
+        ContactLinkIn: {
+            /** @default other */
+            kind: components["schemas"]["LinkKind"];
+            /** Url */
+            url: string;
+        };
+        /** ContactLinkOut */
+        ContactLinkOut: {
+            /** Id */
+            id: number;
+            kind: components["schemas"]["LinkKind"];
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            source: components["schemas"]["ContactSource"];
+            /** Url */
+            url: string;
+        };
+        /** ContactLinkPatch */
+        ContactLinkPatch: {
+            kind?: components["schemas"]["LinkKind"] | null;
+            /** Url */
+            url?: string | null;
+        };
+        /**
+         * ContactMet
+         * @description Triage: have you met this person (spec 10.2)?
+         * @enum {string}
+         */
+        ContactMet: "unknown" | "met" | "not_met" | "skip";
+        /**
+         * ContactPage
+         * @description One page of contacts, the count of every match, and a reading of the selection.
+         */
+        ContactPage: {
+            /** Describe */
+            describe: string;
+            /** Items */
+            items: components["schemas"]["ContactRow"][];
+            /** Total */
+            total: number;
+        };
+        /**
+         * ContactPatch
+         * @description Fields to change on a contact; a field left out is untouched.
+         *
+         *     A LinkedIn field (``li_public_id`` through ``connected_on``) sent here is a
+         *     manual override that sticks until reverted; ``null`` clears it and sticks
+         *     the same way. ``li_public_id`` also sets ``li_url`` to the canonical profile
+         *     URL, and is refused when another contact holds the slug. ``preferred_name``
+         *     sent empty or ``null`` falls back to ``first_name``. ``met`` stamps
+         *     ``triaged_at``. ``met`` and ``do_not_contact`` cannot be null, so ``null``
+         *     means "leave it".
+         */
+        ContactPatch: {
+            /** Connected On */
+            connected_on?: string | null;
+            /** Current Company */
+            current_company?: string | null;
+            /** Current Title */
+            current_title?: string | null;
+            /** Do Not Contact */
+            do_not_contact?: boolean | null;
+            /** Do Not Contact Reason */
+            do_not_contact_reason?: string | null;
+            /** First Name */
+            first_name?: string | null;
+            /** Headline */
+            headline?: string | null;
+            /** Last Name */
+            last_name?: string | null;
+            /** Li Public Id */
+            li_public_id?: string | null;
+            /** Location */
+            location?: string | null;
+            met?: components["schemas"]["ContactMet"] | null;
+            /** Notes */
+            notes?: string | null;
+            /** Preferred Name */
+            preferred_name?: string | null;
+        };
+        /**
+         * ContactPhoneIn
+         * @description A new number. ``number_e164`` is derived from a ``+``-prefixed ``raw`` when not given.
+         */
+        ContactPhoneIn: {
+            /**
+             * Is Primary
+             * @default false
+             */
+            is_primary: boolean;
+            /** @default other */
+            kind: components["schemas"]["PhoneKind"];
+            /** Number E164 */
+            number_e164?: string | null;
+            /** Raw */
+            raw: string;
+        };
+        /** ContactPhoneOut */
+        ContactPhoneOut: {
+            /** Id */
+            id: number;
+            /** Is Primary */
+            is_primary: boolean;
+            kind: components["schemas"]["PhoneKind"];
+            /** Number E164 */
+            number_e164: string | null;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Raw */
+            raw: string;
+            source: components["schemas"]["ContactSource"];
+        };
+        /** ContactPhonePatch */
+        ContactPhonePatch: {
+            /** Is Primary */
+            is_primary?: boolean | null;
+            kind?: components["schemas"]["PhoneKind"] | null;
+            /** Number E164 */
+            number_e164?: string | null;
+            /** Raw */
+            raw?: string | null;
+        };
+        /** ContactPositionOut */
+        ContactPositionOut: {
+            /** Company */
+            company: string | null;
+            /** Company Urn */
+            company_urn: string | null;
+            /** Ended On */
+            ended_on: string | null;
+            /** Id */
+            id: number;
+            /** Is Current */
+            is_current: boolean;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            source: components["schemas"]["ContactSource"];
+            /** Started On */
+            started_on: string | null;
+            /** Title */
+            title: string | null;
+        };
+        /**
+         * ContactQuery
+         * @description The body of ``POST /contacts/query``: a filter, a sort, a page, and the columns wanted.
+         *
+         *     ``columns`` names the scalar fields each row carries (``id`` always does);
+         *     ``null`` means every one of them. ``primary_email`` and ``primary_phone`` are
+         *     always present.
+         */
+        ContactQuery: {
+            /** Columns */
+            columns?: ("li_urn" | "li_public_id" | "li_url" | "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "connected_on" | "degree" | "met" | "triaged_at" | "do_not_contact" | "do_not_contact_reason" | "li_missing_count" | "li_disconnected_at" | "last_enriched_at" | "enrich_priority" | "last_contacted_at" | "notes" | "archived_at" | "source" | "created_at" | "updated_at")[] | null;
+            filter?: components["schemas"]["FilterTree"] | null;
+            /**
+             * Limit
+             * @default 50
+             */
+            limit: number;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /** Sort */
+            sort?: components["schemas"]["SortKey"][];
+        };
+        /**
+         * ContactRow
+         * @description One row of the Contacts table (spec 10.1), compact.
+         *
+         *     The scalar fields are present when the query asked for them, and every one
+         *     of them when it named no columns; a field that was not asked for is absent
+         *     from the JSON, not ``null``. ``primary_email`` and ``primary_phone`` are the
+         *     primary child, or the first one when none is marked primary.
+         *
+         *     Tags are not on a row yet. Carrying them means a third preloaded collection
+         *     per page, and the Contacts table (P1-12) decides whether it wants them as
+         *     names or as ids; until it does, a row that needs them asks
+         *     ``GET /contacts/{id}`` or the tags API.
+         */
+        ContactRow: {
+            /** Archived At */
+            archived_at?: string | null;
+            /** Connected On */
+            connected_on?: string | null;
+            /** Created At */
+            created_at?: string | null;
+            /** Current Company */
+            current_company?: string | null;
+            /** Current Title */
+            current_title?: string | null;
+            /** Degree */
+            degree?: number | null;
+            /** Do Not Contact */
+            do_not_contact?: boolean | null;
+            /** Do Not Contact Reason */
+            do_not_contact_reason?: string | null;
+            /** Enrich Priority */
+            enrich_priority?: number | null;
+            /** First Name */
+            first_name?: string | null;
+            /** Headline */
+            headline?: string | null;
+            /** Id */
+            id: number;
+            /** Last Contacted At */
+            last_contacted_at?: string | null;
+            /** Last Enriched At */
+            last_enriched_at?: string | null;
+            /** Last Name */
+            last_name?: string | null;
+            /** Li Disconnected At */
+            li_disconnected_at?: string | null;
+            /** Li Missing Count */
+            li_missing_count?: number | null;
+            /** Li Public Id */
+            li_public_id?: string | null;
+            /** Li Url */
+            li_url?: string | null;
+            /** Li Urn */
+            li_urn?: string | null;
+            /** Location */
+            location?: string | null;
+            met?: components["schemas"]["ContactMet"] | null;
+            /** Notes */
+            notes?: string | null;
+            /** Preferred Name */
+            preferred_name?: string | null;
+            /** Primary Email */
+            primary_email: string | null;
+            /** Primary Phone */
+            primary_phone: string | null;
+            source?: components["schemas"]["ContactSource"] | null;
+            /** Triaged At */
+            triaged_at?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+        };
+        /**
          * ContactSource
          * @description Where a row came from. On ``contacts`` the first source; children carry their own.
          *
@@ -514,10 +1373,173 @@ export interface components {
             /** Tag Id */
             tag_id: number;
         };
+        /**
+         * Contains
+         * @description Case-insensitive substring; ``%`` and ``_`` in ``value`` match themselves.
+         */
+        Contains: {
+            /**
+             * Field
+             * @enum {string}
+             */
+            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "contains";
+            /** Value */
+            value: string;
+        };
+        /**
+         * CountMismatch
+         * @description The ``409`` body of a bulk action whose selection no longer counts what the UI showed.
+         */
+        CountMismatch: {
+            /** Actual Count */
+            actual_count: number;
+            /**
+             * Detail
+             * @constant
+             */
+            detail: "count mismatch";
+            /** Expected Count */
+            expected_count: number;
+        };
+        /**
+         * EmailContains
+         * @description Any of the contact's emails contains ``value`` (case-insensitive, literal).
+         */
+        EmailContains: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "email_contains";
+            /** Value */
+            value: string;
+        };
+        /**
+         * EmailKind
+         * @enum {string}
+         */
+        EmailKind: "personal" | "work" | "other";
+        /**
+         * EmailStatus
+         * @enum {string}
+         */
+        EmailStatus: "ok" | "bounced" | "invalid";
+        /** EnrolledIn */
+        EnrolledIn: {
+            /** Campaign Id */
+            campaign_id: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "enrolled_in";
+        };
+        /** Eq */
+        Eq: {
+            /**
+             * Field
+             * @enum {string}
+             */
+            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at" | "do_not_contact";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "eq";
+            /** Value */
+            value: string | number | boolean;
+        };
+        FilterNode: components["schemas"]["And"] | components["schemas"]["Or"] | components["schemas"]["Not"] | components["schemas"]["Eq"] | components["schemas"]["Neq"] | components["schemas"]["Contains"] | components["schemas"]["StartsWith"] | components["schemas"]["IsEmpty"] | components["schemas"]["Gt"] | components["schemas"]["Gte"] | components["schemas"]["Lt"] | components["schemas"]["Lte"] | components["schemas"]["Between"] | components["schemas"]["HasEmail"] | components["schemas"]["HasPhone"] | components["schemas"]["HasLiUrl"] | components["schemas"]["HasPosition"] | components["schemas"]["EmailContains"] | components["schemas"]["LastContacted"] | components["schemas"]["ConnectedWithinDays"] | components["schemas"]["ChangedJobsWithinDays"] | components["schemas"]["TagAny"] | components["schemas"]["TagAll"] | components["schemas"]["TagNone"] | components["schemas"]["ListMember"] | components["schemas"]["EnrolledIn"] | components["schemas"]["RepliedIn"];
+        /**
+         * FilterTree
+         * @description The root: a predicate (or none) and the archived-contacts switch.
+         *
+         *     The JSON schema carries ``x-netkeeper-fields``: each field's kind, label,
+         *     the ops it takes, and the values of an enum, for the builder.
+         */
+        FilterTree: {
+            /**
+             * Include Archived
+             * @default false
+             */
+            include_archived: boolean;
+            where?: components["schemas"]["FilterNode"] | null;
+        };
+        /** Gt */
+        Gt: {
+            /**
+             * Field
+             * @enum {string}
+             */
+            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "gt";
+            /** Value */
+            value: string | number | boolean;
+        };
+        /** Gte */
+        Gte: {
+            /**
+             * Field
+             * @enum {string}
+             */
+            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "gte";
+            /** Value */
+            value: string | number | boolean;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /**
+         * HasEmail
+         * @description At least one email row, optionally with the given ``status``.
+         */
+        HasEmail: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "has_email";
+            status?: components["schemas"]["EmailStatus"] | null;
+        };
+        /** HasLiUrl */
+        HasLiUrl: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "has_li_url";
+        };
+        /** HasPhone */
+        HasPhone: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "has_phone";
+        };
+        /** HasPosition */
+        HasPosition: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "has_position";
         };
         /** HealthOut */
         HealthOut: {
@@ -606,6 +1628,135 @@ export interface components {
             summary?: string | null;
         };
         /**
+         * IsEmpty
+         * @description NULL, or the empty string for a string column.
+         */
+        IsEmpty: {
+            /**
+             * Field
+             * @enum {string}
+             */
+            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "is_empty";
+        };
+        /**
+         * LastContacted
+         * @description Exactly one of ``within_days``, ``older_than_days``, ``never``.
+         *
+         *     ``older_than_days`` needs a value: never-contacted people do not count as
+         *     contacted long ago. Combine with ``never`` under ``or`` for both.
+         */
+        LastContacted: {
+            /**
+             * Never
+             * @default false
+             */
+            never: boolean;
+            /** Older Than Days */
+            older_than_days?: number | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "last_contacted";
+            /** Within Days */
+            within_days?: number | null;
+        };
+        /**
+         * LinkKind
+         * @enum {string}
+         */
+        LinkKind: "website" | "twitter" | "github" | "other";
+        /** ListMember */
+        ListMember: {
+            /** List Id */
+            list_id: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "list_member";
+        };
+        /** Lt */
+        Lt: {
+            /**
+             * Field
+             * @enum {string}
+             */
+            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "lt";
+            /** Value */
+            value: string | number | boolean;
+        };
+        /** Lte */
+        Lte: {
+            /**
+             * Field
+             * @enum {string}
+             */
+            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "lte";
+            /** Value */
+            value: string | number | boolean;
+        };
+        /**
+         * MergeIn
+         * @description Fold ``loser_id`` into the contact in the path (spec 8.2).
+         */
+        MergeIn: {
+            /** Loser Id */
+            loser_id: number;
+        };
+        /**
+         * MergedConflict
+         * @description The ``409`` body of a write to a merged-away contact: where it went.
+         */
+        MergedConflict: {
+            /**
+             * Detail
+             * @constant
+             */
+            detail: "merged";
+            /** Merged Into Id */
+            merged_into_id: number;
+        };
+        /** Neq */
+        Neq: {
+            /**
+             * Field
+             * @enum {string}
+             */
+            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at" | "do_not_contact";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "neq";
+            /** Value */
+            value: string | number | boolean;
+        };
+        /** Not */
+        Not: {
+            child: components["schemas"]["FilterNode"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "not";
+        };
+        /**
          * NotesIn
          * @description The contact's notes, Markdown, replaced whole; ``null`` clears them.
          */
@@ -624,6 +1775,42 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+        };
+        /** Or */
+        Or: {
+            /** Children */
+            children: components["schemas"]["FilterNode"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "or";
+        };
+        /**
+         * PhoneKind
+         * @enum {string}
+         */
+        PhoneKind: "mobile" | "home" | "work" | "other";
+        /** RepliedIn */
+        RepliedIn: {
+            /** Campaign Id */
+            campaign_id: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "replied_in";
+        };
+        /**
+         * RevertFieldIn
+         * @description The field to put back to its last synced value (spec 10.5, CP1 #28).
+         */
+        RevertFieldIn: {
+            /**
+             * Field
+             * @enum {string}
+             */
+            field: "li_urn" | "li_public_id" | "li_url" | "first_name" | "last_name" | "headline" | "current_title" | "current_company" | "location" | "connected_on";
         };
         /**
          * RuleField
@@ -655,6 +1842,78 @@ export interface components {
             observed_at: string;
             source: components["schemas"]["ContactSource"];
         };
+        /**
+         * SortKey
+         * @description One ``ORDER BY`` term. Strings sort case-insensitively; empty values sort last.
+         */
+        SortKey: {
+            /**
+             * Direction
+             * @default asc
+             * @enum {string}
+             */
+            direction: "asc" | "desc";
+            /**
+             * Field
+             * @enum {string}
+             */
+            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at" | "do_not_contact";
+        };
+        /** StartsWith */
+        StartsWith: {
+            /**
+             * Field
+             * @enum {string}
+             */
+            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "starts_with";
+            /** Value */
+            value: string;
+        };
+        /**
+         * SyncedValueOut
+         * @description What an automated source last reported for one field: what a revert restores.
+         */
+        SyncedValueOut: {
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            source: components["schemas"]["ContactSource"];
+            /** Value */
+            value: string | null;
+        };
+        /**
+         * TagAll
+         * @description Carries every tag named (case-insensitive).
+         */
+        TagAll: {
+            /** Names */
+            names: string[];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "tag_all";
+        };
+        /**
+         * TagAny
+         * @description Carries at least one of the tags named (case-insensitive), whatever its source.
+         */
+        TagAny: {
+            /** Names */
+            names: string[];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "tag_any";
+        };
         /** TagCreate */
         TagCreate: {
             /** Color */
@@ -670,6 +1929,19 @@ export interface components {
          * @enum {string}
          */
         TagKind: "manual" | "auto" | "llm";
+        /**
+         * TagNone
+         * @description Carries none of the tags named (case-insensitive).
+         */
+        TagNone: {
+            /** Names */
+            names: string[];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "tag_none";
+        };
         /** TagOut */
         TagOut: {
             /** Color */
@@ -1086,6 +2358,427 @@ export interface operations {
             };
         };
     };
+    search_contacts: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive substring of any name, company, title, headline, or email. */
+                q?: string;
+                /** @description Items per page. */
+                limit?: number;
+                /** @description Items to skip. */
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bulk_update_contacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkOut"];
+                };
+            };
+            /** @description The selection no longer counts as shown, or the confirmation expired */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CountMismatch"];
+                };
+            };
+            /** @description The filter is invalid, or the confirmation token does not hold up */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfirmationRejected"];
+                };
+            };
+        };
+    };
+    count_bulk_contacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkCountIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkCountOut"];
+                };
+            };
+            /** @description The filter, sort, or page is invalid, or uses a predicate not yet built */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    query_contacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactQuery"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactPage"];
+                };
+            };
+            /** @description The filter, sort, or page is invalid, or uses a predicate not yet built */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactDetail"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactDetail"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact was merged into another */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MergedConflict"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    archive_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactDetail"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact was merged into another */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MergedConflict"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    add_contact_email: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactEmailIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactEmailOut"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact already has it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_contact_email: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+                email_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such contact, or no such row on it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact was merged into another */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MergedConflict"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_contact_email: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+                email_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactEmailPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactEmailOut"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact already has it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_interactions: {
         parameters: {
             query?: {
@@ -1171,6 +2864,200 @@ export interface operations {
             };
         };
     };
+    add_contact_link: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactLinkIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactLinkOut"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact already has it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_contact_link: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+                link_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such contact, or no such row on it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact was merged into another */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MergedConflict"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_contact_link: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+                link_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactLinkPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactLinkOut"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact already has it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    merge_contacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MergeIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactDetail"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The two cannot be merged */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     set_contact_notes: {
         parameters: {
             query?: never;
@@ -1197,6 +3084,200 @@ export interface operations {
             };
             /** @description No such contact */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    add_contact_phone: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactPhoneIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactPhoneOut"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact already has it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_contact_phone: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+                phone_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such contact, or no such row on it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact was merged into another */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MergedConflict"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_contact_phone: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+                phone_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactPhonePatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactPhoneOut"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact already has it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revert_contact_field: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RevertFieldIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactDetail"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Nothing synced to revert to, or the contact was merged */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1323,6 +3404,53 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unarchive_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactDetail"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact was merged into another */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MergedConflict"];
+                };
             };
             /** @description Validation Error */
             422: {

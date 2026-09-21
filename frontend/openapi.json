@@ -1,6 +1,30 @@
 {
   "components": {
     "schemas": {
+      "And": {
+        "additionalProperties": false,
+        "properties": {
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/FilterNode"
+            },
+            "minItems": 1,
+            "title": "Children",
+            "type": "array"
+          },
+          "op": {
+            "const": "and",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "children"
+        ],
+        "title": "And",
+        "type": "object"
+      },
       "AutotagRuleCreate": {
         "properties": {
           "enabled": {
@@ -226,6 +250,1688 @@
         "title": "AutotagRuleRunOut",
         "type": "object"
       },
+      "Between": {
+        "additionalProperties": false,
+        "description": "``low <= field <= high``, both ends included.",
+        "properties": {
+          "field": {
+            "enum": [
+              "degree",
+              "connected_on",
+              "last_contacted_at",
+              "last_enriched_at",
+              "triaged_at",
+              "li_disconnected_at",
+              "archived_at",
+              "created_at",
+              "updated_at"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "high": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "High"
+          },
+          "low": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Low"
+          },
+          "op": {
+            "const": "between",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "field",
+          "low",
+          "high"
+        ],
+        "title": "Between",
+        "type": "object"
+      },
+      "BulkCountIn": {
+        "additionalProperties": false,
+        "description": "Ask how many contacts an action would touch, and for the token that confirms it.",
+        "properties": {
+          "action": {
+            "enum": [
+              "set_met",
+              "archive",
+              "unarchive",
+              "set_do_not_contact"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "selection": {
+            "$ref": "#/components/schemas/BulkSelection"
+          }
+        },
+        "required": [
+          "selection",
+          "action"
+        ],
+        "title": "BulkCountIn",
+        "type": "object"
+      },
+      "BulkCountOut": {
+        "description": "The count to put in the confirmation dialog, and the token that makes it binding.\n\nSend ``token`` back with the action. It is bound to this user, this action,\nthis selection, and this count, and it expires at ``expires_at`` (five\nminutes). ``describe`` reads the selection back in words for the dialog.",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "describe": {
+            "title": "Describe",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "count",
+          "describe",
+          "token",
+          "expires_at"
+        ],
+        "title": "BulkCountOut",
+        "type": "object"
+      },
+      "BulkIn": {
+        "additionalProperties": false,
+        "description": "A bulk action and the confirmation token that carries the count (spec 10.1).\n\n``token`` comes from ``POST /contacts/bulk/count``. The server re-counts the\nselection inside the writer transaction and refuses with ``409`` when the\ncount has moved, so an action never lands on rows the person did not see.\n``value`` is the ``met`` value for ``set_met`` and a boolean for\n``set_do_not_contact`` (with ``reason``); ``archive`` and ``unarchive`` take\nnone.",
+        "properties": {
+          "action": {
+            "enum": [
+              "set_met",
+              "archive",
+              "unarchive",
+              "set_do_not_contact"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "selection": {
+            "$ref": "#/components/schemas/BulkSelection"
+          },
+          "token": {
+            "description": "The count confirmation token.",
+            "minLength": 1,
+            "title": "Token",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContactMet"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "selection",
+          "action",
+          "token"
+        ],
+        "title": "BulkIn",
+        "type": "object"
+      },
+      "BulkOut": {
+        "properties": {
+          "affected": {
+            "title": "Affected",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "affected"
+        ],
+        "title": "BulkOut",
+        "type": "object"
+      },
+      "BulkSelection": {
+        "additionalProperties": false,
+        "description": "Which contacts a bulk action applies to: a filter, or explicit ids (one of the two).\n\nA filter selects what the Contacts table shows for it: live contacts, and\narchived ones only with ``include_archived``. Ids select those contacts,\narchived or not; a merged-away id is never selected.",
+        "properties": {
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterTree"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "maxItems": 1000,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ids"
+          }
+        },
+        "title": "BulkSelection",
+        "type": "object"
+      },
+      "ChangedJobsWithinDays": {
+        "additionalProperties": false,
+        "description": "A ``contact_snapshots`` row observed in the last ``days`` days (spec 9.8).",
+        "properties": {
+          "days": {
+            "minimum": 0.0,
+            "title": "Days",
+            "type": "integer"
+          },
+          "op": {
+            "const": "changed_jobs_within_days",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "days"
+        ],
+        "title": "ChangedJobsWithinDays",
+        "type": "object"
+      },
+      "ConfirmationRejected": {
+        "description": "The body of a bulk action whose confirmation token does not hold up.\n\n``409`` when the token expired (ask for the count again); ``422`` when it is\nunreadable, was issued to someone else, or is for another action or another\nselection.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "malformed",
+              "expired",
+              "user",
+              "action",
+              "selection"
+            ],
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail",
+          "reason"
+        ],
+        "title": "ConfirmationRejected",
+        "type": "object"
+      },
+      "ConnectedWithinDays": {
+        "additionalProperties": false,
+        "description": "``connected_on`` on or after today (in the user's timezone) minus ``days``.",
+        "properties": {
+          "days": {
+            "minimum": 0.0,
+            "title": "Days",
+            "type": "integer"
+          },
+          "op": {
+            "const": "connected_within_days",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "days"
+        ],
+        "title": "ConnectedWithinDays",
+        "type": "object"
+      },
+      "ContactDetail": {
+        "description": "A contact in full: every scalar, its children, and its provenance (spec 8.1, 10.5).\n\n``timeline`` is the newest page of interactions and snapshots interleaved,\nthe same shape ``GET /contacts/{id}/timeline`` pages through, so the detail\nscreen renders in one request; ask that endpoint for older entries.\n\n``field_sources`` says which source last wrote each LinkedIn field;\n``synced_values`` what the automated sources last reported;\n``overridden_fields`` the ones a manual edit hides a different synced value\non, each with a revert available. ``resolved_from`` is set when the id asked\nfor belongs to a merged-away contact and this is its survivor.",
+        "properties": {
+          "archived_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          },
+          "connected_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connected On"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "current_company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Company"
+          },
+          "current_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Title"
+          },
+          "degree": {
+            "title": "Degree",
+            "type": "integer"
+          },
+          "do_not_contact": {
+            "title": "Do Not Contact",
+            "type": "boolean"
+          },
+          "do_not_contact_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Do Not Contact Reason"
+          },
+          "emails": {
+            "items": {
+              "$ref": "#/components/schemas/ContactEmailOut"
+            },
+            "title": "Emails",
+            "type": "array"
+          },
+          "enrich_priority": {
+            "title": "Enrich Priority",
+            "type": "integer"
+          },
+          "field_sources": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ContactSource"
+            },
+            "title": "Field Sources",
+            "type": "object"
+          },
+          "first_name": {
+            "title": "First Name",
+            "type": "string"
+          },
+          "headline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headline"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_contacted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Contacted At"
+          },
+          "last_enriched_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Enriched At"
+          },
+          "last_name": {
+            "title": "Last Name",
+            "type": "string"
+          },
+          "li_disconnected_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Disconnected At"
+          },
+          "li_missing_count": {
+            "title": "Li Missing Count",
+            "type": "integer"
+          },
+          "li_public_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Public Id"
+          },
+          "li_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Url"
+          },
+          "li_urn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Urn"
+          },
+          "links": {
+            "items": {
+              "$ref": "#/components/schemas/ContactLinkOut"
+            },
+            "title": "Links",
+            "type": "array"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "merged_into_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merged Into Id"
+          },
+          "met": {
+            "$ref": "#/components/schemas/ContactMet"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "overridden_fields": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Overridden Fields",
+            "type": "array"
+          },
+          "phones": {
+            "items": {
+              "$ref": "#/components/schemas/ContactPhoneOut"
+            },
+            "title": "Phones",
+            "type": "array"
+          },
+          "positions": {
+            "items": {
+              "$ref": "#/components/schemas/ContactPositionOut"
+            },
+            "title": "Positions",
+            "type": "array"
+          },
+          "preferred_name": {
+            "title": "Preferred Name",
+            "type": "string"
+          },
+          "resolved_from": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved From"
+          },
+          "snapshots": {
+            "items": {
+              "$ref": "#/components/schemas/SnapshotOut"
+            },
+            "title": "Snapshots",
+            "type": "array"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ContactSource"
+          },
+          "synced_values": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SyncedValueOut"
+            },
+            "title": "Synced Values",
+            "type": "object"
+          },
+          "timeline": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "interaction": "#/components/schemas/TimelineInteraction",
+                  "snapshot": "#/components/schemas/TimelineSnapshot"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/TimelineInteraction"
+                },
+                {
+                  "$ref": "#/components/schemas/TimelineSnapshot"
+                }
+              ]
+            },
+            "title": "Timeline",
+            "type": "array"
+          },
+          "triaged_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Triaged At"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "li_urn",
+          "li_public_id",
+          "li_url",
+          "first_name",
+          "last_name",
+          "preferred_name",
+          "headline",
+          "current_title",
+          "current_company",
+          "location",
+          "connected_on",
+          "degree",
+          "met",
+          "triaged_at",
+          "do_not_contact",
+          "do_not_contact_reason",
+          "li_missing_count",
+          "li_disconnected_at",
+          "last_enriched_at",
+          "enrich_priority",
+          "last_contacted_at",
+          "notes",
+          "archived_at",
+          "source",
+          "created_at",
+          "updated_at",
+          "merged_into_id",
+          "emails",
+          "phones",
+          "links",
+          "positions",
+          "snapshots",
+          "timeline",
+          "field_sources",
+          "synced_values",
+          "overridden_fields",
+          "resolved_from"
+        ],
+        "title": "ContactDetail",
+        "type": "object"
+      },
+      "ContactEmailIn": {
+        "additionalProperties": false,
+        "description": "A new address. The first address on a contact becomes primary whether or not asked.",
+        "properties": {
+          "email": {
+            "minLength": 1,
+            "title": "Email",
+            "type": "string"
+          },
+          "is_primary": {
+            "default": false,
+            "title": "Is Primary",
+            "type": "boolean"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EmailKind",
+            "default": "other"
+          },
+          "status": {
+            "$ref": "#/components/schemas/EmailStatus",
+            "default": "ok"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "title": "ContactEmailIn",
+        "type": "object"
+      },
+      "ContactEmailOut": {
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_primary": {
+            "title": "Is Primary",
+            "type": "boolean"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EmailKind"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ContactSource"
+          },
+          "status": {
+            "$ref": "#/components/schemas/EmailStatus"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "kind",
+          "is_primary",
+          "status",
+          "source",
+          "observed_at"
+        ],
+        "title": "ContactEmailOut",
+        "type": "object"
+      },
+      "ContactEmailPatch": {
+        "additionalProperties": false,
+        "description": "Fields to change on an address; ``is_primary: true`` demotes the others.",
+        "properties": {
+          "email": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "is_primary": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Primary"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EmailKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EmailStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "ContactEmailPatch",
+        "type": "object"
+      },
+      "ContactLinkIn": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/LinkKind",
+            "default": "other"
+          },
+          "url": {
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "ContactLinkIn",
+        "type": "object"
+      },
+      "ContactLinkOut": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/LinkKind"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ContactSource"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "kind",
+          "source",
+          "observed_at"
+        ],
+        "title": "ContactLinkOut",
+        "type": "object"
+      },
+      "ContactLinkPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LinkKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "url": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "title": "ContactLinkPatch",
+        "type": "object"
+      },
+      "ContactMet": {
+        "description": "Triage: have you met this person (spec 10.2)?",
+        "enum": [
+          "unknown",
+          "met",
+          "not_met",
+          "skip"
+        ],
+        "title": "ContactMet",
+        "type": "string"
+      },
+      "ContactPage": {
+        "description": "One page of contacts, the count of every match, and a reading of the selection.",
+        "properties": {
+          "describe": {
+            "title": "Describe",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ContactRow"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "describe"
+        ],
+        "title": "ContactPage",
+        "type": "object"
+      },
+      "ContactPatch": {
+        "additionalProperties": false,
+        "description": "Fields to change on a contact; a field left out is untouched.\n\nA LinkedIn field (``li_public_id`` through ``connected_on``) sent here is a\nmanual override that sticks until reverted; ``null`` clears it and sticks\nthe same way. ``li_public_id`` also sets ``li_url`` to the canonical profile\nURL, and is refused when another contact holds the slug. ``preferred_name``\nsent empty or ``null`` falls back to ``first_name``. ``met`` stamps\n``triaged_at``. ``met`` and ``do_not_contact`` cannot be null, so ``null``\nmeans \"leave it\".",
+        "properties": {
+          "connected_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connected On"
+          },
+          "current_company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Company"
+          },
+          "current_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Title"
+          },
+          "do_not_contact": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Do Not Contact"
+          },
+          "do_not_contact_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Do Not Contact Reason"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "headline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headline"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          },
+          "li_public_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Public Id"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "met": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContactMet"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "preferred_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preferred Name"
+          }
+        },
+        "title": "ContactPatch",
+        "type": "object"
+      },
+      "ContactPhoneIn": {
+        "additionalProperties": false,
+        "description": "A new number. ``number_e164`` is derived from a ``+``-prefixed ``raw`` when not given.",
+        "properties": {
+          "is_primary": {
+            "default": false,
+            "title": "Is Primary",
+            "type": "boolean"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PhoneKind",
+            "default": "other"
+          },
+          "number_e164": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Number E164"
+          },
+          "raw": {
+            "minLength": 1,
+            "title": "Raw",
+            "type": "string"
+          }
+        },
+        "required": [
+          "raw"
+        ],
+        "title": "ContactPhoneIn",
+        "type": "object"
+      },
+      "ContactPhoneOut": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_primary": {
+            "title": "Is Primary",
+            "type": "boolean"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PhoneKind"
+          },
+          "number_e164": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Number E164"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "raw": {
+            "title": "Raw",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ContactSource"
+          }
+        },
+        "required": [
+          "id",
+          "number_e164",
+          "raw",
+          "kind",
+          "is_primary",
+          "source",
+          "observed_at"
+        ],
+        "title": "ContactPhoneOut",
+        "type": "object"
+      },
+      "ContactPhonePatch": {
+        "additionalProperties": false,
+        "properties": {
+          "is_primary": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Primary"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PhoneKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "number_e164": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Number E164"
+          },
+          "raw": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw"
+          }
+        },
+        "title": "ContactPhonePatch",
+        "type": "object"
+      },
+      "ContactPositionOut": {
+        "properties": {
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company"
+          },
+          "company_urn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company Urn"
+          },
+          "ended_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended On"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_current": {
+            "title": "Is Current",
+            "type": "boolean"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ContactSource"
+          },
+          "started_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started On"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "company",
+          "company_urn",
+          "started_on",
+          "ended_on",
+          "is_current",
+          "source",
+          "observed_at"
+        ],
+        "title": "ContactPositionOut",
+        "type": "object"
+      },
+      "ContactQuery": {
+        "additionalProperties": false,
+        "description": "The body of ``POST /contacts/query``: a filter, a sort, a page, and the columns wanted.\n\n``columns`` names the scalar fields each row carries (``id`` always does);\n``null`` means every one of them. ``primary_email`` and ``primary_phone`` are\nalways present.",
+        "properties": {
+          "columns": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "li_urn",
+                    "li_public_id",
+                    "li_url",
+                    "first_name",
+                    "last_name",
+                    "preferred_name",
+                    "headline",
+                    "current_title",
+                    "current_company",
+                    "location",
+                    "connected_on",
+                    "degree",
+                    "met",
+                    "triaged_at",
+                    "do_not_contact",
+                    "do_not_contact_reason",
+                    "li_missing_count",
+                    "li_disconnected_at",
+                    "last_enriched_at",
+                    "enrich_priority",
+                    "last_contacted_at",
+                    "notes",
+                    "archived_at",
+                    "source",
+                    "created_at",
+                    "updated_at"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Columns"
+          },
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterTree"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "sort": {
+            "items": {
+              "$ref": "#/components/schemas/SortKey"
+            },
+            "title": "Sort",
+            "type": "array"
+          }
+        },
+        "title": "ContactQuery",
+        "type": "object"
+      },
+      "ContactRow": {
+        "description": "One row of the Contacts table (spec 10.1), compact.\n\nThe scalar fields are present when the query asked for them, and every one\nof them when it named no columns; a field that was not asked for is absent\nfrom the JSON, not ``null``. ``primary_email`` and ``primary_phone`` are the\nprimary child, or the first one when none is marked primary.\n\nTags are not on a row yet. Carrying them means a third preloaded collection\nper page, and the Contacts table (P1-12) decides whether it wants them as\nnames or as ids; until it does, a row that needs them asks\n``GET /contacts/{id}`` or the tags API.",
+        "properties": {
+          "archived_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          },
+          "connected_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connected On"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "current_company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Company"
+          },
+          "current_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Title"
+          },
+          "degree": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Degree"
+          },
+          "do_not_contact": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Do Not Contact"
+          },
+          "do_not_contact_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Do Not Contact Reason"
+          },
+          "enrich_priority": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enrich Priority"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "headline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headline"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_contacted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Contacted At"
+          },
+          "last_enriched_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Enriched At"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          },
+          "li_disconnected_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Disconnected At"
+          },
+          "li_missing_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Missing Count"
+          },
+          "li_public_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Public Id"
+          },
+          "li_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Url"
+          },
+          "li_urn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Urn"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "met": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContactMet"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "preferred_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preferred Name"
+          },
+          "primary_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Primary Email"
+          },
+          "primary_phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Primary Phone"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContactSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "triaged_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Triaged At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "id",
+          "primary_email",
+          "primary_phone"
+        ],
+        "title": "ContactRow",
+        "type": "object"
+      },
       "ContactSource": {
         "description": "Where a row came from. On ``contacts`` the first source; children carry their own.\n\nFor a LinkedIn field (spec 10.5) a recorded ``manual`` outranks everything\nuntil the person reverts it; among the automated sources ``sync`` beats\n``archive`` beats ``csv``. The fields a person owns (``preferred_name``,\n``notes``, ``met``, tags) take ``manual`` and nothing else.",
         "enum": [
@@ -295,6 +2001,668 @@
         "title": "ContactTagOut",
         "type": "object"
       },
+      "Contains": {
+        "additionalProperties": false,
+        "description": "Case-insensitive substring; ``%`` and ``_`` in ``value`` match themselves.",
+        "properties": {
+          "field": {
+            "enum": [
+              "first_name",
+              "last_name",
+              "preferred_name",
+              "headline",
+              "current_title",
+              "current_company",
+              "location",
+              "li_public_id"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "op": {
+            "const": "contains",
+            "title": "Op",
+            "type": "string"
+          },
+          "value": {
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "field",
+          "value"
+        ],
+        "title": "Contains",
+        "type": "object"
+      },
+      "CountMismatch": {
+        "description": "The ``409`` body of a bulk action whose selection no longer counts what the UI showed.",
+        "properties": {
+          "actual_count": {
+            "title": "Actual Count",
+            "type": "integer"
+          },
+          "detail": {
+            "const": "count mismatch",
+            "title": "Detail",
+            "type": "string"
+          },
+          "expected_count": {
+            "title": "Expected Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "detail",
+          "expected_count",
+          "actual_count"
+        ],
+        "title": "CountMismatch",
+        "type": "object"
+      },
+      "EmailContains": {
+        "additionalProperties": false,
+        "description": "Any of the contact's emails contains ``value`` (case-insensitive, literal).",
+        "properties": {
+          "op": {
+            "const": "email_contains",
+            "title": "Op",
+            "type": "string"
+          },
+          "value": {
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "value"
+        ],
+        "title": "EmailContains",
+        "type": "object"
+      },
+      "EmailKind": {
+        "enum": [
+          "personal",
+          "work",
+          "other"
+        ],
+        "title": "EmailKind",
+        "type": "string"
+      },
+      "EmailStatus": {
+        "enum": [
+          "ok",
+          "bounced",
+          "invalid"
+        ],
+        "title": "EmailStatus",
+        "type": "string"
+      },
+      "EnrolledIn": {
+        "additionalProperties": false,
+        "properties": {
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "integer"
+          },
+          "op": {
+            "const": "enrolled_in",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "campaign_id"
+        ],
+        "title": "EnrolledIn",
+        "type": "object"
+      },
+      "Eq": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "first_name",
+              "last_name",
+              "preferred_name",
+              "headline",
+              "current_title",
+              "current_company",
+              "location",
+              "li_public_id",
+              "met",
+              "source",
+              "degree",
+              "connected_on",
+              "last_contacted_at",
+              "last_enriched_at",
+              "triaged_at",
+              "li_disconnected_at",
+              "archived_at",
+              "created_at",
+              "updated_at",
+              "do_not_contact"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "op": {
+            "const": "eq",
+            "title": "Op",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "op",
+          "field",
+          "value"
+        ],
+        "title": "Eq",
+        "type": "object"
+      },
+      "FilterNode": {
+        "discriminator": {
+          "mapping": {
+            "and": "#/components/schemas/And",
+            "between": "#/components/schemas/Between",
+            "changed_jobs_within_days": "#/components/schemas/ChangedJobsWithinDays",
+            "connected_within_days": "#/components/schemas/ConnectedWithinDays",
+            "contains": "#/components/schemas/Contains",
+            "email_contains": "#/components/schemas/EmailContains",
+            "enrolled_in": "#/components/schemas/EnrolledIn",
+            "eq": "#/components/schemas/Eq",
+            "gt": "#/components/schemas/Gt",
+            "gte": "#/components/schemas/Gte",
+            "has_email": "#/components/schemas/HasEmail",
+            "has_li_url": "#/components/schemas/HasLiUrl",
+            "has_phone": "#/components/schemas/HasPhone",
+            "has_position": "#/components/schemas/HasPosition",
+            "is_empty": "#/components/schemas/IsEmpty",
+            "last_contacted": "#/components/schemas/LastContacted",
+            "list_member": "#/components/schemas/ListMember",
+            "lt": "#/components/schemas/Lt",
+            "lte": "#/components/schemas/Lte",
+            "neq": "#/components/schemas/Neq",
+            "not": "#/components/schemas/Not",
+            "or": "#/components/schemas/Or",
+            "replied_in": "#/components/schemas/RepliedIn",
+            "starts_with": "#/components/schemas/StartsWith",
+            "tag_all": "#/components/schemas/TagAll",
+            "tag_any": "#/components/schemas/TagAny",
+            "tag_none": "#/components/schemas/TagNone"
+          },
+          "propertyName": "op"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/And"
+          },
+          {
+            "$ref": "#/components/schemas/Or"
+          },
+          {
+            "$ref": "#/components/schemas/Not"
+          },
+          {
+            "$ref": "#/components/schemas/Eq"
+          },
+          {
+            "$ref": "#/components/schemas/Neq"
+          },
+          {
+            "$ref": "#/components/schemas/Contains"
+          },
+          {
+            "$ref": "#/components/schemas/StartsWith"
+          },
+          {
+            "$ref": "#/components/schemas/IsEmpty"
+          },
+          {
+            "$ref": "#/components/schemas/Gt"
+          },
+          {
+            "$ref": "#/components/schemas/Gte"
+          },
+          {
+            "$ref": "#/components/schemas/Lt"
+          },
+          {
+            "$ref": "#/components/schemas/Lte"
+          },
+          {
+            "$ref": "#/components/schemas/Between"
+          },
+          {
+            "$ref": "#/components/schemas/HasEmail"
+          },
+          {
+            "$ref": "#/components/schemas/HasPhone"
+          },
+          {
+            "$ref": "#/components/schemas/HasLiUrl"
+          },
+          {
+            "$ref": "#/components/schemas/HasPosition"
+          },
+          {
+            "$ref": "#/components/schemas/EmailContains"
+          },
+          {
+            "$ref": "#/components/schemas/LastContacted"
+          },
+          {
+            "$ref": "#/components/schemas/ConnectedWithinDays"
+          },
+          {
+            "$ref": "#/components/schemas/ChangedJobsWithinDays"
+          },
+          {
+            "$ref": "#/components/schemas/TagAny"
+          },
+          {
+            "$ref": "#/components/schemas/TagAll"
+          },
+          {
+            "$ref": "#/components/schemas/TagNone"
+          },
+          {
+            "$ref": "#/components/schemas/ListMember"
+          },
+          {
+            "$ref": "#/components/schemas/EnrolledIn"
+          },
+          {
+            "$ref": "#/components/schemas/RepliedIn"
+          }
+        ]
+      },
+      "FilterTree": {
+        "additionalProperties": false,
+        "description": "The root: a predicate (or none) and the archived-contacts switch.\n\nThe JSON schema carries ``x-netkeeper-fields``: each field's kind, label,\nthe ops it takes, and the values of an enum, for the builder.",
+        "properties": {
+          "include_archived": {
+            "default": false,
+            "title": "Include Archived",
+            "type": "boolean"
+          },
+          "where": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "FilterTree",
+        "type": "object",
+        "x-netkeeper-fields": {
+          "archived_at": {
+            "kind": "datetime",
+            "label": "archived",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "connected_on": {
+            "kind": "date",
+            "label": "connected on",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "created_at": {
+            "kind": "datetime",
+            "label": "created",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "current_company": {
+            "kind": "string",
+            "label": "company",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "current_title": {
+            "kind": "string",
+            "label": "title",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "degree": {
+            "kind": "int",
+            "label": "degree",
+            "ops": [
+              "eq",
+              "neq",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "do_not_contact": {
+            "kind": "bool",
+            "label": "do not contact",
+            "ops": [
+              "eq",
+              "neq"
+            ]
+          },
+          "first_name": {
+            "kind": "string",
+            "label": "first name",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "headline": {
+            "kind": "string",
+            "label": "headline",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "last_contacted_at": {
+            "kind": "datetime",
+            "label": "last contacted",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "last_enriched_at": {
+            "kind": "datetime",
+            "label": "last enriched",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "last_name": {
+            "kind": "string",
+            "label": "last name",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "li_disconnected_at": {
+            "kind": "datetime",
+            "label": "disconnected on LinkedIn",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "li_public_id": {
+            "kind": "string",
+            "label": "LinkedIn id",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "location": {
+            "kind": "string",
+            "label": "location",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "met": {
+            "kind": "enum",
+            "label": "met",
+            "ops": [
+              "eq",
+              "neq"
+            ],
+            "values": [
+              "unknown",
+              "met",
+              "not_met",
+              "skip"
+            ]
+          },
+          "preferred_name": {
+            "kind": "string",
+            "label": "preferred name",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "source": {
+            "kind": "enum",
+            "label": "source",
+            "ops": [
+              "eq",
+              "neq"
+            ],
+            "values": [
+              "sync",
+              "archive",
+              "csv",
+              "manual"
+            ]
+          },
+          "triaged_at": {
+            "kind": "datetime",
+            "label": "triaged",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "updated_at": {
+            "kind": "datetime",
+            "label": "updated",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          }
+        }
+      },
+      "Gt": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "degree",
+              "connected_on",
+              "last_contacted_at",
+              "last_enriched_at",
+              "triaged_at",
+              "li_disconnected_at",
+              "archived_at",
+              "created_at",
+              "updated_at"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "op": {
+            "const": "gt",
+            "title": "Op",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "op",
+          "field",
+          "value"
+        ],
+        "title": "Gt",
+        "type": "object"
+      },
+      "Gte": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "degree",
+              "connected_on",
+              "last_contacted_at",
+              "last_enriched_at",
+              "triaged_at",
+              "li_disconnected_at",
+              "archived_at",
+              "created_at",
+              "updated_at"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "op": {
+            "const": "gte",
+            "title": "Op",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "op",
+          "field",
+          "value"
+        ],
+        "title": "Gte",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -306,6 +2674,77 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HasEmail": {
+        "additionalProperties": false,
+        "description": "At least one email row, optionally with the given ``status``.",
+        "properties": {
+          "op": {
+            "const": "has_email",
+            "title": "Op",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EmailStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "title": "HasEmail",
+        "type": "object"
+      },
+      "HasLiUrl": {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "has_li_url",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "title": "HasLiUrl",
+        "type": "object"
+      },
+      "HasPhone": {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "has_phone",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "title": "HasPhone",
+        "type": "object"
+      },
+      "HasPosition": {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "has_position",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "title": "HasPosition",
         "type": "object"
       },
       "HealthOut": {
@@ -524,6 +2963,322 @@
         "title": "InteractionPatch",
         "type": "object"
       },
+      "IsEmpty": {
+        "additionalProperties": false,
+        "description": "NULL, or the empty string for a string column.",
+        "properties": {
+          "field": {
+            "enum": [
+              "first_name",
+              "last_name",
+              "preferred_name",
+              "headline",
+              "current_title",
+              "current_company",
+              "location",
+              "li_public_id",
+              "connected_on",
+              "last_contacted_at",
+              "last_enriched_at",
+              "triaged_at",
+              "li_disconnected_at",
+              "archived_at",
+              "created_at",
+              "updated_at"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "op": {
+            "const": "is_empty",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "field"
+        ],
+        "title": "IsEmpty",
+        "type": "object"
+      },
+      "LastContacted": {
+        "additionalProperties": false,
+        "description": "Exactly one of ``within_days``, ``older_than_days``, ``never``.\n\n``older_than_days`` needs a value: never-contacted people do not count as\ncontacted long ago. Combine with ``never`` under ``or`` for both.",
+        "properties": {
+          "never": {
+            "default": false,
+            "title": "Never",
+            "type": "boolean"
+          },
+          "older_than_days": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Older Than Days"
+          },
+          "op": {
+            "const": "last_contacted",
+            "title": "Op",
+            "type": "string"
+          },
+          "within_days": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Within Days"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "title": "LastContacted",
+        "type": "object"
+      },
+      "LinkKind": {
+        "enum": [
+          "website",
+          "twitter",
+          "github",
+          "other"
+        ],
+        "title": "LinkKind",
+        "type": "string"
+      },
+      "ListMember": {
+        "additionalProperties": false,
+        "properties": {
+          "list_id": {
+            "title": "List Id",
+            "type": "integer"
+          },
+          "op": {
+            "const": "list_member",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "list_id"
+        ],
+        "title": "ListMember",
+        "type": "object"
+      },
+      "Lt": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "degree",
+              "connected_on",
+              "last_contacted_at",
+              "last_enriched_at",
+              "triaged_at",
+              "li_disconnected_at",
+              "archived_at",
+              "created_at",
+              "updated_at"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "op": {
+            "const": "lt",
+            "title": "Op",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "op",
+          "field",
+          "value"
+        ],
+        "title": "Lt",
+        "type": "object"
+      },
+      "Lte": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "degree",
+              "connected_on",
+              "last_contacted_at",
+              "last_enriched_at",
+              "triaged_at",
+              "li_disconnected_at",
+              "archived_at",
+              "created_at",
+              "updated_at"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "op": {
+            "const": "lte",
+            "title": "Op",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "op",
+          "field",
+          "value"
+        ],
+        "title": "Lte",
+        "type": "object"
+      },
+      "MergeIn": {
+        "description": "Fold ``loser_id`` into the contact in the path (spec 8.2).",
+        "properties": {
+          "loser_id": {
+            "title": "Loser Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "loser_id"
+        ],
+        "title": "MergeIn",
+        "type": "object"
+      },
+      "MergedConflict": {
+        "description": "The ``409`` body of a write to a merged-away contact: where it went.",
+        "properties": {
+          "detail": {
+            "const": "merged",
+            "title": "Detail",
+            "type": "string"
+          },
+          "merged_into_id": {
+            "title": "Merged Into Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "detail",
+          "merged_into_id"
+        ],
+        "title": "MergedConflict",
+        "type": "object"
+      },
+      "Neq": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "first_name",
+              "last_name",
+              "preferred_name",
+              "headline",
+              "current_title",
+              "current_company",
+              "location",
+              "li_public_id",
+              "met",
+              "source",
+              "degree",
+              "connected_on",
+              "last_contacted_at",
+              "last_enriched_at",
+              "triaged_at",
+              "li_disconnected_at",
+              "archived_at",
+              "created_at",
+              "updated_at",
+              "do_not_contact"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "op": {
+            "const": "neq",
+            "title": "Op",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "op",
+          "field",
+          "value"
+        ],
+        "title": "Neq",
+        "type": "object"
+      },
+      "Not": {
+        "additionalProperties": false,
+        "properties": {
+          "child": {
+            "$ref": "#/components/schemas/FilterNode"
+          },
+          "op": {
+            "const": "not",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "child"
+        ],
+        "title": "Not",
+        "type": "object"
+      },
       "NotesIn": {
         "description": "The contact's notes, Markdown, replaced whole; ``null`` clears them.",
         "properties": {
@@ -574,6 +3329,86 @@
           "updated_at"
         ],
         "title": "NotesOut",
+        "type": "object"
+      },
+      "Or": {
+        "additionalProperties": false,
+        "properties": {
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/FilterNode"
+            },
+            "minItems": 1,
+            "title": "Children",
+            "type": "array"
+          },
+          "op": {
+            "const": "or",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "children"
+        ],
+        "title": "Or",
+        "type": "object"
+      },
+      "PhoneKind": {
+        "enum": [
+          "mobile",
+          "home",
+          "work",
+          "other"
+        ],
+        "title": "PhoneKind",
+        "type": "string"
+      },
+      "RepliedIn": {
+        "additionalProperties": false,
+        "properties": {
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "integer"
+          },
+          "op": {
+            "const": "replied_in",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "campaign_id"
+        ],
+        "title": "RepliedIn",
+        "type": "object"
+      },
+      "RevertFieldIn": {
+        "description": "The field to put back to its last synced value (spec 10.5, CP1 #28).",
+        "properties": {
+          "field": {
+            "enum": [
+              "li_urn",
+              "li_public_id",
+              "li_url",
+              "first_name",
+              "last_name",
+              "headline",
+              "current_title",
+              "current_company",
+              "location",
+              "connected_on"
+            ],
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "RevertFieldIn",
         "type": "object"
       },
       "RuleField": {
@@ -663,6 +3498,169 @@
         "title": "SnapshotOut",
         "type": "object"
       },
+      "SortKey": {
+        "additionalProperties": false,
+        "description": "One ``ORDER BY`` term. Strings sort case-insensitively; empty values sort last.",
+        "properties": {
+          "direction": {
+            "default": "asc",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "field": {
+            "enum": [
+              "first_name",
+              "last_name",
+              "preferred_name",
+              "headline",
+              "current_title",
+              "current_company",
+              "location",
+              "li_public_id",
+              "met",
+              "source",
+              "degree",
+              "connected_on",
+              "last_contacted_at",
+              "last_enriched_at",
+              "triaged_at",
+              "li_disconnected_at",
+              "archived_at",
+              "created_at",
+              "updated_at",
+              "do_not_contact"
+            ],
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "SortKey",
+        "type": "object"
+      },
+      "StartsWith": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "enum": [
+              "first_name",
+              "last_name",
+              "preferred_name",
+              "headline",
+              "current_title",
+              "current_company",
+              "location",
+              "li_public_id"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "op": {
+            "const": "starts_with",
+            "title": "Op",
+            "type": "string"
+          },
+          "value": {
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "field",
+          "value"
+        ],
+        "title": "StartsWith",
+        "type": "object"
+      },
+      "SyncedValueOut": {
+        "description": "What an automated source last reported for one field: what a revert restores.",
+        "properties": {
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ContactSource"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "value",
+          "source",
+          "observed_at"
+        ],
+        "title": "SyncedValueOut",
+        "type": "object"
+      },
+      "TagAll": {
+        "additionalProperties": false,
+        "description": "Carries every tag named (case-insensitive).",
+        "properties": {
+          "names": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Names",
+            "type": "array"
+          },
+          "op": {
+            "const": "tag_all",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "names"
+        ],
+        "title": "TagAll",
+        "type": "object"
+      },
+      "TagAny": {
+        "additionalProperties": false,
+        "description": "Carries at least one of the tags named (case-insensitive), whatever its source.",
+        "properties": {
+          "names": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Names",
+            "type": "array"
+          },
+          "op": {
+            "const": "tag_any",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "names"
+        ],
+        "title": "TagAny",
+        "type": "object"
+      },
       "TagCreate": {
         "properties": {
           "color": {
@@ -703,6 +3701,31 @@
         ],
         "title": "TagKind",
         "type": "string"
+      },
+      "TagNone": {
+        "additionalProperties": false,
+        "description": "Carries none of the tags named (case-insensitive).",
+        "properties": {
+          "names": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Names",
+            "type": "array"
+          },
+          "op": {
+            "const": "tag_none",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "names"
+        ],
+        "title": "TagNone",
+        "type": "object"
       },
       "TagOut": {
         "properties": {
@@ -1130,7 +4153,7 @@
     },
     "/api/v1/autotag-rules/preview": {
       "post": {
-        "description": "How many live contacts a pattern matches in a field, and the first ten. Writes nothing.",
+        "description": "How many live contacts a pattern matches in a field, and the first ten.\n\nWrites nothing, and its session is a reader, so the rule editor's live\npreview never takes the SQLite write lock while it scans the address book\n(#62).",
         "operationId": "preview_autotag_rule",
         "requestBody": {
           "content": {
@@ -1362,6 +4385,549 @@
         ]
       }
     },
+    "/api/v1/contacts": {
+      "get": {
+        "description": "Quick search, by last name then first name; blank ``q`` lists every live contact.",
+        "operationId": "search_contacts",
+        "parameters": [
+          {
+            "description": "Case-insensitive substring of any name, company, title, headline, or email.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "description": "Case-insensitive substring of any name, company, title, headline, or email.",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Items per page.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Items per page.",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Items to skip.",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Search Contacts",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/bulk": {
+      "post": {
+        "description": "One action on every contact a filter or an id list selects, count confirmed (spec 10.1).\n\n`token` comes from `POST /contacts/bulk/count`. The selection is counted\nagain here, inside the writer transaction, and the action is refused when\nthe count has moved.",
+        "operationId": "bulk_update_contacts",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CountMismatch"
+                }
+              }
+            },
+            "description": "The selection no longer counts as shown, or the confirmation expired"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfirmationRejected"
+                }
+              }
+            },
+            "description": "The filter is invalid, or the confirmation token does not hold up"
+          }
+        },
+        "summary": "Bulk Update Contacts",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/bulk/count": {
+      "post": {
+        "description": "How many contacts the action would touch, and the token that confirms that count.\n\nPut `count` in the confirmation dialog and send `token` back with the\naction. The token is bound to this user, this action, this selection, and\nthis count, and expires in five minutes; a selection that has moved by then\nis refused rather than applied to rows nobody saw. Writes nothing.",
+        "operationId": "count_bulk_contacts",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkCountIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkCountOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "The filter, sort, or page is invalid, or uses a predicate not yet built"
+          }
+        },
+        "summary": "Count Bulk Contacts",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/query": {
+      "post": {
+        "description": "The Contacts table: filter, sort, page, and the columns to carry (spec 10.1, 10.4).\n\nA `POST` because the filter tree does not fit a query string; it reads only,\nand its session never takes the write lock. `total` counts every match;\n`describe` reads the filter for the table header.",
+        "operationId": "query_contacts",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContactQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "The filter, sort, or page is invalid, or uses a predicate not yet built"
+          }
+        },
+        "summary": "Query Contacts",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}": {
+      "get": {
+        "description": "The contact in full. A merged-away id answers with its survivor and `resolved_from`.",
+        "operationId": "get_contact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Contact",
+        "tags": [
+          "contacts"
+        ]
+      },
+      "patch": {
+        "description": "Edit fields by hand. A LinkedIn field edited here sticks until reverted (spec 10.5).",
+        "operationId": "update_contact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContactPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergedConflict"
+                }
+              }
+            },
+            "description": "The contact was merged into another"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Contact",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/archive": {
+      "post": {
+        "description": "Archive. Contacts are never deleted (spec 8); an archived one leaves the table.",
+        "operationId": "archive_contact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergedConflict"
+                }
+              }
+            },
+            "description": "The contact was merged into another"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Archive Contact",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/emails": {
+      "post": {
+        "description": "Add an address. The first one is primary; `is_primary` on a later one demotes the rest.",
+        "operationId": "add_contact_email",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContactEmailIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactEmailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "description": "The contact already has it"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Contact Email",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/emails/{email_id}": {
+      "delete": {
+        "description": "Remove an address; when it was primary, the first remaining one takes over.",
+        "operationId": "delete_contact_email",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "email_id",
+            "required": true,
+            "schema": {
+              "title": "Email Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact, or no such row on it"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergedConflict"
+                }
+              }
+            },
+            "description": "The contact was merged into another"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Contact Email",
+        "tags": [
+          "contacts"
+        ]
+      },
+      "patch": {
+        "operationId": "update_contact_email",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "email_id",
+            "required": true,
+            "schema": {
+              "title": "Email Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContactEmailPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactEmailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "description": "The contact already has it"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Contact Email",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
     "/api/v1/contacts/{contact_id}/interactions": {
       "get": {
         "description": "The contact's interactions, newest first.",
@@ -1489,6 +5055,245 @@
         ]
       }
     },
+    "/api/v1/contacts/{contact_id}/links": {
+      "post": {
+        "operationId": "add_contact_link",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContactLinkIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactLinkOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "description": "The contact already has it"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Contact Link",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/links/{link_id}": {
+      "delete": {
+        "operationId": "delete_contact_link",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "link_id",
+            "required": true,
+            "schema": {
+              "title": "Link Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact, or no such row on it"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergedConflict"
+                }
+              }
+            },
+            "description": "The contact was merged into another"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Contact Link",
+        "tags": [
+          "contacts"
+        ]
+      },
+      "patch": {
+        "operationId": "update_contact_link",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "link_id",
+            "required": true,
+            "schema": {
+              "title": "Link Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContactLinkPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactLinkOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "description": "The contact already has it"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Contact Link",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/merge": {
+      "post": {
+        "description": "Fold `loser_id` into this contact (spec 8.2); the loser resolves here from then on.",
+        "operationId": "merge_contacts",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "description": "The two cannot be merged"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Merge Contacts",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
     "/api/v1/contacts/{contact_id}/notes": {
       "put": {
         "description": "Replace the contact's notes (Markdown, stored as sent).",
@@ -1542,6 +5347,246 @@
         "summary": "Set Contact Notes",
         "tags": [
           "interactions"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/phones": {
+      "post": {
+        "description": "Add a number. The first one is primary; `is_primary` on a later one demotes the rest.",
+        "operationId": "add_contact_phone",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContactPhoneIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactPhoneOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "description": "The contact already has it"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Contact Phone",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/phones/{phone_id}": {
+      "delete": {
+        "operationId": "delete_contact_phone",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "phone_id",
+            "required": true,
+            "schema": {
+              "title": "Phone Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact, or no such row on it"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergedConflict"
+                }
+              }
+            },
+            "description": "The contact was merged into another"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Contact Phone",
+        "tags": [
+          "contacts"
+        ]
+      },
+      "patch": {
+        "operationId": "update_contact_phone",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "phone_id",
+            "required": true,
+            "schema": {
+              "title": "Phone Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContactPhonePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactPhoneOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "description": "The contact already has it"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Contact Phone",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/revert-field": {
+      "post": {
+        "description": "Put a LinkedIn field back to its last synced value and provenance (CP1, #28).",
+        "operationId": "revert_contact_field",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevertFieldIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "description": "Nothing synced to revert to, or the contact was merged"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revert Contact Field",
+        "tags": [
+          "contacts"
         ]
       }
     },
@@ -1725,6 +5770,61 @@
         "summary": "Get Timeline",
         "tags": [
           "interactions"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/unarchive": {
+      "post": {
+        "operationId": "unarchive_contact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergedConflict"
+                }
+              }
+            },
+            "description": "The contact was merged into another"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unarchive Contact",
+        "tags": [
+          "contacts"
         ]
       }
     },
