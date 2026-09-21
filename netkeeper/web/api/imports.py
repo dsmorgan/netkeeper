@@ -60,7 +60,10 @@ SAMPLE_ROWS = 5
 Responses = dict[int | str, dict[str, Any]]
 NOT_FOUND: Responses = {404: {"description": "No such import run, row, contact, or preset"}}
 CONFLICT: Responses = {
-    409: {"description": "The run's state forbids this, or candidate rows are undecided"}
+    409: {
+        "description": "The run's state forbids this, candidate rows are undecided, "
+        "or a merge has drawn in a contact the run created"
+    }
 }
 INVALID: Responses = {422: {"description": "A file or a mapping that cannot be used"}}
 
@@ -77,11 +80,17 @@ def translate_errors() -> Iterator[None]:
     except (
         service.RunNotDraft,
         service.RunNotCommitted,
+        service.RunMerged,
         service.UndecidedCandidates,
         service.DuplicatePreset,
     ) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except (service.EmptyFile, service.InvalidMapping, service.UnknownPreset) as exc:
+    except (
+        service.EmptyFile,
+        service.MalformedCsv,
+        service.InvalidMapping,
+        service.UnknownPreset,
+    ) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
@@ -365,7 +374,10 @@ def rollback_import_run(run_id: int, user: CurrentUser, session: SessionDep) -> 
 
     A contact the run created is deleted; a contact it only enriched keeps the
     values it had before the run, and the child rows the run added are removed. A
-    field something changed after the import keeps that later value.
+    field something changed after the import keeps that later value, and its
+    provenance with it. A run whose created contacts a merge has since drawn in
+    answers ``409`` and is not undone at all: deleting one of those contacts
+    would take rows the run never created.
     """
     with translate_errors():
         result = service.rollback(session, user, run_id)

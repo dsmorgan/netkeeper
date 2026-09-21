@@ -12,6 +12,8 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.crm import identity
+from netkeeper.crm.importer import FIELD_SIZE_LIMIT
 from netkeeper.crm.provenance import set_manual_field
 from netkeeper.db import session_scope
 from netkeeper.models import Contact, ContactSource, User
@@ -133,6 +135,22 @@ async def test_inspect_stores_nothing(client: httpx.AsyncClient) -> None:
 async def test_a_file_with_no_header_is_refused(client: httpx.AsyncClient) -> None:
     response = await client.post("/api/v1/imports/inspect", headers=CSRF, json={"content": ""})
     assert response.status_code == 422
+
+
+async def test_a_field_past_the_readers_limit_is_a_bad_request_not_a_crash(
+    client: httpx.AsyncClient,
+) -> None:
+    oversized = 'A,Headline\n1,"' + "x" * (FIELD_SIZE_LIMIT + 1024) + '"\n'
+    inspected = await client.post(
+        "/api/v1/imports/inspect", headers=CSRF, json={"content": oversized}
+    )
+    assert inspected.status_code == 422, inspected.status_code
+    drafted = await client.post(
+        "/api/v1/imports",
+        headers=CSRF,
+        json={"filename": "big.csv", "content": oversized},
+    )
+    assert drafted.status_code == 422, drafted.status_code
 
 
 async def test_a_file_no_preset_fits_needs_a_mapping(client: httpx.AsyncClient) -> None:
@@ -332,6 +350,51 @@ async def test_rollback_removes_only_what_the_run_created(
     wilhelmina = contact_by_slug(running_app, "wilhelmina-pockrandt-qz")
     assert wilhelmina is not None and wilhelmina.headline == "Tinsmith, retired"
     assert (await client.get(f"/api/v1/imports/{run['id']}")).json()["status"] == "rolled_back"
+
+
+async def test_a_rollback_across_a_merge_is_refused(
+    client: httpx.AsyncClient, running_app: FastAPI, seeded: object
+) -> None:
+    run = await draft(client)
+    await client.post(
+        f"/api/v1/imports/{run['id']}/commit", headers=CSRF, json={"skip_undecided": True}
+    )
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = session.scalars(select(User)).one()
+        created = session.scalars(
+            scoped(user, Contact).where(Contact.li_public_id == "imogen-thistlewhite-qz")
+        ).one()
+        older = factories.make_contact(
+            session, user, li_urn=None, li_public_id=None, first_name="Imogen"
+        )
+        identity.merge(session, user, created.id, older.id)
+
+    response = await client.post(f"/api/v1/imports/{run['id']}/rollback", headers=CSRF)
+
+    assert response.status_code == 409
+    assert "merge" in response.json()["detail"]
+    assert contact_by_slug(running_app, "imogen-thistlewhite-qz") is not None
+    assert (await client.get(f"/api/v1/imports/{run['id']}")).json()["status"] == "committed"
+
+
+async def test_a_saved_preset_maps_a_later_file_missing_one_of_its_columns(
+    client: httpx.AsyncClient,
+) -> None:
+    await client.put(
+        "/api/v1/imports/presets/our-crm",
+        headers=CSRF,
+        json={
+            "mapping": {
+                "Given": "first_name",
+                "Family": "last_name",
+                "Works At": "current_company",
+            }
+        },
+    )
+    run = await draft(client, content="Given,Family\nHortensia,Blennerhassett\n", preset="our-crm")
+    assert run["mapping"] == {"Given": "first_name", "Family": "last_name"}
+    assert run["created_count"] == 1
 
 
 async def test_a_draft_cannot_be_rolled_back(client: httpx.AsyncClient) -> None:

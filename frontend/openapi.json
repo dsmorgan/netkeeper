@@ -6940,7 +6940,7 @@
             "description": "Successful Response"
           },
           "409": {
-            "description": "The run's state forbids this, or candidate rows are undecided"
+            "description": "The run's state forbids this, candidate rows are undecided, or a merge has drawn in a contact the run created"
           },
           "422": {
             "description": "A file or a mapping that cannot be used"
@@ -7037,7 +7037,7 @@
             "description": "No such import run, row, contact, or preset"
           },
           "409": {
-            "description": "The run's state forbids this, or candidate rows are undecided"
+            "description": "The run's state forbids this, candidate rows are undecided, or a merge has drawn in a contact the run created"
           },
           "422": {
             "description": "A file or a mapping that cannot be used"
@@ -7106,7 +7106,7 @@
     },
     "/api/v1/imports/{run_id}/rollback": {
       "post": {
-        "description": "Undo a committed run, and only what that run did.\n\nA contact the run created is deleted; a contact it only enriched keeps the\nvalues it had before the run, and the child rows the run added are removed. A\nfield something changed after the import keeps that later value.",
+        "description": "Undo a committed run, and only what that run did.\n\nA contact the run created is deleted; a contact it only enriched keeps the\nvalues it had before the run, and the child rows the run added are removed. A\nfield something changed after the import keeps that later value, and its\nprovenance with it. A run whose created contacts a merge has since drawn in\nanswers ``409`` and is not undone at all: deleting one of those contacts\nwould take rows the run never created.",
         "operationId": "rollback_import_run",
         "parameters": [
           {
@@ -7134,7 +7134,7 @@
             "description": "No such import run, row, contact, or preset"
           },
           "409": {
-            "description": "The run's state forbids this, or candidate rows are undecided"
+            "description": "The run's state forbids this, candidate rows are undecided, or a merge has drawn in a contact the run created"
           },
           "422": {
             "content": {

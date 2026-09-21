@@ -28,10 +28,12 @@ that something changed after the import is left alone: the rollback only puts
 back what still holds the value the run wrote. A field the import was refused
 was never written, so a rollback never touches it either.
 
-Two things a rollback deliberately does not undo: the ``source`` and
-``observed_at`` stamps refreshed on child rows that already existed (the row was
-not created by the run, and its value is unchanged), and a merge a person
-performed afterwards.
+A rollback does not undo the ``source`` and ``observed_at`` stamps refreshed on
+child rows that already existed: the row was not created by the run, and its
+value is unchanged. It does not undo a merge either, and because deleting a
+contact a merge has drawn in would take rows with it that the run never created,
+a run whose created contacts have since been merged is *refused* rather than
+partly undone (:class:`RunMerged`).
 
 Every function that writes needs a writer session (CLAUDE.md): each reads before
 it writes, and on SQLite an unmarked read-then-write fails at once with
@@ -59,6 +61,7 @@ from netkeeper.crm.importer import (
     EmptyFile,
     ImportField,
     InvalidMapping,
+    MalformedCsv,
     MappedRow,
     ParsedCsv,
     Preset,
@@ -147,6 +150,19 @@ class RunNotDraft(ImportRunError, ValueError):
 
 class RunNotCommitted(ImportRunError, ValueError):
     """Only a committed run can be rolled back."""
+
+
+class RunMerged(ImportRunError, ValueError):
+    """A contact the run created has since been merged, so the run cannot be undone safely."""
+
+    def __init__(self, contact_ids: Sequence[int]) -> None:
+        self.contact_ids = tuple(contact_ids)
+        shown = ", ".join(str(contact_id) for contact_id in self.contact_ids)
+        super().__init__(
+            f"this run created contact(s) {shown}, which a merge has since drawn in; "
+            "rolling it back would delete rows the merge moved onto them, or leave "
+            "behind rows it moved off them. Undo the merge first."
+        )
 
 
 class ContactNotFound(ImportRunError, LookupError):
@@ -835,9 +851,13 @@ def rollback(session: Session, user: User, run_id: int) -> RollbackResult:
     only enriched stays, with every field the run wrote put back to the value
     recorded before it, its provenance and synced-value entries put back too, and
     the child rows the run added deleted. A field something changed after the
-    import keeps that later value: the rollback only reverses what still holds
-    what the run wrote. ``RunNotCommitted`` for a draft or an already rolled-back
-    run. ``RuntimeError`` when ``session`` is not a writer.
+    import keeps that later value, and keeps its ``field_sources`` and
+    ``synced_values`` entries with it: putting the provenance back without the
+    value would leave a person's own edit in place marked as nobody's, and the
+    next import would overwrite it. ``RunMerged`` when a merge has drawn in a
+    contact the run created; nothing is undone, because deleting that contact
+    would take rows the run never made. ``RunNotCommitted`` for a draft or an
+    already rolled-back run. ``RuntimeError`` when ``session`` is not a writer.
     """
     _require_writer(session)
     run = get_run(session, user, run_id)
@@ -853,6 +873,11 @@ def rollback(session: Session, user: User, run_id: int) -> RollbackResult:
         and row.changes_json is not None
         and row.changes_json["created_contact"]
     }
+    # Checked before the first write, as apply() checks before its own: a refusal
+    # leaves the run exactly as it was rather than half undone.
+    merged = _merged_since(session, user, created_ids)
+    if merged:
+        raise RunMerged(merged)
     restored = fields = children = 0
     for row in rows:
         changes = row.changes_json
@@ -889,23 +914,41 @@ def _restore(
     contact = get_scoped(session, user, Contact, contact_id)
     if contact is None:
         return None  # deleted since the import; there is nothing to put back
+    # Which fields are still this run's to undo, decided once and before the first
+    # write. A field whose value something changed after the import belongs to
+    # whatever changed it, and so do its provenance and ledger entries: popping
+    # those would leave the later value in place with no recorded source, which
+    # reopens a person's own edit to the next import (spec 10.5, CP1 #28). A field
+    # the run only re-stamped, changing no value, has no entry in ``fields`` and is
+    # the run's to undo either way.
+    ours = {
+        name
+        for name, change in changes["fields"].items()
+        if _json_value(getattr(contact, name)) == change["after"]
+    }
+
+    def undoable(name: str) -> bool:
+        return name not in changes["fields"] or name in ours
+
     restored = 0
     # In PROVENANCE_ORDER, because assigning li_public_id derives li_url, which is
     # restored on its own right after (netkeeper.crm.provenance.PROVENANCE_ORDER).
     for name in PROVENANCE_ORDER:
         change = changes["fields"].get(name)
-        if change is None:
+        if change is None or name not in ours:
             continue
-        if _json_value(getattr(contact, name)) != change["after"]:
-            continue  # something wrote this field after the import; leave it alone
         setattr(contact, name, _column_value(name, change["before"]))
         restored += 1
     for name, source in changes["sources"].items():
+        if not undoable(name):
+            continue
         if source is None:
             contact.field_sources.pop(name, None)
         else:
             contact.field_sources[name] = source
     for name, entry in changes["synced"].items():
+        if not undoable(name):
+            continue
         if entry is None:
             contact.synced_values.pop(name, None)
         else:
@@ -921,6 +964,35 @@ def _restore(
         result = cast("CursorResult[Any]", session.execute(_unsynchronized(statement)))
         deleted += result.rowcount
     return restored, deleted
+
+
+def _merged_since(session: Session, user: User, contact_ids: Iterable[int]) -> list[int]:
+    """The contacts the run created that a merge has since drawn in, ascending.
+
+    Two shapes, both of which make deleting the contact wrong. The created
+    contact was merged away, so the children the run gave it live on the survivor
+    now: deleting it leaves behind what the run created. Or another contact was
+    merged *into* it — the natural choice, since the created contact is the one
+    carrying the LinkedIn identity — and its children, tags, and interactions are
+    the loser's too: deleting it destroys a contact that existed before the run
+    ever read the file. Unwinding a merge is not something a rollback can do, so
+    :func:`rollback` refuses instead.
+    """
+    ids = sorted(contact_ids)
+    if not ids:
+        return []
+    involved: set[int] = set()
+    merged_away = scoped(user, Contact).where(
+        Contact.id.in_(ids), Contact.merged_into_id.is_not(None)
+    )
+    involved.update(contact.id for contact in session.scalars(merged_away))
+    survivors = scoped(user, Contact).where(Contact.merged_into_id.in_(ids))
+    involved.update(
+        contact.merged_into_id
+        for contact in session.scalars(survivors)
+        if contact.merged_into_id is not None
+    )
+    return sorted(involved)
 
 
 def _delete_contacts(session: Session, user: User, contact_ids: Iterable[int]) -> int:
@@ -1051,11 +1123,13 @@ __all__ = [
     "ImportRunError",
     "Inspection",
     "InvalidMapping",
+    "MalformedCsv",
     "MergeInto",
     "PlannedChange",
     "PresetNotFound",
     "RollbackResult",
     "RowPreview",
+    "RunMerged",
     "RunNotCommitted",
     "RunNotDraft",
     "RunNotFound",
