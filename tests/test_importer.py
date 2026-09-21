@@ -186,6 +186,17 @@ def test_an_override_wins_over_the_preset_and_an_empty_one_unmaps_a_column() -> 
     )
     assert resolved.mapping["CityState"] is ImportField.HEADLINE
     assert "Phone Number" not in resolved.mapping
+    # Edited, so it is no longer the nine-column preset and is not filed as one.
+    assert resolved.preset is None
+
+
+def test_a_preset_accepted_unedited_keeps_its_name() -> None:
+    headers = parse_csv(NINE_COLUMN).headers
+    resolved = resolve_mapping(
+        headers,
+        preset=get_preset("nine-column"),
+        overrides={"CityState": "location"},  # what the preset already says
+    )
     assert resolved.preset == "nine-column"
 
 
@@ -222,9 +233,13 @@ def test_a_mapping_naming_a_field_an_import_cannot_write_is_refused() -> None:
         resolve_mapping(("A",), overrides={"A": "notes"})
 
 
-def test_a_mapping_that_maps_nothing_is_refused() -> None:
-    with pytest.raises(InvalidMapping, match="no column is mapped"):
-        resolve_mapping(("A", "B"))
+def test_a_mapping_that_maps_nothing_is_allowed_so_it_can_be_mapped_by_hand() -> None:
+    # The guard lives on create_run, not here: a file whose headers no preset
+    # knows has to reach the mapping screen before anyone can fix it.
+    resolved = resolve_mapping(("A", "B"))
+    assert resolved.mapping == {}
+    assert resolved.preset is None
+    assert resolved.unmapped == ("A", "B")
 
 
 def test_a_stored_mapping_drops_columns_this_file_does_not_have() -> None:

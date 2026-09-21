@@ -439,6 +439,7 @@ class ResolvedMapping:
     """Which column feeds which field, and what was left over."""
 
     mapping: dict[str, ImportField]
+    """Empty when nothing claims a column; only a run refuses that (``create_run``)."""
     preset: str | None
     """The preset the mapping started from, when it came from one."""
     unmapped: tuple[str, ...]
@@ -455,10 +456,18 @@ def resolve_mapping(
     """Work out ``{header: field}`` from a preset, a saved mapping, and explicit overrides.
 
     The three are applied in that order, so an override wins over a saved
-    mapping, which wins over a preset. An override with no field (``None`` or an
+    mapping, which wins over a preset. ``preset`` on the result names the preset
+    only when nothing edited what it produced. An override with no field (``None`` or an
     empty string) unmaps that column, which is how a person drops a preset's
-    guess. ``InvalidMapping`` when a key names no header of this file, when a
-    value is not an :class:`ImportField`, or when nothing is mapped in the end.
+    guess. ``InvalidMapping`` when a key names no header of this file, or when a
+    value is not an :class:`ImportField`.
+
+    A mapping that claims no column at all is *not* refused here. A file whose
+    headers no preset recognizes has to be readable before it can be mapped by
+    hand, and :func:`inspect_csv` exists to show those headers; refusing at this
+    depth left the only screen that can fix it out of reach. The requirement
+    that an import map something belongs to the one path that writes, and lives
+    in :func:`netkeeper.crm.import_runs.create_run`.
     """
     known = set(headers)
     mapping: dict[str, ImportField] = preset.mapping_for(headers) if preset is not None else {}
@@ -485,14 +494,15 @@ def resolve_mapping(
                     f"{field!r} is not a field an import can write; "
                     f"the fields are {', '.join(sorted(ImportField))}"
                 ) from exc
-    if not mapping:
-        raise InvalidMapping(
-            "no column is mapped to a field; pick a preset or map at least one column"
-        )
     ordered = {header: mapping[header] for header in headers if header in mapping}
+    # The preset's name is recorded only when the mapping is still the preset's
+    # own. A mapping someone has edited is theirs, and filing the run under
+    # "linkedin-archive" would put a name on it that no longer describes it;
+    # every screen that reads `preset` then repeats that.
+    unedited = preset is not None and ordered == preset.mapping_for(headers)
     return ResolvedMapping(
         ordered,
-        preset=preset.name if preset is not None else None,
+        preset=preset.name if unedited and preset is not None else None,
         unmapped=tuple(header for header in headers if header not in ordered),
     )
 

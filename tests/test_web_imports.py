@@ -153,13 +153,79 @@ async def test_a_field_past_the_readers_limit_is_a_bad_request_not_a_crash(
     assert drafted.status_code == 422, drafted.status_code
 
 
-async def test_a_file_no_preset_fits_needs_a_mapping(client: httpx.AsyncClient) -> None:
+async def test_inspecting_a_file_no_preset_fits_shows_its_columns(
+    client: httpx.AsyncClient,
+) -> None:
+    """Inspect writes nothing and exists to show the columns, so it never refuses.
+
+    A CSV from anything but LinkedIn lands here, and refusing it left the only
+    screen that can map it by hand out of reach.
+    """
     response = await client.post(
         "/api/v1/imports/inspect",
         headers=CSRF,
         json={"content": "Widget,Sprocket\n1,2\n"},
     )
-    assert response.status_code == 422
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["headers"] == ["Widget", "Sprocket"]
+    assert body["mapping"] == {}
+    assert body["unmapped"] == ["Widget", "Sprocket"]
+    assert body["preset"] is None
+    assert body["detected_preset"] is None
+    assert body["row_count"] == 1
+
+
+async def test_inspecting_a_file_one_preset_half_fits_still_shows_every_column(
+    client: httpx.AsyncClient,
+) -> None:
+    """Two columns is under MIN_PRESET_MATCH, so nothing is detected and nothing raises."""
+    response = await client.post(
+        "/api/v1/imports/inspect",
+        headers=CSRF,
+        json={"content": "First Name,Last Name\nAda,Pallisade\n"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["detected_preset"] is None
+    assert body["mapping"] == {}
+    assert body["unmapped"] == ["First Name", "Last Name"]
+
+
+async def test_a_file_no_preset_fits_can_be_mapped_by_hand(client: httpx.AsyncClient) -> None:
+    """The mapping the inspect screen collects is what makes the run readable."""
+    content = "Widget,Sprocket\nAda,Pallisade\n"
+    response = await client.post(
+        "/api/v1/imports/inspect",
+        headers=CSRF,
+        json={"content": content, "mapping": {"Widget": "first_name", "Sprocket": "last_name"}},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["mapping"] == {"Widget": "first_name", "Sprocket": "last_name"}
+
+    drafted = await client.post(
+        "/api/v1/imports",
+        headers=CSRF,
+        json={
+            "filename": "by-hand.csv",
+            "content": content,
+            "mapping": {"Widget": "first_name", "Sprocket": "last_name"},
+        },
+    )
+    assert drafted.status_code == 201, drafted.text
+    assert drafted.json()["total_rows"] == 1
+
+
+async def test_a_run_still_needs_a_mapping_that_claims_a_column(
+    client: httpx.AsyncClient,
+) -> None:
+    """Reading a file into a run is where the requirement lives now."""
+    response = await client.post(
+        "/api/v1/imports",
+        headers=CSRF,
+        json={"filename": "nothing.csv", "content": "Widget,Sprocket\n1,2\n"},
+    )
+    assert response.status_code == 422, response.text
     assert "no column is mapped" in response.json()["detail"]
 
 

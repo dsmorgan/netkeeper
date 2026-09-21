@@ -1,8 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRef, useState } from 'react'
 
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-
 import { createRun, importKeys, inspectFile, presetsQuery, runQuery, savePreset } from './api'
 import { DraftReview } from './draft-review'
 import { asColumnMapping } from './fields'
@@ -46,20 +44,10 @@ function ResumeDraft({ runId }: { runId: number }) {
   if (run.isError) {
     return <ErrorNote>{message(run.error)}</ErrorNote>
   }
-  if (run.data.status !== 'draft') {
-    return (
-      <Card className="max-w-2xl">
-        <CardHeader>
-          <CardTitle>This import is already {run.data.status.replace('_', ' ')}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-muted-foreground">
-            Open it from the history to see what it did, or roll it back.
-          </p>
-        </CardContent>
-      </Card>
-    )
-  }
+  // Whether the run is still a draft is DraftReview's to judge, and it judges
+  // it after its own commit. Deciding here instead meant that committing —
+  // which invalidates this very query — brought the run back as `committed` and
+  // replaced the result of the commit with "already committed".
   return (
     <DraftReview
       run={run.data}
@@ -126,7 +114,12 @@ function NewImport() {
   const read = useMutation({
     mutationFn: async () => {
       if (file === null) throw new Error('no file is open')
-      return createRun({ ...file, preset: presetChoice, mapping })
+      return createRun({
+        filename: file.filename,
+        content: file.content,
+        preset: presetChoice,
+        mapping,
+      })
     },
     onSuccess: (created) => {
       lastRead.current = { signature: signatureOf(presetChoice, mapping), run: created }
@@ -194,6 +187,9 @@ function NewImport() {
           encoding={file.encoding}
           encodingReason={file.reason}
           replacements={file.replacements}
+          damagedUtf8={file.damagedUtf8}
+          utf8Damage={file.utf8Damage}
+          characters={file.content.length}
           onEncodingChange={(next) => {
             if (chosen !== null) open.mutate({ picked: chosen, as: next })
           }}
@@ -229,7 +225,15 @@ function NewImport() {
           }}
           pending={read.isPending || reinspect.isPending || open.isPending}
           error={
-            read.isError ? message(read.error) : reinspect.isError ? message(reinspect.error) : null
+            // `open` is on this screen too: the encoding select re-reads the
+            // file through it, and leaving it out made that fail in silence.
+            read.isError
+              ? message(read.error)
+              : reinspect.isError
+                ? message(reinspect.error)
+                : open.isError
+                  ? message(open.error)
+                  : null
           }
         />
       </div>

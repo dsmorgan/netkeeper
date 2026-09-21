@@ -10,7 +10,11 @@ import type { Decision, ImportRun } from './types'
 interface CommitStepProps {
   run: ImportRun
   decisions: Record<number, Decision>
+  /** Live where it can be: the draft's count is what the file meant when it was read. */
+  candidateTotal: number
   undecided: number
+  /** The API refused the last commit because a row it re-resolved has no decision. */
+  refused: boolean
   skipUndecided: boolean
   onSkipChange: (skip: boolean) => void
   onCommit: () => void
@@ -29,7 +33,9 @@ interface CommitStepProps {
 export function CommitStep({
   run,
   decisions,
+  candidateTotal,
   undecided,
+  refused,
   skipUndecided,
   onSkipChange,
   onCommit,
@@ -40,7 +46,10 @@ export function CommitStep({
   const chosen = Object.values(decisions)
   const merges = chosen.filter((decision) => decision.kind === 'merge_into').length
   const creates = chosen.filter((decision) => decision.kind === 'create_new').length
-  const blocked = undecided > 0 && !skipUndecided
+  // `refused` is the API having re-resolved a row this screen could not see. It
+  // blocks like an undecided candidate and, more to the point, it puts the skip
+  // box on screen — without it a refused commit has no move left at all.
+  const blocked = (undecided > 0 || refused) && !skipUndecided
 
   return (
     <div className="flex max-w-3xl flex-col gap-4">
@@ -53,10 +62,10 @@ export function CommitStep({
         </CardHeader>
         <CardContent className="space-y-3">
           <RunCounts run={run} tense="plan" />
-          {run.candidate_count > 0 && (
+          {candidateTotal > 0 && (
             <p className="text-muted-foreground">
-              Of {run.candidate_count} candidates, {merges} merge into an existing contact and{' '}
-              {creates} become new contacts.
+              Of {candidateTotal} {candidateTotal === 1 ? 'candidate' : 'candidates'}, {merges}{' '}
+              merge into an existing contact and {creates} become new contacts.
             </p>
           )}
           <p className="text-muted-foreground">
@@ -66,22 +75,38 @@ export function CommitStep({
         </CardContent>
       </Card>
 
-      {undecided > 0 && (
+      {(undecided > 0 || refused) && (
         <Note tone="warn">
-          <p className="font-medium">
-            {undecided} {undecided === 1 ? 'candidate has' : 'candidates have'} no decision.
-          </p>
-          <p>
-            Go back and decide each one, or skip them: a skipped candidate is left out of the import
-            entirely and its row is recorded as skipped.
-          </p>
+          {refused ? (
+            <>
+              <p className="font-medium">
+                The import was refused: a row resolves to a candidate right now.
+              </p>
+              <p>
+                Your contacts changed after this file was read, so a row that needed no decision
+                then needs one now. Go back and answer it, or skip the ones nobody has answered.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="font-medium">
+                {undecided} {undecided === 1 ? 'candidate has' : 'candidates have'} no decision.
+              </p>
+              <p>
+                Go back and decide each one, or skip them: a skipped candidate is left out of the
+                import entirely and its row is recorded as skipped.
+              </p>
+            </>
+          )}
           <label className="flex items-center gap-2 text-foreground">
             <input
               type="checkbox"
               checked={skipUndecided}
               onChange={(event) => onSkipChange(event.target.checked)}
             />
-            Skip the {undecided} undecided {undecided === 1 ? 'candidate' : 'candidates'}
+            {undecided > 0
+              ? `Skip the ${undecided} undecided ${undecided === 1 ? 'candidate' : 'candidates'}`
+              : 'Skip any candidate nobody has decided'}
           </label>
         </Note>
       )}

@@ -21,6 +21,12 @@ interface MappingStepProps {
   encodingReason: EncodingReason
   /** Characters the decoder could not make sense of; above zero the guess is wrong. */
   replacements: number
+  /** The fallback fired on what is really a UTF-8 file with a few bad bytes. */
+  damagedUtf8: boolean
+  /** Characters a UTF-8 read would have lost, when `damagedUtf8`. */
+  utf8Damage: number
+  /** Characters in the file, to say how few the damaged ones are. */
+  characters: number
   onEncodingChange: (encoding: Encoding) => void
   inspection: Inspection
   presets: PresetList | undefined
@@ -54,6 +60,9 @@ export function MappingStep({
   encoding,
   encodingReason,
   replacements,
+  damagedUtf8,
+  utf8Damage,
+  characters,
   onEncodingChange,
   inspection,
   presets,
@@ -134,15 +143,28 @@ export function MappingStep({
             </Note>
           )}
 
-          {encodingReason === 'fallback' && (
-            <Note tone="warn">
-              <p>
-                This file is not UTF-8, so it was read as {ENCODING_LABELS['windows-1252']} — what
-                Excel and older Windows tools write. Check an accented name in the table below; if
-                it looks wrong, pick another encoding.
-              </p>
-            </Note>
-          )}
+          {encodingReason === 'fallback' &&
+            (damagedUtf8 ? (
+              <Note tone="warn">
+                <p className="font-medium">
+                  {utf8Damage} of {characters.toLocaleString()} characters are not valid UTF-8.
+                </p>
+                <p>
+                  That is a UTF-8 file with a few damaged bytes rather than a{' '}
+                  {ENCODING_LABELS['windows-1252']} one, so reading it this way mangles every accent
+                  in it. Choose UTF-8 above to keep the rest and lose only the damaged characters,
+                  or repair the file and start again.
+                </p>
+              </Note>
+            ) : (
+              <Note tone="warn">
+                <p>
+                  This file is not UTF-8, so it was read as {ENCODING_LABELS['windows-1252']} — what
+                  Excel and older Windows tools write. Check an accented name in the table below; if
+                  it looks wrong, pick another encoding.
+                </p>
+              </Note>
+            ))}
 
           <div className="flex flex-wrap items-center gap-2">
             <label htmlFor="import-preset" className="font-medium">

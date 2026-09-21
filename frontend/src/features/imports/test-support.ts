@@ -18,9 +18,12 @@ export const HEADERS = [
   'Notes',
 ]
 
+// The preamble line is quoted, as LinkedIn writes it. Unquoted, its comma makes
+// the real parser take *that* line as the header and answer 422 — checked
+// against `parse_csv`, not assumed.
 export const CSV_TEXT = [
   'Notes:',
-  'When exporting your connection data, your recipient information is included.',
+  '"When exporting your connection data, your recipient information is included."',
   '',
   HEADERS.join(','),
   'Rosalind,Quillfeather,rosalind@nimbus-kettle.example,Nimbus Kettle Co,Kettle Fitter,01 Mar 2021,',
@@ -64,6 +67,18 @@ export const ARCHIVE_INSPECTION: Inspection = {
       Notes: '',
     },
   ],
+}
+
+/** A CSV no built-in preset recognizes: every column waiting to be mapped by hand. */
+export const UNRECOGNIZED_INSPECTION: Inspection = {
+  headers: ['Given', 'Surname', 'Mail'],
+  row_count: 2,
+  preamble_rows: 0,
+  detected_preset: null,
+  preset: null,
+  mapping: {},
+  unmapped: ['Given', 'Surname', 'Mail'],
+  sample: [{ Given: 'Hortensia', Surname: 'Blennerhassett', Mail: 'h@tarnish.example' }],
 }
 
 /** The same file read with a preset that claims fewer of its columns. */
@@ -255,9 +270,52 @@ export interface Call {
 
 type Handler = (call: Call) => Response | Promise<Response>
 
+const RESOLUTIONS = ['matched', 'created', 'candidate', 'skipped']
+
+/**
+ * The query bounds the real routes declare, so the fakes refuse what the API
+ * refuses.
+ *
+ * Keying a fake on method and path alone let three contract mistakes through
+ * unnoticed — a preview limit of 999, a rows limit of 5000, and a resolution
+ * value that is not one of the four — each of which the real API answers 422
+ * to, and each of which would blank the screen.
+ */
+const QUERY_RULES: ReadonlyArray<{
+  path: RegExp
+  limit: readonly [number, number]
+  resolution?: boolean
+}> = [
+  { path: /^\/api\/v1\/imports$/, limit: [1, 200] },
+  { path: /^\/api\/v1\/imports\/\d+\/preview$/, limit: [1, 200] },
+  { path: /^\/api\/v1\/imports\/\d+\/rows$/, limit: [1, 500], resolution: true },
+]
+
+function queryComplaint(call: Call): string | null {
+  const rule = QUERY_RULES.find((candidate) => candidate.path.test(call.path))
+  if (rule === undefined) return null
+  const limit = call.query.get('limit')
+  if (limit !== null) {
+    const value = Number(limit)
+    if (!Number.isInteger(value) || value < rule.limit[0] || value > rule.limit[1]) {
+      return `limit: input should be between ${rule.limit[0]} and ${rule.limit[1]}`
+    }
+  }
+  const offset = call.query.get('offset')
+  if (offset !== null && (!Number.isInteger(Number(offset)) || Number(offset) < 0)) {
+    return 'offset: input should be greater than or equal to 0'
+  }
+  const resolution = call.query.get('resolution')
+  if (resolution !== null && (!rule.resolution || !RESOLUTIONS.includes(resolution))) {
+    return `resolution: input should be ${RESOLUTIONS.join(', ')}`
+  }
+  return null
+}
+
 /**
  * Routes `METHOD /path` to a handler, answers `/health` and `/me` for the app
- * shell, and records every call so a test can assert on what was sent.
+ * shell, checks the query against what the route declares, and records every
+ * call so a test can assert on what was sent.
  */
 export function backend(handlers: Record<string, Handler>, calls: Call[] = []) {
   return async (request: Request): Promise<Response> => {
@@ -270,6 +328,10 @@ export function backend(handlers: Record<string, Handler>, calls: Call[] = []) {
       body: raw === '' ? undefined : JSON.parse(raw),
     }
     calls.push(call)
+    const complaint = queryComplaint(call)
+    if (complaint !== null) {
+      return jsonResponse({ detail: [{ msg: complaint }] }, 422)
+    }
     const handler = handlers[`${request.method} ${url.pathname}`]
     if (handler !== undefined) return handler(call)
     if (url.pathname === '/api/v1/health') {
@@ -291,4 +353,33 @@ export function backend(handlers: Record<string, Handler>, calls: Call[] = []) {
 /** A CSV as the browser would hand it to the wizard. */
 export function csvFile(text = CSV_TEXT, name = 'connections.csv'): File {
   return new File([text], name, { type: 'text/csv' })
+}
+
+/**
+ * A commit that refuses like the real one.
+ *
+ * `commit` answers 409 while any candidate row has no decision unless it was
+ * told to skip them. A fake that always succeeds hides exactly the flow this
+ * wizard exists to prevent.
+ */
+export function commitLike(candidateRows: readonly number[], applied: ImportRun) {
+  return (call: Call): Response => {
+    const body = (call.body ?? {}) as {
+      decisions?: Array<{ row_number: number }>
+      skip_undecided?: boolean
+    }
+    const decided = new Set((body.decisions ?? []).map((decision) => decision.row_number))
+    const undecided = candidateRows.filter((row) => !decided.has(row))
+    if (undecided.length > 0 && body.skip_undecided !== true) {
+      return jsonResponse(
+        {
+          detail:
+            `${undecided.length} row(s) resolve to a candidate and have no decision ` +
+            `(rows ${undecided.join(', ')}); decide each one, or commit with skip_undecided`,
+        },
+        409,
+      )
+    }
+    return jsonResponse(applied)
+  }
 }

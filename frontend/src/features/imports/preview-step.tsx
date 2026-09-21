@@ -10,6 +10,10 @@ interface PreviewStepProps {
   run: ImportRun
   rows: PreviewRow[] | undefined
   mapping: ColumnMapping
+  /** Rows these resolutions call candidates, whatever the draft recorded. */
+  liveCandidates: number
+  /** The draft's counts no longer match what the rows resolve to now. */
+  stale: boolean
   pending: boolean
   error: string | null
   onRetry: () => void
@@ -58,12 +62,17 @@ export function PreviewStep({
   run,
   rows,
   mapping,
+  liveCandidates,
+  stale,
   pending,
   error,
   onRetry,
   onBack,
   onContinue,
 }: PreviewStepProps) {
+  // The larger of what the draft recorded and what these rows resolve to now,
+  // so a stale draft never labels the button "Go to commit" over a candidate.
+  const candidates = Math.max(run.candidate_count, liveCandidates)
   const refused = rows ? refusedChanges(rows) : []
   const refusedFields = [...new Set(refused.map(({ change }) => fieldLabel(change.field)))]
   const dropped = rows ? droppedCells(rows) : []
@@ -79,8 +88,19 @@ export function PreviewStep({
             is written until you commit
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-3">
           <RunCounts run={run} tense="plan" />
+          {stale && (
+            <Note tone="warn">
+              <p className="font-medium">This draft was read before your contacts changed.</p>
+              <p>
+                The counts above are what the file meant then. The rows below are what it means now,
+                and a commit uses these: {liveCandidates}{' '}
+                {liveCandidates === 1 ? 'row needs' : 'rows need'} a decision that the draft did not
+                record.
+              </p>
+            </Note>
+          )}
         </CardContent>
       </Card>
 
@@ -206,8 +226,8 @@ export function PreviewStep({
           </Button>
         )}
         <Button onClick={onContinue} disabled={pending || rows === undefined}>
-          {run.candidate_count > 0
-            ? `Review ${run.candidate_count} ${run.candidate_count === 1 ? 'candidate' : 'candidates'}`
+          {candidates > 0
+            ? `Review ${candidates} ${candidates === 1 ? 'candidate' : 'candidates'}`
             : 'Go to commit'}
         </Button>
       </div>

@@ -3,12 +3,27 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 
 import { fieldLabel, rowLabel } from './fields'
 import { ErrorNote, Note } from './notes'
-import type { ColumnMapping, Decision, ImportRow, ImportRun, PreviewRow } from './types'
+import type { ColumnMapping, Decision, ImportRun, PreviewRow } from './types'
+
+/**
+ * What the screen needs of a candidate row.
+ *
+ * Narrower than `ImportRow` on purpose: the rows come from two places, the
+ * stored ones the draft recorded and the live ones the preview has just found,
+ * and both satisfy this.
+ */
+export interface CandidateRow {
+  row_number: number
+  raw: Record<string, string>
+  candidate_ids: number[]
+}
 
 interface CandidatesStepProps {
   run: ImportRun
-  rows: ImportRow[]
+  rows: CandidateRow[]
   total: number
+  /** The preview found a candidate the draft never recorded: it was read too long ago. */
+  stale: boolean
   /** Preview rows by row number: the closest contact's current values, where known. */
   previews: Map<number, PreviewRow>
   mapping: ColumnMapping
@@ -61,6 +76,7 @@ export function CandidatesStep({
   run,
   rows,
   total,
+  stale,
   previews,
   mapping,
   decisions,
@@ -109,6 +125,15 @@ export function CandidatesStep({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          {stale && (
+            <Note tone="warn">
+              <p>
+                Your contacts have changed since this file was read, so a row that needed no
+                decision then needs one now. These are the rows as they resolve right now, which is
+                what the commit will use.
+              </p>
+            </Note>
+          )}
           <p role="status">
             {decided} of {total} decided
             {undecided > 0 ? `, ${undecided} to go` : ''}.
