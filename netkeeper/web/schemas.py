@@ -16,6 +16,7 @@ from pydantic import (
 
 from netkeeper.crm.confirmation import InvalidReason
 from netkeeper.crm.filters import FilterTree, SortKey
+from netkeeper.crm.importer import ImportField
 from netkeeper.crm.interactions import TimelineEntry
 from netkeeper.crm.tags import PATTERN_MAX_LENGTH, InvalidPattern, compile_pattern
 from netkeeper.models import (
@@ -25,6 +26,10 @@ from netkeeper.models import (
     ContactSource,
     EmailKind,
     EmailStatus,
+    ImportDecisionKind,
+    ImportResolution,
+    ImportSourceKind,
+    ImportStatus,
     Interaction,
     InteractionKind,
     LinkKind,
@@ -34,6 +39,7 @@ from netkeeper.models import (
     TagSource,
     UserKind,
 )
+from netkeeper.models.imports import FILENAME_MAX_LENGTH, PRESET_NAME_MAX_LENGTH
 from netkeeper.services.tasks import TaskStatus
 
 
@@ -756,3 +762,181 @@ class ContactLinkPatch(BaseModel):
 def given_fields(body: BaseModel) -> dict[str, Any]:
     """The fields a patch body carried, by name, ``null`` included: what to change."""
     return {name: getattr(body, name) for name in body.model_fields_set}
+
+
+# --- imports: mapping, review, commit, rollback (spec 10.5) ------------------
+
+# A CSV is sent as text rather than as a multipart upload: the API is local and
+# single-user, and this keeps the request one JSON body the generated client
+# already knows how to make. The cap is far above a LinkedIn export of a large
+# network (a few megabytes) and stops a mistyped request from being read at all.
+MAX_IMPORT_CHARS = 32_000_000
+
+ImportPresetName = Annotated[str, Field(min_length=1, max_length=PRESET_NAME_MAX_LENGTH)]
+ImportFilename = Annotated[str, Field(min_length=1, max_length=FILENAME_MAX_LENGTH)]
+ImportContent = Annotated[str, Field(max_length=MAX_IMPORT_CHARS)]
+ColumnMapping = dict[str, str]
+"""Column header to :class:`~netkeeper.crm.importer.ImportField` value; ``""`` unmaps it."""
+
+
+class ImportInspectIn(BaseModel):
+    """A file to read the header of, with the mapping to try on it. Nothing is stored."""
+
+    content: ImportContent
+    preset: ImportPresetName | None = None
+    mapping: ColumnMapping | None = None
+
+
+class ImportInspectOut(BaseModel):
+    """A file's columns and the mapping chosen for them, for the mapping screen."""
+
+    headers: list[str]
+    row_count: int
+    preamble_rows: int
+    """Lines above the header, as the LinkedIn archive's "Notes:" block."""
+    detected_preset: str | None
+    """The built-in preset that best fits the header, whether or not it was used."""
+    preset: str | None
+    mapping: dict[str, ImportField]
+    unmapped: list[str]
+    sample: list[dict[str, str]]
+    """The first rows as they were read, so the screen can show the mapping's effect."""
+
+
+class ImportRunCreate(ImportInspectIn):
+    """A file to read into a draft run."""
+
+    filename: ImportFilename
+    source_kind: ImportSourceKind = ImportSourceKind.CSV
+
+
+class ImportRunOut(BaseModel):
+    id: int
+    source_kind: ImportSourceKind
+    filename: str
+    preset: str | None
+    mapping: dict[str, str]
+    status: ImportStatus
+    total_rows: int
+    matched_count: int
+    created_count: int
+    candidate_count: int
+    skipped_count: int
+    committed_at: datetime | None
+    rolled_back_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ImportRunPage(BaseModel):
+    items: list[ImportRunOut]
+    total: int
+
+
+class ImportDecisionOut(BaseModel):
+    kind: ImportDecisionKind
+    contact_id: int | None
+
+
+class ImportRefusedOut(BaseModel):
+    """A value an import was not allowed to write, and what outranked it (spec 10.5)."""
+
+    field: str
+    incoming: str | None
+    kept: str | None
+    source: ContactSource
+
+
+class ImportRowOut(BaseModel):
+    id: int
+    row_number: int
+    raw: dict[str, str]
+    resolution: ImportResolution
+    contact_id: int | None
+    matched_by: str | None
+    candidate_ids: list[int]
+    decision: ImportDecisionOut | None
+    refused: list[ImportRefusedOut]
+    """Fields the row carried that provenance kept out; empty until the run is committed."""
+    error: str | None
+
+
+class ImportRowPage(BaseModel):
+    items: list[ImportRowOut]
+    total: int
+
+
+class ImportChangeOut(BaseModel):
+    """One field a row would write, with the value that is there now."""
+
+    field: str
+    before: str | None
+    after: str | None
+    refused: bool
+    kept_source: ContactSource | None
+    """What refused the row; ``manual`` is a person's own edit, which no import overwrites."""
+
+
+class ImportPreviewRow(BaseModel):
+    """One row of the review screen (spec 10.5 step 3)."""
+
+    row_number: int
+    raw: dict[str, str]
+    resolution: ImportResolution
+    contact_id: int | None
+    """The contact a matched row lands on; null for a candidate or a new contact."""
+    matched_by: str | None
+    candidate_ids: list[int]
+    changes: list[ImportChangeOut]
+    """For a candidate these are measured against the first of ``candidate_ids``."""
+    problem: str | None
+
+
+class ImportDecisionIn(BaseModel):
+    """What to do with one candidate row. ``merge_into`` needs the contact to merge into."""
+
+    row_number: int
+    kind: ImportDecisionKind
+    contact_id: int | None = None
+
+    @model_validator(mode="after")
+    def _merge_needs_a_contact(self) -> ImportDecisionIn:
+        if self.kind is ImportDecisionKind.MERGE_INTO and self.contact_id is None:
+            raise ValueError("a merge_into decision needs contact_id")
+        return self
+
+
+class ImportCommitIn(BaseModel):
+    """Decisions to record, then apply the whole run in one transaction."""
+
+    decisions: list[ImportDecisionIn] = Field(default_factory=list)
+    skip_undecided: bool = False
+    """Skip candidate rows nobody decided instead of refusing the commit."""
+
+
+class ImportRollbackOut(BaseModel):
+    """What undoing a run removed and put back."""
+
+    run_id: int
+    contacts_deleted: int
+    contacts_restored: int
+    fields_restored: int
+    children_deleted: int
+
+
+class ImportPresetOut(BaseModel):
+    name: str
+    builtin: bool
+    mapping: dict[str, str]
+    """For a built-in preset the headers it recognizes; for a saved one its own columns."""
+
+
+class ImportPresetsOut(BaseModel):
+    """The presets on offer. Built-in ones are the same for everyone; saved ones are yours."""
+
+    builtin: list[ImportPresetOut]
+    saved: list[ImportPresetOut]
+
+
+class ImportPresetIn(BaseModel):
+    mapping: ColumnMapping = Field(min_length=1)

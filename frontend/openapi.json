@@ -2791,6 +2791,830 @@
         "title": "HealthOut",
         "type": "object"
       },
+      "ImportChangeOut": {
+        "description": "One field a row would write, with the value that is there now.",
+        "properties": {
+          "after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After"
+          },
+          "before": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "kept_source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContactSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "refused": {
+            "title": "Refused",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "field",
+          "before",
+          "after",
+          "refused",
+          "kept_source"
+        ],
+        "title": "ImportChangeOut",
+        "type": "object"
+      },
+      "ImportCommitIn": {
+        "description": "Decisions to record, then apply the whole run in one transaction.",
+        "properties": {
+          "decisions": {
+            "items": {
+              "$ref": "#/components/schemas/ImportDecisionIn"
+            },
+            "title": "Decisions",
+            "type": "array"
+          },
+          "skip_undecided": {
+            "default": false,
+            "title": "Skip Undecided",
+            "type": "boolean"
+          }
+        },
+        "title": "ImportCommitIn",
+        "type": "object"
+      },
+      "ImportDecisionIn": {
+        "description": "What to do with one candidate row. ``merge_into`` needs the contact to merge into.",
+        "properties": {
+          "contact_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Id"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ImportDecisionKind"
+          },
+          "row_number": {
+            "title": "Row Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "row_number",
+          "kind"
+        ],
+        "title": "ImportDecisionIn",
+        "type": "object"
+      },
+      "ImportDecisionKind": {
+        "description": "What a person decided about a candidate row (:mod:`netkeeper.crm.identity`).",
+        "enum": [
+          "merge_into",
+          "create_new"
+        ],
+        "title": "ImportDecisionKind",
+        "type": "string"
+      },
+      "ImportDecisionOut": {
+        "properties": {
+          "contact_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Id"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ImportDecisionKind"
+          }
+        },
+        "required": [
+          "kind",
+          "contact_id"
+        ],
+        "title": "ImportDecisionOut",
+        "type": "object"
+      },
+      "ImportField": {
+        "description": "What a column may feed.\n\nThe first ten are the scalar columns of ``contacts`` that carry per-field\nprovenance (:data:`netkeeper.crm.provenance.PROVENANCE_ORDER`); the last\nthree add child rows, which provenance does not rank. A field a person owns\n(``preferred_name``, ``notes``, ``met``, tags) is deliberately absent: no\nimport touches those (spec 10.5).",
+        "enum": [
+          "li_urn",
+          "li_public_id",
+          "li_url",
+          "first_name",
+          "last_name",
+          "headline",
+          "current_title",
+          "current_company",
+          "location",
+          "connected_on",
+          "email",
+          "phone",
+          "link"
+        ],
+        "title": "ImportField",
+        "type": "string"
+      },
+      "ImportInspectIn": {
+        "description": "A file to read the header of, with the mapping to try on it. Nothing is stored.",
+        "properties": {
+          "content": {
+            "maxLength": 32000000,
+            "title": "Content",
+            "type": "string"
+          },
+          "mapping": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mapping"
+          },
+          "preset": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "ImportInspectIn",
+        "type": "object"
+      },
+      "ImportInspectOut": {
+        "description": "A file's columns and the mapping chosen for them, for the mapping screen.",
+        "properties": {
+          "detected_preset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detected Preset"
+          },
+          "headers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "array"
+          },
+          "mapping": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ImportField"
+            },
+            "title": "Mapping",
+            "type": "object"
+          },
+          "preamble_rows": {
+            "title": "Preamble Rows",
+            "type": "integer"
+          },
+          "preset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset"
+          },
+          "row_count": {
+            "title": "Row Count",
+            "type": "integer"
+          },
+          "sample": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Sample",
+            "type": "array"
+          },
+          "unmapped": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unmapped",
+            "type": "array"
+          }
+        },
+        "required": [
+          "headers",
+          "row_count",
+          "preamble_rows",
+          "detected_preset",
+          "preset",
+          "mapping",
+          "unmapped",
+          "sample"
+        ],
+        "title": "ImportInspectOut",
+        "type": "object"
+      },
+      "ImportPresetIn": {
+        "properties": {
+          "mapping": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "minProperties": 1,
+            "title": "Mapping",
+            "type": "object"
+          }
+        },
+        "required": [
+          "mapping"
+        ],
+        "title": "ImportPresetIn",
+        "type": "object"
+      },
+      "ImportPresetOut": {
+        "properties": {
+          "builtin": {
+            "title": "Builtin",
+            "type": "boolean"
+          },
+          "mapping": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Mapping",
+            "type": "object"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "builtin",
+          "mapping"
+        ],
+        "title": "ImportPresetOut",
+        "type": "object"
+      },
+      "ImportPresetsOut": {
+        "description": "The presets on offer. Built-in ones are the same for everyone; saved ones are yours.",
+        "properties": {
+          "builtin": {
+            "items": {
+              "$ref": "#/components/schemas/ImportPresetOut"
+            },
+            "title": "Builtin",
+            "type": "array"
+          },
+          "saved": {
+            "items": {
+              "$ref": "#/components/schemas/ImportPresetOut"
+            },
+            "title": "Saved",
+            "type": "array"
+          }
+        },
+        "required": [
+          "builtin",
+          "saved"
+        ],
+        "title": "ImportPresetsOut",
+        "type": "object"
+      },
+      "ImportPreviewRow": {
+        "description": "One row of the review screen (spec 10.5 step 3).",
+        "properties": {
+          "candidate_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Candidate Ids",
+            "type": "array"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/ImportChangeOut"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "contact_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Id"
+          },
+          "matched_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matched By"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Problem"
+          },
+          "raw": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Raw",
+            "type": "object"
+          },
+          "resolution": {
+            "$ref": "#/components/schemas/ImportResolution"
+          },
+          "row_number": {
+            "title": "Row Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "row_number",
+          "raw",
+          "resolution",
+          "contact_id",
+          "matched_by",
+          "candidate_ids",
+          "changes",
+          "problem"
+        ],
+        "title": "ImportPreviewRow",
+        "type": "object"
+      },
+      "ImportRefusedOut": {
+        "description": "A value an import was not allowed to write, and what outranked it (spec 10.5).",
+        "properties": {
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "incoming": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incoming"
+          },
+          "kept": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kept"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ContactSource"
+          }
+        },
+        "required": [
+          "field",
+          "incoming",
+          "kept",
+          "source"
+        ],
+        "title": "ImportRefusedOut",
+        "type": "object"
+      },
+      "ImportResolution": {
+        "description": "What one row is (spec 8.2, 8.4).\n\nOn a draft run this is the plan; on a committed run it is what happened.\n``created`` is \"this row is a new contact\"; ``candidate`` waits for a\nperson's decision; ``skipped`` is a row that carried nothing usable, or one\nwhose candidacy nobody resolved.",
+        "enum": [
+          "matched",
+          "created",
+          "candidate",
+          "skipped"
+        ],
+        "title": "ImportResolution",
+        "type": "string"
+      },
+      "ImportRollbackOut": {
+        "description": "What undoing a run removed and put back.",
+        "properties": {
+          "children_deleted": {
+            "title": "Children Deleted",
+            "type": "integer"
+          },
+          "contacts_deleted": {
+            "title": "Contacts Deleted",
+            "type": "integer"
+          },
+          "contacts_restored": {
+            "title": "Contacts Restored",
+            "type": "integer"
+          },
+          "fields_restored": {
+            "title": "Fields Restored",
+            "type": "integer"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id",
+          "contacts_deleted",
+          "contacts_restored",
+          "fields_restored",
+          "children_deleted"
+        ],
+        "title": "ImportRollbackOut",
+        "type": "object"
+      },
+      "ImportRowOut": {
+        "properties": {
+          "candidate_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Candidate Ids",
+            "type": "array"
+          },
+          "contact_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Id"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ImportDecisionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "matched_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matched By"
+          },
+          "raw": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Raw",
+            "type": "object"
+          },
+          "refused": {
+            "items": {
+              "$ref": "#/components/schemas/ImportRefusedOut"
+            },
+            "title": "Refused",
+            "type": "array"
+          },
+          "resolution": {
+            "$ref": "#/components/schemas/ImportResolution"
+          },
+          "row_number": {
+            "title": "Row Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "row_number",
+          "raw",
+          "resolution",
+          "contact_id",
+          "matched_by",
+          "candidate_ids",
+          "decision",
+          "refused",
+          "error"
+        ],
+        "title": "ImportRowOut",
+        "type": "object"
+      },
+      "ImportRowPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ImportRowOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "ImportRowPage",
+        "type": "object"
+      },
+      "ImportRunCreate": {
+        "description": "A file to read into a draft run.",
+        "properties": {
+          "content": {
+            "maxLength": 32000000,
+            "title": "Content",
+            "type": "string"
+          },
+          "filename": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Filename",
+            "type": "string"
+          },
+          "mapping": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mapping"
+          },
+          "preset": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset"
+          },
+          "source_kind": {
+            "$ref": "#/components/schemas/ImportSourceKind",
+            "default": "csv"
+          }
+        },
+        "required": [
+          "content",
+          "filename"
+        ],
+        "title": "ImportRunCreate",
+        "type": "object"
+      },
+      "ImportRunOut": {
+        "properties": {
+          "candidate_count": {
+            "title": "Candidate Count",
+            "type": "integer"
+          },
+          "committed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Committed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_count": {
+            "title": "Created Count",
+            "type": "integer"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "mapping": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Mapping",
+            "type": "object"
+          },
+          "matched_count": {
+            "title": "Matched Count",
+            "type": "integer"
+          },
+          "preset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset"
+          },
+          "rolled_back_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rolled Back At"
+          },
+          "skipped_count": {
+            "title": "Skipped Count",
+            "type": "integer"
+          },
+          "source_kind": {
+            "$ref": "#/components/schemas/ImportSourceKind"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ImportStatus"
+          },
+          "total_rows": {
+            "title": "Total Rows",
+            "type": "integer"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "source_kind",
+          "filename",
+          "preset",
+          "mapping",
+          "status",
+          "total_rows",
+          "matched_count",
+          "created_count",
+          "candidate_count",
+          "skipped_count",
+          "committed_at",
+          "rolled_back_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ImportRunOut",
+        "type": "object"
+      },
+      "ImportRunPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ImportRunOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "ImportRunPage",
+        "type": "object"
+      },
+      "ImportSourceKind": {
+        "description": "Where the rows came from. ``archive`` is the LinkedIn export (P1-03).",
+        "enum": [
+          "archive",
+          "csv"
+        ],
+        "title": "ImportSourceKind",
+        "type": "string"
+      },
+      "ImportStatus": {
+        "description": "A run is read and resolved (``draft``), then applied, then possibly undone.",
+        "enum": [
+          "draft",
+          "committed",
+          "rolled_back"
+        ],
+        "title": "ImportStatus",
+        "type": "string"
+      },
       "InteractionIn": {
         "description": "A new interaction. ``at`` must carry a timezone; it is stored as UTC.",
         "properties": {
@@ -5892,6 +6716,525 @@
         "summary": "Get Health",
         "tags": [
           "health"
+        ]
+      }
+    },
+    "/api/v1/imports": {
+      "get": {
+        "description": "Import runs, newest first.",
+        "operationId": "list_import_runs",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportRunPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Import Runs",
+        "tags": [
+          "imports"
+        ]
+      },
+      "post": {
+        "description": "Read a file into a draft run: one row per data row, with counts for the whole file.\n\nA draft writes nothing but the run and its rows. ``preset`` may name a\nbuilt-in preset or one you saved; ``mapping`` overrides it column by column,\nand a column mapped to ``\"\"`` is left out.",
+        "operationId": "create_import_run",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportRunCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "A file or a mapping that cannot be used"
+          }
+        },
+        "summary": "Create Import Run",
+        "tags": [
+          "imports"
+        ]
+      }
+    },
+    "/api/v1/imports/inspect": {
+      "post": {
+        "description": "A file's columns and the mapping a preset gives them. Nothing is stored.",
+        "operationId": "inspect_import_file",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportInspectIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportInspectOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "A file or a mapping that cannot be used"
+          }
+        },
+        "summary": "Inspect Import File",
+        "tags": [
+          "imports"
+        ]
+      }
+    },
+    "/api/v1/imports/presets": {
+      "get": {
+        "description": "The built-in presets, with the headers each recognizes, and the user's own.",
+        "operationId": "list_import_presets",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportPresetsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Import Presets",
+        "tags": [
+          "imports"
+        ]
+      }
+    },
+    "/api/v1/imports/presets/{name}": {
+      "delete": {
+        "description": "Forget one of your own presets. The built-in ones cannot be deleted.",
+        "operationId": "delete_import_preset",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such import run, row, contact, or preset"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Import Preset",
+        "tags": [
+          "imports"
+        ]
+      },
+      "put": {
+        "description": "Save a column mapping under a name, replacing any earlier preset by that name.",
+        "operationId": "save_import_preset",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportPresetIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportPresetOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "The run's state forbids this, or candidate rows are undecided"
+          },
+          "422": {
+            "description": "A file or a mapping that cannot be used"
+          }
+        },
+        "summary": "Save Import Preset",
+        "tags": [
+          "imports"
+        ]
+      }
+    },
+    "/api/v1/imports/{run_id}": {
+      "get": {
+        "operationId": "get_import_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such import run, row, contact, or preset"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Import Run",
+        "tags": [
+          "imports"
+        ]
+      }
+    },
+    "/api/v1/imports/{run_id}/commit": {
+      "post": {
+        "description": "Apply every row of a draft run, in this request's one transaction.\n\nCandidate rows with no decision answer ``409`` unless ``skip_undecided`` is\nset, in which case they are skipped and counted. A row that cannot be applied\nis skipped with its reason on the row; everything else still lands.",
+        "operationId": "commit_import_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportCommitIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportRunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such import run, row, contact, or preset"
+          },
+          "409": {
+            "description": "The run's state forbids this, or candidate rows are undecided"
+          },
+          "422": {
+            "description": "A file or a mapping that cannot be used"
+          }
+        },
+        "summary": "Commit Import Run",
+        "tags": [
+          "imports"
+        ]
+      }
+    },
+    "/api/v1/imports/{run_id}/preview": {
+      "post": {
+        "description": "Resolve the first rows against the database as it is now, without writing anything.\n\nEach row says whether it is an existing contact, a candidate waiting for a\ndecision, or a new contact, and which fields would change; a change with\n``refused`` set is one a more authoritative source keeps, a manual edit above\nall (spec 10.5). A ``POST`` because resolving writes inside a savepoint that\nis rolled back, which needs a writer session.",
+        "operationId": "preview_import_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ImportPreviewRow"
+                  },
+                  "title": "Response Preview Import Run",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such import run, row, contact, or preset"
+          },
+          "422": {
+            "description": "A file or a mapping that cannot be used"
+          }
+        },
+        "summary": "Preview Import Run",
+        "tags": [
+          "imports"
+        ]
+      }
+    },
+    "/api/v1/imports/{run_id}/rollback": {
+      "post": {
+        "description": "Undo a committed run, and only what that run did.\n\nA contact the run created is deleted; a contact it only enriched keeps the\nvalues it had before the run, and the child rows the run added are removed. A\nfield something changed after the import keeps that later value.",
+        "operationId": "rollback_import_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportRollbackOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such import run, row, contact, or preset"
+          },
+          "409": {
+            "description": "The run's state forbids this, or candidate rows are undecided"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rollback Import Run",
+        "tags": [
+          "imports"
+        ]
+      }
+    },
+    "/api/v1/imports/{run_id}/rows": {
+      "get": {
+        "description": "A run's rows in file order, optionally only those with one resolution.",
+        "operationId": "list_import_rows",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "resolution",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ImportResolution"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Resolution"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportRowPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such import run, row, contact, or preset"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Import Rows",
+        "tags": [
+          "imports"
         ]
       }
     },
