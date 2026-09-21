@@ -63,10 +63,12 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
+from html.parser import HTMLParser
 from typing import Final
 
 from sqlalchemy.orm import Session
 
+from netkeeper.crm import positions as positions_service
 from netkeeper.crm.identity import (
     Candidate,
     IncomingContact,
@@ -77,6 +79,7 @@ from netkeeper.crm.identity import (
     resolve,
 )
 from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
+from netkeeper.crm.positions import PositionCounts
 from netkeeper.crm.tags import RuleRun, ensure_default_rules, run_rules
 from netkeeper.db import is_writer
 from netkeeper.linkedin.archive import (
@@ -86,6 +89,7 @@ from netkeeper.linkedin.archive import (
     InvitationDirection,
     InvitationRow,
     MessageRow,
+    PositionRow,
 )
 from netkeeper.linkedin.conversations import Owner, group
 from netkeeper.models import ContactSource, EmailKind, Interaction, InteractionKind, User
@@ -98,6 +102,63 @@ log = logging.getLogger(__name__)
 # evidence, so it holds the message rather than a label, but a body is a CSV
 # field with no length limit and the timeline is not a mail reader.
 SUMMARY_MAX_CHARS: Final = 2000
+# How far _trim will back off from the cap to land on whitespace rather than
+# split a word. A single token longer than this window (a URL, most often)
+# still gets a hard cut; anything shorter loses at most this many characters
+# to land on a boundary that means something for plain text.
+_BOUNDARY_LOOKBACK: Final = 200
+
+# Tags that separate the plain text they wrap from what comes next; folded to
+# a newline rather than deleted so "<p>one</p><p>two</p>" reads as two lines,
+# not "onetwo".
+_BLOCK_TAGS: Final[frozenset[str]] = frozenset(
+    {"p", "div", "br", "li", "tr", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol"}
+)
+
+
+class _TextExtractor(HTMLParser):
+    """Plain text from an HTML fragment: entities unescaped, tags dropped (#75).
+
+    ``convert_charrefs=True`` does the unescaping. An unterminated tag at the
+    end -- exactly the shape a body cut at a raw character limit used to leave
+    behind -- is simply never emitted: the parser buffers it waiting for a
+    ``>`` that never comes and drops the buffer on :meth:`close`, which is why
+    this runs on the full body *before* :func:`_trim` cuts it, not after.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        self._parts.append(data)
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+
+def _html_to_text(value: str) -> str:
+    """``value`` as plain text: entities unescaped, tags stripped, blank lines dropped (#75).
+
+    LinkedIn InMail arrives as an HTML fragment
+    (``<p class="spinmail-quill-editor">...</p>``); the evidence panel is worth
+    more when it shows what was actually written than when it shows markup, so
+    this runs at import and what lands in ``interactions.summary`` is text a
+    person can read.
+    """
+    parser = _TextExtractor()
+    parser.feed(value)
+    parser.close()
+    lines = (line.strip() for line in parser.text().splitlines())
+    return "\n".join(line for line in lines if line)
 
 
 @dataclass(slots=True)
@@ -177,6 +238,7 @@ class ArchiveImport:
     connections: ConnectionCounts = field(default_factory=ConnectionCounts)
     messages: MessageCounts = field(default_factory=MessageCounts)
     invitations: InvitationCounts = field(default_factory=InvitationCounts)
+    positions: PositionCounts = field(default_factory=PositionCounts)
     tagging: RuleRun = field(default_factory=lambda: RuleRun(0, 0, 0, 0))
 
 
@@ -213,6 +275,9 @@ def import_archive(
             _import_connections(
                 session, user, archive.connections(member), when, report.connections, touched
             )
+    for member in archive.members:
+        if member.kind is ArchiveKind.POSITIONS:
+            _import_positions(session, user, archive.positions(member), when, report)
     written = _Interactions(session, user)
     profile_name = archive.owner_name()
     for member in archive.members:
@@ -235,17 +300,42 @@ def import_archive(
     report.tagging = run_rules(session, user, sorted(set(touched)))
     log.info(
         "archive %s imported for user %d: %d connections (%d created, %d updated, "
-        "%d for review), %d message interactions, %d invitation interactions",
+        "%d for review), %d positions (%d created, %d updated), %d message interactions, "
+        "%d invitation interactions",
         archive.name,
         user.id,
         report.connections.rows,
         report.connections.created,
         report.connections.updated,
         report.connections.needs_review,
+        report.positions.rows,
+        report.positions.created,
+        report.positions.updated,
         report.messages.added,
         report.invitations.added,
     )
     return report
+
+
+# --- positions ----------------------------------------------------------
+
+
+def _import_positions(
+    session: Session,
+    user: User,
+    rows: Iterable[PositionRow],
+    observed_at: datetime,
+    report: ArchiveImport,
+) -> None:
+    counted = positions_service.import_positions(
+        session, user, rows, source=ContactSource.ARCHIVE, observed_at=observed_at
+    )
+    counts = report.positions
+    counts.rows += counted.rows
+    counts.created += counted.created
+    counts.updated += counted.updated
+    counts.skipped += counted.skipped
+    counts.undated += counted.undated
 
 
 # --- connections ------------------------------------------------------------
@@ -357,8 +447,9 @@ def _note_owner(owner: Owner, report: ArchiveImport) -> None:
 
 
 def _message_summary(row: MessageRow) -> str | None:
-    """A message as triage evidence: its subject and body, trimmed to a readable length."""
-    parts = [part for part in (row.subject, row.content.strip()) if part]
+    """A message as triage evidence: its subject and body, as plain text, trimmed (#75)."""
+    parts = [_html_to_text(part) for part in (row.subject, row.content) if part]
+    parts = [part for part in parts if part]
     return _trim("\n".join(parts))
 
 
@@ -399,10 +490,13 @@ def _import_invitations(
 
 
 def _invitation_summary(row: InvitationRow) -> str | None:
-    """The invitation's note, marked as one; the marker alone when it carried no note."""
+    """The invitation's note, as plain text and marked as one; the marker alone with no note."""
     if row.message is None:
         return INVITATION_SUMMARY
-    return _trim(f"{INVITATION_SUMMARY}: {row.message}")
+    note = _html_to_text(row.message)
+    if not note:
+        return INVITATION_SUMMARY
+    return _trim(f"{INVITATION_SUMMARY}: {note}")
 
 
 # --- writing interactions ---------------------------------------------------
@@ -484,13 +578,26 @@ class _Interactions:
 
 
 def _trim(text: str) -> str | None:
-    """``text`` at most :data:`SUMMARY_MAX_CHARS` long, with an ellipsis when cut; empty is None."""
+    """``text`` at most :data:`SUMMARY_MAX_CHARS` long, with an ellipsis when cut; empty is None.
+
+    ``text`` is plain text by the time this runs (#75), so the boundary that
+    matters is whitespace, not a tag: a cut backs off, within
+    :data:`_BOUNDARY_LOOKBACK` characters, to the nearest space or newline
+    rather than split a word. A single token longer than that window -- a URL,
+    most often -- gets a hard cut, same as before.
+    """
     stripped = text.strip()
     if not stripped:
         return None
     if len(stripped) <= SUMMARY_MAX_CHARS:
         return stripped
-    return stripped[: SUMMARY_MAX_CHARS - 1].rstrip() + "…"
+    limit = SUMMARY_MAX_CHARS - 1
+    cut = stripped[:limit]
+    window_start = max(0, limit - _BOUNDARY_LOOKBACK)
+    boundary = max(cut.rfind(" ", window_start), cut.rfind("\n", window_start))
+    if boundary > window_start:
+        cut = cut[:boundary]
+    return cut.rstrip() + "…"
 
 
 def _require_writer(session: Session) -> None:

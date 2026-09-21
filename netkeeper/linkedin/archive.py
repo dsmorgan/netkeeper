@@ -1,4 +1,5 @@
-"""Read a LinkedIn data archive: ``Connections.csv``, ``messages.csv``, ``Invitations.csv``.
+"""Read a LinkedIn data archive: ``Connections.csv``, ``messages.csv``,
+``Invitations.csv``, ``Positions.csv``.
 
 Spec 9.2, the archive row of the data-sources table.
 
@@ -6,7 +7,8 @@ Pure parsing behind the extractor boundary (spec 9.10, ADR 0005): nothing here
 imports the models or opens a session. A zip or a single CSV goes in; typed,
 frozen rows come out one table at a time, streamed, so an archive with years
 of messages is never held in memory at once. The core's importer
-(:mod:`netkeeper.crm.archive`) maps the rows onto contacts and interactions.
+(:mod:`netkeeper.crm.archive`) maps the rows onto contacts, interactions, and
+the user's own positions (P1-26).
 
 What the archive looks like (LinkedIn's "Settings & Privacy > Data privacy >
 Get a copy of your data"): a zip of CSV files in UTF-8, some starting with a
@@ -14,7 +16,7 @@ byte-order mark. ``Connections.csv`` opens with a preamble before its header
 (a line ``Notes:``, a sentence about missing email addresses, and a blank
 line). Tables are recognized by their header, never by their file name, so a
 member with any name, or a single CSV uploaded on its own, reads the same way.
-Unknown columns are ignored; a member that is none of the three tables is
+Unknown columns are ignored; a member that is none of the recognized tables is
 skipped; a table that lacks a column the reader needs is an
 :class:`ArchiveFormatError` naming the file.
 
@@ -24,12 +26,14 @@ with two digits); a message ``DATE`` is ``2023-05-01 14:22:10``, with or
 without a trailing ``UTC`` depending on the export, and either way it is read
 as UTC because that is the only zone LinkedIn ever names here; an invitation
 ``Sent At`` (``5/12/21, 3:14 PM``, month first) names no zone and is read as
-UTC too, the closest thing to a documented meaning it has. An unparseable date
-is ``None`` on the row rather than an error: the row is still a record of a
-person or a message, and the importer decides what to do without a time and
-counts how often it had to. A cell that held something and still did not parse
-is logged at warning level with the member and the row number, never the cell,
-so a change in LinkedIn's formats is visible without putting a date of a real
+UTC too, the closest thing to a documented meaning it has; a position's
+``Started On``/``Finished On`` (``Jun 2026``) carries no day at all, only a
+month, and is read as the first of it. An unparseable date is ``None`` on the
+row rather than an error: the row is still a record of a person, a message, or
+a position, and the importer decides what to do without a time and counts how
+often it had to. A cell that held something and still did not parse is logged
+at warning level with the member and the row number, never the cell, so a
+change in LinkedIn's formats is visible without putting a date of a real
 person's life in a log file.
 """
 
@@ -182,7 +186,7 @@ class ArchiveFormatError(ValueError):
 class ArchiveKind(enum.StrEnum):
     """The tables this reader recognizes.
 
-    The first three carry the rows an import writes. ``PROFILE`` is the
+    The first four carry the rows an import writes. ``PROFILE`` is the
     archive's own owner, which no import writes but which names whose archive
     this is when the message traffic cannot say.
     """
@@ -190,13 +194,19 @@ class ArchiveKind(enum.StrEnum):
     CONNECTIONS = "connections"
     MESSAGES = "messages"
     INVITATIONS = "invitations"
+    POSITIONS = "positions"
     PROFILE = "profile"
 
 
 IMPORTABLE_KINDS: Final[frozenset[ArchiveKind]] = frozenset(
-    {ArchiveKind.CONNECTIONS, ArchiveKind.MESSAGES, ArchiveKind.INVITATIONS}
+    {ArchiveKind.CONNECTIONS, ArchiveKind.MESSAGES, ArchiveKind.INVITATIONS, ArchiveKind.POSITIONS}
 )
 """The kinds that carry rows to import. An archive with none of them is useless."""
+
+_IMPORTABLE_TABLE_NAMES: Final[str] = (
+    "Connections.csv, messages.csv, Invitations.csv, or Positions.csv"
+)
+"""What :data:`IMPORTABLE_KINDS` is called in an error message, spelled once."""
 
 
 class InvitationDirection(enum.StrEnum):
@@ -295,7 +305,25 @@ class ProfileRow:
         return name or None
 
 
-ArchiveRow = ConnectionRow | MessageRow | InvitationRow | ProfileRow
+@dataclass(frozen=True, slots=True)
+class PositionRow:
+    """One line of ``Positions.csv``: one stint of the archive owner's own career.
+
+    Neither ``company`` nor ``title`` is guaranteed; a row with both blank
+    identifies nothing, and the importer only counts it. ``started_on`` and
+    ``ended_on`` carry no day, only a month (:func:`parse_position_date`): a
+    stint with a start and no end is LinkedIn's way of saying "current", and
+    one with neither date is a stint LinkedIn never dated at all.
+    """
+
+    row_number: int
+    company: str | None
+    title: str | None
+    started_on: date | None
+    ended_on: date | None
+
+
+ArchiveRow = ConnectionRow | MessageRow | InvitationRow | ProfileRow | PositionRow
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,6 +390,16 @@ def parse_message_date(text: str | None) -> datetime | None:
 def parse_invitation_date(text: str | None) -> datetime | None:
     """``5/12/21, 3:14 PM`` (month first, as LinkedIn writes it) as aware UTC; else ``None``."""
     return _parse(text, "%m/%d/%y, %I:%M %p", lambda value: value.replace(tzinfo=UTC))
+
+
+def parse_position_date(text: str | None) -> date | None:
+    """``Jun 2026``, month and year only, as the first of that month; else ``None``.
+
+    ``Positions.csv`` never gives a day, so ``date(year, month, 1)`` is the
+    closest thing to what LinkedIn recorded; nothing here claims the position
+    actually began or ended on the 1st.
+    """
+    return _parse(text, "%b %Y", lambda value: value.date())
 
 
 def _parse[T](text: str | None, pattern: str, convert: Callable[[datetime], T]) -> T | None:
@@ -442,6 +480,11 @@ LAYOUTS: Final[tuple[_Layout, ...]] = (
     _Layout(
         ArchiveKind.PROFILE,
         signature=frozenset({"first name", "last name", "headline"}),
+        required=frozenset(),
+    ),
+    _Layout(
+        ArchiveKind.POSITIONS,
+        signature=frozenset({"company name", "title", "started on", "finished on"}),
         required=frozenset(),
     ),
 )
@@ -620,6 +663,26 @@ def read_profile(text: TextIO, name: str = "Profile.csv") -> Iterator[ProfileRow
         )
 
 
+def read_positions(text: TextIO, name: str = "Positions.csv") -> Iterator[PositionRow]:
+    """Stream :class:`PositionRow` from a ``Positions.csv`` text stream.
+
+    ``ArchiveFormatError`` when ``text`` is not that table.
+    """
+    header, records = _table(text, name)
+    header = _expect(header, ArchiveKind.POSITIONS, name)
+    for row_number, record in _data_rows(records):
+        fields = _Fields(header.columns, record)
+        started_on = fields.get("started on")
+        ended_on = fields.get("finished on")
+        yield PositionRow(
+            row_number=row_number,
+            company=fields.get("company name"),
+            title=fields.get("title"),
+            started_on=_dated(parse_position_date(started_on), started_on, name, row_number),
+            ended_on=_dated(parse_position_date(ended_on), ended_on, name, row_number),
+        )
+
+
 def _expect(header: _Header | None, kind: ArchiveKind, name: str) -> _Header:
     if header is None:
         raise ArchiveFormatError(
@@ -702,6 +765,10 @@ class Archive:
         """Stream the rows of a ``profile`` member. ``ValueError`` for another kind."""
         return self._stream(member, ArchiveKind.PROFILE, read_profile)
 
+    def positions(self, member: ArchiveMember) -> Iterator[PositionRow]:
+        """Stream the rows of a ``positions`` member. ``ValueError`` for another kind."""
+        return self._stream(member, ArchiveKind.POSITIONS, read_positions)
+
     def owner_name(self) -> str | None:
         """The owner's name as ``Profile.csv`` writes it, or ``None`` when it is absent.
 
@@ -737,9 +804,10 @@ class Archive:
 
 _KIND_ORDER: Final[dict[ArchiveKind, int]] = {
     ArchiveKind.CONNECTIONS: 0,
-    ArchiveKind.MESSAGES: 1,
-    ArchiveKind.INVITATIONS: 2,
-    ArchiveKind.PROFILE: 3,
+    ArchiveKind.POSITIONS: 1,
+    ArchiveKind.MESSAGES: 2,
+    ArchiveKind.INVITATIONS: 3,
+    ArchiveKind.PROFILE: 4,
 }
 
 
@@ -762,10 +830,11 @@ def open_archive(source: Path | IO[bytes], *, filename: str | None = None) -> It
     directly reads it anyway; that is an explicit request, not a scan.
 
     The scan happens once, on open, reading only the head of each member, so a
-    table missing a column the reader needs, an archive with none of the three
-    tables, a single CSV that is none of them, or a file that is neither zip
-    nor CSV raise :class:`ArchiveFormatError` here, before any row is read. A
-    stream passed in is left open; a path is closed on exit.
+    table missing a column the reader needs, an archive with none of the
+    importable tables (:data:`IMPORTABLE_KINDS`), a single CSV that is none of
+    them, or a file that is neither zip nor CSV raise :class:`ArchiveFormatError`
+    here, before any row is read. A stream passed in is left open; a path is
+    closed on exit.
     """
     if isinstance(source, Path):
         if source.is_dir():
@@ -902,7 +971,7 @@ def _no_table_reason(infos: Sequence[zipfile.ZipInfo]) -> tuple[str, ArchiveRefu
     client having wrapped the download again, say), instead of sending them
     looking for a ``Connections.csv`` that is one level down.
     """
-    default = "no Connections.csv, messages.csv, or Invitations.csv table in the archive"
+    default = f"no {_IMPORTABLE_TABLE_NAMES} table in the archive"
     nested = [info.filename for info in infos if _looks_like_nested_zip(info.filename)]
     if len(nested) == 1:
         inner = nested[0]
@@ -1027,7 +1096,7 @@ def _open_dir(root: Path, name: str) -> Archive:
         members.append((ArchiveMember(relative, header.kind, _file_time(path)), opener))
     if not _has_rows_to_import(members):
         raise ArchiveFormatError(
-            f"{name}: no Connections.csv, messages.csv, or Invitations.csv table in the directory",
+            f"{name}: no {_IMPORTABLE_TABLE_NAMES} table in the directory",
             ArchiveRefusalCode.WRONG_ARCHIVE,
         )
     return Archive(name, members, lambda: None, ignored=ignored)
@@ -1039,8 +1108,8 @@ def _open_csv(handle: IO[bytes], name: str) -> Archive:
         header, _ = _table(text, name)
     if header is None:
         raise ArchiveFormatError(
-            f"{name}: not a LinkedIn archive zip, and no Connections.csv, messages.csv, or "
-            "Invitations.csv header in its first lines",
+            f"{name}: not a LinkedIn archive zip, and no {_IMPORTABLE_TABLE_NAMES} header "
+            "in its first lines",
             ArchiveRefusalCode.NOT_A_ZIP,
         )
     if header.kind not in IMPORTABLE_KINDS:

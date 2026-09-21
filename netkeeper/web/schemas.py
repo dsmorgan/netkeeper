@@ -118,14 +118,16 @@ class InteractionOut(BaseModel):
     summary: str | None
     """Verbatim, exactly as stored, and for a message that is someone else's words.
 
-    The archive importer keeps LinkedIn message bodies here (#75): InMail
-    arrives as HTML, and a body cut at the stored length can end mid-tag. The
-    API escapes nothing and strips nothing on the way out, by decision — the
-    evidence panel is worth more when it shows what was actually written — so
-    **whatever renders this must escape it**. Never `dangerouslySetInnerHTML`,
+    The archive importer stores LinkedIn message bodies here as plain text
+    (#75): InMail arrives as HTML, and the import path unescapes entities and
+    strips tags before anything is written, rather than trusting whatever
+    renders this to clean it. The API itself still escapes nothing and strips
+    nothing further on the way out — a person's own hand-entered interaction
+    can carry any text they typed, angle brackets included — so
+    **whatever renders this must still escape it**. Never `dangerouslySetInnerHTML`,
     and no Markdown renderer with HTML passthrough.
     ``tests/test_web_triage.py::test_message_summaries_and_notes_come_back_verbatim``
-    pins the contract, so no renderer can assume the API cleaned it.
+    pins the contract, so no renderer can assume a value here is free of markup.
     """
     message_id: int | None
     source: ContactSource
@@ -529,6 +531,61 @@ class ContactPositionOut(BaseModel):
     is_current: bool
     source: ContactSource
     observed_at: datetime
+
+
+# --- the user's own positions (spec 8.1, P1-26; #84) -------------------------
+
+
+def _title_or_company(title: str | None, company: str | None) -> None:
+    if not (title or "").strip() and not (company or "").strip():
+        raise ValueError("a position needs a title or a company")
+
+
+class UserPositionIn(BaseModel):
+    """One stint to add to the user's own job history. Needs a title or a company.
+
+    ``is_current`` left out is inferred: a start with no end is current,
+    anything else is not.
+    """
+
+    title: str | None = None
+    company: str | None = None
+    company_urn: str | None = None
+    started_on: date | None = None
+    ended_on: date | None = None
+    is_current: bool | None = None
+
+    @model_validator(mode="after")
+    def _needs_title_or_company(self) -> Self:
+        _title_or_company(self.title, self.company)
+        return self
+
+
+class UserPositionPatch(BaseModel):
+    """Change given fields of one of the user's own positions; a field left out is untouched."""
+
+    title: str | None = None
+    company: str | None = None
+    company_urn: str | None = None
+    started_on: date | None = None
+    ended_on: date | None = None
+    is_current: bool | None = None
+
+
+class UserPositionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str | None
+    company: str | None
+    company_urn: str | None
+    started_on: date | None
+    ended_on: date | None
+    is_current: bool
+    source: ContactSource
+    observed_at: datetime
+    created_at: datetime
+    updated_at: datetime
 
 
 class SyncedValueOut(BaseModel):
@@ -1242,12 +1299,12 @@ class TriageContactOut(BaseModel):
 class SharedCompanyOut(BaseModel):
     """A company this contact is at or was at, and the overlap with the address book.
 
-    Overlap with **the rest of your contacts**, not with you: nothing in the data
-    model records your own positions, so "you both worked at X" is not something
-    netkeeper can say, and a panel must not label it that way (spec 10.2).
-    ``contact_count`` is how many *other* live contacts are at that company now
-    and ``met_count`` how many of those you have already marked met, so the
-    reading is "you know four people there, three of whom you have met".
+    Overlap with **the rest of your contacts**, not with you: ``contact_count``
+    is how many *other* live contacts are at that company now and ``met_count``
+    how many of those you have already marked met, so the reading is "you know
+    four people there, three of whom you have met". This is **not** "you both
+    worked at X" -- that claim is :class:`OverlapOut`, a separate field with a
+    separate name, and a panel must never confuse the two (spec 10.2, #84).
 
     Every company the contact has is returned, including one where nobody else
     is, as ``contact_count: 0``; a client that only wants overlap filters those.
@@ -1258,6 +1315,26 @@ class SharedCompanyOut(BaseModel):
     company: str
     contact_count: int
     met_count: int
+
+
+class OverlapOut(BaseModel):
+    """Genuine you-and-them overlap: the same company, and the years it is known to overlap.
+
+    The actual LinkedIn "you both worked at X" signal (#84), computed from the
+    user's own job history (``/me/positions``) against this contact's. Unlike
+    :class:`SharedCompanyOut`, a match here means the two date ranges are not
+    provably disjoint -- a stint known to have ended before the other started
+    is excluded. ``started_on``/``ended_on`` are the tightest span the evidence
+    can stand behind; either or both are ``null`` when a bound is not known on
+    either side (a still-current position, or one nobody ever dated), which
+    still counts as overlap on the company alone.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    company: str
+    started_on: date | None
+    ended_on: date | None
 
 
 class TriageMessagesOut(BaseModel):
@@ -1275,11 +1352,17 @@ class TriageMessagesOut(BaseModel):
 
 
 class TriageEvidenceOut(BaseModel):
-    """Everything the panel shows beside the contact, in the same response as the contact."""
+    """Everything the panel shows beside the contact, in the same response as the contact.
+
+    ``shared_companies`` and ``worked_together`` are two different signals with
+    two different names (see :class:`SharedCompanyOut` and :class:`OverlapOut`);
+    neither implies the other.
+    """
 
     messages: TriageMessagesOut
     timeline: list[TimelineEntryOut]
     shared_companies: list[SharedCompanyOut]
+    worked_together: list[OverlapOut]
 
 
 class TriageCardOut(BaseModel):

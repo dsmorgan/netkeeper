@@ -327,11 +327,13 @@ async def test_message_summaries_and_notes_come_back_verbatim(
 ) -> None:
     """The API escapes nothing, on any of the three paths that carry someone else's words.
 
-    A LinkedIn message body is written by somebody else and the archive stores it
-    as it came (#75), HTML and all. The decision for the API is to return it
-    unchanged and leave escaping to whatever renders it, so this test pins the
-    contract: if the API ever starts cleaning, or ever stops, a renderer built
-    on the other assumption has to be told.
+    The archive importer cleans a LinkedIn message body to plain text at
+    import time (#75); this test is about a different layer, that the API
+    itself never escapes or strips a stored `summary` or `notes` value on the
+    way out, whatever it contains -- an interaction added by hand, as this one
+    is, can carry anything a person typed. The contract: if the API ever
+    starts cleaning, or ever stops, a renderer built on the other assumption
+    has to be told.
     """
     with session_scope(_factory(running_app), write=True) as session:
         user = _local_user(session)

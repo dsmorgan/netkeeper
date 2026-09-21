@@ -1037,6 +1037,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/me/positions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List My Positions
+         * @description The user's own job history, current first, then most recently started.
+         */
+        get: operations["list_my_positions"];
+        put?: never;
+        /**
+         * Create My Position
+         * @description Add one stint to the user's own job history by hand.
+         */
+        post: operations["create_my_position"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/positions/{position_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete My Position
+         * @description Delete one of the user's own positions.
+         */
+        delete: operations["delete_my_position"];
+        options?: never;
+        head?: never;
+        /**
+         * Update My Position
+         * @description Change fields of one of the user's own positions; a field left out is untouched.
+         */
+        patch: operations["update_my_position"];
+        trace?: never;
+    };
     "/api/v1/tags": {
         parameters: {
             query?: never;
@@ -3061,6 +3109,27 @@ export interface components {
             op: "or";
         };
         /**
+         * OverlapOut
+         * @description Genuine you-and-them overlap: the same company, and the years it is known to overlap.
+         *
+         *     The actual LinkedIn "you both worked at X" signal (#84), computed from the
+         *     user's own job history (``/me/positions``) against this contact's. Unlike
+         *     :class:`SharedCompanyOut`, a match here means the two date ranges are not
+         *     provably disjoint -- a stint known to have ended before the other started
+         *     is excluded. ``started_on``/``ended_on`` are the tightest span the evidence
+         *     can stand behind; either or both are ``null`` when a bound is not known on
+         *     either side (a still-current position, or one nobody ever dated), which
+         *     still counts as overlap on the company alone.
+         */
+        OverlapOut: {
+            /** Company */
+            company: string;
+            /** Ended On */
+            ended_on: string | null;
+            /** Started On */
+            started_on: string | null;
+        };
+        /**
          * PhoneKind
          * @enum {string}
          */
@@ -3161,12 +3230,12 @@ export interface components {
          * SharedCompanyOut
          * @description A company this contact is at or was at, and the overlap with the address book.
          *
-         *     Overlap with **the rest of your contacts**, not with you: nothing in the data
-         *     model records your own positions, so "you both worked at X" is not something
-         *     netkeeper can say, and a panel must not label it that way (spec 10.2).
-         *     ``contact_count`` is how many *other* live contacts are at that company now
-         *     and ``met_count`` how many of those you have already marked met, so the
-         *     reading is "you know four people there, three of whom you have met".
+         *     Overlap with **the rest of your contacts**, not with you: ``contact_count``
+         *     is how many *other* live contacts are at that company now and ``met_count``
+         *     how many of those you have already marked met, so the reading is "you know
+         *     four people there, three of whom you have met". This is **not** "you both
+         *     worked at X" -- that claim is :class:`OverlapOut`, a separate field with a
+         *     separate name, and a panel must never confuse the two (spec 10.2, #84).
          *
          *     Every company the contact has is returned, including one where nobody else
          *     is, as ``contact_count: 0``; a client that only wants overlap filters those.
@@ -3542,6 +3611,10 @@ export interface components {
         /**
          * TriageEvidenceOut
          * @description Everything the panel shows beside the contact, in the same response as the contact.
+         *
+         *     ``shared_companies`` and ``worked_together`` are two different signals with
+         *     two different names (see :class:`SharedCompanyOut` and :class:`OverlapOut`);
+         *     neither implies the other.
          */
         TriageEvidenceOut: {
             messages: components["schemas"]["TriageMessagesOut"];
@@ -3549,6 +3622,8 @@ export interface components {
             shared_companies: components["schemas"]["SharedCompanyOut"][];
             /** Timeline */
             timeline: (components["schemas"]["TimelineInteraction"] | components["schemas"]["TimelineSnapshot"])[];
+            /** Worked Together */
+            worked_together: components["schemas"]["OverlapOut"][];
         };
         /**
          * TriageMessagesOut
@@ -3721,6 +3796,78 @@ export interface components {
             kind: components["schemas"]["UserKind"];
             /** Timezone */
             timezone: string;
+        };
+        /**
+         * UserPositionIn
+         * @description One stint to add to the user's own job history. Needs a title or a company.
+         *
+         *     ``is_current`` left out is inferred: a start with no end is current,
+         *     anything else is not.
+         */
+        UserPositionIn: {
+            /** Company */
+            company?: string | null;
+            /** Company Urn */
+            company_urn?: string | null;
+            /** Ended On */
+            ended_on?: string | null;
+            /** Is Current */
+            is_current?: boolean | null;
+            /** Started On */
+            started_on?: string | null;
+            /** Title */
+            title?: string | null;
+        };
+        /** UserPositionOut */
+        UserPositionOut: {
+            /** Company */
+            company: string | null;
+            /** Company Urn */
+            company_urn: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Ended On */
+            ended_on: string | null;
+            /** Id */
+            id: number;
+            /** Is Current */
+            is_current: boolean;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            source: components["schemas"]["ContactSource"];
+            /** Started On */
+            started_on: string | null;
+            /** Title */
+            title: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * UserPositionPatch
+         * @description Change given fields of one of the user's own positions; a field left out is untouched.
+         */
+        UserPositionPatch: {
+            /** Company */
+            company?: string | null;
+            /** Company Urn */
+            company_urn?: string | null;
+            /** Ended On */
+            ended_on?: string | null;
+            /** Is Current */
+            is_current?: boolean | null;
+            /** Started On */
+            started_on?: string | null;
+            /** Title */
+            title?: string | null;
         };
         /** ValidationError */
         ValidationError: {
@@ -6090,6 +6237,133 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["UserOut"];
                 };
+            };
+        };
+    };
+    list_my_positions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserPositionOut"][];
+                };
+            };
+        };
+    };
+    create_my_position: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserPositionIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserPositionOut"];
+                };
+            };
+            /** @description Neither a title nor a company */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_my_position: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                position_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such position */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_my_position: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                position_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserPositionPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserPositionOut"];
+                };
+            };
+            /** @description No such position */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Neither a title nor a company */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

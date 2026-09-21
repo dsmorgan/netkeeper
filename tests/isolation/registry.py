@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from netkeeper.crm import import_runs as import_service
 from netkeeper.crm import lists as list_service
+from netkeeper.crm import positions as position_service
 from netkeeper.crm import tags as tag_service
 from netkeeper.crm.filters import parse_filter
 from netkeeper.crm.interactions import add_interaction
@@ -280,6 +281,11 @@ def _suggestion_key(_session: Session, _user: User) -> dict[str, str]:
     return {"key": "met_with_messages"}
 
 
+def _seed_positions(session: Session, user: User) -> int:
+    position_service.add_position(session, user, company="Seeded Works", title="Engineer")
+    return 1
+
+
 REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/contacts", seed_contacts, paged_count),
     ListEndpoint(
@@ -339,4 +345,5 @@ REGISTRY: list[ListEndpoint] = [
         paged_count,
         path_params=_suggestion_key,
     ),
+    ListEndpoint(f"{API_PREFIX}/me/positions", _seed_positions, array_count),
 ]

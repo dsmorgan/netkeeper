@@ -35,6 +35,7 @@ from netkeeper.linkedin.archive import (
     parse_connected_on,
     parse_invitation_date,
     parse_message_date,
+    parse_position_date,
     public_id_from_url,
 )
 from netkeeper.linkedin.conversations import Owner, detect_owner, group
@@ -157,6 +158,20 @@ def test_invitation_dates_are_month_first_and_read_as_utc() -> None:
 
 
 @pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Jun 2026", date(2026, 6, 1)),
+        ("Jan 2018", date(2018, 1, 1)),
+        ("", None),
+        (None, None),
+        ("2026-06-01", None),
+    ],
+)
+def test_position_dates_are_month_and_year_only(text: str | None, expected: date | None) -> None:
+    assert parse_position_date(text) == expected
+
+
+@pytest.mark.parametrize(
     ("url", "expected"),
     [
         ("https://www.linkedin.com/in/Ada-Fictional", "ada-fictional"),
@@ -175,12 +190,13 @@ def test_public_id_comes_from_the_profile_url(url: str | None, expected: str | N
 
 def test_the_fixture_holds_only_the_files_it_is_meant_to() -> None:
     """A real export has thirty-odd more members, several holding the owner's own
-    address and phone number. Only these five belong here, and only these five
+    address and phone number. Only these six belong here, and only these six
     are hand-written, so anything else appearing is a real export leaking in.
     """
     assert sorted(path.name for path in FIXTURES.iterdir()) == [
         "Connections.csv",
         "Invitations.csv",
+        "Positions.csv",
         "Profile.csv",
         "guide_messages.csv",
         "messages.csv",
@@ -191,6 +207,7 @@ def test_a_directory_yields_the_tables_in_reading_order() -> None:
     with open_archive(FIXTURES) as archive:
         assert [(member.name, member.kind) for member in archive.members] == [
             ("Connections.csv", ArchiveKind.CONNECTIONS),
+            ("Positions.csv", ArchiveKind.POSITIONS),
             ("messages.csv", ArchiveKind.MESSAGES),
             ("Invitations.csv", ArchiveKind.INVITATIONS),
             ("Profile.csv", ArchiveKind.PROFILE),
@@ -207,6 +224,7 @@ def test_a_zip_reads_the_same_as_the_directory(tmp_path: Path) -> None:
     with open_archive(_zipped(tmp_path)) as archive:
         assert [member.kind for member in archive.members] == [
             ArchiveKind.CONNECTIONS,
+            ArchiveKind.POSITIONS,
             ArchiveKind.MESSAGES,
             ArchiveKind.INVITATIONS,
             ArchiveKind.PROFILE,
@@ -220,7 +238,7 @@ def test_a_zip_arrives_as_a_stream_too(tmp_path: Path) -> None:
     data = _zipped(tmp_path).read_bytes()
     with open_archive(io.BytesIO(data), filename="upload.zip") as archive:
         assert archive.name == "upload.zip"
-        assert len(archive.members) == 4
+        assert len(archive.members) == 5
 
 
 def test_the_zip_names_the_table_it_does_not_read(tmp_path: Path) -> None:
@@ -750,6 +768,27 @@ def test_invitations_carry_direction_and_both_parties() -> None:
     assert rows[1].inviter_public_id == "bo-placeholder"
     assert rows[3].invitee_public_id is None
     assert rows[5].sent_at is None
+
+
+# --- positions ----------------------------------------------------------------
+
+
+def test_positions_carry_company_title_and_a_month_precision_span() -> None:
+    with open_archive(FIXTURES) as archive:
+        rows = list(archive.positions(_member(archive, ArchiveKind.POSITIONS)))
+    assert [row.company for row in rows] == [
+        "Fictional Works, Inc.",
+        "Notional Group",
+        "Placeholder Ltd",
+        None,
+    ]
+    assert rows[0].started_on == date(2018, 1, 1)
+    assert rows[0].ended_on == date(2019, 12, 1)
+    assert rows[1].started_on == date(2020, 6, 1)
+    assert rows[1].ended_on is None  # no Finished On: still current
+    assert rows[2].started_on is None
+    assert rows[2].ended_on is None  # neither date at all
+    assert rows[3].company is None and rows[3].title is None
 
 
 # --- the owner's own profile ------------------------------------------------

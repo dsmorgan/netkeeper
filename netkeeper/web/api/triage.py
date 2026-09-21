@@ -30,6 +30,7 @@ from netkeeper.models import ContactMet, MetSource, TriageDecision
 from netkeeper.web.deps import CurrentUser, SessionDep
 from netkeeper.web.schemas import (
     InteractionOut,
+    OverlapOut,
     PreferredNameIn,
     PreferredNameOut,
     SharedCompanyOut,
@@ -371,6 +372,7 @@ def _card_out(card: Card | None) -> TriageCardOut | None:
             shared_companies=[
                 SharedCompanyOut.model_validate(item) for item in evidence.shared_companies
             ],
+            worked_together=[OverlapOut.model_validate(item) for item in evidence.worked_together],
         ),
     )
 

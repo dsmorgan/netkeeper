@@ -34,6 +34,7 @@ from netkeeper.models import (
     InteractionKind,
     RuleField,
     User,
+    UserPosition,
 )
 from netkeeper.scoping import scoped
 
@@ -120,6 +121,13 @@ def test_the_sample_imports_with_the_expected_counts(
     assert invitations.undirected == 1
     assert invitations.undated == 1
     assert invitations.already_present == 0
+
+    positions = report.positions
+    assert positions.rows == 4
+    assert positions.created == 3  # the fourth row names neither a company nor a title
+    assert positions.updated == 0
+    assert positions.skipped == 1
+    assert positions.undated == 1  # "Placeholder Ltd" carries neither date
 
     assert len(_contacts(writer, user)) == 7
     assert len(_interactions(writer, user)) == 10
@@ -355,6 +363,111 @@ def test_a_long_body_is_trimmed(writer: Session, user: User, tmp_path: Path) -> 
     assert summaries[0] is not None
     assert len(summaries[0]) == SUMMARY_MAX_CHARS
     assert summaries[0].endswith("…")
+
+
+def test_html_message_bodies_become_plain_text(writer: Session, user: User, tmp_path: Path) -> None:
+    """LinkedIn InMail arrives as HTML; the stored summary is plain text (#75)."""
+    export = tmp_path / "export"
+    export.mkdir()
+    (export / "Connections.csv").write_text(
+        "First Name,Last Name,URL,Email Address,Company,Position,Connected On\n"
+        "Ada,Fictional,https://www.linkedin.com/in/ada-fictional,,Works,Eng,12 Mar 2019\n",
+        encoding="utf-8",
+    )
+    body = (
+        "<p class='spinmail-quill-editor'>Hello &amp; welcome</p>"
+        "<p class='spinmail-quill-editor'>Second line, cut off mid tag <a href='foo"
+    )
+    (export / "messages.csv").write_text(
+        "CONVERSATION ID,CONVERSATION TITLE,FROM,SENDER PROFILE URL,TO,"
+        "RECIPIENT PROFILE URLS,DATE,SUBJECT,CONTENT,FOLDER\n"
+        f"c1,,Nettie Keeperton,https://www.linkedin.com/in/nettie-keeperton,Ada Fictional,"
+        f'https://www.linkedin.com/in/ada-fictional,2023-05-01 14:22:10 UTC,,"{body}",INBOX\n',
+        encoding="utf-8",
+    )
+    with open_archive(export) as opened:
+        import_archive(
+            writer, user, opened, observed_at=OBSERVED, owner_public_id="nettie-keeperton"
+        )
+    summary = _interactions(writer, user)[0].summary
+    assert summary == "Hello & welcome\nSecond line, cut off mid tag"
+    assert "<" not in summary and ">" not in summary
+
+
+def test_a_long_plain_text_body_is_cut_on_a_word_boundary(
+    writer: Session, user: User, tmp_path: Path
+) -> None:
+    words = "lorem ipsum dolor sit amet consectetur " * 100
+    assert len(words) > SUMMARY_MAX_CHARS
+    export = tmp_path / "export"
+    export.mkdir()
+    (export / "Connections.csv").write_text(
+        "First Name,Last Name,URL,Email Address,Company,Position,Connected On\n"
+        "Ada,Fictional,https://www.linkedin.com/in/ada-fictional,,Works,Eng,12 Mar 2019\n",
+        encoding="utf-8",
+    )
+    (export / "messages.csv").write_text(
+        "CONVERSATION ID,CONVERSATION TITLE,FROM,SENDER PROFILE URL,TO,"
+        "RECIPIENT PROFILE URLS,DATE,SUBJECT,CONTENT,FOLDER\n"
+        f"c1,,Nettie Keeperton,https://www.linkedin.com/in/nettie-keeperton,Ada Fictional,"
+        f'https://www.linkedin.com/in/ada-fictional,2023-05-01 14:22:10 UTC,,"{words}",INBOX\n',
+        encoding="utf-8",
+    )
+    with open_archive(export) as opened:
+        import_archive(
+            writer, user, opened, observed_at=OBSERVED, owner_public_id="nettie-keeperton"
+        )
+    summary = _interactions(writer, user)[0].summary
+    assert summary is not None
+    assert summary.endswith("…")
+    plain = summary.removesuffix("…")
+    assert not plain.endswith(" ")  # rstripped after the cut
+    assert len(plain) < SUMMARY_MAX_CHARS - 1  # backed off the hard cap to land on a word
+    assert words.strip()[: len(plain)] == plain  # a prefix of the original, not mangled
+    assert words.strip()[len(plain)] == " "  # and the cut itself landed on whitespace
+
+
+# --- positions ----------------------------------------------------------
+
+
+def test_positions_become_the_users_own_job_history(
+    writer: Session, user: User, archive: Archive
+) -> None:
+    _run(writer, user, archive)
+    rows = {row.company: row for row in writer.scalars(scoped(user, UserPosition)) if row.company}
+    assert set(rows) == {"Fictional Works, Inc.", "Notional Group", "Placeholder Ltd"}
+    assert rows["Fictional Works, Inc."].title == "Founding Engineer"
+    assert rows["Fictional Works, Inc."].started_on == date(2018, 1, 1)
+    assert rows["Fictional Works, Inc."].ended_on == date(2019, 12, 1)
+    assert rows["Fictional Works, Inc."].is_current is False
+    # No Finished On: current.
+    assert rows["Notional Group"].started_on == date(2020, 6, 1)
+    assert rows["Notional Group"].ended_on is None
+    assert rows["Notional Group"].is_current is True
+    # Neither date at all: not current, and nothing crashes over the missing pair.
+    assert rows["Placeholder Ltd"].started_on is None
+    assert rows["Placeholder Ltd"].ended_on is None
+    assert rows["Placeholder Ltd"].is_current is False
+    assert all(row.source is ContactSource.ARCHIVE for row in rows.values())
+
+
+def test_a_position_re_import_does_not_duplicate(
+    writer: Session, user: User, archive: Archive
+) -> None:
+    _run(writer, user, archive)
+    before = len(list(writer.scalars(scoped(user, UserPosition))))
+
+    second = _run(writer, user, archive)
+
+    assert second.positions.created == 0
+    assert second.positions.updated == 3
+    assert len(list(writer.scalars(scoped(user, UserPosition)))) == before
+
+
+def test_positions_are_scoped_to_the_user(writer: Session, user: User, archive: Archive) -> None:
+    other = factories.make_user(writer)
+    _run(writer, user, archive)
+    assert list(writer.scalars(scoped(other, UserPosition))) == []
 
 
 # --- re-import --------------------------------------------------------------
