@@ -4922,6 +4922,44 @@
         "title": "PhoneKind",
         "type": "string"
       },
+      "PreferredNameIn": {
+        "description": "What you call this person. Empty means \"use the first name\".",
+        "properties": {
+          "preferred_name": {
+            "maxLength": 200,
+            "title": "Preferred Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "preferred_name"
+        ],
+        "title": "PreferredNameIn",
+        "type": "object"
+      },
+      "PreferredNameOut": {
+        "description": "The stored name (the first name when the edit was empty) and the undoable decision.",
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "decision": {
+            "$ref": "#/components/schemas/TriageDecisionOut"
+          },
+          "preferred_name": {
+            "title": "Preferred Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contact_id",
+          "preferred_name",
+          "decision"
+        ],
+        "title": "PreferredNameOut",
+        "type": "object"
+      },
       "RepliedIn": {
         "additionalProperties": false,
         "properties": {
@@ -5137,6 +5175,30 @@
           }
         },
         "title": "SavedViewPatch",
+        "type": "object"
+      },
+      "SharedCompanyOut": {
+        "description": "A company this contact is at or was at, and the overlap with the address book.\n\n``contact_count`` is how many *other* live contacts are at that company now,\n``met_count`` how many of those you have already marked met.",
+        "properties": {
+          "company": {
+            "title": "Company",
+            "type": "string"
+          },
+          "contact_count": {
+            "title": "Contact Count",
+            "type": "integer"
+          },
+          "met_count": {
+            "title": "Met Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "company",
+          "contact_count",
+          "met_count"
+        ],
+        "title": "SharedCompanyOut",
         "type": "object"
       },
       "SnapshotOut": {
@@ -5702,6 +5764,682 @@
           "snapshot"
         ],
         "title": "TimelineSnapshot",
+        "type": "object"
+      },
+      "TriageCardOut": {
+        "description": "One contact with its evidence: one request is enough to triage it.",
+        "properties": {
+          "contact": {
+            "$ref": "#/components/schemas/TriageContactOut"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/TriageEvidenceOut"
+          }
+        },
+        "required": [
+          "contact",
+          "evidence"
+        ],
+        "title": "TriageCardOut",
+        "type": "object"
+      },
+      "TriageContactOut": {
+        "description": "The contact under triage: the fields the screen shows (spec 10.2).",
+        "properties": {
+          "connected_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connected On"
+          },
+          "current_company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Company"
+          },
+          "current_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Title"
+          },
+          "do_not_contact": {
+            "title": "Do Not Contact",
+            "type": "boolean"
+          },
+          "first_name": {
+            "title": "First Name",
+            "type": "string"
+          },
+          "headline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headline"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_name": {
+            "title": "Last Name",
+            "type": "string"
+          },
+          "li_public_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Public Id"
+          },
+          "li_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Url"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "met": {
+            "$ref": "#/components/schemas/ContactMet"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "preferred_name": {
+            "title": "Preferred Name",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "$ref": "#/components/schemas/TriageTagOut"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "triaged_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Triaged At"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "li_public_id",
+          "li_url",
+          "first_name",
+          "last_name",
+          "preferred_name",
+          "headline",
+          "current_title",
+          "current_company",
+          "location",
+          "connected_on",
+          "met",
+          "triaged_at",
+          "do_not_contact",
+          "notes",
+          "tags",
+          "updated_at"
+        ],
+        "title": "TriageContactOut",
+        "type": "object"
+      },
+      "TriageDecisionIn": {
+        "description": "The `m`, `n`, or `s` key on one contact.\n\n``prefetch_after_id`` is the id of the last card the client already holds;\nthe response prefetches the one after it, so a client that keeps two cards in\nhand never waits. Left out, the prefetch follows the contact just decided.",
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "met": {
+            "$ref": "#/components/schemas/ContactMet"
+          },
+          "prefetch_after_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prefetch After Id"
+          }
+        },
+        "required": [
+          "contact_id",
+          "met"
+        ],
+        "title": "TriageDecisionIn",
+        "type": "object"
+      },
+      "TriageDecisionKind": {
+        "description": "What a decision was. The kind steers nothing in undo; it is for the history.",
+        "enum": [
+          "decide",
+          "preferred_name",
+          "bulk_met"
+        ],
+        "title": "TriageDecisionKind",
+        "type": "string"
+      },
+      "TriageDecisionOut": {
+        "description": "One row of the triage log: what changed, as it was and as the decision left it.",
+        "properties": {
+          "after_state": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "After State",
+            "type": "object"
+          },
+          "batch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Id"
+          },
+          "before_state": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Before State",
+            "type": "object"
+          },
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "decided_at": {
+            "format": "date-time",
+            "title": "Decided At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TriageDecisionKind"
+          },
+          "undone_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Undone At"
+          }
+        },
+        "required": [
+          "id",
+          "contact_id",
+          "kind",
+          "before_state",
+          "after_state",
+          "batch_id",
+          "decided_at",
+          "undone_at"
+        ],
+        "title": "TriageDecisionOut",
+        "type": "object"
+      },
+      "TriageDecisionResult": {
+        "description": "The decision, the next contact with its evidence, and the progress counters.",
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/TriageDecisionOut"
+          },
+          "next": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TriageCardOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "progress": {
+            "$ref": "#/components/schemas/TriageProgressOut"
+          }
+        },
+        "required": [
+          "decision",
+          "next",
+          "progress"
+        ],
+        "title": "TriageDecisionResult",
+        "type": "object"
+      },
+      "TriageEvidenceOut": {
+        "description": "Everything the panel shows beside the contact, in the same response as the contact.",
+        "properties": {
+          "messages": {
+            "$ref": "#/components/schemas/TriageMessagesOut"
+          },
+          "shared_companies": {
+            "items": {
+              "$ref": "#/components/schemas/SharedCompanyOut"
+            },
+            "title": "Shared Companies",
+            "type": "array"
+          },
+          "timeline": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "interaction": "#/components/schemas/TimelineInteraction",
+                  "snapshot": "#/components/schemas/TimelineSnapshot"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/TimelineInteraction"
+                },
+                {
+                  "$ref": "#/components/schemas/TimelineSnapshot"
+                }
+              ]
+            },
+            "title": "Timeline",
+            "type": "array"
+          }
+        },
+        "required": [
+          "messages",
+          "timeline",
+          "shared_companies"
+        ],
+        "title": "TriageEvidenceOut",
+        "type": "object"
+      },
+      "TriageMessagesOut": {
+        "description": "The message history with this contact: its shape, and the newest few.",
+        "properties": {
+          "first_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First At"
+          },
+          "inbound": {
+            "title": "Inbound",
+            "type": "integer"
+          },
+          "last_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last At"
+          },
+          "outbound": {
+            "title": "Outbound",
+            "type": "integer"
+          },
+          "recent": {
+            "items": {
+              "$ref": "#/components/schemas/InteractionOut"
+            },
+            "title": "Recent",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "inbound",
+          "outbound",
+          "first_at",
+          "last_at",
+          "recent"
+        ],
+        "title": "TriageMessagesOut",
+        "type": "object"
+      },
+      "TriageProgressOut": {
+        "description": "Triaged against total, and how many are left in the queue that was asked for.",
+        "properties": {
+          "by_state": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/ContactMet"
+            },
+            "title": "By State",
+            "type": "object"
+          },
+          "remaining": {
+            "title": "Remaining",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "triaged": {
+            "title": "Triaged",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "triaged",
+          "remaining",
+          "by_state"
+        ],
+        "title": "TriageProgressOut",
+        "type": "object"
+      },
+      "TriageQueueOut": {
+        "description": "The contact to show now, the one after it, and the progress counters.\n\n``next`` is the prefetch: hold it, and deciding ``card`` costs no wait. Both\nare ``null`` when the queue is empty.",
+        "properties": {
+          "card": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TriageCardOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TriageCardOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "progress": {
+            "$ref": "#/components/schemas/TriageProgressOut"
+          }
+        },
+        "required": [
+          "card",
+          "next",
+          "progress"
+        ],
+        "title": "TriageQueueOut",
+        "type": "object"
+      },
+      "TriageSuggestionApplyIn": {
+        "description": "``expected_count`` is the count the banner showed; a different one answers `409`.",
+        "properties": {
+          "expected_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Count"
+          }
+        },
+        "title": "TriageSuggestionApplyIn",
+        "type": "object"
+      },
+      "TriageSuggestionApplyOut": {
+        "description": "How many contacts the suggestion touched, and the batch one undo takes back.",
+        "properties": {
+          "applied": {
+            "title": "Applied",
+            "type": "integer"
+          },
+          "batch_id": {
+            "title": "Batch Id",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "progress": {
+            "$ref": "#/components/schemas/TriageProgressOut"
+          }
+        },
+        "required": [
+          "key",
+          "applied",
+          "batch_id",
+          "progress"
+        ],
+        "title": "TriageSuggestionApplyOut",
+        "type": "object"
+      },
+      "TriageSuggestionOut": {
+        "description": "A bulk action worth offering, with the number of contacts it would touch.\n\nOffered, never applied on its own: the count is a preview and the apply is a\nseparate call.",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "title",
+          "description",
+          "count"
+        ],
+        "title": "TriageSuggestionOut",
+        "type": "object"
+      },
+      "TriageTagOut": {
+        "description": "A tag as the triage card shows it; the tags resource carries the counts.",
+        "properties": {
+          "color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TagKind"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "color",
+          "kind"
+        ],
+        "title": "TriageTagOut",
+        "type": "object"
+      },
+      "TriageUndoIn": {
+        "description": "``force`` restores the previous state even where the contact has moved on since.\n\nWithout it a contact that changed after the decision answers `409` and\nnothing is written.",
+        "properties": {
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          }
+        },
+        "title": "TriageUndoIn",
+        "type": "object"
+      },
+      "TriageUndoOut": {
+        "description": "What the undo put back.\n\n``card`` is the restored contact, ready to show, when one decision was\nundone; a bulk batch has no single contact and ``decisions`` counts the rows.\n``forced`` lists the contacts whose newer state was overwritten.",
+        "properties": {
+          "batch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Id"
+          },
+          "card": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TriageCardOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "decisions": {
+            "title": "Decisions",
+            "type": "integer"
+          },
+          "forced": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Forced",
+            "type": "array"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TriageDecisionKind"
+          },
+          "progress": {
+            "$ref": "#/components/schemas/TriageProgressOut"
+          }
+        },
+        "required": [
+          "kind",
+          "decisions",
+          "batch_id",
+          "forced",
+          "card",
+          "progress"
+        ],
+        "title": "TriageUndoOut",
         "type": "object"
       },
       "UserKind": {
@@ -8867,6 +9605,440 @@
         "summary": "Get Task",
         "tags": [
           "tasks"
+        ]
+      }
+    },
+    "/api/v1/triage/contacts/{contact_id}/preferred-name": {
+      "put": {
+        "description": "The `p` key: what you call this person, as a manual edit no later sync overwrites.\n\nAn empty name falls back to the first name. The edit is undoable like a\ndecision.",
+        "operationId": "set_preferred_name",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreferredNameIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferredNameOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Preferred Name",
+        "tags": [
+          "triage"
+        ]
+      }
+    },
+    "/api/v1/triage/decisions": {
+      "post": {
+        "description": "Record `met`, `not_met`, or `skip` on a contact and return the next card with it.\n\nThe response carries the contact after `prefetch_after_id` (or after the one\njust decided), so triaging a run costs one request per contact.",
+        "operationId": "decide_triage",
+        "parameters": [
+          {
+            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+            "in": "query",
+            "name": "states",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/components/schemas/ContactMet"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+              "title": "States"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TriageDecisionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriageDecisionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Decide Triage",
+        "tags": [
+          "triage"
+        ]
+      }
+    },
+    "/api/v1/triage/next": {
+      "get": {
+        "description": "The next contact to triage with its evidence, the one after it, and the progress.\n\n`after_id` moves on without deciding (the `→` key). Both cards are `null`\nwhen the queue is empty.",
+        "operationId": "get_next_triage_contact",
+        "parameters": [
+          {
+            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+            "in": "query",
+            "name": "states",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/components/schemas/ContactMet"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+              "title": "States"
+            }
+          },
+          {
+            "description": "Cursor: the first contact past this id, for moving on without deciding.",
+            "in": "query",
+            "name": "after_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Cursor: the first contact past this id, for moving on without deciding.",
+              "title": "After Id"
+            }
+          },
+          {
+            "description": "Also return the contact after this one, so the client never waits.",
+            "in": "query",
+            "name": "prefetch",
+            "required": false,
+            "schema": {
+              "default": true,
+              "description": "Also return the contact after this one, so the client never waits.",
+              "title": "Prefetch",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriageQueueOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Next Triage Contact",
+        "tags": [
+          "triage"
+        ]
+      }
+    },
+    "/api/v1/triage/suggestions": {
+      "get": {
+        "description": "The bulk actions worth offering, with the count each would apply to.\n\nA suggestion that matches nobody is left out, so the banner shows only when\nthere is something to accept. Nothing is applied until `apply`.",
+        "operationId": "list_triage_suggestions",
+        "parameters": [
+          {
+            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+            "in": "query",
+            "name": "states",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/components/schemas/ContactMet"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+              "title": "States"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TriageSuggestionOut"
+                  },
+                  "title": "Response List Triage Suggestions",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Triage Suggestions",
+        "tags": [
+          "triage"
+        ]
+      }
+    },
+    "/api/v1/triage/suggestions/{key}/apply": {
+      "post": {
+        "description": "Apply a bulk suggestion as one batch that a single undo takes back.\n\nSend the `expected_count` the banner showed: a set that has moved on since\nanswers `409` rather than touching more people than the banner named.",
+        "operationId": "apply_triage_suggestion",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+            "in": "query",
+            "name": "states",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/components/schemas/ContactMet"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+              "title": "States"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/TriageSuggestionApplyIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriageSuggestionApplyOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No suggestion by that key"
+          },
+          "409": {
+            "description": "The suggestion matches a different count now"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Apply Triage Suggestion",
+        "tags": [
+          "triage"
+        ]
+      }
+    },
+    "/api/v1/triage/undo": {
+      "post": {
+        "description": "Undo the newest triage action, restoring the previous state exactly.\n\nA bulk apply is undone as one batch. `409` when the contact changed after the\ndecision, so nothing is overwritten silently; `force` in the body restores\nanyway.",
+        "operationId": "undo_triage",
+        "parameters": [
+          {
+            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+            "in": "query",
+            "name": "states",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/components/schemas/ContactMet"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+              "title": "States"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/TriageUndoIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriageUndoOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No triage decision left to undo"
+          },
+          "409": {
+            "description": "The contact changed after the decision; retry with `force`"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Undo Triage",
+        "tags": [
+          "triage"
         ]
       }
     },

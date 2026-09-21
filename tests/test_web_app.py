@@ -72,6 +72,12 @@ API_PATHS = {
     "/api/v1/lists/{list_id}/members/{contact_id}",
     "/api/v1/views",
     "/api/v1/views/{view_id}",
+    "/api/v1/triage/next",
+    "/api/v1/triage/decisions",
+    "/api/v1/triage/undo",
+    "/api/v1/triage/contacts/{contact_id}/preferred-name",
+    "/api/v1/triage/suggestions",
+    "/api/v1/triage/suggestions/{key}/apply",
 }
 
 
@@ -184,6 +190,7 @@ def test_known_api_modules_are_discovered() -> None:
         "me",
         "tags",
         "tasks",
+        "triage",
     ]
 
 

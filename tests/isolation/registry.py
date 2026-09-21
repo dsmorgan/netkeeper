@@ -18,6 +18,7 @@ from netkeeper.models import (
     Contact,
     ContactList,
     ContactSnapshot,
+    ContactSource,
     ImportRun,
     InteractionKind,
     ListKind,
@@ -203,6 +204,26 @@ def _seed_views(session: Session, user: User) -> int:
     return 1
 
 
+def _seed_triage_suggestions(session: Session, user: User) -> int:
+    """A contact with message history, which is what the bulk suggestion offers to mark met.
+
+    One suggestion, however many contacts it covers: the endpoint lists the
+    actions worth offering, and one that matches nobody is left out, so the
+    unseeded user is served an empty array.
+    """
+    contact = factories.make_contact(session, user)
+    add_interaction(
+        session,
+        user,
+        contact.id,
+        InteractionKind.LI_IN,
+        SEED_AT,
+        "a message",
+        source=ContactSource.ARCHIVE,
+    )
+    return 1
+
+
 REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/contacts", seed_contacts, paged_count),
     ListEndpoint(
@@ -242,4 +263,5 @@ REGISTRY: list[ListEndpoint] = [
         path_params=own_list,
     ),
     ListEndpoint(f"{API_PREFIX}/views", _seed_views, array_count),
+    ListEndpoint(f"{API_PREFIX}/triage/suggestions", _seed_triage_suggestions, array_count),
 ]
