@@ -12,11 +12,20 @@
  * - the event is already handled (`defaultPrevented`), so a component that
  *   binds a key for itself wins;
  * - the target is a text field, a select, or a `contenteditable`, so typing a
- *   name into the `p` editor types it instead of marking people met.
+ *   name into the `p` editor types it instead of marking people met;
+ * - the keystroke is an auto-repeat.
  *
- * That last rule is the whole reason this screen has no modal: the editors and
- * the help overlay move focus but never trap it, and the map stays live except
- * where a keystroke obviously means a letter.
+ * The text-field rule is the whole reason this screen has no modal: the editors
+ * and the help overlay move focus but never trap it, and the map stays live
+ * except where a keystroke obviously means a letter.
+ *
+ * The auto-repeat rule is about what a key *means* here. Every key on this
+ * screen is a judgement about one person, and a judgement cannot be held down:
+ * a finger resting on `m` for a second marks thirty people met, and the
+ * two-card buffer does not slow it, because it rate-limits a burst inside one
+ * tick and an auto-repeat arrives as thirty separate ones. `→` is excluded for
+ * the same reason rather than a different one — holding it skims past contacts
+ * too fast to have been read, and each repeat costs a request.
  */
 
 import { useEffect } from 'react'
@@ -41,6 +50,7 @@ export function useTriageKeys(options: {
     if (!enabled) return
     function handle(event: KeyboardEvent) {
       if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return
+      if (event.repeat) return
       if (isTyping(event.target)) return
       const action = actionFor(event.key)
       if (action === null) return

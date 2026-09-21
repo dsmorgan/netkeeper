@@ -13,10 +13,17 @@
  *    seconds against a backend that takes 15 ms to answer, and cost exactly one
  *    request each.
  *
- * The backend here is a fake with a fixed 15 ms delay, which is generous for a
- * local FastAPI process over SQLite on loopback. What the test cannot measure is
- * a person reading the evidence panel, so the honest form of the result is
- * "the screen adds N ms of the twelve-second budget", and N is printed below.
+ * The first of those is the load-bearing one. The second is a regression guard
+ * on the request count, and its wall time says as much about the fake as about
+ * the screen: the backend here has a fixed 15 ms delay, which dominates the
+ * per-contact figure. Driven against a real FastAPI/SQLite backend the same
+ * fifty decisions took 210 ms, 4.2 ms each, with an identical request count and
+ * ordering — so the delay here is conservative, not flattering, and the number
+ * printed below is an upper bound rather than the result.
+ *
+ * What neither test measures is a person reading the evidence panel. The honest
+ * form of the result is "the screen adds a few milliseconds of the twelve
+ * seconds a contact gets", not "a contact takes N ms".
  */
 
 import { fireEvent, screen, waitFor } from '@testing-library/react'

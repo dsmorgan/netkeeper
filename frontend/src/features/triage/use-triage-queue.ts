@@ -30,8 +30,10 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
 
 import {
+  LIVENESS_CONFLICTS,
   TriageError,
   applySuggestion,
+  conflictFieldOf,
   decide as decideRequest,
   fetchQueue,
   setPreferredName,
@@ -57,10 +59,26 @@ export interface TriageQueueState {
   exhausted: boolean
   /** The queue could not be loaded at all: the screen shows a retry. */
   loadError: string | null
-  /** One action failed; the screen keeps working. */
-  actionError: string | null
+  /**
+   * Actions that failed, oldest first. The screen keeps working around them.
+   *
+   * A list rather than one slot, and never cleared by the next keystroke. A
+   * decision is recorded behind a card that has already left the screen, so the
+   * only evidence that a write did not land is this banner; a run of fifty that
+   * quietly loses one would end with the person believing fifty were triaged.
+   * It goes away when they dismiss it and not before.
+   */
+  actionErrors: string[]
   /** A `409` from undo, as the backend worded it. The person chooses what happens. */
   undoConflict: string | null
+  /**
+   * The contact field that `409` named, which says what kind of refusal it was.
+   *
+   * `archived_at` or `merged_into_id` mean the contact has left the queue, and
+   * forcing restores it without putting it back; anything else is an ordinary
+   * edit in between, and forcing leaves the contact exactly where it was.
+   */
+  undoConflictField: string | null
   /**
    * What `u` would take back, newest first.
    *
@@ -91,8 +109,9 @@ const INITIAL: TriageQueueState = {
   pendingDecisions: 0,
   exhausted: false,
   loadError: null,
-  actionError: null,
+  actionErrors: [],
   undoConflict: null,
+  undoConflictField: null,
   undoable: [],
   taggedSinceUndoable: false,
   restored: null,
@@ -136,6 +155,11 @@ const MET_LABELS: Record<ContactMet, string> = {
   unknown: 'untriaged',
 }
 
+/** Append a failure without disturbing the ones already on screen. */
+function withFailure(state: TriageQueueState, failure: string): TriageQueueState {
+  return { ...state, actionErrors: [...state.actionErrors, failure] }
+}
+
 function nameOf(card: TriageCard): string {
   const { preferred_name, last_name } = card.contact
   return `${preferred_name} ${last_name}`.trim()
@@ -150,6 +174,19 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
   const chain = useRef<Promise<unknown>>(Promise.resolve())
   /** Bumped per undoable action, so a retracted one is found by identity. */
   const sequence = useRef(0)
+  /**
+   * Decisions whose write failed, by `seq`, with the contact each one named.
+   *
+   * Serializing the requests puts them in keypress order, which is enough while
+   * they all land. It is not enough when one does not: `u` pressed underneath a
+   * decision that is still in flight means "take back *that* decision", and if
+   * that decision never reached the server's stack, the undo would reach past
+   * it and silently revert the contact before it — one the queue will not serve
+   * again either, because both sit behind the frontier. So the intent is
+   * captured when `u` is pressed and checked against this map when its turn
+   * comes.
+   */
+  const retracted = useRef(new Map<number, string>())
   const states = useMemo(() => statesFor(filter), [filter])
 
   const commit = useCallback((update: (state: TriageQueueState) => TriageQueueState) => {
@@ -232,8 +269,10 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
         ...state,
         cards: state.cards.slice(1),
         pendingDecisions: state.pendingDecisions + 1,
-        actionError: null,
+        // `actionErrors` is deliberately untouched: a write that did not land
+        // must not be erased by the next keystroke.
         undoConflict: null,
+        undoConflictField: null,
         restored: null,
         taggedSinceUndoable: false,
         undoable: [{ seq, kind: 'decision', label: decisionLabel }, ...state.undoable],
@@ -248,13 +287,20 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
           })
           absorb(result.next, result.progress, true)
         } catch (error) {
-          commit((state) => ({
-            ...state,
-            pendingDecisions: state.pendingDecisions - 1,
-            // Nothing was written, so `u` must not offer to take it back.
-            undoable: state.undoable.filter((action) => action.seq !== seq),
-            actionError: `${nameOf(card)} was not recorded: ${messageOf(error, 'the request failed')}`,
-          }))
+          // Nothing was written. Retracting the entry keeps `u` from offering to
+          // take it back, and the note keeps an undo that was already pressed
+          // underneath this decision from reaching past it to the one before.
+          retracted.current.set(seq, nameOf(card))
+          commit((state) =>
+            withFailure(
+              {
+                ...state,
+                pendingDecisions: state.pendingDecisions - 1,
+                undoable: state.undoable.filter((action) => action.seq !== seq),
+              },
+              `${nameOf(card)} was not recorded: ${messageOf(error, 'the request failed')}`,
+            ),
+          )
         }
       })
     },
@@ -275,22 +321,40 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
         })
         absorb(queue.card, queue.progress, false)
       } catch (error) {
-        commit((state) => ({
-          ...state,
-          actionError: messageOf(error, 'the next contact could not be read'),
-        }))
+        commit((state) =>
+          withFailure(state, messageOf(error, 'the next contact could not be read')),
+        )
       }
     })
   }, [absorb, commit, enqueue, states])
 
   const undo = useCallback(
-    (options?: { force?: boolean }): Promise<void> =>
-      enqueue(async () => {
+    (options?: { force?: boolean }): Promise<void> => {
+      // Both of these are read when the key is pressed, not when the request
+      // goes out, because they are what the person meant by pressing it.
+      const meant = stateRef.current.undoable[0]?.seq
+      const force = options?.force ?? false
+      // A force answers a refusal the screen is still showing, and the field it
+      // named says whether the contact is merely edited or gone from the queue.
+      const overLiveness =
+        force &&
+        stateRef.current.undoConflictField !== null &&
+        LIVENESS_CONFLICTS.has(stateRef.current.undoConflictField)
+      return enqueue(async () => {
+        const retraction = meant === undefined ? undefined : retracted.current.get(meant)
+        if (retraction !== undefined) {
+          // The decision this `u` was aimed at never reached the server. Sending
+          // the request now would take back the decision *before* it.
+          commit((state) =>
+            withFailure(
+              state,
+              `Nothing was taken back: the decision on ${retraction} never reached the server, so there was nothing to undo.`,
+            ),
+          )
+          return
+        }
         try {
-          const result = await undoRequest({
-            force: options?.force ?? false,
-            states,
-          })
+          const result = await undoRequest({ force, states })
           if (result.card === null) {
             // A bulk batch put many contacts back: the buffer no longer
             // describes the queue, so take it again.
@@ -305,24 +369,22 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
           }
           const restored = result.card
           // The card comes off the restored contact whatever state that left it
-          // in, so it is not necessarily one this queue would serve, and the
-          // card itself shows neither way that happens:
+          // in, so it is not always one this queue would serve — and the card
+          // shows neither way that happens. Undoing a preferred-name edit on
+          // somebody already marked met hands back a `met` contact; a contact
+          // archived or merged away is restored without returning to the queue.
           //
-          // - Undoing a preferred-name edit on somebody already marked met
-          //   hands back a `met` contact, which this queue does not hold.
-          // - A forced undo may have gone through over an archive or a merge.
-          //   The API says a contact it names in `forced` can be restored
-          //   without being back in the queue, and `met` alone looks fine.
-          //
-          // Either one is reported rather than rendered as the next card,
-          // because putting somebody in front of you that the queue will never
-          // serve again is how a run loses its place.
-          const forced = result.forced.includes(restored.contact.id)
-          const inQueue = !forced && states.includes(restored.contact.met)
+          // `result.forced` alone does not tell them apart. The service appends
+          // to it for *any* divergence it overrode, an edited field included,
+          // and that is the common case: an archive or a merge needs another
+          // actor. So liveness is read from the refusal this force answered,
+          // and `forced` only narrows it to the contacts actually overridden.
+          const leftQueue = overLiveness && result.forced.includes(restored.contact.id)
+          const inQueue = !leftQueue && states.includes(restored.contact.met)
           commit((state) => {
             const head = state.cards[0]
             const replaces =
-              !forced && head !== undefined && head.contact.id === restored.contact.id
+              !leftQueue && head !== undefined && head.contact.id === restored.contact.id
             const cards = replaces
               ? [restored, ...state.cards.slice(1)]
               : inQueue
@@ -334,34 +396,36 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
               cards,
               progress: result.progress,
               undoConflict: null,
-              actionError: null,
+              undoConflictField: null,
               undoable: state.undoable.slice(1),
               taggedSinceUndoable: false,
               restored:
                 replaces || inQueue
                   ? null
                   : `Put ${restored.contact.preferred_name} ${restored.contact.last_name} back the way they were. ${
-                      forced
-                        ? 'A forced undo can restore a contact that is no longer in this queue, so the card did not change.'
+                      leftQueue
+                        ? 'They were archived or merged away since, so they are not in this queue and the card did not change.'
                         : 'They are not in this queue, so the card did not change.'
                     }`,
             }
           })
         } catch (error) {
           if (error instanceof TriageError && error.status === 409) {
-            commit((state) => ({ ...state, undoConflict: error.detail }))
+            commit((state) => ({
+              ...state,
+              undoConflict: error.detail,
+              undoConflictField: conflictFieldOf(error.detail),
+            }))
             return
           }
           if (error instanceof TriageError && error.status === 404) {
-            commit((state) => ({ ...state, actionError: 'Nothing left to undo.' }))
+            commit((state) => withFailure(state, 'Nothing left to undo.'))
             return
           }
-          commit((state) => ({
-            ...state,
-            actionError: messageOf(error, 'the undo failed'),
-          }))
+          commit((state) => withFailure(state, messageOf(error, 'the undo failed')))
         }
-      }),
+      })
+    },
     [commit, enqueue, load, states],
   )
 
@@ -372,7 +436,6 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
           const result = await setPreferredName({ contactId, preferredName })
           commit((state) => ({
             ...state,
-            actionError: null,
             restored: null,
             taggedSinceUndoable: false,
             undoable: [
@@ -390,10 +453,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
             ),
           }))
         } catch (error) {
-          commit((state) => ({
-            ...state,
-            actionError: messageOf(error, 'the name was not saved'),
-          }))
+          commit((state) => withFailure(state, messageOf(error, 'the name was not saved')))
         }
       })
     },
@@ -424,10 +484,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
           )
           commit((state) => ({ ...state, taggedSinceUndoable: true }))
         } catch (error) {
-          commit((state) => ({
-            ...state,
-            actionError: messageOf(error, 'the tag was not applied'),
-          }))
+          commit((state) => withFailure(state, messageOf(error, 'the tag was not applied')))
         }
       })
     },
@@ -442,10 +499,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
           patchTags(contactId, (tags) => tags.filter((tag) => tag.id !== tagId))
           commit((state) => ({ ...state, taggedSinceUndoable: true }))
         } catch (error) {
-          commit((state) => ({
-            ...state,
-            actionError: messageOf(error, 'the tag was not removed'),
-          }))
+          commit((state) => withFailure(state, messageOf(error, 'the tag was not removed')))
         }
       })
     },
@@ -500,11 +554,11 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
     skipAhead,
     undo,
     dismissConflict: useCallback(
-      () => commit((previous) => ({ ...previous, undoConflict: null })),
+      () => commit((previous) => ({ ...previous, undoConflict: null, undoConflictField: null })),
       [commit],
     ),
     dismissError: useCallback(
-      () => commit((previous) => ({ ...previous, actionError: null, restored: null })),
+      () => commit((previous) => ({ ...previous, actionErrors: [], restored: null })),
       [commit],
     ),
     rename,

@@ -59,6 +59,26 @@ export class TriageError extends Error {
   }
 }
 
+/**
+ * The contact field named in an undo `409`, or `null` when the wording has moved.
+ *
+ * The service builds its refusal as `contact 4 has <field>=<found> where the
+ * decision left <expected>; <reason>` (`netkeeper/crm/triage.py`, `UndoConflict`),
+ * and the field is the only part that says *which kind* of refusal this is:
+ * `archived_at` and `merged_into_id` mean the contact has left the queue, and
+ * anything else means a field was edited in between. The distinction changes
+ * both what the screen says and what it does with the card a force hands back,
+ * so it is parsed once, here, rather than in each place that needs it.
+ *
+ * A `null` return is the safe reading: treat it as an ordinary field conflict.
+ */
+export function conflictFieldOf(detail: string): string | null {
+  return /\bhas ([a-z_]+)=/.exec(detail)?.[1] ?? null
+}
+
+/** The refusals that mean the contact is gone from the queue, not merely edited. */
+export const LIVENESS_CONFLICTS: ReadonlySet<string> = new Set(['archived_at', 'merged_into_id'])
+
 /** FastAPI puts its wording in `detail`; anything else falls back to `whenUnknown`. */
 function detailOf(error: unknown, whenUnknown: string): string {
   if (typeof error === 'object' && error !== null && 'detail' in error) {
