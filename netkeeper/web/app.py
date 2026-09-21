@@ -4,8 +4,9 @@
 one passed in), migrates the database to head, makes sure the local user exists
 with the default auto-tag rules seeded, installs the scope guard on the session
 factory, and starts the event bus and the task runner, all kept on
-``app.state``. API modules under :mod:`netkeeper.web.api` are discovered, so
-adding an endpoint never edits this file.
+``app.state``, along with the signer behind bulk count confirmations. API
+modules under :mod:`netkeeper.web.api` are discovered, so adding an endpoint
+never edits this file.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from sqlalchemy import Engine
 
 from netkeeper import __version__, migrations
 from netkeeper.config import Settings, load_settings
+from netkeeper.crm.confirmation import Signer
 from netkeeper.crm.tags import ensure_default_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.logging_setup import setup_logging
@@ -32,6 +34,7 @@ from netkeeper.services.tasks import TaskRunner
 from netkeeper.services.users import ensure_local_user
 from netkeeper.web import api as api_package
 from netkeeper.web.deps import LocalSingleUser
+from netkeeper.web.errors import install_error_handlers
 from netkeeper.web.frontend import frontend_dist, mount_frontend
 from netkeeper.web.security import CSRFMiddleware
 
@@ -69,6 +72,7 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
         lifespan=lifespan,
     )
     app.add_middleware(CSRFMiddleware)
+    install_error_handlers(app)
     for name, router in discover_routers():
         app.include_router(router, prefix=API_PREFIX)
         log.debug("mounted api module %s", name)
@@ -106,6 +110,9 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     app.state.bus = bus
     app.state.tasks = tasks
     app.state.auth = LocalSingleUser()
+    # One signing key per process, never written down: an outstanding bulk
+    # confirmation does not survive a restart, and nothing has to be cleaned up.
+    app.state.confirmations = Signer.generated()
     return tasks
 
 

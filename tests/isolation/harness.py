@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from string import Formatter
 
@@ -11,8 +13,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.db import session_scope
 from netkeeper.models import User, UserKind
+from netkeeper.web.security import CLIENT_HEADER, CLIENT_HEADER_VALUE
 
-from .registry import ListEndpoint
+from .registry import Body, ListEndpoint
 
 
 @dataclass(frozen=True)
@@ -28,12 +31,29 @@ class FixedUser:
         return user
 
 
+@contextmanager
+def acting_as(app: FastAPI, user_id: int) -> Iterator[None]:
+    """Resolve every request to ``user_id`` for the block, then put the app's auth back.
+
+    How a test acts as a second user: the local app has one auth provider, and
+    swapping it is how the harness crosses users. Tests outside this package use
+    it for the same reason.
+    """
+    previous = app.state.auth
+    app.state.auth = FixedUser(user_id)
+    try:
+        yield
+    finally:
+        app.state.auth = previous
+
+
 @dataclass(frozen=True)
 class _Call:
-    """One request the harness makes: as which user, at which path, expecting what."""
+    """One request the harness makes: as which user, at which path, with what, expecting what."""
 
     user_id: int
     url: str
+    body: Body | None
     want: int
     seeded: bool
 
@@ -55,6 +75,9 @@ async def assert_isolated(app: FastAPI, endpoint: ListEndpoint) -> None:
     ``404`` or ``200`` with no items: an endpoint whose parent lookup is not
     scoped would hand A the rows under B's resource. When the parameter names no
     resource (both users' paths are the same) there is nothing to cross.
+
+    A ``POST`` list is called with ``endpoint.body`` (built per user when it is a
+    callable) and the CSRF header; the crossed call sends the owner's body.
     """
     factory: sessionmaker[Session] = app.state.session_factory
     with session_scope(factory, write=True) as session:  # seeds read, then write
@@ -67,8 +90,24 @@ async def assert_isolated(app: FastAPI, endpoint: ListEndpoint) -> None:
         for user in (a, b):
             seeded = endpoint.seed(session, user)
             assert seeded > 0, f"{endpoint.path}: seed created no rows for user {user.id}"
-            calls.append(_Call(user.id, _url(endpoint, session, user), seeded, seeded=True))
-        calls.append(_Call(nobody.id, _url(endpoint, session, nobody), 0, seeded=False))
+            calls.append(
+                _Call(
+                    user.id,
+                    _url(endpoint, session, user),
+                    _body(endpoint, session, user),
+                    seeded,
+                    seeded=True,
+                )
+            )
+        calls.append(
+            _Call(
+                nobody.id,
+                _url(endpoint, session, nobody),
+                _body(endpoint, session, nobody),
+                0,
+                seeded=False,
+            )
+        )
     for call in calls:
         await _check(app, endpoint, call)
     seeded_calls = [call for call in calls if call.seeded]
@@ -96,8 +135,17 @@ def _url(endpoint: ListEndpoint, session: Session, user: User) -> str:
     return endpoint.path.format(**params)
 
 
+def _body(endpoint: ListEndpoint, session: Session, user: User) -> Body | None:
+    if endpoint.method.upper() == "GET":
+        assert endpoint.body is None, f"{endpoint.path}: a GET list takes no body"
+        return None
+    if callable(endpoint.body):
+        return endpoint.body(session, user)
+    return endpoint.body if endpoint.body is not None else {}
+
+
 async def _check(app: FastAPI, endpoint: ListEndpoint, call: _Call) -> None:
-    response = await _get_as(app, call.user_id, call.url)
+    response = await _request_as(app, call.user_id, endpoint, call.url, call.body)
     where = f"{endpoint.path} as user {call.user_id}"
     if call.url != endpoint.path:
         where += f" ({call.url})"
@@ -110,7 +158,7 @@ async def _check(app: FastAPI, endpoint: ListEndpoint, call: _Call) -> None:
 
 async def _check_crossed(app: FastAPI, endpoint: ListEndpoint, viewer: _Call, owner: _Call) -> None:
     """``viewer`` asks for ``owner``'s resource: nothing of ``owner``'s may come back."""
-    response = await _get_as(app, viewer.user_id, owner.url)
+    response = await _request_as(app, viewer.user_id, endpoint, owner.url, owner.body)
     where = f"{endpoint.path} as user {viewer.user_id} at user {owner.user_id}'s {owner.url}"
     if response.status_code == 404:
         return
@@ -121,12 +169,14 @@ async def _check_crossed(app: FastAPI, endpoint: ListEndpoint, viewer: _Call, ow
     )
 
 
-async def _get_as(app: FastAPI, user_id: int, url: str) -> httpx.Response:
-    previous = app.state.auth
-    app.state.auth = FixedUser(user_id)
-    try:
+async def _request_as(
+    app: FastAPI, user_id: int, endpoint: ListEndpoint, url: str, body: Body | None
+) -> httpx.Response:
+    with acting_as(app, user_id):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            return await client.get(url)
-    finally:
-        app.state.auth = previous
+            if endpoint.method.upper() == "GET":
+                return await client.get(url)
+            return await client.request(
+                endpoint.method, url, json=body, headers={CLIENT_HEADER: CLIENT_HEADER_VALUE}
+            )

@@ -11,7 +11,7 @@ from fastapi import APIRouter
 
 from netkeeper.crm import tags as service
 from netkeeper.web.api.tags import INVALID, NOT_FOUND, translate_errors
-from netkeeper.web.deps import CurrentUser, SessionDep
+from netkeeper.web.deps import CurrentUser, SessionDep, read_only
 from netkeeper.web.schemas import (
     AutotagRuleCreate,
     AutotagRuleOut,
@@ -76,10 +76,16 @@ def run_autotag_rules(user: CurrentUser, session: SessionDep) -> AutotagRuleRunO
 
 
 @router.post("/preview", operation_id="preview_autotag_rule", responses=INVALID)
+@read_only
 def preview_autotag_rule(
     body: AutotagRulePreviewIn, user: CurrentUser, session: SessionDep
 ) -> AutotagRulePreviewOut:
-    """How many live contacts a pattern matches in a field, and the first ten. Writes nothing."""
+    """How many live contacts a pattern matches in a field, and the first ten.
+
+    Writes nothing, and its session is a reader, so the rule editor's live
+    preview never takes the SQLite write lock while it scans the address book
+    (#62).
+    """
     with translate_errors():
         preview = service.preview_matches(session, user, body.field, body.pattern)
     return AutotagRulePreviewOut(

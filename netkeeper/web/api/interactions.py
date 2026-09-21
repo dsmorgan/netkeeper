@@ -14,8 +14,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import AwareDatetime
 
 from netkeeper.crm import interactions as service
-from netkeeper.crm.interactions import MISSING, NotFound, TimelineEntry
-from netkeeper.models import ContactSnapshot, Interaction
+from netkeeper.crm.interactions import MISSING, NotFound
 from netkeeper.web.deps import CurrentUser, SessionDep
 from netkeeper.web.schemas import (
     InteractionIn,
@@ -24,11 +23,8 @@ from netkeeper.web.schemas import (
     InteractionPatch,
     NotesIn,
     NotesOut,
-    SnapshotOut,
-    TimelineEntryOut,
-    TimelineInteraction,
     TimelinePage,
-    TimelineSnapshot,
+    timeline_entry_out,
 )
 
 router = APIRouter(tags=["interactions"])
@@ -153,7 +149,9 @@ def get_timeline(
     # exactly the limit may be followed by an empty one; that is the one cursor
     # the service cannot rule out without another query.
     next_before = entries[-1].at if len(entries) >= limit else None
-    return TimelinePage(items=[_entry_out(entry) for entry in entries], next_before=next_before)
+    return TimelinePage(
+        items=[timeline_entry_out(entry) for entry in entries], next_before=next_before
+    )
 
 
 @router.put(
@@ -168,18 +166,6 @@ def set_contact_notes(
     except NotFound:
         raise _no_such_contact() from None
     return NotesOut(contact_id=contact.id, notes=contact.notes, updated_at=contact.updated_at)
-
-
-def _entry_out(entry: TimelineEntry) -> TimelineEntryOut:
-    if isinstance(entry.row, Interaction):
-        return TimelineInteraction(
-            kind="interaction", at=entry.at, interaction=InteractionOut.model_validate(entry.row)
-        )
-    if isinstance(entry.row, ContactSnapshot):
-        return TimelineSnapshot(
-            kind="snapshot", at=entry.at, snapshot=SnapshotOut.model_validate(entry.row)
-        )
-    raise TypeError(f"timeline entry of unexpected type {type(entry.row).__name__}")
 
 
 def _no_such_contact() -> HTTPException:

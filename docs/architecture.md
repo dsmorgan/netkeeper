@@ -689,6 +689,8 @@ Cost controls: a per-day call cap, batch size limits, and a token estimate shown
 - JSON under `/api/v1`. Every route resolves the current user through the `CurrentUser` dependency; `GET /api/v1/me` returns it. Resources: `contacts`, `tags`, `autotag-rules`, `lists`, `triage`, `imports`, `exports`, `linkedin` (`status`, `runs`, `budget`, `heat`, `pins`), `templates`, `campaigns` (with `steps`, `preview`, `test-send`, `activate`, `pause`), `enrollments`, `messages`, `mailboxes` (`oauth/start`, `oauth/callback`, `status`), `settings`, `posture`, `llm`, `events`.
 - `GET /api/v1/events` is an SSE stream of task progress, run status, and mailbox and browser health. The UI subscribes once.
 - Every browser-touching route enqueues through `services/tasks.py` and returns `202` with a task id.
+- A query whose input does not fit a query string is a `POST` that reads: the contacts list carries a filter tree. Such a route is marked read-only so its session never takes the SQLite write lock, and it registers with the isolation test like any list.
+- A bulk action applies to a filter, so the person confirms a count, not a list of rows. The client asks for the count, gets a signed token bound to that user, action, selection, and count, and sends it back to execute; the server re-counts and refuses when the count has moved. The token expires in five minutes and is never stored.
 - OpenAPI schema is exported in CI and the TypeScript client is regenerated from it; a diff fails the build.
 
 ### 14.2 Local security
