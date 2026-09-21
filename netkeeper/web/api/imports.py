@@ -17,19 +17,31 @@ refusal is resumed rather than orphaned (#90).
 A commit is one transaction because the request's session is one transaction: the
 handler either returns and the session commits, or it raises and nothing lands.
 The rules the service applies are :mod:`netkeeper.crm.import_runs`.
+
+``POST /imports/archive`` (P1-20) is a different shape: the LinkedIn export zip
+itself, unpacked in memory and run straight through
+:func:`netkeeper.crm.archive.import_archive` in this request's one transaction —
+no draft, no preview, no candidate review, because that pipeline has none; a
+connection row that resolves to a candidate is counted and left for a later
+CSV import to resolve instead (see that module's docstring). It shares nothing
+with the run-based screens above except the router and the CSRF guard.
 """
 
 from __future__ import annotations
 
+import io
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any
+from typing import Annotated, Any, Final
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from netkeeper.crm import import_runs as service
+from netkeeper.crm.archive import ArchiveImport
+from netkeeper.crm.archive import import_archive as run_archive_import
 from netkeeper.crm.identity import CreateNew, Decision, MergeInto
 from netkeeper.crm.importer import PRESETS
+from netkeeper.linkedin.archive import ArchiveFormatError, open_archive
 from netkeeper.models import (
     ContactSource,
     ImportDecisionKind,
@@ -40,6 +52,10 @@ from netkeeper.models import (
 )
 from netkeeper.web.deps import CurrentUser, SessionDep
 from netkeeper.web.schemas import (
+    ArchiveConnectionCountsOut,
+    ArchiveImportOut,
+    ArchiveInvitationCountsOut,
+    ArchiveMessageCountsOut,
     ImportChangeOut,
     ImportCommitIn,
     ImportDecisionIn,
@@ -98,6 +114,8 @@ def translate_errors() -> Iterator[None]:
         service.InvalidMapping,
         service.UnknownPreset,
     ) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ArchiveFormatError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
@@ -247,6 +265,100 @@ def inspect_import_file(body: ImportInspectIn, user: CurrentUser) -> ImportInspe
         unmapped=list(inspection.resolved.unmapped),
         sample=[dict(row) for row in inspection.parsed.rows[:SAMPLE_ROWS]],
     )
+
+
+# --- the LinkedIn archive (spec 10.5, 14.1; P1-20) ---------------------------
+
+ARCHIVE_MAX_UPLOAD_BYTES: Final = 200 * 1024 * 1024
+"""The raw upload read before it is even opened as a zip.
+
+Far above any real export — the sample this endpoint was checked against is
+under half a megabyte — so this only stops a mistaken, unrelated multi-gigabyte
+upload from being read into memory at all. What guards an upload that *is* a
+zip (total uncompressed size, member count, compression ratio, member paths)
+lives in :mod:`netkeeper.linkedin.archive`, so the CLI's ``import archive`` gets
+the same protection against a hostile archive that this endpoint does.
+"""
+
+
+def archive_report_out(
+    report: ArchiveImport, *, filename: str, ignored_files: list[str]
+) -> ArchiveImportOut:
+    return ArchiveImportOut(
+        filename=filename,
+        observed_at=report.observed_at,
+        owner_public_id=report.owner_public_id,
+        owner_by=report.owner_by,
+        connections=ArchiveConnectionCountsOut(
+            rows=report.connections.rows,
+            created=report.connections.created,
+            updated=report.connections.updated,
+            needs_review=report.connections.needs_review,
+            skipped=report.connections.skipped,
+            with_email=report.connections.with_email,
+            undated=report.connections.undated,
+        ),
+        messages=ArchiveMessageCountsOut(
+            rows=report.messages.rows,
+            conversations=report.messages.conversations,
+            attributed=report.messages.attributed,
+            no_counterpart=report.messages.no_counterpart,
+            group_threads=report.messages.group_threads,
+            unknown_contact=report.messages.unknown_contact,
+            no_owner=report.messages.no_owner,
+            added=report.messages.added,
+            already_present=report.messages.already_present,
+            undated=report.messages.undated,
+            outbound=report.messages.outbound,
+            inbound=report.messages.inbound,
+        ),
+        invitations=ArchiveInvitationCountsOut(
+            rows=report.invitations.rows,
+            added=report.invitations.added,
+            already_present=report.invitations.already_present,
+            unknown_contact=report.invitations.unknown_contact,
+            no_counterpart=report.invitations.no_counterpart,
+            undated=report.invitations.undated,
+            undirected=report.invitations.undirected,
+        ),
+        ignored_files=ignored_files,
+    )
+
+
+@router.post(
+    "/imports/archive",
+    operation_id="import_archive",
+    status_code=201,
+    responses=INVALID,
+)
+async def import_archive(
+    user: CurrentUser,
+    session: SessionDep,
+    file: Annotated[
+        UploadFile, File(description="The LinkedIn export zip, exactly as downloaded.")
+    ],
+) -> ArchiveImportOut:
+    """Import a LinkedIn export zip: connections, messages, and invitations (P1-20).
+
+    Unpacked in memory — nothing is written to disk — and run through the same
+    :func:`netkeeper.crm.archive.import_archive` that ``netkeeper import archive``
+    uses on a path, so the two report the same counts for the same archive.
+    Re-uploading the same export adds nothing (see that function's idempotence).
+    A zip that is not a LinkedIn export, or one that fails a guard (its total
+    size, member count, compression ratio, or a member's path), answers 422
+    naming what was wrong; nothing is unpacked before those checks pass.
+    """
+    name = file.filename or "upload.zip"
+    data = await file.read(ARCHIVE_MAX_UPLOAD_BYTES + 1)
+    if len(data) > ARCHIVE_MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{name}: over the {ARCHIVE_MAX_UPLOAD_BYTES} byte upload limit",
+        )
+    with translate_errors(), open_archive(io.BytesIO(data), filename=name) as archive:
+        report = run_archive_import(session, user, archive)
+        ignored_files = list(archive.ignored)
+    return archive_report_out(report, filename=name, ignored_files=ignored_files)
 
 
 # --- runs -------------------------------------------------------------------

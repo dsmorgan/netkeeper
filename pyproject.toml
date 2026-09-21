@@ -24,6 +24,7 @@ dependencies = [
   "sse-starlette>=2.1",
   "keyring>=25",
   "regex>=2026.9.10",
+  "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

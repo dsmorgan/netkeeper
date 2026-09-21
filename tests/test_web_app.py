@@ -59,6 +59,7 @@ API_PATHS = {
     "/api/v1/autotag-rules/preview",
     "/api/v1/imports",
     "/api/v1/imports/inspect",
+    "/api/v1/imports/archive",
     "/api/v1/imports/presets",
     "/api/v1/imports/presets/{name}",
     "/api/v1/imports/{run_id}",

@@ -983,6 +983,74 @@ class ImportPresetIn(BaseModel):
     mapping: ColumnMapping = Field(min_length=1)
 
 
+# --- archive import through the API (spec 10.5, 14.1; P1-20) ----------------
+
+
+class ArchiveConnectionCountsOut(BaseModel):
+    """What ``Connections.csv`` did (:class:`netkeeper.crm.archive.ConnectionCounts`)."""
+
+    rows: int
+    created: int
+    updated: int
+    needs_review: int
+    skipped: int
+    with_email: int
+    undated: int
+
+
+class ArchiveMessageCountsOut(BaseModel):
+    """What ``messages.csv`` did (:class:`netkeeper.crm.archive.MessageCounts`)."""
+
+    rows: int
+    conversations: int
+    attributed: int
+    no_counterpart: int
+    group_threads: int
+    unknown_contact: int
+    no_owner: int
+    added: int
+    already_present: int
+    undated: int
+    outbound: int
+    inbound: int
+
+
+class ArchiveInvitationCountsOut(BaseModel):
+    """What ``Invitations.csv`` did (:class:`netkeeper.crm.archive.InvitationCounts`)."""
+
+    rows: int
+    added: int
+    already_present: int
+    unknown_contact: int
+    no_counterpart: int
+    undated: int
+    undirected: int
+
+
+class ArchiveImportOut(BaseModel):
+    """What importing one uploaded archive did (P1-20).
+
+    There is no ``positions`` field yet: #117 adds ``Positions.csv`` support in
+    parallel and will add its own counts field alongside these. That is an
+    additive change for any client generated from the OpenAPI schema, never a
+    breaking one to the fields already here, which is what lets it land without
+    a version bump on this endpoint. Until then, ``Positions.csv`` (and any
+    other table this importer does not act on) shows up in ``ignored_files``.
+    """
+
+    filename: str
+    observed_at: datetime
+    owner_public_id: str | None
+    """Whose archive this was taken to be; ``None`` when the message traffic could not say."""
+    owner_by: str | None
+    """What identified the owner (see :mod:`netkeeper.linkedin.conversations`), or ``None``."""
+    connections: ArchiveConnectionCountsOut
+    messages: ArchiveMessageCountsOut
+    invitations: ArchiveInvitationCountsOut
+    ignored_files: list[str]
+    """Tables the archive carried that no importer reads yet, such as ``Positions.csv``."""
+
+
 # --- lists and saved views (spec 10.1, 10.4; P1-08) --------------------------
 
 ListName = Annotated[str, Field(min_length=1, max_length=LIST_NAME_MAX_LENGTH)]

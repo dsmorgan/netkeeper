@@ -97,6 +97,7 @@ async def test_state_changing_routes_need_the_csrf_header(client: httpx.AsyncCli
     for method, path in [
         ("POST", "/api/v1/imports"),
         ("POST", "/api/v1/imports/inspect"),
+        ("POST", "/api/v1/imports/archive"),
         ("POST", "/api/v1/imports/1/preview"),
         ("POST", "/api/v1/imports/1/commit"),
         ("POST", "/api/v1/imports/1/rollback"),

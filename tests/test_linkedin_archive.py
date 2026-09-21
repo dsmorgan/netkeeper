@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from netkeeper.linkedin import archive as linkedin_archive
 from netkeeper.linkedin.archive import (
     Archive,
     ArchiveFormatError,
@@ -219,6 +220,129 @@ def test_a_zip_arrives_as_a_stream_too(tmp_path: Path) -> None:
     with open_archive(io.BytesIO(data), filename="upload.zip") as archive:
         assert archive.name == "upload.zip"
         assert len(archive.members) == 4
+
+
+def test_the_zip_names_the_table_it_does_not_read(tmp_path: Path) -> None:
+    """``_zipped`` adds one member with a header this reader does not recognize."""
+    with open_archive(_zipped(tmp_path)) as archive:
+        assert archive.ignored == ("Jobs/Saved Jobs.csv",)
+
+
+def test_a_directory_names_the_tables_it_does_not_read(tmp_path: Path) -> None:
+    for source in FIXTURES.iterdir():
+        (tmp_path / source.name).write_bytes(source.read_bytes())
+    (tmp_path / "Skills.csv").write_text("Name\nMade up\n", encoding="utf-8")
+    with open_archive(tmp_path) as archive:
+        assert archive.ignored == ("Skills.csv",)
+
+
+def test_a_doubly_named_zip_extension_still_opens_normally(tmp_path: Path) -> None:
+    """A real export's own filename ends ``.zip.zip`` (checked by hand against one);
+    nothing here keys off the name, only the bytes, so the doubled extension
+    changes nothing about how it opens.
+    """
+    zipped = _zipped(tmp_path)
+    doubled = zipped.with_name("export.zip.zip")
+    zipped.rename(doubled)
+    with open_archive(doubled) as archive:
+        assert len(archive.members) == 4
+
+
+def test_a_zip_nested_inside_a_zip_is_refused_not_unwrapped(tmp_path: Path) -> None:
+    """Checked by hand against a real export: its own ``.zip.zip`` name is just a
+    doubled extension, not an actual nested zip — the CSVs sit directly in the one
+    zip a person downloads. A genuinely nested zip (someone re-zipping their own
+    download, say) is refused rather than silently unwrapped a level, since real
+    exports never need that and guessing how far to unwrap is its own hazard.
+    """
+    inner = tmp_path / "inner.zip"
+    with zipfile.ZipFile(inner, "w") as zf:
+        zf.write(FIXTURES / "Connections.csv", arcname="Connections.csv")
+    outer = tmp_path / "export.zip.zip"
+    with zipfile.ZipFile(outer, "w") as zf:
+        zf.write(inner, arcname="export.zip")
+    with pytest.raises(ArchiveFormatError, match=r"no Connections\.csv"), open_archive(outer):
+        pass
+
+
+# --- zip guards (P1-20) ------------------------------------------------------
+
+
+def test_too_many_members_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(linkedin_archive, "MAX_MEMBERS", 2)
+    path = tmp_path / "export.zip"
+    with zipfile.ZipFile(path, "w") as zf:
+        for index in range(3):
+            zf.writestr(f"Skills{index}.csv", "Name\nMade up\n")
+    with pytest.raises(ArchiveFormatError, match="member limit"), open_archive(path):
+        pass
+
+
+def test_too_many_files_in_a_directory_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(linkedin_archive, "MAX_MEMBERS", 2)
+    for index in range(3):
+        (tmp_path / f"Skills{index}.csv").write_text("Name\nMade up\n", encoding="utf-8")
+    with pytest.raises(ArchiveFormatError, match="file limit"), open_archive(tmp_path):
+        pass
+
+
+def test_the_uncompressed_total_over_the_cap_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(linkedin_archive, "MAX_TOTAL_UNCOMPRESSED_BYTES", 100)
+    path = tmp_path / "export.zip"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("Connections.csv", "First Name\n" + "a" * 60 + "\n")
+        zf.writestr("Skills.csv", "Name\n" + "b" * 60 + "\n")
+    with pytest.raises(ArchiveFormatError, match="uncompressed"), open_archive(path):
+        pass
+
+
+def test_the_directory_total_over_the_cap_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(linkedin_archive, "MAX_TOTAL_UNCOMPRESSED_BYTES", 100)
+    (tmp_path / "Connections.csv").write_text("First Name\n" + "a" * 60 + "\n", encoding="utf-8")
+    (tmp_path / "Skills.csv").write_text("Name\n" + "b" * 60 + "\n", encoding="utf-8")
+    with pytest.raises(ArchiveFormatError, match="across its files"), open_archive(tmp_path):
+        pass
+
+
+def test_a_high_compression_ratio_is_refused_as_a_bomb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(linkedin_archive, "MAX_COMPRESSION_RATIO", 10)
+    monkeypatch.setattr(linkedin_archive, "COMPRESSION_RATIO_FLOOR_BYTES", 100)
+    path = tmp_path / "export.zip"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("Skills.csv", "0" * 100_000, compress_type=zipfile.ZIP_DEFLATED)
+    with pytest.raises(ArchiveFormatError, match="compresses"), open_archive(path):
+        pass
+
+
+def test_ordinary_csv_text_is_nowhere_near_the_compression_ratio_limit(tmp_path: Path) -> None:
+    """Real CSV text, actually deflated, does not approach the default ratio limit."""
+    path = tmp_path / "export.zip"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Connections.csv", (FIXTURES / "Connections.csv").read_bytes())
+        zf.writestr("messages.csv", (FIXTURES / "messages.csv").read_bytes())
+    with open_archive(path) as archive:
+        assert len(archive.members) == 2
+
+
+@pytest.mark.parametrize(
+    "member_name", ["/etc/passwd.csv", "../../etc/passwd.csv", "a/../../b.csv", "C:/win.csv"]
+)
+def test_a_member_path_that_would_escape_the_archive_is_refused(
+    tmp_path: Path, member_name: str
+) -> None:
+    path = tmp_path / "export.zip"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(member_name, "First Name,Last Name,URL,Connected On\n")
+    with pytest.raises(ArchiveFormatError, match="unsafe path"), open_archive(path):
+        pass
 
 
 def test_one_csv_opens_on_its_own() -> None:
