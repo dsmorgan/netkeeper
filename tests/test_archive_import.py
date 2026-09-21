@@ -25,7 +25,14 @@ from netkeeper.crm.interactions import add_interaction
 from netkeeper.crm.provenance import SOURCE_RANK, revert_to_synced, set_manual_field
 from netkeeper.db import session_scope
 from netkeeper.linkedin.archive import Archive, open_archive
-from netkeeper.models import Contact, ContactSource, Interaction, InteractionKind, User
+from netkeeper.models import (
+    Contact,
+    ContactPosition,
+    ContactSource,
+    Interaction,
+    InteractionKind,
+    User,
+)
 from netkeeper.scoping import scoped
 
 FIXTURES = Path(__file__).parent / "fixtures" / "archive"
@@ -89,17 +96,17 @@ def test_the_sample_imports_with_the_expected_counts(
     messages = report.messages
     assert report.owner_public_id == "nettie-keeperton"
     assert report.owner_by == "traffic"
-    assert messages.rows == 11
-    assert messages.conversations == 6
-    assert messages.attributed == 3
+    assert messages.rows == 13
+    assert messages.conversations == 7
+    assert messages.attributed == 4
     assert messages.no_counterpart == 1  # nobody signed conv-bb
     assert messages.group_threads == 1
     assert messages.unknown_contact == 1  # the stranger is not a connection
     assert messages.no_owner == 0
     assert messages.attributed + 3 == messages.conversations
-    assert messages.added == 6
-    assert messages.outbound == 2
-    assert messages.inbound == 4
+    assert messages.added == 8
+    assert messages.outbound == 3
+    assert messages.inbound == 5
     assert messages.undated == 1
     assert messages.already_present == 0
 
@@ -113,7 +120,10 @@ def test_the_sample_imports_with_the_expected_counts(
     assert invitations.already_present == 0
 
     assert len(_contacts(writer, user)) == 7
-    assert len(_interactions(writer, user)) == 8
+    assert len(_interactions(writer, user)) == 10
+    # Decision: the archive gives Company and Position with no dates, so it
+    # writes the scalars under provenance and no position history at all.
+    assert list(writer.scalars(scoped(user, ContactPosition))) == []
 
 
 def test_observed_at_defaults_to_the_export_time(
@@ -348,8 +358,44 @@ def test_a_row_with_no_profile_url_is_held_for_review_rather_than_duplicated(
     writer: Session, user: User, archive: Archive
 ) -> None:
     _run(writer, user, archive)
-    _run(writer, user, archive)
+    second = _run(writer, user, archive)
     assert [contact.first_name for contact in _all_contacts(writer, user)].count("Fen") == 1
+    # It reappears for review on every run, which is the cost of spec 8.2 never
+    # letting a name and a company be a match. Pinned so the behavior is a
+    # decision rather than a surprise.
+    assert second.connections.needs_review == 1
+
+
+def test_a_no_op_reimport_does_not_restamp_every_contact(
+    writer: Session, user: User, archive: Archive
+) -> None:
+    """Runs two and three are byte-identical, so nothing should look edited.
+
+    ``synced_values`` is a ``MutableDict``: writing an equal entry into it still
+    marks the row dirty and fires ``onupdate``, which on a real archive would
+    move ``updated_at`` on every contact for an import that changed nothing.
+    """
+    _run(writer, user, archive)
+    writer.flush()
+    before = {contact.id: contact.updated_at for contact in _all_contacts(writer, user)}
+
+    _run(writer, user, archive)
+    writer.flush()
+
+    assert {contact.id: contact.updated_at for contact in _all_contacts(writer, user)} == before
+
+
+def test_a_comma_in_a_display_name_does_not_cost_a_conversation(
+    writer: Session, user: User, archive: Archive
+) -> None:
+    """Regression: "Dee Notional, PhD" in ``TO`` used to read as two recipients,
+    which made the conversation a group thread and dropped both its messages.
+    """
+    report = _run(writer, user, archive)
+    assert report.messages.group_threads == 1  # the one real group thread, and only it
+    dee = _contacts(writer, user)["dee-notional"]
+    rows = [row for row in _interactions(writer, user) if row.contact_id == dee.id]
+    assert [row.kind for row in rows] == [InteractionKind.LI_OUT, InteractionKind.LI_IN]
 
 
 def test_a_third_run_still_adds_nothing(writer: Session, user: User, archive: Archive) -> None:

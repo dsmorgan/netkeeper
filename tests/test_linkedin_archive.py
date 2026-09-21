@@ -12,7 +12,10 @@ a URL at all, a group thread, and both directions of invitation.
 from __future__ import annotations
 
 import io
+import json
 import logging
+import subprocess
+import sys
 import zipfile
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -36,6 +39,9 @@ from netkeeper.linkedin.conversations import Owner, detect_owner, group
 
 FIXTURES = Path(__file__).parent / "fixtures" / "archive"
 OWNER = "nettie-keeperton"
+# What ADR 0005 keeps out of the extractor. "sqlalchemy" is not in the ADR's
+# words but follows from them: importing the ORM is how the models arrive.
+FORBIDDEN_IMPORTS = ("netkeeper.models", "netkeeper.crm", "netkeeper.db", "sqlalchemy")
 
 
 def _member(archive: Archive, kind: ArchiveKind) -> ArchiveMember:
@@ -60,7 +66,9 @@ def _message(
     recipient_public_ids: tuple[str, ...] = (),
     *,
     row_number: int = 1,
+    recipient_urls: tuple[str, ...] | None = None,
 ) -> MessageRow:
+    """A message row. ``recipient_urls`` defaults to one URL per recipient public id."""
     return MessageRow(
         row_number=row_number,
         conversation_id=conversation_id,
@@ -69,13 +77,50 @@ def _message(
         sender_url=None,
         sender_public_id=sender_public_id,
         recipients=recipients,
-        recipient_urls=(),
+        recipient_urls=(
+            recipient_urls
+            if recipient_urls is not None
+            else tuple(f"https://www.linkedin.com/in/{slug}" for slug in recipient_public_ids)
+        ),
         recipient_public_ids=recipient_public_ids,
         sent_at=datetime(2024, 1, 1, tzinfo=UTC),
         subject=None,
         content="body",
         folder="INBOX",
     )
+
+
+# --- the boundary -----------------------------------------------------------
+
+
+def test_the_extractor_loads_no_models_and_no_session() -> None:
+    """ADR 0005: nothing under ``linkedin/`` imports the ORM or opens a session.
+
+    Asserted in a subprocess, because this test module has the whole package
+    imported already and would see every one of these in ``sys.modules``
+    whatever the extractor did. A plain grep would miss a transitive import,
+    which is the way this invariant actually breaks.
+    """
+    script = (
+        "import sys, json\n"
+        "import netkeeper.linkedin.archive, netkeeper.linkedin.conversations\n"
+        "print(json.dumps(sorted(sys.modules)))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=Path(__file__).parent.parent,
+    )
+    loaded = json.loads(result.stdout)
+    leaked = [
+        name
+        for name in loaded
+        for forbidden in FORBIDDEN_IMPORTS
+        if name == forbidden or name.startswith(f"{forbidden}.")
+    ]
+    assert leaked == [], f"netkeeper/linkedin/ pulled in {leaked}"
 
 
 # --- dates ------------------------------------------------------------------
@@ -126,12 +171,27 @@ def test_public_id_comes_from_the_profile_url(url: str | None, expected: str | N
 # --- opening ----------------------------------------------------------------
 
 
-def test_a_directory_yields_the_three_tables() -> None:
+def test_the_fixture_holds_only_the_files_it_is_meant_to() -> None:
+    """A real export has thirty-odd more members, several holding the owner's own
+    address and phone number. Only these five belong here, and only these five
+    are hand-written, so anything else appearing is a real export leaking in.
+    """
+    assert sorted(path.name for path in FIXTURES.iterdir()) == [
+        "Connections.csv",
+        "Invitations.csv",
+        "Profile.csv",
+        "guide_messages.csv",
+        "messages.csv",
+    ]
+
+
+def test_a_directory_yields_the_tables_in_reading_order() -> None:
     with open_archive(FIXTURES) as archive:
         assert [(member.name, member.kind) for member in archive.members] == [
             ("Connections.csv", ArchiveKind.CONNECTIONS),
             ("messages.csv", ArchiveKind.MESSAGES),
             ("Invitations.csv", ArchiveKind.INVITATIONS),
+            ("Profile.csv", ArchiveKind.PROFILE),
         ]
 
 
@@ -147,6 +207,7 @@ def test_a_zip_reads_the_same_as_the_directory(tmp_path: Path) -> None:
             ArchiveKind.CONNECTIONS,
             ArchiveKind.MESSAGES,
             ArchiveKind.INVITATIONS,
+            ArchiveKind.PROFILE,
         ]
         assert archive.exported_at is not None
         rows = list(archive.connections(_member(archive, ArchiveKind.CONNECTIONS)))
@@ -157,7 +218,7 @@ def test_a_zip_arrives_as_a_stream_too(tmp_path: Path) -> None:
     data = _zipped(tmp_path).read_bytes()
     with open_archive(io.BytesIO(data), filename="upload.zip") as archive:
         assert archive.name == "upload.zip"
-        assert len(archive.members) == 3
+        assert len(archive.members) == 4
 
 
 def test_one_csv_opens_on_its_own() -> None:
@@ -285,6 +346,47 @@ def test_invitations_carry_direction_and_both_parties() -> None:
     assert rows[5].sent_at is None
 
 
+# --- the owner's own profile ------------------------------------------------
+
+
+def test_the_profile_names_the_archive_owner() -> None:
+    with open_archive(FIXTURES) as archive:
+        assert archive.owner_name() == "Nettie Keeperton"
+
+
+def test_an_archive_without_a_profile_names_nobody(tmp_path: Path) -> None:
+    (tmp_path / "Connections.csv").write_text(
+        "First Name,Last Name,URL,Email Address,Company,Position,Connected On\n"
+        "Ada,Fictional,https://www.linkedin.com/in/ada-fictional,,Works,Eng,12 Mar 2019\n",
+        encoding="utf-8",
+    )
+    with open_archive(tmp_path) as archive:
+        assert archive.owner_name() is None
+
+
+def test_a_profile_on_its_own_is_not_an_archive(tmp_path: Path) -> None:
+    """It names the owner and holds nothing to import, so there is nothing to open."""
+    path = tmp_path / "Profile.csv"
+    path.write_text(
+        "First Name,Last Name,Headline\nNettie,Keeperton,Keeps a made-up network warm\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ArchiveFormatError), open_archive(path):
+        pass
+
+
+def test_a_directory_of_only_a_profile_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "Profile.csv").write_text(
+        "First Name,Last Name,Headline\nNettie,Keeperton,Keeps a made-up network warm\n",
+        encoding="utf-8",
+    )
+    with (
+        pytest.raises(ArchiveFormatError, match=r"no Connections\.csv"),
+        open_archive(tmp_path),
+    ):
+        pass
+
+
 # --- conversations ----------------------------------------------------------
 
 
@@ -324,13 +426,14 @@ def test_a_group_thread_is_skipped_not_split() -> None:
 def test_every_conversation_is_accounted_for() -> None:
     with open_archive(FIXTURES) as archive:
         threads = group(archive.messages(_member(archive, ArchiveKind.MESSAGES)))
-    assert threads.total_conversations == 6
-    assert len(threads.conversations) == 4
-    assert threads.rows == 11
+    assert threads.total_conversations == 7
+    assert len(threads.conversations) == 5
+    assert threads.rows == 13
     assert threads.undated_rows == 1
 
 
-def test_a_row_addressed_to_several_makes_a_group_thread_even_without_urls() -> None:
+def test_several_names_and_no_urls_at_all_make_a_group_thread() -> None:
+    """With no URL list to check against, the names are all there is to go on."""
     rows = [
         _message("one", "Nettie Keeperton", OWNER, ("Ada Fictional", "Bo Placeholder")),
         _message("two", "Nettie Keeperton", OWNER, ("Ada Fictional",), ("ada-fictional",)),
@@ -339,6 +442,38 @@ def test_a_row_addressed_to_several_makes_a_group_thread_even_without_urls() -> 
     threads = group(rows)
     assert threads.skipped_for("group") == 1
     assert {c.conversation_id for c in threads.conversations} == {"two", "three"}
+
+
+def test_a_comma_in_a_display_name_does_not_invent_a_second_recipient() -> None:
+    """``TO`` splits on commas and credentials carry them; the URL list is the truth.
+
+    Regression: counting names alone turned every "Firstname Lastname, PhD"
+    thread into a group chat and dropped the conversation whole.
+    """
+    rows = [
+        _message(
+            "one",
+            "Nettie Keeperton",
+            OWNER,
+            ("Dee Notional", "PhD"),
+            ("dee-notional",),
+        ),
+        _message("one", "Dee Notional, PhD", "dee-notional", ("Nettie Keeperton",), (OWNER,)),
+    ]
+    threads = group(rows, owner=OWNER)
+    assert threads.skipped_for("group") == 0
+    (conversation,) = threads.conversations
+    assert conversation.counterpart_public_id == "dee-notional"
+    assert [message.outbound for message in conversation.messages] == [True, False]
+
+
+def test_a_comma_in_a_name_survives_the_whole_read() -> None:
+    """End to end from the fixture, because the split happens in the parser."""
+    with open_archive(FIXTURES) as archive:
+        threads = group(archive.messages(_member(archive, ArchiveKind.MESSAGES)))
+    conversation = next(c for c in threads.conversations if c.conversation_id == "conv-gg")
+    assert conversation.counterpart_public_id == "dee-notional"
+    assert len(conversation.messages) == 2
 
 
 def test_display_names_never_match_across_conversations() -> None:
@@ -388,6 +523,19 @@ def test_the_profile_name_breaks_a_tie() -> None:
     owner = detect_owner(rows, profile_name="Nettie Keeperton")
     assert owner is not None
     assert (owner.public_id, owner.by) == (OWNER, "profile-name")
+
+
+def test_the_profile_name_settles_a_tie_end_to_end() -> None:
+    """The path :func:`netkeeper.crm.archive.import_archive` takes for a small archive."""
+    rows = [
+        _message("one", "Nettie Keeperton", OWNER, ("Ada Fictional",), ("ada-fictional",)),
+        _message("two", "Ada Fictional", "ada-fictional", ("Nettie Keeperton",), (OWNER,)),
+    ]
+    assert group(rows).owner is None
+    threads = group(rows, profile_name="Nettie Keeperton")
+    assert threads.owner is not None
+    assert (threads.owner.public_id, threads.owner.by) == (OWNER, "profile-name")
+    assert len(threads.conversations) == 2
 
 
 def test_no_messages_at_all_name_no_owner() -> None:

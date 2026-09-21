@@ -185,10 +185,12 @@ def import_archive(
     ``observed_at`` is when the archive saw what it says, which is what per-field
     provenance compares to decide whether a value is newer than the one on
     record. It defaults to the archive's own export time when it has one
-    (``Archive.exported_at``, the newest member timestamp) and to now when it
-    does not; a naive value is a ``ValueError``. ``owner_public_id`` says whose
+    (``Archive.exported_at``, the newest member timestamp, which for a zip is
+    approximate to the exporting machine's UTC offset) and to now when it does
+    not; a naive value is a ``ValueError``. ``owner_public_id`` says whose
     archive this is when the caller knows, skipping the detection in
-    :mod:`netkeeper.linkedin.conversations`.
+    :mod:`netkeeper.linkedin.conversations`; without it, the owner is read out
+    of the message traffic, with ``Profile.csv``'s name to settle a tie.
 
     Nothing is committed. ``RuntimeError`` when ``session`` is not a writer.
     """
@@ -203,14 +205,15 @@ def import_archive(
                 session, user, archive.connections(member), when, report.connections
             )
     written = _Interactions(session, user)
+    profile_name = archive.owner_name()
     for member in archive.members:
         if member.kind is ArchiveKind.MESSAGES:
             _import_messages(
-                session, user, archive.messages(member), owner_public_id, written, report
+                archive.messages(member), owner_public_id, profile_name, written, report
             )
     for member in archive.members:
         if member.kind is ArchiveKind.INVITATIONS:
-            _import_invitations(session, user, archive.invitations(member), written, report)
+            _import_invitations(archive.invitations(member), written, report)
     log.info(
         "archive %s imported for user %d: %d connections (%d created, %d updated, "
         "%d for review), %d message interactions, %d invitation interactions",
@@ -287,15 +290,14 @@ def _incoming_contact(row: ConnectionRow, observed_at: datetime) -> IncomingCont
 
 
 def _import_messages(
-    session: Session,
-    user: User,
     rows: Iterable[MessageRow],
     owner_public_id: str | None,
+    profile_name: str | None,
     written: _Interactions,
     report: ArchiveImport,
 ) -> None:
     counts = report.messages
-    threads = group(rows, owner=owner_public_id)
+    threads = group(rows, owner=owner_public_id, profile_name=profile_name)
     counts.rows += threads.rows
     counts.undated += threads.undated_rows
     counts.conversations += threads.total_conversations
@@ -343,8 +345,6 @@ def _message_summary(row: MessageRow) -> str | None:
 
 
 def _import_invitations(
-    session: Session,
-    user: User,
     rows: Iterable[InvitationRow],
     written: _Interactions,
     report: ArchiveImport,

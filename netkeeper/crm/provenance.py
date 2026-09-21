@@ -127,8 +127,11 @@ def record_synced_value(
     the value (:func:`may_overwrite` decides that separately), so the last synced
     value is always there to revert to. The ledger is chronological, not ranked:
     an observation older than the one recorded is dropped, as a child row's is,
-    and False says so; one at the same instant or later replaces it. A date is
-    stored in ISO form and ``observed_at`` as an ISO datetime in UTC.
+    and False says so; one at the same instant or later replaces it. Repeating
+    an observation the ledger already holds, as a second import of the same
+    file does, returns True and writes nothing, so it leaves ``updated_at``
+    alone. A date is stored in ISO form and ``observed_at`` as an ISO datetime
+    in UTC.
     ``ValueError`` for a field that carries no provenance, for ``manual`` (a
     person's edit is what the ledger exists to undo, never an entry in it), for a
     source that is not a :class:`ContactSource`, and for a naive ``observed_at``.
@@ -148,6 +151,12 @@ def record_synced_value(
         "source": reported.value,
         "observed_at": observed_at.astimezone(UTC).isoformat(),
     }
+    if existing == entry:
+        # The same observation again. ``synced_values`` is a MutableDict, so
+        # assigning an equal value still marks the row dirty and fires
+        # ``onupdate``; an import that changes nothing would re-stamp
+        # ``updated_at`` on every contact it read.
+        return True
     if not contact.synced_values:  # unset before the first flush, or empty
         contact.synced_values = {field: entry}
     else:
