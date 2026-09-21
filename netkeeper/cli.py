@@ -445,7 +445,9 @@ def import_csv_cmd(
     ] = None,
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Resolve the whole file and report, without committing."),
+        typer.Option(
+            "--dry-run", help="Resolve the whole file and report, leaving a draft run behind."
+        ),
     ] = False,
     on_candidate: Annotated[
         OnCandidate | None,
@@ -556,7 +558,11 @@ def _commit_draft(draft: _RunSnapshot, on_candidate: OnCandidate | None) -> _Run
                     run = import_runs.commit(session, user, draft.id, decisions=decisions)
                 else:
                     run = import_runs.commit(session, user, draft.id)
-            except import_runs.ImportRunError as exc:
+            # commit() does not raise CsvImportError today, but catching it here
+            # too keeps this in step with web/api/imports.py's translate_errors(),
+            # which covers it on every route: the asymmetry between the two
+            # exception groups is exactly what _create_draft got bitten by once.
+            except (import_runs.ImportRunError, import_runs.CsvImportError) as exc:
                 typer.echo(f"error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
             return _snapshot_of(run)
@@ -612,7 +618,10 @@ def import_rollback_cmd(
             user = _local_user_or_exit(session)
             try:
                 result = import_runs.rollback(session, user, run_id)
-            except import_runs.ImportRunError as exc:
+            # Same defensive symmetry as _commit_draft: rollback() does not raise
+            # CsvImportError today, but the except clause matches
+            # translate_errors() rather than assuming it never will.
+            except (import_runs.ImportRunError, import_runs.CsvImportError) as exc:
                 typer.echo(f"error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
             summary = (
@@ -726,6 +735,10 @@ def contacts_stats() -> None:
     finally:
         engine.dispose()
     typer.echo(_format_table(("METRIC", "COUNT"), _stats_rows(stats)), nl=False)
+    typer.echo(
+        f"total ({stats.total}) counts live contacts only: not archived, not merged away. "
+        "archived and merged away are separate counts of what total leaves out."
+    )
 
 
 def _stats_rows(stats: ContactStats) -> list[tuple[str, str]]:
