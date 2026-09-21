@@ -1,0 +1,751 @@
+"""Read a LinkedIn data archive: ``Connections.csv``, ``messages.csv``, ``Invitations.csv``.
+
+Spec 9.2, the archive row of the data-sources table.
+
+Pure parsing behind the extractor boundary (spec 9.10, ADR 0005): nothing here
+imports the models or opens a session. A zip or a single CSV goes in; typed,
+frozen rows come out one table at a time, streamed, so an archive with years
+of messages is never held in memory at once. The core's importer
+(:mod:`netkeeper.crm.archive`) maps the rows onto contacts and interactions.
+
+What the archive looks like (LinkedIn's "Settings & Privacy > Data privacy >
+Get a copy of your data"): a zip of CSV files in UTF-8, some starting with a
+byte-order mark. ``Connections.csv`` opens with a preamble before its header
+(a line ``Notes:``, a sentence about missing email addresses, and a blank
+line). Tables are recognized by their header, never by their file name, so a
+member with any name, or a single CSV uploaded on its own, reads the same way.
+Unknown columns are ignored; a member that is none of the three tables is
+skipped; a table that lacks a column the reader needs is an
+:class:`ArchiveFormatError` naming the file.
+
+Dates: ``Connected On`` is a calendar date, day first and month abbreviated
+(``12 Mar 2019``, and ``12 Mar 19`` in exports old enough to write the year
+with two digits); a message ``DATE`` is ``2023-05-01 14:22:10``, with or
+without a trailing ``UTC`` depending on the export, and either way it is read
+as UTC because that is the only zone LinkedIn ever names here; an invitation
+``Sent At`` (``5/12/21, 3:14 PM``, month first) names no zone and is read as
+UTC too, the closest thing to a documented meaning it has. An unparseable date
+is ``None`` on the row rather than an error: the row is still a record of a
+person or a message, and the importer decides what to do without a time and
+counts how often it had to. A cell that held something and still did not parse
+is logged at warning level with the member and the row number, never the cell,
+so a change in LinkedIn's formats is visible without putting a date of a real
+person's life in a log file.
+"""
+
+from __future__ import annotations
+
+import csv
+import enum
+import io
+import logging
+import re
+import zipfile
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from typing import IO, Final, TextIO
+from urllib.parse import unquote
+
+log = logging.getLogger(__name__)
+
+# Records to look through for a header before giving up on a table. LinkedIn's
+# preamble is three records; the allowance leaves room for it to grow.
+MAX_PREAMBLE_RECORDS: Final = 10
+# A message body is a CSV field; the module default (128 KiB) is too small for
+# the longest ones.
+FIELD_SIZE_LIMIT: Final = 16 * 1024 * 1024
+# A zip member larger than this, uncompressed, is refused before it is read.
+# messages.csv for a heavy user is tens of megabytes; this is far above that
+# and keeps a crafted archive from expanding without bound.
+MAX_MEMBER_BYTES: Final = 512 * 1024 * 1024
+# Zip member timestamps older than LinkedIn itself are placeholders, not the export time.
+EARLIEST_EXPORT: Final = datetime(2003, 1, 1, tzinfo=UTC)
+
+_PROFILE_URL = re.compile(r"linkedin\.com/in/([^/?#]+)", re.IGNORECASE)
+
+# Members whose header is the messages header but whose rows are not messages
+# between people: LinkedIn exports its own assistants' chat logs in the same
+# shape. Recognizing tables by header alone would import a coaching session as
+# a conversation with a contact, so these three are skipped by name. Names are
+# the only thing that separates them; the rows are indistinguishable.
+NOT_CONVERSATIONS: Final[frozenset[str]] = frozenset(
+    {
+        "guide_messages.csv",
+        "learning_coach_messages.csv",
+        "learning_role_play_messages.csv",
+    }
+)
+
+
+class ArchiveFormatError(ValueError):
+    """The file is not a LinkedIn archive, or one of its tables cannot be read.
+
+    The message names the file (and inside a zip, the member) the problem is in.
+    """
+
+
+class ArchiveKind(enum.StrEnum):
+    """The three tables the importer reads."""
+
+    CONNECTIONS = "connections"
+    MESSAGES = "messages"
+    INVITATIONS = "invitations"
+
+
+class InvitationDirection(enum.StrEnum):
+    OUTGOING = "OUTGOING"
+    INCOMING = "INCOMING"
+
+
+# --- rows -------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionRow:
+    """One line of ``Connections.csv``: a 1st-degree connection.
+
+    ``row_number`` counts records after the header from 1. ``public_id`` is the
+    slug of ``url``; ``email`` is lowercased and present only for people who
+    let their connections see it. Empty cells are ``None``.
+    """
+
+    row_number: int
+    first_name: str
+    last_name: str
+    url: str | None
+    public_id: str | None
+    email: str | None
+    company: str | None
+    position: str | None
+    connected_on: date | None
+
+
+@dataclass(frozen=True, slots=True)
+class MessageRow:
+    """One line of ``messages.csv``: a message in one of the owner's conversations.
+
+    The archive owner appears as the sender or among the recipients; nothing
+    in the file says which name is theirs. ``recipients`` and
+    ``recipient_urls`` are the comma-separated lists as LinkedIn writes them;
+    ``recipient_public_ids`` holds the slugs of the URLs that are profile URLs,
+    so it can be shorter than ``recipients``. ``sent_at`` is aware UTC, or
+    ``None`` when the date did not parse.
+    """
+
+    row_number: int
+    conversation_id: str
+    conversation_title: str | None
+    sender: str
+    sender_url: str | None
+    sender_public_id: str | None
+    recipients: tuple[str, ...]
+    recipient_urls: tuple[str, ...]
+    recipient_public_ids: tuple[str, ...]
+    sent_at: datetime | None
+    subject: str | None
+    content: str
+    folder: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class InvitationRow:
+    """One line of ``Invitations.csv``: a connection invitation the owner sent or received.
+
+    ``direction`` says which; ``None`` when the cell is neither ``OUTGOING``
+    nor ``INCOMING``. The profile URLs, and the slugs derived from them, are
+    the newer columns and may be absent in an old export.
+    """
+
+    row_number: int
+    sender: str
+    recipient: str
+    sent_at: datetime | None
+    message: str | None
+    direction: InvitationDirection | None
+    inviter_url: str | None
+    invitee_url: str | None
+    inviter_public_id: str | None
+    invitee_public_id: str | None
+
+
+ArchiveRow = ConnectionRow | MessageRow | InvitationRow
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveMember:
+    """A recognized table inside an :class:`Archive`.
+
+    ``name`` is the member's path inside the zip or the unpacked directory, or
+    the file name of a single CSV. ``modified_at`` is the member's timestamp as
+    UTC when it is plausible (after :data:`EARLIEST_EXPORT` and not in the
+    future), else ``None``; a single CSV read from a stream has none.
+    """
+
+    name: str
+    kind: ArchiveKind
+    modified_at: datetime | None
+
+
+# --- parsing helpers --------------------------------------------------------
+
+
+def public_id_from_url(url: str | None) -> str | None:
+    """The ``/in/`` slug of a LinkedIn profile URL, lowercased and URL-decoded, or ``None``.
+
+    The importer's identity resolution normalizes the same way; this copy keeps
+    the parser free of core imports (spec 9.10).
+    """
+    if url is None:
+        return None
+    match = _PROFILE_URL.search(url.strip())
+    if match is None:
+        return None
+    slug = unquote(match.group(1)).strip().lower()
+    return slug or None
+
+
+def parse_connected_on(text: str | None) -> date | None:
+    """``12 Mar 2019``, or an old export's ``12 Mar 19``, as a date; else ``None``.
+
+    The two forms cannot be confused: ``%Y`` matches four digits and ``%y``
+    exactly two, so a year is read the way it was written.
+    """
+    for pattern in ("%d %b %Y", "%d %b %y"):
+        parsed = _parse(text, pattern, lambda value: value.date())
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def parse_message_date(text: str | None) -> datetime | None:
+    """``2023-05-01 14:22:10``, with or without ``UTC``, as an aware UTC datetime.
+
+    ``None`` when unparseable. Exports differ on the suffix; neither form names
+    another zone, so both are read as UTC.
+    """
+    for pattern in ("%Y-%m-%d %H:%M:%S UTC", "%Y-%m-%d %H:%M:%S"):
+        parsed = _parse(text, pattern, lambda value: value.replace(tzinfo=UTC))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def parse_invitation_date(text: str | None) -> datetime | None:
+    """``5/12/21, 3:14 PM`` (month first, as LinkedIn writes it) as aware UTC; else ``None``."""
+    return _parse(text, "%m/%d/%y, %I:%M %p", lambda value: value.replace(tzinfo=UTC))
+
+
+def _parse[T](text: str | None, pattern: str, convert: Callable[[datetime], T]) -> T | None:
+    if text is None:
+        return None
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+    try:
+        return convert(datetime.strptime(cleaned, pattern))  # convert applies the zone
+    except ValueError:
+        return None
+
+
+def _normalize(name: str) -> str:
+    return name.strip().strip("﻿").casefold()
+
+
+def _split_list(text: str) -> tuple[str, ...]:
+    """A comma-separated cell as LinkedIn writes recipients and their URLs."""
+    return tuple(part.strip() for part in text.split(",") if part.strip())
+
+
+class _Fields:
+    """Cell access by normalized column name for one record. Missing or empty is ``None``."""
+
+    __slots__ = ("columns", "record")
+
+    def __init__(self, columns: dict[str, int], record: list[str]) -> None:
+        self.columns = columns
+        self.record = record
+
+    def get(self, column: str) -> str | None:
+        index = self.columns.get(column)
+        if index is None or index >= len(self.record):
+            return None
+        value = self.record[index].strip()
+        return value or None
+
+    def text(self, column: str) -> str:
+        return self.get(column) or ""
+
+
+# --- headers ----------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Layout:
+    """How a table is recognized (``signature``) and what the reader needs (``required``)."""
+
+    kind: ArchiveKind
+    signature: frozenset[str]
+    required: frozenset[str]
+
+
+# The signatures are disjoint from every other file in the archive: Profile.csv
+# has First Name and Last Name too, but no Connected On.
+LAYOUTS: Final[tuple[_Layout, ...]] = (
+    _Layout(
+        ArchiveKind.CONNECTIONS,
+        signature=frozenset({"first name", "last name", "connected on"}),
+        required=frozenset({"url"}),
+    ),
+    _Layout(
+        ArchiveKind.MESSAGES,
+        signature=frozenset({"conversation id", "from", "to"}),
+        required=frozenset({"sender profile url", "recipient profile urls", "date", "content"}),
+    ),
+    _Layout(
+        ArchiveKind.INVITATIONS,
+        signature=frozenset({"direction", "sent at"}),
+        required=frozenset({"from", "to"}),
+    ),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _Header:
+    kind: ArchiveKind
+    columns: dict[str, int]
+
+
+def _records(text: TextIO, name: str) -> Iterator[list[str]]:
+    """CSV records from ``text``; a decoding or CSV error becomes an :class:`ArchiveFormatError`."""
+    csv.field_size_limit(FIELD_SIZE_LIMIT)
+    try:
+        yield from csv.reader(text)
+    except (csv.Error, UnicodeDecodeError) as exc:
+        raise ArchiveFormatError(f"{name}: cannot be read as UTF-8 CSV: {exc}") from exc
+
+
+def _find_header(records: Iterator[list[str]], name: str) -> _Header | None:
+    """Consume records up to and including the header; ``None`` when no table is recognized.
+
+    A record that carries a table's signature but lacks a column the reader
+    needs is that table, malformed: an :class:`ArchiveFormatError`.
+    """
+    for index, record in enumerate(records):
+        if index >= MAX_PREAMBLE_RECORDS:
+            break
+        names = [_normalize(cell) for cell in record]
+        present = set(names)
+        for layout in LAYOUTS:
+            if not layout.signature <= present:
+                continue
+            missing = sorted(layout.required - present)
+            if missing:
+                raise ArchiveFormatError(
+                    f"{name}: the {layout.kind.value} table is missing "
+                    f"column(s) {', '.join(missing)}"
+                )
+            columns: dict[str, int] = {}
+            for position, column in enumerate(names):
+                if column and column not in columns:  # the first of a repeated name wins
+                    columns[column] = position
+            return _Header(layout.kind, columns)
+    return None
+
+
+def _table(text: TextIO, name: str) -> tuple[_Header | None, Iterator[list[str]]]:
+    """The header of the table in ``text`` and an iterator over the records after it."""
+    records = _records(text, name)
+    return _find_header(records, name), records
+
+
+def _data_rows(records: Iterator[list[str]]) -> Iterator[tuple[int, list[str]]]:
+    """``(row_number, record)`` for every non-blank record; numbering counts blank ones too."""
+    for row_number, record in enumerate(records, start=1):
+        if any(cell.strip() for cell in record):
+            yield row_number, record
+
+
+# --- row readers ------------------------------------------------------------
+
+
+def read_connections(text: TextIO, name: str = "Connections.csv") -> Iterator[ConnectionRow]:
+    """Stream :class:`ConnectionRow` from a ``Connections.csv`` text stream (preamble and all).
+
+    ``ArchiveFormatError`` when ``text`` is not that table.
+    """
+    header, records = _table(text, name)
+    header = _expect(header, ArchiveKind.CONNECTIONS, name)
+    for row_number, record in _data_rows(records):
+        fields = _Fields(header.columns, record)
+        url = fields.get("url")
+        connected_on = fields.get("connected on")
+        yield ConnectionRow(
+            row_number=row_number,
+            first_name=fields.text("first name"),
+            last_name=fields.text("last name"),
+            url=url,
+            public_id=public_id_from_url(url),
+            email=_lower(fields.get("email address")),
+            company=fields.get("company"),
+            position=fields.get("position"),
+            connected_on=_dated(parse_connected_on(connected_on), connected_on, name, row_number),
+        )
+
+
+def read_messages(text: TextIO, name: str = "messages.csv") -> Iterator[MessageRow]:
+    """Stream :class:`MessageRow` from a ``messages.csv`` text stream.
+
+    ``ArchiveFormatError`` when ``text`` is not that table.
+    """
+    header, records = _table(text, name)
+    header = _expect(header, ArchiveKind.MESSAGES, name)
+    for row_number, record in _data_rows(records):
+        fields = _Fields(header.columns, record)
+        sender_url = fields.get("sender profile url")
+        sent_at = fields.get("date")
+        recipient_urls = _split_list(fields.text("recipient profile urls"))
+        yield MessageRow(
+            row_number=row_number,
+            conversation_id=fields.text("conversation id"),
+            conversation_title=fields.get("conversation title"),
+            sender=fields.text("from"),
+            sender_url=sender_url,
+            sender_public_id=public_id_from_url(sender_url),
+            recipients=_split_list(fields.text("to")),
+            recipient_urls=recipient_urls,
+            recipient_public_ids=tuple(
+                slug for url in recipient_urls if (slug := public_id_from_url(url)) is not None
+            ),
+            sent_at=_dated(parse_message_date(sent_at), sent_at, name, row_number),
+            subject=fields.get("subject"),
+            content=fields.text("content"),
+            folder=fields.get("folder"),
+        )
+
+
+def read_invitations(text: TextIO, name: str = "Invitations.csv") -> Iterator[InvitationRow]:
+    """Stream :class:`InvitationRow` from an ``Invitations.csv`` text stream.
+
+    ``ArchiveFormatError`` when ``text`` is not that table.
+    """
+    header, records = _table(text, name)
+    header = _expect(header, ArchiveKind.INVITATIONS, name)
+    for row_number, record in _data_rows(records):
+        fields = _Fields(header.columns, record)
+        inviter_url = fields.get("inviterprofileurl")
+        invitee_url = fields.get("inviteeprofileurl")
+        sent_at = fields.get("sent at")
+        yield InvitationRow(
+            row_number=row_number,
+            sender=fields.text("from"),
+            recipient=fields.text("to"),
+            sent_at=_dated(parse_invitation_date(sent_at), sent_at, name, row_number),
+            message=fields.get("message"),
+            direction=_direction(fields.get("direction")),
+            inviter_url=inviter_url,
+            invitee_url=invitee_url,
+            inviter_public_id=public_id_from_url(inviter_url),
+            invitee_public_id=public_id_from_url(invitee_url),
+        )
+
+
+def _dated[T](parsed: T | None, raw: str | None, name: str, row_number: int) -> T | None:
+    """``parsed``, warning first when ``raw`` held something the parser could not read.
+
+    An empty cell is silent: LinkedIn leaves dates out all the time. A cell with
+    something in it that is not a date means a format changed, which is worth
+    knowing; the cell itself is a date in a real person's life and stays out of
+    the log (CLAUDE.md).
+    """
+    if parsed is None and raw is not None:
+        log.warning("%s row %d: the date cell is in no form this reader knows", name, row_number)
+    return parsed
+
+
+def _expect(header: _Header | None, kind: ArchiveKind, name: str) -> _Header:
+    if header is None:
+        raise ArchiveFormatError(f"{name}: no LinkedIn {kind.value} table header found")
+    if header.kind is not kind:
+        raise ArchiveFormatError(f"{name}: this is the {header.kind.value} table, not {kind.value}")
+    return header
+
+
+def _lower(value: str | None) -> str | None:
+    return value.lower() if value is not None else None
+
+
+def _direction(value: str | None) -> InvitationDirection | None:
+    if value is None:
+        return None
+    try:
+        return InvitationDirection(value.strip().upper())
+    except ValueError:
+        return None
+
+
+# --- the archive ------------------------------------------------------------
+
+_TextOpener = Callable[[], AbstractContextManager[TextIO]]
+
+
+class Archive:
+    """An open archive: its recognized tables, and a fresh row stream for each on demand.
+
+    Get one from :func:`open_archive`. ``members`` lists the recognized tables
+    in reading order (connections, messages, invitations, then by name);
+    ``exported_at`` is the newest plausible member timestamp, the closest thing
+    the archive has to an export time, or ``None`` when no member carries one.
+    Each reader may be called more than once; every call starts the table over.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        members: list[tuple[ArchiveMember, _TextOpener]],
+        close: Callable[[], None],
+    ) -> None:
+        self.name = name
+        self._members = dict(members)
+        self._close = close
+        self.members: tuple[ArchiveMember, ...] = tuple(
+            sorted(self._members, key=lambda member: (_KIND_ORDER[member.kind], member.name))
+        )
+        stamps = [member.modified_at for member in self.members if member.modified_at is not None]
+        self.exported_at: datetime | None = max(stamps) if stamps else None
+
+    def connections(self, member: ArchiveMember) -> Iterator[ConnectionRow]:
+        """Stream the rows of a ``connections`` member. ``ValueError`` for another kind."""
+        return self._stream(member, ArchiveKind.CONNECTIONS, read_connections)
+
+    def messages(self, member: ArchiveMember) -> Iterator[MessageRow]:
+        """Stream the rows of a ``messages`` member. ``ValueError`` for another kind."""
+        return self._stream(member, ArchiveKind.MESSAGES, read_messages)
+
+    def invitations(self, member: ArchiveMember) -> Iterator[InvitationRow]:
+        """Stream the rows of an ``invitations`` member. ``ValueError`` for another kind."""
+        return self._stream(member, ArchiveKind.INVITATIONS, read_invitations)
+
+    def _stream[R](
+        self,
+        member: ArchiveMember,
+        kind: ArchiveKind,
+        reader: Callable[[TextIO, str], Iterator[R]],
+    ) -> Iterator[R]:
+        if member.kind is not kind:
+            raise ValueError(f"{member.name} is the {member.kind.value} table, not {kind.value}")
+        opener = self._members.get(member)
+        if opener is None:
+            raise ValueError(f"{member.name} is not a member of {self.name}")
+        with opener() as text:
+            yield from reader(text, member.name)
+
+    def close(self) -> None:
+        self._close()
+
+
+_KIND_ORDER: Final[dict[ArchiveKind, int]] = {
+    ArchiveKind.CONNECTIONS: 0,
+    ArchiveKind.MESSAGES: 1,
+    ArchiveKind.INVITATIONS: 2,
+}
+
+
+@contextmanager
+def open_archive(source: Path | IO[bytes], *, filename: str | None = None) -> Iterator[Archive]:
+    """Open a LinkedIn archive and yield an :class:`Archive`.
+
+    ``source`` is the export zip, a directory the zip was unpacked into, one of
+    its CSVs on its own, or a seekable binary stream holding any of the first
+    two (an upload). Whether a file is a zip is decided from its bytes, not its
+    name; ``filename`` is what error messages call it (default: the path's
+    name, or ``upload``).
+
+    A zip and a directory are both scanned whole, subdirectories included, and
+    a member is recognized by its header rather than its file name, so an
+    export that renames or moves a table still reads. Two kinds of member are
+    passed over on sight: anything that is not a ``.csv``, and the assistant
+    chat logs in :data:`NOT_CONVERSATIONS`, whose header is the messages header
+    but whose rows are not messages between people. Naming one of those files
+    directly reads it anyway; that is an explicit request, not a scan.
+
+    The scan happens once, on open, reading only the head of each member, so a
+    table missing a column the reader needs, an archive with none of the three
+    tables, a single CSV that is none of them, or a file that is neither zip
+    nor CSV raise :class:`ArchiveFormatError` here, before any row is read. A
+    stream passed in is left open; a path is closed on exit.
+    """
+    if isinstance(source, Path):
+        if source.is_dir():
+            archive = _open_dir(source, filename or source.name)
+            try:
+                yield archive
+            finally:
+                archive.close()
+            return
+        name = filename or source.name
+        with source.open("rb") as handle:
+            archive = _open(handle, name)
+            try:
+                yield archive
+            finally:
+                archive.close()
+        return
+    archive = _open(source, filename or "upload")
+    try:
+        yield archive
+    finally:
+        archive.close()
+
+
+def _open(handle: IO[bytes], name: str) -> Archive:
+    handle.seek(0)
+    is_zip = zipfile.is_zipfile(handle)
+    handle.seek(0)
+    return _open_zip(handle, name) if is_zip else _open_csv(handle, name)
+
+
+def _open_zip(handle: IO[bytes], name: str) -> Archive:
+    try:
+        zf = zipfile.ZipFile(handle)
+    except zipfile.BadZipFile as exc:
+        raise ArchiveFormatError(f"{name}: not a valid zip file ({exc})") from exc
+    members: list[tuple[ArchiveMember, _TextOpener]] = []
+    try:
+        for info in zf.infolist():
+            if info.is_dir() or not _looks_like_csv(info.filename):
+                continue
+            if info.file_size > MAX_MEMBER_BYTES:
+                raise ArchiveFormatError(
+                    f"{name}: member {info.filename} is {info.file_size} bytes uncompressed, "
+                    f"over the {MAX_MEMBER_BYTES} byte limit"
+                )
+            opener = _zip_opener(zf, info, f"{name}:{info.filename}")
+            with opener() as text:
+                header, _ = _table(text, f"{name}:{info.filename}")
+            if header is None:
+                log.debug("%s: skipping %s, not a table the importer reads", name, info.filename)
+                continue
+            members.append((ArchiveMember(info.filename, header.kind, _zip_time(info)), opener))
+    except BaseException:
+        zf.close()
+        raise
+    if not members:
+        zf.close()
+        raise ArchiveFormatError(
+            f"{name}: no Connections.csv, messages.csv, or Invitations.csv table in the archive"
+        )
+    return Archive(name, members, zf.close)
+
+
+def _open_dir(root: Path, name: str) -> Archive:
+    """Scan an unpacked export, in sorted order so two runs list its tables the same way."""
+    members: list[tuple[ArchiveMember, _TextOpener]] = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if not path.is_file() or not _looks_like_csv(relative):
+            continue
+        member_name = f"{name}:{relative}"
+        size = path.stat().st_size
+        if size > MAX_MEMBER_BYTES:
+            raise ArchiveFormatError(
+                f"{name}: member {relative} is {size} bytes, over the {MAX_MEMBER_BYTES} byte limit"
+            )
+        opener = _path_opener(path, member_name)
+        with opener() as text:
+            header, _ = _table(text, member_name)
+        if header is None:
+            log.debug("%s: skipping %s, not a table the importer reads", name, relative)
+            continue
+        members.append((ArchiveMember(relative, header.kind, _file_time(path)), opener))
+    if not members:
+        raise ArchiveFormatError(
+            f"{name}: no Connections.csv, messages.csv, or Invitations.csv table in the directory"
+        )
+    return Archive(name, members, lambda: None)
+
+
+def _open_csv(handle: IO[bytes], name: str) -> Archive:
+    opener = _stream_opener(handle, name)
+    with opener() as text:
+        header, _ = _table(text, name)
+    if header is None:
+        raise ArchiveFormatError(
+            f"{name}: not a LinkedIn archive zip, and no Connections.csv, messages.csv, or "
+            "Invitations.csv header in its first lines"
+        )
+    return Archive(name, [(ArchiveMember(name, header.kind, None), opener)], lambda: None)
+
+
+def _looks_like_csv(path: str) -> bool:
+    parts = path.replace("\\", "/").split("/")
+    base = parts[-1]
+    return (
+        base.lower().endswith(".csv")
+        and not base.startswith("._")  # macOS resource forks
+        and "__MACOSX" not in parts
+        and base.lower() not in NOT_CONVERSATIONS
+    )
+
+
+def _zip_time(info: zipfile.ZipInfo) -> datetime | None:
+    try:
+        return _plausible(datetime(*info.date_time, tzinfo=UTC))
+    except (TypeError, ValueError):
+        return None
+
+
+def _file_time(path: Path) -> datetime | None:
+    try:
+        return _plausible(datetime.fromtimestamp(path.stat().st_mtime, UTC))
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _plausible(stamp: datetime) -> datetime | None:
+    """A member timestamp, or ``None`` when it predates LinkedIn or sits in the future."""
+    if stamp < EARLIEST_EXPORT or stamp > datetime.now(UTC) + timedelta(days=1):
+        return None
+    return stamp
+
+
+def _zip_opener(zf: zipfile.ZipFile, info: zipfile.ZipInfo, name: str) -> _TextOpener:
+    @contextmanager
+    def opener() -> Iterator[TextIO]:
+        try:
+            raw = zf.open(info)
+        except (zipfile.BadZipFile, NotImplementedError, RuntimeError) as exc:
+            # A corrupt member, an unsupported compression method, or encryption.
+            raise ArchiveFormatError(f"{name}: cannot be opened ({exc})") from exc
+        with raw:
+            yield io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
+
+    return opener
+
+
+def _path_opener(path: Path, name: str) -> _TextOpener:
+    @contextmanager
+    def opener() -> Iterator[TextIO]:
+        try:
+            handle = path.open("r", encoding="utf-8-sig", newline="")
+        except OSError as exc:
+            raise ArchiveFormatError(f"{name}: cannot be opened ({exc})") from exc
+        with handle:
+            yield handle
+
+    return opener
+
+
+def _stream_opener(handle: IO[bytes], name: str) -> _TextOpener:
+    @contextmanager
+    def opener() -> Iterator[TextIO]:
+        handle.seek(0)
+        wrapper = io.TextIOWrapper(handle, encoding="utf-8-sig", newline="")
+        try:
+            yield wrapper
+        finally:
+            wrapper.detach()  # the caller's stream stays open
+
+    return opener

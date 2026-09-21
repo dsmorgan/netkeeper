@@ -48,3 +48,10 @@ Contacts.csv
 messages.csv
 Invitations.csv
 *Campaign Statistics*
+
+# The sanitized sample archive under tests/fixtures/archive is committed on
+# purpose: its members carry the real export's file names because that is what
+# the parser has to recognize, so the rules above would otherwise swallow them.
+# Only .csv comes back, and only there; a real export dropped in that directory
+# would still fail the suite, which asserts the sample's exact counts.
+!tests/fixtures/archive/*.csv
