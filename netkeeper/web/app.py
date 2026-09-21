@@ -25,6 +25,7 @@ from sqlalchemy import Engine
 from netkeeper import __version__, migrations
 from netkeeper.config import Settings, load_settings
 from netkeeper.crm.confirmation import Signer
+from netkeeper.crm.lists import ensure_validated_list
 from netkeeper.crm.tags import ensure_default_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.logging_setup import setup_logging
@@ -99,6 +100,7 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     with session_scope(factory, write=True) as session:  # reads, then may insert the user
         user = ensure_local_user(session, settings=settings)
         ensure_default_rules(session, user)  # once per user; a deleted default stays deleted
+        ensure_validated_list(session, user)  # once per user; a deleted "Validated" stays deleted
         log.info(
             "database at revision %s, local user %d", migrations.current_revision(engine), user.id
         )

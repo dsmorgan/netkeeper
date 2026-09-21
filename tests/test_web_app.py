@@ -66,6 +66,12 @@ API_PATHS = {
     "/api/v1/imports/{run_id}/commit",
     "/api/v1/imports/{run_id}/rollback",
     "/api/v1/exports",
+    "/api/v1/lists",
+    "/api/v1/lists/{list_id}",
+    "/api/v1/lists/{list_id}/members",
+    "/api/v1/lists/{list_id}/members/{contact_id}",
+    "/api/v1/views",
+    "/api/v1/views/{view_id}",
 }
 
 
@@ -174,6 +180,7 @@ def test_known_api_modules_are_discovered() -> None:
         "health",
         "imports",
         "interactions",
+        "lists",
         "me",
         "tags",
         "tasks",

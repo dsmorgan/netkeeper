@@ -20,9 +20,12 @@ from netkeeper.crm.importer import ImportField
 from netkeeper.crm.interactions import TimelineEntry
 from netkeeper.crm.tags import PATTERN_MAX_LENGTH, InvalidPattern, compile_pattern
 from netkeeper.models import (
+    LIST_NAME_MAX_LENGTH,
     TAG_NAME_MAX_LENGTH,
     ContactMet,
     ContactSnapshot,
+    VIEW_NAME_MAX_LENGTH,
+    ContactMet,
     ContactSource,
     EmailKind,
     EmailStatus,
@@ -34,6 +37,7 @@ from netkeeper.models import (
     InteractionKind,
     LinkKind,
     PhoneKind,
+    ListKind,
     RuleField,
     TagKind,
     TagSource,
@@ -940,3 +944,91 @@ class ImportPresetsOut(BaseModel):
 
 class ImportPresetIn(BaseModel):
     mapping: ColumnMapping = Field(min_length=1)
+
+
+# --- lists and saved views (spec 10.1, 10.4; P1-08) --------------------------
+
+ListName = Annotated[str, Field(min_length=1, max_length=LIST_NAME_MAX_LENGTH)]
+ViewName = Annotated[str, Field(min_length=1, max_length=VIEW_NAME_MAX_LENGTH)]
+
+
+class ListOut(BaseModel):
+    id: int
+    name: str
+    kind: ListKind
+    filter: FilterTree | None
+    member_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ListCreate(BaseModel):
+    name: ListName
+    kind: ListKind
+    filter: FilterTree | None = None
+    """Required for a smart list, refused for a static one; the service checks both ways."""
+
+
+class ListPatch(BaseModel):
+    """Fields left out (or ``null``) are left alone; a smart list's filter cannot be cleared,
+    only replaced."""
+
+    name: ListName | None = None
+    filter: FilterTree | None = None
+
+
+class ListMembersIn(BaseModel):
+    contact_ids: list[int] = Field(min_length=1)
+
+
+class ListMembersAddedOut(BaseModel):
+    added: int
+    """Contacts newly added; ids already members, or repeated, are not recounted."""
+
+
+class ContactSummaryOut(BaseModel):
+    """A contact as a list or saved view shows it: enough to identify and open them."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    first_name: str
+    last_name: str
+    preferred_name: str
+    headline: str | None
+    current_title: str | None
+    current_company: str | None
+    met: ContactMet
+    li_url: str | None
+
+
+class ListMembersPage(BaseModel):
+    items: list[ContactSummaryOut]
+    total: int
+
+
+class SavedViewOut(BaseModel):
+    id: int
+    name: str
+    columns: list[str]
+    sort: list[SortKey]
+    filter: FilterTree | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SavedViewCreate(BaseModel):
+    name: ViewName
+    columns: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
+    sort: list[SortKey] = Field(default_factory=list)
+    filter: FilterTree | None = None
+
+
+class SavedViewPatch(BaseModel):
+    """Fields left out are left alone; ``columns`` and ``sort`` replace the whole list when
+    given; ``filter: null`` clears it (a view with no filter shows every contact)."""
+
+    name: ViewName | None = None
+    columns: list[Annotated[str, Field(min_length=1)]] | None = Field(default=None, min_length=1)
+    sort: list[SortKey] | None = None
+    filter: FilterTree | None = None
