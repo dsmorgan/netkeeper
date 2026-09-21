@@ -60,9 +60,12 @@ from netkeeper.models import (
     ContactPosition,
     ContactSnapshot,
     ContactSource,
+    ContactTag,
+    ContactTagSuppression,
     EmailKind,
     LinkKind,
     PhoneKind,
+    TagSource,
     User,
     linkedin_profile_url,
     normalize_email,
@@ -832,7 +835,9 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     duplicate goes), snapshots, aliases, and interactions all move. The
     survivor's empty provenance fields take the loser's values with the loser's
     recorded source, and its ``synced_values`` fill in from the loser's for the
-    fields it has none for. The loser's URN and slug move to the survivor when it lacks
+    fields it has none for. Tag assignments and suppressions carry across under
+    :func:`~netkeeper.crm.tags.tag_contact`'s precedence, one row per tag; see
+    :func:`_merge_tags`. The loser's URN and slug move to the survivor when it lacks
     them; otherwise the slug becomes an alias of the survivor and the URN is
     dropped. Both are cleared on the loser, whose ``merged_into_id`` points at
     the survivor. ``met`` takes the more decided value, ``do_not_contact`` is
@@ -861,10 +866,18 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
         return survivor
     if survivor.id == loser.id:
         raise ValueError(f"contact {survivor_id} is merged into {loser_id}; nothing to merge")
+    # Both rows came through get_scoped, so both are this user's. Everything below
+    # moves rows between them without re-filtering each one, so state the invariant
+    # rather than assume it: one cross-user row here would leak across users.
+    if survivor.user_id != user.id or loser.user_id != user.id:
+        raise ValueError(
+            f"contacts {survivor.id} and {loser.id} are not both contacts of user {user.id}"
+        )
     log.info("merging contact %d into %d for user %d", loser.id, survivor.id, user.id)
 
     _merge_identity(session, user, survivor, loser)
     _merge_children(survivor, loser)
+    _merge_tags(session, user, survivor, loser)
     _merge_scalars(survivor, loser)
     _merge_synced_values(survivor, loser)
     loser.merged_into_id = survivor.id
@@ -949,6 +962,112 @@ def _keep_one_primary(rows: Sequence[ContactEmail] | Sequence[ContactPhone]) -> 
             if seen:
                 row.is_primary = False
             seen = True
+
+
+def _merge_tags(session: Session, user: User, survivor: Contact, loser: Contact) -> None:
+    """Carry the loser's tag assignments and suppressions across, one row per tag (spec 8.3).
+
+    The precedence is :func:`~netkeeper.crm.tags.tag_contact`'s, read across both
+    contacts: a ``manual`` assignment beats a ``rule`` or an ``llm`` one, and on a
+    tie the survivor's row stays, because its ``contact_id`` is already right and
+    its ``rule_id`` credit is current. A ``rule`` assignment that moves keeps that
+    credit, so the next run re-credits it instead of counting it as newly added.
+    A ``manual`` assignment that wins over an automatic one leaves the row
+    ``manual`` with no rule, exactly as ``tag_contact`` does.
+
+    Suppressions carry across too: one on the loser says the user removed that
+    automatic tag from that person, and the person survives the merge. Where a
+    suppression on one contact meets an automatic assignment on the other, the
+    suppression wins, in both directions:
+
+    - The loser's suppression removes the survivor's ``rule`` or ``llm``
+      assignment, which is what :func:`~netkeeper.crm.tags.untag_contact` would
+      have done to the survivor; without it a tag the user deliberately removed
+      would come back with the merge, which is what the suppression exists to
+      prevent.
+    - The survivor's suppression drops the loser's ``rule`` or ``llm``
+      assignment, because ``tag_contact`` refuses an automatic assignment on a
+      contact that suppresses the tag (:class:`~netkeeper.crm.tags.TagSuppressed`).
+
+    A ``manual`` assignment on either contact beats a suppression on either and
+    clears it, as ``tag_contact`` with its default source does. So the survivor
+    keeps at most one of an assignment and a suppression per tag, the invariant
+    those two functions hold on a single contact, and the loser keeps neither.
+    """
+    mine_tagged = _assignments_of(session, user, survivor.id)
+    their_tagged = _assignments_of(session, user, loser.id)
+    mine_blocked = _suppressions_of(session, user, survivor.id)
+    their_blocked = _suppressions_of(session, user, loser.id)
+    for tag_id in sorted({*mine_tagged, *their_tagged, *mine_blocked, *their_blocked}):
+        assigned = (mine_tagged.get(tag_id), their_tagged.get(tag_id))
+        blocked = (mine_blocked.get(tag_id), their_blocked.get(tag_id))
+        if any(row is not None and row.source is TagSource.MANUAL for row in assigned):
+            kept = _keep_assignment(session, survivor, *assigned)
+            kept.source = TagSource.MANUAL
+            kept.rule_id = None
+            _drop(session, *blocked)
+        elif any(row is not None for row in blocked):
+            if any(row is not None for row in assigned):
+                log.info(
+                    "tag %d stays suppressed for contact %d after the merge of contact %d; "
+                    "the automatic assignment is dropped",
+                    tag_id,
+                    survivor.id,
+                    loser.id,
+                )
+            _drop(session, *assigned)
+            _keep_suppression(session, survivor, *blocked)
+        else:
+            _keep_assignment(session, survivor, *assigned)
+    session.flush()
+
+
+def _assignments_of(session: Session, user: User, contact_id: int) -> dict[int, ContactTag]:
+    """The contact's tag assignments by tag id; one per tag, as the unique constraint has it."""
+    rows = session.scalars(scoped(user, ContactTag).where(ContactTag.contact_id == contact_id))
+    return {row.tag_id: row for row in rows}
+
+
+def _suppressions_of(
+    session: Session, user: User, contact_id: int
+) -> dict[int, ContactTagSuppression]:
+    """The contact's tag suppressions by tag id."""
+    rows = session.scalars(
+        scoped(user, ContactTagSuppression).where(ContactTagSuppression.contact_id == contact_id)
+    )
+    return {row.tag_id: row for row in rows}
+
+
+def _keep_assignment(
+    session: Session, survivor: Contact, mine: ContactTag | None, theirs: ContactTag | None
+) -> ContactTag:
+    """Leave the survivor one assignment for the tag: its own, or the loser's moved across."""
+    if mine is None:
+        assert theirs is not None, "called with no assignment on either contact"
+        survivor.tag_assignments.append(theirs)  # source and rule_id come along
+        return theirs
+    _drop(session, theirs)
+    return mine
+
+
+def _keep_suppression(
+    session: Session,
+    survivor: Contact,
+    mine: ContactTagSuppression | None,
+    theirs: ContactTagSuppression | None,
+) -> None:
+    """Leave the survivor one suppression for the tag: its own, or the loser's moved across."""
+    if mine is None:
+        assert theirs is not None, "called with no suppression on either contact"
+        theirs.contact_id = survivor.id  # no relationship to append to; the FK is the whole row
+    else:
+        _drop(session, theirs)
+
+
+def _drop(session: Session, *rows: ContactTag | ContactTagSuppression | None) -> None:
+    for row in rows:
+        if row is not None:
+            session.delete(row)
 
 
 def _merge_scalars(survivor: Contact, loser: Contact) -> None:
