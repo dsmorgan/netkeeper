@@ -37,6 +37,7 @@ from netkeeper.crm.provenance import (
     revert_to_synced,
     set_manual_field,
 )
+from netkeeper.crm.tags import create_rule, create_tag, run_rules, tag_contact, untag_contact
 from netkeeper.db import is_writer, session_scope
 from netkeeper.models import (
     CONTACT_CHILDREN,
@@ -47,10 +48,15 @@ from netkeeper.models import (
     ContactMet,
     ContactSnapshot,
     ContactSource,
+    ContactTag,
+    ContactTagSuppression,
     EmailKind,
     Interaction,
     InteractionKind,
     LinkKind,
+    RuleField,
+    Tag,
+    TagSource,
     User,
     UserOwned,
 )
@@ -1510,3 +1516,336 @@ def test_merge_runs_in_the_callers_transaction(session_factory: sessionmaker[Ses
             )
             == 3
         )
+
+
+# --- merge: tags and suppressions -------------------------------------------
+
+
+def assignments_of(
+    session: Session, user: User, contact: Contact
+) -> dict[int, tuple[TagSource, int | None]]:
+    """Tag id to (source, credited rule id) for every assignment on ``contact``."""
+    return {
+        row.tag_id: (row.source, row.rule_id)
+        for row in session.scalars(
+            scoped(user, ContactTag).where(ContactTag.contact_id == contact.id)
+        )
+    }
+
+
+def suppressions_of(session: Session, user: User, contact: Contact) -> set[int]:
+    """The tag ids suppressed for ``contact``."""
+    return {
+        row.tag_id
+        for row in session.scalars(
+            scoped(user, ContactTagSuppression).where(
+                ContactTagSuppression.contact_id == contact.id
+            )
+        )
+    }
+
+
+def assign(
+    session: Session,
+    user: User,
+    contact: Contact,
+    tag: Tag,
+    source: TagSource,
+    rule_id: int | None = None,
+) -> ContactTag:
+    """A ``contact_tags`` row with the source and rule credit a run or the user would leave."""
+    row = ContactTag(
+        user_id=user.id, contact_id=contact.id, tag_id=tag.id, source=source, rule_id=rule_id
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+# (tag name, the survivor's source, the loser's source, what the survivor ends with).
+# None is "no assignment on that side"; every pairing tag_contact ranks, both ways round.
+MERGE_TAG_MATRIX: tuple[tuple[str, TagSource | None, TagSource | None, TagSource], ...] = (
+    ("manual-manual", TagSource.MANUAL, TagSource.MANUAL, TagSource.MANUAL),
+    ("manual-rule", TagSource.MANUAL, TagSource.RULE, TagSource.MANUAL),
+    ("rule-manual", TagSource.RULE, TagSource.MANUAL, TagSource.MANUAL),
+    ("rule-rule", TagSource.RULE, TagSource.RULE, TagSource.RULE),
+    ("manual-llm", TagSource.MANUAL, TagSource.LLM, TagSource.MANUAL),
+    ("llm-manual", TagSource.LLM, TagSource.MANUAL, TagSource.MANUAL),
+    ("llm-rule", TagSource.LLM, TagSource.RULE, TagSource.LLM),
+    ("rule-llm", TagSource.RULE, TagSource.LLM, TagSource.RULE),
+    ("llm-llm", TagSource.LLM, TagSource.LLM, TagSource.LLM),
+    ("none-manual", None, TagSource.MANUAL, TagSource.MANUAL),
+    ("none-rule", None, TagSource.RULE, TagSource.RULE),
+    ("none-llm", None, TagSource.LLM, TagSource.LLM),
+    ("manual-none", TagSource.MANUAL, None, TagSource.MANUAL),
+    ("rule-none", TagSource.RULE, None, TagSource.RULE),
+    ("llm-none", TagSource.LLM, None, TagSource.LLM),
+)
+
+
+def test_merge_tags_follow_tag_contacts_precedence(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    alice, _ = users
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    expected: dict[int, tuple[TagSource, int | None]] = {}
+    kept_rows: dict[int, int] = {}  # tag id -> the contact_tags row that should survive
+    for name, mine_source, their_source, wanted in MERGE_TAG_MATRIX:
+        tag = create_tag(writer, alice, name)
+        my_rule = create_rule(writer, alice, tag.id, RuleField.TITLE, f"^{name}$")
+        their_rule = create_rule(writer, alice, tag.id, RuleField.HEADLINE, f"^{name}$")
+        mine = (
+            None
+            if mine_source is None
+            else assign(
+                writer,
+                alice,
+                survivor,
+                tag,
+                mine_source,
+                my_rule.id if mine_source is TagSource.RULE else None,
+            )
+        )
+        theirs = (
+            None
+            if their_source is None
+            else assign(
+                writer,
+                alice,
+                loser,
+                tag,
+                their_source,
+                their_rule.id if their_source is TagSource.RULE else None,
+            )
+        )
+        credit = None
+        if wanted is TagSource.RULE:
+            credit = my_rule.id if mine_source is TagSource.RULE else their_rule.id
+        expected[tag.id] = (wanted, credit)
+        kept = mine if mine is not None else theirs
+        assert kept is not None
+        kept_rows[tag.id] = kept.id
+    assert merge(writer, alice, survivor.id, loser.id) is survivor
+    writer.expire_all()
+    assert assignments_of(writer, alice, survivor) == expected
+    assert assignments_of(writer, alice, loser) == {}
+    assert suppressions_of(writer, alice, survivor) == set()
+    # A tie keeps the survivor's own row, and a moved row is moved, not re-made.
+    assert {
+        row.tag_id: row.id
+        for row in writer.scalars(
+            scoped(alice, ContactTag).where(ContactTag.contact_id == survivor.id)
+        )
+    } == kept_rows
+
+
+def test_merge_carries_suppressions_over(writer: Session, users: tuple[User, User]) -> None:
+    alice, _ = users
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    moved = create_tag(writer, alice, "moved")
+    shared = create_tag(writer, alice, "shared")
+    for tag in (moved, shared):
+        tag_contact(writer, alice, loser.id, tag.id, source=TagSource.RULE)
+        untag_contact(writer, alice, loser.id, tag.id)
+    tag_contact(writer, alice, survivor.id, shared.id, source=TagSource.LLM)
+    untag_contact(writer, alice, survivor.id, shared.id)
+    assert suppressions_of(writer, alice, survivor) == {shared.id}
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+    assert suppressions_of(writer, alice, survivor) == {moved.id, shared.id}
+    assert suppressions_of(writer, alice, loser) == set()
+    assert assignments_of(writer, alice, survivor) == {}
+    assert writer.scalar(scoped_count(alice, ContactTagSuppression)) == 2
+
+
+def _rule_tagged_pair(writer: Session, user: User) -> tuple[Tag, int, Contact, Contact]:
+    """Two contacts a run has tagged from one rule, plus that tag and the rule's id."""
+    tag = create_tag(writer, user, "investor")
+    rule = create_rule(writer, user, tag.id, RuleField.TITLE, r"\binvestor\b")
+    survivor = factories.make_contact(writer, user, current_title="Investor")
+    loser = factories.make_contact(writer, user, current_title="Investor")
+    assert run_rules(writer, user).added == 2
+    assert assignments_of(writer, user, survivor) == {tag.id: (TagSource.RULE, rule.id)}
+    assert assignments_of(writer, user, loser) == {tag.id: (TagSource.RULE, rule.id)}
+    return tag, rule.id, survivor, loser
+
+
+def test_merge_keeps_a_tag_the_user_removed_from_the_loser(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """The loser's suppression beats the survivor's rule assignment."""
+    alice, _ = users
+    tag, _rule_id, survivor, loser = _rule_tagged_pair(writer, alice)
+    assert untag_contact(writer, alice, loser.id, tag.id) is True
+    assert suppressions_of(writer, alice, loser) == {tag.id}
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+    assert assignments_of(writer, alice, survivor) == {}
+    assert suppressions_of(writer, alice, survivor) == {tag.id}
+    assert assignments_of(writer, alice, loser) == {}
+    assert suppressions_of(writer, alice, loser) == set()
+    # And no later run puts it back, which is the whole point of the suppression.
+    assert run_rules(writer, alice).added == 0
+    assert assignments_of(writer, alice, survivor) == {}
+
+
+def test_merge_keeps_a_tag_the_user_removed_from_the_survivor(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """The survivor's suppression beats the loser's rule assignment."""
+    alice, _ = users
+    tag, rule_id, survivor, loser = _rule_tagged_pair(writer, alice)
+    assert untag_contact(writer, alice, survivor.id, tag.id) is True
+    assert assignments_of(writer, alice, loser) == {tag.id: (TagSource.RULE, rule_id)}
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+    assert assignments_of(writer, alice, survivor) == {}
+    assert suppressions_of(writer, alice, survivor) == {tag.id}
+    assert assignments_of(writer, alice, loser) == {}
+    assert run_rules(writer, alice).added == 0
+    assert assignments_of(writer, alice, survivor) == {}
+
+
+def test_merge_manual_tag_beats_a_suppression_either_way(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    alice, _ = users
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    by_loser = create_tag(writer, alice, "tagged-on-the-loser")
+    by_survivor = create_tag(writer, alice, "tagged-on-the-survivor")
+    # The user tagged the loser by hand and suppressed the same tag on the survivor.
+    tag_contact(writer, alice, loser.id, by_loser.id)
+    tag_contact(writer, alice, survivor.id, by_loser.id, source=TagSource.RULE)
+    untag_contact(writer, alice, survivor.id, by_loser.id)
+    # And the other way round.
+    tag_contact(writer, alice, survivor.id, by_survivor.id)
+    tag_contact(writer, alice, loser.id, by_survivor.id, source=TagSource.RULE)
+    untag_contact(writer, alice, loser.id, by_survivor.id)
+    assert suppressions_of(writer, alice, survivor) == {by_loser.id}
+    assert suppressions_of(writer, alice, loser) == {by_survivor.id}
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+    assert assignments_of(writer, alice, survivor) == {
+        by_loser.id: (TagSource.MANUAL, None),
+        by_survivor.id: (TagSource.MANUAL, None),
+    }
+    assert suppressions_of(writer, alice, survivor) == set()
+    assert assignments_of(writer, alice, loser) == {}
+    assert suppressions_of(writer, alice, loser) == set()
+
+
+def test_merge_tags_when_only_one_side_has_any(writer: Session, users: tuple[User, User]) -> None:
+    alice, _ = users
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    bare = factories.make_contact(writer, alice)
+    by_hand = create_tag(writer, alice, "by-hand")
+    by_rule = create_tag(writer, alice, "by-rule")
+    blocked = create_tag(writer, alice, "blocked")
+    rule = create_rule(writer, alice, by_rule.id, RuleField.TITLE, "nothing-here-matches")
+    assign(writer, alice, loser, by_rule, TagSource.RULE, rule.id)
+    tag_contact(writer, alice, loser.id, by_hand.id)
+    tag_contact(writer, alice, loser.id, blocked.id, source=TagSource.LLM)
+    untag_contact(writer, alice, loser.id, blocked.id)
+    merge(writer, alice, survivor.id, loser.id)  # the survivor has nothing: it all moves
+    writer.expire_all()
+    moved = {
+        by_rule.id: (TagSource.RULE, rule.id),
+        by_hand.id: (TagSource.MANUAL, None),
+    }
+    assert assignments_of(writer, alice, survivor) == moved
+    assert suppressions_of(writer, alice, survivor) == {blocked.id}
+    assert assignments_of(writer, alice, loser) == {}
+    assert suppressions_of(writer, alice, loser) == set()
+    merge(writer, alice, survivor.id, bare.id)  # the loser has nothing: nothing changes
+    writer.expire_all()
+    assert assignments_of(writer, alice, survivor) == moved
+    assert suppressions_of(writer, alice, survivor) == {blocked.id}
+
+
+def test_merging_twice_does_not_duplicate_a_tag(writer: Session, users: tuple[User, User]) -> None:
+    alice, _ = users
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    kept = create_tag(writer, alice, "investor")
+    blocked = create_tag(writer, alice, "recruiter")
+    tag_contact(writer, alice, survivor.id, kept.id, source=TagSource.RULE)
+    tag_contact(writer, alice, loser.id, kept.id)
+    tag_contact(writer, alice, loser.id, blocked.id, source=TagSource.RULE)
+    untag_contact(writer, alice, loser.id, blocked.id)
+    merge(writer, alice, survivor.id, loser.id)
+    assert merge(writer, alice, survivor.id, loser.id) is survivor  # a no-op the second time
+    writer.expire_all()
+    assert assignments_of(writer, alice, survivor) == {kept.id: (TagSource.MANUAL, None)}
+    assert suppressions_of(writer, alice, survivor) == {blocked.id}
+    assert writer.scalar(scoped_count(alice, ContactTag)) == 1
+    assert writer.scalar(scoped_count(alice, ContactTagSuppression)) == 1
+    third = factories.make_contact(writer, alice)
+    tag_contact(writer, alice, third.id, kept.id, source=TagSource.RULE)
+    merge(writer, alice, survivor.id, third.id)
+    writer.expire_all()
+    assert assignments_of(writer, alice, survivor) == {kept.id: (TagSource.MANUAL, None)}
+    assert writer.scalar(scoped_count(alice, ContactTag)) == 1
+
+
+def test_merge_tags_roll_back_with_the_rest(session_factory: sessionmaker[Session]) -> None:
+    with session_scope(session_factory, write=True) as session:
+        alice = factories.make_user(session)
+        survivor = factories.make_contact(session, alice)
+        loser = factories.make_contact(session, alice)
+        kept = create_tag(session, alice, "investor")
+        blocked = create_tag(session, alice, "recruiter")
+        tag_contact(session, alice, survivor.id, kept.id, source=TagSource.RULE)
+        tag_contact(session, alice, loser.id, kept.id)
+        tag_contact(session, alice, loser.id, blocked.id, source=TagSource.RULE)
+        untag_contact(session, alice, loser.id, blocked.id)
+        user_id, survivor_id, loser_id = alice.id, survivor.id, loser.id
+        kept_id, blocked_id = kept.id, blocked.id
+    with (
+        pytest.raises(RuntimeError, match="after the merge"),
+        session_scope(session_factory, write=True) as session,
+    ):
+        alice = session.get_one(User, user_id)
+        merge(session, alice, survivor_id, loser_id)
+        raise RuntimeError("after the merge")
+    with session_scope(session_factory) as session:
+        alice = session.get_one(User, user_id)
+        survivor = session.scalars(scoped(alice, Contact).where(Contact.id == survivor_id)).one()
+        loser = session.scalars(scoped(alice, Contact).where(Contact.id == loser_id)).one()
+        assert assignments_of(session, alice, survivor) == {kept_id: (TagSource.RULE, None)}
+        assert assignments_of(session, alice, loser) == {kept_id: (TagSource.MANUAL, None)}
+        assert suppressions_of(session, alice, loser) == {blocked_id}
+        assert suppressions_of(session, alice, survivor) == set()
+
+
+def test_merge_never_moves_another_users_tags(writer: Session, users: tuple[User, User]) -> None:
+    alice, bob = users
+    mine = factories.make_contact(writer, alice)
+    my_other = factories.make_contact(writer, alice)
+    theirs = factories.make_contact(writer, bob)
+    my_tag = create_tag(writer, alice, "investor")
+    their_kept = create_tag(writer, bob, "investor")
+    their_blocked = create_tag(writer, bob, "recruiter")
+    tag_contact(writer, alice, my_other.id, my_tag.id)
+    tag_contact(writer, bob, theirs.id, their_kept.id)
+    tag_contact(writer, bob, theirs.id, their_blocked.id, source=TagSource.RULE)
+    untag_contact(writer, bob, theirs.id, their_blocked.id)
+    before = (assignments_of(writer, bob, theirs), suppressions_of(writer, bob, theirs))
+    assert before == ({their_kept.id: (TagSource.MANUAL, None)}, {their_blocked.id})
+    for actor, survivor_id, loser_id in (
+        (bob, mine.id, my_other.id),  # B merging two of A's contacts
+        (alice, mine.id, theirs.id),  # A folding one of B's into hers
+        (bob, theirs.id, my_other.id),  # B folding one of A's into his
+    ):
+        with pytest.raises(ValueError, match="not one of user"):
+            merge(writer, actor, survivor_id, loser_id)
+    assert (assignments_of(writer, bob, theirs), suppressions_of(writer, bob, theirs)) == before
+    assert assignments_of(writer, alice, my_other) == {my_tag.id: (TagSource.MANUAL, None)}
+    assert assignments_of(writer, alice, mine) == {}
+    merge(writer, alice, mine.id, my_other.id)  # her own merge moves only her rows
+    writer.expire_all()
+    assert assignments_of(writer, alice, mine) == {my_tag.id: (TagSource.MANUAL, None)}
+    assert (assignments_of(writer, bob, theirs), suppressions_of(writer, bob, theirs)) == before
