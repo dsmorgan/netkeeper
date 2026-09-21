@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -121,6 +122,87 @@ def test_cli_import_archive_of_a_missing_path_is_a_usage_error(
     assert result.exit_code != 0
     assert "Traceback" not in result.output
     assert "does not exist" in _plain(result.output)
+
+
+async def test_the_cli_and_the_api_report_the_same_counts_for_the_same_archive(
+    client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """P1-20's own "done when": the same zip, imported independently by each,
+    into two separate databases, agrees on every number the CLI prints.
+
+    This deliberately does not use the ``cli_db`` fixture: it monkeypatches
+    ``$NETKEEPER_DATABASE_URL`` for the whole test, which ``database_url()``
+    prefers over any path given to it (CLAUDE.md), and the ``client`` fixture's
+    own database is built from a path the same way (``bare_engine``) — the two
+    would collide onto one database instead of being the independent ones this
+    test needs. ``env=`` on just this ``invoke`` call scopes the override to
+    the CLI's own process-wide state for exactly as long as that call runs.
+    """
+    cli_dir = tmp_path / "cli-db"
+    cli_dir.mkdir()
+    cli_url = database_url(cli_dir)
+    cli_engine = make_engine(cli_url)
+    migrations.upgrade(cli_engine)
+    cli_factory = make_session_factory(cli_engine)
+    install_scope_guard(cli_factory)
+    with session_scope(cli_factory, write=True) as session:
+        ensure_local_user(session)
+    cli_engine.dispose()
+
+    zipped = tmp_path / "export.zip"
+    with zipfile.ZipFile(zipped, "w") as zf:
+        for source in sorted(FIXTURES_ARCHIVE.iterdir()):
+            zf.write(source, arcname=source.name)
+
+    cli_result = CliRunner().invoke(
+        cli, ["import", "archive", str(zipped)], env={"NETKEEPER_DATABASE_URL": cli_url}
+    )
+    assert cli_result.exit_code == 0, cli_result.output
+
+    response = await client.post(
+        "/api/v1/imports/archive",
+        headers={"X-Netkeeper-Client": "1"},
+        files={"file": ("export.zip", zipped.read_bytes(), "application/zip")},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+
+    connections = re.search(
+        r"connections: (\d+) rows, (\d+) created, (\d+) updated, (\d+) skipped, "
+        r"(\d+) needs review",
+        cli_result.output,
+    )
+    assert connections is not None, cli_result.output
+    assert [int(value) for value in connections.groups()] == [
+        body["connections"]["rows"],
+        body["connections"]["created"],
+        body["connections"]["updated"],
+        body["connections"]["skipped"],
+        body["connections"]["needs_review"],
+    ]
+
+    messages = re.search(
+        r"messages: (\d+) rows in (\d+) conversations \((\d+) attributed, "
+        r"(\d+) no counterparty, (\d+) group, (\d+) not a contact\); (\d+) interactions added",
+        cli_result.output,
+    )
+    assert messages is not None, cli_result.output
+    assert [int(value) for value in messages.groups()] == [
+        body["messages"]["rows"],
+        body["messages"]["conversations"],
+        body["messages"]["attributed"],
+        body["messages"]["no_counterpart"],
+        body["messages"]["group_threads"],
+        body["messages"]["unknown_contact"],
+        body["messages"]["added"],
+    ]
+
+    invitations = re.search(r"invitations: (\d+) rows; (\d+) interactions added", cli_result.output)
+    assert invitations is not None, cli_result.output
+    assert [int(value) for value in invitations.groups()] == [
+        body["invitations"]["rows"],
+        body["invitations"]["added"],
+    ]
 
 
 # --- import csv -----------------------------------------------------------

@@ -41,7 +41,7 @@ import io
 import logging
 import re
 import zipfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -62,6 +62,22 @@ FIELD_SIZE_LIMIT: Final = 16 * 1024 * 1024
 # messages.csv for a heavy user is tens of megabytes; this is far above that
 # and keeps a crafted archive from expanding without bound.
 MAX_MEMBER_BYTES: Final = 512 * 1024 * 1024
+# Every declared uncompressed size in a zip, summed, refused before any member
+# is opened. A real export's total is a couple of megabytes (the sample this
+# was checked against: about 1.4 MB across thirty-odd members); this stays far
+# above that while still bounding what a hostile zip can make this process hold.
+MAX_TOTAL_UNCOMPRESSED_BYTES: Final = 1024 * 1024 * 1024
+# How many members a zip may declare. A real export runs to a few dozen; this
+# leaves generous room to grow and still refuses a "many tiny files" bomb.
+MAX_MEMBERS: Final = 500
+# A member's declared uncompressed size divided by its declared compressed
+# size, refused above this ratio — the classic zip bomb shape, a few bytes of
+# input inflating to gigabytes. Ordinary CSV text under DEFLATE rarely clears
+# single digits. The ratio is only judged once a member is big enough for the
+# question to matter (below the floor, a high ratio is just DEFLATE doing well
+# on a short repetitive cell, not a bomb).
+MAX_COMPRESSION_RATIO: Final = 100
+COMPRESSION_RATIO_FLOOR_BYTES: Final = 8 * 1024 * 1024
 # Zip member timestamps older than LinkedIn itself are placeholders, not the export time.
 EARLIEST_EXPORT: Final = datetime(2003, 1, 1, tzinfo=UTC)
 
@@ -559,7 +575,14 @@ class Archive:
     in reading order (connections, messages, invitations, then by name);
     ``exported_at`` is the newest plausible member timestamp, the closest thing
     the archive has to an export time, or ``None`` when no member carries one.
-    Each reader may be called more than once; every call starts the table over.
+    ``ignored`` names every other ``.csv`` table the scan found — a real
+    header this reader does not recognize, such as ``Positions.csv`` until
+    P1-20's companion item adds it — sorted for a stable report; a member
+    skipped by name or extension (an assistant log, a macOS resource fork,
+    anything not ``.csv``) never appears there, since that is noise the export
+    format itself produces rather than data the person's report should call
+    out. Each reader may be called more than once; every call starts the table
+    over.
     """
 
     def __init__(
@@ -567,6 +590,8 @@ class Archive:
         name: str,
         members: list[tuple[ArchiveMember, _TextOpener]],
         close: Callable[[], None],
+        *,
+        ignored: Iterable[str] = (),
     ) -> None:
         self.name = name
         self._members = dict(members)
@@ -574,6 +599,7 @@ class Archive:
         self.members: tuple[ArchiveMember, ...] = tuple(
             sorted(self._members, key=lambda member: (_KIND_ORDER[member.kind], member.name))
         )
+        self.ignored: tuple[str, ...] = tuple(sorted(ignored))
         stamps = [member.modified_at for member in self.members if member.modified_at is not None]
         self.exported_at: datetime | None = max(stamps) if stamps else None
 
@@ -694,20 +720,19 @@ def _open_zip(handle: IO[bytes], name: str) -> Archive:
     except zipfile.BadZipFile as exc:
         raise ArchiveFormatError(f"{name}: not a valid zip file ({exc})") from exc
     members: list[tuple[ArchiveMember, _TextOpener]] = []
+    ignored: list[str] = []
     try:
-        for info in zf.infolist():
-            if info.is_dir() or not _looks_like_csv(info.filename):
+        infos = [info for info in zf.infolist() if not info.is_dir()]
+        _guard_zip_members(infos, name)
+        for info in infos:
+            if not _looks_like_csv(info.filename):
                 continue
-            if info.file_size > MAX_MEMBER_BYTES:
-                raise ArchiveFormatError(
-                    f"{name}: member {info.filename} is {info.file_size} bytes uncompressed, "
-                    f"over the {MAX_MEMBER_BYTES} byte limit"
-                )
             opener = _zip_opener(zf, info, f"{name}:{info.filename}")
             with opener() as text:
                 header, _ = _table(text, f"{name}:{info.filename}")
             if header is None:
                 log.debug("%s: skipping %s, not a table the importer reads", name, info.filename)
+                ignored.append(info.filename)
                 continue
             members.append((ArchiveMember(info.filename, header.kind, _zip_time(info)), opener))
     except BaseException:
@@ -718,15 +743,74 @@ def _open_zip(handle: IO[bytes], name: str) -> Archive:
         raise ArchiveFormatError(
             f"{name}: no Connections.csv, messages.csv, or Invitations.csv table in the archive"
         )
-    return Archive(name, members, zf.close)
+    return Archive(name, members, zf.close, ignored=ignored)
+
+
+def _guard_zip_members(infos: Sequence[zipfile.ZipInfo], name: str) -> None:
+    """Refuse a hostile zip on its declared metadata, before any member is opened.
+
+    Every check here reads only what the zip's central directory already
+    states — a member count, a declared path, a declared size, a declared
+    compressed size — so refusing one costs nothing: nothing is decompressed
+    to find out. Checked over every member, not only the ``.csv``-looking
+    ones, because a bomb does not have to look like a table to cost something
+    if it were opened.
+    """
+    if len(infos) > MAX_MEMBERS:
+        raise ArchiveFormatError(
+            f"{name}: {len(infos)} members in the zip, over the {MAX_MEMBERS} member limit"
+        )
+    total = 0
+    for info in infos:
+        if not _is_safe_member_path(info.filename):
+            raise ArchiveFormatError(f"{name}: member {info.filename!r} has an unsafe path")
+        if info.file_size > MAX_MEMBER_BYTES:
+            raise ArchiveFormatError(
+                f"{name}: member {info.filename} is {info.file_size} bytes uncompressed, "
+                f"over the {MAX_MEMBER_BYTES} byte limit"
+            )
+        if info.file_size > COMPRESSION_RATIO_FLOOR_BYTES:
+            ratio = info.file_size / max(info.compress_size, 1)
+            if ratio > MAX_COMPRESSION_RATIO:
+                raise ArchiveFormatError(
+                    f"{name}: member {info.filename} compresses {ratio:.0f}x, over the "
+                    f"{MAX_COMPRESSION_RATIO}x ratio a real export never approaches"
+                )
+        total += info.file_size
+        if total > MAX_TOTAL_UNCOMPRESSED_BYTES:
+            raise ArchiveFormatError(
+                f"{name}: more than {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes uncompressed "
+                "across its members"
+            )
+
+
+def _is_safe_member_path(filename: str) -> bool:
+    """False for a path that would escape wherever a member's name was ever used as a path.
+
+    Nothing here extracts a member to disk — :func:`_zip_opener` reads it into
+    memory — but a name has to earn the right to be treated as one before it
+    is used in a log line or an error message either, and ``zipfile`` only
+    sanitizes a path on ``extract``, never on ``infolist`` or ``open``.
+    """
+    normalized = filename.replace("\\", "/")
+    if normalized.startswith("/"):
+        return False
+    if len(normalized) > 1 and normalized[1] == ":":  # a drive letter, e.g. "C:/"
+        return False
+    return ".." not in normalized.split("/")
 
 
 def _open_dir(root: Path, name: str) -> Archive:
     """Scan an unpacked export, in sorted order so two runs list its tables the same way."""
     members: list[tuple[ArchiveMember, _TextOpener]] = []
-    for path in sorted(root.rglob("*")):
+    ignored: list[str] = []
+    paths = [path for path in sorted(root.rglob("*")) if path.is_file()]
+    if len(paths) > MAX_MEMBERS:
+        raise ArchiveFormatError(f"{name}: {len(paths)} files, over the {MAX_MEMBERS} file limit")
+    total = 0
+    for path in paths:
         relative = path.relative_to(root).as_posix()
-        if not path.is_file() or not _looks_like_csv(relative):
+        if not _looks_like_csv(relative):
             continue
         member_name = f"{name}:{relative}"
         size = path.stat().st_size
@@ -734,18 +818,24 @@ def _open_dir(root: Path, name: str) -> Archive:
             raise ArchiveFormatError(
                 f"{name}: member {relative} is {size} bytes, over the {MAX_MEMBER_BYTES} byte limit"
             )
+        total += size
+        if total > MAX_TOTAL_UNCOMPRESSED_BYTES:
+            raise ArchiveFormatError(
+                f"{name}: more than {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes across its files"
+            )
         opener = _path_opener(path, member_name)
         with opener() as text:
             header, _ = _table(text, member_name)
         if header is None:
             log.debug("%s: skipping %s, not a table the importer reads", name, relative)
+            ignored.append(relative)
             continue
         members.append((ArchiveMember(relative, header.kind, _file_time(path)), opener))
     if not _has_rows_to_import(members):
         raise ArchiveFormatError(
             f"{name}: no Connections.csv, messages.csv, or Invitations.csv table in the directory"
         )
-    return Archive(name, members, lambda: None)
+    return Archive(name, members, lambda: None, ignored=ignored)
 
 
 def _open_csv(handle: IO[bytes], name: str) -> Archive:

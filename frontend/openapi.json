@@ -49,6 +49,227 @@
         "title": "And",
         "type": "object"
       },
+      "ArchiveConnectionCountsOut": {
+        "description": "What ``Connections.csv`` did (:class:`netkeeper.crm.archive.ConnectionCounts`).",
+        "properties": {
+          "created": {
+            "title": "Created",
+            "type": "integer"
+          },
+          "needs_review": {
+            "title": "Needs Review",
+            "type": "integer"
+          },
+          "rows": {
+            "title": "Rows",
+            "type": "integer"
+          },
+          "skipped": {
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "undated": {
+            "title": "Undated",
+            "type": "integer"
+          },
+          "updated": {
+            "title": "Updated",
+            "type": "integer"
+          },
+          "with_email": {
+            "title": "With Email",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rows",
+          "created",
+          "updated",
+          "needs_review",
+          "skipped",
+          "with_email",
+          "undated"
+        ],
+        "title": "ArchiveConnectionCountsOut",
+        "type": "object"
+      },
+      "ArchiveImportOut": {
+        "description": "What importing one uploaded archive did (P1-20).\n\nThere is no ``positions`` field yet: #117 adds ``Positions.csv`` support in\nparallel and will add its own counts field alongside these. That is an\nadditive change for any client generated from the OpenAPI schema, never a\nbreaking one to the fields already here, which is what lets it land without\na version bump on this endpoint. Until then, ``Positions.csv`` (and any\nother table this importer does not act on) shows up in ``ignored_files``.",
+        "properties": {
+          "connections": {
+            "$ref": "#/components/schemas/ArchiveConnectionCountsOut"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "ignored_files": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ignored Files",
+            "type": "array"
+          },
+          "invitations": {
+            "$ref": "#/components/schemas/ArchiveInvitationCountsOut"
+          },
+          "messages": {
+            "$ref": "#/components/schemas/ArchiveMessageCountsOut"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "owner_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner By"
+          },
+          "owner_public_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Public Id"
+          }
+        },
+        "required": [
+          "filename",
+          "observed_at",
+          "owner_public_id",
+          "owner_by",
+          "connections",
+          "messages",
+          "invitations",
+          "ignored_files"
+        ],
+        "title": "ArchiveImportOut",
+        "type": "object"
+      },
+      "ArchiveInvitationCountsOut": {
+        "description": "What ``Invitations.csv`` did (:class:`netkeeper.crm.archive.InvitationCounts`).",
+        "properties": {
+          "added": {
+            "title": "Added",
+            "type": "integer"
+          },
+          "already_present": {
+            "title": "Already Present",
+            "type": "integer"
+          },
+          "no_counterpart": {
+            "title": "No Counterpart",
+            "type": "integer"
+          },
+          "rows": {
+            "title": "Rows",
+            "type": "integer"
+          },
+          "undated": {
+            "title": "Undated",
+            "type": "integer"
+          },
+          "undirected": {
+            "title": "Undirected",
+            "type": "integer"
+          },
+          "unknown_contact": {
+            "title": "Unknown Contact",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rows",
+          "added",
+          "already_present",
+          "unknown_contact",
+          "no_counterpart",
+          "undated",
+          "undirected"
+        ],
+        "title": "ArchiveInvitationCountsOut",
+        "type": "object"
+      },
+      "ArchiveMessageCountsOut": {
+        "description": "What ``messages.csv`` did (:class:`netkeeper.crm.archive.MessageCounts`).",
+        "properties": {
+          "added": {
+            "title": "Added",
+            "type": "integer"
+          },
+          "already_present": {
+            "title": "Already Present",
+            "type": "integer"
+          },
+          "attributed": {
+            "title": "Attributed",
+            "type": "integer"
+          },
+          "conversations": {
+            "title": "Conversations",
+            "type": "integer"
+          },
+          "group_threads": {
+            "title": "Group Threads",
+            "type": "integer"
+          },
+          "inbound": {
+            "title": "Inbound",
+            "type": "integer"
+          },
+          "no_counterpart": {
+            "title": "No Counterpart",
+            "type": "integer"
+          },
+          "no_owner": {
+            "title": "No Owner",
+            "type": "integer"
+          },
+          "outbound": {
+            "title": "Outbound",
+            "type": "integer"
+          },
+          "rows": {
+            "title": "Rows",
+            "type": "integer"
+          },
+          "undated": {
+            "title": "Undated",
+            "type": "integer"
+          },
+          "unknown_contact": {
+            "title": "Unknown Contact",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rows",
+          "conversations",
+          "attributed",
+          "no_counterpart",
+          "group_threads",
+          "unknown_contact",
+          "no_owner",
+          "added",
+          "already_present",
+          "undated",
+          "outbound",
+          "inbound"
+        ],
+        "title": "ArchiveMessageCountsOut",
+        "type": "object"
+      },
       "AutotagRuleCreate": {
         "properties": {
           "enabled": {
@@ -334,6 +555,21 @@
           "high"
         ],
         "title": "Between",
+        "type": "object"
+      },
+      "Body_import_archive": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "description": "The LinkedIn export zip, exactly as downloaded.",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_import_archive",
         "type": "object"
       },
       "BulkCountIn": {
@@ -8689,6 +8925,41 @@
           }
         },
         "summary": "Create Import Run",
+        "tags": [
+          "imports"
+        ]
+      }
+    },
+    "/api/v1/imports/archive": {
+      "post": {
+        "description": "Import a LinkedIn export zip: connections, messages, and invitations (P1-20).\n\nUnpacked in memory — nothing is written to disk — and run through the same\n:func:`netkeeper.crm.archive.import_archive` that ``netkeeper import archive``\nuses on a path, so the two report the same counts for the same archive.\nRe-uploading the same export adds nothing (see that function's idempotence).\nA zip that is not a LinkedIn export, or one that fails a guard (its total\nsize, member count, compression ratio, or a member's path), answers 422\nnaming what was wrong; nothing is unpacked before those checks pass.",
+        "operationId": "import_archive",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_import_archive"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveImportOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "A file or a mapping that cannot be used"
+          }
+        },
+        "summary": "Import Archive",
         "tags": [
           "imports"
         ]

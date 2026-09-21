@@ -671,6 +671,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/imports/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import Archive
+         * @description Import a LinkedIn export zip: connections, messages, and invitations (P1-20).
+         *
+         *     Unpacked in memory — nothing is written to disk — and run through the same
+         *     :func:`netkeeper.crm.archive.import_archive` that ``netkeeper import archive``
+         *     uses on a path, so the two report the same counts for the same archive.
+         *     Re-uploading the same export adds nothing (see that function's idempotence).
+         *     A zip that is not a LinkedIn export, or one that fails a guard (its total
+         *     size, member count, compression ratio, or a member's path), answers 422
+         *     naming what was wrong; nothing is unpacked before those checks pass.
+         */
+        post: operations["import_archive"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/imports/inspect": {
         parameters: {
             query?: never;
@@ -1288,6 +1316,105 @@ export interface components {
              */
             op: "and";
         };
+        /**
+         * ArchiveConnectionCountsOut
+         * @description What ``Connections.csv`` did (:class:`netkeeper.crm.archive.ConnectionCounts`).
+         */
+        ArchiveConnectionCountsOut: {
+            /** Created */
+            created: number;
+            /** Needs Review */
+            needs_review: number;
+            /** Rows */
+            rows: number;
+            /** Skipped */
+            skipped: number;
+            /** Undated */
+            undated: number;
+            /** Updated */
+            updated: number;
+            /** With Email */
+            with_email: number;
+        };
+        /**
+         * ArchiveImportOut
+         * @description What importing one uploaded archive did (P1-20).
+         *
+         *     There is no ``positions`` field yet: #117 adds ``Positions.csv`` support in
+         *     parallel and will add its own counts field alongside these. That is an
+         *     additive change for any client generated from the OpenAPI schema, never a
+         *     breaking one to the fields already here, which is what lets it land without
+         *     a version bump on this endpoint. Until then, ``Positions.csv`` (and any
+         *     other table this importer does not act on) shows up in ``ignored_files``.
+         */
+        ArchiveImportOut: {
+            connections: components["schemas"]["ArchiveConnectionCountsOut"];
+            /** Filename */
+            filename: string;
+            /** Ignored Files */
+            ignored_files: string[];
+            invitations: components["schemas"]["ArchiveInvitationCountsOut"];
+            messages: components["schemas"]["ArchiveMessageCountsOut"];
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Owner By */
+            owner_by: string | null;
+            /** Owner Public Id */
+            owner_public_id: string | null;
+        };
+        /**
+         * ArchiveInvitationCountsOut
+         * @description What ``Invitations.csv`` did (:class:`netkeeper.crm.archive.InvitationCounts`).
+         */
+        ArchiveInvitationCountsOut: {
+            /** Added */
+            added: number;
+            /** Already Present */
+            already_present: number;
+            /** No Counterpart */
+            no_counterpart: number;
+            /** Rows */
+            rows: number;
+            /** Undated */
+            undated: number;
+            /** Undirected */
+            undirected: number;
+            /** Unknown Contact */
+            unknown_contact: number;
+        };
+        /**
+         * ArchiveMessageCountsOut
+         * @description What ``messages.csv`` did (:class:`netkeeper.crm.archive.MessageCounts`).
+         */
+        ArchiveMessageCountsOut: {
+            /** Added */
+            added: number;
+            /** Already Present */
+            already_present: number;
+            /** Attributed */
+            attributed: number;
+            /** Conversations */
+            conversations: number;
+            /** Group Threads */
+            group_threads: number;
+            /** Inbound */
+            inbound: number;
+            /** No Counterpart */
+            no_counterpart: number;
+            /** No Owner */
+            no_owner: number;
+            /** Outbound */
+            outbound: number;
+            /** Rows */
+            rows: number;
+            /** Undated */
+            undated: number;
+            /** Unknown Contact */
+            unknown_contact: number;
+        };
         /** AutotagRuleCreate */
         AutotagRuleCreate: {
             /**
@@ -1390,6 +1517,14 @@ export interface components {
              * @enum {string}
              */
             op: "between";
+        };
+        /** Body_import_archive */
+        Body_import_archive: {
+            /**
+             * File
+             * @description The LinkedIn export zip, exactly as downloaded.
+             */
+            file: string;
         };
         /**
          * BulkCountIn
@@ -5019,6 +5154,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ImportRunOut"];
+                };
+            };
+            /** @description A file or a mapping that cannot be used */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    import_archive: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_import_archive"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArchiveImportOut"];
                 };
             };
             /** @description A file or a mapping that cannot be used */
