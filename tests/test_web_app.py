@@ -56,6 +56,15 @@ API_PATHS = {
     "/api/v1/autotag-rules/reorder",
     "/api/v1/autotag-rules/run",
     "/api/v1/autotag-rules/preview",
+    "/api/v1/imports",
+    "/api/v1/imports/inspect",
+    "/api/v1/imports/presets",
+    "/api/v1/imports/presets/{name}",
+    "/api/v1/imports/{run_id}",
+    "/api/v1/imports/{run_id}/rows",
+    "/api/v1/imports/{run_id}/preview",
+    "/api/v1/imports/{run_id}/commit",
+    "/api/v1/imports/{run_id}/rollback",
 }
 
 
@@ -161,6 +170,7 @@ def test_known_api_modules_are_discovered() -> None:
         "contacts",
         "events",
         "health",
+        "imports",
         "interactions",
         "me",
         "tags",

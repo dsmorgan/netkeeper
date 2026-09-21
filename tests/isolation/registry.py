@@ -10,9 +10,17 @@ from typing import Any
 import factories
 from sqlalchemy.orm import Session
 
+from netkeeper.crm import import_runs as import_service
 from netkeeper.crm import tags as tag_service
 from netkeeper.crm.interactions import add_interaction
-from netkeeper.models import Contact, ContactSnapshot, InteractionKind, RuleField, User
+from netkeeper.models import (
+    Contact,
+    ContactSnapshot,
+    ImportRun,
+    InteractionKind,
+    RuleField,
+    User,
+)
 from netkeeper.scoping import scoped
 from netkeeper.web.app import API_PREFIX
 
@@ -108,6 +116,48 @@ def _seed_timeline(session: Session, user: User) -> int:
     return 2
 
 
+# A file with its own mapping, so the seed does not depend on preset detection.
+IMPORT_CSV = (
+    "First Name,Last Name,Company\n"
+    "Hortensia,Blennerhassett,Tarnish and Sons\n"
+    "Peregrine,Wollstonecraft,Vellum Press\n"
+)
+EMPTY_IMPORT_CSV = "First Name,Last Name,Company\n"
+IMPORT_MAPPING = {
+    "First Name": "first_name",
+    "Last Name": "last_name",
+    "Company": "current_company",
+}
+
+
+def own_import_run(session: Session, user: User) -> dict[str, str]:
+    """``run_id`` of the user's first import run; a fresh, empty one when they have none."""
+    run = session.scalars(scoped(user, ImportRun).order_by(ImportRun.id)).first()
+    if run is None:
+        run = import_service.create_run(
+            session,
+            user,
+            filename="empty.csv",
+            content=EMPTY_IMPORT_CSV,
+            mapping=IMPORT_MAPPING,
+        )
+    return {"run_id": str(run.id)}
+
+
+def _seed_import_runs(session: Session, user: User) -> int:
+    import_service.create_run(
+        session, user, filename="people.csv", content=IMPORT_CSV, mapping=IMPORT_MAPPING
+    )
+    return 1
+
+
+def _seed_import_rows(session: Session, user: User) -> int:
+    run = import_service.create_run(
+        session, user, filename="people.csv", content=IMPORT_CSV, mapping=IMPORT_MAPPING
+    )
+    return run.total_rows
+
+
 def _seed_tags(session: Session, user: User) -> int:
     tag_service.create_tag(session, user, "seeded")
     return 1
@@ -139,6 +189,13 @@ REGISTRY: list[ListEndpoint] = [
         _seed_timeline,
         paged_count,
         path_params=own_contact,
+    ),
+    ListEndpoint(f"{API_PREFIX}/imports", _seed_import_runs, paged_count),
+    ListEndpoint(
+        f"{API_PREFIX}/imports/{{run_id}}/rows",
+        _seed_import_rows,
+        paged_count,
+        path_params=own_import_run,
     ),
     ListEndpoint(f"{API_PREFIX}/tags", _seed_tags, array_count),
     ListEndpoint(f"{API_PREFIX}/autotag-rules", _seed_autotag_rules, array_count),

@@ -586,6 +586,209 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Import Runs
+         * @description Import runs, newest first.
+         */
+        get: operations["list_import_runs"];
+        put?: never;
+        /**
+         * Create Import Run
+         * @description Read a file into a draft run: one row per data row, with counts for the whole file.
+         *
+         *     A draft writes nothing but the run and its rows. ``preset`` may name a
+         *     built-in preset or one you saved; ``mapping`` overrides it column by column,
+         *     and a column mapped to ``""`` is left out.
+         */
+        post: operations["create_import_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/imports/inspect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Inspect Import File
+         * @description A file's columns and the mapping a preset gives them. Nothing is stored.
+         */
+        post: operations["inspect_import_file"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/imports/presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Import Presets
+         * @description The built-in presets, with the headers each recognizes, and the user's own.
+         */
+        get: operations["list_import_presets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/imports/presets/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save Import Preset
+         * @description Save a column mapping under a name, replacing any earlier preset by that name.
+         */
+        put: operations["save_import_preset"];
+        post?: never;
+        /**
+         * Delete Import Preset
+         * @description Forget one of your own presets. The built-in ones cannot be deleted.
+         */
+        delete: operations["delete_import_preset"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/imports/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Import Run */
+        get: operations["get_import_run"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/imports/{run_id}/commit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Commit Import Run
+         * @description Apply every row of a draft run, in this request's one transaction.
+         *
+         *     Candidate rows with no decision answer ``409`` unless ``skip_undecided`` is
+         *     set, in which case they are skipped and counted. A row that cannot be applied
+         *     is skipped with its reason on the row; everything else still lands.
+         */
+        post: operations["commit_import_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/imports/{run_id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Import Run
+         * @description Resolve the first rows against the database as it is now, without writing anything.
+         *
+         *     Each row says whether it is an existing contact, a candidate waiting for a
+         *     decision, or a new contact, and which fields would change; a change with
+         *     ``refused`` set is one a more authoritative source keeps, a manual edit above
+         *     all (spec 10.5). A ``POST`` because resolving writes inside a savepoint that
+         *     is rolled back, which needs a writer session.
+         */
+        post: operations["preview_import_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/imports/{run_id}/rollback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rollback Import Run
+         * @description Undo a committed run, and only what that run did.
+         *
+         *     A contact the run created is deleted; a contact it only enriched keeps the
+         *     values it had before the run, and the child rows the run added are removed. A
+         *     field something changed after the import keeps that later value.
+         */
+        post: operations["rollback_import_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/imports/{run_id}/rows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Import Rows
+         * @description A run's rows in file order, optionally only those with one resolution.
+         */
+        get: operations["list_import_rows"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/interactions/{interaction_id}": {
         parameters: {
             query?: never;
@@ -1564,6 +1767,306 @@ export interface components {
             /** Version */
             version: string;
         };
+        /**
+         * ImportChangeOut
+         * @description One field a row would write, with the value that is there now.
+         */
+        ImportChangeOut: {
+            /** After */
+            after: string | null;
+            /** Before */
+            before: string | null;
+            /** Field */
+            field: string;
+            kept_source: components["schemas"]["ContactSource"] | null;
+            /** Refused */
+            refused: boolean;
+        };
+        /**
+         * ImportCommitIn
+         * @description Decisions to record, then apply the whole run in one transaction.
+         */
+        ImportCommitIn: {
+            /** Decisions */
+            decisions?: components["schemas"]["ImportDecisionIn"][];
+            /**
+             * Skip Undecided
+             * @default false
+             */
+            skip_undecided: boolean;
+        };
+        /**
+         * ImportDecisionIn
+         * @description What to do with one candidate row. ``merge_into`` needs the contact to merge into.
+         */
+        ImportDecisionIn: {
+            /** Contact Id */
+            contact_id?: number | null;
+            kind: components["schemas"]["ImportDecisionKind"];
+            /** Row Number */
+            row_number: number;
+        };
+        /**
+         * ImportDecisionKind
+         * @description What a person decided about a candidate row (:mod:`netkeeper.crm.identity`).
+         * @enum {string}
+         */
+        ImportDecisionKind: "merge_into" | "create_new";
+        /** ImportDecisionOut */
+        ImportDecisionOut: {
+            /** Contact Id */
+            contact_id: number | null;
+            kind: components["schemas"]["ImportDecisionKind"];
+        };
+        /**
+         * ImportField
+         * @description What a column may feed.
+         *
+         *     The first ten are the scalar columns of ``contacts`` that carry per-field
+         *     provenance (:data:`netkeeper.crm.provenance.PROVENANCE_ORDER`); the last
+         *     three add child rows, which provenance does not rank. A field a person owns
+         *     (``preferred_name``, ``notes``, ``met``, tags) is deliberately absent: no
+         *     import touches those (spec 10.5).
+         * @enum {string}
+         */
+        ImportField: "li_urn" | "li_public_id" | "li_url" | "first_name" | "last_name" | "headline" | "current_title" | "current_company" | "location" | "connected_on" | "email" | "phone" | "link";
+        /**
+         * ImportInspectIn
+         * @description A file to read the header of, with the mapping to try on it. Nothing is stored.
+         */
+        ImportInspectIn: {
+            /** Content */
+            content: string;
+            /** Mapping */
+            mapping?: {
+                [key: string]: string;
+            } | null;
+            /** Preset */
+            preset?: string | null;
+        };
+        /**
+         * ImportInspectOut
+         * @description A file's columns and the mapping chosen for them, for the mapping screen.
+         */
+        ImportInspectOut: {
+            /** Detected Preset */
+            detected_preset: string | null;
+            /** Headers */
+            headers: string[];
+            /** Mapping */
+            mapping: {
+                [key: string]: components["schemas"]["ImportField"];
+            };
+            /** Preamble Rows */
+            preamble_rows: number;
+            /** Preset */
+            preset: string | null;
+            /** Row Count */
+            row_count: number;
+            /** Sample */
+            sample: {
+                [key: string]: string;
+            }[];
+            /** Unmapped */
+            unmapped: string[];
+        };
+        /** ImportPresetIn */
+        ImportPresetIn: {
+            /** Mapping */
+            mapping: {
+                [key: string]: string;
+            };
+        };
+        /** ImportPresetOut */
+        ImportPresetOut: {
+            /** Builtin */
+            builtin: boolean;
+            /** Mapping */
+            mapping: {
+                [key: string]: string;
+            };
+            /** Name */
+            name: string;
+        };
+        /**
+         * ImportPresetsOut
+         * @description The presets on offer. Built-in ones are the same for everyone; saved ones are yours.
+         */
+        ImportPresetsOut: {
+            /** Builtin */
+            builtin: components["schemas"]["ImportPresetOut"][];
+            /** Saved */
+            saved: components["schemas"]["ImportPresetOut"][];
+        };
+        /**
+         * ImportPreviewRow
+         * @description One row of the review screen (spec 10.5 step 3).
+         */
+        ImportPreviewRow: {
+            /** Candidate Ids */
+            candidate_ids: number[];
+            /** Changes */
+            changes: components["schemas"]["ImportChangeOut"][];
+            /** Contact Id */
+            contact_id: number | null;
+            /** Matched By */
+            matched_by: string | null;
+            /** Problem */
+            problem: string | null;
+            /** Raw */
+            raw: {
+                [key: string]: string;
+            };
+            resolution: components["schemas"]["ImportResolution"];
+            /** Row Number */
+            row_number: number;
+        };
+        /**
+         * ImportRefusedOut
+         * @description A value an import was not allowed to write, and what outranked it (spec 10.5).
+         */
+        ImportRefusedOut: {
+            /** Field */
+            field: string;
+            /** Incoming */
+            incoming: string | null;
+            /** Kept */
+            kept: string | null;
+            source: components["schemas"]["ContactSource"];
+        };
+        /**
+         * ImportResolution
+         * @description What one row is (spec 8.2, 8.4).
+         *
+         *     On a draft run this is the plan; on a committed run it is what happened.
+         *     ``created`` is "this row is a new contact"; ``candidate`` waits for a
+         *     person's decision; ``skipped`` is a row that carried nothing usable, or one
+         *     whose candidacy nobody resolved.
+         * @enum {string}
+         */
+        ImportResolution: "matched" | "created" | "candidate" | "skipped";
+        /**
+         * ImportRollbackOut
+         * @description What undoing a run removed and put back.
+         */
+        ImportRollbackOut: {
+            /** Children Deleted */
+            children_deleted: number;
+            /** Contacts Deleted */
+            contacts_deleted: number;
+            /** Contacts Restored */
+            contacts_restored: number;
+            /** Fields Restored */
+            fields_restored: number;
+            /** Run Id */
+            run_id: number;
+        };
+        /** ImportRowOut */
+        ImportRowOut: {
+            /** Candidate Ids */
+            candidate_ids: number[];
+            /** Contact Id */
+            contact_id: number | null;
+            decision: components["schemas"]["ImportDecisionOut"] | null;
+            /** Error */
+            error: string | null;
+            /** Id */
+            id: number;
+            /** Matched By */
+            matched_by: string | null;
+            /** Raw */
+            raw: {
+                [key: string]: string;
+            };
+            /** Refused */
+            refused: components["schemas"]["ImportRefusedOut"][];
+            resolution: components["schemas"]["ImportResolution"];
+            /** Row Number */
+            row_number: number;
+        };
+        /** ImportRowPage */
+        ImportRowPage: {
+            /** Items */
+            items: components["schemas"]["ImportRowOut"][];
+            /** Total */
+            total: number;
+        };
+        /**
+         * ImportRunCreate
+         * @description A file to read into a draft run.
+         */
+        ImportRunCreate: {
+            /** Content */
+            content: string;
+            /** Filename */
+            filename: string;
+            /** Mapping */
+            mapping?: {
+                [key: string]: string;
+            } | null;
+            /** Preset */
+            preset?: string | null;
+            /** @default csv */
+            source_kind: components["schemas"]["ImportSourceKind"];
+        };
+        /** ImportRunOut */
+        ImportRunOut: {
+            /** Candidate Count */
+            candidate_count: number;
+            /** Committed At */
+            committed_at: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Created Count */
+            created_count: number;
+            /** Filename */
+            filename: string;
+            /** Id */
+            id: number;
+            /** Mapping */
+            mapping: {
+                [key: string]: string;
+            };
+            /** Matched Count */
+            matched_count: number;
+            /** Preset */
+            preset: string | null;
+            /** Rolled Back At */
+            rolled_back_at: string | null;
+            /** Skipped Count */
+            skipped_count: number;
+            source_kind: components["schemas"]["ImportSourceKind"];
+            status: components["schemas"]["ImportStatus"];
+            /** Total Rows */
+            total_rows: number;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** ImportRunPage */
+        ImportRunPage: {
+            /** Items */
+            items: components["schemas"]["ImportRunOut"][];
+            /** Total */
+            total: number;
+        };
+        /**
+         * ImportSourceKind
+         * @description Where the rows came from. ``archive`` is the LinkedIn export (P1-03).
+         * @enum {string}
+         */
+        ImportSourceKind: "archive" | "csv";
+        /**
+         * ImportStatus
+         * @description A run is read and resolved (``draft``), then applied, then possibly undone.
+         * @enum {string}
+         */
+        ImportStatus: "draft" | "committed" | "rolled_back";
         /**
          * InteractionIn
          * @description A new interaction. ``at`` must carry a timezone; it is stored as UTC.
@@ -3512,6 +4015,406 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthOut"];
+                };
+            };
+        };
+    };
+    list_import_runs: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportRunPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_import_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImportRunCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportRunOut"];
+                };
+            };
+            /** @description A file or a mapping that cannot be used */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    inspect_import_file: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImportInspectIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportInspectOut"];
+                };
+            };
+            /** @description A file or a mapping that cannot be used */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_import_presets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportPresetsOut"];
+                };
+            };
+        };
+    };
+    save_import_preset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImportPresetIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportPresetOut"];
+                };
+            };
+            /** @description The run's state forbids this, or candidate rows are undecided */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A file or a mapping that cannot be used */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_import_preset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such import run, row, contact, or preset */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_import_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportRunOut"];
+                };
+            };
+            /** @description No such import run, row, contact, or preset */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    commit_import_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImportCommitIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportRunOut"];
+                };
+            };
+            /** @description No such import run, row, contact, or preset */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The run's state forbids this, or candidate rows are undecided */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A file or a mapping that cannot be used */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    preview_import_run: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportPreviewRow"][];
+                };
+            };
+            /** @description No such import run, row, contact, or preset */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A file or a mapping that cannot be used */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    rollback_import_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportRollbackOut"];
+                };
+            };
+            /** @description No such import run, row, contact, or preset */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The run's state forbids this, or candidate rows are undecided */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_import_rows: {
+        parameters: {
+            query?: {
+                resolution?: components["schemas"]["ImportResolution"] | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportRowPage"];
+                };
+            };
+            /** @description No such import run, row, contact, or preset */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

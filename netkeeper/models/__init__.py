@@ -24,6 +24,19 @@ from netkeeper.models.contacts import (
     normalize_email,
     normalize_public_id,
 )
+from netkeeper.models.imports import (
+    IMPORT_TABLES,
+    FieldChange,
+    ImportDecisionKind,
+    ImportResolution,
+    ImportRow,
+    ImportRun,
+    ImportSourceKind,
+    ImportStatus,
+    RefusedField,
+    RowChanges,
+    RowDecision,
+)
 from netkeeper.models.settings import JsonValue, SettingKV
 from netkeeper.models.tags import (
     TAG_NAME_MAX_LENGTH,
@@ -41,6 +54,7 @@ from netkeeper.models.user import User, UserKind
 
 __all__ = [
     "CONTACT_CHILDREN",
+    "IMPORT_TABLES",
     "TAG_NAME_MAX_LENGTH",
     "TAG_TABLES",
     "AutotagRule",
@@ -59,11 +73,21 @@ __all__ = [
     "ContactTagSuppression",
     "EmailKind",
     "EmailStatus",
+    "FieldChange",
+    "ImportDecisionKind",
+    "ImportResolution",
+    "ImportRow",
+    "ImportRun",
+    "ImportSourceKind",
+    "ImportStatus",
     "Interaction",
     "InteractionKind",
     "JsonValue",
     "LinkKind",
     "PhoneKind",
+    "RefusedField",
+    "RowChanges",
+    "RowDecision",
     "RuleField",
     "SettingKV",
     "SyncedValue",
