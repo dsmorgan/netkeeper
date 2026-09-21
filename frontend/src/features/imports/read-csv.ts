@@ -76,14 +76,27 @@ export interface Decoded {
   content: string
   encoding: Encoding
   reason: EncodingReason
-  /** Characters no encoding could make sense of; above zero, the guess is wrong. */
+  /** Characters this encoding could make nothing of; above zero, the guess is wrong. */
   replacements: number
+  /**
+   * True when the fallback fired on what is really a UTF-8 file with bad bytes.
+   *
+   * `isUtf8` is all or nothing, so one damaged byte in an otherwise UTF-8 file
+   * sends it down the Windows-1252 path — and because Windows-1252 has a
+   * character for every byte, `replacements` stays 0 and nothing looks wrong
+   * while every accent in the file is quietly mangled. This is the one signal
+   * that says so.
+   */
+  damagedUtf8: boolean
+  /** Characters a UTF-8 read would have lost, when `damagedUtf8`. */
+  utf8Damage: number
 }
 
 export type FileRead = Decoded | { ok: false; reason: string }
 
-function approximateMegabytes(characters: number): string {
-  return `${(characters / 1_000_000).toFixed(1)} MB`
+/** Megabytes to one decimal, rounded up, so a limit never reads as its own excess. */
+function megabytes(bytes: number): string {
+  return `${(Math.ceil(bytes / 100_000) / 10).toFixed(1)} MB`
 }
 
 function startsWith(bytes: Uint8Array, ...prefix: number[]): boolean {
@@ -98,6 +111,25 @@ function isUtf8(bytes: Uint8Array): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * How a lenient UTF-8 read of `buffer` would fare: what it loses, and what it
+ * gets that plain ASCII would not.
+ *
+ * These two together tell a damaged UTF-8 file from a Windows-1252 one. In a
+ * real Windows-1252 export every accented byte is invalid UTF-8, so `damaged`
+ * is high and `intact` is zero. In a UTF-8 file with a few bad bytes, most
+ * accents still decode, so `intact` stands well above `damaged`.
+ */
+function utf8Reading(buffer: ArrayBuffer): { damaged: number; intact: number } {
+  let damaged = 0
+  let intact = 0
+  for (const character of new TextDecoder('utf-8').decode(buffer)) {
+    if (character === REPLACEMENT) damaged += 1
+    else if (character.codePointAt(0)! > 0x7f) intact += 1
+  }
+  return { damaged, intact }
 }
 
 /**
@@ -167,8 +199,9 @@ export async function readCsvFile(file: File, as?: Encoding): Promise<FileRead> 
     return {
       ok: false,
       reason:
-        `${file.name} holds ${approximateMegabytes(content.length)} of text, over the ` +
-        `${approximateMegabytes(MAX_IMPORT_CHARACTERS)} an import accepts in one request. ` +
+        `${file.name} came to ${content.length.toLocaleString()} characters ` +
+        `(${megabytes(buffer.byteLength)} on disk), over the ` +
+        `${MAX_IMPORT_CHARACTERS.toLocaleString()} an import accepts in one request. ` +
         'Split it into smaller files and import them one after another.',
     }
   }
@@ -178,6 +211,10 @@ export async function readCsvFile(file: File, as?: Encoding): Promise<FileRead> 
     if (character === REPLACEMENT) replacements += 1
   }
 
+  // Only the fallback is a guess worth second-guessing: every other branch was
+  // settled by a byte-order mark, by the bytes being valid UTF-8, or by choice.
+  const utf8 = sniffed.reason === 'fallback' ? utf8Reading(buffer) : { damaged: 0, intact: 0 }
+
   return {
     ok: true,
     filename: file.name,
@@ -185,5 +222,7 @@ export async function readCsvFile(file: File, as?: Encoding): Promise<FileRead> 
     encoding: sniffed.encoding,
     reason: sniffed.reason,
     replacements,
+    damagedUtf8: utf8.damaged > 0 && utf8.intact >= utf8.damaged,
+    utf8Damage: utf8.damaged,
   }
 }

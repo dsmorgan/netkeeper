@@ -91,6 +91,24 @@ describe('readCsvFile', () => {
     expect(forced.ok && forced.content.length).toBe(sniffed.ok ? sniffed.content.length + 1 : 0)
   })
 
+  it('tells a UTF-8 file with a few bad bytes from a Windows one', async () => {
+    // Plenty of accents that decode, plus one byte that does not: a damaged
+    // UTF-8 file. Reading it as Windows-1252 would mangle every one of them,
+    // and Windows-1252 never reports a replacement to say so.
+    const damaged = new Uint8Array([...UTF_8, 0x9d, ...UTF_8.slice(5), ...UTF_8.slice(5)])
+    const read = await readCsvFile(accented([...damaged]))
+    expect(read).toMatchObject({ encoding: 'windows-1252', reason: 'fallback', replacements: 0 })
+    expect(read.ok && read.damagedUtf8).toBe(true)
+    expect(read.ok && read.utf8Damage).toBe(1)
+  })
+
+  it('does not call a real Windows export damaged UTF-8', async () => {
+    // Every accented byte here is invalid UTF-8, so none would survive: that is
+    // a Windows-1252 file, not a damaged one.
+    const read = await readCsvFile(accented(WINDOWS_1252))
+    expect(read.ok && read.damagedUtf8).toBe(false)
+  })
+
   it('counts characters no encoding could make sense of', async () => {
     // Valid UTF-8 read as UTF-16LE: an odd byte count leaves a lone unit.
     const read = await readCsvFile(accented(UTF_8), 'utf-16be')
@@ -109,11 +127,16 @@ describe('readCsvFile', () => {
     expect(read.ok === false && read.reason).toMatch(/is empty/)
   })
 
-  it('refuses a file too large to send in one JSON body', async () => {
+  it('refuses a file too large to send in one JSON body, without saying 8 MB is over 8 MB', async () => {
     const file = new File(['a'.repeat(MAX_IMPORT_CHARACTERS + 1)], 'huge.csv')
     const read = await readCsvFile(file)
     expect(read.ok).toBe(false)
-    expect(read.ok === false && read.reason).toMatch(/Split it into smaller files/)
+    const reason = read.ok === false ? read.reason : ''
+    expect(reason).toMatch(/Split it into smaller files/)
+    // The limit is in characters, so the message counts characters; the size on
+    // disk is bytes, which for an accented file is the larger number.
+    expect(reason).toContain('8,000,001 characters')
+    expect(reason).toContain('over the 8,000,000')
   })
 
   it('accepts a file right on the limit', async () => {

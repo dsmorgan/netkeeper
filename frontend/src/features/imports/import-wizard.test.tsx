@@ -1,4 +1,4 @@
-import { fireEvent, screen, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import { jsonResponse, mockFetch } from '@/test/fetch'
@@ -12,8 +12,10 @@ import {
   NINE_COLUMN_INSPECTION,
   PRESETS,
   PREVIEW_ROWS,
+  UNRECOGNIZED_INSPECTION,
   type Call,
   backend,
+  commitLike,
   csvFile,
 } from './test-support'
 
@@ -39,7 +41,8 @@ function happyBackend(calls: Call[] = []) {
       'POST /api/v1/imports': () => jsonResponse(DRAFT_RUN, 201),
       'POST /api/v1/imports/7/preview': () => jsonResponse(PREVIEW_ROWS),
       'GET /api/v1/imports/7/rows': () => jsonResponse({ items: [CANDIDATE_ROW], total: 1 }),
-      'POST /api/v1/imports/7/commit': () => jsonResponse(COMMITTED_RUN),
+      // Refuses like the real one: 409 while row 3 has no decision.
+      'POST /api/v1/imports/7/commit': commitLike([CANDIDATE_ROW.row_number], COMMITTED_RUN),
     },
     calls,
   )
@@ -199,6 +202,12 @@ describe('import wizard', () => {
 
     expect(screen.getByText('Row 3: Imogen Pallisade')).toBeVisible()
     expect(screen.getByText(/today: Job title “Escapement Fitter”/)).toBeVisible()
+    // The stored candidates loaded cleanly: no 422 from a limit or a resolution
+    // the route does not take.
+    expect(screen.queryByRole('alert')).toBeNull()
+    const rows = calls.find((call) => call.path === '/api/v1/imports/7/rows')
+    expect(rows?.query.get('resolution')).toBe('candidate')
+    expect(Number(rows?.query.get('limit'))).toBeLessThanOrEqual(500)
 
     fireEvent.click(screen.getByRole('radio', { name: /Merge into contact #12/ }))
     expect(screen.getByText('1 of 1 decided.')).toBeVisible()
@@ -281,6 +290,57 @@ describe('import wizard', () => {
   })
 })
 
+describe('a CSV no preset recognizes', () => {
+  it('reaches the mapping screen instead of dead-ending on upload', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        // The API used to answer 422 here, which left the only screen that can
+        // fix the file out of reach. It now returns the columns.
+        'POST /api/v1/imports/inspect': () => jsonResponse(UNRECOGNIZED_INSPECTION),
+      }),
+    )
+    await renderApp('/imports')
+    await screen.findByText('Choose a CSV')
+
+    fireEvent.change(screen.getByLabelText('CSV file'), {
+      target: {
+        files: [csvFile('Given,Surname,Mail\nHortensia,Blennerhassett,h@tarnish.example\n')],
+      },
+    })
+
+    expect(await screen.findByText('Map the columns')).toBeVisible()
+    expect(
+      screen.getByText(
+        'No built-in preset matches these columns, so start from “Map the columns by hand”.',
+      ),
+    ).toBeVisible()
+    expect(screen.getByText('0 of 3 columns mapped')).toBeVisible()
+    expect(screen.getByText(/3 columns are not imported/)).toBeVisible()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('will not read a file into a run until a column is mapped', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/inspect': () => jsonResponse(UNRECOGNIZED_INSPECTION),
+      }),
+    )
+    await renderApp('/imports')
+    await screen.findByText('Choose a CSV')
+    fireEvent.change(screen.getByLabelText('CSV file'), {
+      target: {
+        files: [csvFile('Given,Surname,Mail\nHortensia,Blennerhassett,h@tarnish.example\n')],
+      },
+    })
+    await screen.findByText('Map the columns')
+
+    expect(screen.getByRole('button', { name: 'Preview the import' })).toBeDisabled()
+    expect(screen.getByText('Map at least one column first.')).toBeVisible()
+  })
+})
+
 describe('file encoding (issue #79)', () => {
   it('reads a Windows export as Windows-1252 and says so', async () => {
     const calls: Call[] = []
@@ -316,6 +376,28 @@ describe('file encoding (issue #79)', () => {
     expect(screen.queryByText(/Check an accented name/)).toBeNull()
   })
 
+  it('says so when an encoding override fails instead of snapping back in silence', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/inspect': (call) => {
+          const { content } = call.body as { content: string }
+          // Read as UTF-16 the bytes come back as something else entirely, so
+          // the header line is no longer there to find.
+          return content.includes('First Name')
+            ? jsonResponse(ARCHIVE_INSPECTION)
+            : jsonResponse({ detail: 'the file has no header row' }, 422)
+        },
+      }),
+    )
+    await renderApp('/imports')
+    await chooseFile()
+
+    fireEvent.change(screen.getByLabelText('Read as'), { target: { value: 'utf-16be' } })
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('the file has no header row')
+  })
+
   it('lets the encoding be overridden, and reads the file again with it', async () => {
     const calls: Call[] = []
     mockFetch(happyBackend(calls))
@@ -327,6 +409,103 @@ describe('file encoding (issue #79)', () => {
 
     expect(screen.getByLabelText('Read as')).toHaveValue('windows-1252')
     expect(calls.filter((call) => call.path === '/api/v1/imports/inspect')).toHaveLength(2)
+  })
+})
+
+describe('a draft whose meaning has changed since it was read', () => {
+  /**
+   * The draft recorded no candidates; the preview, re-resolved against the
+   * database as it is now, finds one. `commit` re-resolves too, so gating on
+   * the stored count enables a button that answers 409 with nothing left to try.
+   */
+  function staleBackend(calls: Call[] = []) {
+    const staleRun = { ...DRAFT_RUN, candidate_count: 0, matched_count: 2, created_count: 1 }
+    return backend(
+      {
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'GET /api/v1/imports/7': () => jsonResponse(staleRun),
+        // Live: row 3 needs a decision, whatever the draft says.
+        'POST /api/v1/imports/7/preview': () => jsonResponse(PREVIEW_ROWS),
+        // Stored: the draft recorded none, so this page is empty.
+        'GET /api/v1/imports/7/rows': () => jsonResponse({ items: [], total: 0 }),
+        'POST /api/v1/imports/7/commit': commitLike([3], COMMITTED_RUN),
+      },
+      calls,
+    )
+  }
+
+  it('says the draft has gone stale and still routes through the candidates', async () => {
+    mockFetch(staleBackend())
+    await renderApp('/imports?run=7')
+
+    expect(await screen.findByText('The first 4 rows')).toBeVisible()
+    expect(screen.getByText('This draft was read before your contacts changed.')).toBeVisible()
+    expect(screen.getByText(/1 row needs a decision that the draft did not record/)).toBeVisible()
+
+    // Not "Go to commit": the live resolutions decide the label.
+    fireEvent.click(screen.getByRole('button', { name: 'Review 1 candidate' }))
+    expect(await screen.findByText('Decide the candidates')).toBeVisible()
+    expect(screen.getByText(/Your contacts have changed since this file was read/)).toBeVisible()
+    expect(screen.getByText('Row 3: Imogen Pallisade')).toBeVisible()
+    expect(screen.getByText('0 of 1 decided, 1 to go.')).toBeVisible()
+  })
+
+  it("blocks the commit on the live count, not the draft's", async () => {
+    mockFetch(staleBackend())
+    await renderApp('/imports?run=7')
+    await screen.findByText('The first 4 rows')
+    fireEvent.click(screen.getByRole('button', { name: 'Review 1 candidate' }))
+    await screen.findByText('Decide the candidates')
+    fireEvent.click(screen.getByRole('button', { name: 'Go to commit' }))
+    await screen.findByText('Commit the import')
+
+    expect(screen.getByRole('button', { name: 'Commit 4 rows' })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the candidates' }))
+    expect(await screen.findByText('Decide the candidates')).toBeVisible()
+  })
+
+  it('offers a way out when the API refuses a commit this screen thought was ready', async () => {
+    // The worst case: nothing on screen knows row 3 is a candidate, so the
+    // button is enabled and the API refuses. Skipping has to be reachable.
+    const calls: Call[] = []
+    mockFetch(
+      backend(
+        {
+          'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+          'GET /api/v1/imports/7': () =>
+            jsonResponse({ ...DRAFT_RUN, candidate_count: 0, matched_count: 3 }),
+          'POST /api/v1/imports/7/preview': () =>
+            jsonResponse(PREVIEW_ROWS.filter((row) => row.resolution !== 'candidate')),
+          'GET /api/v1/imports/7/rows': () => jsonResponse({ items: [], total: 0 }),
+          'POST /api/v1/imports/7/commit': commitLike([3], COMMITTED_RUN),
+        },
+        calls,
+      ),
+    )
+    await renderApp('/imports?run=7')
+    await screen.findByText('The first 3 rows')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Go to commit' }))
+    await screen.findByText('Commit the import')
+
+    const button = screen.getByRole('button', { name: 'Commit 4 rows' })
+    expect(button).toBeEnabled()
+    fireEvent.click(button)
+
+    expect(
+      await screen.findByText('The import was refused: a row resolves to a candidate right now.'),
+    ).toBeVisible()
+    expect(screen.getByRole('alert')).toHaveTextContent('rows 3')
+    // Blocked now, but with the escape on screen rather than a dead end.
+    expect(screen.getByRole('button', { name: 'Commit 4 rows' })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Skip any candidate nobody has decided' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Commit 4 rows' }))
+
+    expect(await screen.findByText('Imported connections.csv')).toBeVisible()
+    const last = calls.filter((call) => call.path === '/api/v1/imports/7/commit').at(-1)
+    expect(last?.body).toEqual({ decisions: [], skip_undecided: true })
   })
 })
 
@@ -345,6 +524,41 @@ describe('finishing a draft from the history', () => {
     expect(await screen.findByText('The first 4 rows')).toBeVisible()
     // There is no file in hand, so the mapping cannot be changed from here.
     expect(screen.queryByRole('button', { name: 'Change the mapping' })).toBeNull()
+  })
+
+  it('keeps the commit result when the run comes back committed underneath it', async () => {
+    // Committing invalidates the run query, and the real API then answers
+    // `committed`. Judging the status above the result replaced it with
+    // "already committed" — the same way the rollback summary was once lost.
+    let applied = false
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'GET /api/v1/imports/7': () => jsonResponse(applied ? COMMITTED_RUN : DRAFT_RUN),
+        'POST /api/v1/imports/7/preview': () => jsonResponse(PREVIEW_ROWS),
+        'GET /api/v1/imports/7/rows': () => jsonResponse({ items: [CANDIDATE_ROW], total: 1 }),
+        'POST /api/v1/imports/7/commit': (call) => {
+          const answer = commitLike([CANDIDATE_ROW.row_number], COMMITTED_RUN)(call)
+          if (answer.status === 200) applied = true
+          return answer
+        },
+      }),
+    )
+    await renderApp('/imports?run=7')
+    await screen.findByText('The first 4 rows')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review 1 candidate' }))
+    await screen.findByText('Decide the candidates')
+    fireEvent.click(screen.getByRole('radio', { name: /Merge into contact #12/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Go to commit' }))
+    await screen.findByText('Commit the import')
+    fireEvent.click(screen.getByRole('button', { name: 'Commit 4 rows' }))
+
+    expect(await screen.findByText('Imported connections.csv')).toBeVisible()
+    await waitFor(() => {
+      expect(screen.queryByText(/This import is already/)).toBeNull()
+    })
+    expect(screen.getByText('Imported connections.csv')).toBeVisible()
   })
 
   it('refuses to reopen a run that was already committed', async () => {

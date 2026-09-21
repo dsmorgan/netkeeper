@@ -235,8 +235,12 @@ def inspect_csv(
     The mapping comes from the named preset (or, when none is named, the one
     :func:`~netkeeper.crm.importer.detect_preset` finds), then a saved preset's
     stored mapping, then ``mapping``'s explicit choices, each overriding the one
-    before. ``EmptyFile``, ``UnknownPreset``, and ``InvalidMapping`` say why a
-    file or a mapping cannot be used.
+    before. ``EmptyFile``, ``MalformedCsv``, ``UnknownPreset``, and
+    ``InvalidMapping`` say why a file or a mapping cannot be used.
+
+    A file no preset recognizes is *not* an error here: the result carries its
+    headers with an empty mapping, which is exactly what a person needs in order
+    to map it by hand. Only :func:`create_run` insists a mapping claim a column.
     """
     parsed = parse_csv(content)
     detected = detect_preset(parsed.headers)
@@ -554,7 +558,9 @@ def create_run(
     repeated in the file resolves to the contact its first occurrence would
     create rather than looking like a second new person. Nothing is written
     outside the run and its rows. ``preset_name`` may name a built-in preset or
-    one the user saved. ``RuntimeError`` when ``session`` is not a writer.
+    one the user saved. ``InvalidMapping`` when the mapping claims no column,
+    which is the one place that requirement is enforced. ``RuntimeError`` when
+    ``session`` is not a writer.
     """
     _require_writer(session)
     inspection = inspect_csv(
@@ -563,6 +569,13 @@ def create_run(
         saved_mapping=_saved_mapping(session, user, preset_name),
         mapping=mapping,
     )
+    # Inspecting a file nothing maps is fine and is how a person gets to the
+    # mapping screen; reading one into a run would store rows that can say
+    # nothing about anybody.
+    if not inspection.resolved.mapping:
+        raise InvalidMapping(
+            "no column is mapped to a field; pick a preset or map at least one column"
+        )
     observed_at = utcnow()
     outcomes: list[_Outcome] = []
     with _dry_run(session):
