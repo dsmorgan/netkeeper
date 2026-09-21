@@ -8,6 +8,12 @@ is now and says what each one would change and what provenance would refuse;
 ``POST /imports/{id}/commit`` applies the run in the request's one transaction;
 ``POST /imports/{id}/rollback`` undoes a committed run.
 
+A draft that is never finished — a ``--dry-run``, or a commit refused for
+undecided candidates — is not silently lost: ``GET /imports?status=draft``
+finds it and ``DELETE /imports/{id}`` removes it, or a later
+``POST /imports/{id}/commit`` on the same id finishes it, which is how a
+refusal is resumed rather than orphaned (#90).
+
 A commit is one transaction because the request's session is one transaction: the
 handler either returns and the session commits, or it raises and nothing lands.
 The rules the service applies are :mod:`netkeeper.crm.import_runs`.
@@ -30,6 +36,7 @@ from netkeeper.models import (
     ImportResolution,
     ImportRow,
     ImportRun,
+    ImportStatus,
 )
 from netkeeper.web.deps import CurrentUser, SessionDep
 from netkeeper.web.schemas import (
@@ -249,11 +256,13 @@ def inspect_import_file(body: ImportInspectIn, user: CurrentUser) -> ImportInspe
 def list_import_runs(
     user: CurrentUser,
     session: SessionDep,
+    status: ImportStatus | None = None,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> ImportRunPage:
-    """Import runs, newest first."""
-    runs, total = service.list_runs(session, user, limit=limit, offset=offset)
+    """Import runs, newest first. ``status=draft`` is how the orphans left by a
+    ``--dry-run`` or a refused commit are found, to finish or delete (#90)."""
+    runs, total = service.list_runs(session, user, status=status, limit=limit, offset=offset)
     return ImportRunPage(items=[run_out(run) for run in runs], total=total)
 
 
@@ -284,6 +293,18 @@ def create_import_run(
 def get_import_run(run_id: int, user: CurrentUser, session: SessionDep) -> ImportRunOut:
     with translate_errors():
         return run_out(service.get_run(session, user, run_id))
+
+
+@router.delete(
+    "/imports/{run_id}",
+    operation_id="delete_import_run",
+    status_code=204,
+    responses={**NOT_FOUND, **CONFLICT},
+)
+def delete_import_run(run_id: int, user: CurrentUser, session: SessionDep) -> None:
+    """Delete a draft run and its rows. A committed or rolled-back run is refused (#90)."""
+    with translate_errors():
+        service.delete_run(session, user, run_id)
 
 
 @router.get("/imports/{run_id}/rows", operation_id="list_import_rows", responses=NOT_FOUND)

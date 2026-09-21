@@ -27,6 +27,7 @@ from netkeeper.models import (
     ContactEmail,
     ContactSource,
     ImportResolution,
+    ImportRow,
     ImportStatus,
     User,
 )
@@ -581,6 +582,59 @@ def test_a_run_cannot_be_committed_twice(writer: Session, user: User) -> None:
         import_runs.commit(writer, user, run_id, skip_undecided=True)
 
 
+# --- orphaned drafts: listing and deleting (#90) -----------------------------
+
+
+def test_list_runs_narrows_by_status(writer: Session, user: User) -> None:
+    committed_id = import_sample(writer, user, content=NINE_COLUMN)
+    draft = import_runs.create_run(writer, user, filename="second.csv", content=NINE_COLUMN)
+
+    drafts, draft_total = import_runs.list_runs(writer, user, status=ImportStatus.DRAFT)
+    assert draft_total == 1
+    assert [run.id for run in drafts] == [draft.id]
+
+    committed, committed_total = import_runs.list_runs(writer, user, status=ImportStatus.COMMITTED)
+    assert committed_total == 1
+    assert [run.id for run in committed] == [committed_id]
+
+    every_run, every_total = import_runs.list_runs(writer, user)
+    assert every_total == 2
+    assert {run.id for run in every_run} == {committed_id, draft.id}
+
+
+def test_delete_run_removes_a_draft_and_its_rows(writer: Session, user: User) -> None:
+    run = import_runs.create_run(writer, user, filename="orphan.csv", content=NINE_COLUMN)
+    run_id = run.id
+    assert run.total_rows == 3
+
+    import_runs.delete_run(writer, user, run_id)
+
+    with pytest.raises(import_runs.RunNotFound):
+        import_runs.get_run(writer, user, run_id)
+    remaining_rows = writer.scalars(scoped(user, ImportRow).where(ImportRow.run_id == run_id)).all()
+    assert list(remaining_rows) == []
+
+
+def test_delete_run_refuses_a_committed_run(writer: Session, user: User) -> None:
+    run_id = import_sample(writer, user, content=NINE_COLUMN)
+    with pytest.raises(import_runs.RunNotDraft):
+        import_runs.delete_run(writer, user, run_id)
+    # Refused, not half-deleted: the run and its rows are still there.
+    assert import_runs.get_run(writer, user, run_id).status is ImportStatus.COMMITTED
+
+
+def test_delete_run_refuses_a_rolled_back_run(writer: Session, user: User) -> None:
+    run_id = import_sample(writer, user, content=NINE_COLUMN)
+    import_runs.rollback(writer, user, run_id)
+    with pytest.raises(import_runs.RunNotDraft):
+        import_runs.delete_run(writer, user, run_id)
+
+
+def test_delete_run_needs_a_writer_session(session: Session, user_in: User) -> None:
+    with pytest.raises(RuntimeError, match="writer session"):
+        import_runs.delete_run(session, user_in, 1)
+
+
 def test_a_saved_preset_maps_a_file_the_built_ins_do_not(writer: Session, user: User) -> None:
     content = "Given,Family,Works At\nHortensia,Blennerhassett,Tarnish & Sons\n"
     import_runs.save_preset(
@@ -645,6 +699,8 @@ def test_one_user_cannot_see_or_roll_back_another_users_run(
             import_runs.rollback(session, bob, run_id)
         with pytest.raises(import_runs.RunNotFound):
             import_runs.preview(session, bob, run_id)
+        with pytest.raises(import_runs.RunNotFound):
+            import_runs.delete_run(session, bob, run_id)
 
         # Alice's run is untouched, and Bob's own presets are his alone.
         assert import_runs.get_run(session, alice, run_id).status is ImportStatus.COMMITTED

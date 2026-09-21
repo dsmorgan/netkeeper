@@ -65,6 +65,7 @@ from netkeeper.web.schemas import (
     ContactPositionOut,
     ContactQuery,
     ContactRow,
+    ContactStatsOut,
     CountMismatch,
     MergedConflict,
     MergeIn,
@@ -182,6 +183,22 @@ def search_contacts(
     with translate_errors():
         page = service.search(session, user, q, limit=limit, offset=offset)
     return _page(page, None)
+
+
+@router.get("/contacts/stats", operation_id="get_contact_stats")
+def get_contact_stats(user: CurrentUser, session: SessionDep) -> ContactStatsOut:
+    """Counts and triage progress over the user's contacts, for a dashboard (spec 10.1).
+
+    ``netkeeper.crm.contacts.contact_stats()`` backs this, ``netkeeper contacts
+    stats``, and the triage queue's progress bar alike, so the three numbers
+    cannot quietly disagree (#90).
+
+    Declared before ``/contacts/{contact_id}``, which would otherwise try to
+    read ``stats`` as a contact id and answer ``422`` (see the same note on
+    ``/imports/presets`` in ``web/api/imports.py``).
+    """
+    stats = service.contact_stats(session, user)
+    return ContactStatsOut.model_validate(stats)
 
 
 # --- one contact ------------------------------------------------------------

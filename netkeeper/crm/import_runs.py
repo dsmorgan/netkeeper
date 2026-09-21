@@ -15,6 +15,9 @@ The flow this module implements, and what each step promises:
 4. :func:`commit` applies every row in the caller's transaction, so the whole
    file lands or none of it does, and records what each row did.
 5. :func:`rollback` undoes one run by id.
+6. :func:`delete_run` removes a run that never got past step 2 — a
+   ``--dry-run``, or a commit refused for undecided candidates — so a draft
+   nobody finishes does not sit in the table forever (#90).
 
 What a rollback undoes, exactly
 -------------------------------
@@ -644,11 +647,27 @@ def get_run(session: Session, user: User, run_id: int) -> ImportRun:
 
 
 def list_runs(
-    session: Session, user: User, *, limit: int = 50, offset: int = 0
+    session: Session,
+    user: User,
+    *,
+    status: ImportStatus | None = None,
+    limit: int = 50,
+    offset: int = 0,
 ) -> tuple[list[ImportRun], int]:
-    """``user``'s runs, newest first, and how many there are in all."""
-    total = session.scalar(scoped_count(user, ImportRun)) or 0
-    statement = scoped(user, ImportRun).order_by(ImportRun.id.desc()).limit(limit).offset(offset)
+    """``user``'s runs, newest first, and how many there are in all.
+
+    ``status`` narrows to one state, ``draft`` in particular being how a person
+    finds the runs a ``--dry-run`` or a refused commit left behind (#90): every
+    one of those stays a draft until it is finished with :func:`commit` or
+    removed with :func:`delete_run`, so it always shows up here.
+    """
+    counted = scoped_count(user, ImportRun)
+    statement = scoped(user, ImportRun).order_by(ImportRun.id.desc())
+    if status is not None:
+        counted = counted.where(ImportRun.status == status)
+        statement = statement.where(ImportRun.status == status)
+    total = session.scalar(counted) or 0
+    statement = statement.limit(limit).offset(offset)
     return list(session.scalars(statement)), total
 
 
@@ -920,6 +939,29 @@ def rollback(session: Session, user: User, run_id: int) -> RollbackResult:
     return RollbackResult(run.id, deleted, restored, fields, children)
 
 
+# --- deleting a draft ---------------------------------------------------------
+
+
+def delete_run(session: Session, user: User, run_id: int) -> None:
+    """Delete a draft run and its rows; the database cascades the rows away.
+
+    Only a draft may be deleted (#90): a committed run is what :func:`rollback`
+    undoes, and a rolled-back one is the record that it happened, so both are
+    refused with :class:`RunNotDraft` like a second commit is. ``RunNotFound``
+    for a run that is not ``user``'s. ``RuntimeError`` when ``session`` is not a
+    writer.
+    """
+    _require_writer(session)
+    run = get_run(session, user, run_id)
+    if run.status is not ImportStatus.DRAFT:
+        raise RunNotDraft(
+            f"import run {run.id} is {run.status.value}; only a draft run can be deleted"
+        )
+    session.execute(scoped_delete(user, ImportRun).where(ImportRun.id == run.id))
+    session.expunge(run)
+    log.info("deleted draft import run %d for user %d", run_id, user.id)
+
+
 def _restore(
     session: Session, user: User, contact_id: int, changes: RowChanges
 ) -> tuple[int, int] | None:
@@ -1152,6 +1194,7 @@ __all__ = [
     "commit",
     "create_run",
     "delete_preset",
+    "delete_run",
     "get_run",
     "inspect_csv",
     "list_rows",

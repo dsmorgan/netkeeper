@@ -522,6 +522,8 @@ The reason is in [Multi-user readiness](#multi-user-readiness): in a hosted depl
 
 A dense table with server-side filtering, sorting, and pagination. Columns are configurable and saved as views. Row actions: tag, add to list, set met, set do-not-contact, pin for enrichment, open on LinkedIn, open in Gmail. Bulk actions apply to the current filter, with a confirmation that states the count.
 
+`GET /contacts/stats` (`netkeeper contacts stats`) gives a dashboard the same counts and triage progress the triage queue's progress bar shows, from the one function, `contact_stats()`, both share (#90; before this item the CLI and the API computed the triage numbers separately and disagreed, #85).
+
 ### 10.2 Triage
 
 The Step 6 replacement. A focused screen that shows one contact at a time:
@@ -551,6 +553,8 @@ Static lists are explicit membership with an `added_at`, for the "First 100" sty
 3. Preview: the first 20 rows resolved (matched, created, candidate), counts for the whole file.
 4. Resolve candidates one by one or accept all creates.
 5. Commit inside one transaction. `import_row` keeps the raw row and the decision, so any import can be audited or rolled back by run.
+
+A file that is only inspected or previewed writes nothing, but step 3's draft is a real row: reading a file, or a commit refused for undecided candidates, leaves an `import_run` in `draft` status and its rows behind. `GET /imports?status=draft` (`netkeeper import runs --status draft`) finds these; `DELETE /imports/{id}` (`netkeeper import rm`) removes one; and a refused commit is finished, not re-read, with `POST /imports/{id}/commit` on the same id (`netkeeper import resume`) — the same run the web wizard's "Finish this import" resumes (#90).
 
 Field-level provenance: an imported value never overwrites a value from a more authoritative source. For a LinkedIn field a manual edit sticks: once you edit it, no later sync, archive, or CSV import overwrites it until you revert it (CP1 decision, #28). Clearing a field by hand is an edit too and sticks the same way. The last value each automated source reported is kept per field in `contacts.synced_values` (value, source, `observed_at`), whether or not it reached the live column, so a revert restores LinkedIn's value and its provenance. Among the automated sources, sync > archive > csv. For `preferred_name`, `notes`, `met`, and tags, manual wins and no import touches them.
 

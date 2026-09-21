@@ -1992,6 +1992,65 @@
         "title": "ContactSource",
         "type": "string"
       },
+      "ContactStatsOut": {
+        "description": "Counts and triage progress over the user's live contacts (spec 10.1).\n\n``netkeeper.crm.contacts.contact_stats()`` backs this, ``netkeeper contacts\nstats``, and ``netkeeper.crm.triage.progress()`` all at once, so the CLI,\nthis endpoint, and the triage queue's progress bar cannot quietly disagree\non what \"how many contacts\" means (#90; they once did).",
+        "properties": {
+          "archived": {
+            "title": "Archived",
+            "type": "integer"
+          },
+          "merged_away": {
+            "title": "Merged Away",
+            "type": "integer"
+          },
+          "met": {
+            "title": "Met",
+            "type": "integer"
+          },
+          "not_met": {
+            "title": "Not Met",
+            "type": "integer"
+          },
+          "skipped": {
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "tagged": {
+            "title": "Tagged",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "untriaged": {
+            "title": "Untriaged",
+            "type": "integer"
+          },
+          "with_email": {
+            "title": "With Email",
+            "type": "integer"
+          },
+          "with_phone": {
+            "title": "With Phone",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "met",
+          "not_met",
+          "skipped",
+          "untriaged",
+          "archived",
+          "merged_away",
+          "with_email",
+          "with_phone",
+          "tagged"
+        ],
+        "title": "ContactStatsOut",
+        "type": "object"
+      },
       "ContactSummaryOut": {
         "description": "A contact as a list or saved view shows it: enough to identify and open them.",
         "properties": {
@@ -7036,6 +7095,28 @@
         ]
       }
     },
+    "/api/v1/contacts/stats": {
+      "get": {
+        "description": "Counts and triage progress over the user's contacts, for a dashboard (spec 10.1).\n\n``netkeeper.crm.contacts.contact_stats()`` backs this, ``netkeeper contacts\nstats``, and the triage queue's progress bar alike, so the three numbers\ncannot quietly disagree (#90).\n\nDeclared before ``/contacts/{contact_id}``, which would otherwise try to\nread ``stats`` as a contact id and answer ``422`` (see the same note on\n``/imports/presets`` in ``web/api/imports.py``).",
+        "operationId": "get_contact_stats",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactStatsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Contact Stats",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
     "/api/v1/contacts/{contact_id}": {
       "get": {
         "description": "The contact in full. A merged-away id answers with its survivor and `resolved_from`.",
@@ -8493,9 +8574,25 @@
     },
     "/api/v1/imports": {
       "get": {
-        "description": "Import runs, newest first.",
+        "description": "Import runs, newest first. ``status=draft`` is how the orphans left by a\n``--dry-run`` or a refused commit are found, to finish or delete (#90).",
         "operationId": "list_import_runs",
         "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ImportStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
           {
             "in": "query",
             "name": "limit",
@@ -8725,6 +8822,46 @@
       }
     },
     "/api/v1/imports/{run_id}": {
+      "delete": {
+        "description": "Delete a draft run and its rows. A committed or rolled-back run is refused (#90).",
+        "operationId": "delete_import_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such import run, row, contact, or preset"
+          },
+          "409": {
+            "description": "The run's state forbids this, candidate rows are undecided, or a merge has drawn in a contact the run created"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Import Run",
+        "tags": [
+          "imports"
+        ]
+      },
       "get": {
         "operationId": "get_import_run",
         "parameters": [
