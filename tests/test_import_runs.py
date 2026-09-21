@@ -18,9 +18,9 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.crm import import_runs
+from netkeeper.crm import identity, import_runs
 from netkeeper.crm.identity import CreateNew, MergeInto
-from netkeeper.crm.provenance import set_manual_field
+from netkeeper.crm.provenance import may_overwrite, set_manual_field
 from netkeeper.db import mark_for_write, session_scope
 from netkeeper.models import (
     Contact,
@@ -43,6 +43,13 @@ ROW_CANDIDATE = 3  # Barnaby: name and company match, nothing else does
 ROW_NEW = 4  # Imogen: nobody yet
 ROW_DUPLICATE = 5  # Imogen again, with a different position
 ROW_BAD_EMAIL = 6  # Crispin: new, and the address in the file is not one
+
+# A second, smaller file that writes one field of an existing contact, so a
+# rollback can be asked to undo the earlier of two runs that touched it.
+SECOND_FILE = (
+    "Profile Url,First Name,Last Name,Position\n"
+    "https://www.linkedin.com/in/fern-oglethorpe-qz/,Fern,Oglethorpe,Kite Director\n"
+)
 
 
 @pytest.fixture
@@ -233,6 +240,135 @@ def test_a_draft_run_cannot_be_rolled_back(writer: Session, user: User) -> None:
 def test_rollback_needs_a_writer_session(session: Session, user_in: User) -> None:
     with pytest.raises(RuntimeError, match="writer session"):
         import_runs.rollback(session, user_in, 1)
+
+
+def test_rollback_keeps_the_provenance_of_a_field_edited_after_the_import(
+    writer: Session, user: User
+) -> None:
+    """The value and its source are one thing: undoing half of it reopens the edit.
+
+    Putting ``field_sources`` back while leaving the later value in place would
+    leave a person's own words on the contact marked as nobody's, and the next
+    import would overwrite them (spec 10.5, CP1 #28).
+    """
+    seeded = seed_existing(writer, user)
+    fern = seeded["fern"]
+    run_id = import_sample(writer, user)
+    assert fern.current_title == "Head of Kites"
+
+    set_manual_field(fern, "current_title", "Kite Emeritus")
+    writer.flush()
+    import_runs.rollback(writer, user, run_id)
+
+    assert fern.current_title == "Kite Emeritus"
+    assert fern.field_sources["current_title"] == ContactSource.MANUAL.value
+    assert not may_overwrite("current_title", ContactSource.CSV.value, fern)
+    # The ledger entry stays too, so the edit still has something to revert to.
+    assert fern.synced_values["current_title"]["value"] == "Head of Kites"
+
+
+def test_a_later_import_still_refuses_an_edit_that_outlived_a_rollback(
+    writer: Session, user: User
+) -> None:
+    seeded = seed_existing(writer, user)
+    fern = seeded["fern"]
+    first = import_sample(writer, user)
+    set_manual_field(fern, "current_title", "Kite Emeritus")
+    writer.flush()
+    import_runs.rollback(writer, user, first)
+
+    import_sample(writer, user)  # the same file, all over again
+
+    assert fern.current_title == "Kite Emeritus"
+    assert fern.field_sources["current_title"] == ContactSource.MANUAL.value
+
+
+def test_rolling_back_the_earlier_of_two_runs_leaves_the_later_one_alone(
+    writer: Session, user: User
+) -> None:
+    seeded = seed_existing(writer, user)
+    fern = seeded["fern"]
+    first = import_sample(writer, user)
+    import_sample(writer, user, content=SECOND_FILE)
+    assert fern.current_title == "Kite Director"
+
+    import_runs.rollback(writer, user, first)
+
+    # The field is the second run's now, value and source together.
+    assert fern.current_title == "Kite Director"
+    assert fern.field_sources["current_title"] == ContactSource.CSV.value
+    # The fields the second run never touched do go back.
+    assert fern.headline is None
+
+
+# --- a merge afterwards is refused, not overrun -----------------------------
+
+
+def _older_record(session: Session, user: User) -> Contact:
+    """A second, pre-existing record of the person the sample creates."""
+    return factories.make_contact(
+        session,
+        user,
+        li_urn=None,
+        li_public_id=None,
+        first_name="Imogen",
+        last_name="Thistlewhite",
+        current_company="Nimbus Pickle Co",
+        emails=["imogen.older@picklestuff.example"],
+    )
+
+
+def test_a_rollback_is_refused_when_the_created_contact_became_a_merge_survivor(
+    writer: Session, user: User
+) -> None:
+    """Deleting it would take the loser's rows, which the run never created."""
+    seeded = seed_existing(writer, user)
+    run_id = import_sample(writer, user)
+    imogen = by_slug(writer, user, "imogen-thistlewhite-qz")
+    assert imogen is not None
+    older = _older_record(writer, user)
+    identity.merge(writer, user, imogen.id, older.id)  # the created contact survives
+
+    with pytest.raises(import_runs.RunMerged) as raised:
+        import_runs.rollback(writer, user, run_id)
+
+    assert raised.value.contact_ids == (imogen.id,)
+    # Nothing was undone: the refusal comes before the first write.
+    assert by_slug(writer, user, "imogen-thistlewhite-qz") is not None
+    assert seeded["fern"].current_title == "Head of Kites"
+    assert import_runs.get_run(writer, user, run_id).status is ImportStatus.COMMITTED
+
+
+def test_a_rollback_is_refused_when_the_created_contact_was_merged_away(
+    writer: Session, user: User
+) -> None:
+    """Its children live on the survivor now, so deleting it leaves them behind."""
+    seed_existing(writer, user)
+    run_id = import_sample(writer, user)
+    imogen = by_slug(writer, user, "imogen-thistlewhite-qz")
+    assert imogen is not None
+    older = _older_record(writer, user)
+    created_id = imogen.id
+    identity.merge(writer, user, older.id, imogen.id)  # the created contact loses
+
+    with pytest.raises(import_runs.RunMerged) as raised:
+        import_runs.rollback(writer, user, run_id)
+
+    assert raised.value.contact_ids == (created_id,)
+    assert import_runs.get_run(writer, user, run_id).status is ImportStatus.COMMITTED
+
+
+def test_a_merge_between_contacts_the_run_never_created_does_not_block_a_rollback(
+    writer: Session, user: User
+) -> None:
+    seeded = seed_existing(writer, user)
+    run_id = import_sample(writer, user)
+    bystander = factories.make_contact(writer, user, first_name="Ottoline", last_name="Gubbins")
+    identity.merge(writer, user, seeded["fern"].id, bystander.id)
+
+    result = import_runs.rollback(writer, user, run_id)
+
+    assert result.contacts_deleted == 2
 
 
 # --- the LinkedHelper sample: the item's "done when" ------------------------

@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import csv
 from datetime import date
 from pathlib import Path
 
 import pytest
 
 from netkeeper.crm.importer import (
+    FIELD_SIZE_LIMIT,
     EmptyFile,
     ImportField,
     InvalidMapping,
+    MalformedCsv,
     UnknownPreset,
     detect_preset,
     get_preset,
@@ -95,6 +98,35 @@ def test_a_file_with_no_header_is_refused() -> None:
         parse_csv("Notes:\n\n")
 
 
+def _oversized_field() -> str:
+    return 'A,Headline\n1,"' + "x" * (FIELD_SIZE_LIMIT + 1024) + '"\n'
+
+
+def test_a_field_past_the_readers_limit_is_a_readable_error_not_a_crash() -> None:
+    """``csv`` raises its own error for an oversized field, and it is no relation of ours."""
+    with pytest.raises(MalformedCsv, match="not readable as CSV"):
+        parse_csv(_oversized_field())
+
+
+def test_the_field_limit_does_not_depend_on_what_another_reader_set() -> None:
+    """``csv``'s cap is one process-wide global; the archive reader raises it to 16 MiB."""
+    previous = csv.field_size_limit(64 * 1024 * 1024)
+    try:
+        with pytest.raises(MalformedCsv):
+            parse_csv(_oversized_field())
+        # And the reader put back what it found, so nobody else's file changes fate.
+        assert csv.field_size_limit() == 64 * 1024 * 1024
+    finally:
+        csv.field_size_limit(previous)
+
+
+def test_a_header_that_collides_with_a_suffix_still_gets_its_own_key() -> None:
+    parsed = parse_csv("A,A,A (2)\n1,2,3\n")
+    assert len(set(parsed.headers)) == len(parsed.headers)
+    assert len(parsed.rows[0]) == 3
+    assert sorted(parsed.rows[0].values()) == ["1", "2", "3"]
+
+
 def test_bytes_are_read_as_utf8_then_as_windows_1252() -> None:
     assert parse_csv("﻿A,B\n1,2\n".encode()).headers == ("A", "B")
     assert parse_csv("Name,City\nFran\xe7oise,R\xfcgen\n".encode("cp1252")).rows[0] == {
@@ -168,9 +200,21 @@ def test_unmapped_columns_are_reported() -> None:
     assert resolved.unmapped == ("Sprocket",)
 
 
-def test_a_mapping_naming_a_column_the_file_lacks_is_refused() -> None:
+def test_an_explicit_mapping_naming_a_column_the_file_lacks_is_refused() -> None:
     with pytest.raises(InvalidMapping, match="does not have"):
         resolve_mapping(("A",), overrides={"B": "first_name"})
+
+
+def test_a_saved_preset_skips_a_column_this_file_does_not_have() -> None:
+    """Presets are for reuse: the next file need not have every column of the last."""
+    resolved = resolve_mapping(
+        ("Given", "Family"),
+        saved={"Given": "first_name", "Family": "last_name", "Works At": "current_company"},
+    )
+    assert resolved.mapping == {
+        "Given": ImportField.FIRST_NAME,
+        "Family": ImportField.LAST_NAME,
+    }
 
 
 def test_a_mapping_naming_a_field_an_import_cannot_write_is_refused() -> None:
@@ -266,6 +310,26 @@ def test_a_url_that_is_not_a_linkedin_profile_is_dropped_and_named() -> None:
     assert mapped.incoming is not None
     assert mapped.incoming.li_url is None
     assert "not a LinkedIn profile URL" in (mapped.problem_text or "")
+
+
+def test_a_bare_member_id_is_not_a_urn_and_is_dropped() -> None:
+    """``li_urn`` is unique and is what resolution matches on first; a guess there sticks."""
+    mapping = {"First Name": ImportField.FIRST_NAME, "Provider Id": ImportField.LI_URN}
+    mapped = map_row({"First Name": "Hortensia", "Provider Id": "382910477"}, mapping)
+    assert mapped.incoming is not None
+    assert mapped.incoming.li_urn is None
+    assert "is not a LinkedIn URN" in (mapped.problem_text or "")
+
+
+@pytest.mark.parametrize(
+    "urn", ["urn:li:fsd_profile/ACoAAAtest", "urn:li:fsd_profile:ACoAAAtest", "urn:li:person/42"]
+)
+def test_a_real_urn_is_kept(urn: str) -> None:
+    mapping = {"Provider Id": ImportField.LI_URN, "First Name": ImportField.FIRST_NAME}
+    mapped = map_row({"Provider Id": urn, "First Name": "Hortensia"}, mapping)
+    assert mapped.incoming is not None
+    assert mapped.incoming.li_urn == urn
+    assert mapped.problems == ()
 
 
 def test_a_date_in_no_readable_form_is_dropped_and_named() -> None:

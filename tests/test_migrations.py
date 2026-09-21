@@ -572,6 +572,151 @@ def test_deleting_a_tag_cascades_and_deleting_a_rule_clears_rule_id(
             assert _count(connection, table) == 0, table
 
 
+# --- imports (0005) ---------------------------------------------------------
+
+IMPORT_TABLES = ("import_runs", "import_rows")
+RAW_CELLS = """{"Given": "Hortensia"}"""
+
+
+def _insert_import_run(
+    connection: Connection,
+    *,
+    id: int,
+    user_id: int,
+    source_kind: str = "csv",
+    status: str = "draft",
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO import_runs (id, user_id, source_kind, filename, preset, mapping_json,"
+            " status, total_rows, matched_count, created_count, candidate_count, skipped_count,"
+            " committed_at, rolled_back_at, created_at, updated_at)"
+            " VALUES (:id, :user_id, :source_kind, 'people.csv', NULL, '{}', :status,"
+            " 0, 0, 0, 0, 0, NULL, NULL, :t, :t)"
+        ),
+        {"id": id, "user_id": user_id, "source_kind": source_kind, "status": status, "t": STAMP},
+    )
+
+
+def _insert_import_row(
+    connection: Connection,
+    *,
+    id: int,
+    user_id: int,
+    run_id: int,
+    row_number: int = 1,
+    resolution: str = "created",
+    contact_id: int | None = None,
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO import_rows (id, user_id, run_id, row_number, raw_json, resolution,"
+            " contact_id, matched_by, candidate_ids_json, decision_json, changes_json, error,"
+            f" created_at, updated_at) VALUES (:id, :user_id, :run_id, :row_number, '{RAW_CELLS}',"
+            " :resolution, :contact_id, NULL, NULL, NULL, NULL, NULL, :t, :t)"
+        ),
+        {
+            "id": id,
+            "user_id": user_id,
+            "run_id": run_id,
+            "row_number": row_number,
+            "resolution": resolution,
+            "contact_id": contact_id,
+            "t": STAMP,
+        },
+    )
+
+
+def _raw_cells(connection: Connection, row_id: int) -> Any:
+    """``raw_json`` as a dict: SQLite hands back the text, PostgreSQL the parsed JSON."""
+    value = connection.execute(
+        text("SELECT raw_json FROM import_rows WHERE id = :id"), {"id": row_id}
+    ).scalar_one()
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def test_migration_creates_the_import_tables(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    assert set(IMPORT_TABLES) <= set(inspect(migration_engine).get_table_names())
+
+
+def test_import_enums_are_checked_by_the_database(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_import_run(connection, id=1, user_id=1)
+        _insert_import_row(connection, id=1, user_id=1, run_id=1)
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_import_run(connection, id=2, user_id=1, source_kind="bogus")
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_import_run(connection, id=3, user_id=1, status="bogus")
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_import_row(connection, id=2, user_id=1, run_id=1, row_number=2, resolution="bogus")
+
+
+def test_a_row_number_is_unique_within_a_run(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        _insert_import_run(connection, id=1, user_id=1)
+        _insert_import_run(connection, id=2, user_id=2)
+        _insert_import_row(connection, id=1, user_id=1, run_id=1, row_number=1)
+        _insert_import_row(connection, id=2, user_id=1, run_id=1, row_number=2)  # same run: fine
+        _insert_import_row(connection, id=3, user_id=2, run_id=2, row_number=1)  # other user: fine
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_import_row(connection, id=4, user_id=1, run_id=1, row_number=1)
+
+
+def test_deleting_a_contact_leaves_the_import_row_with_its_raw_cells(
+    migration_engine: Engine,
+) -> None:
+    """SET NULL, not CASCADE: a rollback deletes the contact and the audit row stays."""
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_import_run(connection, id=1, user_id=1, status="committed")
+        _insert_import_row(connection, id=1, user_id=1, run_id=1, contact_id=1)
+        connection.execute(text("DELETE FROM contacts WHERE id = 1"))
+
+        assert _count(connection, "import_rows") == 1
+        assert (
+            connection.execute(text("SELECT contact_id FROM import_rows WHERE id = 1")).scalar_one()
+            is None
+        )
+        assert _raw_cells(connection, 1) == {"Given": "Hortensia"}
+
+
+def test_deleting_a_run_cascades_to_its_rows(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_import_run(connection, id=1, user_id=1)
+        _insert_import_run(connection, id=2, user_id=1)
+        _insert_import_row(connection, id=1, user_id=1, run_id=1)
+        _insert_import_row(connection, id=2, user_id=1, run_id=2)
+        connection.execute(text("DELETE FROM import_runs WHERE id = 1"))
+
+        assert _count(connection, "import_rows") == 1
+        assert _count(connection, "import_runs") == 1
+
+
+def test_deleting_a_user_cascades_to_both_import_tables(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        for user_id in (1, 2):
+            _insert_import_run(connection, id=user_id, user_id=user_id)
+            _insert_import_row(connection, id=user_id, user_id=user_id, run_id=user_id)
+        connection.execute(text("DELETE FROM users WHERE id = 1"))
+
+        assert _count(connection, "import_runs") == 1
+        assert _count(connection, "import_rows") == 1
+        connection.execute(text("DELETE FROM users WHERE id = 2"))
+        for table in IMPORT_TABLES:
+            assert _count(connection, table) == 0, table
+
+
 # --- script directory -------------------------------------------------------
 
 

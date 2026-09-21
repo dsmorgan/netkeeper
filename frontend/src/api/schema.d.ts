@@ -760,7 +760,10 @@ export interface paths {
          *
          *     A contact the run created is deleted; a contact it only enriched keeps the
          *     values it had before the run, and the child rows the run added are removed. A
-         *     field something changed after the import keeps that later value.
+         *     field something changed after the import keeps that later value, and its
+         *     provenance with it. A run whose created contacts a merge has since drawn in
+         *     answers ``409`` and is not undone at all: deleting one of those contacts
+         *     would take rows the run never created.
          */
         post: operations["rollback_import_run"];
         delete?: never;
@@ -4157,7 +4160,7 @@ export interface operations {
                     "application/json": components["schemas"]["ImportPresetOut"];
                 };
             };
-            /** @description The run's state forbids this, or candidate rows are undecided */
+            /** @description The run's state forbids this, candidate rows are undecided, or a merge has drawn in a contact the run created */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4278,7 +4281,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The run's state forbids this, or candidate rows are undecided */
+            /** @description The run's state forbids this, candidate rows are undecided, or a merge has drawn in a contact the run created */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4359,7 +4362,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The run's state forbids this, or candidate rows are undecided */
+            /** @description The run's state forbids this, candidate rows are undecided, or a merge has drawn in a contact the run created */
             409: {
                 headers: {
                     [name: string]: unknown;

@@ -34,7 +34,9 @@ What a row may lose
 A cell that cannot become a value is dropped and named in
 :attr:`MappedRow.problems`; the rest of the row still imports. That covers a
 malformed address, a phone number with no digits, a date in no recognized
-format, and a profile URL that is not a LinkedIn one. A row with nothing left to
+format, a profile URL that is not a LinkedIn one, and a ``li_urn`` that is not a
+URN — a bare member id looks plausible, and a wrong one would write a bogus
+identity into the column resolution matches on first. A row with nothing left to
 identify a person by (no LinkedIn identity, no name, no address, no phone) is not
 importable at all and comes back with ``incoming`` as None.
 """
@@ -46,7 +48,8 @@ import enum
 import io
 import logging
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Final
@@ -69,6 +72,13 @@ MIN_HEADER_CELLS: Final[int] = 2
 MAX_PREAMBLE_ROWS: Final[int] = 20
 # A preset must recognize this many of a file's headers before it is offered.
 MIN_PRESET_MATCH: Final[int] = 3
+# The largest single cell this reader will take. ``csv`` caps a field at 128 KiB
+# by default and raises rather than truncating; a contact field is never close to
+# either number, and a cap bounds what one quoted cell in a hostile file can make
+# the reader hold. The cap is process-wide in ``csv`` and other readers set their
+# own (the archive reader wants 16 MiB for a message body), so parse_csv() pins
+# it for the read and puts back whatever was there.
+FIELD_SIZE_LIMIT: Final[int] = 1024 * 1024
 
 _NOT_ALPHANUMERIC = re.compile(r"[^a-z0-9]+")
 # Deliberately loose: one @, a dot in the domain, no spaces or list separators.
@@ -100,6 +110,10 @@ _MONTHS: Final[dict[str, int]] = {
 _DAY_MONTH_YEAR = re.compile(r"^(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})$")
 _MONTH_DAY_YEAR = re.compile(r"^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})$")
 _SLASHED = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{2}|\d{4})$")
+# ``urn:li:<entity>/<id>`` or ``urn:li:<entity>:<id>`` (spec 8.1). Nothing here
+# derives or repairs a URN; a cell that is not one is dropped, because ``li_urn``
+# is a unique identity column and the first thing identity.resolve() matches on.
+_LI_URN = re.compile(r"^urn:li:[A-Za-z][A-Za-z0-9_]*[:/]\S+$")
 
 
 class ImportField(enum.StrEnum):
@@ -166,6 +180,16 @@ class EmptyFile(CsvImportError, ValueError):
     """The file has no header row: it is empty, or it is all preamble."""
 
 
+class MalformedCsv(CsvImportError, ValueError):
+    """The bytes are not CSV this reader can take.
+
+    Above all a quoted field past :mod:`csv`'s own field-size limit (128 KiB),
+    which is the one hostile shape that reaches the reader rather than parsing
+    into nonsense. ``_csv.Error`` is no relation of anything else here, so it is
+    caught and re-raised as this, which the API turns into a 422.
+    """
+
+
 class UnknownPreset(CsvImportError, LookupError):
     """No preset by that name."""
 
@@ -227,7 +251,11 @@ PRESETS: Final[tuple[Preset, ...]] = (
     ),
     Preset(
         "nine-column",
-        # Spec appendix A, so an export of this preset imports back unchanged.
+        # Spec appendix A, so a file exported with this preset reads back into the
+        # same columns. The contact does not round-trip exactly: appendix A writes
+        # ``preferred_name`` into "First Name", and an import reads that column
+        # into ``first_name``, because ``preferred_name`` is a person's own and no
+        # import touches it (spec 10.5).
         _aliases(
             li_url="LinkedIn Profile URL",
             email="Email Address",
@@ -337,41 +365,69 @@ def parse_csv(content: str | bytes) -> ParsedCsv:
     preamble = 0
     rows: list[dict[str, str]] = []
     dropped = 0
-    for cells in reader:
-        if headers is None:
-            if sum(1 for cell in cells if cell.strip()) >= MIN_HEADER_CELLS:
-                headers = _header_names(cells)
-                continue
-            preamble += 1
-            if preamble > MAX_PREAMBLE_ROWS:
-                raise EmptyFile(
-                    f"no header row in the first {MAX_PREAMBLE_ROWS} lines: "
-                    f"a header needs at least {MIN_HEADER_CELLS} non-empty columns"
+    try:
+        with _field_size_limit(FIELD_SIZE_LIMIT):
+            for cells in reader:
+                if headers is None:
+                    if sum(1 for cell in cells if cell.strip()) >= MIN_HEADER_CELLS:
+                        headers = _header_names(cells)
+                        continue
+                    preamble += 1
+                    if preamble > MAX_PREAMBLE_ROWS:
+                        raise EmptyFile(
+                            f"no header row in the first {MAX_PREAMBLE_ROWS} lines: "
+                            f"a header needs at least {MIN_HEADER_CELLS} non-empty columns"
+                        )
+                    continue
+                if not any(cell.strip() for cell in cells):
+                    continue  # a blank line, including the one a trailing newline makes
+                dropped += max(0, len(cells) - len(headers))
+                rows.append(
+                    {
+                        header: cells[index].strip() if index < len(cells) else ""
+                        for index, header in enumerate(headers)
+                    }
                 )
-            continue
-        if not any(cell.strip() for cell in cells):
-            continue  # a blank line, including the one a trailing newline makes
-        dropped += max(0, len(cells) - len(headers))
-        rows.append(
-            {
-                header: cells[index].strip() if index < len(cells) else ""
-                for index, header in enumerate(headers)
-            }
-        )
+    except csv.Error as exc:
+        # A quoted field past csv's field-size limit above all. Its exception is
+        # no relation of CsvImportError, so without this it leaves the API as a 500.
+        raise MalformedCsv(f"the file is not readable as CSV: {exc}") from exc
     if headers is None:
         raise EmptyFile("the file has no header row")
     return ParsedCsv(headers, tuple(rows), preamble_rows=preamble, dropped_cells=dropped)
 
 
+@contextmanager
+def _field_size_limit(limit: int) -> Iterator[None]:
+    """Pin ``csv``'s field cap for the block, then put back what was there.
+
+    The cap is one global inside the ``csv`` module, so without this a file's
+    fate would depend on which other reader ran first in the process.
+    """
+    previous = csv.field_size_limit(limit)
+    try:
+        yield
+    finally:
+        csv.field_size_limit(previous)
+
+
 def _header_names(cells: Sequence[str]) -> tuple[str, ...]:
-    """Header cells trimmed, empty ones named after their position, repeats suffixed."""
+    """Header cells trimmed, empty ones named after their position, repeats suffixed.
+
+    The suffix climbs until the name is free, so a file whose own header already
+    holds the name a suffix would produce (``A,A,A (2)``) still ends with one key
+    per column and no row loses a cell.
+    """
     names: list[str] = []
-    seen: dict[str, int] = {}
+    used: set[str] = set()
     for index, cell in enumerate(cells, start=1):
-        name = cell.strip() or f"column {index}"
-        count = seen.get(name, 0) + 1
-        seen[name] = count
-        names.append(name if count == 1 else f"{name} ({count})")
+        base = cell.strip() or f"column {index}"
+        name, suffix = base, 1
+        while name in used:
+            suffix += 1
+            name = f"{base} ({suffix})"
+        used.add(name)
+        names.append(name)
     return tuple(names)
 
 
@@ -406,9 +462,15 @@ def resolve_mapping(
     """
     known = set(headers)
     mapping: dict[str, ImportField] = preset.mapping_for(headers) if preset is not None else {}
-    for source, pairs in (("saved mapping", saved), ("mapping", overrides)):
+    # A saved preset is meant to be reused across files, so a column this one
+    # lacks is simply not mapped, as a built-in preset's unmatched aliases are.
+    # An explicit override is a choice someone just made about *this* file, so a
+    # column that is not there is a mistake worth reporting.
+    for source, pairs, strict in (("saved mapping", saved, False), ("mapping", overrides, True)):
         for header, field in (pairs or {}).items():
             if header not in known:
+                if not strict:
+                    continue
                 raise InvalidMapping(
                     f"the {source} names a column {header!r} this file does not have; "
                     f"its columns are {', '.join(repr(name) for name in headers)}"
@@ -526,6 +588,12 @@ def _scalar(field: ImportField, value: str, header: str, problems: list[str]) ->
         return parsed
     if field is ImportField.LI_URL and public_id_from_url(value) is None:
         problems.append(f"{header}: {value!r} is not a LinkedIn profile URL")
+        return None
+    if field is ImportField.LI_URN and not _LI_URN.match(value):
+        # A bare member id looks plausible and is not a URN. Letting one through
+        # would write a bogus identity into a unique column that resolution
+        # trusts, and unlike a mismapped name it would not show as unmapped.
+        problems.append(f"{header}: {value!r} is not a LinkedIn URN (urn:li:...)")
         return None
     return value
 
