@@ -80,6 +80,7 @@ from netkeeper.models import (
     RuleField,
     Tag,
     TagKind,
+    TagMetSignal,
     TagSource,
     User,
     tag_name_key,
@@ -444,13 +445,20 @@ def create_tag(
     *,
     color: str | None = None,
     kind: TagKind = TagKind.MANUAL,
+    met_signal: TagMetSignal | None = None,
 ) -> Tag:
     """A new tag, flushed. :class:`DuplicateTag` when the name is taken (any case)."""
     _require_writer(session)
     cleaned = clean_tag_name(name)
     if find_tag(session, user, cleaned) is not None:
         raise DuplicateTag(f"a tag named {cleaned!r} already exists")
-    tag = Tag(user_id=user.id, name=cleaned, color=clean_color(color), kind=kind)
+    tag = Tag(
+        user_id=user.id,
+        name=cleaned,
+        color=clean_color(color),
+        kind=kind,
+        met_signal=None if met_signal is None else TagMetSignal(met_signal),
+    )
     session.add(tag)
     session.flush()
     log.debug("created tag %d %r for user %d", tag.id, tag.name, user.id)
@@ -464,8 +472,14 @@ def update_tag(
     *,
     name: str | None = None,
     color: str | Unset | None = UNSET,
+    met_signal: TagMetSignal | Unset | None = UNSET,
 ) -> Tag:
-    """Rename and/or recolor a tag. ``color=None`` clears it; omitted leaves it."""
+    """Rename, recolor, or give a tag its triage meaning.
+
+    ``color=None`` and ``met_signal=None`` clear those; omitted leaves them.
+    ``met_signal`` is the user saying what the tag means for triage (spec 10.2):
+    it puts a batch on offer and takes one off, and it decides nobody by itself.
+    """
     _require_writer(session)
     tag = get_tag(session, user, tag_id)
     if name is not None:
@@ -476,6 +490,8 @@ def update_tag(
         tag.name = cleaned
     if not isinstance(color, Unset):
         tag.color = clean_color(color)
+    if not isinstance(met_signal, Unset):
+        tag.met_signal = None if met_signal is None else TagMetSignal(met_signal)
     session.flush()
     return tag
 

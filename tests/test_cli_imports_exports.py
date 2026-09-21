@@ -109,6 +109,9 @@ def test_cli_import_archive_reports_the_known_counts(cli_db: sessionmaker[Sessio
         "1 group, 1 not a contact); 8 interactions added"
     ) in result.output
     assert "invitations: 6 rows; 2 interactions added" in result.output
+    # The rules run with the import (#64). This database has no rules seeded, so
+    # the line reports the contacts examined and no tags.
+    assert "auto-tag rules: 7 contacts examined, 0 tags added, 0 removed" in result.output
     with cli_db() as session:
         user = ensure_local_user(session)
         assert session.scalar(scoped_count(user, Contact)) == 7

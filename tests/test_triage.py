@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.crm import triage as module
 from netkeeper.crm.identity import IncomingContact, apply, merge, resolve
-from netkeeper.crm.interactions import add_interaction
+from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
+from netkeeper.crm.tags import create_rule, create_tag, run_rules, tag_contact
 from netkeeper.crm.triage import (
     CountChanged,
     InvalidDecision,
@@ -28,6 +29,10 @@ from netkeeper.models import (
     ContactSource,
     Interaction,
     InteractionKind,
+    MetSource,
+    RuleField,
+    Tag,
+    TagMetSignal,
     TriageDecision,
     TriageDecisionKind,
     User,
@@ -74,7 +79,10 @@ def _message(
 
 
 def _queue_ids(
-    writer: Session, user: User, states: Sequence[ContactMet] = module.DEFAULT_QUEUE_STATES
+    writer: Session,
+    user: User,
+    states: Sequence[ContactMet] = module.DEFAULT_QUEUE_STATES,
+    decided_by: MetSource | None = None,
 ) -> list[int]:
     """Every contact the queue would hand out, in order, by walking the cursor.
 
@@ -85,7 +93,9 @@ def _queue_ids(
     ids: list[int] = []
     after: int | None = None
     for _ in range(_QUEUE_WALK_LIMIT):
-        contact = module.next_contact(writer, user, states=states, after_id=after)
+        contact = module.next_contact(
+            writer, user, states=states, after_id=after, decided_by=decided_by
+        )
         if contact is None:
             return ids
         ids.append(contact.id)
@@ -218,10 +228,20 @@ def test_deciding_writes_met_and_logs_what_it_changed(writer: Session, user: Use
     contact = factories.make_contact(writer, user)
     decision = module.decide(writer, user, contact.id, ContactMet.MET, at=NOW)
     assert contact.met is ContactMet.MET
+    assert contact.met_source is MetSource.MANUAL
     assert contact.triaged_at == NOW
     assert decision.kind is TriageDecisionKind.DECIDE
-    assert decision.before_state == {"met": "unknown", "triaged_at": None}
-    assert decision.after_state == {"met": "met", "triaged_at": NOW.isoformat()}
+    assert decision.before_state == {
+        "met": "unknown",
+        "met_source": "manual",
+        "triaged_at": None,
+    }
+    assert decision.after_state == {
+        "met": "met",
+        "met_source": "manual",
+        "triaged_at": NOW.isoformat(),
+    }
+    assert decision.reason is None, "a decision by hand came from no suggestion"
     assert decision.undone_at is None
 
 
@@ -491,7 +511,9 @@ def test_the_suggestion_counts_the_untriaged_with_message_history(
 
 
 def test_no_suggestion_when_it_would_touch_nobody(writer: Session, user: User) -> None:
-    factories.make_contact(writer, user)
+    """A contact no batch covers: a note on file is not evidence either way."""
+    contact = factories.make_contact(writer, user)
+    add_interaction(writer, user, contact.id, InteractionKind.NOTE, NOW, "a note, not a message")
     assert module.suggestions(writer, user) == []
 
 
@@ -579,3 +601,268 @@ def _open_decisions(writer: Session, user: User) -> int:
         scoped(user, TriageDecision).where(TriageDecision.undone_at.is_(None))
     ).all()
     return len(rows)
+
+
+# --- the rest of the catalogue ----------------------------------------------
+
+
+def _invitation(
+    writer: Session,
+    user: User,
+    contact: Contact,
+    *,
+    note: str | None = None,
+    outbound: bool = False,
+    at: datetime = EARLIER,
+) -> Interaction:
+    """An invitation as the archive importer writes one: the marker, then any note."""
+    summary = INVITATION_SUMMARY if note is None else f"{INVITATION_SUMMARY}: {note}"
+    kind = InteractionKind.LI_OUT if outbound else InteractionKind.LI_IN
+    return add_interaction(
+        writer, user, contact.id, kind, at, summary, source=ContactSource.ARCHIVE
+    )
+
+
+def _signalled_tag(writer: Session, user: User, name: str, signal: TagMetSignal) -> Tag:
+    return create_tag(writer, user, name, met_signal=signal)
+
+
+def _offers(writer: Session, user: User) -> dict[str, module.Suggestion]:
+    return {offer.key: offer for offer in module.suggestions(writer, user)}
+
+
+def test_a_bare_invitation_is_not_message_history(writer: Session, user: User) -> None:
+    """The importer stores an invitation as an li_in row, and clicking Connect is not a thread."""
+    invited, wrote = _contacts(writer, user, 2)
+    _invitation(writer, user, invited)
+    _message(writer, user, wrote)
+    offers = _offers(writer, user)
+    assert offers[module.SUGGESTION_MET_WITH_MESSAGES].count == 1
+    applied = module.apply_suggestion(writer, user, module.SUGGESTION_MET_WITH_MESSAGES)
+    assert (applied.applied, _met(wrote), _met(invited)) == (1, ContactMet.MET, ContactMet.UNKNOWN)
+
+
+def test_an_invitation_note_is_its_own_batch(writer: Session, user: User) -> None:
+    noted, also_noted, bare, wrote = _contacts(writer, user, 4)
+    _invitation(writer, user, noted, note="we met at the pottery fair")
+    _invitation(writer, user, also_noted, note="good to meet you", outbound=True)
+    _invitation(writer, user, bare)
+    _message(writer, user, wrote)
+    offer = _offers(writer, user)[module.SUGGESTION_MET_INVITATION_NOTE]
+    assert offer.count == 2
+    assert offer.met is ContactMet.MET
+    applied = module.apply_suggestion(
+        writer, user, module.SUGGESTION_MET_INVITATION_NOTE, expected_count=2
+    )
+    assert applied.applied == 2
+    assert (_met(noted), _met(also_noted)) == (ContactMet.MET, ContactMet.MET)
+    assert (_met(bare), _met(wrote)) == (ContactMet.UNKNOWN, ContactMet.UNKNOWN)
+
+
+def test_a_note_from_someone_you_went_on_to_write_to_stays_in_the_stronger_batch(
+    writer: Session, user: User
+) -> None:
+    both = factories.make_contact(writer, user)
+    _invitation(writer, user, both, note="hello")
+    _message(writer, user, both)
+    offers = _offers(writer, user)
+    assert module.SUGGESTION_MET_INVITATION_NOTE not in offers, "no person is counted twice"
+    assert offers[module.SUGGESTION_MET_WITH_MESSAGES].count == 1
+
+
+def test_the_no_evidence_batch_takes_only_the_contacts_nothing_is_known_about(
+    writer: Session, user: User
+) -> None:
+    blank = factories.make_contact(writer, user, current_company="Northwind Pottery")
+    noted = factories.make_contact(writer, user, current_company="Blue Harbor Tools")
+    add_interaction(writer, user, noted.id, InteractionKind.NOTE, NOW, "spoke at a conference")
+    wrote = factories.make_contact(writer, user, current_company="Somewhere Else")
+    _message(writer, user, wrote)
+    offer = _offers(writer, user)[module.SUGGESTION_NOT_MET_NO_EVIDENCE]
+    assert (offer.count, offer.met) == (1, ContactMet.NOT_MET)
+    covered, total = module.suggestion_contacts(writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE)
+    assert ([contact.id for contact in covered], total) == ([blank.id], 1)
+
+
+def test_the_no_evidence_batch_keeps_back_a_colleague_of_someone_you_know(
+    writer: Session, user: User
+) -> None:
+    """A company where you have met or written to somebody is evidence the panel will show."""
+    known = factories.make_contact(writer, user, current_company="Northwind Pottery")
+    _message(writer, user, known)
+    colleague = factories.make_contact(writer, user, current_company="northwind pottery")
+    stranger = factories.make_contact(writer, user, current_company="Somewhere Else")
+    covered, _total = module.suggestion_contacts(
+        writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE
+    )
+    assert [contact.id for contact in covered] == [stranger.id]
+    factories.make_contact(writer, user, current_company="Somewhere Else", met=ContactMet.MET)
+    after, _total = module.suggestion_contacts(writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE)
+    assert after == [], "a contact already marked met makes their company known too"
+    assert colleague.met is ContactMet.UNKNOWN
+
+
+def test_a_tag_says_nothing_until_the_user_gives_it_a_meaning(writer: Session, user: User) -> None:
+    contact = factories.make_contact(writer, user)
+    add_interaction(writer, user, contact.id, InteractionKind.NOTE, NOW, "a note")
+    tag = create_tag(writer, user, "recruiter")
+    tag_contact(writer, user, contact.id, tag.id)
+    assert module.suggestions(writer, user) == []
+    with pytest.raises(InvalidDecision, match="says nothing"):
+        module.apply_suggestion(writer, user, f"{module.TAG_KEY_PREFIX}{tag.id}")
+
+
+def test_a_tag_with_a_meaning_is_offered_as_its_own_batch(writer: Session, user: User) -> None:
+    recruiters = _signalled_tag(writer, user, "recruiter", TagMetSignal.NOT_MET)
+    colleagues = _signalled_tag(writer, user, "colleague", TagMetSignal.MET)
+    recruiter, colleague, untagged = _contacts(writer, user, 3)
+    for contact in (recruiter, colleague, untagged):
+        add_interaction(writer, user, contact.id, InteractionKind.NOTE, NOW, "a note")
+    tag_contact(writer, user, recruiter.id, recruiters.id)
+    tag_contact(writer, user, colleague.id, colleagues.id)
+    offers = _offers(writer, user)
+    assert [key for key in offers] == [
+        f"{module.TAG_KEY_PREFIX}{colleagues.id}",
+        f"{module.TAG_KEY_PREFIX}{recruiters.id}",
+    ], "met before not met, and nothing else is on offer"
+    assert offers[f"{module.TAG_KEY_PREFIX}{recruiters.id}"].tag_id == recruiters.id
+    applied = module.apply_suggestion(
+        writer, user, f"{module.TAG_KEY_PREFIX}{recruiters.id}", expected_count=1, at=NOW
+    )
+    assert (applied.applied, applied.met) == (1, ContactMet.NOT_MET)
+    assert (_met(recruiter), _met(colleague), _met(untagged)) == (
+        ContactMet.NOT_MET,
+        ContactMet.UNKNOWN,
+        ContactMet.UNKNOWN,
+    )
+    (row,) = writer.scalars(
+        scoped(user, TriageDecision).where(TriageDecision.contact_id == recruiter.id)
+    ).all()
+    assert row.kind is TriageDecisionKind.BULK_NOT_MET
+    assert row.reason == f"{module.TAG_KEY_PREFIX}{recruiters.id}"
+
+
+def test_a_tag_a_rule_applied_counts_like_one_applied_by_hand(writer: Session, user: User) -> None:
+    tag = _signalled_tag(writer, user, "recruiter", TagMetSignal.NOT_MET)
+    create_rule(writer, user, tag.id, RuleField.TITLE, r"\brecruiter\b")
+    contact = factories.make_contact(writer, user, current_title="Technical Recruiter")
+    add_interaction(writer, user, contact.id, InteractionKind.NOTE, NOW, "a note")
+    assert run_rules(writer, user).added == 1
+    assert _offers(writer, user)[f"{module.TAG_KEY_PREFIX}{tag.id}"].count == 1
+
+
+def test_a_tag_batch_never_reaches_another_user_s_tag(writer: Session, user: User) -> None:
+    other = factories.make_user(writer)
+    theirs = create_tag(writer, other, "colleague", met_signal=TagMetSignal.MET)
+    with pytest.raises(InvalidDecision):
+        module.apply_suggestion(writer, user, f"{module.TAG_KEY_PREFIX}{theirs.id}")
+    with pytest.raises(InvalidDecision):
+        module.suggestion_contacts(writer, user, f"{module.TAG_KEY_PREFIX}{theirs.id}")
+
+
+# --- the preview ------------------------------------------------------------
+
+
+def test_a_suggestion_lists_who_it_covers_in_pages(writer: Session, user: User) -> None:
+    covered = _contacts(writer, user, 3)
+    for contact in covered:
+        _message(writer, user, contact)
+    quiet = factories.make_contact(writer, user)
+    add_interaction(writer, user, quiet.id, InteractionKind.NOTE, NOW, "a note")
+    first, total = module.suggestion_contacts(
+        writer, user, module.SUGGESTION_MET_WITH_MESSAGES, limit=2
+    )
+    assert ([contact.id for contact in first], total) == ([covered[0].id, covered[1].id], 3)
+    second, _total = module.suggestion_contacts(
+        writer, user, module.SUGGESTION_MET_WITH_MESSAGES, limit=2, offset=2
+    )
+    assert [contact.id for contact in second] == [covered[2].id]
+    assert all(contact.met is ContactMet.UNKNOWN for contact in covered), "a preview writes nothing"
+    assert _open_decisions(writer, user) == 0
+
+
+def test_a_preview_of_an_unknown_suggestion_is_refused(writer: Session, user: User) -> None:
+    for key in ("mark-everyone-as-a-friend", f"{module.TAG_KEY_PREFIX}nope"):
+        with pytest.raises(InvalidDecision):
+            module.suggestion_contacts(writer, user, key)
+
+
+def test_a_preview_never_reaches_another_user_s_contacts(writer: Session, user: User) -> None:
+    other = factories.make_user(writer)
+    theirs = factories.make_contact(writer, other)
+    _message(writer, other, theirs)
+    mine = factories.make_contact(writer, user)
+    _message(writer, user, mine)
+    covered, total = module.suggestion_contacts(writer, user, module.SUGGESTION_MET_WITH_MESSAGES)
+    assert ([contact.id for contact in covered], total) == ([mine.id], 1)
+
+
+# --- what netkeeper decided, and reviewing it -------------------------------
+
+
+def test_a_batch_marks_its_work_automatic_and_says_which_batch_it_was(
+    writer: Session, user: User
+) -> None:
+    contact = factories.make_contact(writer, user)
+    _message(writer, user, contact)
+    applied = module.apply_suggestion(
+        writer, user, module.SUGGESTION_MET_WITH_MESSAGES, at=NOW, expected_count=1
+    )
+    assert contact.met_source is MetSource.AUTOMATIC
+    (row,) = writer.scalars(scoped(user, TriageDecision)).all()
+    assert row.kind is TriageDecisionKind.BULK_MET
+    assert (row.batch_id, row.reason) == (applied.batch_id, module.SUGGESTION_MET_WITH_MESSAGES)
+    assert row.decided_at == NOW
+    assert row.before_state["met_source"] == "manual"
+    assert row.after_state["met_source"] == "automatic"
+
+
+def test_the_review_queue_serves_exactly_the_contacts_a_batch_decided(
+    writer: Session, user: User
+) -> None:
+    messaged, quiet = _contacts(writer, user, 2)
+    _message(writer, user, messaged)
+    add_interaction(writer, user, quiet.id, InteractionKind.NOTE, NOW, "a note")
+    module.decide(writer, user, quiet.id, ContactMet.NOT_MET)
+    module.apply_suggestion(writer, user, module.SUGGESTION_MET_WITH_MESSAGES)
+    review = _queue_ids(
+        writer, user, states=module.REVIEW_QUEUE_STATES, decided_by=MetSource.AUTOMATIC
+    )
+    assert review == [messaged.id], "the contact decided by hand is not up for review"
+    assert _queue_ids(writer, user) == [], "and the untriaged queue is empty"
+
+
+def test_deciding_by_hand_closes_the_review_and_undo_reopens_it(
+    writer: Session, user: User
+) -> None:
+    contact = factories.make_contact(writer, user)
+    _message(writer, user, contact)
+    module.apply_suggestion(writer, user, module.SUGGESTION_MET_WITH_MESSAGES)
+    module.decide(writer, user, contact.id, ContactMet.NOT_MET)
+    assert contact.met_source is MetSource.MANUAL
+    assert (
+        _queue_ids(writer, user, states=module.REVIEW_QUEUE_STATES, decided_by=MetSource.AUTOMATIC)
+        == []
+    )
+    module.undo(writer, user)
+    assert (contact.met, contact.met_source) == (ContactMet.MET, MetSource.AUTOMATIC)
+    assert _queue_ids(
+        writer, user, states=module.REVIEW_QUEUE_STATES, decided_by=MetSource.AUTOMATIC
+    ) == [contact.id]
+    module.undo(writer, user)
+    assert (contact.met, contact.met_source) == (ContactMet.UNKNOWN, MetSource.MANUAL)
+
+
+def test_progress_counts_what_was_decided_automatically(writer: Session, user: User) -> None:
+    messaged, quiet = _contacts(writer, user, 2)
+    _message(writer, user, messaged)
+    assert module.progress(writer, user).automatic == 0
+    module.apply_suggestion(writer, user, module.SUGGESTION_MET_WITH_MESSAGES)
+    counters = module.progress(writer, user)
+    assert (counters.total, counters.triaged, counters.automatic) == (2, 1, 1)
+    assert counters.by_state[ContactMet.MET] == 1
+    review = module.progress(
+        writer, user, states=module.REVIEW_QUEUE_STATES, decided_by=MetSource.AUTOMATIC
+    )
+    assert review.remaining == 1, "the review queue counts its own contacts, not every decided one"
+    assert quiet.met is ContactMet.UNKNOWN

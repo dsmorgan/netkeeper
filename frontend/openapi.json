@@ -4376,6 +4376,18 @@
           "status": {
             "$ref": "#/components/schemas/ImportStatus"
           },
+          "tagged_contacts": {
+            "title": "Tagged Contacts",
+            "type": "integer"
+          },
+          "tags_added": {
+            "title": "Tags Added",
+            "type": "integer"
+          },
+          "tags_removed": {
+            "title": "Tags Removed",
+            "type": "integer"
+          },
           "total_rows": {
             "title": "Total Rows",
             "type": "integer"
@@ -4398,6 +4410,9 @@
           "created_count",
           "candidate_count",
           "skipped_count",
+          "tagged_contacts",
+          "tags_added",
+          "tags_removed",
           "committed_at",
           "rolled_back_at",
           "created_at",
@@ -5062,6 +5077,15 @@
         ],
         "title": "MergedConflict",
         "type": "object"
+      },
+      "MetSource": {
+        "description": "Who decided ``met``: the person, or netkeeper on their behalf (spec 10.2).\n\n``manual`` is the resting state and covers a contact nobody has decided yet.\n``automatic`` is set only by a triage batch the person accepted\n(:func:`netkeeper.crm.triage.apply_suggestion`), so a decision netkeeper made\nnever reads as one the person made by hand, and the review queue can serve\nexactly those contacts back for checking. No import writes either: ``met``\nstays a field the person owns.",
+        "enum": [
+          "manual",
+          "automatic"
+        ],
+        "title": "MetSource",
+        "type": "string"
       },
       "Neq": {
         "additionalProperties": false,
@@ -5805,6 +5829,16 @@
             "$ref": "#/components/schemas/TagKind",
             "default": "manual"
           },
+          "met_signal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TagMetSignal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "name": {
             "maxLength": 100,
             "minLength": 1,
@@ -5826,6 +5860,15 @@
           "llm"
         ],
         "title": "TagKind",
+        "type": "string"
+      },
+      "TagMetSignal": {
+        "description": "What carrying a tag says about having met the person (spec 10.2).\n\nThe user's own reading of their own label: \"everyone I tagged *recruiter* is\nsomeone I have not met\", \"everyone I tagged *colleague* is someone I have\".\nA tag says nothing until the user sets this, and setting it decides nobody\non its own: it only makes a triage batch worth offering, which the user then\npreviews and accepts. NULL is the default and means the tag carries no\nsignal.",
+        "enum": [
+          "met",
+          "not_met"
+        ],
+        "title": "TagMetSignal",
         "type": "string"
       },
       "TagNone": {
@@ -5882,6 +5925,16 @@
           "kind": {
             "$ref": "#/components/schemas/TagKind"
           },
+          "met_signal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TagMetSignal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -5897,6 +5950,7 @@
           "name",
           "color",
           "kind",
+          "met_signal",
           "contact_count",
           "created_at",
           "updated_at"
@@ -5905,7 +5959,7 @@
         "type": "object"
       },
       "TagPatch": {
-        "description": "Fields left out are left alone; ``color: null`` clears the color.",
+        "description": "Fields left out are left alone; ``color: null`` and ``met_signal: null`` clear them.",
         "properties": {
           "color": {
             "anyOf": [
@@ -5918,6 +5972,16 @@
               }
             ],
             "title": "Color"
+          },
+          "met_signal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TagMetSignal"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "name": {
             "anyOf": [
@@ -6229,6 +6293,9 @@
           "met": {
             "$ref": "#/components/schemas/ContactMet"
           },
+          "met_source": {
+            "$ref": "#/components/schemas/MetSource"
+          },
           "notes": {
             "anyOf": [
               {
@@ -6282,6 +6349,7 @@
           "location",
           "connected_on",
           "met",
+          "met_source",
           "triaged_at",
           "do_not_contact",
           "notes",
@@ -6325,7 +6393,8 @@
         "enum": [
           "decide",
           "preferred_name",
-          "bulk_met"
+          "bulk_met",
+          "bulk_not_met"
         ],
         "title": "TriageDecisionKind",
         "type": "string"
@@ -6388,6 +6457,17 @@
           "kind": {
             "$ref": "#/components/schemas/TriageDecisionKind"
           },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
           "undone_at": {
             "anyOf": [
               {
@@ -6408,6 +6488,7 @@
           "before_state",
           "after_state",
           "batch_id",
+          "reason",
           "decided_at",
           "undone_at"
         ],
@@ -6546,6 +6627,10 @@
       "TriageProgressOut": {
         "description": "Triaged against total, and how many are left in the queue that was asked for.",
         "properties": {
+          "automatic": {
+            "title": "Automatic",
+            "type": "integer"
+          },
           "by_state": {
             "additionalProperties": {
               "type": "integer"
@@ -6573,7 +6658,8 @@
           "total",
           "triaged",
           "remaining",
-          "by_state"
+          "by_state",
+          "automatic"
         ],
         "title": "TriageProgressOut",
         "type": "object"
@@ -6646,6 +6732,9 @@
             "title": "Key",
             "type": "string"
           },
+          "met": {
+            "$ref": "#/components/schemas/ContactMet"
+          },
           "progress": {
             "$ref": "#/components/schemas/TriageProgressOut"
           }
@@ -6654,6 +6743,7 @@
           "key",
           "applied",
           "batch_id",
+          "met",
           "progress"
         ],
         "title": "TriageSuggestionApplyOut",
@@ -6674,6 +6764,20 @@
             "title": "Key",
             "type": "string"
           },
+          "met": {
+            "$ref": "#/components/schemas/ContactMet"
+          },
+          "tag_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Id"
+          },
           "title": {
             "title": "Title",
             "type": "string"
@@ -6683,9 +6787,43 @@
           "key",
           "title",
           "description",
-          "count"
+          "count",
+          "met",
+          "tag_id"
         ],
         "title": "TriageSuggestionOut",
+        "type": "object"
+      },
+      "TriageSuggestionPage": {
+        "description": "One page of the contacts a suggestion covers, so it can be read before it is taken.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TriageContactOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "TriageSuggestionPage",
         "type": "object"
       },
       "TriageTagOut": {
@@ -10005,7 +10143,7 @@
         ]
       },
       "patch": {
-        "description": "Rename or recolor. A field left out is left alone; ``color: null`` clears it.",
+        "description": "Rename, recolor, or say what the tag means for triage.\n\nA field left out is left alone; `color: null` and `met_signal: null` clear\nthem. `met_signal` is what carrying this tag says about having met someone\n(spec 10.2): it puts a triage batch on offer, which is still previewed and\naccepted by hand.",
         "operationId": "update_tag",
         "parameters": [
           {
@@ -10180,11 +10318,11 @@
     },
     "/api/v1/triage/decisions": {
       "post": {
-        "description": "Record `met`, `not_met`, or `skip` on a contact and return the next card with it.\n\nThe response carries the contact after `prefetch_after_id` (or after the one\njust decided), so triaging a run costs one request per contact.",
+        "description": "Record `met`, `not_met`, or `skip` on a contact and return the next card with it.\n\nThe response carries the contact after `prefetch_after_id` (or after the one\njust decided), so triaging a run costs one request per contact. Pass the\n`decided_by` the queue is being served with, so a review pass hands back the\nnext contact still waiting to be reviewed; the one just decided has left that\nqueue, because deciding by hand is what `manual` means.",
         "operationId": "decide_triage",
         "parameters": [
           {
-            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
             "in": "query",
             "name": "states",
             "required": false,
@@ -10200,8 +10338,26 @@
                   "type": "null"
                 }
               ],
-              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
               "title": "States"
+            }
+          },
+          {
+            "description": "Narrow the queue to the contacts whose current `met` was decided this way. `automatic` is the review pass: what netkeeper decided for you, on the same cards, so you can check it. Deciding one by hand makes it `manual` and takes it out of that queue.",
+            "in": "query",
+            "name": "decided_by",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/MetSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Narrow the queue to the contacts whose current `met` was decided this way. `automatic` is the review pass: what netkeeper decided for you, on the same cards, so you can check it. Deciding one by hand makes it `manual` and takes it out of that queue.",
+              "title": "Decided By"
             }
           }
         ],
@@ -10248,11 +10404,11 @@
     },
     "/api/v1/triage/next": {
       "get": {
-        "description": "The next contact to triage with its evidence, the one after it, and the progress.\n\n`after_id` moves on without deciding (the `→` key). Both cards are `null`\nwhen the queue is empty.",
+        "description": "The next contact to triage with its evidence, the one after it, and the progress.\n\n`after_id` moves on without deciding (the `→` key). Both cards are `null`\nwhen the queue is empty. `decided_by=automatic` serves the review pass: the\ncontacts a batch decided and nobody has corrected.",
         "operationId": "get_next_triage_contact",
         "parameters": [
           {
-            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
             "in": "query",
             "name": "states",
             "required": false,
@@ -10268,7 +10424,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
               "title": "States"
             }
           },
@@ -10302,6 +10458,24 @@
               "title": "Prefetch",
               "type": "boolean"
             }
+          },
+          {
+            "description": "Narrow the queue to the contacts whose current `met` was decided this way. `automatic` is the review pass: what netkeeper decided for you, on the same cards, so you can check it. Deciding one by hand makes it `manual` and takes it out of that queue.",
+            "in": "query",
+            "name": "decided_by",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/MetSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Narrow the queue to the contacts whose current `met` was decided this way. `automatic` is the review pass: what netkeeper decided for you, on the same cards, so you can check it. Deciding one by hand makes it `manual` and takes it out of that queue.",
+              "title": "Decided By"
+            }
           }
         ],
         "responses": {
@@ -10334,11 +10508,11 @@
     },
     "/api/v1/triage/suggestions": {
       "get": {
-        "description": "The bulk actions worth offering, with the count each would apply to.\n\nA suggestion that matches nobody is left out, so the banner shows only when\nthere is something to accept. Nothing is applied until `apply`.",
+        "description": "The bulk actions worth offering, with the count each would apply to.\n\nStrongest evidence first, and the batch that assumes the most last. A\nsuggestion that matches nobody is left out, so the banner shows only when\nthere is something to accept. Every count is against the queue as it stands,\nso accepting one batch shrinks the rest. Nothing is applied until `apply`.",
         "operationId": "list_triage_suggestions",
         "parameters": [
           {
-            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
             "in": "query",
             "name": "states",
             "required": false,
@@ -10354,7 +10528,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
               "title": "States"
             }
           }
@@ -10393,7 +10567,7 @@
     },
     "/api/v1/triage/suggestions/{key}/apply": {
       "post": {
-        "description": "Apply a bulk suggestion as one batch that a single undo takes back.\n\nSend the `expected_count` the banner showed: a set that has moved on since\nanswers `409` rather than touching more people than the banner named.",
+        "description": "Apply a bulk suggestion as one batch that a single undo takes back.\n\nSend the `expected_count` the banner showed: a set that has moved on since\nanswers `409` rather than touching more people than the banner named. Every\ncontact it touches is left marked `automatic`, so `/triage/next` with\n`decided_by=automatic` serves exactly this batch's work back for review.",
         "operationId": "apply_triage_suggestion",
         "parameters": [
           {
@@ -10406,7 +10580,7 @@
             }
           },
           {
-            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
             "in": "query",
             "name": "states",
             "required": false,
@@ -10422,7 +10596,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
               "title": "States"
             }
           }
@@ -10478,13 +10652,22 @@
         ]
       }
     },
-    "/api/v1/triage/undo": {
-      "post": {
-        "description": "Undo the newest triage action, restoring the previous state exactly.\n\nA bulk apply is undone as one batch. `409` when the contact changed after the\ndecision, so nothing is overwritten silently; `force` in the body restores\nanyway.",
-        "operationId": "undo_triage",
+    "/api/v1/triage/suggestions/{key}/contacts": {
+      "get": {
+        "description": "Who a suggestion covers, a page at a time, in the order the queue holds them.\n\nThe preview a count alone cannot give: a batch that decides hundreds of\npeople at once should be readable as a list of names before anyone says yes.\nWrites nothing, and the page is served from the same query the apply uses,\nso what is shown is what would be decided.",
+        "operationId": "list_triage_suggestion_contacts",
         "parameters": [
           {
-            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
             "in": "query",
             "name": "states",
             "required": false,
@@ -10500,7 +10683,92 @@
                   "type": "null"
                 }
               ],
-              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit.",
+              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
+              "title": "States"
+            }
+          },
+          {
+            "description": "Contacts per page of a preview.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Contacts per page of a preview.",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "How many contacts to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "How many contacts to skip.",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriageSuggestionPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No suggestion by that key"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Triage Suggestion Contacts",
+        "tags": [
+          "triage"
+        ]
+      }
+    },
+    "/api/v1/triage/undo": {
+      "post": {
+        "description": "Undo the newest triage action, restoring the previous state exactly.\n\nA bulk apply is undone as one batch. `409` when the contact changed after the\ndecision, so nothing is overwritten silently; `force` in the body restores\nanyway.",
+        "operationId": "undo_triage",
+        "parameters": [
+          {
+            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
+            "in": "query",
+            "name": "states",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/components/schemas/ContactMet"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
               "title": "States"
             }
           }

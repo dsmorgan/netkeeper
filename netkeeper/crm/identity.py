@@ -1133,7 +1133,11 @@ def _merge_scalars(survivor: Contact, loser: Contact) -> None:
         # "" means "use first_name" on a stored row (the preferred_name validator).
         survivor.preferred_name = loser.preferred_name if loser_custom_name else ""
     if MET_RANK[loser.met] > MET_RANK[survivor.met]:
+        # The value carries who decided it with it (spec 10.2): a decision a
+        # triage batch made must not read as one the person made by hand just
+        # because it moved to the survivor, and it stays up for review there.
         survivor.met = loser.met
+        survivor.met_source = loser.met_source
         survivor.triaged_at = loser.triaged_at
     if loser.do_not_contact:
         if not survivor.do_not_contact:

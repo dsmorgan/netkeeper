@@ -13,7 +13,9 @@ The flow this module implements, and what each step promises:
 3. :func:`preview` re-resolves the first :data:`PREVIEW_ROWS` rows the same way
    and says, per row, what it would change and what provenance would refuse.
 4. :func:`commit` applies every row in the caller's transaction, so the whole
-   file lands or none of it does, and records what each row did.
+   file lands or none of it does, and records what each row did. The auto-tag
+   rules then run over exactly the contacts it wrote, in that same transaction
+   (#64), and the run keeps their counts.
 5. :func:`rollback` undoes one run by id.
 6. :func:`delete_run` removes a run that never got past step 2 — a
    ``--dry-run``, or a commit refused for undecided candidates — so a draft
@@ -79,6 +81,7 @@ from netkeeper.crm.importer import (
     resolve_mapping,
 )
 from netkeeper.crm.provenance import PROVENANCE_ORDER, may_overwrite
+from netkeeper.crm.tags import run_rules
 from netkeeper.db import is_writer
 from netkeeper.models import (
     Contact,
@@ -850,16 +853,45 @@ def commit(
     _recount(run, outcomes)
     run.status = ImportStatus.COMMITTED
     run.committed_at = utcnow()
+    # The rules, over the contacts this commit wrote and no others, in the same
+    # transaction (spec 10.3, #64). A file that lands leaves its contacts tagged;
+    # one that raises takes the tags with it.
+    tagging = run_rules(session, user, _written_contacts(outcomes))
+    run.tagged_contacts = tagging.contacts
+    run.tags_added = tagging.added
+    run.tags_removed = tagging.removed
     session.flush()
     log.info(
-        "import run %d committed for user %d: %d matched, %d created, %d skipped",
+        "import run %d committed for user %d: %d matched, %d created, %d skipped, "
+        "%d tags added over %d contacts",
         run.id,
         user.id,
         run.matched_count,
         run.created_count,
         run.skipped_count,
+        run.tags_added,
+        run.tagged_contacts,
     )
     return run
+
+
+def _written_contacts(outcomes: Sequence[_Outcome]) -> list[int]:
+    """The contacts a commit created or enriched, ascending and without repeats.
+
+    A row that was skipped wrote nothing, and a candidate nobody decided wrote
+    nothing either, so neither is in here; a person repeated down the file is in
+    once. The empty list is "no contacts", not "every contact": passing None to
+    :func:`~netkeeper.crm.tags.run_rules` would reconcile the whole address book
+    on an import that landed nothing.
+    """
+    return sorted(
+        {
+            outcome.contact_id
+            for outcome in outcomes
+            if outcome.contact_id is not None
+            and outcome.resolution in (ImportResolution.MATCHED, ImportResolution.CREATED)
+        }
+    )
 
 
 # --- rollback ---------------------------------------------------------------

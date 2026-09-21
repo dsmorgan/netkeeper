@@ -50,6 +50,21 @@ class TagSource(enum.StrEnum):
     LLM = "llm"
 
 
+class TagMetSignal(enum.StrEnum):
+    """What carrying a tag says about having met the person (spec 10.2).
+
+    The user's own reading of their own label: "everyone I tagged *recruiter* is
+    someone I have not met", "everyone I tagged *colleague* is someone I have".
+    A tag says nothing until the user sets this, and setting it decides nobody
+    on its own: it only makes a triage batch worth offering, which the user then
+    previews and accepts. NULL is the default and means the tag carries no
+    signal.
+    """
+
+    MET = "met"
+    NOT_MET = "not_met"
+
+
 class RuleField(enum.StrEnum):
     """The contact field a rule's pattern is searched in (spec 8.3)."""
 
@@ -75,6 +90,10 @@ class Tag(UserOwned, TimestampMixin, Base):
     color: Mapped[str | None] = mapped_column(String(7))
     kind: Mapped[TagKind] = mapped_column(
         string_enum(TagKind, "tag_kind"), nullable=False, default=TagKind.MANUAL
+    )
+    # What the user says carrying this tag means for triage; NULL is "nothing".
+    met_signal: Mapped[TagMetSignal | None] = mapped_column(
+        string_enum(TagMetSignal, "tag_met_signal")
     )
 
     rules: Mapped[list[AutotagRule]] = relationship(

@@ -263,6 +263,7 @@ Done when: each predicate has a test; invalid trees produce a readable error; th
 Goal: tags with kinds, rule engine over title, headline, and company, default rule set, suppression rows, run on create, enrichment, and demand; a "matches N" preview.
 Depends on: P1-01.
 Done when: default rules tag a fixture set as expected; removing an auto-tag suppresses it on the next run; manual tags are untouched.
+As built: on demand shipped here; P1-22 added the import, over the contacts it wrote (#64). A contact created by hand, and the enrichment the extractor brings in phase 2, still wait for a run.
 
 **P1-08 Lists and saved views** · lane core · S
 Goal: static lists with membership, smart lists holding a filter, saved table views.

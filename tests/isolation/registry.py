@@ -270,6 +270,16 @@ def _seed_triage_suggestions(session: Session, user: User) -> int:
     return 1
 
 
+def _suggestion_key(_session: Session, _user: User) -> dict[str, str]:
+    """The message-history batch, whose key is the same for everybody.
+
+    A user with no message history is served an empty page rather than a 404,
+    which is what makes this a real isolation test: the seeded user sees their
+    own contact, and the unseeded one sees nobody.
+    """
+    return {"key": "met_with_messages"}
+
+
 REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/contacts", seed_contacts, paged_count),
     ListEndpoint(
@@ -323,4 +333,10 @@ REGISTRY: list[ListEndpoint] = [
     ),
     ListEndpoint(f"{API_PREFIX}/views", _seed_views, array_count),
     ListEndpoint(f"{API_PREFIX}/triage/suggestions", _seed_triage_suggestions, array_count),
+    ListEndpoint(
+        f"{API_PREFIX}/triage/suggestions/{{key}}/contacts",
+        _seed_triage_suggestions,
+        paged_count,
+        path_params=_suggestion_key,
+    ),
 ]

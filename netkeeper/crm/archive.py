@@ -42,6 +42,13 @@ still produce two interactions, and importing that file twice still produces
 two. Interactions a person entered by hand are never matched against, so an
 import cannot swallow one, and cannot be blocked by one either.
 
+The auto-tag rules run at the end of the import, over the contacts it created
+or enriched and no others, in the same transaction (spec 10.3, #64). So an
+address book is tagged the moment it lands rather than when somebody finds the
+button, and a failed import takes its tags down with it. The counts are in
+``ArchiveImport.tagging``. A row that resolved to a candidate was not written,
+so it is not in the run; the next import that resolves it will be.
+
 Transactions belong to the caller: nothing here commits, and the session must
 be a writer (``session_scope(factory, write=True)``) because every step reads
 before it writes.
@@ -66,7 +73,8 @@ from netkeeper.crm.identity import (
     apply,
     resolve,
 )
-from netkeeper.crm.interactions import add_interaction
+from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
+from netkeeper.crm.tags import RuleRun, run_rules
 from netkeeper.db import is_writer
 from netkeeper.linkedin.archive import (
     Archive,
@@ -87,11 +95,6 @@ log = logging.getLogger(__name__)
 # evidence, so it holds the message rather than a label, but a body is a CSV
 # field with no length limit and the timeline is not a mail reader.
 SUMMARY_MAX_CHARS: Final = 2000
-# What marks an interaction as an invitation rather than a message. The schema
-# has one kind for both directions of LinkedIn traffic and no column for the
-# distinction, and "they accepted my invitation" reads very differently from
-# "we talked" when triaging.
-INVITATION_SUMMARY: Final = "LinkedIn invitation"
 
 
 @dataclass(slots=True)
@@ -161,7 +164,8 @@ class ArchiveImport:
     what identified them (see :mod:`netkeeper.linkedin.conversations`); both
     are ``None`` when the messages table was absent or the owner unclear, in
     which case no message was imported at all. ``observed_at`` is the instant
-    every row was recorded as observed.
+    every row was recorded as observed. ``tagging`` is what the auto-tag rules
+    did to the contacts this import created or enriched.
     """
 
     observed_at: datetime
@@ -170,6 +174,7 @@ class ArchiveImport:
     connections: ConnectionCounts = field(default_factory=ConnectionCounts)
     messages: MessageCounts = field(default_factory=MessageCounts)
     invitations: InvitationCounts = field(default_factory=InvitationCounts)
+    tagging: RuleRun = field(default_factory=lambda: RuleRun(0, 0, 0, 0))
 
 
 def import_archive(
@@ -199,10 +204,11 @@ def import_archive(
     if when.tzinfo is None or when.utcoffset() is None:
         raise ValueError("observed_at must be timezone-aware")
     report = ArchiveImport(observed_at=when)
+    touched: list[int] = []
     for member in archive.members:
         if member.kind is ArchiveKind.CONNECTIONS:
             _import_connections(
-                session, user, archive.connections(member), when, report.connections
+                session, user, archive.connections(member), when, report.connections, touched
             )
     written = _Interactions(session, user)
     profile_name = archive.owner_name()
@@ -214,6 +220,10 @@ def import_archive(
     for member in archive.members:
         if member.kind is ArchiveKind.INVITATIONS:
             _import_invitations(archive.invitations(member), written, report)
+    # The rules, over the contacts this import touched and no others, in the
+    # caller's transaction (spec 10.3, #64): a freshly imported address book is
+    # tagged when the import returns, with no button to find and press first.
+    report.tagging = run_rules(session, user, sorted(set(touched)))
     log.info(
         "archive %s imported for user %d: %d connections (%d created, %d updated, "
         "%d for review), %d message interactions, %d invitation interactions",
@@ -238,7 +248,9 @@ def _import_connections(
     rows: Iterable[ConnectionRow],
     observed_at: datetime,
     counts: ConnectionCounts,
+    touched: list[int],
 ) -> None:
+    """Import every row, collecting into ``touched`` the contacts that were written."""
     for row in rows:
         counts.rows += 1
         if row.connected_on is None:
@@ -255,10 +267,10 @@ def _import_connections(
             case Candidate():
                 counts.needs_review += 1
             case Matched():
-                apply(session, user, incoming, resolution)
+                touched.append(apply(session, user, incoming, resolution).id)
                 counts.updated += 1
             case New():
-                apply(session, user, incoming, resolution)
+                touched.append(apply(session, user, incoming, resolution).id)
                 counts.created += 1
 
 

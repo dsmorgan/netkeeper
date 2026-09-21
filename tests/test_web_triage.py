@@ -271,6 +271,7 @@ async def test_the_card_carries_its_evidence_in_the_same_response(
         "triaged": 0,
         "remaining": 1,
         "by_state": {"unknown": 1, "met": 0, "not_met": 0, "skip": 0},
+        "automatic": 0,
     }
 
 
@@ -534,6 +535,109 @@ async def test_an_unknown_suggestion_key_is_not_found(
     assert response.status_code == 404, response.text
 
 
+# --- the preview, and reviewing what was decided ----------------------------
+
+
+async def test_a_suggestion_can_be_read_before_it_is_taken(
+    running_app: FastAPI, client: httpx.AsyncClient, run_contacts: list[int]
+) -> None:
+    page = await _get(client, f"{TRIAGE}/suggestions/met_with_messages/contacts", limit=2)
+    assert page["total"] == RUN_LENGTH - 1  # the first contact has no messages
+    assert [item["id"] for item in page["items"]] == run_contacts[1:3]
+    assert page["items"][0]["met"] == "unknown"
+    assert page["items"][0]["met_source"] == "manual"
+    assert (page["limit"], page["offset"]) == (2, 0)
+    rest = await _get(client, f"{TRIAGE}/suggestions/met_with_messages/contacts", offset=2)
+    assert [item["id"] for item in rest["items"]] == run_contacts[3:]
+    still = await _get(client, f"{TRIAGE}/next")
+    assert still["progress"]["triaged"] == 0, "reading the preview decided nobody"
+
+
+async def test_previewing_an_unknown_suggestion_is_not_found(
+    running_app: FastAPI, client: httpx.AsyncClient, contact_id: int
+) -> None:
+    response = await client.get(f"{TRIAGE}/suggestions/no-such-key/contacts")
+    assert response.status_code == 404, response.text
+
+
+async def test_the_review_queue_walks_what_the_batch_decided(
+    running_app: FastAPI, client: httpx.AsyncClient, run_contacts: list[int]
+) -> None:
+    """After a batch, `/triage/next?decided_by=automatic` is the pass over its work."""
+    applied = await client.post(
+        f"{TRIAGE}/suggestions/met_with_messages/apply", json={}, headers=CSRF
+    )
+    assert applied.status_code == 200, applied.text
+    body = applied.json()
+    assert (body["applied"], body["met"]) == (RUN_LENGTH - 1, "met")
+    assert body["progress"]["automatic"] == RUN_LENGTH - 1
+
+    review = await _get(client, f"{TRIAGE}/next", decided_by="automatic")
+    assert review["card"]["contact"]["id"] == run_contacts[1], "the first contact was not decided"
+    assert review["card"]["contact"]["met_source"] == "automatic"
+    assert review["next"]["contact"]["id"] == run_contacts[2]
+    assert review["progress"]["remaining"] == RUN_LENGTH - 1
+
+    # The review pass decides with ``decided_by`` too, so the prefetch is the
+    # next contact still waiting to be reviewed rather than the next untriaged.
+    corrected = await client.post(
+        f"{TRIAGE}/decisions",
+        json={"contact_id": run_contacts[1], "met": "not_met"},
+        params={"decided_by": "automatic"},
+        headers=CSRF,
+    )
+    assert corrected.status_code == 201, corrected.text
+    assert corrected.json()["next"]["contact"]["id"] == run_contacts[2]
+    after = await _get(client, f"{TRIAGE}/next", decided_by="automatic")
+    assert after["card"]["contact"]["id"] == run_contacts[2], "the corrected one has left the queue"
+    assert after["progress"]["automatic"] == RUN_LENGTH - 2
+    assert _contact_row(running_app, LOCAL_USER_ID, run_contacts[1]).met is ContactMet.NOT_MET
+
+
+async def test_a_decision_records_the_batch_it_came_from(
+    running_app: FastAPI, client: httpx.AsyncClient, contact_id: int
+) -> None:
+    applied = await client.post(
+        f"{TRIAGE}/suggestions/met_with_messages/apply", json={"expected_count": 1}, headers=CSRF
+    )
+    assert applied.status_code == 200, applied.text
+    undone = await _undo(client)
+    assert undone.status_code == 200, undone.text
+    assert undone.json()["batch_id"] == applied.json()["batch_id"]
+    assert _contact_row(running_app, LOCAL_USER_ID, contact_id).met is ContactMet.UNKNOWN
+
+
+async def test_a_tag_the_user_gave_a_meaning_becomes_a_batch(
+    running_app: FastAPI, client: httpx.AsyncClient, contact_id: int
+) -> None:
+    # The default rule set ships a ``recruiter`` tag; giving it a meaning is
+    # exactly the move this batch exists for.
+    tags = {tag["name"]: tag for tag in (await client.get("/api/v1/tags")).json()}
+    assert tags["recruiter"]["met_signal"] is None
+    tag_id = tags["recruiter"]["id"]
+    created = await client.patch(
+        f"/api/v1/tags/{tag_id}", json={"met_signal": "not_met"}, headers=CSRF
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["met_signal"] == "not_met"
+    assert (
+        await client.post(
+            f"/api/v1/contacts/{contact_id}/tags", json={"tag_id": tag_id}, headers=CSRF
+        )
+    ).status_code == 201
+    offers = {offer["key"]: offer for offer in (await client.get(f"{TRIAGE}/suggestions")).json()}
+    key = f"tag:{tag_id}"
+    assert offers[key]["count"] == 1 and offers[key]["met"] == "not_met"
+    assert offers[key]["tag_id"] == tag_id
+    preview = await _get(client, f"{TRIAGE}/suggestions/{key}/contacts")
+    assert [item["id"] for item in preview["items"]] == [contact_id]
+    applied = await client.post(
+        f"{TRIAGE}/suggestions/{key}/apply", json={"expected_count": 1}, headers=CSRF
+    )
+    assert applied.status_code == 200, applied.text
+    assert _contact_row(running_app, LOCAL_USER_ID, contact_id).met is ContactMet.NOT_MET
+
+
 # --- two users --------------------------------------------------------------
 
 
@@ -564,6 +668,8 @@ async def test_another_user_is_never_served_or_allowed_to_act_on_these_contacts(
         f"{TRIAGE}/suggestions/met_with_messages/apply", json={}, headers=CSRF
     )
     assert apply_response.json()["applied"] == 0
+    preview = await client.get(f"{TRIAGE}/suggestions/met_with_messages/contacts")
+    assert preview.json()["items"] == [], "B previews none of A's contacts"
 
     as_user(LOCAL_USER_ID)
     contact = _contact_row(running_app, LOCAL_USER_ID, contact_id)
