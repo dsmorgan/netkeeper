@@ -66,11 +66,13 @@ def reorder_autotag_rules(
     return [AutotagRuleOut.model_validate(rule) for rule in rules]
 
 
-@router.post("/run", operation_id="run_autotag_rules")
+@router.post("/run", operation_id="run_autotag_rules", responses=INVALID)
 def run_autotag_rules(user: CurrentUser, session: SessionDep) -> AutotagRuleRunOut:
     """Apply every enabled rule to every live contact (seeding the defaults on first use)."""
-    service.ensure_default_rules(session, user)
-    return _run_out(service.run_rules(session, user))
+    with translate_errors():
+        service.ensure_default_rules(session, user)
+        result = service.run_rules(session, user)
+    return _run_out(result)
 
 
 @router.post("/preview", operation_id="preview_autotag_rule", responses=INVALID)

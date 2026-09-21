@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from re import _parser  # type: ignore[attr-defined]
@@ -69,6 +70,18 @@ from netkeeper.services.users import ensure_local_user
 
 NOW = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 DEFAULT_TAG_NAMES = [name for name, _ in DEFAULT_PATTERNS]
+
+
+@contextmanager
+def match_budget(seconds: float) -> Iterator[None]:
+    """Run the block with a match budget long enough that no honest search times out."""
+    original = svc.MATCH_TIMEOUT_S
+    svc.MATCH_TIMEOUT_S = seconds  # type: ignore[misc]
+    try:
+        yield
+    finally:
+        svc.MATCH_TIMEOUT_S = original  # type: ignore[misc]
+
 
 # The "done when" fixture (issue #16): a title and the default tags it gets. Every
 # default tag appears at least once, and the last rows are the near misses.
@@ -317,7 +330,19 @@ def test_tag_contact_checks_that_the_contact_and_the_tag_are_the_users(
 # --- rules ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("pattern", ["", "   ", "(", "[a-", "x" * 501])
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "",
+        "   ",
+        "(",
+        "[a-",
+        "x" * 501,
+        # The parser raises OverflowError, not re.error, for a count at or above MAXREPEAT.
+        "a{1,4294967296}",
+        "a{4294967295}",
+    ],
+)
 def test_a_rule_pattern_must_compile(writer: Session, user: User, pattern: str) -> None:
     vp = create_tag(writer, user, "vp")
     with pytest.raises(InvalidPattern):
@@ -387,6 +412,126 @@ def test_a_nested_unbounded_repeat_is_rejected_at_save_and_preview(
 def test_a_pattern_without_nesting_passes_the_static_check(pattern: str) -> None:
     assert not has_nested_unbounded_repeat(_parser.parse(pattern, re.IGNORECASE))
     compile_pattern(pattern)
+
+
+COMPILE_BOMBS = [
+    r"(?:(?:a{100}){100}){100}",
+    r"(?:a{40}){40}",
+    r"((a{2}){3}){200}",
+    r"(a{60}|b){60}",
+    r"(?:(?:a{50}){50}){50}",
+]
+CHEAP_COUNTED = [
+    r"(?:a{10}){10}",
+    r"Chief\s+(\w+[\s-]+){1,2}Officer",
+    r"(?:a{500})",
+    r"(\w{2,4}\s){1,3}Manager",
+]
+
+
+@pytest.mark.parametrize("pattern", COMPILE_BOMBS)
+def test_nested_counted_repeats_are_refused_before_they_are_compiled(
+    writer: Session, user: User, pattern: str
+) -> None:
+    """``regex`` expands ``a{n}`` at compile time, which no search timeout bounds.
+
+    ``(?:(?:a{300}){300}){300}`` is twenty-four characters and needs about six
+    gigabytes, so the cost has to be refused from the parse tree.
+    """
+    assert svc.expansion(_parser.parse(pattern, re.IGNORECASE)) > svc.MAX_EXPANSION
+    vp = create_tag(writer, user, "vp")
+    rule = create_rule(writer, user, vp.id, RuleField.TITLE, "ok")
+    for attempt in (
+        lambda: compile_pattern(pattern),
+        lambda: create_rule(writer, user, vp.id, RuleField.TITLE, pattern),
+        lambda: update_rule(writer, user, rule.id, pattern=pattern),
+        lambda: preview_rule(writer, user, RuleField.TITLE, pattern),
+    ):
+        with pytest.raises(InvalidPattern, match="too much memory"):
+            attempt()
+    assert rule.pattern == "ok"
+
+
+@pytest.mark.parametrize("pattern", CHEAP_COUNTED + [p for _, p in DEFAULT_PATTERNS])
+def test_a_pattern_that_expands_cheaply_is_accepted(pattern: str) -> None:
+    assert svc.expansion(_parser.parse(pattern, re.IGNORECASE)) <= svc.MAX_EXPANSION
+    compile_pattern(pattern)
+
+
+SLOW_PATTERN = r"(a|aa)+$"
+"""No nested unbounded repeat, so it saves, but its alternation backtracks exponentially."""
+
+MATCHES_SLOWLY = "a" * 30 + "b" + "aa"
+"""``SLOW_PATTERN`` matches this, but only after about half a second of backtracking:
+ten times the shipped 50 ms budget, and the cost grows 2.6x per two characters, so
+neither half of the comparison is close enough to the boundary to turn on machine speed."""
+
+NEVER_MATCHES = "a" * 40 + "b"
+"""About a minute of backtracking, then no match. Always a timeout, on any machine."""
+
+
+def test_a_timed_out_search_leaves_an_existing_tag_alone(writer: Session, user: User) -> None:
+    """A timeout means "not known". Treating it as "does not match" on the removal side
+    would make a tag depend on how loaded the machine is: the same rule and the same
+    contact would tag on a fast run and untag on a slow one, and because no suppression
+    is written the tag would come back on the next fast run and flap forever."""
+    vp = create_tag(writer, user, "vp")
+    create_rule(writer, user, vp.id, RuleField.TITLE, SLOW_PATTERN)
+    contact = contact_with_title(writer, user, MATCHES_SLOWLY)
+
+    with match_budget(30.0):
+        assert run_rules(writer, user) == RuleRun(contacts=1, added=1, removed=0, updated=0)
+    assert names_on(writer, user, contact) == {"vp"}
+
+    # The shipped budget cannot finish this search. The tag must survive anyway.
+    assert run_rules(writer, user) == RuleRun(contacts=1, added=0, removed=0, updated=0, timeouts=1)
+    assert names_on(writer, user, contact) == {"vp"}
+
+    with match_budget(30.0):
+        assert run_rules(writer, user) == RuleRun(contacts=1, added=0, removed=0, updated=0)
+    assert names_on(writer, user, contact) == {"vp"}
+
+
+def test_a_rule_that_keeps_timing_out_is_skipped_for_the_rest_of_the_run(
+    writer: Session, user: User, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One evil pattern must not cost the run its corpus size. Without a give-up, 10,000
+    contacts at 50 ms a search is hours inside the writer transaction, holding the write
+    lock that the guard exists to protect."""
+    give_up = svc.MATCH_TIMEOUT_GIVE_UP
+    contacts = [contact_with_title(writer, user, NEVER_MATCHES) for _ in range(give_up + 5)]
+    vp = create_tag(writer, user, "vp")
+    rule = create_rule(writer, user, vp.id, RuleField.TITLE, SLOW_PATTERN)
+
+    with caplog.at_level("WARNING", logger="netkeeper.crm.tags"):
+        result = run_rules(writer, user)
+
+    # Only `give_up` searches ran; the last five contacts cost nothing.
+    assert result == RuleRun(
+        contacts=len(contacts), added=0, removed=0, updated=0, timeouts=give_up
+    )
+    assert f"auto-tag rule {rule.id} has timed out on {give_up} contacts" in caplog.text
+    assert all(names_on(writer, user, contact) == set() for contact in contacts)
+
+
+def test_a_rule_skipped_after_its_give_up_still_removes_nothing(
+    writer: Session, user: User
+) -> None:
+    """The give-up is a timeout too, so it has to be as non-destructive as one."""
+    give_up = svc.MATCH_TIMEOUT_GIVE_UP
+    stuck = [contact_with_title(writer, user, NEVER_MATCHES) for _ in range(give_up)]
+    tagged = contact_with_title(writer, user, MATCHES_SLOWLY)  # searched last, after the budget
+    vp = create_tag(writer, user, "vp")
+    create_rule(writer, user, vp.id, RuleField.TITLE, SLOW_PATTERN)
+
+    with match_budget(30.0):
+        run_rules(writer, user, [tagged.id])
+    assert names_on(writer, user, tagged) == {"vp"}
+
+    result = run_rules(writer, user)
+    assert (result.removed, result.timeouts) == (0, give_up)
+    assert names_on(writer, user, tagged) == {"vp"}
+    assert all(names_on(writer, user, contact) == set() for contact in stuck)
 
 
 def test_a_search_that_times_out_is_no_match_and_is_counted(

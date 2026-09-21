@@ -1219,6 +1219,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "A name, color, pattern, or reorder request that cannot be stored"
           }
         },
         "summary": "Run Autotag Rules",
