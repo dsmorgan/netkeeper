@@ -156,7 +156,7 @@ describe('the triage keyboard map (spec 10.2)', () => {
 
     const help = await screen.findByRole('dialog', { name: 'Keyboard shortcuts' })
     expect(help).toHaveAttribute('aria-modal', 'false')
-    for (const label of ['m', 'n', 's', 'u', 't', 'p', '→', '?', 'Esc']) {
+    for (const label of ['m', 'n', 's', 'u', 't', 'p', '←', '→', '?', 'Esc']) {
       expect(within(help).getByText(label, { selector: 'kbd' })).toBeInTheDocument()
     }
 
@@ -177,7 +177,7 @@ describe('the triage keyboard map (spec 10.2)', () => {
 
     fireEvent.keyDown(window, { key: 'm', metaKey: true })
     fireEvent.keyDown(window, { key: 'q' })
-    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+    fireEvent.keyDown(window, { key: 'ArrowDown' })
 
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(backend.byId(1).met).toBe('unknown')
@@ -235,11 +235,32 @@ describe('the triage keyboard map (spec 10.2)', () => {
     expect(backend.decisions).toHaveLength(0)
   })
 
+  it('says a key was ignored rather than swallowing it (issue #92)', async () => {
+    // Six `m` presses against a slow backend used to decide the two cards in
+    // hand and drop the other four in silence, which is not something a
+    // keyboard-first screen may do.
+    const { backend } = renderTriage({ contacts: 6, latencyMs: 60 })
+    await currentName()
+
+    for (let index = 0; index < 6; index += 1) press('m')
+
+    await waitFor(() =>
+      expect(screen.getByTestId('triage-notice')).toHaveTextContent(/so m did nothing/i),
+    )
+    expect(screen.getByTestId('triage-notice')).toHaveTextContent(/Nothing was recorded/i)
+    // Exactly the two that had a card, and no request for the four that did not.
+    await waitFor(() =>
+      expect(backend.contacts.filter((contact) => contact.met !== 'unknown')).toHaveLength(2),
+    )
+    expect(backend.countOf('/api/v1/triage/decisions', 'POST')).toBe(2)
+  })
+
   it('prevents the default for a key it handles, so nothing scrolls', async () => {
     renderTriage({ contacts: 3 })
     await currentName()
 
     expect(press('ArrowRight')).toBe(false)
+    expect(press('ArrowLeft')).toBe(false)
     expect(fireEvent.keyDown(window, { key: 'z' })).toBe(true)
   })
 })

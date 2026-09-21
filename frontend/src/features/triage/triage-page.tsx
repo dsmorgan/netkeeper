@@ -1,7 +1,8 @@
 /**
  * `/triage` — spec 10.2, the Step 6 workflow.
  *
- * One contact at a time with its evidence, the keyboard map, the progress
+ * One contact at a time with its evidence, the keyboard map, the button row
+ * that teaches it, the position counters, the visible queue, the progress
  * counters, the queue filter, and the bulk suggestion banner.
  *
  * The screen is built to a budget: fifty contacts in ten minutes with the
@@ -10,6 +11,17 @@
  * modal, no keystroke waits for a round trip (`useTriageQueue` keeps the next
  * card in hand), and every key in the map works from a cold page with focus
  * nowhere in particular.
+ *
+ * It is keyboard-*first*, not keyboard-only (P1-23). Every action in the map has
+ * a button that shows its key and goes through the same handler, synchronously,
+ * so the mouse path costs what the keyboard path costs and neither one waits.
+ *
+ * **Back and undo are two different things and the screen keeps them apart.**
+ * `←` walks the contacts this run has already seen: it is a cursor, it sends no
+ * request, and the card says what decision the contact already carries. `u` asks
+ * the server to take back the newest *write*. They are named for that, they sit
+ * in different groups in the button row, and every move of either kind says what
+ * just happened in the line under the buttons.
  */
 
 import { useQueryClient } from '@tanstack/react-query'
@@ -17,13 +29,15 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 
+import { ActionBar } from './action-bar'
 import { ContactCard } from './contact-card'
 import { EvidencePanel } from './evidence-panel'
 import { KeyboardHelp } from './keyboard-help'
 import { PreferredNameEditor } from './preferred-name-editor'
-import { SPEC_BINDINGS } from './keymap'
+import { QueueList } from './queue-list'
 import { SuggestionBanner } from './suggestion-banner'
 import { TagPicker } from './tag-picker'
+import { bindingFor } from './keymap'
 import { useTriageKeys } from './use-triage-keys'
 import { useTriageQueue } from './use-triage-queue'
 import { SUGGESTIONS_KEY, type QueueFilter } from './api'
@@ -40,8 +54,10 @@ type Overlay = 'none' | 'help' | 'name' | 'tags'
  * because they do not hold focus and `m` still works while they are up — would
  * let a name typed for one contact be submitted against the next. Tying the
  * overlay to the contact it was opened for closes it by derivation when the
- * card moves, with no effect and nothing to forget. The help overlay is about
- * the screen rather than a contact, so it carries `null` and stays up.
+ * card moves, with no effect and nothing to forget. That covers stepping back
+ * as well as moving on, because both change which contact is on screen. The
+ * help overlay is about the screen rather than a contact, so it carries `null`
+ * and stays up.
  */
 interface OpenOverlay {
   kind: Overlay
@@ -69,7 +85,9 @@ export function TriagePage() {
   // The key handler reads the queue through a ref so its identity is stable and
   // the window listener is bound once rather than on every render. The ref is
   // written after the commit, which is soon enough: a keystroke can only arrive
-  // once the render it belongs to is on screen.
+  // once the render it belongs to is on screen — and the actions it calls read
+  // the queue's own state rather than this snapshot, so even a key pressed
+  // inside the same tick as the last one acts on what is really there.
   const queueRef = useRef(queue)
   useEffect(() => {
     queueRef.current = queue
@@ -78,30 +96,43 @@ export function TriagePage() {
   const onAction = useCallback(
     (action: TriageAction) => {
       const current = queueRef.current
+      // A key that cannot act says so rather than vanishing (issue #92): six
+      // `m` presses against a slow backend used to decide two and drop four.
+      const nothing = () => {
+        const key = bindingFor(action)?.label ?? 'that key'
+        current.notify(
+          `No contact is on screen yet, so ${key} did nothing. Nothing was recorded — try again once the next contact is here.`,
+        )
+      }
       switch (action) {
         case 'met':
-          current.decide('met')
+          if (!current.decide('met')) nothing()
           return
         case 'not-met':
-          current.decide('not_met')
+          if (!current.decide('not_met')) nothing()
           return
         case 'skip':
-          current.decide('skip')
+          if (!current.decide('skip')) nothing()
           return
         case 'undo':
           void current.undo().then(previewAgain)
           return
+        case 'back':
+          current.back()
+          return
         case 'next':
-          current.skipAhead()
+          if (!current.forward()) nothing()
           return
         case 'tag': {
-          const open = current.current
-          if (open !== null) setOverlay({ kind: 'tags', contactId: open.contact.id })
+          const open = current.peek()
+          if (open === null) nothing()
+          else setOverlay({ kind: 'tags', contactId: open.contact.id })
           return
         }
         case 'preferred-name': {
-          const open = current.current
-          if (open !== null) setOverlay({ kind: 'name', contactId: open.contact.id })
+          const open = current.peek()
+          if (open === null) nothing()
+          else setOverlay({ kind: 'name', contactId: open.contact.id })
           return
         }
         case 'help':
@@ -125,11 +156,19 @@ export function TriagePage() {
   const open: Overlay =
     overlay.contactId === null || overlay.contactId === card?.contact.id ? overlay.kind : 'none'
   const progress = queue.progress
-  const triaged = (progress?.triaged ?? 0) + queue.pendingDecisions
+  const triaged = (progress?.triaged ?? 0) + queue.pending.triaged
   const total = progress?.total ?? 0
-  const remaining = Math.max((progress?.remaining ?? 0) - queue.pendingDecisions, 0)
+  const remaining = Math.max((progress?.remaining ?? 0) - queue.pending.removed, 0)
   const skipped = progress?.by_state.skip ?? 0
   const nextUndo = queue.undoable[0]
+  const seen = queue.passed.length
+  const filterLabel = FILTERS.find((option) => option.value === filter)?.label ?? 'Untriaged'
+  // Where this card sits, in the two terms a person asked for: which contact of
+  // the run this is, and how much of the queue is still in front of them.
+  const position =
+    queue.reviewIndex === null
+      ? `Contact ${seen + 1} of this run · ${remaining} left in this queue`
+      : `Looking back: ${queue.reviewIndex + 1} of the ${seen} you have already seen · ${remaining} left in this queue`
 
   return (
     <div className="flex flex-col gap-4">
@@ -161,11 +200,17 @@ export function TriagePage() {
             {skipped > 0 && ` · ${skipped} skipped`}
           </span>
         </p>
-
-        <Button size="sm" variant="ghost" onClick={() => onAction('help')}>
-          Keyboard (?)
-        </Button>
       </div>
+
+      <ActionBar onAction={onAction} />
+
+      <p
+        data-testid="triage-notice"
+        aria-live="polite"
+        className="min-h-5 text-sm text-muted-foreground"
+      >
+        {queue.notice}
+      </p>
 
       <SuggestionBanner
         filter={filter}
@@ -214,72 +259,80 @@ export function TriagePage() {
         </div>
       )}
 
-      {queue.status === 'ready' && card === null && queue.refilling && (
-        <p role="status">Loading the next contact…</p>
-      )}
+      {queue.status === 'ready' && (
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,18rem)]">
+          <div className="flex min-w-0 flex-col gap-4">
+            {card === null && queue.refilling && <p role="status">Loading the next contact…</p>}
 
-      {queue.status === 'ready' && card === null && !queue.refilling && (
-        <EmptyQueue
-          filter={filter}
-          skipped={skipped}
-          onRevisitSkipped={() => setFilter('skip')}
-          canUndo={queue.undoable.length > 0}
-          onUndo={() => void queue.undo().then(previewAgain)}
-        />
-      )}
+            {card === null && !queue.refilling && (
+              <EmptyQueue
+                filter={filter}
+                skipped={skipped}
+                seen={seen}
+                onRevisitSkipped={() => setFilter('skip')}
+                canUndo={queue.undoable.length > 0}
+                onUndo={() => void queue.undo().then(previewAgain)}
+                onBack={queue.back}
+              />
+            )}
 
-      {card !== null && (
-        <>
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,22rem)_minmax(0,1fr)]">
-            <ContactCard
-              card={card}
-              position={`${Math.min(triaged + 1, Math.max(total, 1))} of ${total} · ${remaining} left`}
-            />
-            <EvidencePanel card={card} />
+            {card !== null && (
+              <div className="grid gap-4 lg:grid-cols-[minmax(0,22rem)_minmax(0,1fr)]">
+                <ContactCard card={card} position={position} review={queue.reviewing} />
+                <EvidencePanel card={card} />
+              </div>
+            )}
+
+            {card !== null && open === 'name' && (
+              <PreferredNameEditor
+                key={card.contact.id}
+                contactId={card.contact.id}
+                initial={card.contact.preferred_name}
+                firstName={card.contact.first_name}
+                onSave={queue.rename}
+                onClose={() => setOverlay(CLOSED)}
+              />
+            )}
+
+            {card !== null && open === 'tags' && (
+              <TagPicker
+                key={card.contact.id}
+                applied={card.contact.tags}
+                onAdd={(tag) => void queue.addTag(card.contact.id, tag)}
+                onRemove={(tagId) => void queue.removeTag(card.contact.id, tagId)}
+                onClose={() => setOverlay(CLOSED)}
+              />
+            )}
           </div>
 
-          {open === 'name' && (
-            <PreferredNameEditor
-              key={card.contact.id}
-              contactId={card.contact.id}
-              initial={card.contact.preferred_name}
-              firstName={card.contact.first_name}
-              onSave={queue.rename}
-              onClose={() => setOverlay(CLOSED)}
+          {(seen > 0 || queue.liveCard !== null) && (
+            <QueueList
+              passed={queue.passed}
+              reviewIndex={queue.reviewIndex}
+              liveCard={queue.liveCard}
+              ahead={queue.ahead}
+              remaining={remaining}
+              exhausted={queue.exhausted}
+              filterLabel={filterLabel}
+              onOpen={queue.goTo}
+              onResume={queue.resume}
+              onNext={() => onAction('next')}
             />
           )}
-
-          {open === 'tags' && (
-            <TagPicker
-              key={card.contact.id}
-              applied={card.contact.tags}
-              onAdd={(tag) => void queue.addTag(card.contact.id, tag)}
-              onRemove={(tagId) => void queue.removeTag(card.contact.id, tagId)}
-              onClose={() => setOverlay(CLOSED)}
-            />
-          )}
-        </>
+        </div>
       )}
 
       <div className="flex flex-col gap-1 text-sm text-muted-foreground">
-        <p className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          {SPEC_BINDINGS.map((binding) => (
-            <span key={binding.key} className="inline-flex items-center gap-1">
-              <kbd className="rounded border px-1.5 py-0.5 font-mono text-xs">{binding.label}</kbd>
-              {binding.description}
-            </span>
-          ))}
-          <span className="inline-flex items-center gap-1">
-            <kbd className="rounded border px-1.5 py-0.5 font-mono text-xs">?</kbd>
-            all keys
-          </span>
-        </p>
         <p data-testid="undo-affordance">
           {nextUndo === undefined
-            ? 'u takes back the newest triage decision.'
+            ? 'u takes back the newest triage decision. That stack lives on the server, so on a fresh page it can reach one from an earlier session.'
             : `u takes back: ${nextUndo.label}.`}
           {queue.taggedSinceUndoable &&
             ' Tagging is not on the triage undo stack, so u reaches past the tag you just set.'}
+        </p>
+        <p data-testid="back-affordance">
+          ← is not undo. It walks back through the contacts you have already seen, shows what each
+          one carries, and writes nothing until you decide.
         </p>
       </div>
 
@@ -360,15 +413,19 @@ function UndoConflict({
 function EmptyQueue({
   filter,
   skipped,
+  seen,
   onRevisitSkipped,
   canUndo,
   onUndo,
+  onBack,
 }: {
   filter: QueueFilter
   skipped: number
+  seen: number
   onRevisitSkipped: () => void
   canUndo: boolean
   onUndo: () => void
+  onBack: () => void
 }) {
   return (
     <div
@@ -389,9 +446,14 @@ function EmptyQueue({
             Revisit the skipped
           </Button>
         )}
+        {seen > 0 && (
+          <Button size="sm" variant="outline" onClick={onBack}>
+            Go back over this run
+          </Button>
+        )}
         {canUndo && (
           <Button size="sm" variant="outline" onClick={onUndo}>
-            Undo the last decision
+            Undo the last write
           </Button>
         )}
       </div>

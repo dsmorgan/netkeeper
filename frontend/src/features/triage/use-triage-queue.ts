@@ -1,5 +1,6 @@
 /**
- * The triage queue: two cards in hand, one request per contact, exact undo.
+ * The triage queue: two cards in hand, one request per contact, exact undo,
+ * and a trail of the contacts this run has already put on screen.
  *
  * The budget is twelve seconds a contact (P1-14), so the rule this hook exists
  * to keep is that a keypress never waits for the network. It holds a small
@@ -8,7 +9,7 @@
  * card after the one now on screen — refills the buffer. The steady state is one
  * request per contact and no round trip between two cards.
  *
- * Three details make that safe rather than merely fast:
+ * Four details make that safe rather than merely fast:
  *
  * - **Requests are serialized.** One promise chain, in keypress order. Undo pops
  *   the newest decision, so a `u` racing a `POST` that has not landed would undo
@@ -20,11 +21,21 @@
  *   person has already passed over as soon as `m` and `→` interleave.
  * - **A failed write is loud.** The card is already gone from the screen when the
  *   `POST` answers, so a failure becomes a banner naming the contact, never a
- *   silent drop.
+ *   silent drop — and the contact stays in `passed`, marked, so `←` reaches them.
+ * - **Nothing is ever dropped in silence.** A key that cannot act says so in
+ *   `notice` rather than doing nothing (issue #92).
+ *
+ * **Going back is not undo (P1-23).** Every card that leaves the front of the
+ * queue is kept in `passed` with the decision it carries, and `reviewIndex`
+ * points into that trail. Stepping through it sends no request and writes
+ * nothing: it is a cursor. `undo` is the other thing entirely — it asks the
+ * server to take back the newest write. They can both be on the screen because
+ * they are named for what they do, and each one says what just happened in
+ * `notice`.
  *
  * Nothing here is optimistic about what the server stores: the progress counters
- * come from the answers. Only the *screen position* runs ahead, and
- * `pendingDecisions` says how far, so the counter reads true mid-run.
+ * come from the answers. Only the *screen position* runs ahead, and `pending`
+ * says how far, so the counters read true mid-run.
  */
 
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
@@ -44,17 +55,53 @@ import {
   type ContactMet,
   type QueueFilter,
   type TriageCard,
+  type TriageContact,
   type TriageProgress,
   type TriageTag,
 } from './api'
 
+/**
+ * A contact this run has already put on screen, and what it left behind.
+ *
+ * The card is kept whole — evidence included — so stepping back costs no request
+ * and shows the same screen it showed the first time.
+ */
+export interface PassedCard {
+  card: TriageCard
+  /** What was written for them, or `null` when they were only passed over. */
+  decision: ContactMet | null
+  /** A decision was sent for them and refused: they are still untriaged. */
+  failed: boolean
+}
+
+/**
+ * How far the screen is running ahead of the server's counters.
+ *
+ * Two numbers rather than one, because a decision does not always move both.
+ * Re-deciding somebody already triaged leaves `triaged` alone; marking an
+ * untriaged contact `skip` while the Skipped filter is on leaves `remaining`
+ * alone, because they stay in the queue.
+ */
+export interface PendingCounts {
+  triaged: number
+  removed: number
+}
+
+const NO_PENDING: PendingCounts = { triaged: 0, removed: 0 }
+
 export interface TriageQueueState {
   status: 'loading' | 'ready' | 'error'
-  /** The buffer. `cards[0]` is on screen; the rest are prefetched. */
+  /** The buffer. `cards[0]` is the live card; the rest are prefetched. */
   cards: TriageCard[]
+  /** Contacts already passed this run, oldest first. The `←` key walks this. */
+  passed: PassedCard[]
+  /** Where `←` has walked to, or `null` when the live card is on screen. */
+  reviewIndex: number | null
+  /** The last thing that happened, in the screen's own words. Never an error. */
+  notice: string | null
   progress: TriageProgress | null
-  /** Decisions sent but not yet answered, so the progress counter can read true. */
-  pendingDecisions: number
+  /** Decisions sent but not yet answered, so the counters can read true. */
+  pending: PendingCounts
   /** The server has said there is nothing past the frontier. */
   exhausted: boolean
   /** The queue could not be loaded at all: the screen shows a retry. */
@@ -105,8 +152,11 @@ export interface UndoableAction {
 const INITIAL: TriageQueueState = {
   status: 'loading',
   cards: [],
+  passed: [],
+  reviewIndex: null,
+  notice: null,
   progress: null,
-  pendingDecisions: 0,
+  pending: NO_PENDING,
   exhausted: false,
   loadError: null,
   actionErrors: [],
@@ -117,6 +167,16 @@ const INITIAL: TriageQueueState = {
   restored: null,
 }
 
+/**
+ * How far back `←` reaches.
+ *
+ * The trail holds whole cards, evidence included, so it is bounded rather than
+ * left to grow with a run of thousands. A hundred contacts is far more than the
+ * fifty the budget is written around, and the screen says when the trail has
+ * been trimmed rather than pretending the run started there.
+ */
+const MAX_PASSED = 100
+
 /** What a bulk apply did, so the banner can re-preview instead of reporting a failure. */
 export type BulkOutcome =
   | { kind: 'applied'; applied: number }
@@ -124,13 +184,30 @@ export type BulkOutcome =
   | { kind: 'failed'; detail: string }
 
 export interface TriageQueue extends TriageQueueState {
-  /** The contact on screen, or `null` when the queue is empty or refilling. */
+  /** The contact on screen: the live card, or the one `←` has walked back to. */
   readonly current: TriageCard | null
+  /** The trail entry on screen, or `null` when the live card is. */
+  readonly reviewing: PassedCard | null
+  /** The head of the buffer, whatever `←` is looking at. */
+  readonly liveCard: TriageCard | null
+  /** The cards already in hand behind the live one. */
+  readonly ahead: readonly TriageCard[]
   /** True while the buffer is empty but more is coming. */
   readonly refilling: boolean
-  decide: (met: ContactMet) => void
-  /** The `→` key: move on without deciding. Writes nothing. */
-  skipAhead: () => void
+  /** The card on screen, read fresh — safe from a key pressed before a re-render. */
+  peek: () => TriageCard | null
+  /** Record a decision for the contact on screen. `false` when there was none. */
+  decide: (met: ContactMet) => boolean
+  /** The `←` key: walk back through contacts already passed. Writes nothing. */
+  back: () => void
+  /** The `→` key: forward through the trail, or on past the live card. */
+  forward: () => boolean
+  /** Open a contact from the trail by its place in it. */
+  goTo: (index: number) => void
+  /** Leave the trail and return to the live card. */
+  resume: () => void
+  /** Say something happened that the screen would otherwise swallow. */
+  notify: (text: string) => void
   /** Resolves once the undo has landed, so a caller can re-run what it invalidates. */
   undo: (options?: { force?: boolean }) => Promise<void>
   dismissConflict: () => void
@@ -163,6 +240,64 @@ function withFailure(state: TriageQueueState, failure: string): TriageQueueState
 function nameOf(card: TriageCard): string {
   const { preferred_name, last_name } = card.contact
   return `${preferred_name} ${last_name}`.trim()
+}
+
+/** The card on screen: the trail entry `←` walked to, or the head of the buffer. */
+function onScreen(state: TriageQueueState): TriageCard | null {
+  if (state.reviewIndex === null) return state.cards[0] ?? null
+  return state.passed[state.reviewIndex]?.card ?? null
+}
+
+/**
+ * What going back to this contact should say, which is never "undone".
+ *
+ * `decision` is what the server holds for them, and `failed` says the last
+ * thing sent for them was refused — so the two together, not either alone, are
+ * what the person needs to read.
+ */
+function reviewNotice(entry: PassedCard): string {
+  const name = nameOf(entry.card)
+  if (entry.failed) {
+    const holds =
+      entry.decision === null
+        ? 'they are still untriaged'
+        : `they are still ${MET_LABELS[entry.decision]}`
+    return `Back at ${name}. The last decision sent for them was not recorded, so ${holds} — deciding now tries again.`
+  }
+  if (entry.decision === null) {
+    return `Back at ${name}. You moved past them without deciding; nothing has been written for them.`
+  }
+  return `Back at ${name}, who you marked ${MET_LABELS[entry.decision]}. Going back wrote nothing; deciding again replaces it.`
+}
+
+/** How the trail names a contact's state, for the queue list's chips. */
+export function passedStateLabel(entry: PassedCard): string {
+  if (entry.failed) return 'Not recorded'
+  if (entry.decision === null) return 'Passed over'
+  return { met: 'Met', not_met: 'Not met', skip: 'Skipped', unknown: 'Untriaged' }[entry.decision]
+}
+
+/** Drop the oldest of the trail once it is longer than a run needs. */
+function remember(passed: PassedCard[], entry: PassedCard): PassedCard[] {
+  const next = [...passed, entry]
+  return next.length > MAX_PASSED ? next.slice(next.length - MAX_PASSED) : next
+}
+
+/** Rewrite one contact wherever the queue is holding it: in hand or in the trail. */
+function patchContact(
+  state: TriageQueueState,
+  contactId: number,
+  patch: (contact: TriageContact) => TriageContact,
+): TriageQueueState {
+  const one = (card: TriageCard): TriageCard =>
+    card.contact.id === contactId ? { ...card, contact: patch(card.contact) } : card
+  return {
+    ...state,
+    cards: state.cards.map(one),
+    passed: state.passed.map((entry) =>
+      entry.card.contact.id === contactId ? { ...entry, card: one(entry.card) } : entry,
+    ),
+  }
 }
 
 export function useTriageQueue(filter: QueueFilter): TriageQueue {
@@ -246,12 +381,18 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
 
   /** Fold a refill answer into the buffer and move the frontier with it. */
   const absorb = useCallback(
-    (card: TriageCard | null, progress: TriageProgress, decided: boolean) => {
+    (card: TriageCard | null, progress: TriageProgress, settle: PendingCounts | null) => {
       if (card !== null) frontierRef.current = card.contact.id
       commit((state) => ({
         ...state,
         progress,
-        pendingDecisions: decided ? state.pendingDecisions - 1 : state.pendingDecisions,
+        pending:
+          settle === null
+            ? state.pending
+            : {
+                triaged: state.pending.triaged - settle.triaged,
+                removed: state.pending.removed - settle.removed,
+              },
         cards: card === null ? state.cards : [...state.cards, card],
         exhausted: card === null,
       }))
@@ -260,23 +401,67 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
   )
 
   const decide = useCallback(
-    (met: ContactMet) => {
-      const card = stateRef.current.cards[0]
-      if (card === undefined) return
+    (met: ContactMet): boolean => {
+      const before = stateRef.current
+      const reviewIndex = before.reviewIndex
+      const entry = reviewIndex === null ? null : before.passed[reviewIndex]
+      const card = reviewIndex === null ? before.cards[0] : entry?.card
+      if (card === undefined) return false
+
+      const was = card.contact.met
+      // Both counters move only when this decision actually changes the thing
+      // they count: re-deciding somebody already triaged adds no triage, and a
+      // decision that keeps the contact inside the filter takes nothing off it.
+      const settle: PendingCounts = {
+        triaged: was === 'unknown' && met !== 'unknown' ? 1 : 0,
+        removed: states.includes(was) && !states.includes(met) ? 1 : 0,
+      }
       const decisionLabel = `${MET_LABELS[met]} — ${nameOf(card)}`
       const seq = (sequence.current += 1)
-      commit((state) => ({
-        ...state,
-        cards: state.cards.slice(1),
-        pendingDecisions: state.pendingDecisions + 1,
-        // `actionErrors` is deliberately untouched: a write that did not land
-        // must not be erased by the next keystroke.
-        undoConflict: null,
-        undoConflictField: null,
-        restored: null,
-        taggedSinceUndoable: false,
-        undoable: [{ seq, kind: 'decision', label: decisionLabel }, ...state.undoable],
-      }))
+      const decided: TriageCard = { ...card, contact: { ...card.contact, met } }
+
+      commit((state) => {
+        const shared = {
+          ...state,
+          pending: {
+            triaged: state.pending.triaged + settle.triaged,
+            removed: state.pending.removed + settle.removed,
+          },
+          // `actionErrors` is deliberately untouched: a write that did not land
+          // must not be erased by the next keystroke.
+          undoConflict: null,
+          undoConflictField: null,
+          restored: null,
+          taggedSinceUndoable: false,
+          undoable: [{ seq, kind: 'decision' as const, label: decisionLabel }, ...state.undoable],
+        }
+        if (reviewIndex === null) {
+          return {
+            ...shared,
+            cards: state.cards.slice(1),
+            passed: remember(state.passed, { card: decided, decision: met, failed: false }),
+            notice: null,
+          }
+        }
+        // Changing a decision from the trail. The buffer is untouched — the
+        // contact is behind the frontier and was never going to be served
+        // again — and the cursor steps forward, so `← m` puts the person back
+        // where they were with one more key.
+        const passed = state.passed.map((old, index) =>
+          index === reviewIndex ? { card: decided, decision: met, failed: false } : old,
+        )
+        const moved = reviewIndex + 1
+        const stillReviewing = moved < passed.length
+        return {
+          ...shared,
+          passed,
+          reviewIndex: stillReviewing ? moved : null,
+          notice:
+            `${nameOf(card)} is ${MET_LABELS[met]} now` +
+            (was === 'unknown' ? '.' : ` instead of ${MET_LABELS[was]}.`),
+        }
+      })
+
       void enqueue(async () => {
         try {
           const result = await decideRequest({
@@ -285,33 +470,60 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
             prefetchAfterId: frontierRef.current,
             states,
           })
-          absorb(result.next, result.progress, true)
+          absorb(result.next, result.progress, settle)
         } catch (error) {
-          // Nothing was written. Retracting the entry keeps `u` from offering to
-          // take it back, and the note keeps an undo that was already pressed
-          // underneath this decision from reaching past it to the one before.
+          // Nothing was written, so the trail goes back to what the contact
+          // actually holds — which is not always "untriaged": this may have
+          // been a change to a decision that did land. Retracting the undoable
+          // entry keeps `u` from offering to take back a write that never
+          // happened, the trail marks the contact so `←` reaches them, and the
+          // note keeps an undo already pressed underneath this decision from
+          // reaching past it to the one before.
           retracted.current.set(seq, nameOf(card))
+          const unchanged: PassedCard = {
+            card,
+            decision: entry?.decision ?? (was === 'unknown' ? null : was),
+            failed: true,
+          }
+          const stays =
+            was === 'unknown'
+              ? 'They stay untriaged and come back the next time this queue is loaded'
+              : `They stay ${MET_LABELS[was]}`
           commit((state) =>
             withFailure(
               {
                 ...state,
-                pendingDecisions: state.pendingDecisions - 1,
+                pending: {
+                  triaged: state.pending.triaged - settle.triaged,
+                  removed: state.pending.removed - settle.removed,
+                },
+                passed: state.passed.map((old) =>
+                  old.card.contact.id === card.contact.id ? unchanged : old,
+                ),
                 undoable: state.undoable.filter((action) => action.seq !== seq),
               },
-              `${nameOf(card)} was not recorded: ${messageOf(error, 'the request failed')}`,
+              `${nameOf(card)} was not recorded: ${messageOf(error, 'the request failed')}. ${stays}; ← goes back to them in this run.`,
             ),
           )
         }
       })
+      return true
     },
     [absorb, commit, enqueue, states],
   )
 
-  const skipAhead = useCallback(() => {
-    if (stateRef.current.cards[0] === undefined) return
-    commit((state) => ({ ...state, cards: state.cards.slice(1), undoConflict: null }))
+  const skipAhead = useCallback((): boolean => {
+    const card = stateRef.current.cards[0]
+    if (card === undefined) return false
+    commit((state) => ({
+      ...state,
+      cards: state.cards.slice(1),
+      passed: remember(state.passed, { card, decision: null, failed: false }),
+      undoConflict: null,
+      notice: null,
+    }))
     // The frontier is the end of the queue, so there is nothing to ask for.
-    if (stateRef.current.exhausted) return
+    if (stateRef.current.exhausted) return true
     void enqueue(async () => {
       try {
         const queue = await fetchQueue({
@@ -319,20 +531,93 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
           afterId: frontierRef.current,
           prefetch: false,
         })
-        absorb(queue.card, queue.progress, false)
+        absorb(queue.card, queue.progress, null)
       } catch (error) {
         commit((state) =>
           withFailure(state, messageOf(error, 'the next contact could not be read')),
         )
       }
     })
+    return true
   }, [absorb, commit, enqueue, states])
+
+  const back = useCallback(() => {
+    commit((state) => {
+      if (state.passed.length === 0) {
+        return {
+          ...state,
+          notice: 'Nothing behind you: this is the first contact of the run.',
+        }
+      }
+      const at = state.reviewIndex ?? state.passed.length
+      if (at === 0) {
+        return {
+          ...state,
+          notice: `That is as far back as this run goes — the last ${state.passed.length} contacts you saw.`,
+        }
+      }
+      const index = at - 1
+      const entry = state.passed[index]
+      if (entry === undefined) return state
+      return { ...state, reviewIndex: index, notice: reviewNotice(entry) }
+    })
+  }, [commit])
+
+  const resumeNotice = useCallback((state: TriageQueueState): string => {
+    const live = state.cards[0]
+    return live === undefined
+      ? 'Back at the end of the queue; there is nothing left to triage here.'
+      : `Back at the queue, on ${nameOf(live)}.`
+  }, [])
+
+  const forward = useCallback((): boolean => {
+    if (stateRef.current.reviewIndex === null) return skipAhead()
+    commit((state) => {
+      if (state.reviewIndex === null) return state
+      const index = state.reviewIndex + 1
+      const entry = state.passed[index]
+      if (entry === undefined) {
+        return { ...state, reviewIndex: null, notice: resumeNotice(state) }
+      }
+      return { ...state, reviewIndex: index, notice: reviewNotice(entry) }
+    })
+    return true
+  }, [commit, resumeNotice, skipAhead])
+
+  const goTo = useCallback(
+    (index: number) => {
+      commit((state) => {
+        const entry = state.passed[index]
+        if (entry === undefined) return state
+        return { ...state, reviewIndex: index, notice: reviewNotice(entry) }
+      })
+    },
+    [commit],
+  )
+
+  const resume = useCallback(() => {
+    commit((state) =>
+      state.reviewIndex === null
+        ? state
+        : { ...state, reviewIndex: null, notice: resumeNotice(state) },
+    )
+  }, [commit, resumeNotice])
+
+  const notify = useCallback(
+    (text: string) => {
+      commit((state) => ({ ...state, notice: text }))
+    },
+    [commit],
+  )
+
+  const peek = useCallback(() => onScreen(stateRef.current), [])
 
   const undo = useCallback(
     (options?: { force?: boolean }): Promise<void> => {
-      // Both of these are read when the key is pressed, not when the request
+      // All of these are read when the key is pressed, not when the request
       // goes out, because they are what the person meant by pressing it.
-      const meant = stateRef.current.undoable[0]?.seq
+      const taking = stateRef.current.undoable[0]
+      const meant = taking?.seq
       const force = options?.force ?? false
       // A force answers a refusal the screen is still showing, and the field it
       // named says whether the contact is merely edited or gone from the queue.
@@ -355,6 +640,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
         }
         try {
           const result = await undoRequest({ force, states })
+          const undone = taking === undefined ? 'the newest triage decision' : `“${taking.label}”`
           if (result.card === null) {
             // A bulk batch put many contacts back: the buffer no longer
             // describes the queue, so take it again.
@@ -363,6 +649,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
               ...state,
               undoable: state.undoable.slice(1),
               taggedSinceUndoable: false,
+              notice: `Undo took back ${undone}.`,
               restored: `Put ${result.decisions} contacts back the way they were.`,
             }))
             return
@@ -390,15 +677,38 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
               : inQueue
                 ? [restored, ...state.cards]
                 : state.cards
+            // A contact put back at the front of the queue is ahead again, not
+            // behind, so the trail lets go of them rather than listing them in
+            // both places. One left where they are keeps their place in the
+            // trail, with whatever the undo made of their decision.
+            const returning = !replaces && inQueue
+            const passed = returning
+              ? state.passed.filter((entry) => entry.card.contact.id !== restored.contact.id)
+              : state.passed.map((entry) =>
+                  entry.card.contact.id === restored.contact.id
+                    ? {
+                        card: restored,
+                        decision: restored.contact.met === 'unknown' ? null : restored.contact.met,
+                        failed: false,
+                      }
+                    : entry,
+                )
+            const reviewIndex =
+              state.reviewIndex === null || state.reviewIndex < passed.length
+                ? state.reviewIndex
+                : null
             return {
               ...state,
               status: 'ready',
               cards,
+              passed,
+              reviewIndex: returning ? null : reviewIndex,
               progress: result.progress,
               undoConflict: null,
               undoConflictField: null,
               undoable: state.undoable.slice(1),
               taggedSinceUndoable: false,
+              notice: `Undo took back ${undone}.`,
               restored:
                 replaces || inQueue
                   ? null
@@ -434,24 +744,25 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
       await enqueue(async () => {
         try {
           const result = await setPreferredName({ contactId, preferredName })
-          commit((state) => ({
-            ...state,
-            restored: null,
-            taggedSinceUndoable: false,
-            undoable: [
+          commit((state) =>
+            patchContact(
               {
-                seq: (sequence.current += 1),
-                kind: 'preferred-name' as const,
-                label: `name — ${result.preferred_name}`,
+                ...state,
+                restored: null,
+                taggedSinceUndoable: false,
+                undoable: [
+                  {
+                    seq: (sequence.current += 1),
+                    kind: 'preferred-name' as const,
+                    label: `name — ${result.preferred_name}`,
+                  },
+                  ...state.undoable,
+                ],
               },
-              ...state.undoable,
-            ],
-            cards: state.cards.map((card) =>
-              card.contact.id === contactId
-                ? { ...card, contact: { ...card.contact, preferred_name: result.preferred_name } }
-                : card,
+              contactId,
+              (contact) => ({ ...contact, preferred_name: result.preferred_name }),
             ),
-          }))
+          )
         } catch (error) {
           commit((state) => withFailure(state, messageOf(error, 'the name was not saved')))
         }
@@ -462,14 +773,9 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
 
   const patchTags = useCallback(
     (contactId: number, update: (tags: TriageTag[]) => TriageTag[]) => {
-      commit((state) => ({
-        ...state,
-        cards: state.cards.map((card) =>
-          card.contact.id === contactId
-            ? { ...card, contact: { ...card.contact, tags: update(card.contact.tags) } }
-            : card,
-        ),
-      }))
+      commit((state) =>
+        patchContact(state, contactId, (contact) => ({ ...contact, tags: update(contact.tags) })),
+      )
     },
     [commit],
   )
@@ -515,8 +821,8 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
             expectedCount,
             states,
           })
-          // The batch moved a lot of contacts out of the queue; the buffer and
-          // the cursor both describe a queue that no longer exists.
+          // The batch moved a lot of contacts out of the queue; the buffer, the
+          // trail, and the cursor all describe a queue that no longer exists.
           await load()
           commit((state) => ({
             ...state,
@@ -548,10 +854,18 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
   const state = stateRef.current
   return {
     ...state,
-    current: state.cards[0] ?? null,
+    current: onScreen(state),
+    reviewing: state.reviewIndex === null ? null : (state.passed[state.reviewIndex] ?? null),
+    liveCard: state.cards[0] ?? null,
+    ahead: state.cards.slice(1),
     refilling: state.status === 'ready' && state.cards.length === 0 && !state.exhausted,
+    peek,
     decide,
-    skipAhead,
+    back,
+    forward,
+    goTo,
+    resume,
+    notify,
     undo,
     dismissConflict: useCallback(
       () => commit((previous) => ({ ...previous, undoConflict: null, undoConflictField: null })),
