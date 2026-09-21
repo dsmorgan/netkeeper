@@ -1,13 +1,14 @@
-"""Command-line entry point: serve, db, config, backup, openapi, tags, version."""
+"""Command-line entry point: serve, db, config, backup, openapi, tags, import/export, version."""
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal, NoReturn
 
 import typer
 import uvicorn
@@ -17,11 +18,18 @@ from sqlalchemy.orm import Session
 
 from netkeeper import __version__, migrations
 from netkeeper.config import ConfigError, Settings, load_settings, render_toml
+from netkeeper.crm import import_runs
+from netkeeper.crm.archive import ArchiveImport, import_archive
+from netkeeper.crm.contacts import ContactStats, contact_stats
+from netkeeper.crm.exports import ExportFormat, ExportPreset, export_stream
+from netkeeper.crm.filters import FilterError, FilterTree, SortKey, parse_filter, parse_sort
+from netkeeper.crm.identity import CreateNew
 from netkeeper.crm.lists import list_lists, list_views, member_counts
 from netkeeper.crm.tags import ensure_default_rules, list_tags, run_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
+from netkeeper.linkedin.archive import ArchiveFormatError, open_archive
 from netkeeper.logging_setup import setup_logging
-from netkeeper.models import User, UserKind
+from netkeeper.models import ImportResolution, ImportRun, User, UserKind
 from netkeeper.paths import CONFIG_ENV, data_dir
 from netkeeper.scoping import install_scope_guard
 from netkeeper.services.backup import (
@@ -47,12 +55,18 @@ tags_app = typer.Typer(help="Tags and auto-tag rules.", no_args_is_help=True)
 lists_app = typer.Typer(
     help="Static lists, smart lists, and saved table views.", no_args_is_help=True
 )
+import_app = typer.Typer(
+    help="Bring contacts in from a LinkedIn archive or a CSV.", no_args_is_help=True
+)
+contacts_app = typer.Typer(help="Inspect your contacts.", no_args_is_help=True)
 app.add_typer(config_app, name="config")
 app.add_typer(db_app, name="db")
 app.add_typer(openapi_app, name="openapi")
 app.add_typer(backup_app, name="backup")
 app.add_typer(tags_app, name="tags")
 app.add_typer(lists_app, name="lists")
+app.add_typer(import_app, name="import")
+app.add_typer(contacts_app, name="contacts")
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +362,386 @@ def lists_views() -> None:
         return
     table = [(row.name, ", ".join(row.columns)) for row in rows]
     typer.echo(_format_table(("NAME", "COLUMNS"), table), nl=False)
+
+
+# --- import -------------------------------------------------------------
+
+
+@import_app.command("archive")
+def import_archive_cmd(
+    path: Annotated[
+        Path,
+        typer.Argument(
+            help="A LinkedIn data export: a zip, an unpacked directory, or one CSV on its own.",
+            exists=True,
+            readable=True,
+        ),
+    ],
+) -> None:
+    """Import a LinkedIn archive: connections, messages, and invitations (netkeeper.crm.archive)."""
+    try:
+        with open_archive(path) as archive:
+            engine = make_engine(database_url())
+            try:
+                factory = make_session_factory(engine)
+                install_scope_guard(factory)
+                with session_scope(factory, write=True) as session:
+                    user = _local_user_or_exit(session)
+                    report = import_archive(session, user, archive)
+                    summary = _archive_report(report)
+            finally:
+                engine.dispose()
+    except ArchiveFormatError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(summary)
+
+
+def _archive_report(report: ArchiveImport) -> str:
+    c, m, i = report.connections, report.messages, report.invitations
+    return "\n".join(
+        (
+            f"connections: {c.rows} rows, {c.created} created, {c.updated} updated, "
+            f"{c.skipped} skipped, {c.needs_review} needs review",
+            f"messages: {m.rows} rows in {m.conversations} conversations "
+            f"({m.attributed} attributed, {m.no_counterpart} no counterparty, "
+            f"{m.group_threads} group, {m.unknown_contact} not a contact); "
+            f"{m.added} interactions added",
+            f"invitations: {i.rows} rows; {i.added} interactions added",
+        )
+    )
+
+
+# Candidates are ambiguous on purpose (spec 8.2 step 4): "merge" cannot be a
+# blanket flag because merging is which-contact, not whether-to-merge, and
+# Candidate.contact_ids is ascending by id, not ranked by confidence, so
+# merging into contact_ids[0] would be merging into whichever row happens to
+# be oldest, not the one that is actually the same person. Only the two
+# decisions that are safe in bulk are offered: skip (nothing happens) and new
+# (a distinct contact that can still be merged by hand later). The default,
+# with neither flag, is to refuse and say which rows need a look.
+# Not a PEP 695 `type` alias: Typer's parameter introspection does not chase
+# TypeAliasType through to the Literal it wraps (RuntimeError: "Type not yet
+# supported"), so this stays a plain assignment, as netkeeper.crm.exports does
+# for ExportFormat and ExportPreset.
+OnCandidate = Literal["new", "skip"]
+
+
+@import_app.command("csv")
+def import_csv_cmd(
+    path: Annotated[
+        Path,
+        typer.Argument(help="The CSV file to import.", exists=True, dir_okay=False, readable=True),
+    ],
+    preset: Annotated[
+        str | None,
+        typer.Option("--preset", help="A built-in preset name, or one you saved. Default: detect."),
+    ] = None,
+    mapping: Annotated[
+        str | None,
+        typer.Option(
+            "--mapping", help='A column mapping as JSON, e.g. \'{"Company": "current_company"}\'.'
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Resolve the whole file and report, without committing."),
+    ] = False,
+    on_candidate: Annotated[
+        OnCandidate | None,
+        typer.Option(
+            "--on-candidate",
+            help="How to resolve a row that matches more than one contact: "
+            "new (a separate contact) or skip (leave it out). Omitted: refuse and say which rows.",
+        ),
+    ] = None,
+) -> None:
+    """Import a CSV: read it into a draft run, then commit it (netkeeper.crm.import_runs).
+
+    Reading the file and committing it are two separate transactions, the way
+    ``POST /imports`` and ``POST /imports/{id}/commit`` are two separate
+    requests: a draft always lands, even when this goes on to refuse the
+    commit, so "decide them in the app" or a later ``--on-candidate`` names a
+    run that is actually there to open or resume.
+    """
+    parsed_mapping = _mapping_or_exit(mapping)
+    content = path.read_bytes()
+    draft = _create_draft(path.name, content, preset, parsed_mapping)
+    lines = [_run_report("draft", draft)]
+    if dry_run:
+        typer.echo("\n".join(lines))
+        return
+    if draft.candidate_rows and on_candidate is None:
+        _refuse_undecided(draft.id, draft.candidate_rows)
+    committed = _commit_draft(draft, on_candidate)
+    lines.append(_run_report("committed", committed))
+    typer.echo("\n".join(lines))
+
+
+@dataclass(frozen=True, slots=True)
+class _RunSnapshot:
+    """The fields of an ``ImportRun`` the CLI reports, read while its session was open."""
+
+    id: int
+    filename: str
+    preset: str | None
+    total_rows: int
+    matched_count: int
+    created_count: int
+    candidate_count: int
+    skipped_count: int
+    candidate_rows: tuple[int, ...] = ()
+
+
+def _snapshot_of(run: ImportRun, *, candidate_rows: tuple[int, ...] = ()) -> _RunSnapshot:
+    return _RunSnapshot(
+        id=run.id,
+        filename=run.filename,
+        preset=run.preset,
+        total_rows=run.total_rows,
+        matched_count=run.matched_count,
+        created_count=run.created_count,
+        candidate_count=run.candidate_count,
+        skipped_count=run.skipped_count,
+        candidate_rows=candidate_rows,
+    )
+
+
+def _create_draft(
+    filename: str, content: bytes, preset: str | None, mapping: dict[str, str] | None
+) -> _RunSnapshot:
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            try:
+                run = import_runs.create_run(
+                    session,
+                    user,
+                    filename=filename,
+                    content=content,
+                    preset_name=preset,
+                    mapping=mapping,
+                )
+            # EmptyFile, MalformedCsv, InvalidMapping, and UnknownPreset are
+            # netkeeper.crm.importer.CsvImportError, not ImportRunError: reading
+            # the file and running it as an import are different failure modes,
+            # exactly as they are two different exception groups in
+            # web/api/imports.py's translate_errors().
+            except (import_runs.ImportRunError, import_runs.CsvImportError) as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            candidates = tuple(
+                row.row_number for row in run.rows if row.resolution is ImportResolution.CANDIDATE
+            )
+            return _snapshot_of(run, candidate_rows=candidates)
+    finally:
+        engine.dispose()
+
+
+def _commit_draft(draft: _RunSnapshot, on_candidate: OnCandidate | None) -> _RunSnapshot:
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            try:
+                if on_candidate == "skip":
+                    run = import_runs.commit(session, user, draft.id, skip_undecided=True)
+                elif on_candidate == "new":
+                    decisions = {number: CreateNew() for number in draft.candidate_rows}
+                    run = import_runs.commit(session, user, draft.id, decisions=decisions)
+                else:
+                    run = import_runs.commit(session, user, draft.id)
+            except import_runs.ImportRunError as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            return _snapshot_of(run)
+    finally:
+        engine.dispose()
+
+
+def _mapping_or_exit(raw: str | None) -> dict[str, str] | None:
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        typer.echo(f"error: --mapping is not valid JSON: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not isinstance(data, dict) or not all(isinstance(v, str) for v in data.values()):
+        typer.echo('error: --mapping must be a JSON object of {"header": "field"}', err=True)
+        raise typer.Exit(code=1)
+    return {str(key): value for key, value in data.items()}
+
+
+def _refuse_undecided(run_id: int, row_numbers: Sequence[int]) -> NoReturn:
+    shown = ", ".join(str(number) for number in row_numbers[:10])
+    more = "" if len(row_numbers) <= 10 else f" and {len(row_numbers) - 10} more"
+    typer.echo(
+        f"error: {len(row_numbers)} row(s) match more than one contact and have no decision "
+        f"(rows {shown}{more}); decide them in the app (import run {run_id}), "
+        "or re-run with --on-candidate new or --on-candidate skip",
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
+def _run_report(label: str, run: _RunSnapshot) -> str:
+    return (
+        f"{label} run {run.id}: {run.total_rows} rows from {run.filename!r} "
+        f"({run.preset or 'custom mapping'}); {run.matched_count} matched, "
+        f"{run.created_count} created, {run.candidate_count} candidate(s), "
+        f"{run.skipped_count} skipped"
+    )
+
+
+@import_app.command("rollback")
+def import_rollback_cmd(
+    run_id: Annotated[int, typer.Argument(help="The import run to undo.")],
+) -> None:
+    """Undo a committed import run: delete what it created, restore what it enriched."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            try:
+                result = import_runs.rollback(session, user, run_id)
+            except import_runs.ImportRunError as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            summary = (
+                f"run {result.run_id}: {result.contacts_deleted} contact(s) deleted, "
+                f"{result.contacts_restored} restored, {result.fields_restored} field(s) "
+                f"put back, {result.children_deleted} child row(s) removed"
+            )
+    finally:
+        engine.dispose()
+    typer.echo(summary)
+
+
+# --- export ---------------------------------------------------------------
+
+
+@app.command("export")
+def export_cmd(
+    preset: Annotated[ExportPreset, typer.Option("--preset")] = "full",
+    output_format: Annotated[ExportFormat, typer.Option("--format")] = "json",
+    headerless: Annotated[
+        bool, typer.Option("--headerless", help="Drop the CSV header row (ignored otherwise).")
+    ] = False,
+    filter_: Annotated[
+        str | None,
+        typer.Option("--filter", help="A FilterTree (spec 10.4) as JSON. Omitted: every contact."),
+    ] = None,
+    sort: Annotated[
+        str | None,
+        typer.Option("--sort", help="A list of SortKey as JSON. Omitted: id ascending."),
+    ] = None,
+    out: Annotated[
+        Path | None, typer.Option("--out", help="File to write to. Omitted: stdout.")
+    ] = None,
+) -> None:
+    """Export contacts as CSV, JSON, or vCard: the same presets as ``GET /exports``."""
+    tree = _filter_or_exit(filter_)
+    sort_keys = _sort_or_exit(sort)
+    now = datetime.now(UTC)
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            body = export_stream(
+                session,
+                user,
+                preset=preset,
+                output_format=output_format,
+                headerless=headerless,
+                tree=tree,
+                sort=sort_keys,
+                now=now,
+            )
+            if out is not None:
+                with out.open("w", encoding="utf-8", newline="") as handle:
+                    for chunk in body:
+                        handle.write(chunk)
+            else:
+                for chunk in body:
+                    typer.echo(chunk, nl=False)
+    finally:
+        engine.dispose()
+    if out is not None:
+        typer.echo(f"wrote {out}")
+
+
+def _filter_or_exit(raw: str | None) -> FilterTree:
+    if raw is None:
+        return FilterTree()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        typer.echo(f"error: --filter is not valid JSON: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    try:
+        return parse_filter(data)
+    except FilterError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _sort_or_exit(raw: str | None) -> list[SortKey]:
+    if raw is None:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        typer.echo(f"error: --sort is not valid JSON: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    try:
+        return parse_sort(data)
+    except FilterError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+# --- contacts ---------------------------------------------------------------
+
+
+@contacts_app.command("stats")
+def contacts_stats() -> None:
+    """Triage progress: how many contacts are met, not met, skipped, or untriaged, and more."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            stats = contact_stats(session, user)
+    finally:
+        engine.dispose()
+    typer.echo(_format_table(("METRIC", "COUNT"), _stats_rows(stats)), nl=False)
+
+
+def _stats_rows(stats: ContactStats) -> list[tuple[str, str]]:
+    fields = (
+        ("total", stats.total),
+        ("met", stats.met),
+        ("not met", stats.not_met),
+        ("skipped", stats.skipped),
+        ("untriaged", stats.untriaged),
+        ("archived", stats.archived),
+        ("merged away", stats.merged_away),
+        ("with email", stats.with_email),
+        ("with phone", stats.with_phone),
+        ("tagged", stats.tagged),
+    )
+    return [(name, str(count)) for name, count in fields]
 
 
 def _local_user_or_exit(session: Session) -> User:

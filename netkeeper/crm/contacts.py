@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Final, Literal, cast
 
-from sqlalchemy import CursorResult, Select, Update, func
+from sqlalchemy import ColumnElement, CursorResult, Select, Update, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from netkeeper.crm.filters import (
@@ -71,6 +71,7 @@ from netkeeper.models import (
     ContactPhone,
     ContactSnapshot,
     ContactSource,
+    ContactTag,
     EmailKind,
     EmailStatus,
     LinkKind,
@@ -195,6 +196,64 @@ def search(session: Session, user: User, q: str, *, limit: int, offset: int = 0)
     page = query(session, user, search_tree(text), SEARCH_SORT, limit=limit, offset=offset)
     reading = f'matching "{text}"' if text else "all contacts"
     return Page(page.contacts, page.total, reading)
+
+
+@dataclass(frozen=True, slots=True)
+class ContactStats:
+    """Triage progress and counts across every one of ``user``'s contacts.
+
+    Unlike :func:`query`, this counts everything: a merged-away contact and an
+    archived one are never left out, because knowing how many of each there
+    are is the whole point. ``met``, ``not_met``, ``skipped``, and
+    ``untriaged`` are the four states of :class:`~netkeeper.models.ContactMet`
+    and always add up to ``total``.
+    """
+
+    total: int
+    met: int
+    not_met: int
+    skipped: int
+    untriaged: int
+    archived: int
+    merged_away: int
+    with_email: int
+    with_phone: int
+    tagged: int
+
+
+def contact_stats(session: Session, user: User) -> ContactStats:
+    """Counts for ``user``'s contacts, for ``netkeeper contacts stats``."""
+
+    def count(clause: ColumnElement[bool] | None = None) -> int:
+        statement = scoped_count(user, Contact)
+        return session.scalar(statement if clause is None else statement.where(clause)) or 0
+
+    def has_child(model: type[ContactEmail] | type[ContactPhone]) -> ColumnElement[bool]:
+        return (
+            select(model.id)
+            .where(model.contact_id == Contact.id, model.user_id == user.id)
+            .correlate(Contact)
+            .exists()
+        )
+
+    has_tag = (
+        select(ContactTag.id)
+        .where(ContactTag.contact_id == Contact.id, ContactTag.user_id == user.id)
+        .correlate(Contact)
+        .exists()
+    )
+    return ContactStats(
+        total=count(),
+        met=count(Contact.met == ContactMet.MET),
+        not_met=count(Contact.met == ContactMet.NOT_MET),
+        skipped=count(Contact.met == ContactMet.SKIP),
+        untriaged=count(Contact.met == ContactMet.UNKNOWN),
+        archived=count(Contact.archived_at.is_not(None)),
+        merged_away=count(Contact.merged_into_id.is_not(None)),
+        with_email=count(has_child(ContactEmail)),
+        with_phone=count(has_child(ContactPhone)),
+        tagged=count(has_tag),
+    )
 
 
 def get_contact(session: Session, user: User, contact_id: int) -> tuple[Contact, int | None]:
