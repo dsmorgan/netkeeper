@@ -1034,6 +1034,145 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/triage/contacts/{contact_id}/preferred-name": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Preferred Name
+         * @description The `p` key: what you call this person, as a manual edit no later sync overwrites.
+         *
+         *     An empty name falls back to the first name. The edit is undoable like a
+         *     decision.
+         */
+        put: operations["set_preferred_name"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/triage/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Decide Triage
+         * @description Record `met`, `not_met`, or `skip` on a contact and return the next card with it.
+         *
+         *     The response carries the contact after `prefetch_after_id` (or after the one
+         *     just decided), so triaging a run costs one request per contact.
+         */
+        post: operations["decide_triage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/triage/next": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Next Triage Contact
+         * @description The next contact to triage with its evidence, the one after it, and the progress.
+         *
+         *     `after_id` moves on without deciding (the `→` key). Both cards are `null`
+         *     when the queue is empty.
+         */
+        get: operations["get_next_triage_contact"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/triage/suggestions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Triage Suggestions
+         * @description The bulk actions worth offering, with the count each would apply to.
+         *
+         *     A suggestion that matches nobody is left out, so the banner shows only when
+         *     there is something to accept. Nothing is applied until `apply`.
+         */
+        get: operations["list_triage_suggestions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/triage/suggestions/{key}/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply Triage Suggestion
+         * @description Apply a bulk suggestion as one batch that a single undo takes back.
+         *
+         *     Send the `expected_count` the banner showed: a set that has moved on since
+         *     answers `409` rather than touching more people than the banner named.
+         */
+        post: operations["apply_triage_suggestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/triage/undo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Undo Triage
+         * @description Undo the newest triage action, restoring the previous state exactly.
+         *
+         *     A bulk apply is undone as one batch. `409` when the contact changed after the
+         *     decision, so nothing is overwritten silently; `force` in the body restores
+         *     anyway.
+         */
+        post: operations["undo_triage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/views": {
         parameters: {
             query?: never;
@@ -2607,6 +2746,25 @@ export interface components {
          * @enum {string}
          */
         PhoneKind: "mobile" | "home" | "work" | "other";
+        /**
+         * PreferredNameIn
+         * @description What you call this person. Empty means "use the first name".
+         */
+        PreferredNameIn: {
+            /** Preferred Name */
+            preferred_name: string;
+        };
+        /**
+         * PreferredNameOut
+         * @description The stored name (the first name when the edit was empty) and the undoable decision.
+         */
+        PreferredNameOut: {
+            /** Contact Id */
+            contact_id: number;
+            decision: components["schemas"]["TriageDecisionOut"];
+            /** Preferred Name */
+            preferred_name: string;
+        };
         /** RepliedIn */
         RepliedIn: {
             /** Campaign Id */
@@ -2679,6 +2837,21 @@ export interface components {
             name?: string | null;
             /** Sort */
             sort?: components["schemas"]["SortKey"][] | null;
+        };
+        /**
+         * SharedCompanyOut
+         * @description A company this contact is at or was at, and the overlap with the address book.
+         *
+         *     ``contact_count`` is how many *other* live contacts are at that company now,
+         *     ``met_count`` how many of those you have already marked met.
+         */
+        SharedCompanyOut: {
+            /** Company */
+            company: string;
+            /** Contact Count */
+            contact_count: number;
+            /** Met Count */
+            met_count: number;
         };
         /**
          * SnapshotOut
@@ -2912,6 +3085,255 @@ export interface components {
              */
             kind: "snapshot";
             snapshot: components["schemas"]["SnapshotOut"];
+        };
+        /**
+         * TriageCardOut
+         * @description One contact with its evidence: one request is enough to triage it.
+         */
+        TriageCardOut: {
+            contact: components["schemas"]["TriageContactOut"];
+            evidence: components["schemas"]["TriageEvidenceOut"];
+        };
+        /**
+         * TriageContactOut
+         * @description The contact under triage: the fields the screen shows (spec 10.2).
+         */
+        TriageContactOut: {
+            /** Connected On */
+            connected_on: string | null;
+            /** Current Company */
+            current_company: string | null;
+            /** Current Title */
+            current_title: string | null;
+            /** Do Not Contact */
+            do_not_contact: boolean;
+            /** First Name */
+            first_name: string;
+            /** Headline */
+            headline: string | null;
+            /** Id */
+            id: number;
+            /** Last Name */
+            last_name: string;
+            /** Li Public Id */
+            li_public_id: string | null;
+            /** Li Url */
+            li_url: string | null;
+            /** Location */
+            location: string | null;
+            met: components["schemas"]["ContactMet"];
+            /** Notes */
+            notes: string | null;
+            /** Preferred Name */
+            preferred_name: string;
+            /** Tags */
+            tags: components["schemas"]["TriageTagOut"][];
+            /** Triaged At */
+            triaged_at: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * TriageDecisionIn
+         * @description The `m`, `n`, or `s` key on one contact.
+         *
+         *     ``prefetch_after_id`` is the id of the last card the client already holds;
+         *     the response prefetches the one after it, so a client that keeps two cards in
+         *     hand never waits. Left out, the prefetch follows the contact just decided.
+         */
+        TriageDecisionIn: {
+            /** Contact Id */
+            contact_id: number;
+            met: components["schemas"]["ContactMet"];
+            /** Prefetch After Id */
+            prefetch_after_id?: number | null;
+        };
+        /**
+         * TriageDecisionKind
+         * @description What a decision was. The kind steers nothing in undo; it is for the history.
+         * @enum {string}
+         */
+        TriageDecisionKind: "decide" | "preferred_name" | "bulk_met";
+        /**
+         * TriageDecisionOut
+         * @description One row of the triage log: what changed, as it was and as the decision left it.
+         */
+        TriageDecisionOut: {
+            /** After State */
+            after_state: {
+                [key: string]: string | null;
+            };
+            /** Batch Id */
+            batch_id: string | null;
+            /** Before State */
+            before_state: {
+                [key: string]: string | null;
+            };
+            /** Contact Id */
+            contact_id: number;
+            /**
+             * Decided At
+             * Format: date-time
+             */
+            decided_at: string;
+            /** Id */
+            id: number;
+            kind: components["schemas"]["TriageDecisionKind"];
+            /** Undone At */
+            undone_at: string | null;
+        };
+        /**
+         * TriageDecisionResult
+         * @description The decision, the next contact with its evidence, and the progress counters.
+         */
+        TriageDecisionResult: {
+            decision: components["schemas"]["TriageDecisionOut"];
+            next: components["schemas"]["TriageCardOut"] | null;
+            progress: components["schemas"]["TriageProgressOut"];
+        };
+        /**
+         * TriageEvidenceOut
+         * @description Everything the panel shows beside the contact, in the same response as the contact.
+         */
+        TriageEvidenceOut: {
+            messages: components["schemas"]["TriageMessagesOut"];
+            /** Shared Companies */
+            shared_companies: components["schemas"]["SharedCompanyOut"][];
+            /** Timeline */
+            timeline: (components["schemas"]["TimelineInteraction"] | components["schemas"]["TimelineSnapshot"])[];
+        };
+        /**
+         * TriageMessagesOut
+         * @description The message history with this contact: its shape, and the newest few.
+         */
+        TriageMessagesOut: {
+            /** First At */
+            first_at: string | null;
+            /** Inbound */
+            inbound: number;
+            /** Last At */
+            last_at: string | null;
+            /** Outbound */
+            outbound: number;
+            /** Recent */
+            recent: components["schemas"]["InteractionOut"][];
+            /** Total */
+            total: number;
+        };
+        /**
+         * TriageProgressOut
+         * @description Triaged against total, and how many are left in the queue that was asked for.
+         */
+        TriageProgressOut: {
+            /** By State */
+            by_state: {
+                [key: string]: number;
+            };
+            /** Remaining */
+            remaining: number;
+            /** Total */
+            total: number;
+            /** Triaged */
+            triaged: number;
+        };
+        /**
+         * TriageQueueOut
+         * @description The contact to show now, the one after it, and the progress counters.
+         *
+         *     ``next`` is the prefetch: hold it, and deciding ``card`` costs no wait. Both
+         *     are ``null`` when the queue is empty.
+         */
+        TriageQueueOut: {
+            card: components["schemas"]["TriageCardOut"] | null;
+            next: components["schemas"]["TriageCardOut"] | null;
+            progress: components["schemas"]["TriageProgressOut"];
+        };
+        /**
+         * TriageSuggestionApplyIn
+         * @description ``expected_count`` is the count the banner showed; a different one answers `409`.
+         */
+        TriageSuggestionApplyIn: {
+            /** Expected Count */
+            expected_count?: number | null;
+        };
+        /**
+         * TriageSuggestionApplyOut
+         * @description How many contacts the suggestion touched, and the batch one undo takes back.
+         */
+        TriageSuggestionApplyOut: {
+            /** Applied */
+            applied: number;
+            /** Batch Id */
+            batch_id: string;
+            /** Key */
+            key: string;
+            progress: components["schemas"]["TriageProgressOut"];
+        };
+        /**
+         * TriageSuggestionOut
+         * @description A bulk action worth offering, with the number of contacts it would touch.
+         *
+         *     Offered, never applied on its own: the count is a preview and the apply is a
+         *     separate call.
+         */
+        TriageSuggestionOut: {
+            /** Count */
+            count: number;
+            /** Description */
+            description: string;
+            /** Key */
+            key: string;
+            /** Title */
+            title: string;
+        };
+        /**
+         * TriageTagOut
+         * @description A tag as the triage card shows it; the tags resource carries the counts.
+         */
+        TriageTagOut: {
+            /** Color */
+            color: string | null;
+            /** Id */
+            id: number;
+            kind: components["schemas"]["TagKind"];
+            /** Name */
+            name: string;
+        };
+        /**
+         * TriageUndoIn
+         * @description ``force`` restores the previous state even where the contact has moved on since.
+         *
+         *     Without it a contact that changed after the decision answers `409` and
+         *     nothing is written.
+         */
+        TriageUndoIn: {
+            /**
+             * Force
+             * @default false
+             */
+            force: boolean;
+        };
+        /**
+         * TriageUndoOut
+         * @description What the undo put back.
+         *
+         *     ``card`` is the restored contact, ready to show, when one decision was
+         *     undone; a bulk batch has no single contact and ``decisions`` counts the rows.
+         *     ``forced`` lists the contacts whose newer state was overwritten.
+         */
+        TriageUndoOut: {
+            /** Batch Id */
+            batch_id: string | null;
+            card: components["schemas"]["TriageCardOut"] | null;
+            /** Decisions */
+            decisions: number;
+            /** Forced */
+            forced: number[];
+            kind: components["schemas"]["TriageDecisionKind"];
+            progress: components["schemas"]["TriageProgressOut"];
         };
         /**
          * UserKind
@@ -5349,6 +5771,261 @@ export interface operations {
             };
             /** @description No such task */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_preferred_name: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreferredNameIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreferredNameOut"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    decide_triage: {
+        parameters: {
+            query?: {
+                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit. */
+                states?: components["schemas"]["ContactMet"][] | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TriageDecisionIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TriageDecisionResult"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_next_triage_contact: {
+        parameters: {
+            query?: {
+                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit. */
+                states?: components["schemas"]["ContactMet"][] | null;
+                /** @description Cursor: the first contact past this id, for moving on without deciding. */
+                after_id?: number | null;
+                /** @description Also return the contact after this one, so the client never waits. */
+                prefetch?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TriageQueueOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_triage_suggestions: {
+        parameters: {
+            query?: {
+                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit. */
+                states?: components["schemas"]["ContactMet"][] | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TriageSuggestionOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    apply_triage_suggestion: {
+        parameters: {
+            query?: {
+                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit. */
+                states?: components["schemas"]["ContactMet"][] | null;
+            };
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["TriageSuggestionApplyIn"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TriageSuggestionApplyOut"];
+                };
+            };
+            /** @description No suggestion by that key */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The suggestion matches a different count now */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    undo_triage: {
+        parameters: {
+            query?: {
+                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit. */
+                states?: components["schemas"]["ContactMet"][] | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["TriageUndoIn"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TriageUndoOut"];
+                };
+            };
+            /** @description No triage decision left to undo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact changed after the decision; retry with `force` */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

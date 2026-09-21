@@ -41,6 +41,7 @@ from netkeeper.models import (
     RuleField,
     TagKind,
     TagSource,
+    TriageDecisionKind,
     UserKind,
 )
 from netkeeper.models.imports import FILENAME_MAX_LENGTH, PRESET_NAME_MAX_LENGTH
@@ -170,8 +171,8 @@ class TimelinePage(BaseModel):
 def timeline_entry_out(entry: TimelineEntry) -> TimelineEntryOut:
     """One :class:`~netkeeper.crm.interactions.TimelineEntry` as the tagged union above.
 
-    Both the timeline endpoint and the contact detail render entries with it, so
-    the two can never drift.
+    The timeline endpoint, the contact detail, and the triage card all render
+    entries with it, so they can never drift.
     """
     if isinstance(entry.row, Interaction):
         return TimelineInteraction(
@@ -1034,3 +1035,211 @@ class SavedViewPatch(BaseModel):
     )
     sort: list[SortKey] | None = None
     filter: FilterTree | None = None
+
+
+# --- triage (spec 10.2) ------------------------------------------------------
+
+
+class TriageTagOut(BaseModel):
+    """A tag as the triage card shows it; the tags resource carries the counts."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    color: str | None
+    kind: TagKind
+
+
+class TriageContactOut(BaseModel):
+    """The contact under triage: the fields the screen shows (spec 10.2)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    li_public_id: str | None
+    li_url: str | None
+    first_name: str
+    last_name: str
+    preferred_name: str
+    headline: str | None
+    current_title: str | None
+    current_company: str | None
+    location: str | None
+    connected_on: date | None
+    met: ContactMet
+    triaged_at: datetime | None
+    do_not_contact: bool
+    notes: str | None
+    """Markdown, part of the evidence panel."""
+    tags: list[TriageTagOut]
+    updated_at: datetime
+
+
+class SharedCompanyOut(BaseModel):
+    """A company this contact is at or was at, and the overlap with the address book.
+
+    ``contact_count`` is how many *other* live contacts are at that company now,
+    ``met_count`` how many of those you have already marked met.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    company: str
+    contact_count: int
+    met_count: int
+
+
+class TriageMessagesOut(BaseModel):
+    """The message history with this contact: its shape, and the newest few."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    total: int
+    inbound: int
+    outbound: int
+    first_at: datetime | None
+    last_at: datetime | None
+    recent: list[InteractionOut]
+
+
+class TriageEvidenceOut(BaseModel):
+    """Everything the panel shows beside the contact, in the same response as the contact."""
+
+    messages: TriageMessagesOut
+    timeline: list[TimelineEntryOut]
+    shared_companies: list[SharedCompanyOut]
+
+
+class TriageCardOut(BaseModel):
+    """One contact with its evidence: one request is enough to triage it."""
+
+    contact: TriageContactOut
+    evidence: TriageEvidenceOut
+
+
+class TriageProgressOut(BaseModel):
+    """Triaged against total, and how many are left in the queue that was asked for."""
+
+    total: int
+    triaged: int
+    remaining: int
+    by_state: dict[ContactMet, int]
+
+
+class TriageQueueOut(BaseModel):
+    """The contact to show now, the one after it, and the progress counters.
+
+    ``next`` is the prefetch: hold it, and deciding ``card`` costs no wait. Both
+    are ``null`` when the queue is empty.
+    """
+
+    card: TriageCardOut | None
+    next: TriageCardOut | None
+    progress: TriageProgressOut
+
+
+class TriageDecisionIn(BaseModel):
+    """The `m`, `n`, or `s` key on one contact.
+
+    ``prefetch_after_id`` is the id of the last card the client already holds;
+    the response prefetches the one after it, so a client that keeps two cards in
+    hand never waits. Left out, the prefetch follows the contact just decided.
+    """
+
+    contact_id: int
+    met: ContactMet
+    prefetch_after_id: int | None = None
+
+
+class TriageDecisionOut(BaseModel):
+    """One row of the triage log: what changed, as it was and as the decision left it."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    contact_id: int
+    kind: TriageDecisionKind
+    before_state: dict[str, str | None]
+    after_state: dict[str, str | None]
+    batch_id: str | None
+    decided_at: datetime
+    undone_at: datetime | None
+
+
+class TriageDecisionResult(BaseModel):
+    """The decision, the next contact with its evidence, and the progress counters."""
+
+    decision: TriageDecisionOut
+    next: TriageCardOut | None
+    progress: TriageProgressOut
+
+
+class TriageUndoIn(BaseModel):
+    """``force`` restores the previous state even where the contact has moved on since.
+
+    Without it a contact that changed after the decision answers `409` and
+    nothing is written.
+    """
+
+    force: bool = False
+
+
+class TriageUndoOut(BaseModel):
+    """What the undo put back.
+
+    ``card`` is the restored contact, ready to show, when one decision was
+    undone; a bulk batch has no single contact and ``decisions`` counts the rows.
+    ``forced`` lists the contacts whose newer state was overwritten.
+    """
+
+    kind: TriageDecisionKind
+    decisions: int
+    batch_id: str | None
+    forced: list[int]
+    card: TriageCardOut | None
+    progress: TriageProgressOut
+
+
+class PreferredNameIn(BaseModel):
+    """What you call this person. Empty means "use the first name"."""
+
+    preferred_name: Annotated[str, Field(max_length=200)]
+
+
+class PreferredNameOut(BaseModel):
+    """The stored name (the first name when the edit was empty) and the undoable decision."""
+
+    contact_id: int
+    preferred_name: str
+    decision: TriageDecisionOut
+
+
+class TriageSuggestionOut(BaseModel):
+    """A bulk action worth offering, with the number of contacts it would touch.
+
+    Offered, never applied on its own: the count is a preview and the apply is a
+    separate call.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    key: str
+    title: str
+    description: str
+    count: int
+
+
+class TriageSuggestionApplyIn(BaseModel):
+    """``expected_count`` is the count the banner showed; a different one answers `409`."""
+
+    expected_count: int | None = None
+
+
+class TriageSuggestionApplyOut(BaseModel):
+    """How many contacts the suggestion touched, and the batch one undo takes back."""
+
+    key: str
+    applied: int
+    batch_id: str
+    progress: TriageProgressOut
