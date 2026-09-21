@@ -19,7 +19,8 @@ export interface paths {
         put?: never;
         /**
          * Create Autotag Rule
-         * @description Add a rule at the end of the order. The pattern is validated, not run.
+         * @description Add a rule at the end of the order. The pattern is validated (syntax, no nested unbounded
+         *     repeat), not run.
          */
         post: operations["create_autotag_rule"];
         delete?: never;
@@ -456,6 +457,8 @@ export interface components {
             contact_ids: number[];
             /** Count */
             count: number;
+            /** Timeouts */
+            timeouts: number;
         };
         /**
          * AutotagRuleReorder
@@ -473,6 +476,8 @@ export interface components {
             contacts: number;
             /** Removed */
             removed: number;
+            /** Timeouts */
+            timeouts: number;
             /** Updated */
             updated: number;
         };
