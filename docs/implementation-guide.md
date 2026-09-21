@@ -364,15 +364,10 @@ Goal: `list_member` compiles — a subquery over `list_members` for a static lis
 Depends on: P1-08.
 Done when: a static list exports its own members, an unavailable predicate is never a 500 or a truncated 200, and merging keeps the survivor in every list the loser belonged to.
 
-**P1-28 Frontend: the automatic pass, the queue, and exporting a static list** · lane frontend · S
-Goal: triage opens on what was decided automatically — what the rules tagged during the import, which batches are on offer, who each covers, and a review queue of the decisions already applied; the contacts ahead are listed rather than counted, once P1-29 makes that possible; `/lists` gains the Export button P1-27 makes truthful, and the filter builder gains the list picker that makes `list_member` reachable, which P1-15 promised for every predicate.
-Depends on: P1-22, P1-23, P1-27, P1-29.
+**P1-28 Frontend: the automatic pass, and exporting a static list** · lane frontend · S
+Goal: triage opens on what was decided automatically — what the rules tagged during the import, which batches are on offer, who each covers, and a review queue of the decisions already applied; `/lists` gains the Export button P1-27 makes truthful, and the filter builder gains the list picker that makes `list_member` reachable, which P1-15 promised for every predicate.
+Depends on: P1-22, P1-23, P1-27.
 Done when: the first thing a person sees after an import is the work already done for them, a static list exports its members rather than everyone, and every predicate in the filter language is reachable from the builder.
-
-**P1-29 The triage queue can be listed** · lane core · S
-Goal: an endpoint that pages the contacts waiting for triage, in the order triage will serve them, each with the decision it already carries. `POST /contacts/query` cannot filter on `met`, and the triage endpoint serves one card plus its successor, so a client can only show a number where the user asked for a list.
-Depends on: P1-09, P1-22.
-Done when: the order matches what the triage endpoint serves next, paging is stable while decisions are being made, and the endpoint is covered by the two-user isolation harness.
 
 **CP1** · checkpoint · after P1-01, P1-02, P1-06 merge.
 **CP2** · checkpoint · closes phase 1.
