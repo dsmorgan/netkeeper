@@ -46,12 +46,11 @@ describe('app shell', () => {
   })
 
   it('renders every placeholder route with its phase', async () => {
-    // `/triage` is not here: P1-14 replaced its placeholder with the real
-    // screen, which has its own tests under `features/triage/`.
+    // `/triage` (P1-14), `/lists` and `/exports` (P1-15) are not here: their
+    // placeholders are gone, and each real screen has its own tests under
+    // `features/`.
     const phases: Array<[string, number]> = [
-      ['/lists', 1],
       ['/imports', 1],
-      ['/exports', 1],
       ['/linkedin', 2],
       ['/templates', 3],
       ['/campaigns', 3],
