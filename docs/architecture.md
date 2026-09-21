@@ -46,7 +46,7 @@ The table shows each manual step in [networking-workflow.md](networking-workflow
 |---|---|---|
 | 1.1 Export connections | Request the LinkedIn data archive, wait up to 24 h, unzip, open CSV | **Import** the official archive (zero-risk seed) and/or **Connections sync** through the sidecar (minutes, no wait) |
 | 1.2 Mark people you have met | Add a column in a spreadsheet | **Triage** screen: keyboard-driven met / not met / skip, with evidence (message history, connected-on date, notes) |
-| 1.3 Keep the validated list | Sort, delete rows, save a copy | `met = true` is a field; nothing is deleted. A built-in smart list "Validated" |
+| 1.3 Keep the validated list | Sort, delete rows, save a copy | `met` is an enum field (`unknown`, `met`, `not_met`, `skip`); nothing is deleted. A built-in smart list "Validated" holds `met = met` |
 | 2 Enrich contact info | Paste URLs into a scraping tool, 100 at a time, clean the CSV | **Enrichment** job visits profiles under a daily budget, harvests email, phone, location, and current position in one visit, prioritized by who you plan to contact |
 | 2 Keep the essential fields | Delete columns in a spreadsheet | Not needed. Export presets produce any column layout, including the nine-column layout in Appendix A |
 | 3.1 Build a list of 100, drop no-email | Manual list | Static and smart **lists**; `has_email` is a filter |
