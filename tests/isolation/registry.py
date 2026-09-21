@@ -11,13 +11,16 @@ import factories
 from sqlalchemy.orm import Session
 
 from netkeeper.crm import import_runs as import_service
+from netkeeper.crm import lists as list_service
 from netkeeper.crm import tags as tag_service
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.models import (
     Contact,
+    ContactList,
     ContactSnapshot,
     ImportRun,
     InteractionKind,
+    ListKind,
     RuleField,
     User,
 )
@@ -173,6 +176,29 @@ def _seed_exports(session: Session, user: User) -> int:
     factories.make_contact(session, user, emails=["seeded@example.test"])
     factories.make_contact(session, user)
     return 2
+def own_list(session: Session, user: User) -> dict[str, str]:
+    """``list_id`` of the user's first list; a fresh, empty static one when they have none."""
+    row = session.scalars(scoped(user, ContactList).order_by(ContactList.id)).first()
+    if row is None:
+        row = list_service.create_list(session, user, "empty", ListKind.STATIC)
+    return {"list_id": str(row.id)}
+
+
+def _seed_lists(session: Session, user: User) -> int:
+    list_service.create_list(session, user, "seeded", ListKind.STATIC)
+    return 1
+
+
+def _seed_list_members(session: Session, user: User) -> int:
+    contact = factories.make_contact(session, user)
+    row = list_service.create_list(session, user, "seeded", ListKind.STATIC)
+    list_service.add_members(session, user, row.id, [contact.id])
+    return 1
+
+
+def _seed_views(session: Session, user: User) -> int:
+    list_service.create_view(session, user, "seeded", ["first_name", "last_name"])
+    return 1
 
 
 REGISTRY: list[ListEndpoint] = [
@@ -206,4 +232,12 @@ REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/tags", _seed_tags, array_count),
     ListEndpoint(f"{API_PREFIX}/autotag-rules", _seed_autotag_rules, array_count),
     ListEndpoint(f"{API_PREFIX}/exports", _seed_exports, array_count),
+    ListEndpoint(f"{API_PREFIX}/lists", _seed_lists, array_count),
+    ListEndpoint(
+        f"{API_PREFIX}/lists/{{list_id}}/members",
+        _seed_list_members,
+        paged_count,
+        path_params=own_list,
+    ),
+    ListEndpoint(f"{API_PREFIX}/views", _seed_views, array_count),
 ]

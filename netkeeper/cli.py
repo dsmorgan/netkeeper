@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from netkeeper import __version__, migrations
 from netkeeper.config import ConfigError, Settings, load_settings, render_toml
+from netkeeper.crm.lists import list_lists, list_views, member_counts
 from netkeeper.crm.tags import ensure_default_rules, list_tags, run_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.logging_setup import setup_logging
@@ -43,11 +44,15 @@ openapi_app = typer.Typer(help="Work with the API schema.", no_args_is_help=True
 # `netkeeper backup --help` also carries the note about the default subcommand.
 backup_app = typer.Typer(invoke_without_command=True)
 tags_app = typer.Typer(help="Tags and auto-tag rules.", no_args_is_help=True)
+lists_app = typer.Typer(
+    help="Static lists, smart lists, and saved table views.", no_args_is_help=True
+)
 app.add_typer(config_app, name="config")
 app.add_typer(db_app, name="db")
 app.add_typer(openapi_app, name="openapi")
 app.add_typer(backup_app, name="backup")
 app.add_typer(tags_app, name="tags")
+app.add_typer(lists_app, name="lists")
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +309,45 @@ def tags_run_rules() -> None:
     if result.timeouts:
         line += f", {result.timeouts} searches timed out (treated as no match; see the log)"
     typer.echo(line)
+
+
+@lists_app.command("list")
+def lists_list() -> None:
+    """List the local user's lists with kind and how many contacts are in each right now."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            rows = list_lists(session, user)
+            counts = member_counts(session, user, [row.id for row in rows])
+    finally:
+        engine.dispose()
+    if not rows:
+        typer.echo("no lists")
+        return
+    table = [(row.name, row.kind.value, str(counts.get(row.id, 0))) for row in rows]
+    typer.echo(_format_table(("NAME", "KIND", "MEMBERS"), table), nl=False)
+
+
+@lists_app.command("views")
+def lists_views() -> None:
+    """List the local user's saved table views with their columns."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            rows = list_views(session, user)
+    finally:
+        engine.dispose()
+    if not rows:
+        typer.echo("no saved views")
+        return
+    table = [(row.name, ", ".join(row.columns)) for row in rows]
+    typer.echo(_format_table(("NAME", "COLUMNS"), table), nl=False)
 
 
 def _local_user_or_exit(session: Session) -> User:
