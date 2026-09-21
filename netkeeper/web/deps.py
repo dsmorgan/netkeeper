@@ -113,6 +113,25 @@ def get_session(request: Request) -> Iterator[Session]:
 SessionDep = Annotated[Session, Depends(get_session, scope="function")]
 
 
+def get_reader_session(request: Request) -> Iterator[Session]:
+    """A read-only session kept open for the whole response, including while it streams.
+
+    :func:`get_session` closes before the response is sent (``scope="function"``),
+    which is wrong for an endpoint that streams its body from the database as it
+    goes (an export, P1-11): the generator a ``StreamingResponse`` iterates would
+    be reading through an already-closed session. This dependency instead uses
+    ``scope="request"``, so it stays open until the response has finished sending.
+    It is never marked for write (:func:`netkeeper.db.session_scope`'s default):
+    a read has no business taking the SQLite write lock.
+    """
+    factory: sessionmaker[Session] = request.app.state.session_factory
+    with session_scope(factory) as session:
+        yield session
+
+
+ReaderSessionDep = Annotated[Session, Depends(get_reader_session, scope="request")]
+
+
 def current_user(request: Request, session: SessionDep) -> User:
     auth: AuthProvider = request.app.state.auth
     return auth.current_user(request, session)
