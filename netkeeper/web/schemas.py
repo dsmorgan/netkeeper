@@ -159,7 +159,9 @@ HexColor = Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")]
 
 
 def _valid_pattern(pattern: str) -> str:
-    """A rule pattern must compile; the service checks again when it stores one."""
+    """A rule pattern must compile and be free of nested unbounded repeats (``(a+)+``), which
+    can backtrack for minutes inside a writer transaction; the service checks again when it
+    stores or previews one, so the two can never disagree."""
     try:
         compile_pattern(pattern)
     except InvalidPattern as exc:
@@ -253,6 +255,8 @@ class AutotagRulePreviewOut(BaseModel):
     count: int
     contact_ids: list[int]
     """The first matching contacts, by id, up to ten."""
+    timeouts: int
+    """Contacts the pattern timed out on (50 ms), counted as no match."""
 
 
 class AutotagRuleRunOut(BaseModel):
@@ -260,3 +264,5 @@ class AutotagRuleRunOut(BaseModel):
     added: int
     removed: int
     updated: int
+    timeouts: int
+    """Searches that hit the 50 ms timeout, each treated as no match."""

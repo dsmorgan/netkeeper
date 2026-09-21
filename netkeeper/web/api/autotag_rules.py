@@ -31,6 +31,7 @@ def _run_out(result: service.RuleRun) -> AutotagRuleRunOut:
         added=result.added,
         removed=result.removed,
         updated=result.updated,
+        timeouts=result.timeouts,
     )
 
 
@@ -46,7 +47,8 @@ def list_autotag_rules(user: CurrentUser, session: SessionDep) -> list[AutotagRu
 def create_autotag_rule(
     body: AutotagRuleCreate, user: CurrentUser, session: SessionDep
 ) -> AutotagRuleOut:
-    """Add a rule at the end of the order. The pattern is validated, not run."""
+    """Add a rule at the end of the order. The pattern is validated (syntax, no nested unbounded
+    repeat), not run."""
     with translate_errors():
         rule = service.create_rule(
             session, user, body.tag_id, body.field, body.pattern, enabled=body.enabled
@@ -78,7 +80,9 @@ def preview_autotag_rule(
     """How many live contacts a pattern matches in a field, and the first ten. Writes nothing."""
     with translate_errors():
         preview = service.preview_matches(session, user, body.field, body.pattern)
-    return AutotagRulePreviewOut(count=preview.count, contact_ids=list(preview.contact_ids))
+    return AutotagRulePreviewOut(
+        count=preview.count, contact_ids=list(preview.contact_ids), timeouts=preview.timeouts
+    )
 
 
 @router.patch("/{rule_id}", operation_id="update_autotag_rule", responses={**NOT_FOUND, **INVALID})

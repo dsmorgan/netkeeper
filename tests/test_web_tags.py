@@ -147,7 +147,7 @@ async def test_rules_crud_reorder_run_and_preview(
         headers=CSRF,
     )
     assert preview.status_code == 200
-    assert preview.json() == {"count": 2, "contact_ids": [founder_contact, barista]}
+    assert preview.json() == {"count": 2, "contact_ids": [founder_contact, barista], "timeouts": 0}
     bad = await client.post(
         "/api/v1/autotag-rules/preview", json={"field": "title", "pattern": "("}, headers=CSRF
     )
@@ -159,7 +159,7 @@ async def test_rules_crud_reorder_run_and_preview(
 
     run = await client.post("/api/v1/autotag-rules/run", headers=CSRF)
     assert run.status_code == 200
-    assert run.json() == {"contacts": 3, "added": 3, "removed": 0, "updated": 0}
+    assert run.json() == {"contacts": 3, "added": 3, "removed": 0, "updated": 0, "timeouts": 0}
     tags = await _tags_by_name(client)
     assert (tags["vp"]["contact_count"], tags["engineering"]["contact_count"]) == (1, 1)
     assert tags["founder"]["contact_count"] == 1
@@ -193,7 +193,7 @@ async def test_rules_crud_reorder_run_and_preview(
     assert enabled.status_code == 200 and enabled.json()["enabled"] is True
     assert (await client.patch(url, json={"pattern": "["}, headers=CSRF)).status_code == 422
     single = await client.post(f"{url}/run", headers=CSRF)
-    assert single.json() == {"contacts": 3, "added": 1, "removed": 0, "updated": 0}
+    assert single.json() == {"contacts": 3, "added": 1, "removed": 0, "updated": 0, "timeouts": 0}
     assert (await _tags_by_name(client))["vp"]["contact_count"] == 2
 
     reordered = await client.post(
@@ -222,7 +222,7 @@ async def test_rules_crud_reorder_run_and_preview(
     assert len(listed.json()) == DEFAULT_RULE_COUNT
     # The deleted rule's assignment goes at the next full run.
     run = await client.post("/api/v1/autotag-rules/run", headers=CSRF)
-    assert run.json() == {"contacts": 3, "added": 0, "removed": 1, "updated": 0}
+    assert run.json() == {"contacts": 3, "added": 0, "removed": 1, "updated": 0, "timeouts": 0}
 
 
 async def test_removing_an_auto_tag_keeps_it_off_until_added_by_hand(
@@ -240,5 +240,5 @@ async def test_removing_an_auto_tag_keeps_it_off_until_added_by_hand(
     manual = await client.post(url, json={"tag_id": vp_id}, headers=CSRF)
     assert manual.status_code == 201 and manual.json()["source"] == "manual"
     run = await client.post("/api/v1/autotag-rules/run", headers=CSRF)
-    assert run.json() == {"contacts": 3, "added": 0, "removed": 0, "updated": 0}
+    assert run.json() == {"contacts": 3, "added": 0, "removed": 0, "updated": 0, "timeouts": 0}
     assert (await _tags_by_name(client))["vp"]["contact_count"] == 1

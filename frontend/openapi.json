@@ -161,11 +161,16 @@
           "count": {
             "title": "Count",
             "type": "integer"
+          },
+          "timeouts": {
+            "title": "Timeouts",
+            "type": "integer"
           }
         },
         "required": [
           "count",
-          "contact_ids"
+          "contact_ids",
+          "timeouts"
         ],
         "title": "AutotagRulePreviewOut",
         "type": "object"
@@ -202,6 +207,10 @@
             "title": "Removed",
             "type": "integer"
           },
+          "timeouts": {
+            "title": "Timeouts",
+            "type": "integer"
+          },
           "updated": {
             "title": "Updated",
             "type": "integer"
@@ -211,7 +220,8 @@
           "contacts",
           "added",
           "removed",
-          "updated"
+          "updated",
+          "timeouts"
         ],
         "title": "AutotagRuleRunOut",
         "type": "object"
@@ -1082,7 +1092,7 @@
         ]
       },
       "post": {
-        "description": "Add a rule at the end of the order. The pattern is validated, not run.",
+        "description": "Add a rule at the end of the order. The pattern is validated (syntax, no nested unbounded\nrepeat), not run.",
         "operationId": "create_autotag_rule",
         "requestBody": {
           "content": {

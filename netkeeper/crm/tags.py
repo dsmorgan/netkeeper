@@ -20,10 +20,19 @@ What this module decides
   removed. ``manual`` and ``llm`` assignments are never touched. A disabled
   rule matches nothing; a deleted rule leaves its assignments (the database
   clears ``rule_id``) for the next run to remove or credit to another rule.
-- Patterns are Python regular expressions searched with ``re.IGNORECASE``,
+- Patterns are Python regular expressions searched without regard to case,
   validated when a rule is saved (:func:`compile_pattern`), and evaluated in
   Python over the candidate rows in batches, because SQL regular expressions
   differ between SQLite and PostgreSQL.
+- A pattern runs inside a writer transaction, which on SQLite holds the write
+  lock for everyone, so a pattern that backtracks catastrophically (``(a+)+$``
+  takes about a minute on a thirty-character title) is guarded twice. At save
+  and preview time the pattern's parse tree is refused when an unbounded
+  repeat (``+``, ``*``, ``{n,}``) contains another one, the shape behind
+  exponential backtracking. At run time every search goes through the
+  ``regex`` package with a :data:`MATCH_TIMEOUT_S` timeout; a search that
+  times out counts as no match for that contact, is logged with the rule and
+  the contact, and is counted in the result.
 - The default rule set (:data:`DEFAULT_PATTERNS`, one ``title`` and one
   ``headline`` rule per tag, because a contact from the connections list has a
   headline and no title until it is enriched) is seeded once per user and
@@ -45,8 +54,13 @@ import logging
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Final
 
+# ``re.compile``'s own parser (``sre_parse`` is its deprecated alias, and importing
+# that warns). Private, but its tree is the honest way to see a nested repeat.
+from re import _parser  # type: ignore[attr-defined]
+from typing import Any, Final
+
+import regex
 from sqlalchemy import ColumnElement, and_, func
 from sqlalchemy.orm import Session
 
@@ -73,6 +87,8 @@ DEFAULTS_SEEDED_KEY: Final = "tags.defaults_seeded"
 """The ``settings_kv`` key that records that the default rules were seeded for a user."""
 
 PATTERN_MAX_LENGTH: Final = 500
+MATCH_TIMEOUT_S: Final = 0.05
+"""How long one pattern may spend on one value before it counts as no match."""
 PREVIEW_SAMPLE: Final = 10
 """How many matching contact ids a preview returns alongside the count."""
 BATCH_SIZE: Final = 500
@@ -165,7 +181,7 @@ class InvalidTagValue(TagError, ValueError):
 
 
 class InvalidPattern(TagError, ValueError):
-    """A rule pattern that is empty, too long, or not a valid regular expression."""
+    """A rule pattern that is empty, too long, invalid, or may backtrack catastrophically."""
 
 
 class TagSuppressed(TagError):
@@ -189,6 +205,8 @@ class RulePreview:
     count: int
     contact_ids: tuple[int, ...]
     """The first :data:`PREVIEW_SAMPLE` matching contacts, by id."""
+    timeouts: int = 0
+    """Contacts the pattern timed out on, counted as no match."""
 
 
 @dataclass(frozen=True)
@@ -203,6 +221,8 @@ class RuleRun:
     """``rule`` assignments deleted because no enabled rule matches their tag any more."""
     updated: int
     """``rule`` assignments credited to a different rule."""
+    timeouts: int = 0
+    """Searches that hit :data:`MATCH_TIMEOUT_S`, each counted as no match."""
 
 
 class Unset(enum.Enum):
@@ -224,16 +244,89 @@ def _require_writer(session: Session) -> None:
         raise RuntimeError("tag operations need a writer session; use session_scope(write=True)")
 
 
-def compile_pattern(pattern: str) -> re.Pattern[str]:
-    """``pattern`` compiled with ``re.IGNORECASE``, or :class:`InvalidPattern` saying why."""
+def compile_pattern(pattern: str) -> regex.Pattern[str]:
+    """``pattern`` compiled for a case-insensitive search, or :class:`InvalidPattern` saying why.
+
+    The standard library's parser checks the syntax and provides the tree that
+    :func:`has_nested_unbounded_repeat` walks; the ``regex`` package does the
+    compiling, because its ``search`` takes a timeout (see :func:`search`).
+    """
     if not pattern.strip():
         raise InvalidPattern("pattern is empty")
     if len(pattern) > PATTERN_MAX_LENGTH:
         raise InvalidPattern(f"pattern is longer than {PATTERN_MAX_LENGTH} characters")
     try:
-        return re.compile(pattern, re.IGNORECASE)
+        tree = _parser.parse(pattern, re.IGNORECASE)
     except re.error as exc:
         raise InvalidPattern(f"invalid regular expression: {exc}") from exc
+    if has_nested_unbounded_repeat(tree):
+        raise InvalidPattern(
+            "pattern may run slowly: an unbounded repeat (+, *, {n,}) inside another one, "
+            "as in (a+)+, can take exponential time; rewrite it without the nesting"
+        )
+    try:
+        return regex.compile(pattern, regex.IGNORECASE)
+    except regex.error as exc:
+        raise InvalidPattern(f"invalid regular expression: {exc}") from exc
+
+
+_REPEATS: Final[frozenset[Any]] = frozenset(
+    {_parser.MAX_REPEAT, _parser.MIN_REPEAT, _parser.POSSESSIVE_REPEAT}
+)
+
+
+def has_nested_unbounded_repeat(tree: Any, *, inside_unbounded: bool = False) -> bool:
+    """True when a repeat with no upper bound contains another one, anywhere below it.
+
+    ``tree`` is what ``re._parser.parse`` returns: a sequence of ``(opcode,
+    arguments)`` pairs. ``(a+)+``, ``(a*)*``, ``(a+)*``, ``(a*)+``, and
+    ``(a{2,})+`` are the shapes; a bounded outer repeat (``(\\w+\\s+){1,2}``) is
+    not, and neither is ``a+b+``. The walk looks through groups, alternations,
+    lookarounds, atomic groups, and conditionals.
+    """
+    for op, args in tree:
+        if op in _REPEATS:
+            _low, high, body = args
+            unbounded = high == _parser.MAXREPEAT
+            if unbounded and inside_unbounded:
+                return True
+            if has_nested_unbounded_repeat(body, inside_unbounded=inside_unbounded or unbounded):
+                return True
+        elif op is _parser.SUBPATTERN:
+            if has_nested_unbounded_repeat(args[3], inside_unbounded=inside_unbounded):
+                return True
+        elif op is _parser.BRANCH:
+            if any(
+                has_nested_unbounded_repeat(branch, inside_unbounded=inside_unbounded)
+                for branch in args[1]
+            ):
+                return True
+        elif op in (_parser.ASSERT, _parser.ASSERT_NOT):
+            if has_nested_unbounded_repeat(args[1], inside_unbounded=inside_unbounded):
+                return True
+        elif op is _parser.ATOMIC_GROUP:
+            if has_nested_unbounded_repeat(args, inside_unbounded=inside_unbounded):
+                return True
+        elif op is _parser.GROUPREF_EXISTS:
+            _group, yes, no = args
+            for branch in (yes, no):
+                if branch is not None and has_nested_unbounded_repeat(
+                    branch, inside_unbounded=inside_unbounded
+                ):
+                    return True
+    return False
+
+
+def search(compiled: regex.Pattern[str], value: str) -> bool | None:
+    """Whether ``compiled`` matches somewhere in ``value``; None when the search timed out.
+
+    The timeout is :data:`MATCH_TIMEOUT_S`, read at call time so a test can
+    shorten it. A timeout is the caller's to log and count; it never raises.
+    """
+    try:
+        return compiled.search(value, timeout=MATCH_TIMEOUT_S) is not None
+    except TimeoutError:
+        return None
 
 
 def clean_tag_name(name: str) -> str:
@@ -547,11 +640,12 @@ class _Candidate:
     """One contact's searchable fields, as a run or a preview reads them."""
 
     id: int
-    values: dict[RuleField, str]
+    values: dict[RuleField, str | None]
 
-    def matches(self, field: RuleField, pattern: re.Pattern[str]) -> bool:
+    def search(self, field: RuleField, pattern: regex.Pattern[str]) -> bool | None:
+        """:func:`search` over the field's value; False for an empty field."""
         value = self.values.get(field)
-        return value is not None and pattern.search(value) is not None
+        return False if value is None else search(pattern, value)
 
 
 def _live() -> ColumnElement[bool]:
@@ -597,8 +691,20 @@ def preview_matches(
 ) -> RulePreview:
     """How many live contacts ``pattern`` matches in ``field``, and the first ``sample`` ids."""
     compiled = compile_pattern(pattern)
-    matched = [c.id for c in _candidates(session, user, None) if c.matches(field, compiled)]
-    return RulePreview(count=len(matched), contact_ids=tuple(matched[:sample]))
+    matched: list[int] = []
+    timeouts = 0
+    for candidate in _candidates(session, user, None):
+        hit = candidate.search(field, compiled)
+        if hit is None:
+            timeouts += 1
+            log.warning(
+                "pattern preview timed out after %d ms on contact %d; counted as no match",
+                MATCH_TIMEOUT_S * 1000,
+                candidate.id,
+            )
+        elif hit:
+            matched.append(candidate.id)
+    return RulePreview(count=len(matched), contact_ids=tuple(matched[:sample]), timeouts=timeouts)
 
 
 def preview_rule(session: Session, user: User, field: RuleField, pattern: str) -> int:
@@ -648,7 +754,7 @@ def _reconcile(
     tags' ``rule`` assignments are reconciled (None: all of them)."""
     compiled = [(rule, compile_pattern(rule.pattern)) for rule in rules]
     candidates = _candidates(session, user, contact_ids)
-    added = removed = updated = 0
+    added = removed = updated = timeouts = 0
     for start in range(0, len(candidates), BATCH_SIZE):
         batch = candidates[start : start + BATCH_SIZE]
         ids = [c.id for c in batch]
@@ -657,7 +763,16 @@ def _reconcile(
         for candidate in batch:
             matched: dict[int, list[int]] = {}  # tag id -> ids of the rules that matched
             for rule, pattern in compiled:
-                if candidate.matches(rule.field, pattern):
+                hit = candidate.search(rule.field, pattern)
+                if hit is None:
+                    timeouts += 1
+                    log.warning(
+                        "auto-tag rule %d timed out after %d ms on contact %d; treated as no match",
+                        rule.id,
+                        MATCH_TIMEOUT_S * 1000,
+                        candidate.id,
+                    )
+                elif hit:
                     matched.setdefault(rule.tag_id, []).append(rule.id)
             existing = assignments.get(candidate.id, {})
             for tag_id, rule_ids in matched.items():
@@ -683,14 +798,22 @@ def _reconcile(
                     session.delete(row)
                     removed += 1
         session.flush()
-    result = RuleRun(contacts=len(candidates), added=added, removed=removed, updated=updated)
+    result = RuleRun(
+        contacts=len(candidates),
+        added=added,
+        removed=removed,
+        updated=updated,
+        timeouts=timeouts,
+    )
     log.info(
-        "auto-tag run for user %d over %d contacts: %d added, %d removed, %d re-credited",
+        "auto-tag run for user %d over %d contacts: %d added, %d removed, %d re-credited, "
+        "%d timed out",
         user.id,
         result.contacts,
         result.added,
         result.removed,
         result.updated,
+        result.timeouts,
     )
     return result
 

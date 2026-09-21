@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from re import _parser  # type: ignore[attr-defined]
 from typing import Any
 
 import factories
@@ -36,6 +38,7 @@ from netkeeper.crm.tags import (
     delete_tag,
     ensure_default_rules,
     find_tag,
+    has_nested_unbounded_repeat,
     list_rules,
     list_tags,
     preview_matches,
@@ -331,6 +334,95 @@ def test_compile_pattern_ignores_case() -> None:
     assert compile_pattern(r"\bvp\b").search("Senior VP, Sales") is not None
 
 
+# --- the ReDoS guard --------------------------------------------------------
+
+NESTED_UNBOUNDED = [
+    r"(a+)+$",
+    r"(a*)*",
+    r"(a+)*",
+    r"(a*)+",
+    r"(a{2,})+",
+    r"(?:a+)+",
+    r"((a)+)+",
+    r"(a+|b)+",
+    r"(\w+\s?)+$",
+    r"x(?=(y+)+)",
+    r"(?>a+)+",
+    r"(?P<g>a)(?(g)b+|c)+",
+]
+NOT_NESTED = [
+    r"(a+)",
+    r"a+b+",
+    r"(a+){1,3}",
+    r"(ab)+",
+    r"(a?)+",
+    r"(a+)?",
+    r"(a|b)+",
+    r"\b(engineer(s|ing)?|developer)\b",
+    r"Chief\s+(\w+[\s-]+){1,2}Officer",
+    r"(?:x|y+)",
+    r"x(?=y+)",
+]
+
+
+@pytest.mark.parametrize("pattern", NESTED_UNBOUNDED)
+def test_a_nested_unbounded_repeat_is_rejected_at_save_and_preview(
+    writer: Session, user: User, pattern: str
+) -> None:
+    assert has_nested_unbounded_repeat(_parser.parse(pattern, re.IGNORECASE))
+    vp = create_tag(writer, user, "vp")
+    rule = create_rule(writer, user, vp.id, RuleField.TITLE, "ok")
+    for attempt in (
+        lambda: compile_pattern(pattern),
+        lambda: create_rule(writer, user, vp.id, RuleField.TITLE, pattern),
+        lambda: update_rule(writer, user, rule.id, pattern=pattern),
+        lambda: preview_rule(writer, user, RuleField.TITLE, pattern),
+    ):
+        with pytest.raises(InvalidPattern, match="may run slowly"):
+            attempt()
+    assert rule.pattern == "ok"
+
+
+@pytest.mark.parametrize("pattern", NOT_NESTED)
+def test_a_pattern_without_nesting_passes_the_static_check(pattern: str) -> None:
+    assert not has_nested_unbounded_repeat(_parser.parse(pattern, re.IGNORECASE))
+    compile_pattern(pattern)
+
+
+def test_a_search_that_times_out_is_no_match_and_is_counted(
+    writer: Session, user: User, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``(a|aa)+$`` has no nested repeat, so it saves, but it backtracks exponentially."""
+    slow = r"(a|aa)+$"
+    assert not has_nested_unbounded_repeat(_parser.parse(slow, re.IGNORECASE))
+    vp = create_tag(writer, user, "vp")
+    rule = create_rule(writer, user, vp.id, RuleField.TITLE, slow)
+    quick = contact_with_title(writer, user, "aa")
+    stuck = contact_with_title(writer, user, "a" * 40 + "b")
+    miss = contact_with_title(writer, user, "nothing")
+    with caplog.at_level("WARNING", logger="netkeeper.crm.tags"):
+        preview = preview_matches(writer, user, RuleField.TITLE, slow)
+        result = run_rules(writer, user)
+    assert preview == svc.RulePreview(count=1, contact_ids=(quick.id,), timeouts=1)
+    assert result == RuleRun(contacts=3, added=1, removed=0, updated=0, timeouts=1)
+    assert names_on(writer, user, quick) == {"vp"}
+    assert names_on(writer, user, stuck) == set()
+    assert names_on(writer, user, miss) == set()
+    messages = [record.getMessage() for record in caplog.records]
+    assert f"auto-tag rule {rule.id} timed out after 50 ms on contact {stuck.id}" in messages[-1]
+    assert f"pattern preview timed out after 50 ms on contact {stuck.id}" in messages[0]
+    # Idempotent: the timeout repeats, nothing else changes.
+    assert run_rules(writer, user) == RuleRun(contacts=3, added=0, removed=0, updated=0, timeouts=1)
+
+
+def test_the_timeout_is_read_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    compiled = compile_pattern(r"(a|aa)+$")
+    assert svc.search(compiled, "aa") is True
+    assert svc.search(compiled, "a" * 40 + "b") is None  # 50 ms is not enough
+    monkeypatch.setattr(svc, "MATCH_TIMEOUT_S", 30.0)
+    assert svc.search(compiled, "a" * 18 + "b") is False  # given time, it finishes: no match
+
+
 def test_create_update_delete_and_reorder_rules(writer: Session, user: User, other: User) -> None:
     vp, founder = create_tag(writer, user, "vp"), create_tag(writer, user, "founder")
     a = create_rule(writer, user, vp.id, RuleField.TITLE, "vp")
@@ -581,6 +673,7 @@ def test_default_patterns_are_the_spec_list_and_compile() -> None:
     assert DEFAULT_FIELDS == (RuleField.TITLE, RuleField.HEADLINE)
     for _, pattern in DEFAULT_PATTERNS:
         compile_pattern(pattern)
+        assert not has_nested_unbounded_repeat(_parser.parse(pattern, re.IGNORECASE)), pattern
 
 
 def test_ensure_default_rules_seeds_once_and_never_recreates_a_deleted_default(

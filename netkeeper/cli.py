@@ -297,10 +297,13 @@ def tags_run_rules() -> None:
         engine.dispose()
     if seeded:
         typer.echo(f"seeded {len(seeded)} default rules")
-    typer.echo(
+    line = (
         f"{result.contacts} contacts: {result.added} tags added, {result.removed} removed, "
         f"{result.updated} re-credited"
     )
+    if result.timeouts:
+        line += f", {result.timeouts} searches timed out (treated as no match; see the log)"
+    typer.echo(line)
 
 
 def _local_user_or_exit(session: Session) -> User:
