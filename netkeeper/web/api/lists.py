@@ -94,12 +94,13 @@ def _member_out(contact: Contact) -> ContactSummaryOut:
 # --- lists --------------------------------------------------------------
 
 
-@router.get("/lists", operation_id="list_lists")
+@router.get("/lists", operation_id="list_lists", responses=INVALID)
 def list_lists(user: CurrentUser, session: SessionDep) -> list[ListOut]:
     """Every list, static and smart, with how many contacts are in it right now."""
-    rows = service.list_lists(session, user)
-    counts = service.member_counts(session, user, [row.id for row in rows])
-    return [_list_out(row, counts.get(row.id, 0)) for row in rows]
+    with translate_errors():
+        rows = service.list_lists(session, user)
+        counts = service.member_counts(session, user, rows)
+        return [_list_out(row, counts.get(row.id, 0)) for row in rows]
 
 
 @router.post(
@@ -181,10 +182,11 @@ def remove_list_member(
 # --- saved views ----------------------------------------------------------
 
 
-@router.get("/views", operation_id="list_views")
+@router.get("/views", operation_id="list_views", responses=INVALID)
 def list_views(user: CurrentUser, session: SessionDep) -> list[SavedViewOut]:
     """Every saved table view, by name."""
-    return [_view_out(row) for row in service.list_views(session, user)]
+    with translate_errors():
+        return [_view_out(row) for row in service.list_views(session, user)]
 
 
 @router.post(

@@ -18,14 +18,14 @@ from netkeeper.crm.confirmation import InvalidReason
 from netkeeper.crm.filters import FilterTree, SortKey
 from netkeeper.crm.importer import ImportField
 from netkeeper.crm.interactions import TimelineEntry
+from netkeeper.crm.lists import MAX_COLUMNS
 from netkeeper.crm.tags import PATTERN_MAX_LENGTH, InvalidPattern, compile_pattern
 from netkeeper.models import (
     LIST_NAME_MAX_LENGTH,
     TAG_NAME_MAX_LENGTH,
-    ContactMet,
-    ContactSnapshot,
     VIEW_NAME_MAX_LENGTH,
     ContactMet,
+    ContactSnapshot,
     ContactSource,
     EmailKind,
     EmailStatus,
@@ -36,8 +36,8 @@ from netkeeper.models import (
     Interaction,
     InteractionKind,
     LinkKind,
-    PhoneKind,
     ListKind,
+    PhoneKind,
     RuleField,
     TagKind,
     TagSource,
@@ -1019,7 +1019,7 @@ class SavedViewOut(BaseModel):
 
 class SavedViewCreate(BaseModel):
     name: ViewName
-    columns: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
+    columns: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1, max_length=MAX_COLUMNS)
     sort: list[SortKey] = Field(default_factory=list)
     filter: FilterTree | None = None
 
@@ -1029,6 +1029,8 @@ class SavedViewPatch(BaseModel):
     given; ``filter: null`` clears it (a view with no filter shows every contact)."""
 
     name: ViewName | None = None
-    columns: list[Annotated[str, Field(min_length=1)]] | None = Field(default=None, min_length=1)
+    columns: list[Annotated[str, Field(min_length=1)]] | None = Field(
+        default=None, min_length=1, max_length=MAX_COLUMNS
+    )
     sort: list[SortKey] | None = None
     filter: FilterTree | None = None

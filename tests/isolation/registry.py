@@ -176,6 +176,8 @@ def _seed_exports(session: Session, user: User) -> int:
     factories.make_contact(session, user, emails=["seeded@example.test"])
     factories.make_contact(session, user)
     return 2
+
+
 def own_list(session: Session, user: User) -> dict[str, str]:
     """``list_id`` of the user's first list; a fresh, empty static one when they have none."""
     row = session.scalars(scoped(user, ContactList).order_by(ContactList.id)).first()

@@ -8,6 +8,7 @@ import factories
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.crm import identity
 from netkeeper.crm.filters import FilterError, SortKey, compile_filter, parse_filter
 from netkeeper.crm.lists import (
     UNSET,
@@ -209,7 +210,7 @@ def test_member_counts_batches_several_lists(writer: Session, user: User) -> Non
     b = create_list(writer, user, "B", ListKind.STATIC)
     c1 = factories.make_contact(writer, user)
     add_members(writer, user, a.id, [c1.id])
-    counts = member_counts(writer, user, [a.id, b.id])
+    counts = member_counts(writer, user, [a, b])
     assert counts == {a.id: 1, b.id: 0}
 
 
@@ -246,6 +247,34 @@ def test_a_smart_lists_members_track_the_live_data(writer: Session, user: User) 
     assert member_count(writer, user, smart.id) == 1
     members, _total = list_members(writer, user, smart.id, limit=50)
     assert [c.id for c in members] == [contact.id]
+
+    # A contact that did not exist when the list was made still belongs to it. Without
+    # this, an implementation that froze membership at creation time passes every other
+    # test in this file, because they all build their contacts before the list.
+    later = factories.make_contact(writer, user, met=ContactMet.MET)
+    assert member_count(writer, user, smart.id) == 2
+    members, _total = list_members(writer, user, smart.id, limit=50)
+    assert sorted(c.id for c in members) == sorted([contact.id, later.id])
+
+
+def test_a_static_list_drops_a_member_that_was_merged_away(writer: Session, user: User) -> None:
+    """A merged-away contact is a tombstone: `merge` moves its emails, phones and
+    LinkedIn identity to the survivor, so leaving it in a static list would hand a
+    campaign a row with no way to reach anyone. Spec 8.2 and `filters.py`'s rule that
+    merged-away contacts never appear; every smart list already honors it."""
+    keep = factories.make_contact(writer, user)
+    loser = factories.make_contact(writer, user)
+    survivor = factories.make_contact(writer, user)
+    row = create_list(writer, user, "First 100", ListKind.STATIC)
+    add_members(writer, user, row.id, [keep.id, loser.id])
+    assert member_count(writer, user, row.id) == 2
+
+    identity.merge(writer, user, survivor.id, loser.id)
+
+    members, total = list_members(writer, user, row.id, limit=50)
+    assert [c.id for c in members] == [keep.id]
+    assert total == 1
+    assert member_count(writer, user, row.id) == 1
 
 
 def test_smart_list_members_pagination(writer: Session, user: User) -> None:

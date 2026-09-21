@@ -840,6 +840,101 @@ export interface paths {
         patch: operations["update_interaction"];
         trace?: never;
     };
+    "/api/v1/lists": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Lists
+         * @description Every list, static and smart, with how many contacts are in it right now.
+         */
+        get: operations["list_lists"];
+        put?: never;
+        /**
+         * Create List
+         * @description Create a static or smart list. A smart list's filter is validated (parsed and
+         *     compiled) before it is stored; a static one starts with no members.
+         */
+        post: operations["create_list"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/lists/{list_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete List
+         * @description Delete a list. Its members (if static) go with it.
+         */
+        delete: operations["delete_list"];
+        options?: never;
+        head?: never;
+        /**
+         * Update List
+         * @description Rename a list and/or, for a smart list, replace its filter. Fields left out, or a
+         *     ``filter`` of ``null``, are left alone.
+         */
+        patch: operations["update_list"];
+        trace?: never;
+    };
+    "/api/v1/lists/{list_id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List List Members
+         * @description One page of the list's members. For a smart list this is exactly what running its
+         *     filter returns right now; nothing is materialized.
+         */
+        get: operations["list_list_members"];
+        put?: never;
+        /**
+         * Add List Members
+         * @description Add contacts to a static list. `422` for a smart list, which has no members to add.
+         */
+        post: operations["add_list_members"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/lists/{list_id}/members/{contact_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove List Member
+         * @description Take a contact off a static list. `422` for a smart list.
+         */
+        delete: operations["remove_list_member"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me": {
         parameters: {
             query?: never;
@@ -939,14 +1034,73 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/views": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Views
+         * @description Every saved table view, by name.
+         */
+        get: operations["list_views"];
+        put?: never;
+        /**
+         * Create View
+         * @description Save a column set, sort, and optional filter for the contacts table to restore.
+         */
+        post: operations["create_view"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/views/{view_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete View
+         * @description Delete a saved view.
+         */
+        delete: operations["delete_view"];
+        options?: never;
+        head?: never;
+        /**
+         * Update View
+         * @description Change any of a view's name, columns, sort, and filter. Fields left out are left
+         *     alone; ``filter: null`` clears it.
+         */
+        patch: operations["update_view"];
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /** And */
-        And: {
+        "And-Input": {
             /** Children */
-            children: components["schemas"]["FilterNode"][];
+            children: components["schemas"]["FilterNode-Input"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "and";
+        };
+        /** And */
+        "And-Output": {
+            /** Children */
+            children: components["schemas"]["FilterNode-Output"][];
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -1141,7 +1295,7 @@ export interface components {
          *     archived or not; a merged-away id is never selected.
          */
         BulkSelection: {
-            filter?: components["schemas"]["FilterTree"] | null;
+            filter?: components["schemas"]["FilterTree-Input"] | null;
             /** Ids */
             ids?: number[] | null;
         };
@@ -1497,7 +1651,7 @@ export interface components {
         ContactQuery: {
             /** Columns */
             columns?: ("li_urn" | "li_public_id" | "li_url" | "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "connected_on" | "degree" | "met" | "triaged_at" | "do_not_contact" | "do_not_contact_reason" | "li_missing_count" | "li_disconnected_at" | "last_enriched_at" | "enrich_priority" | "last_contacted_at" | "notes" | "archived_at" | "source" | "created_at" | "updated_at")[] | null;
-            filter?: components["schemas"]["FilterTree"] | null;
+            filter?: components["schemas"]["FilterTree-Input"] | null;
             /**
              * Limit
              * @default 50
@@ -1594,6 +1748,29 @@ export interface components {
          * @enum {string}
          */
         ContactSource: "sync" | "archive" | "csv" | "manual";
+        /**
+         * ContactSummaryOut
+         * @description A contact as a list or saved view shows it: enough to identify and open them.
+         */
+        ContactSummaryOut: {
+            /** Current Company */
+            current_company: string | null;
+            /** Current Title */
+            current_title: string | null;
+            /** First Name */
+            first_name: string;
+            /** Headline */
+            headline: string | null;
+            /** Id */
+            id: number;
+            /** Last Name */
+            last_name: string;
+            /** Li Url */
+            li_url: string | null;
+            met: components["schemas"]["ContactMet"];
+            /** Preferred Name */
+            preferred_name: string;
+        };
         /** ContactTagCreate */
         ContactTagCreate: {
             /** Tag Id */
@@ -1697,7 +1874,8 @@ export interface components {
             /** Value */
             value: string | number | boolean;
         };
-        FilterNode: components["schemas"]["And"] | components["schemas"]["Or"] | components["schemas"]["Not"] | components["schemas"]["Eq"] | components["schemas"]["Neq"] | components["schemas"]["Contains"] | components["schemas"]["StartsWith"] | components["schemas"]["IsEmpty"] | components["schemas"]["Gt"] | components["schemas"]["Gte"] | components["schemas"]["Lt"] | components["schemas"]["Lte"] | components["schemas"]["Between"] | components["schemas"]["HasEmail"] | components["schemas"]["HasPhone"] | components["schemas"]["HasLiUrl"] | components["schemas"]["HasPosition"] | components["schemas"]["EmailContains"] | components["schemas"]["LastContacted"] | components["schemas"]["ConnectedWithinDays"] | components["schemas"]["ChangedJobsWithinDays"] | components["schemas"]["TagAny"] | components["schemas"]["TagAll"] | components["schemas"]["TagNone"] | components["schemas"]["ListMember"] | components["schemas"]["EnrolledIn"] | components["schemas"]["RepliedIn"];
+        "FilterNode-Input": components["schemas"]["And-Input"] | components["schemas"]["Or-Input"] | components["schemas"]["Not-Input"] | components["schemas"]["Eq"] | components["schemas"]["Neq"] | components["schemas"]["Contains"] | components["schemas"]["StartsWith"] | components["schemas"]["IsEmpty"] | components["schemas"]["Gt"] | components["schemas"]["Gte"] | components["schemas"]["Lt"] | components["schemas"]["Lte"] | components["schemas"]["Between"] | components["schemas"]["HasEmail"] | components["schemas"]["HasPhone"] | components["schemas"]["HasLiUrl"] | components["schemas"]["HasPosition"] | components["schemas"]["EmailContains"] | components["schemas"]["LastContacted"] | components["schemas"]["ConnectedWithinDays"] | components["schemas"]["ChangedJobsWithinDays"] | components["schemas"]["TagAny"] | components["schemas"]["TagAll"] | components["schemas"]["TagNone"] | components["schemas"]["ListMember"] | components["schemas"]["EnrolledIn"] | components["schemas"]["RepliedIn"];
+        "FilterNode-Output": components["schemas"]["And-Output"] | components["schemas"]["Or-Output"] | components["schemas"]["Not-Output"] | components["schemas"]["Eq"] | components["schemas"]["Neq"] | components["schemas"]["Contains"] | components["schemas"]["StartsWith"] | components["schemas"]["IsEmpty"] | components["schemas"]["Gt"] | components["schemas"]["Gte"] | components["schemas"]["Lt"] | components["schemas"]["Lte"] | components["schemas"]["Between"] | components["schemas"]["HasEmail"] | components["schemas"]["HasPhone"] | components["schemas"]["HasLiUrl"] | components["schemas"]["HasPosition"] | components["schemas"]["EmailContains"] | components["schemas"]["LastContacted"] | components["schemas"]["ConnectedWithinDays"] | components["schemas"]["ChangedJobsWithinDays"] | components["schemas"]["TagAny"] | components["schemas"]["TagAll"] | components["schemas"]["TagNone"] | components["schemas"]["ListMember"] | components["schemas"]["EnrolledIn"] | components["schemas"]["RepliedIn"];
         /**
          * FilterTree
          * @description The root: a predicate (or none) and the archived-contacts switch.
@@ -1705,13 +1883,28 @@ export interface components {
          *     The JSON schema carries ``x-netkeeper-fields``: each field's kind, label,
          *     the ops it takes, and the values of an enum, for the builder.
          */
-        FilterTree: {
+        "FilterTree-Input": {
             /**
              * Include Archived
              * @default false
              */
             include_archived: boolean;
-            where?: components["schemas"]["FilterNode"] | null;
+            where?: components["schemas"]["FilterNode-Input"] | null;
+        };
+        /**
+         * FilterTree
+         * @description The root: a predicate (or none) and the archived-contacts switch.
+         *
+         *     The JSON schema carries ``x-netkeeper-fields``: each field's kind, label,
+         *     the ops it takes, and the values of an enum, for the builder.
+         */
+        "FilterTree-Output": {
+            /**
+             * Include Archived
+             * @default false
+             */
+            include_archived: boolean;
+            where?: components["schemas"]["FilterNode-Output"] | null;
         };
         /** Gt */
         Gt: {
@@ -2214,6 +2407,19 @@ export interface components {
          * @enum {string}
          */
         LinkKind: "website" | "twitter" | "github" | "other";
+        /** ListCreate */
+        ListCreate: {
+            filter?: components["schemas"]["FilterTree-Input"] | null;
+            kind: components["schemas"]["ListKind"];
+            /** Name */
+            name: string;
+        };
+        /**
+         * ListKind
+         * @description How a list's members are decided (spec 10.4).
+         * @enum {string}
+         */
+        ListKind: "static" | "smart";
         /** ListMember */
         ListMember: {
             /** List Id */
@@ -2223,6 +2429,54 @@ export interface components {
              * @enum {string}
              */
             op: "list_member";
+        };
+        /** ListMembersAddedOut */
+        ListMembersAddedOut: {
+            /** Added */
+            added: number;
+        };
+        /** ListMembersIn */
+        ListMembersIn: {
+            /** Contact Ids */
+            contact_ids: number[];
+        };
+        /** ListMembersPage */
+        ListMembersPage: {
+            /** Items */
+            items: components["schemas"]["ContactSummaryOut"][];
+            /** Total */
+            total: number;
+        };
+        /** ListOut */
+        ListOut: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            filter: components["schemas"]["FilterTree-Output"] | null;
+            /** Id */
+            id: number;
+            kind: components["schemas"]["ListKind"];
+            /** Member Count */
+            member_count: number;
+            /** Name */
+            name: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * ListPatch
+         * @description Fields left out (or ``null``) are left alone; a smart list's filter cannot be cleared,
+         *     only replaced.
+         */
+        ListPatch: {
+            filter?: components["schemas"]["FilterTree-Input"] | null;
+            /** Name */
+            name?: string | null;
         };
         /** Lt */
         Lt: {
@@ -2291,8 +2545,17 @@ export interface components {
             value: string | number | boolean;
         };
         /** Not */
-        Not: {
-            child: components["schemas"]["FilterNode"];
+        "Not-Input": {
+            child: components["schemas"]["FilterNode-Input"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "not";
+        };
+        /** Not */
+        "Not-Output": {
+            child: components["schemas"]["FilterNode-Output"];
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -2320,9 +2583,19 @@ export interface components {
             updated_at: string;
         };
         /** Or */
-        Or: {
+        "Or-Input": {
             /** Children */
-            children: components["schemas"]["FilterNode"][];
+            children: components["schemas"]["FilterNode-Input"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            op: "or";
+        };
+        /** Or */
+        "Or-Output": {
+            /** Children */
+            children: components["schemas"]["FilterNode-Output"][];
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -2361,6 +2634,52 @@ export interface components {
          * @enum {string}
          */
         RuleField: "title" | "headline" | "company";
+        /** SavedViewCreate */
+        SavedViewCreate: {
+            /** Columns */
+            columns: string[];
+            filter?: components["schemas"]["FilterTree-Input"] | null;
+            /** Name */
+            name: string;
+            /** Sort */
+            sort?: components["schemas"]["SortKey"][];
+        };
+        /** SavedViewOut */
+        SavedViewOut: {
+            /** Columns */
+            columns: string[];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            filter: components["schemas"]["FilterTree-Output"] | null;
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /** Sort */
+            sort: components["schemas"]["SortKey"][];
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * SavedViewPatch
+         * @description Fields left out are left alone; ``columns`` and ``sort`` replace the whole list when
+         *     given; ``filter: null`` clears it (a view with no filter shows every contact).
+         */
+        SavedViewPatch: {
+            /** Columns */
+            columns?: string[] | null;
+            filter?: components["schemas"]["FilterTree-Input"] | null;
+            /** Name */
+            name?: string | null;
+            /** Sort */
+            sort?: components["schemas"]["SortKey"][] | null;
+        };
         /**
          * SnapshotOut
          * @description The headline and job as they were at ``observed_at`` (spec 8.1).
@@ -4561,6 +4880,272 @@ export interface operations {
             };
         };
     };
+    list_lists: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListOut"][];
+                };
+            };
+            /** @description A name, kind/filter combination, or member request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ListCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListOut"];
+                };
+            };
+            /** @description A list or view by that name already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A name, kind/filter combination, or member request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                list_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such list, view, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                list_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ListPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListOut"];
+                };
+            };
+            /** @description No such list, view, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A list or view by that name already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A name, kind/filter combination, or member request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_list_members: {
+        parameters: {
+            query?: {
+                /** @description Members per page. */
+                limit?: number;
+                /** @description Members to skip. */
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                list_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListMembersPage"];
+                };
+            };
+            /** @description No such list, view, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    add_list_members: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                list_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ListMembersIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListMembersAddedOut"];
+                };
+            };
+            /** @description No such list, view, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A name, kind/filter combination, or member request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_list_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                list_id: number;
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such list, view, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A name, kind/filter combination, or member request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_me: {
         parameters: {
             query?: never;
@@ -4777,6 +5362,154 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    list_views: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SavedViewOut"][];
+                };
+            };
+            /** @description A name, kind/filter combination, or member request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_view: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SavedViewCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SavedViewOut"];
+                };
+            };
+            /** @description A list or view by that name already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A name, kind/filter combination, or member request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_view: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                view_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such list, view, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_view: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                view_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SavedViewPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SavedViewOut"];
+                };
+            };
+            /** @description No such list, view, or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A list or view by that name already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A name, kind/filter combination, or member request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
