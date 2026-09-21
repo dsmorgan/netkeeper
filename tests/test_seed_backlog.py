@@ -19,7 +19,7 @@ def test_every_item_in_the_guide_is_parsed() -> None:
     bold_ids = set(re.findall(r"^\*\*(P\d-\d\d) ", guide, flags=re.M))
     assert {it.id for it in items} == bold_ids
     assert len(items) == len(bold_ids), "duplicate item ids"
-    cp_ids = set(re.findall(r"^### (CP\d+): ", guide, flags=re.M))
+    cp_ids = set(re.findall(r"^### (CP\d+(?:\.\d+)?): ", guide, flags=re.M))
     assert {cp.id for cp in checkpoints} == cp_ids
     for it in items:
         assert it.goal and it.done, f"{it.id} is missing Goal or Done when"
