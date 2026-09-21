@@ -8047,6 +8047,54 @@
       }
     },
     "/api/v1/contacts/{contact_id}/tags": {
+      "get": {
+        "description": "The tags on a contact, by name, each with the source that put it there.",
+        "operationId": "list_contact_tags",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ContactTagOut"
+                  },
+                  "title": "Response List Contact Tags",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such tag, rule, or contact for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Contact Tags",
+        "tags": [
+          "tags"
+        ]
+      },
       "post": {
         "description": "Put a tag on a contact by hand. Answers the existing assignment when there is one.",
         "operationId": "tag_contact",

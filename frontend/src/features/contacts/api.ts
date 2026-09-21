@@ -1,0 +1,413 @@
+/**
+ * Every call the Contacts table and detail page make, through the generated
+ * client (`openapi-fetch` over `schema.d.ts`). No hand-written URL or response
+ * type lives outside this module.
+ */
+
+import { queryOptions } from '@tanstack/react-query'
+
+import { api } from '@/api/client'
+
+import type { ColumnId } from './columns'
+import { requestedColumns } from './columns'
+import type {
+  BulkAction,
+  BulkCountOut,
+  BulkSelection,
+  ContactDetail,
+  ContactMet,
+  ContactPage,
+  ContactPatch,
+  ContactTagOut,
+  ContactList,
+  FilterTree,
+  ProvenanceField,
+  SavedView,
+  SortKey,
+  TagOut,
+  TimelineEntry,
+} from './types'
+
+/** A request the backend refused, carrying the status and the parsed body. */
+export class ApiFailure extends Error {
+  readonly status: number
+  readonly body: unknown
+
+  constructor(status: number, body: unknown, message: string) {
+    super(message)
+    this.name = 'ApiFailure'
+    this.status = status
+    this.body = body
+  }
+}
+
+function fail(what: string, status: number, body: unknown): never {
+  const detail =
+    body && typeof body === 'object' && 'detail' in body && typeof body.detail === 'string'
+      ? body.detail
+      : `${status}`
+  throw new ApiFailure(status, body, `${what}: ${detail}`)
+}
+
+// --- the table --------------------------------------------------------------
+
+export const contactsKeys = {
+  all: ['contacts'] as const,
+  pages: () => [...contactsKeys.all, 'page'] as const,
+  detail: (id: number) => [...contactsKeys.all, 'detail', id] as const,
+  timeline: (id: number) => [...contactsKeys.all, 'timeline', id] as const,
+  tags: (id: number) => [...contactsKeys.all, 'tags', id] as const,
+}
+
+export interface ContactsPageRequest {
+  filter: FilterTree
+  sort: readonly SortKey[]
+  limit: number
+  offset: number
+}
+
+/** One page of the table: a filter, a sort, a page, and the columns on screen. */
+export function contactsPageQuery(request: ContactsPageRequest, columns: readonly ColumnId[]) {
+  const body = {
+    filter: request.filter,
+    sort: [...request.sort],
+    limit: request.limit,
+    offset: request.offset,
+    columns: requestedColumns(columns),
+  }
+  return queryOptions({
+    queryKey: [...contactsKeys.pages(), body] as const,
+    queryFn: async ({ signal }): Promise<ContactPage> => {
+      const { data, error, response } = await api.POST('/api/v1/contacts/query', { body, signal })
+      if (data === undefined) fail('contacts query', response.status, error)
+      return data
+    },
+    // A page a filter keystroke just left is still the right answer for the
+    // keystroke before it; keeping it stops the table flashing empty.
+    placeholderData: (previous) => previous,
+    retry: false,
+  })
+}
+
+export function contactQuery(contactId: number) {
+  return queryOptions({
+    queryKey: contactsKeys.detail(contactId),
+    queryFn: async ({ signal }): Promise<ContactDetail> => {
+      const { data, error, response } = await api.GET('/api/v1/contacts/{contact_id}', {
+        params: { path: { contact_id: contactId } },
+        signal,
+      })
+      if (data === undefined) fail('contact', response.status, error)
+      return data
+    },
+    retry: false,
+  })
+}
+
+export interface TimelinePage {
+  items: TimelineEntry[]
+  next_before: string | null
+}
+
+/**
+ * One page of the timeline, newest first. `before` is the cursor the previous
+ * page handed back; `null` starts at the newest entry.
+ */
+export async function fetchTimelinePage(
+  contactId: number,
+  before: string | null,
+  signal?: AbortSignal,
+): Promise<TimelinePage> {
+  const { data, error, response } = await api.GET('/api/v1/contacts/{contact_id}/timeline', {
+    params: { path: { contact_id: contactId }, query: before ? { before } : {} },
+    signal,
+  })
+  if (data === undefined) fail('timeline', response.status, error)
+  return data
+}
+
+/** The tags on one contact. A table row carries none, so this is per contact. */
+export function contactTagsQuery(contactId: number) {
+  return queryOptions({
+    queryKey: contactsKeys.tags(contactId),
+    queryFn: async ({ signal }): Promise<ContactTagOut[]> => {
+      const { data, error, response } = await api.GET('/api/v1/contacts/{contact_id}/tags', {
+        params: { path: { contact_id: contactId } },
+        signal,
+      })
+      if (data === undefined) fail('contact tags', response.status, error)
+      return data
+    },
+    retry: false,
+  })
+}
+
+/**
+ * Lists (spec 10.4, P1-08). Both kinds come back; only a static list takes
+ * members, because a smart list's membership is its filter.
+ */
+export const listsQuery = queryOptions({
+  queryKey: ['lists'] as const,
+  queryFn: async ({ signal }): Promise<ContactList[]> => {
+    const { data, error, response } = await api.GET('/api/v1/lists', { signal })
+    if (data === undefined) fail('lists', response.status, error)
+    return data
+  },
+  retry: false,
+})
+
+/** Puts contacts on a static list. Ids already on it are not counted again. */
+export async function addListMembers(listId: number, contactIds: number[]): Promise<number> {
+  const { data, error, response } = await api.POST('/api/v1/lists/{list_id}/members', {
+    params: { path: { list_id: listId } },
+    body: { contact_ids: contactIds },
+  })
+  if (data === undefined) fail('add to list', response.status, error)
+  return data.added
+}
+
+/** Saved views: a column set, a sort, and a filter under a name (spec 10.1, P1-08). */
+export const viewsQuery = queryOptions({
+  queryKey: ['views'] as const,
+  queryFn: async ({ signal }): Promise<SavedView[]> => {
+    const { data, error, response } = await api.GET('/api/v1/views', { signal })
+    if (data === undefined) fail('views', response.status, error)
+    return data
+  },
+  retry: false,
+})
+
+export async function createView(view: {
+  name: string
+  columns: string[]
+  sort: SortKey[]
+  filter: FilterTree | null
+}): Promise<SavedView> {
+  const { data, error, response } = await api.POST('/api/v1/views', { body: view })
+  if (data === undefined) fail('save view', response.status, error)
+  return data
+}
+
+export async function deleteView(viewId: number): Promise<void> {
+  const { error, response } = await api.DELETE('/api/v1/views/{view_id}', {
+    params: { path: { view_id: viewId } },
+  })
+  if (!response.ok) fail('delete view', response.status, error)
+}
+
+export const tagsQuery = queryOptions({
+  queryKey: ['tags'] as const,
+  queryFn: async ({ signal }): Promise<TagOut[]> => {
+    const { data, error, response } = await api.GET('/api/v1/tags', { signal })
+    if (data === undefined) fail('tags', response.status, error)
+    return data
+  },
+  staleTime: 60_000,
+  retry: false,
+})
+
+// --- writes on one contact --------------------------------------------------
+
+export async function patchContact(contactId: number, patch: ContactPatch): Promise<ContactDetail> {
+  const { data, error, response } = await api.PATCH('/api/v1/contacts/{contact_id}', {
+    params: { path: { contact_id: contactId } },
+    body: patch,
+  })
+  if (data === undefined) fail('save', response.status, error)
+  return data
+}
+
+export async function revertContactField(
+  contactId: number,
+  field: ProvenanceField,
+): Promise<ContactDetail> {
+  const { data, error, response } = await api.POST('/api/v1/contacts/{contact_id}/revert-field', {
+    params: { path: { contact_id: contactId } },
+    body: { field },
+  })
+  if (data === undefined) fail('revert', response.status, error)
+  return data
+}
+
+export async function setArchived(contactId: number, archived: boolean): Promise<ContactDetail> {
+  const path = archived
+    ? ('/api/v1/contacts/{contact_id}/archive' as const)
+    : ('/api/v1/contacts/{contact_id}/unarchive' as const)
+  const { data, error, response } = await api.POST(path, {
+    params: { path: { contact_id: contactId } },
+  })
+  if (data === undefined) fail(archived ? 'archive' : 'unarchive', response.status, error)
+  return data
+}
+
+export async function tagContact(contactId: number, tagId: number): Promise<void> {
+  const { error, response } = await api.POST('/api/v1/contacts/{contact_id}/tags', {
+    params: { path: { contact_id: contactId } },
+    body: { tag_id: tagId },
+  })
+  // The contact already carrying the tag is the state asked for, not a failure.
+  if (!response.ok && response.status !== 409) fail('tag', response.status, error)
+}
+
+export async function untagContact(contactId: number, tagId: number): Promise<void> {
+  const { error, response } = await api.DELETE('/api/v1/contacts/{contact_id}/tags/{tag_id}', {
+    params: { path: { contact_id: contactId, tag_id: tagId } },
+  })
+  if (!response.ok && response.status !== 404) fail('untag', response.status, error)
+}
+
+export async function setNotes(contactId: number, notes: string | null): Promise<void> {
+  const { error, response } = await api.PUT('/api/v1/contacts/{contact_id}/notes', {
+    params: { path: { contact_id: contactId } },
+    body: { notes },
+  })
+  if (!response.ok) fail('notes', response.status, error)
+}
+
+export async function addEmail(contactId: number, email: string): Promise<void> {
+  const { error, response } = await api.POST('/api/v1/contacts/{contact_id}/emails', {
+    params: { path: { contact_id: contactId } },
+    body: { email, kind: 'other', is_primary: false, status: 'ok' },
+  })
+  if (!response.ok) fail('add address', response.status, error)
+}
+
+export async function makeEmailPrimary(contactId: number, emailId: number): Promise<void> {
+  const { error, response } = await api.PATCH('/api/v1/contacts/{contact_id}/emails/{email_id}', {
+    params: { path: { contact_id: contactId, email_id: emailId } },
+    body: { is_primary: true },
+  })
+  if (!response.ok) fail('set primary address', response.status, error)
+}
+
+export async function deleteEmail(contactId: number, emailId: number): Promise<void> {
+  const { error, response } = await api.DELETE('/api/v1/contacts/{contact_id}/emails/{email_id}', {
+    params: { path: { contact_id: contactId, email_id: emailId } },
+  })
+  if (!response.ok) fail('remove address', response.status, error)
+}
+
+export async function addPhone(contactId: number, raw: string): Promise<void> {
+  const { error, response } = await api.POST('/api/v1/contacts/{contact_id}/phones', {
+    params: { path: { contact_id: contactId } },
+    body: { raw, kind: 'other', is_primary: false },
+  })
+  if (!response.ok) fail('add number', response.status, error)
+}
+
+export async function deletePhone(contactId: number, phoneId: number): Promise<void> {
+  const { error, response } = await api.DELETE('/api/v1/contacts/{contact_id}/phones/{phone_id}', {
+    params: { path: { contact_id: contactId, phone_id: phoneId } },
+  })
+  if (!response.ok) fail('remove number', response.status, error)
+}
+
+export async function addLink(contactId: number, url: string): Promise<void> {
+  const { error, response } = await api.POST('/api/v1/contacts/{contact_id}/links', {
+    params: { path: { contact_id: contactId } },
+    body: { url, kind: 'other' },
+  })
+  if (!response.ok) fail('add link', response.status, error)
+}
+
+export async function deleteLink(contactId: number, linkId: number): Promise<void> {
+  const { error, response } = await api.DELETE('/api/v1/contacts/{contact_id}/links/{link_id}', {
+    params: { path: { contact_id: contactId, link_id: linkId } },
+  })
+  if (!response.ok) fail('remove link', response.status, error)
+}
+
+// --- bulk -------------------------------------------------------------------
+
+/**
+ * Everything a confirmation token binds: the selection, the action, and exactly
+ * what would be written.
+ *
+ * The count and the action send the same object, because the token is issued
+ * against all of it: a token for "mark 214 as met" is refused for "mark 214 as
+ * not met". So the dialog settles the whole sentence, reason included, before
+ * it asks for a count.
+ */
+export interface BulkConfirmable {
+  action: BulkAction
+  selection: BulkSelection
+  value?: ContactMet | boolean | null
+  reason?: string | null
+}
+
+function bulkBody(confirmable: BulkConfirmable) {
+  return {
+    action: confirmable.action,
+    selection: confirmable.selection,
+    ...(confirmable.value === undefined ? {} : { value: confirmable.value }),
+    ...(confirmable.reason === undefined ? {} : { reason: confirmable.reason }),
+  }
+}
+
+/** Asks what an action would touch. The token that comes back binds that count. */
+export async function countBulk(confirmable: BulkConfirmable): Promise<BulkCountOut> {
+  const { data, error, response } = await api.POST('/api/v1/contacts/bulk/count', {
+    body: bulkBody(confirmable),
+  })
+  if (data === undefined) fail('count', response.status, error)
+  return data
+}
+
+export async function applyBulk(confirmable: BulkConfirmable, token: string): Promise<number> {
+  const { data, error, response } = await api.POST('/api/v1/contacts/bulk', {
+    body: { ...bulkBody(confirmable), token },
+  })
+  if (data === undefined) fail('bulk action', response.status, error)
+  return data.affected
+}
+
+/**
+ * The survivor a merged-away contact points at, or null when this is some other
+ * failure.
+ *
+ * Every write to a contact that was merged away answers `409 {"detail":
+ * "merged", "merged_into_id": N}` (spec 8.2), so the client can say where the
+ * person went instead of showing a conflict nobody can act on.
+ */
+export function mergedInto(error: unknown): number | null {
+  if (!(error instanceof ApiFailure) || error.status !== 409) return null
+  const body = (error.body ?? {}) as Record<string, unknown>
+  return body.detail === 'merged' && typeof body.merged_into_id === 'number'
+    ? body.merged_into_id
+    : null
+}
+
+/**
+ * Why a bulk action was refused, in the terms the dialog explains it in.
+ *
+ * A moved count and an expired token are both the confirmation doing its job
+ * (spec 14.1): nothing was changed, and asking for the count again is the way
+ * forward. They read differently, so they are separate kinds.
+ */
+export type BulkRefusal =
+  | { kind: 'count_mismatch'; expected: number; actual: number }
+  | { kind: 'expired' }
+  | { kind: 'rejected'; detail: string }
+  | { kind: 'failed'; detail: string }
+
+export function readBulkRefusal(error: unknown): BulkRefusal {
+  if (!(error instanceof ApiFailure)) {
+    return { kind: 'failed', detail: error instanceof Error ? error.message : 'Unknown error' }
+  }
+  const body = (error.body ?? {}) as Record<string, unknown>
+  if (
+    error.status === 409 &&
+    body.detail === 'count mismatch' &&
+    typeof body.expected_count === 'number' &&
+    typeof body.actual_count === 'number'
+  ) {
+    return { kind: 'count_mismatch', expected: body.expected_count, actual: body.actual_count }
+  }
+  if (error.status === 409 && body.reason === 'expired') {
+    return { kind: 'expired' }
+  }
+  if (error.status === 422 && typeof body.reason === 'string') {
+    return { kind: 'rejected', detail: String(body.detail ?? body.reason) }
+  }
+  return { kind: 'failed', detail: error.message }
+}

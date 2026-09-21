@@ -167,6 +167,14 @@ def _seed_tags(session: Session, user: User) -> int:
     return 1
 
 
+def _seed_contact_tags(session: Session, user: User) -> int:
+    """One tagged contact, the first the user has, so ``own_contact`` points at it."""
+    contact = factories.make_contact(session, user)
+    tag = tag_service.create_tag(session, user, "seeded")
+    tag_service.tag_contact(session, user, contact.id, tag.id)
+    return 1
+
+
 def _seed_autotag_rules(session: Session, user: User) -> int:
     tag = tag_service.create_tag(session, user, "seeded")
     tag_service.create_rule(session, user, tag.id, RuleField.TITLE, r"\bseeded\b")
@@ -243,6 +251,12 @@ REGISTRY: list[ListEndpoint] = [
         f"{API_PREFIX}/contacts/{{contact_id}}/timeline",
         _seed_timeline,
         paged_count,
+        path_params=own_contact,
+    ),
+    ListEndpoint(
+        f"{API_PREFIX}/contacts/{{contact_id}}/tags",
+        _seed_contact_tags,
+        array_count,
         path_params=own_contact,
     ),
     ListEndpoint(f"{API_PREFIX}/imports", _seed_import_runs, paged_count),

@@ -532,6 +532,23 @@ def tag_contact(
     return row
 
 
+def contact_tags(session: Session, user: User, contact_id: int) -> list[ContactTag]:
+    """Every tag assignment on ``contact_id``, by tag name; :class:`ContactNotFound`.
+
+    The Contacts detail screen reads a contact's tags with this (spec 10.1);
+    ``ContactRow`` deliberately carries none, so the table asks per contact.
+    """
+    _contact(session, user, contact_id)
+    return list(
+        session.scalars(
+            scoped(user, ContactTag)
+            .join(Tag, Tag.id == ContactTag.tag_id)
+            .where(ContactTag.contact_id == contact_id, Tag.user_id == user.id)
+            .order_by(Tag.name_key, Tag.id)
+        )
+    )
+
+
 def untag_contact(session: Session, user: User, contact_id: int, tag_id: int) -> bool:
     """Remove ``tag_id`` from ``contact_id``; True when there was an assignment.
 
