@@ -5297,6 +5297,46 @@
         "title": "Or",
         "type": "object"
       },
+      "OverlapOut": {
+        "description": "Genuine you-and-them overlap: the same company, and the years it is known to overlap.\n\nThe actual LinkedIn \"you both worked at X\" signal (#84), computed from the\nuser's own job history (``/me/positions``) against this contact's. Unlike\n:class:`SharedCompanyOut`, a match here means the two date ranges are not\nprovably disjoint -- a stint known to have ended before the other started\nis excluded. ``started_on``/``ended_on`` are the tightest span the evidence\ncan stand behind; either or both are ``null`` when a bound is not known on\neither side (a still-current position, or one nobody ever dated), which\nstill counts as overlap on the company alone.",
+        "properties": {
+          "company": {
+            "title": "Company",
+            "type": "string"
+          },
+          "ended_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended On"
+          },
+          "started_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started On"
+          }
+        },
+        "required": [
+          "company",
+          "started_on",
+          "ended_on"
+        ],
+        "title": "OverlapOut",
+        "type": "object"
+      },
       "PhoneKind": {
         "enum": [
           "mobile",
@@ -5563,7 +5603,7 @@
         "type": "object"
       },
       "SharedCompanyOut": {
-        "description": "A company this contact is at or was at, and the overlap with the address book.\n\nOverlap with **the rest of your contacts**, not with you: nothing in the data\nmodel records your own positions, so \"you both worked at X\" is not something\nnetkeeper can say, and a panel must not label it that way (spec 10.2).\n``contact_count`` is how many *other* live contacts are at that company now\nand ``met_count`` how many of those you have already marked met, so the\nreading is \"you know four people there, three of whom you have met\".\n\nEvery company the contact has is returned, including one where nobody else\nis, as ``contact_count: 0``; a client that only wants overlap filters those.",
+        "description": "A company this contact is at or was at, and the overlap with the address book.\n\nOverlap with **the rest of your contacts**, not with you: ``contact_count``\nis how many *other* live contacts are at that company now and ``met_count``\nhow many of those you have already marked met, so the reading is \"you know\nfour people there, three of whom you have met\". This is **not** \"you both\nworked at X\" -- that claim is :class:`OverlapOut`, a separate field with a\nseparate name, and a panel must never confuse the two (spec 10.2, #84).\n\nEvery company the contact has is returned, including one where nobody else\nis, as ``contact_count: 0``; a client that only wants overlap filters those.",
         "properties": {
           "company": {
             "title": "Company",
@@ -6539,7 +6579,7 @@
         "type": "object"
       },
       "TriageEvidenceOut": {
-        "description": "Everything the panel shows beside the contact, in the same response as the contact.",
+        "description": "Everything the panel shows beside the contact, in the same response as the contact.\n\n``shared_companies`` and ``worked_together`` are two different signals with\ntwo different names (see :class:`SharedCompanyOut` and :class:`OverlapOut`);\nneither implies the other.",
         "properties": {
           "messages": {
             "$ref": "#/components/schemas/TriageMessagesOut"
@@ -6571,12 +6611,20 @@
             },
             "title": "Timeline",
             "type": "array"
+          },
+          "worked_together": {
+            "items": {
+              "$ref": "#/components/schemas/OverlapOut"
+            },
+            "title": "Worked Together",
+            "type": "array"
           }
         },
         "required": [
           "messages",
           "timeline",
-          "shared_companies"
+          "shared_companies",
+          "worked_together"
         ],
         "title": "TriageEvidenceOut",
         "type": "object"
@@ -6990,6 +7038,258 @@
           "timezone"
         ],
         "title": "UserOut",
+        "type": "object"
+      },
+      "UserPositionIn": {
+        "description": "One stint to add to the user's own job history. Needs a title or a company.\n\n``is_current`` left out is inferred: a start with no end is current,\nanything else is not.",
+        "properties": {
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company"
+          },
+          "company_urn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company Urn"
+          },
+          "ended_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended On"
+          },
+          "is_current": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Current"
+          },
+          "started_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started On"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "UserPositionIn",
+        "type": "object"
+      },
+      "UserPositionOut": {
+        "properties": {
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company"
+          },
+          "company_urn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company Urn"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "ended_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended On"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_current": {
+            "title": "Is Current",
+            "type": "boolean"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ContactSource"
+          },
+          "started_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started On"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "company",
+          "company_urn",
+          "started_on",
+          "ended_on",
+          "is_current",
+          "source",
+          "observed_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "UserPositionOut",
+        "type": "object"
+      },
+      "UserPositionPatch": {
+        "description": "Change given fields of one of the user's own positions; a field left out is untouched.",
+        "properties": {
+          "company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company"
+          },
+          "company_urn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company Urn"
+          },
+          "ended_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended On"
+          },
+          "is_current": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Current"
+          },
+          "started_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started On"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "UserPositionPatch",
         "type": "object"
       },
       "ValidationError": {
@@ -10052,6 +10352,151 @@
         "summary": "Get Me",
         "tags": [
           "me"
+        ]
+      }
+    },
+    "/api/v1/me/positions": {
+      "get": {
+        "description": "The user's own job history, current first, then most recently started.",
+        "operationId": "list_my_positions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UserPositionOut"
+                  },
+                  "title": "Response List My Positions",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List My Positions",
+        "tags": [
+          "positions"
+        ]
+      },
+      "post": {
+        "description": "Add one stint to the user's own job history by hand.",
+        "operationId": "create_my_position",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserPositionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserPositionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Neither a title nor a company"
+          }
+        },
+        "summary": "Create My Position",
+        "tags": [
+          "positions"
+        ]
+      }
+    },
+    "/api/v1/me/positions/{position_id}": {
+      "delete": {
+        "description": "Delete one of the user's own positions.",
+        "operationId": "delete_my_position",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "position_id",
+            "required": true,
+            "schema": {
+              "title": "Position Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such position"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete My Position",
+        "tags": [
+          "positions"
+        ]
+      },
+      "patch": {
+        "description": "Change fields of one of the user's own positions; a field left out is untouched.",
+        "operationId": "update_my_position",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "position_id",
+            "required": true,
+            "schema": {
+              "title": "Position Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserPositionPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserPositionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such position"
+          },
+          "422": {
+            "description": "Neither a title nor a company"
+          }
+        },
+        "summary": "Update My Position",
+        "tags": [
+          "positions"
         ]
       }
     },

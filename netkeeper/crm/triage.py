@@ -44,11 +44,25 @@ Evidence in the same response
 -----------------------------
 Every answer that hands out a contact hands out its evidence with it
 (:class:`Card`): the LinkedIn message history, the timeline of interactions and
-job snapshots, the companies shared with the rest of the address book, the
-notes, and the tags. A triage screen therefore needs one request per contact,
-not one for the contact and four for the panel. :func:`decide` returns the next
-card with the decision, so the steady state of a run is a single request per
-contact, and the client can hold the one after that already rendered.
+job snapshots, the companies shared with the rest of the address book
+(:class:`SharedCompany`), the genuine you-and-them overlap from the user's own
+career (:class:`Overlap`, #84), the notes, and the tags. A triage screen
+therefore needs one request per contact, not one for the contact and four for
+the panel. :func:`decide` returns the next card with the decision, so the
+steady state of a run is a single request per contact, and the client can hold
+the one after that already rendered.
+
+Two company signals, never to be confused
+------------------------------------------
+:class:`SharedCompany` (P1-09) counts overlap with the *rest of the address
+book*: nothing about the user's own career. :class:`Overlap` (P1-26, #84) is
+the actual LinkedIn "you both worked at X" signal, computed from
+:class:`~netkeeper.models.UserPosition` against this contact's own positions
+and current company. They answer different questions, they are named
+differently on :class:`Evidence`, and neither implies the other -- a person
+can be connected to someone at a company they once shared without either of
+them knowing it, and can also know someone they never worked with. See each
+class's docstring for what it actually counts.
 
 The evidence load costs a fixed number of queries whatever a contact carries;
 ``tests/test_web_triage.py`` counts them and fails if that stops being true.
@@ -76,10 +90,11 @@ write=True)``, or a non-GET request's session).
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Final
 
 from sqlalchemy import ColumnElement, Select, and_, case, func, or_, select
@@ -108,6 +123,7 @@ from netkeeper.models import (
     TriageDecision,
     TriageDecisionKind,
     User,
+    UserPosition,
 )
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped, scoped, scoped_count
@@ -285,13 +301,13 @@ class CountChanged(RuntimeError):
 class SharedCompany:
     """A company this contact is at, or was at, and who else in the address book is there.
 
-    The person's own career is not in the database (there is no table of your
-    positions), so "shared" means shared with the rest of your contacts, which is
-    the evidence that actually helps in triage: you know four people at a
-    company, three of whom you have already marked met, so you were probably in
-    the same room. It is **not** the LinkedIn "you both worked at X" signal that
-    spec 10.2 reads like, and 10.2 now records that divergence; a panel must not
-    label it that way.
+    "Shared" means shared with the rest of your contacts, which is evidence
+    that helps in triage on its own: you know four people at a company, three
+    of whom you have already marked met, so you were probably in the same
+    room. It is **not** the LinkedIn "you both worked at X" signal that spec
+    10.2 originally read like -- that signal exists now too, as
+    :class:`Overlap`, and a panel must never confuse the two or use this
+    field's name for that claim.
 
     ``company`` is the contact's own spelling; the overlap is counted without
     regard to case against other live contacts' current company. Two asymmetries
@@ -300,12 +316,46 @@ class SharedCompany:
     alone, so someone who was there with them and has moved on is not counted;
     and a company where nobody else is comes back with ``contact_count`` 0
     rather than being dropped, so the client sees the whole employment history
-    and filters what it does not want.
+    and filters what it does not want. Unchanged by P1-26: this field keeps its
+    exact behavior and its exact name (#84).
     """
 
     company: str
     contact_count: int
     met_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class Overlap:
+    """Genuine you-and-them overlap: the same company, and the years it is known to overlap.
+
+    The actual LinkedIn "you both worked at X" signal (#84), which
+    :class:`SharedCompany` above is not: this reads the user's own career
+    (:class:`~netkeeper.models.UserPosition`, filled from the archive's
+    ``Positions.csv`` or added by hand, P1-26) against this contact's own
+    positions and current company, matching company names loosely --
+    case-folded, punctuation folded away, and one trailing legal-entity suffix
+    dropped, so "Acme, Inc." and "Acme Inc" count as the same company
+    (:func:`_normalize_company`) -- because neither source spells a company
+    the same way twice.
+
+    A same-company match is only reported when the two sides' date ranges are
+    not *provably* disjoint: a stint that is known to have ended before the
+    other started is excluded, which is what makes this "genuine" rather than
+    the looser company-only match :class:`SharedCompany` makes. ``started_on``
+    and ``ended_on`` are the tightest span the evidence can actually stand
+    behind -- the later of the two starts and the earlier of the two ends,
+    each using whichever side has a value when the other does not. A position
+    with no end date is "current" and never closes its own end of the window;
+    a position with no dates at all closes neither end, so it still counts as
+    overlap (the company matched) but pins down no year. Both fields are
+    ``None`` when every position at this company, on both sides, is entirely
+    undated: company evidence with nothing to say about *when*.
+    """
+
+    company: str
+    started_on: date | None
+    ended_on: date | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,11 +376,17 @@ class MessageEvidence:
 
 @dataclass(frozen=True, slots=True)
 class Evidence:
-    """Everything the triage panel shows beside the contact (spec 10.2)."""
+    """Everything the triage panel shows beside the contact (spec 10.2).
+
+    ``shared_companies`` and ``worked_together`` are deliberately separate
+    fields with separate names: see the module docstring, "Two company
+    signals, never to be confused".
+    """
 
     messages: MessageEvidence
     timeline: list[TimelineEntry]
     shared_companies: list[SharedCompany]
+    worked_together: list[Overlap]
 
 
 @dataclass(frozen=True, slots=True)
@@ -937,6 +993,7 @@ def _evidence(session: Session, user: User, contact: Contact) -> Evidence:
         messages=_messages(session, user, contact),
         timeline=timeline(session, user, contact.id, limit=TIMELINE_LIMIT),
         shared_companies=_shared_companies(session, user, contact),
+        worked_together=_worked_together(session, user, contact),
     )
 
 
@@ -1003,6 +1060,164 @@ def _shared_companies(session: Session, user: User, contact: Contact) -> list[Sh
         total, met = counted.get(key, (0, 0))
         shared.append(SharedCompany(company=spelling, contact_count=total, met_count=met))
     return shared
+
+
+# --- you-and-them overlap (#84) ----------------------------------------------
+
+_COMPANY_SUFFIX_WORDS: Final[frozenset[str]] = frozenset(
+    {"inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation", "co", "company", "plc"}
+)
+_COMPANY_WORD: Final = re.compile(r"[a-z0-9]+")
+
+
+def _normalize_company(name: str) -> str:
+    """A company name for loose matching: case, punctuation, and one trailing suffix folded away.
+
+    ``re.findall`` throws away every non-alphanumeric character rather than
+    just periods and commas, so "Acme, Inc.", "Acme Inc", and "ACME INC" all
+    fold to the same key; dropping one *trailing* word from
+    :data:`_COMPANY_SUFFIX_WORDS` folds "Acme" and "Acme Corp" together too.
+    Never used for :class:`SharedCompany`, which keeps its exact-spelling,
+    lowercase-only match (#84).
+    """
+    words = _COMPANY_WORD.findall(name.casefold())
+    if words and words[-1] in _COMPANY_SUFFIX_WORDS:
+        words = words[:-1]
+    return " ".join(words)
+
+
+@dataclass(frozen=True, slots=True)
+class _Span:
+    """One side of a possible overlap at one company: a date range, loosely.
+
+    ``end`` is what a client would be shown: ``None`` for a stint that is
+    still open or was never dated. ``bound`` is the same value used only to
+    decide whether two spans can be proven *not* to overlap -- "current" (no
+    end date, but known to still be ongoing) is bounded at today, so a
+    currently-current stint cannot claim to overlap a stint that is known to
+    have ended years ago; a stint with no dates at all, current or not, stays
+    unbounded, because there is nothing to bound it with.
+    """
+
+    start: date | None
+    end: date | None
+    bound: date | None
+
+
+def _span(start: date | None, end: date | None, *, current: bool) -> _Span:
+    bound = utcnow().date() if current and end is None else end
+    return _Span(start=start, end=end, bound=bound)
+
+
+def _disjoint(a: _Span, b: _Span) -> bool:
+    """True only when both spans are dated enough to prove they never overlap."""
+    return (a.bound is not None and b.start is not None and a.bound < b.start) or (
+        b.bound is not None and a.start is not None and b.bound < a.start
+    )
+
+
+def _later(a: date | None, b: date | None) -> date | None:
+    """The later of two dates, treating a missing one as unbounded in the past."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
+def _earlier(a: date | None, b: date | None) -> date | None:
+    """The earlier of two dates, treating a missing one as unbounded in the future."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return min(a, b)
+
+
+def _best_window(mine: list[_Span], theirs: list[_Span]) -> tuple[date | None, date | None] | None:
+    """The most informative overlap window among every non-disjoint pairing, or ``None``.
+
+    ``None`` only when every pairing is provably disjoint, which is what makes
+    :class:`Overlap` a genuine claim rather than the same-company-ever match
+    :class:`SharedCompany` makes. Among the pairings that survive, the one
+    that pins down the most wins: two known bounds beat one, one beats none.
+    """
+    best: tuple[date | None, date | None] | None = None
+    best_score = -1
+    for a in mine:
+        for b in theirs:
+            if _disjoint(a, b):
+                continue
+            start, end = _later(a.start, b.start), _earlier(a.end, b.end)
+            score = (start is not None) + (end is not None)
+            if score > best_score:
+                best, best_score = (start, end), score
+    return best
+
+
+def _my_position_windows(session: Session, user: User) -> dict[str, list[_Span]]:
+    """The user's own positions, grouped by :func:`_normalize_company`."""
+    windows: dict[str, list[_Span]] = {}
+    for row in session.scalars(scoped(user, UserPosition)):
+        key = _normalize_company(row.company or "")
+        if not key:
+            continue
+        windows.setdefault(key, []).append(
+            _span(row.started_on, row.ended_on, current=row.is_current)
+        )
+    return windows
+
+
+def _their_position_windows(contact: Contact) -> dict[str, tuple[str, list[_Span]]]:
+    """The contact's own positions and current company, grouped by :func:`_normalize_company`.
+
+    Reads ``contact.positions``, already loaded by :func:`_shared_companies`
+    earlier in the same :func:`_evidence` call, so this adds no query of its
+    own. The synthetic entry for ``current_company`` (no dates at all, but
+    known to be ongoing) is what lets a contact who carries no dated
+    ``ContactPosition`` rows -- true of every contact the archive importer
+    creates today -- still participate in overlap at all.
+    """
+    windows: dict[str, tuple[str, list[_Span]]] = {}
+
+    def add(company: str | None, start: date | None, end: date | None, *, current: bool) -> None:
+        cleaned = (company or "").strip()
+        key = _normalize_company(cleaned)
+        if not key:
+            return
+        display, spans = windows.get(key, (cleaned, []))
+        spans.append(_span(start, end, current=current))
+        windows[key] = (display, spans)
+
+    for row in contact.positions:
+        add(row.company, row.started_on, row.ended_on, current=row.is_current)
+    add(contact.current_company, None, None, current=True)
+    return windows
+
+
+def _worked_together(session: Session, user: User, contact: Contact) -> list[Overlap]:
+    """The you-and-them overlap evidence: same company, dates that are not provably disjoint.
+
+    One query for the user's own positions (a handful of rows read once per
+    card); the matching itself is Python, because it is the loose,
+    punctuation-and-suffix-insensitive kind :func:`_normalize_company` does,
+    not something a database index can do. Sorted by company so the panel is
+    stable across requests.
+    """
+    mine = _my_position_windows(session, user)
+    theirs = _their_position_windows(contact)
+    overlaps = []
+    for key, (display, their_spans) in theirs.items():
+        my_spans = mine.get(key)
+        if my_spans is None:
+            continue
+        window = _best_window(my_spans, their_spans)
+        if window is None:
+            continue
+        started_on, ended_on = window
+        overlaps.append(Overlap(company=display, started_on=started_on, ended_on=ended_on))
+    overlaps.sort(key=lambda item: item.company.casefold())
+    return overlaps
 
 
 # --- the decision log -------------------------------------------------------

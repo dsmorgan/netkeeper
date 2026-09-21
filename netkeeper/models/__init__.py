@@ -68,6 +68,7 @@ from netkeeper.models.triage import (
     TriageDecisionKind,
 )
 from netkeeper.models.user import User, UserKind
+from netkeeper.models.user_positions import UserPosition
 
 __all__ = [
     "BATCH_ID_LENGTH",
@@ -129,6 +130,7 @@ __all__ = [
     "User",
     "UserKind",
     "UserOwned",
+    "UserPosition",
     "linkedin_profile_url",
     "normalize_email",
     "normalize_public_id",

@@ -21,7 +21,9 @@ from netkeeper.models import (
     ContactSource,
     User,
     UserKind,
+    UserPosition,
 )
+from netkeeper.models.base import utcnow
 
 _users: Iterator[int] = itertools.count(1)
 _contacts: Iterator[int] = itertools.count(1)
@@ -93,3 +95,19 @@ def make_contact(
     session.add(contact)
     session.flush()
     return contact
+
+
+def make_user_position(session: Session, user: User, **overrides: Any) -> UserPosition:
+    """A flushed :class:`UserPosition` of ``user``. ``overrides`` are its columns."""
+    fields: dict[str, Any] = {
+        "title": "Staff Engineer",
+        "company": "Fixture Works",
+        "is_current": False,
+        "source": ContactSource.MANUAL,
+        "observed_at": utcnow(),
+    }
+    fields.update(overrides)
+    position = UserPosition(user_id=user.id, **fields)
+    session.add(position)
+    session.flush()
+    return position

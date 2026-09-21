@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -220,6 +220,142 @@ def test_shared_companies_never_count_another_user_s_contacts(writer: Session, u
     factories.make_contact(writer, other, current_company="Northwind Pottery")
     shared = module.load_card(writer, user, mine).evidence.shared_companies
     assert [(item.company, item.contact_count) for item in shared] == [("Northwind Pottery", 0)]
+
+
+# --- the you-and-them overlap (#84) ------------------------------------------
+
+
+def test_worked_together_reports_the_overlapping_years(writer: Session, user: User) -> None:
+    factories.make_user_position(
+        writer,
+        user,
+        company="Northwind Pottery",
+        started_on=date(2019, 1, 1),
+        ended_on=date(2021, 1, 1),
+    )
+    contact = factories.make_contact(
+        writer,
+        user,
+        current_company="Somewhere Else",
+        positions=[
+            {
+                "company": "Northwind Pottery",
+                "started_on": date(2020, 1, 1),
+                "ended_on": date(2022, 1, 1),
+                "is_current": False,
+            }
+        ],
+    )
+    overlap = module.load_card(writer, user, contact).evidence.worked_together
+    assert [(item.company, item.started_on, item.ended_on) for item in overlap] == [
+        ("Northwind Pottery", date(2020, 1, 1), date(2021, 1, 1))
+    ]
+
+
+def test_worked_together_matches_company_names_loosely(writer: Session, user: User) -> None:
+    factories.make_user_position(writer, user, company="Acme, Inc.")
+    contact = factories.make_contact(writer, user, current_company="ACME INC")
+    overlap = module.load_card(writer, user, contact).evidence.worked_together
+    assert [item.company for item in overlap] == ["ACME INC"]  # the contact's own spelling
+
+
+def test_worked_together_excludes_provably_disjoint_stints(writer: Session, user: User) -> None:
+    factories.make_user_position(
+        writer,
+        user,
+        company="Northwind Pottery",
+        started_on=date(2010, 1, 1),
+        ended_on=date(2012, 1, 1),
+    )
+    contact = factories.make_contact(
+        writer,
+        user,
+        current_company="Somewhere Else",
+        positions=[
+            {
+                "company": "Northwind Pottery",
+                "started_on": date(2015, 1, 1),
+                "ended_on": date(2018, 1, 1),
+                "is_current": False,
+            }
+        ],
+    )
+    overlap = module.load_card(writer, user, contact).evidence.worked_together
+    assert overlap == []
+
+
+def test_worked_together_treats_a_current_position_as_bounded_by_today(
+    writer: Session, user: User
+) -> None:
+    """A still-current position cannot claim to overlap a stint that provably ended first."""
+    factories.make_user_position(
+        writer, user, company="Northwind Pottery", started_on=date(2020, 1, 1), is_current=True
+    )
+    contact = factories.make_contact(
+        writer,
+        user,
+        current_company="Somewhere Else",
+        positions=[
+            {
+                "company": "Northwind Pottery",
+                "started_on": date(2015, 1, 1),
+                "ended_on": date(2018, 1, 1),
+                "is_current": False,
+            }
+        ],
+    )
+    overlap = module.load_card(writer, user, contact).evidence.worked_together
+    assert overlap == []
+
+
+def test_worked_together_handles_a_position_with_no_dates_at_all(
+    writer: Session, user: User
+) -> None:
+    """Undated on the user's side, and the contact is only known through current_company
+    (no ContactPosition row at all, exactly what the archive importer creates today):
+    the company still matches, and no year is claimed either way."""
+    factories.make_user_position(writer, user, company="Northwind Pottery")
+    contact = factories.make_contact(writer, user, current_company="Northwind Pottery")
+    overlap = module.load_card(writer, user, contact).evidence.worked_together
+    assert [(item.company, item.started_on, item.ended_on) for item in overlap] == [
+        ("Northwind Pottery", None, None)
+    ]
+
+
+def test_worked_together_uses_the_contacts_current_company_with_no_dated_position(
+    writer: Session, user: User
+) -> None:
+    factories.make_user_position(
+        writer,
+        user,
+        company="Northwind Pottery",
+        started_on=date(2019, 1, 1),
+        ended_on=date(2021, 1, 1),
+    )
+    contact = factories.make_contact(writer, user, current_company="Northwind Pottery")
+    overlap = module.load_card(writer, user, contact).evidence.worked_together
+    # The contact's side carries no dates at all, so the user's own dates stand.
+    assert [(item.company, item.started_on, item.ended_on) for item in overlap] == [
+        ("Northwind Pottery", date(2019, 1, 1), date(2021, 1, 1))
+    ]
+
+
+def test_worked_together_is_independent_of_shared_companies(writer: Session, user: User) -> None:
+    """The two signals answer different questions and must not leak into each other."""
+    factories.make_user_position(writer, user, company="Northwind Pottery")
+    contact = factories.make_contact(writer, user, current_company="Blue Harbor Tools")
+    factories.make_contact(writer, user, current_company="Blue Harbor Tools", met=ContactMet.MET)
+    evidence = module.load_card(writer, user, contact).evidence
+    assert evidence.worked_together == []
+    assert [item.company for item in evidence.shared_companies] == ["Blue Harbor Tools"]
+
+
+def test_worked_together_never_counts_another_user_s_positions(writer: Session, user: User) -> None:
+    other = factories.make_user(writer)
+    factories.make_user_position(writer, other, company="Northwind Pottery")
+    contact = factories.make_contact(writer, user, current_company="Northwind Pottery")
+    overlap = module.load_card(writer, user, contact).evidence.worked_together
+    assert overlap == []
 
 
 # --- decisions --------------------------------------------------------------

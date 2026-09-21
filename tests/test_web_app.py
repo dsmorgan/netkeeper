@@ -24,6 +24,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 API_PATHS = {
     "/api/v1/health",
     "/api/v1/me",
+    "/api/v1/me/positions",
+    "/api/v1/me/positions/{position_id}",
     "/api/v1/events",
     "/api/v1/tasks/ping",
     "/api/v1/tasks/{task_id}",
@@ -191,6 +193,7 @@ def test_known_api_modules_are_discovered() -> None:
         "interactions",
         "lists",
         "me",
+        "positions",
         "tags",
         "tasks",
         "triage",
