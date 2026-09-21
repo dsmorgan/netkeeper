@@ -443,6 +443,29 @@ class ContactPage(BaseModel):
     describe: str
 
 
+class ContactStatsOut(BaseModel):
+    """Counts and triage progress over the user's live contacts (spec 10.1).
+
+    ``netkeeper.crm.contacts.contact_stats()`` backs this, ``netkeeper contacts
+    stats``, and ``netkeeper.crm.triage.progress()`` all at once, so the CLI,
+    this endpoint, and the triage queue's progress bar cannot quietly disagree
+    on what "how many contacts" means (#90; they once did).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    total: int
+    met: int
+    not_met: int
+    skipped: int
+    untriaged: int
+    archived: int
+    merged_away: int
+    with_email: int
+    with_phone: int
+    tagged: int
+
+
 class ContactEmailOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

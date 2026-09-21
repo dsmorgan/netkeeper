@@ -29,7 +29,7 @@ from netkeeper.crm.tags import ensure_default_rules, list_tags, run_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.linkedin.archive import ArchiveFormatError, open_archive
 from netkeeper.logging_setup import setup_logging
-from netkeeper.models import ImportResolution, ImportRun, User, UserKind
+from netkeeper.models import ImportResolution, ImportRun, ImportStatus, User, UserKind
 from netkeeper.paths import CONFIG_ENV, data_dir
 from netkeeper.scoping import install_scope_guard
 from netkeeper.services.backup import (
@@ -589,8 +589,10 @@ def _refuse_undecided(run_id: int, row_numbers: Sequence[int]) -> NoReturn:
     more = "" if len(row_numbers) <= 10 else f" and {len(row_numbers) - 10} more"
     typer.echo(
         f"error: {len(row_numbers)} row(s) match more than one contact and have no decision "
-        f"(rows {shown}{more}); decide them in the app (import run {run_id}), "
-        "or re-run with --on-candidate new or --on-candidate skip",
+        f"(rows {shown}{more}); decide them in the app (import run {run_id}), or finish this "
+        f"run with `netkeeper import resume {run_id} --on-candidate new` (or `--on-candidate "
+        "skip`) -- re-running `import csv` would read the file into a second draft and leave "
+        f"run {run_id} behind as an orphan",
         err=True,
     )
     raise typer.Exit(code=1)
@@ -603,6 +605,54 @@ def _run_report(label: str, run: _RunSnapshot) -> str:
         f"{run.created_count} created, {run.candidate_count} candidate(s), "
         f"{run.skipped_count} skipped"
     )
+
+
+@import_app.command("resume")
+def import_resume_cmd(
+    run_id: Annotated[
+        int, typer.Argument(help="A draft import run to finish, left by --dry-run or a refusal.")
+    ],
+    on_candidate: Annotated[
+        OnCandidate | None,
+        typer.Option(
+            "--on-candidate",
+            help="How to resolve a row that matches more than one contact: "
+            "new (a separate contact) or skip (leave it out). Omitted: refuse and say which rows.",
+        ),
+    ] = None,
+) -> None:
+    """Finish a draft run without reading its file again (netkeeper.crm.import_runs).
+
+    The CLI counterpart of the web wizard's "Finish this import": it commits the
+    named run in place, so a run a refused commit named -- or one left by
+    ``--dry-run`` -- is the one that gets finished, not a second draft next to
+    it (#90). ``netkeeper import runs --status draft`` lists the candidates.
+    """
+    draft = _draft_snapshot(run_id)
+    if draft.candidate_rows and on_candidate is None:
+        _refuse_undecided(draft.id, draft.candidate_rows)
+    committed = _commit_draft(draft, on_candidate)
+    typer.echo(_run_report("committed", committed))
+
+
+def _draft_snapshot(run_id: int) -> _RunSnapshot:
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            try:
+                run = import_runs.get_run(session, user, run_id)
+            except import_runs.RunNotFound as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            candidates = tuple(
+                row.row_number for row in run.rows if row.resolution is ImportResolution.CANDIDATE
+            )
+            return _snapshot_of(run, candidate_rows=candidates)
+    finally:
+        engine.dispose()
 
 
 @import_app.command("rollback")
@@ -632,6 +682,60 @@ def import_rollback_cmd(
     finally:
         engine.dispose()
     typer.echo(summary)
+
+
+@import_app.command("runs")
+def import_runs_cmd(
+    status: Annotated[
+        ImportStatus | None,
+        typer.Option("--status", help="Only runs in this state, e.g. draft. Omitted: every run."),
+    ] = None,
+) -> None:
+    """List import runs, newest first.
+
+    A draft left by ``--dry-run`` or a refused commit stays here -- narrow with
+    ``--status draft`` -- until it is finished with ``import resume`` or
+    removed with ``import rm`` (#90).
+    """
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            runs, total = import_runs.list_runs(session, user, status=status, limit=200)
+    finally:
+        engine.dispose()
+    if not runs:
+        typer.echo("no import runs" if status is None else f"no {status.value} import runs")
+        return
+    rows = [(str(run.id), run.filename, run.status.value, str(run.total_rows)) for run in runs]
+    typer.echo(_format_table(("ID", "FILENAME", "STATUS", "ROWS"), rows), nl=False)
+    if total > len(runs):
+        typer.echo(f"...and {total - len(runs)} more; narrow with --status")
+
+
+@import_app.command("rm")
+def import_rm_cmd(
+    run_id: Annotated[
+        int, typer.Argument(help="A draft import run to delete. A committed run is refused.")
+    ],
+) -> None:
+    """Delete a draft run and its rows (#90). Refuses a committed or rolled-back run."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            try:
+                import_runs.delete_run(session, user, run_id)
+            except (import_runs.ImportRunError, import_runs.CsvImportError) as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+    finally:
+        engine.dispose()
+    typer.echo(f"deleted import run {run_id}")
 
 
 # --- export ---------------------------------------------------------------

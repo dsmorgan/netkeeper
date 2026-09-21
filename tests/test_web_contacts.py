@@ -218,6 +218,53 @@ async def test_the_search_lists_by_substring(client: httpx.AsyncClient, people: 
     assert _names(by_email.json()) == ["Bo Marsh"]
 
 
+# --- stats (P1-25, #90) -------------------------------------------------------
+
+
+async def test_stats_counts_the_live_set_the_same_way_the_service_does(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    """``people`` is two live contacts (Ada, Bo) and one archived (Cy); Ada carries both
+    an email and a phone, Bo an email only, and neither has been triaged.
+    """
+    response = await client.get("/api/v1/contacts/stats")
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["total"] == 2
+    assert body["untriaged"] == 2
+    assert body["met"] == body["not_met"] == body["skipped"] == 0
+    assert body["archived"] == 1
+    assert body["merged_away"] == 0
+    assert body["with_email"] == 2
+    assert body["with_phone"] == 1
+
+
+async def test_stats_matches_a_direct_call_to_the_service(
+    client: httpx.AsyncClient, factory: sessionmaker[Session], owner: User, people: list[int]
+) -> None:
+    with session_scope(factory) as session:
+        user = session.get(User, owner.id)
+        assert user is not None
+        expected = service.contact_stats(session, user)
+
+    response = await client.get("/api/v1/contacts/stats")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body == {
+        "total": expected.total,
+        "met": expected.met,
+        "not_met": expected.not_met,
+        "skipped": expected.skipped,
+        "untriaged": expected.untriaged,
+        "archived": expected.archived,
+        "merged_away": expected.merged_away,
+        "with_email": expected.with_email,
+        "with_phone": expected.with_phone,
+        "tagged": expected.tagged,
+    }
+
+
 # --- get: children and timeline ---------------------------------------------
 
 
@@ -632,6 +679,19 @@ async def test_another_user_reads_nothing_of_the_owners(
         assert wide == {"items": [], "total": 0, "describe": wide["describe"]}
         for contact_id in people:
             assert (await client.get(f"/api/v1/contacts/{contact_id}")).status_code == 404
+
+
+async def test_stats_does_not_count_another_users_contacts(
+    client: httpx.AsyncClient, running_app: FastAPI, intruder: User, people: list[int]
+) -> None:
+    with acting_as(running_app, intruder.id):
+        empty = await client.get("/api/v1/contacts/stats")
+        assert empty.status_code == 200
+        assert all(count == 0 for count in empty.json().values())
+
+    # The owner's own numbers are unaffected by the intruder's request.
+    owned = await client.get("/api/v1/contacts/stats")
+    assert owned.json()["total"] == 2
 
 
 async def test_another_user_cannot_patch_archive_or_revert_the_owners_contacts(

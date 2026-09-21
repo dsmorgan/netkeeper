@@ -21,12 +21,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import factories
+import httpx
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 from typer.testing import CliRunner
 
 from netkeeper import migrations
 from netkeeper.cli import app as cli
+from netkeeper.config import Settings
 from netkeeper.crm import import_runs, triage
 from netkeeper.crm.contacts import contact_stats, merge_contacts
 from netkeeper.crm.exports import export_stream
@@ -36,6 +38,7 @@ from netkeeper.db import database_url, make_engine, make_session_factory, sessio
 from netkeeper.models import Contact, ContactMet, Interaction
 from netkeeper.scoping import install_scope_guard, scoped, scoped_count
 from netkeeper.services.users import ensure_local_user
+from netkeeper.web.app import create_app
 
 FIXTURES_ARCHIVE = Path(__file__).parent / "fixtures" / "archive"
 FIXTURES_CSV = Path(__file__).parent / "fixtures" / "csv"
@@ -178,8 +181,10 @@ def test_cli_import_csv_refuses_undecided_candidates_and_still_leaves_a_draft(
     # own message threads draft.id through correctly.
     assert (
         "error: 1 row(s) match more than one contact and have no decision "
-        "(rows 3); decide them in the app (import run 1), "
-        "or re-run with --on-candidate new or --on-candidate skip"
+        "(rows 3); decide them in the app (import run 1), or finish this "
+        "run with `netkeeper import resume 1 --on-candidate new` (or `--on-candidate "
+        "skip`) -- re-running `import csv` would read the file into a second draft and "
+        "leave run 1 behind as an orphan"
     ) in result.output
     # _refuse_undecided runs before _commit_draft is ever called, so no commit
     # is attempted and nothing is rolled back; the draft it names comes from its
@@ -228,6 +233,137 @@ def test_cli_import_csv_on_candidate_new_creates_a_separate_contact(
         user = ensure_local_user(session)
         # The seeded contact, plus a *new* Thaddeus rather than a merge: 4 total.
         assert session.scalar(scoped_count(user, Contact)) == 4
+
+
+# --- import resume, runs, rm (#90) -------------------------------------------
+
+
+def test_cli_import_resume_finishes_the_named_run_instead_of_a_second_one(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """The regression the refusal message names: re-running `import csv` would have read
+    the file into a second draft next to the one the refusal was about. `import resume`
+    finishes that exact run instead, so there is only ever the one draft.
+    """
+    _seed_candidate(cli_db)
+    refused = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE)])
+    assert refused.exit_code == 1
+    run_id = _run_id(refused.output, "import")
+
+    result = CliRunner().invoke(cli, ["import", "resume", str(run_id), "--on-candidate", "new"])
+    assert result.exit_code == 0, result.output
+    assert (
+        f"committed run {run_id}: 3 rows from 'nine-column-sample.csv' (nine-column); "
+        "0 matched, 3 created, 0 candidate(s), 0 skipped"
+    ) in result.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        # Only run 1 exists: resume did not create a second draft.
+        assert import_runs.list_runs(session, user)[1] == 1
+        assert import_runs.get_run(session, user, run_id).status.value == "committed"
+        # The seeded contact, plus a *new* Thaddeus rather than a merge: 4 total.
+        assert session.scalar(scoped_count(user, Contact)) == 4
+
+
+def test_cli_import_resume_without_on_candidate_refuses_again_naming_the_same_run(
+    cli_db: sessionmaker[Session],
+) -> None:
+    _seed_candidate(cli_db)
+    draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
+    assert draft.exit_code == 0, draft.output
+    run_id = _run_id(draft.output, "draft")
+
+    result = CliRunner().invoke(cli, ["import", "resume", str(run_id)])
+    assert result.exit_code == 1
+    assert f"import run {run_id}" in result.output
+    assert f"netkeeper import resume {run_id} --on-candidate new" in result.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        assert import_runs.list_runs(session, user)[1] == 1  # still just the one draft
+
+
+def test_cli_import_resume_of_a_committed_run_is_a_clean_error(
+    cli_db: sessionmaker[Session],
+) -> None:
+    committed = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE)])
+    assert committed.exit_code == 0, committed.output
+    run_id = _run_id(committed.output, "committed")
+
+    result = CliRunner().invoke(cli, ["import", "resume", str(run_id)])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "only a draft run can be committed" in result.output
+
+
+def test_cli_import_resume_of_an_unknown_run_reports_a_clean_error(
+    cli_db: sessionmaker[Session],
+) -> None:
+    result = CliRunner().invoke(cli, ["import", "resume", "999"])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "no import run 999" in result.output
+
+
+def test_cli_import_runs_lists_newest_first_and_narrows_by_status(
+    cli_db: sessionmaker[Session],
+) -> None:
+    committed = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE)])
+    assert committed.exit_code == 0, committed.output
+    draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
+    assert draft.exit_code == 0, draft.output
+    draft_id = _run_id(draft.output, "draft")
+
+    result = CliRunner().invoke(cli, ["import", "runs"])
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.splitlines()
+    assert lines[0].split() == ["ID", "FILENAME", "STATUS", "ROWS"]
+    ids = [line.split()[0] for line in lines[1:]]
+    assert ids == [str(draft_id), str(draft_id - 1)]  # newest first
+
+    drafts_only = CliRunner().invoke(cli, ["import", "runs", "--status", "draft"])
+    assert drafts_only.exit_code == 0, drafts_only.output
+    data_lines = drafts_only.stdout.splitlines()[1:]
+    assert [line.split()[0] for line in data_lines] == [str(draft_id)]
+
+
+def test_cli_import_runs_with_none_reports_that_clearly(cli_db: sessionmaker[Session]) -> None:
+    result = CliRunner().invoke(cli, ["import", "runs"])
+    assert result.exit_code == 0, result.output
+    assert "no import runs" in result.output
+
+
+def test_cli_import_rm_deletes_a_draft(cli_db: sessionmaker[Session]) -> None:
+    draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
+    run_id = _run_id(draft.output, "draft")
+
+    result = CliRunner().invoke(cli, ["import", "rm", str(run_id)])
+    assert result.exit_code == 0, result.output
+    assert f"deleted import run {run_id}" in result.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        assert import_runs.list_runs(session, user)[1] == 0
+
+
+def test_cli_import_rm_of_a_committed_run_is_refused(cli_db: sessionmaker[Session]) -> None:
+    committed = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE)])
+    run_id = _run_id(committed.output, "committed")
+
+    result = CliRunner().invoke(cli, ["import", "rm", str(run_id)])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "only a draft run can be deleted" in result.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        assert import_runs.get_run(session, user, run_id).status.value == "committed"
+
+
+def test_cli_import_rm_of_an_unknown_run_reports_a_clean_error(
+    cli_db: sessionmaker[Session],
+) -> None:
+    result = CliRunner().invoke(cli, ["import", "rm", "999"])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "no import run 999" in result.output
 
 
 def test_cli_import_csv_of_an_unusable_file_reports_a_clean_error(
@@ -552,6 +688,62 @@ def test_cli_contacts_stats_with_no_contacts_is_all_zero(cli_db: sessionmaker[Se
     assert "total (0) counts live contacts only" in footer
 
 
+async def test_get_contact_stats_agrees_with_the_cli_and_triage_progress(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """The parity item P1-25 exists for: ``GET /contacts/stats``, ``netkeeper contacts
+    stats``, and ``netkeeper.crm.triage.progress()`` must report the same numbers,
+    because they once did not (#85 finding 2, #90). Each reaches the same underlying
+    counts through its own path -- the router, the CLI's own engine, and a direct
+    call -- so a drift in any one of the three fails this test.
+    """
+    with session_scope(cli_db, write=True) as session:
+        user = ensure_local_user(session)
+        factories.make_contact(session, user, met=ContactMet.MET)
+        factories.make_contact(session, user, met=ContactMet.NOT_MET)
+        factories.make_contact(session, user, met=ContactMet.SKIP)
+        factories.make_contact(session, user, met=ContactMet.UNKNOWN)
+        archived = factories.make_contact(session, user, met=ContactMet.MET)
+        archived.archived_at = archived.created_at
+
+    cli_result = CliRunner().invoke(cli, ["contacts", "stats"])
+    assert cli_result.exit_code == 0, cli_result.output
+    lines = cli_result.stdout.splitlines()
+    *data_lines, _footer = lines[1:]
+    cli_rows = {" ".join(line.split()[:-1]): int(line.split()[-1]) for line in data_lines}
+
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        progress = triage.progress(session, user)
+
+    # A second engine on the same file NETKEEPER_DATABASE_URL names, exactly as
+    # `netkeeper serve` would open one: the app's own database, not a copy of it.
+    engine = make_engine(database_url())
+    try:
+        app = create_app(Settings(), engine=engine)
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                response = await client.get("/api/v1/contacts/stats")
+    finally:
+        engine.dispose()
+    assert response.status_code == 200, response.text
+    api = response.json()
+
+    assert api["total"] == cli_rows["total"] == progress.total
+    assert api["met"] == cli_rows["met"] == progress.by_state[ContactMet.MET]
+    assert api["not_met"] == cli_rows["not met"] == progress.by_state[ContactMet.NOT_MET]
+    assert api["skipped"] == cli_rows["skipped"] == progress.by_state[ContactMet.SKIP]
+    assert api["untriaged"] == cli_rows["untriaged"] == progress.by_state[ContactMet.UNKNOWN]
+    # Concretely, not just "whatever the other two say": 5 contacts made, 1
+    # outside the live set (archived), so total is 4 and met is 1.
+    assert api["total"] == 4
+    assert api["met"] == 1
+    assert api["archived"] == cli_rows["archived"] == 1
+
+
 # --- help --------------------------------------------------------------------
 
 
@@ -568,5 +760,5 @@ def test_import_help_lists_archive_csv_and_rollback() -> None:
     result = CliRunner().invoke(cli, ["import", "--help"])
     assert result.exit_code == 0, result.output
     plain = _plain(result.stdout)
-    for name in ("archive", "csv", "rollback"):
+    for name in ("archive", "csv", "rollback", "resume", "runs", "rm"):
         assert name in plain

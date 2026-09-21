@@ -230,6 +230,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/contacts/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Contact Stats
+         * @description Counts and triage progress over the user's contacts, for a dashboard (spec 10.1).
+         *
+         *     ``netkeeper.crm.contacts.contact_stats()`` backs this, ``netkeeper contacts
+         *     stats``, and the triage queue's progress bar alike, so the three numbers
+         *     cannot quietly disagree (#90).
+         *
+         *     Declared before ``/contacts/{contact_id}``, which would otherwise try to
+         *     read ``stats`` as a contact id and answer ``422`` (see the same note on
+         *     ``/imports/presets`` in ``web/api/imports.py``).
+         */
+        get: operations["get_contact_stats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/contacts/{contact_id}": {
         parameters: {
             query?: never;
@@ -623,7 +651,8 @@ export interface paths {
         };
         /**
          * List Import Runs
-         * @description Import runs, newest first.
+         * @description Import runs, newest first. ``status=draft`` is how the orphans left by a
+         *     ``--dry-run`` or a refused commit are found, to finish or delete (#90).
          */
         get: operations["list_import_runs"];
         put?: never;
@@ -717,7 +746,11 @@ export interface paths {
         get: operations["get_import_run"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Import Run
+         * @description Delete a draft run and its rows. A committed or rolled-back run is refused (#90).
+         */
+        delete: operations["delete_import_run"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1891,6 +1924,37 @@ export interface components {
          * @enum {string}
          */
         ContactSource: "sync" | "archive" | "csv" | "manual";
+        /**
+         * ContactStatsOut
+         * @description Counts and triage progress over the user's live contacts (spec 10.1).
+         *
+         *     ``netkeeper.crm.contacts.contact_stats()`` backs this, ``netkeeper contacts
+         *     stats``, and ``netkeeper.crm.triage.progress()`` all at once, so the CLI,
+         *     this endpoint, and the triage queue's progress bar cannot quietly disagree
+         *     on what "how many contacts" means (#90; they once did).
+         */
+        ContactStatsOut: {
+            /** Archived */
+            archived: number;
+            /** Merged Away */
+            merged_away: number;
+            /** Met */
+            met: number;
+            /** Not Met */
+            not_met: number;
+            /** Skipped */
+            skipped: number;
+            /** Tagged */
+            tagged: number;
+            /** Total */
+            total: number;
+            /** Untriaged */
+            untriaged: number;
+            /** With Email */
+            with_email: number;
+            /** With Phone */
+            with_phone: number;
+        };
         /**
          * ContactSummaryOut
          * @description A contact as a list or saved view shows it: enough to identify and open them.
@@ -3793,6 +3857,26 @@ export interface operations {
             };
         };
     };
+    get_contact_stats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactStatsOut"];
+                };
+            };
+        };
+    };
     get_contact: {
         parameters: {
             query?: never;
@@ -4876,6 +4960,7 @@ export interface operations {
     list_import_runs: {
         parameters: {
             query?: {
+                status?: components["schemas"]["ImportStatus"] | null;
                 limit?: number;
                 offset?: number;
             };
@@ -5085,6 +5170,49 @@ export interface operations {
             };
             /** @description No such import run, row, contact, or preset */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_import_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such import run, row, contact, or preset */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The run's state forbids this, candidate rows are undecided, or a merge has drawn in a contact the run created */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

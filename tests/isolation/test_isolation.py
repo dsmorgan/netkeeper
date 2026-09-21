@@ -14,13 +14,14 @@ import pytest
 from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.crm import import_runs as import_service
 from netkeeper.db import session_scope
 from netkeeper.models import User, UserKind
 from netkeeper.web.app import API_PREFIX
 from netkeeper.web.security import CLIENT_HEADER, CLIENT_HEADER_VALUE
 
 from .harness import acting_as, assert_isolated
-from .registry import REGISTRY, ListEndpoint, seed_contacts
+from .registry import IMPORT_CSV, IMPORT_MAPPING, REGISTRY, ListEndpoint, seed_contacts
 
 if not REGISTRY:
     pytest.skip("REGISTRY is empty: no list endpoints exist yet", allow_module_level=True)
@@ -108,3 +109,54 @@ async def _post(
     )
     parsed: dict[str, Any] = response.json()
     return parsed
+
+
+# --- deleting a draft import run ---------------------------------------------
+
+
+async def test_deleting_a_draft_import_run_is_isolated(running_app: FastAPI) -> None:
+    """Delete is destructive, not a list operation, so it is not in ``REGISTRY``; it gets
+    the same two-user treatment the bulk actions above get.
+    """
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        a = User(kind=UserKind.HOSTED, display_name="A")
+        b = User(kind=UserKind.HOSTED, display_name="B")
+        session.add_all([a, b])
+        session.flush()
+        a_run = import_service.create_run(
+            session, a, filename="a.csv", content=IMPORT_CSV, mapping=IMPORT_MAPPING
+        )
+        b_run = import_service.create_run(
+            session, b, filename="b.csv", content=IMPORT_CSV, mapping=IMPORT_MAPPING
+        )
+        a_id, b_id, a_run_id, b_run_id = a.id, b.id, a_run.id, b_run.id
+
+    # B's id does not reach A's draft: refused before anything is touched.
+    await _delete(running_app, b_id, a_run_id, want=404)
+    with session_scope(factory) as session:
+        a_now, b_now = session.get(User, a_id), session.get(User, b_id)
+        assert a_now is not None and b_now is not None
+        assert import_service.list_runs(session, a_now)[1] == 1
+        assert import_service.list_runs(session, b_now)[1] == 1
+
+    # Each deletes their own.
+    await _delete(running_app, a_id, a_run_id, want=204)
+    await _delete(running_app, b_id, b_run_id, want=204)
+    with session_scope(factory) as session:
+        a_now, b_now = session.get(User, a_id), session.get(User, b_id)
+        assert a_now is not None and b_now is not None
+        assert import_service.list_runs(session, a_now)[1] == 0
+        assert import_service.list_runs(session, b_now)[1] == 0
+
+
+async def _delete(app: FastAPI, user_id: int, run_id: int, *, want: int) -> None:
+    with acting_as(app, user_id):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.delete(
+                f"{API_PREFIX}/imports/{run_id}", headers={CLIENT_HEADER: CLIENT_HEADER_VALUE}
+            )
+    assert response.status_code == want, (
+        f"delete run {run_id} as {user_id}: {response.status_code} {response.text}"
+    )

@@ -29,6 +29,7 @@ API_PATHS = {
     "/api/v1/tasks/{task_id}",
     "/api/v1/contacts",
     "/api/v1/contacts/query",
+    "/api/v1/contacts/stats",
     "/api/v1/contacts/bulk",
     "/api/v1/contacts/bulk/count",
     "/api/v1/contacts/{contact_id}",

@@ -100,6 +100,7 @@ async def test_state_changing_routes_need_the_csrf_header(client: httpx.AsyncCli
         ("POST", "/api/v1/imports/1/preview"),
         ("POST", "/api/v1/imports/1/commit"),
         ("POST", "/api/v1/imports/1/rollback"),
+        ("DELETE", "/api/v1/imports/1"),
         ("PUT", "/api/v1/imports/presets/ours"),
         ("DELETE", "/api/v1/imports/presets/ours"),
     ]:
@@ -564,3 +565,68 @@ async def test_runs_are_listed_newest_first(client: httpx.AsyncClient) -> None:
 
     assert body["total"] == 2
     assert [run["id"] for run in body["items"]] == [second["id"], first["id"]]
+
+
+async def test_runs_can_be_filtered_by_status(
+    client: httpx.AsyncClient, seeded: dict[str, int]
+) -> None:
+    """``status=draft`` is how an orphaned run left by a dry run or a refused commit is found."""
+    draft_run = await draft(client, content=NINE_COLUMN)
+    committed_run = await draft(client)
+    await client.post(
+        f"/api/v1/imports/{committed_run['id']}/commit", headers=CSRF, json={"skip_undecided": True}
+    )
+
+    drafts = await client.get("/api/v1/imports", params={"status": "draft"})
+    assert drafts.status_code == 200, drafts.text
+    body = drafts.json()
+    assert body["total"] == 1
+    assert [run["id"] for run in body["items"]] == [draft_run["id"]]
+
+    committed = await client.get("/api/v1/imports", params={"status": "committed"})
+    assert [run["id"] for run in committed.json()["items"]] == [committed_run["id"]]
+
+
+# --- deleting a draft (#90) ---------------------------------------------------
+
+
+async def test_deleting_a_draft_removes_it_and_its_rows(client: httpx.AsyncClient) -> None:
+    run = await draft(client, content=NINE_COLUMN)
+
+    response = await client.delete(f"/api/v1/imports/{run['id']}", headers=CSRF)
+    assert response.status_code == 204, response.text
+
+    assert (await client.get(f"/api/v1/imports/{run['id']}")).status_code == 404
+    assert (await client.get(f"/api/v1/imports/{run['id']}/rows")).status_code == 404
+    listed = await client.get("/api/v1/imports")
+    assert listed.json() == {"items": [], "total": 0}
+
+
+async def test_deleting_a_committed_run_is_refused(
+    client: httpx.AsyncClient, running_app: FastAPI, seeded: dict[str, int]
+) -> None:
+    run = await draft(client)
+    await client.post(
+        f"/api/v1/imports/{run['id']}/commit", headers=CSRF, json={"skip_undecided": True}
+    )
+
+    response = await client.delete(f"/api/v1/imports/{run['id']}", headers=CSRF)
+    assert response.status_code == 409, response.text
+
+    # Refused, not half-deleted: the run and the contact it made are both still there.
+    assert (await client.get(f"/api/v1/imports/{run['id']}")).status_code == 200
+    assert contact_by_slug(running_app, "imogen-thistlewhite-qz") is not None
+
+
+async def test_deleting_a_rolled_back_run_is_refused(client: httpx.AsyncClient) -> None:
+    run = await draft(client, content=NINE_COLUMN)
+    await client.post(f"/api/v1/imports/{run['id']}/commit", headers=CSRF, json={})
+    await client.post(f"/api/v1/imports/{run['id']}/rollback", headers=CSRF)
+
+    response = await client.delete(f"/api/v1/imports/{run['id']}", headers=CSRF)
+    assert response.status_code == 409, response.text
+
+
+async def test_deleting_an_unknown_run_is_not_found(client: httpx.AsyncClient) -> None:
+    response = await client.delete("/api/v1/imports/404", headers=CSRF)
+    assert response.status_code == 404
