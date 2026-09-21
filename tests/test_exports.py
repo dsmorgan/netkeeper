@@ -1,10 +1,13 @@
 """``netkeeper.crm.exports`` (spec 10.6): CSV, JSON, and vCard over a filtered stream.
 
 The nine-column round trip (P1-11's "done when") is the load-bearing test in
-here: :func:`test_nine_column_round_trips_through_its_own_reader`. P1-04's real
-nine-column importer had not merged when this was written, so that test reads
-its own export back with a small stand-in reader rather than the real importer;
-see the TODO on ``_read_nine_column_csv`` for issue #13, which should replace it.
+here: :func:`test_nine_column_round_trips_through_the_real_importer`. It drives
+``netkeeper.crm.import_runs.create_run``/``commit`` — the actual importer, not a
+private reimplementation of the same eight columns — because a stand-in reader
+only proves the export function is the inverse of itself; it proves nothing
+about whether the file the real importer sees comes back the same. See the
+module docstring of ``netkeeper.crm.exports`` for what does and does not survive
+that round trip and why (the "First Name" asymmetry is deliberate, not a bug).
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import factories
 import pytest
 from sqlalchemy.orm import Session
 
+from netkeeper.crm import import_runs
 from netkeeper.crm.exports import (
     FULL_FIELDS,
     LINKEDIN_ARCHIVE,
@@ -30,16 +34,9 @@ from netkeeper.crm.exports import (
     filename_for,
 )
 from netkeeper.crm.filters import FilterTree, SortKey, parse_filter
-from netkeeper.db import database_url, make_engine, make_session_factory
-from netkeeper.models import (
-    Base,
-    Contact,
-    ContactEmail,
-    ContactPhone,
-    ContactSnapshot,
-    ContactSource,
-    User,
-)
+from netkeeper.crm.importer import ImportField, get_preset
+from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
+from netkeeper.models import Base, ContactSnapshot, User
 from netkeeper.scoping import install_scope_guard
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
@@ -87,7 +84,10 @@ def test_nine_column_headerless_drops_the_header_row(session: Session) -> None:
     factories.make_contact(session, user, current_company="Acme Corp")
     with_header = _run(session, user, preset="nine-column", output_format="csv", headerless=False)
     headerless = _run(session, user, preset="nine-column", output_format="csv", headerless=True)
-    assert headerless == "\n".join(with_header.splitlines()[1:]) + "\r\n"
+    # csv.writer emits "\r\n" line endings; a plain "\n".join would only pass by
+    # accident when the fixture has exactly one data row (there was no second
+    # row here to catch it).
+    assert headerless == with_header.split("\r\n", 1)[1]
 
 
 def test_nine_column_json_uses_snake_case_keys(session: Session) -> None:
@@ -116,56 +116,24 @@ def test_nine_column_json_uses_snake_case_keys(session: Session) -> None:
     assert row["city_state"] == "Austin, TX"
 
 
-def _read_nine_column_csv(text: str) -> list[dict[str, str]]:
-    """A minimal reader for the nine-column CSV shape, for the round-trip test below.
+def test_nine_column_round_trips_through_the_real_importer(
+    session: Session, tmp_path: Path
+) -> None:
+    """Export, run the real nine-column importer into a clean database, export again: identical.
 
-    TODO(#13): P1-04's real nine-column importer was not merged when this was
-    written. Once it lands, wire the round-trip test to it directly (import the
-    export through the real importer into a clean database) and delete this
-    stand-in, which only reads back the same eight columns a second time.
+    Both fixture contacts here are fully identified (a name in every row), so
+    neither is the "nothing identifying" case; that one gets its own test below,
+    since asserting it *out* of this file is the point of this test, not an
+    incidental side effect of it.
     """
-    return list(csv.DictReader(io.StringIO(text)))
-
-
-def _contact_from_nine_column_row(row: dict[str, str], user: User) -> Contact:
-    """The reader's half of the round trip: rebuild a contact from one CSV row.
-
-    Mirrors the column mapping in Appendix A: "First Name" is ``preferred_name``,
-    not ``first_name`` (nine-column's own convention; contrast ``linkedin-archive``,
-    which uses the LinkedIn-sourced ``first_name``).
-    """
-    contact = Contact(
-        user_id=user.id,
-        li_url=row["LinkedIn Profile URL"] or None,
-        first_name="",
-        last_name=row["Last Name"],
-        preferred_name=row["First Name"],
-        location=row["CityState"] or None,
-        current_company=row["Current Company"] or None,
-        current_title=row["Current Job Title"] or None,
-        source=ContactSource.CSV,
-    )
-    if row["Email Address"]:
-        contact.emails.append(
-            ContactEmail(user_id=user.id, email=row["Email Address"], is_primary=True)
-        )
-    if row["Phone Number"]:
-        contact.phones.append(
-            ContactPhone(user_id=user.id, raw=row["Phone Number"], is_primary=True)
-        )
-    return contact
-
-
-def test_nine_column_round_trips_through_its_own_reader(session: Session, tmp_path: Path) -> None:
-    """Export, read back into a clean database, export again: the two exports match exactly."""
     user = factories.make_user(session)
     factories.make_contact(
         session,
         user,
-        li_public_id="pat-morgan",
-        preferred_name="Pat",
-        last_name="Morgan",
-        emails=["pat.morgan@example.test"],
+        li_public_id="wren-oakhollow",
+        preferred_name="Wren",
+        last_name="Oakhollow",
+        emails=["wren.oakhollow@example.test"],
         phones=["+15550001111"],
         location="Denver, CO",
         current_company="Northwind Traders",
@@ -176,8 +144,8 @@ def test_nine_column_round_trips_through_its_own_reader(session: Session, tmp_pa
         user,
         li_urn=None,
         li_public_id=None,
-        preferred_name="Robin",
-        last_name="Chen",
+        preferred_name="Ibby",
+        last_name="Thistlewood",
         location=None,
         current_company=None,
         current_title=None,
@@ -192,16 +160,83 @@ def test_nine_column_round_trips_through_its_own_reader(session: Session, tmp_pa
     factory2 = make_session_factory(engine2)
     install_scope_guard(factory2)
     try:
-        with factory2() as session2:
+        with session_scope(factory2, write=True) as session2:
             user2 = factories.make_user(session2)
-            for row in _read_nine_column_csv(first_export):
-                session2.add(_contact_from_nine_column_row(row, user2))
-            session2.commit()
+            run = import_runs.create_run(
+                session2,
+                user2,
+                filename="export.csv",
+                content=first_export,
+                preset_name="nine-column",
+            )
+            import_runs.commit(session2, user2, run.id)
             second_export = _run(session2, user2, preset="nine-column", output_format="csv")
     finally:
         engine2.dispose()
 
-    assert second_export == first_export
+    assert second_export == first_export, "IDENTICAL: False"
+
+
+def test_nine_column_export_mapping_agrees_with_the_importer_except_first_name() -> None:
+    """The export's column-to-field mapping must match ``importer.PRESETS["nine-column"]``.
+
+    Except "First Name": that one is deliberately asymmetric (module docstring
+    of ``netkeeper.crm.exports``) — the export reads ``preferred_name``, the
+    importer writes ``first_name``, on purpose, so a mail merge addresses people
+    by the name you actually call them. Every *other* column must agree, or the
+    round trip breaks silently the next time either side changes independently.
+    """
+    preset = get_preset("nine-column")
+    mapping = preset.mapping_for([column.header for column in NINE_COLUMN])
+    expected_field_by_json_key = {
+        "linkedin_profile_url": ImportField.LI_URL,
+        "email_address": ImportField.EMAIL,
+        "last_name": ImportField.LAST_NAME,
+        "city_state": ImportField.LOCATION,
+        "current_company": ImportField.CURRENT_COMPANY,
+        "current_job_title": ImportField.CURRENT_TITLE,
+        "phone_number": ImportField.PHONE,
+    }
+    for column in NINE_COLUMN:
+        if column.json_key == "first_name":
+            continue  # the deliberate asymmetry: preferred_name out, first_name in
+        assert mapping[column.header] == expected_field_by_json_key[column.json_key], column.header
+    assert mapping["First Name"] is ImportField.FIRST_NAME  # confirms the asymmetry itself
+
+
+def test_nine_column_export_skips_a_row_with_nothing_identifying(session: Session) -> None:
+    """A contact with no LinkedIn identity, no name, no email, and no phone is not exported.
+
+    The real importer refuses exactly this row ("the row identifies nobody");
+    company, title, and location alone are not enough. Exporting it anyway
+    would silently drop it on its own round trip.
+    """
+    user = factories.make_user(session)
+    factories.make_contact(
+        session,
+        user,
+        li_urn=None,
+        li_public_id=None,
+        first_name="",
+        last_name="",
+        preferred_name="",
+        location="Austin, TX",
+        current_company="Acme Corp",
+        current_title="Engineer",
+    )
+    text = _run(session, user, preset="nine-column", output_format="csv")
+    assert text.splitlines()[1:] == []  # header only, no data row
+
+    rows = json.loads(_run(session, user, preset="nine-column", output_format="json"))
+    assert rows == []
+
+
+def test_nine_column_export_drops_an_unparseable_phone(session: Session) -> None:
+    """A phone value with no digits at all is exported as no phone, not as that text."""
+    user = factories.make_user(session)
+    factories.make_contact(session, user, phones=["ask reception"])
+    rows = json.loads(_run(session, user, preset="nine-column", output_format="json"))
+    assert rows[0]["phone_number"] is None
 
 
 # --- linkedin-archive -----------------------------------------------------------
@@ -306,6 +341,33 @@ def test_campaign_audience_computes_connection_age_and_position_change(
     assert row["connected_year"] == "2020"
     assert row["years_since_connected"] == "6"  # connected 2020-06-01, "now" is 2026-09-21
     assert row["last_position_change"] == "2025-03-01"
+
+
+def test_campaign_audience_never_exports_a_do_not_contact_person(session: Session) -> None:
+    """Producing a mail-merge file is a send path by proxy (spec F15): honor do_not_contact.
+
+    Held out regardless of the caller's own filter, not only when nobody asked
+    for do-not-contact people specifically — the preset itself must never
+    produce this row.
+    """
+    user = factories.make_user(session)
+    factories.make_contact(session, user, emails=["reach@example.test"], do_not_contact=False)
+    factories.make_contact(
+        session,
+        user,
+        emails=["leave-me-alone@example.test"],
+        do_not_contact=True,
+        do_not_contact_reason="asked to stop",
+    )
+    text = _run(session, user, preset="campaign-audience", output_format="json")
+    rows = json.loads(text)
+    assert [row["email"] for row in rows] == ["reach@example.test"]
+
+    # Other presets are unaffected: do-not-contact is a fact about the contact,
+    # not something every export hides.
+    full_text = _run(session, user, preset="full", output_format="json")
+    full_rows = json.loads(full_text)
+    assert {row["do_not_contact"] for row in full_rows} == {False, True}
 
 
 # --- vCard 4.0: escaping and 75-octet line folding -----------------------------
