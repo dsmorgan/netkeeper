@@ -265,4 +265,4 @@ class AutotagRuleRunOut(BaseModel):
     removed: int
     updated: int
     timeouts: int
-    """Searches that hit the 50 ms timeout, each treated as no match."""
+    """Searches that hit the 50 ms timeout; each left its tag as it was."""

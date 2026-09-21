@@ -29,10 +29,16 @@ What this module decides
   takes about a minute on a thirty-character title) is guarded twice. At save
   and preview time the pattern's parse tree is refused when an unbounded
   repeat (``+``, ``*``, ``{n,}``) contains another one, the shape behind
-  exponential backtracking. At run time every search goes through the
-  ``regex`` package with a :data:`MATCH_TIMEOUT_S` timeout; a search that
-  times out counts as no match for that contact, is logged with the rule and
-  the contact, and is counted in the result.
+  exponential backtracking, and when its counted repeats multiply out past
+  :data:`MAX_EXPANSION`, because ``regex`` expands those at compile time and
+  a twenty-four character pattern can ask for gigabytes. At run time every
+  search goes through the ``regex`` package with a :data:`MATCH_TIMEOUT_S`
+  timeout. A timed-out search means "not known", not "does not match": it
+  adds no tag and, unlike a real miss, removes none either, so a slow machine
+  cannot strip tags a faster one would keep. It is logged with the rule and
+  the contact and counted in the result, and after
+  :data:`MATCH_TIMEOUT_GIVE_UP` timeouts a rule is skipped for the rest of
+  the run, which bounds what one bad pattern costs the write lock.
 - The default rule set (:data:`DEFAULT_PATTERNS`, one ``title`` and one
   ``headline`` rule per tag, because a contact from the connections list has a
   headline and no title until it is enriched) is seeded once per user and
@@ -89,6 +95,10 @@ DEFAULTS_SEEDED_KEY: Final = "tags.defaults_seeded"
 PATTERN_MAX_LENGTH: Final = 500
 MATCH_TIMEOUT_S: Final = 0.05
 """How long one pattern may spend on one value before it counts as no match."""
+MATCH_TIMEOUT_GIVE_UP: Final = 20
+"""How many contacts one rule may time out on before the rest of the run skips it."""
+MAX_EXPANSION: Final = 1000
+"""The largest product of counted repeats a pattern may expand to (see :func:`expansion`)."""
 PREVIEW_SAMPLE: Final = 10
 """How many matching contact ids a preview returns alongside the count."""
 BATCH_SIZE: Final = 500
@@ -222,7 +232,7 @@ class RuleRun:
     updated: int
     """``rule`` assignments credited to a different rule."""
     timeouts: int = 0
-    """Searches that hit :data:`MATCH_TIMEOUT_S`, each counted as no match."""
+    """Searches that hit :data:`MATCH_TIMEOUT_S`, each leaving its tag undecided."""
 
 
 class Unset(enum.Enum):
@@ -257,12 +267,18 @@ def compile_pattern(pattern: str) -> regex.Pattern[str]:
         raise InvalidPattern(f"pattern is longer than {PATTERN_MAX_LENGTH} characters")
     try:
         tree = _parser.parse(pattern, re.IGNORECASE)
-    except re.error as exc:
+    except (re.error, OverflowError) as exc:
+        # A repeat count at or above MAXREPEAT raises OverflowError, which is not an re.error.
         raise InvalidPattern(f"invalid regular expression: {exc}") from exc
     if has_nested_unbounded_repeat(tree):
         raise InvalidPattern(
             "pattern may run slowly: an unbounded repeat (+, *, {n,}) inside another one, "
             "as in (a+)+, can take exponential time; rewrite it without the nesting"
+        )
+    if expansion(tree) > MAX_EXPANSION:
+        raise InvalidPattern(
+            f"pattern may use too much memory: nested counted repeats multiply out to more "
+            f"than {MAX_EXPANSION} copies, as in (?:a{{100}}){{100}}; lower the counts"
         )
     try:
         return regex.compile(pattern, regex.IGNORECASE)
@@ -315,6 +331,39 @@ def has_nested_unbounded_repeat(tree: Any, *, inside_unbounded: bool = False) ->
                 ):
                     return True
     return False
+
+
+def expansion(tree: Any) -> int:
+    """How many copies of the most-repeated branch a counted repeat multiplies out to.
+
+    ``regex`` expands ``a{n}`` at compile time, so nested counted repeats cost
+    memory as their product: ``(?:(?:a{300}){300}){300}`` is twenty-four
+    characters and needs about six gigabytes, which :data:`MATCH_TIMEOUT_S`
+    does not bound because it is spent before the first search. Unbounded
+    repeats are not counted here; :func:`has_nested_unbounded_repeat` owns
+    those. The result saturates at :data:`MAX_EXPANSION` so a deep tree cannot
+    build a huge integer on the way to being refused.
+    """
+    total = 1
+    for op, args in tree:
+        if op in _REPEATS:
+            _low, high, body = args
+            inner = expansion(body)
+            total *= inner if high == _parser.MAXREPEAT else min(high, MAX_EXPANSION + 1) * inner
+        elif op is _parser.SUBPATTERN:
+            total *= expansion(args[3])
+        elif op is _parser.BRANCH:
+            total *= max((expansion(branch) for branch in args[1]), default=1)
+        elif op in (_parser.ASSERT, _parser.ASSERT_NOT):
+            total *= expansion(args[1])
+        elif op is _parser.ATOMIC_GROUP:
+            total *= expansion(args)
+        elif op is _parser.GROUPREF_EXISTS:
+            _group, yes, no = args
+            total *= max(expansion(b) for b in (yes, no) if b is not None)
+        if total > MAX_EXPANSION:
+            return MAX_EXPANSION + 1
+    return total
 
 
 def search(compiled: regex.Pattern[str], value: str) -> bool | None:
@@ -755,6 +804,7 @@ def _reconcile(
     compiled = [(rule, compile_pattern(rule.pattern)) for rule in rules]
     candidates = _candidates(session, user, contact_ids)
     added = removed = updated = timeouts = 0
+    per_rule_timeouts: dict[int, int] = {}
     for start in range(0, len(candidates), BATCH_SIZE):
         batch = candidates[start : start + BATCH_SIZE]
         ids = [c.id for c in batch]
@@ -762,16 +812,30 @@ def _reconcile(
         suppressed = _suppressions_by_contact(session, user, ids)
         for candidate in batch:
             matched: dict[int, list[int]] = {}  # tag id -> ids of the rules that matched
+            unknown: set[int] = set()  # tag ids a timeout left undecided for this contact
             for rule, pattern in compiled:
+                if per_rule_timeouts.get(rule.id, 0) >= MATCH_TIMEOUT_GIVE_UP:
+                    unknown.add(rule.tag_id)
+                    continue
                 hit = candidate.search(rule.field, pattern)
                 if hit is None:
                     timeouts += 1
+                    unknown.add(rule.tag_id)
+                    seen = per_rule_timeouts[rule.id] = per_rule_timeouts.get(rule.id, 0) + 1
                     log.warning(
-                        "auto-tag rule %d timed out after %d ms on contact %d; treated as no match",
+                        "auto-tag rule %d timed out after %d ms on contact %d; no tag is added "
+                        "or removed for it",
                         rule.id,
                         MATCH_TIMEOUT_S * 1000,
                         candidate.id,
                     )
+                    if seen >= MATCH_TIMEOUT_GIVE_UP:
+                        log.warning(
+                            "auto-tag rule %d has timed out on %d contacts; skipping it for the "
+                            "rest of this run so it cannot hold the write lock",
+                            rule.id,
+                            seen,
+                        )
                 elif hit:
                     matched.setdefault(rule.tag_id, []).append(rule.id)
             existing = assignments.get(candidate.id, {})
@@ -794,7 +858,7 @@ def _reconcile(
                     row.rule_id = rule_ids[0]
                     updated += 1
             for tag_id, row in existing.items():
-                if row.source is TagSource.RULE and tag_id not in matched:
+                if row.source is TagSource.RULE and tag_id not in matched and tag_id not in unknown:
                     session.delete(row)
                     removed += 1
         session.flush()

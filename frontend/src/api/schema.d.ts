@@ -963,6 +963,13 @@ export interface operations {
                     "application/json": components["schemas"]["AutotagRuleRunOut"];
                 };
             };
+            /** @description A name, color, pattern, or reorder request that cannot be stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     delete_autotag_rule: {
