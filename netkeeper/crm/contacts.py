@@ -170,9 +170,11 @@ def query(
     no query each. :class:`~netkeeper.crm.filters.FilterError` for a tree that
     does not compile (a placeholder predicate); ``ValueError`` for a bad page.
     """
-    total = session.scalar(compile_count(user, tree, now=now)) or 0
+    total = session.scalar(compile_count(user, tree, session=session, now=now)) or 0
     statement = paginate(
-        apply_sort(compile_filter(user, tree, now=now), sort), limit=limit, offset=offset
+        apply_sort(compile_filter(user, tree, session=session, now=now), sort),
+        limit=limit,
+        offset=offset,
     ).options(selectinload(Contact.emails), selectinload(Contact.phones))
     contacts = list(session.scalars(statement))
     return Page(contacts, total, describe(tree))
@@ -514,7 +516,7 @@ def count_selection(
 ) -> int:
     """How many of ``user``'s contacts ``selection`` names right now."""
     if selection.tree is not None:
-        return session.scalar(compile_count(user, selection.tree, now=now)) or 0
+        return session.scalar(compile_count(user, selection.tree, session=session, now=now)) or 0
     assert selection.ids is not None
     statement: Select[tuple[int]] = scoped_count(user, Contact).where(
         Contact.id.in_(selection.ids), Contact.merged_into_id.is_(None)
@@ -556,7 +558,7 @@ def bulk_update(
     actual = count_selection(session, user, selection, now=moment)
     if actual != expected_count:
         raise CountMismatch(expected_count, actual)
-    statement = _selection_update(user, selection, moment).values(**values)
+    statement = _selection_update(session, user, selection, moment).values(**values)
     # Session.execute() is typed as the plain Result; DML gets a CursorResult.
     result = cast(CursorResult[Any], session.execute(statement))
     session.expire_all()
@@ -592,9 +594,11 @@ def _bulk_values(
             }
 
 
-def _selection_update(user: User, selection: Selection, now: datetime | None) -> Update:
+def _selection_update(
+    session: Session, user: User, selection: Selection, now: datetime | None
+) -> Update:
     if selection.tree is not None:
-        return compile_update(user, selection.tree, now=now)
+        return compile_update(user, selection.tree, session=session, now=now)
     assert selection.ids is not None
     # "auto" synchronization would issue its own unscoped SELECT to find the rows
     # (see netkeeper.crm.filters.compile_update); the caller expires the session.

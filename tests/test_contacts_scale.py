@@ -28,8 +28,19 @@ from fastapi import FastAPI
 from sqlalchemy import Engine, event, insert, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.crm.filters import parse_filter
 from netkeeper.db import session_scope
-from netkeeper.models import Contact, ContactEmail, ContactPhone, ContactSource, User, UserKind
+from netkeeper.models import (
+    Contact,
+    ContactEmail,
+    ContactList,
+    ContactPhone,
+    ContactSource,
+    ListKind,
+    ListMember,
+    User,
+    UserKind,
+)
 from netkeeper.scoping import scoped
 
 CSRF = {"X-Netkeeper-Client": "1"}
@@ -225,3 +236,137 @@ async def test_the_worst_page_is_still_under_the_budget(
     best = min(timings)
     print(f"MEASURED worst page: best {best:.1f} ms of {_ms(timings)}")
     assert best < BUDGET_MS, f"the last page of {CONTACTS} took {best:.0f} ms"
+
+
+# --- list_member at scale (P1-27) -------------------------------------------
+
+LIST_MEMBERS = 2_000
+
+
+@pytest.fixture
+def crowd_lists(running_app: FastAPI, crowd: int) -> tuple[int, int]:
+    """A static list holding a fifth of the crowd, and a smart list defined over it.
+
+    Returns ``(static_id, outer_id)``. The outer list is the nested case: a
+    smart list whose filter is "met, and in the static list", so compiling it
+    inlines one tree and one ``list_members`` subquery.
+    """
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = session.get_one(User, crowd)
+        static = ContactList(user_id=user.id, name="First 2000", kind=ListKind.STATIC)
+        session.add(static)
+        session.flush()
+        ids = list(session.scalars(scoped(user, Contact).with_only_columns(Contact.id)))[
+            :LIST_MEMBERS
+        ]
+        session.execute(
+            insert(ListMember),
+            [
+                {
+                    "user_id": user.id,
+                    "list_id": static.id,
+                    "contact_id": contact_id,
+                    "added_at": datetime(2026, 1, 1, tzinfo=UTC),
+                }
+                for contact_id in ids
+            ],
+        )
+        outer = ContactList(
+            user_id=user.id,
+            name="Portland in the first 2000",
+            kind=ListKind.SMART,
+            filter_json=parse_filter(
+                {
+                    "where": {
+                        "op": "and",
+                        "children": [
+                            {"op": "eq", "field": "location", "value": "Portland"},
+                            {"op": "list_member", "list_id": static.id},
+                        ],
+                    }
+                }
+            ).model_dump(mode="json"),
+        )
+        session.add(outer)
+        session.flush()
+        return static.id, outer.id
+
+
+def _list_page(list_id: int) -> dict[str, Any]:
+    return {
+        "filter": {"where": {"op": "list_member", "list_id": list_id}},
+        "sort": [{"field": "last_name"}],
+        "limit": 50,
+        "offset": 0,
+    }
+
+
+async def test_a_static_list_of_two_thousand_pages_under_the_budget(
+    client: httpx.AsyncClient, crowd_lists: tuple[int, int]
+) -> None:
+    """The EXISTS is an index lookup per candidate row: ``(user_id, list_id, contact_id)``."""
+    static_id, _ = crowd_lists
+    body = _list_page(static_id)
+    await _timed(client, body)
+    timings = []
+    for _ in range(RUNS):
+        elapsed, page = await _timed(client, body)
+        timings.append(elapsed)
+        assert page["total"] == LIST_MEMBERS
+        assert len(page["items"]) == 50
+    best = min(timings)
+    print(f"MEASURED static list page: best {best:.1f} ms of {_ms(timings)}")
+    assert best < BUDGET_MS, (
+        f"a page of a {LIST_MEMBERS}-member static list took {best:.0f} ms, over the "
+        f"{BUDGET_MS:.0f} ms budget (runs: {_ms(timings)}). Look for the unique index on "
+        "list_members going unused."
+    )
+
+
+async def test_a_nested_list_filter_stays_under_the_budget_and_a_fixed_query_count(
+    client: httpx.AsyncClient, crowd_lists: tuple[int, int], bare_engine: Engine
+) -> None:
+    """The nested case: a smart list over a static one, both resolved once per request.
+
+    Resolving lists is one indexed lookup per distinct list id in the tree, at
+    compile time — never per contact. A page compiles the tree twice, once for
+    the count and once for the rows, and the cache lives on the compile, so the
+    budget is the page's usual queries plus twice the number of lists named.
+    What matters is that none of those numbers move with the size of the crowd
+    or of the list.
+    """
+    _, outer_id = crowd_lists
+    body = _list_page(outer_id)
+    await _timed(client, body)
+    timings = []
+    for _ in range(RUNS):
+        elapsed, page = await _timed(client, body)
+        timings.append(elapsed)
+        assert 0 < page["total"] < LIST_MEMBERS, "the nested filter should select a real slice"
+    best = min(timings)
+    print(f"MEASURED nested list page: best {best:.1f} ms of {_ms(timings)}")
+    assert best < BUDGET_MS, f"a nested list page took {best:.0f} ms (runs: {_ms(timings)})"
+
+    statements: list[str] = []
+
+    @event.listens_for(bare_engine, "before_cursor_execute")
+    def record(*args: Any) -> None:
+        statement: str = args[2]
+        if not statement.startswith(("BEGIN", "COMMIT", "ROLLBACK", "PRAGMA")):
+            statements.append(statement)
+
+    try:
+        await _timed(client, body)
+    finally:
+        event.remove(bare_engine, "before_cursor_execute", record)
+
+    selects = [statement for statement in statements if statement.lstrip().startswith("SELECT")]
+    lookups = [statement for statement in selects if "FROM lists" in statement]
+    assert len(lookups) == 4, (
+        f"two lists, compiled twice (count and page), one cached lookup each: {lookups}"
+    )
+    assert len(selects) <= 9, (
+        f"{len(selects)} selects for one page: the current user, the count, the page, emails, "
+        f"phones, and one lookup per list per compile is the budget. {selects}"
+    )

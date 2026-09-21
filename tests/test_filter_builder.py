@@ -10,6 +10,15 @@ refuses: ``PLACEHOLDERS`` is a Python dict with no place in the schema. So the
 check lives here, where it runs under ``make check`` and fails the moment a
 placeholder graduates — the day ``list_member`` compiles (issue #73), this test
 fails until the builder stops telling people it does not.
+
+That day came with P1-27, and it turned one set into two. The builder greys a
+predicate out for either of two reasons now: the compiler refuses it
+(``PLACEHOLDERS``), or the compiler takes it and the *builder* has nothing to
+edit it with (:data:`BUILDER_ONLY`). Both are honest, and they read the same
+on screen, but only the first is a statement about the server — so a
+builder-only entry may not claim the server refuses it, and the day the
+builder grows the editor it needs, that op leaves :data:`BUILDER_ONLY` rather
+than quietly widening what "unavailable" means.
 """
 
 from __future__ import annotations
@@ -49,11 +58,31 @@ def test_catalog_lists_every_predicate(entries: dict[str, str]) -> None:
     assert sorted(entries) == sorted(OPS)
 
 
-def test_catalog_marks_exactly_the_placeholders(entries: dict[str, str]) -> None:
+BUILDER_ONLY = frozenset({"list_member"})
+"""Ops the compiler takes that the builder still cannot offer.
+
+``list_member`` compiles (P1-27, #73), but picking a list needs a list picker
+the builder does not have; a filter that uses it is accepted everywhere the
+API takes one. Emptying this set is frontend work, and the entry's reason has
+to stop being true before its op may leave it.
+"""
+
+
+def _reason(body: str) -> str:
+    return body.split("unavailable:", 1)[1].split("create:", 1)[0].strip()
+
+
+def test_catalog_marks_the_placeholders_and_nothing_else_it_cannot_explain(
+    entries: dict[str, str],
+) -> None:
     marked = {op for op, body in entries.items() if "unavailable:" in body}
-    assert marked == set(PLACEHOLDERS), (
-        "the builder's 'not available yet' set no longer matches filters.PLACEHOLDERS; "
-        "a predicate either graduated or stopped compiling"
+    assert set(PLACEHOLDERS) <= marked, (
+        "the builder offers a predicate filters.PLACEHOLDERS says the compiler refuses; "
+        "the person would build a filter the server answers 422 for"
+    )
+    assert marked - set(PLACEHOLDERS) == BUILDER_ONLY, (
+        "the builder greys out a predicate the compiler accepts and this test does not "
+        "know about; add it to BUILDER_ONLY with a reason, or give the builder its editor"
     )
 
 
@@ -61,5 +90,14 @@ def test_each_placeholder_says_why(entries: dict[str, str]) -> None:
     for op in PLACEHOLDERS:
         body = entries[op]
         assert "unavailable:" in body, f"{op} is a placeholder with no reason for the UI"
-        reason = body.split("unavailable:", 1)[1].split("create:", 1)[0]
-        assert len(reason.strip()) > 40, f"{op}'s reason is too short to be useful"
+        assert len(_reason(body)) > 40, f"{op}'s reason is too short to be useful"
+
+
+def test_a_builder_only_entry_does_not_blame_the_server(entries: dict[str, str]) -> None:
+    """It compiles; saying otherwise sends people to a bug that is not there."""
+    for op in BUILDER_ONLY:
+        reason = _reason(entries[op])
+        assert len(reason) > 40, f"{op}'s reason is too short to be useful"
+        assert "server refuses" not in reason, (
+            f"{op} compiles now; its reason still says the server refuses it"
+        )

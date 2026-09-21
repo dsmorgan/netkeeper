@@ -24,10 +24,11 @@ says what it is:
 - Tags (spec 8.3, 10.3): ``tag_any``, ``tag_all``, ``tag_none`` over tag
   ``names``, matched without regard to case; a name the user has no tag for
   matches no contact.
-- Placeholders for tables that do not exist yet: ``list_member`` (P1-08),
-  ``enrolled_in`` and ``replied_in`` (P3-04). They parse, so the builder's
-  schema is complete, and compiling one raises :class:`UnsupportedPredicate`
-  naming the item that delivers it.
+- Lists (spec 10.4): ``list_member`` over a ``list_id``. See "Lists" below.
+- Placeholders for tables that do not exist yet: ``enrolled_in`` and
+  ``replied_in`` (P3-04). They parse, so the builder's schema is complete, and
+  compiling one raises :class:`UnsupportedPredicate` naming the item that
+  delivers it.
 
 Semantics
 ---------
@@ -49,12 +50,52 @@ Semantics
   constrains ``user_id``, and the compiled statements are built on
   :func:`netkeeper.scoping.scoped`, so they pass the scope guard.
 
+Lists
+-----
+``list_member`` means exactly what :func:`netkeeper.crm.lists.list_members`
+returns for that list, so the predicate and the list page can never disagree
+about who is in it (``tests/test_filters.py`` pins the two together):
+
+- A **static** list is an ``EXISTS`` over ``list_members`` for the id, plus the
+  liveness ``netkeeper.crm.lists`` applies to a static list's own page: an
+  archived or merged-away contact is not a member, whatever the outer tree's
+  ``include_archived`` says, because the ``list_members`` row can outlive the
+  contact it names being archived or merged away.
+- A **smart** list is its stored tree, inlined here at compile time. That tree
+  carries its own ``include_archived``, and it decides membership of *that*
+  list; the outer tree still applies its own on top, so the result is the
+  intersection.
+
+Inlining is why the compiler takes a ``session``: a smart list's tree lives in
+the ``lists`` table, and a predicate over lists cannot be resolved from the
+node alone. Nothing else here reads the database, so a tree with no
+``list_member`` in it compiles without a single query. What a compile does
+cost is one indexed row lookup per *distinct* list id, cached for the compile
+— never one per contact.
+
+Two lists can name each other, so :class:`_Compiler` carries the ids it is
+already standing in for and raises :class:`ListReferenceError` on a reference
+back to one, rather than recursing until Python stops it.
+:func:`netkeeper.crm.lists.update_list` seeds that set with the list being
+saved, so a cycle is refused at the write that would close it rather than
+found later by whoever opens the list. The same error caps how many lists one
+filter may pull in (:data:`MAX_LIST_EXPANSIONS`): a chain of lists each naming
+the one below it twice would otherwise inline exponentially.
+
+A ``list_member`` naming a list this user does not have (deleted, or someone
+else's) matches no contact, the way a tag name they have never used does. It
+is not an error: a list deleted out from under a saved filter would otherwise
+turn every page that reads that filter into a 422.
+
 Errors
 ------
 :func:`parse_filter` and :func:`parse_sort` raise :class:`FilterError`. Its
 ``issues`` carry a JSON path to each offending node (``where.children[1].value``)
 and its message lists them, ready to show in the UI. :class:`UnsupportedPredicate`
-is a ``FilterError`` too, with the path of the placeholder.
+and :class:`ListReferenceError` are ``FilterError`` too, with the path of the
+node at fault; a path inside an inlined list's own tree is prefixed
+``list[7].where`` to say whose node it is, since it is not in the caller's
+document at all.
 """
 
 from __future__ import annotations
@@ -82,12 +123,13 @@ from pydantic import (
     model_validator,
 )
 from pydantic_core import ErrorDetails
-from sqlalchemy import ColumnElement, Select, Update, and_, func, not_, or_, select
-from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy import ColumnElement, Select, Update, and_, false, func, not_, or_, select
+from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from netkeeper.models import (
     Contact,
     ContactEmail,
+    ContactList,
     ContactMet,
     ContactPhone,
     ContactPosition,
@@ -95,12 +137,16 @@ from netkeeper.models import (
     ContactSource,
     ContactTag,
     EmailStatus,
+    ListKind,
     Tag,
     User,
     tag_name_key,
 )
+
+# ``ListMember`` below is the predicate; the table it reads needs the other name.
+from netkeeper.models import ListMember as ListMemberRow
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import scoped, scoped_count, scoped_update
+from netkeeper.scoping import get_scoped, scoped, scoped_count, scoped_update
 
 log = logging.getLogger(__name__)
 
@@ -603,11 +649,15 @@ type FilterNode = Annotated[
 ]
 
 PLACEHOLDERS: Final[dict[str, str]] = {
-    "list_member": "P1-08",
     "enrolled_in": "P3-04",
     "replied_in": "P3-04",
 }
-"""Predicates that parse but do not compile yet, and the item that delivers each."""
+"""Predicates that parse but do not compile yet, and the item that delivers each.
+
+``list_member`` was here until P1-27 (#73), naming P1-08 — which shipped lists
+without it, so the message named an item that had already been and gone. It
+compiles now; a predicate leaves this table by compiling, never by being
+re-pointed at the next item."""
 
 NODE_TYPES: Final[tuple[type[_Node], ...]] = get_args(get_args(FilterNode.__value__)[0])
 """Every predicate model, in the order the union lists them."""
@@ -696,6 +746,17 @@ class UnsupportedPredicate(FilterError):
         super().__init__([FilterIssue(path, f"{op} is not available yet; {item} delivers it")])
 
 
+class ListReferenceError(FilterError):
+    """``list_member`` reaches a list the compiler will not expand: a cycle, or too many.
+
+    ``list_ids`` is the chain it was expanding when it stopped, outermost first.
+    """
+
+    def __init__(self, path: str, message: str, list_ids: Sequence[int]) -> None:
+        self.list_ids: tuple[int, ...] = tuple(list_ids)
+        super().__init__([FilterIssue(path, message)])
+
+
 _STRIPPED_SEGMENTS: Final[frozenset[str]] = frozenset(OPS)
 
 
@@ -751,38 +812,59 @@ def parse_sort(data: Any) -> list[SortKey]:
 
 
 def compile_where(
-    user: User, tree: FilterTree, *, now: datetime | None = None
+    user: User,
+    tree: FilterTree,
+    *,
+    session: Session,
+    now: datetime | None = None,
+    expanding: Sequence[int] = (),
 ) -> ColumnElement[bool]:
     """The ``WHERE`` clause of ``tree`` for ``user``, to put on a scoped statement.
 
     :func:`compile_filter`, :func:`compile_count`, and :func:`compile_update` are
     built on it. ``now`` is the instant relative windows count back from; aware,
     UTC by default.
+
+    ``session`` resolves ``list_member`` (see "Lists" in the module docstring);
+    a tree with no ``list_member`` anywhere in it never touches it, but the
+    argument is required rather than optional so that a caller cannot be one
+    predicate away from a filter it silently cannot compile. ``expanding`` is
+    the list ids this tree already stands for, so a ``list_member`` back to one
+    of them is a cycle: :func:`netkeeper.crm.lists.update_list` passes the list
+    whose filter it is about to store.
     """
     clock = _Clock.at(user, now)
-    clauses: list[ColumnElement[bool]] = [Contact.merged_into_id.is_(None)]
-    if not tree.include_archived:
-        clauses.append(Contact.archived_at.is_(None))
+    clauses = _liveness(tree)
     if tree.where is not None:
-        clauses.append(_Compiler(user, clock).node(tree.where, "where"))
+        clauses.append(_Compiler(user, clock, session, expanding).node(tree.where, "where"))
     return and_(*clauses)
 
 
+def _liveness(tree: FilterTree) -> list[ColumnElement[bool]]:
+    """The terms every tree carries: never a merged-away contact, archived only on request."""
+    clauses: list[ColumnElement[bool]] = [Contact.merged_into_id.is_(None)]
+    if not tree.include_archived:
+        clauses.append(Contact.archived_at.is_(None))
+    return clauses
+
+
 def compile_filter(
-    user: User, tree: FilterTree, *, now: datetime | None = None
+    user: User, tree: FilterTree, *, session: Session, now: datetime | None = None
 ) -> Select[tuple[Contact]]:
     """``scoped(user, Contact)`` filtered by ``tree``. Sort and page it with the helpers below."""
-    return scoped(user, Contact).where(compile_where(user, tree, now=now))
+    return scoped(user, Contact).where(compile_where(user, tree, session=session, now=now))
 
 
 def compile_count(
-    user: User, tree: FilterTree, *, now: datetime | None = None
+    user: User, tree: FilterTree, *, session: Session, now: datetime | None = None
 ) -> Select[tuple[int]]:
     """``scoped_count(user, Contact)`` filtered by ``tree``."""
-    return scoped_count(user, Contact).where(compile_where(user, tree, now=now))
+    return scoped_count(user, Contact).where(compile_where(user, tree, session=session, now=now))
 
 
-def compile_update(user: User, tree: FilterTree, *, now: datetime | None = None) -> Update:
+def compile_update(
+    user: User, tree: FilterTree, *, session: Session, now: datetime | None = None
+) -> Update:
     """``scoped_update(user, Contact)`` filtered by ``tree``, for a bulk action; add ``.values()``.
 
     The statement carries ``synchronize_session=False``. The ORM's default,
@@ -796,7 +878,7 @@ def compile_update(user: User, tree: FilterTree, *, now: datetime | None = None)
     """
     return (
         scoped_update(user, Contact)
-        .where(compile_where(user, tree, now=now))
+        .where(compile_where(user, tree, session=session, now=now))
         .execution_options(synchronize_session=False)
     )
 
@@ -853,10 +935,20 @@ class _Clock:
         return cls(now=now.astimezone(UTC), today=now.astimezone(zone).date())
 
 
+MAX_LIST_EXPANSIONS: Final = 32
+"""How many smart lists one compile may inline. See "Lists" in the module docstring."""
+
+
 class _Compiler:
-    def __init__(self, user: User, clock: _Clock) -> None:
+    def __init__(
+        self, user: User, clock: _Clock, session: Session, expanding: Sequence[int] = ()
+    ) -> None:
         self.user = user
         self.clock = clock
+        self.session = session
+        self._expanding: tuple[int, ...] = tuple(expanding)
+        self._lists: dict[int, ContactList | None] = {}
+        self._expansions = 0
 
     def node(self, node: FilterNode, path: str) -> ColumnElement[bool]:
         match node:
@@ -940,7 +1032,9 @@ class _Compiler:
                 return and_(*(self._tagged([key]).exists() for key in keys))
             case TagNone():
                 return not_(self._tagged(node.names).exists())
-            case ListMember() | EnrolledIn() | RepliedIn():
+            case ListMember():
+                return self._list_member(node.list_id, path)
+            case EnrolledIn() | RepliedIn():
                 raise UnsupportedPredicate(node.op, path, PLACEHOLDERS[node.op])
             case _ as unreachable:
                 assert_never(unreachable)
@@ -968,6 +1062,91 @@ class _Compiler:
             .where(model.contact_id == Contact.id, model.user_id == self.user.id)
             .correlate(Contact)
         )
+
+    def _list_member(self, list_id: int, path: str) -> ColumnElement[bool]:
+        """Membership of list ``list_id``, meaning whatever ``lists.list_members`` means.
+
+        A list this user does not have matches nobody (see the module
+        docstring), which is also what makes another user's list id safe to
+        name: the lookup is scoped, so it finds nothing and compiles to
+        ``false`` rather than to somebody else's members.
+        """
+        row = self._list(list_id)
+        if row is None:
+            return false()
+        if row.kind is ListKind.STATIC:
+            # The EXISTS says "has a row"; the liveness terms say "and is still a
+            # person", which is what netkeeper.crm.lists._static_members_base adds
+            # to the same join. A membership row outlives its contact being
+            # archived or merged away, so neither is dropped for us by the outer
+            # tree: include_archived on *this* tree does not make an archived
+            # contact a member of a static list.
+            return and_(
+                Contact.merged_into_id.is_(None),
+                Contact.archived_at.is_(None),
+                self._members_of(row.id).exists(),
+            )
+        return self._inline(row, path)
+
+    def _list(self, list_id: int) -> ContactList | None:
+        """The user's list, or None. One query per distinct id per compile, not per row.
+
+        ``no_autoflush`` because compiling is not the caller's write: a filter
+        validated halfway through an edit (``netkeeper.crm.lists.update_list``
+        sets the new name, then compiles the new filter) must not flush that
+        half-done work just because the compiler read a row. Every caller
+        flushes a list it has just created before it compiles anything naming
+        it, so nothing is missed by not flushing here.
+        """
+        if list_id not in self._lists:
+            with self.session.no_autoflush:
+                self._lists[list_id] = get_scoped(self.session, self.user, ContactList, list_id)
+        return self._lists[list_id]
+
+    def _members_of(self, list_id: int) -> Select[tuple[int]]:
+        """``list_members`` rows of this contact in that list; correlated, like a child subquery.
+
+        ``(user_id, list_id, contact_id)`` is the table's unique constraint, so
+        this is an index lookup per candidate row rather than a scan, and the
+        ``user_id`` term is the same defense in depth :meth:`_child_rows` keeps.
+        """
+        return (
+            select(ListMemberRow.id)
+            .where(
+                ListMemberRow.contact_id == Contact.id,
+                ListMemberRow.user_id == self.user.id,
+                ListMemberRow.list_id == list_id,
+            )
+            .correlate(Contact)
+        )
+
+    def _inline(self, row: ContactList, path: str) -> ColumnElement[bool]:
+        """A smart list's stored tree, compiled in place, with the cycle and size guards."""
+        if row.id in self._expanding:
+            chain = " -> ".join(str(list_id) for list_id in (*self._expanding, row.id))
+            raise ListReferenceError(
+                path,
+                f"list {row.id} is defined in terms of itself ({chain})",
+                (*self._expanding, row.id),
+            )
+        if self._expansions >= MAX_LIST_EXPANSIONS:
+            raise ListReferenceError(
+                path,
+                f"this filter pulls in more than {MAX_LIST_EXPANSIONS} lists",
+                (*self._expanding, row.id),
+            )
+        self._expansions += 1
+        # The CHECK constraint on ``lists`` keeps filter_json and kind in step.
+        assert row.filter_json is not None, "a smart list always carries a filter"
+        tree = parse_filter(row.filter_json)
+        clauses = _liveness(tree)
+        if tree.where is not None:
+            self._expanding += (row.id,)
+            try:
+                clauses.append(self.node(tree.where, f"list[{row.id}].where"))
+            finally:
+                self._expanding = self._expanding[:-1]
+        return and_(*clauses)
 
     def _tagged(self, names: Sequence[str]) -> Select[tuple[int]]:
         """``contact_tags`` rows of this contact whose tag is named in ``names``.

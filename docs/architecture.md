@@ -364,6 +364,8 @@ A `contact_alias` table records old `li_public_id` values so a renamed vanity UR
 
 Merging two contacts is a first-class operation that re-points every child row and message and records `merged_into_id` on the loser.
 
+**What "every child row" includes, as built (P1-27).** `list_members` is one of them: the survivor stays in every static list the loser was in, and where both were in a list, the survivor's own membership row is the one kept, with the `added_at` the person joined by. The table is not a child of `contacts` in the way the others are — a membership row belongs to a list and names a contact — which is exactly how it was missed until #81.
+
 ### 8.3 Organization
 
 - `tag` (`name` unique, `color`, `kind` manual/auto/llm), `contact_tag` (`contact_id`, `tag_id`, `source`, `rule_id` nullable). Unique on (`contact_id`, `tag_id`). Removing an auto-tag manually writes a `contact_tag_suppression` row so the rule does not re-add it.
@@ -546,6 +548,14 @@ Smart lists store a filter tree serialized as JSON and compiled to SQLAlchemy. S
 
 Static lists are explicit membership with an `added_at`, for the "First 100" style batches in the training.
 
+**How `list_member` compiles, as built (P1-27).** A static list becomes a correlated `EXISTS` over `list_members` for that id, which needs nothing but the id. A smart list is its stored tree, inlined into the filter being compiled — so a list defined in terms of another list is one flat statement, not a query per contact and not a materialized set. Three rules follow from making the predicate mean what the list page means:
+
+- **Liveness.** A static list's members are live contacts: archived or merged away, they are not members, whatever `include_archived` says on the filter around them, because a membership row outlives either. A smart list's own `include_archived` decides its membership, and the outer filter still applies its own on top.
+- **Cycles.** Two lists could otherwise define each other. The compiler carries the ids it is already standing in for and refuses a reference back to one; `update_list` seeds that set with the list being written, so the cycle is refused at the save that would close it rather than discovered by whoever next opens either list. A cap on how many lists one filter may pull in (32) bounds the other blowup, a chain of lists each naming the one below it twice.
+- **A reference to a list that is not there** — deleted, or another user's — matches no contact, the way a tag name nobody has used does. Turning it into an error would mean deleting one list could 422 every page that reads another.
+
+Because a smart list's tree lives in the `lists` table, compiling a filter is no longer a pure function of the tree: it takes a session. It reads nothing for a filter with no `list_member` in it, and one indexed row per distinct list id for one that has, at compile time rather than per contact.
+
 ### 10.5 Import
 
 1. Upload a CSV or the LinkedIn archive zip.
@@ -560,7 +570,9 @@ Field-level provenance: an imported value never overwrites a value from a more a
 
 ### 10.6 Export
 
-Presets: `nine-column`, `linkedin-archive`, `full`, `campaign-audience`. Formats: CSV, JSON, vCard 4.0. Exports respect the current filter and strip internal counters.
+Presets: `nine-column`, `linkedin-archive`, `full`, `campaign-audience`. Formats: CSV, JSON, vCard 4.0. Exports respect the current filter and strip internal counters. A static list exports its own members through `list_member` (10.4), so the Export button on a list means the list.
+
+An export is streamed, so everything that can refuse it has to happen before the first chunk: the filter is parsed and compiled while the request can still become a `422`. Once a `200` is on the wire a failure can only truncate the file, which is worse than an error because nothing about it looks like one (P1-27).
 
 ## 11. Campaign engine
 

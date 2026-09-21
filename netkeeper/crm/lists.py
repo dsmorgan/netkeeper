@@ -14,11 +14,19 @@ What this module decides
   :func:`update_list` parse it (already done by the Pydantic layer at the API
   boundary) and then compile it for this user with
   :func:`netkeeper.crm.filters.compile_where`, which is never executed but
-  raises :class:`~netkeeper.crm.filters.FilterError` for a malformed tree or
+  raises :class:`~netkeeper.crm.filters.FilterError` for a malformed tree,
   :class:`~netkeeper.crm.filters.UnsupportedPredicate` for one that uses a
-  predicate that does not compile yet. So a smart list can never be saved
-  broken, and a broken filter is never discovered only when someone opens the
-  list.
+  predicate that does not compile yet, and
+  :class:`~netkeeper.crm.filters.ListReferenceError` for a ``list_member``
+  that would make two lists define each other. So a smart list can never be
+  saved broken, and a broken filter is never discovered only when someone
+  opens the list.
+- A filter may name another list (``list_member``), which is why compiling one
+  now takes the session: a smart list it names is inlined from the ``lists``
+  table. :func:`update_list` passes the list being written as ``list_id`` so
+  the cycle it would close is refused at that write, not at everyone's next
+  read. A ``list_member`` naming a list that is later deleted quietly matches
+  nobody rather than breaking every page that reads the filter.
 - A saved view (:func:`create_view`, :func:`update_view`) is a name, a column
   set, a sort, and an optional filter for the contacts table (spec 10.1). It
   never has members; it is restored by the frontend, not evaluated here.
@@ -189,10 +197,21 @@ def _clean_columns(columns: Sequence[str]) -> list[str]:
     return cleaned
 
 
-def _check_filter(user: User, tree: FilterTree) -> None:
+def _check_filter(
+    session: Session, user: User, tree: FilterTree, *, list_id: int | None = None
+) -> None:
     """Compile ``tree`` for ``user``; never executed, but raises for a broken or not-yet-
-    supported filter so a smart list or a saved view is never stored broken."""
-    compile_where(user, tree)
+    supported filter so a smart list or a saved view is never stored broken.
+
+    ``list_id`` is the list this tree is about to become, if any. Compiling
+    inlines every smart list the tree names (:mod:`netkeeper.crm.filters`), so
+    passing it makes a tree that reaches back to its own list — directly or
+    through others — a :class:`~netkeeper.crm.filters.ListReferenceError` here,
+    at the write that would close the cycle. Without it the write would succeed
+    against the list's *stored* tree and the cycle would surface later as a 422
+    on every page that reads either list.
+    """
+    compile_where(user, tree, session=session, expanding=() if list_id is None else (list_id,))
 
 
 # --- lists ----------------------------------------------------------------
@@ -230,7 +249,7 @@ def create_list(
     cleaned = _clean_name(name, max_length=LIST_NAME_MAX_LENGTH, what="list")
     if find_list(session, user, cleaned) is not None:
         raise DuplicateListName(f"a list named {cleaned!r} already exists")
-    stored = _prepare_filter(user, kind, filter)
+    stored = _prepare_filter(session, user, kind, filter)
     row = ContactList(user_id=user.id, name=cleaned, kind=kind, filter_json=stored)
     session.add(row)
     session.flush()
@@ -238,14 +257,16 @@ def create_list(
     return row
 
 
-def _prepare_filter(user: User, kind: ListKind, filter: FilterTree | None) -> dict[str, Any] | None:
+def _prepare_filter(
+    session: Session, user: User, kind: ListKind, filter: FilterTree | None
+) -> dict[str, Any] | None:
     if kind is ListKind.STATIC:
         if filter is not None:
             raise InvalidListValue("a static list has no filter; add members instead")
         return None
     if filter is None:
         raise InvalidListValue("a smart list needs a filter")
-    _check_filter(user, filter)
+    _check_filter(session, user, filter)
     return filter.model_dump(mode="json")
 
 
@@ -276,7 +297,7 @@ def update_list(
             raise WrongListKind("only a smart list's filter can be changed")
         if filter is None:
             raise InvalidListValue("a smart list needs a filter")
-        _check_filter(user, filter)
+        _check_filter(session, user, filter, list_id=row.id)
         row.filter_json = filter.model_dump(mode="json")
     session.flush()
     return row
@@ -407,9 +428,9 @@ def list_members(
         ).all()
         return list(contacts), total
     tree = parse_filter(row.filter_json)
-    total = session.scalar(compile_count(user, tree)) or 0
+    total = session.scalar(compile_count(user, tree, session=session)) or 0
     contacts = session.scalars(
-        compile_filter(user, tree).order_by(Contact.id).limit(limit).offset(offset)
+        compile_filter(user, tree, session=session).order_by(Contact.id).limit(limit).offset(offset)
     ).all()
     return list(contacts), total
 
@@ -420,7 +441,7 @@ def _member_count_for(session: Session, user: User, row: ContactList) -> int:
         base = _static_members_base(user, row)
         return session.scalar(base.with_only_columns(func.count())) or 0
     tree = parse_filter(row.filter_json)
-    return session.scalar(compile_count(user, tree)) or 0
+    return session.scalar(compile_count(user, tree, session=session)) or 0
 
 
 def member_count(session: Session, user: User, list_id: int) -> int:
@@ -476,7 +497,7 @@ def create_view(
         raise DuplicateViewName(f"a view named {cleaned!r} already exists")
     cleaned_columns = _clean_columns(columns)
     if filter is not None:
-        _check_filter(user, filter)
+        _check_filter(session, user, filter)
     row = SavedView(
         user_id=user.id,
         name=cleaned,
@@ -520,7 +541,7 @@ def update_view(
         row.sort = [key.model_dump(mode="json") for key in sort]
     if not isinstance(filter, Unset):
         if filter is not None:
-            _check_filter(user, filter)
+            _check_filter(session, user, filter)
         row.filter_json = None if filter is None else filter.model_dump(mode="json")
     session.flush()
     return row

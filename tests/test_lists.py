@@ -91,8 +91,8 @@ def test_a_static_list_takes_no_filter_and_a_smart_list_needs_one(
 def test_a_broken_or_unsupported_filter_is_refused_at_write_time(
     writer: Session, user: User
 ) -> None:
-    ok_placeholder = parse_filter({"where": {"op": "list_member", "list_id": 1}})
-    with pytest.raises(FilterError):  # UnsupportedPredicate: list_member does not compile yet
+    ok_placeholder = parse_filter({"where": {"op": "enrolled_in", "campaign_id": 1}})
+    with pytest.raises(FilterError):  # UnsupportedPredicate: campaigns arrive with P3-04
         create_list(writer, user, "bad filter", ListKind.SMART, filter=ok_placeholder)
 
 
@@ -227,7 +227,9 @@ def test_a_smart_lists_members_equal_the_filters_result(writer: Session, user: U
     tree = parse_filter({"where": {"op": "eq", "field": "met", "value": "met"}})
     smart = create_list(writer, user, "Met", ListKind.SMART, filter=tree)
 
-    direct_ids = sorted(c.id for c in writer.scalars(compile_filter(user, tree)).all())
+    direct_ids = sorted(
+        c.id for c in writer.scalars(compile_filter(user, tree, session=writer)).all()
+    )
     members, total = list_members(writer, user, smart.id, limit=50)
     assert sorted(c.id for c in members) == direct_ids
     assert total == len(direct_ids) == 2
@@ -257,11 +259,15 @@ def test_a_smart_lists_members_track_the_live_data(writer: Session, user: User) 
     assert sorted(c.id for c in members) == sorted([contact.id, later.id])
 
 
-def test_a_static_list_drops_a_member_that_was_merged_away(writer: Session, user: User) -> None:
-    """A merged-away contact is a tombstone: `merge` moves its emails, phones and
-    LinkedIn identity to the survivor, so leaving it in a static list would hand a
-    campaign a row with no way to reach anyone. Spec 8.2 and `filters.py`'s rule that
-    merged-away contacts never appear; every smart list already honors it."""
+def test_a_merged_member_is_replaced_by_its_survivor(writer: Session, user: User) -> None:
+    """The person stays in the list; only which row stands for them changes.
+
+    A merged-away contact is a tombstone: `merge` moves its emails, phones and
+    LinkedIn identity to the survivor, so this list never shows it (spec 8.2 and
+    `filters.py`'s rule that merged-away contacts never appear). Before #81 that
+    was the whole story and the list quietly lost a member, because nothing
+    moved the membership row; `identity.merge` re-points it now, so the list
+    still has the two people it had."""
     keep = factories.make_contact(writer, user)
     loser = factories.make_contact(writer, user)
     survivor = factories.make_contact(writer, user)
@@ -272,9 +278,88 @@ def test_a_static_list_drops_a_member_that_was_merged_away(writer: Session, user
     identity.merge(writer, user, survivor.id, loser.id)
 
     members, total = list_members(writer, user, row.id, limit=50)
-    assert [c.id for c in members] == [keep.id]
-    assert total == 1
-    assert member_count(writer, user, row.id) == 1
+    assert sorted(c.id for c in members) == sorted([keep.id, survivor.id])
+    assert loser.id not in {c.id for c in members}
+    assert total == 2
+    assert member_count(writer, user, row.id) == 2
+
+
+def test_a_smart_list_can_be_defined_as_part_of_a_static_one(writer: Session, user: User) -> None:
+    """P1-27: the predicate lists were missing. A smart list over a static one's members."""
+    met_inside = factories.make_contact(writer, user, met=ContactMet.MET)
+    unmet_inside = factories.make_contact(writer, user, met=ContactMet.NOT_MET)
+    met_outside = factories.make_contact(writer, user, met=ContactMet.MET)
+    static = create_list(writer, user, "First 100", ListKind.STATIC)
+    add_members(writer, user, static.id, [met_inside.id, unmet_inside.id])
+
+    smart = create_list(
+        writer,
+        user,
+        "Met in the first 100",
+        ListKind.SMART,
+        filter=parse_filter(
+            {
+                "where": {
+                    "op": "and",
+                    "children": [
+                        {"op": "eq", "field": "met", "value": "met"},
+                        {"op": "list_member", "list_id": static.id},
+                    ],
+                }
+            }
+        ),
+    )
+    members, total = list_members(writer, user, smart.id, limit=50)
+    assert [c.id for c in members] == [met_inside.id]
+    assert total == 1 and met_outside.id not in {c.id for c in members}
+
+
+def test_a_filter_that_would_make_two_lists_define_each_other_is_refused(
+    writer: Session, user: User
+) -> None:
+    """The cycle is refused at the write that would close it, not found by the next reader."""
+    first = create_list(
+        writer, user, "First", ListKind.SMART, filter=parse_filter({"where": {"op": "has_email"}})
+    )
+    second = create_list(
+        writer,
+        user,
+        "Second",
+        ListKind.SMART,
+        filter=parse_filter({"where": {"op": "list_member", "list_id": first.id}}),
+    )
+    with pytest.raises(FilterError, match="defined in terms of itself"):
+        update_list(
+            writer,
+            user,
+            first.id,
+            filter=parse_filter({"where": {"op": "list_member", "list_id": second.id}}),
+        )
+    # Refused, so both lists still read: the pair is never left unusable.
+    assert member_count(writer, user, first.id) == 0
+    assert member_count(writer, user, second.id) == 0
+
+
+def test_deleting_a_list_a_filter_names_leaves_that_filter_readable(
+    writer: Session, user: User
+) -> None:
+    """A dangling reference matches nobody; it does not 422 every page that reads the list."""
+    inside = factories.make_contact(writer, user)
+    static = create_list(writer, user, "First 100", ListKind.STATIC)
+    add_members(writer, user, static.id, [inside.id])
+    smart = create_list(
+        writer,
+        user,
+        "Copy",
+        ListKind.SMART,
+        filter=parse_filter({"where": {"op": "list_member", "list_id": static.id}}),
+    )
+    assert member_count(writer, user, smart.id) == 1
+
+    delete_list(writer, user, static.id)
+    assert member_count(writer, user, smart.id) == 0
+    members, total = list_members(writer, user, smart.id, limit=50)
+    assert members == [] and total == 0
 
 
 def test_smart_list_members_pagination(writer: Session, user: User) -> None:
@@ -302,7 +387,7 @@ def test_validated_list_is_seeded_once_and_matches_met_contacts(
     assert get_setting(writer, user, VALIDATED_SEEDED_KEY) is True
 
     tree = parse_filter(VALIDATED_FILTER)
-    direct_ids = [c.id for c in writer.scalars(compile_filter(user, tree)).all()]
+    direct_ids = [c.id for c in writer.scalars(compile_filter(user, tree, session=writer)).all()]
     members, _total = list_members(writer, user, row.id, limit=50)
     assert [c.id for c in members] == direct_ids == [met.id]
 
@@ -433,7 +518,7 @@ def test_a_smart_list_owned_by_one_user_never_returns_another_users_contacts(
     assert [c.id for c in members] == [mine.id]
 
     # the same filter, run as `other`, must never see `user`'s contact
-    other_ids = [c.id for c in writer.scalars(compile_filter(other, tree)).all()]
+    other_ids = [c.id for c in writer.scalars(compile_filter(other, tree, session=writer)).all()]
     assert mine.id not in other_ids
 
 

@@ -7,6 +7,14 @@ docstring for why: the short version is a leaked connection per request, not a
 closed-session error). The whole point of streaming here is to write rows to
 the client as the query yields them, without materializing the file or the
 result set in memory (:mod:`netkeeper.crm.exports`). It is always a read.
+
+Everything that can refuse the request happens before the response is
+returned: the filter and the sort are parsed here, and
+:func:`~netkeeper.crm.exports.export_stream` compiles the filter before it
+hands back its iterator. A ``StreamingResponse`` cannot change its mind once
+the body has started — the status line is long gone — so a compile deferred
+into the generator would answer ``200`` and then stop mid-file. Every refusal
+is a ``422``, the same status the filter gets everywhere else (#95).
 """
 
 from __future__ import annotations
@@ -75,16 +83,21 @@ def export_contacts(
     tree = _parse_filter(filter_)
     sort_keys = _parse_sort(sort)
     now = datetime.now(UTC)
-    body = export_stream(
-        session,
-        user,
-        preset=preset,
-        output_format=output_format,
-        headerless=headerless,
-        tree=tree,
-        sort=sort_keys,
-        now=now,
-    )
+    try:
+        body = export_stream(
+            session,
+            user,
+            preset=preset,
+            output_format=output_format,
+            headerless=headerless,
+            tree=tree,
+            sort=sort_keys,
+            now=now,
+        )
+    except FilterError as exc:
+        # export_stream() compiles before it returns its iterator, so this is
+        # still an ordinary response: nothing has been sent (#95).
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     response = StreamingResponse(body, media_type=MEDIA_TYPES[output_format])
     response.headers["Content-Disposition"] = (
         f'attachment; filename="{filename_for(preset, output_format)}"'

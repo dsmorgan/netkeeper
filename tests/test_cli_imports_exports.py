@@ -833,6 +833,17 @@ def test_cli_export_rejects_invalid_filter_json(cli_db: sessionmaker[Session]) -
     assert "--filter" in result.output
 
 
+def test_cli_export_says_why_a_predicate_is_unavailable(cli_db: sessionmaker[Session]) -> None:
+    """The CLI half of #95: it parses, the compiler refuses it, and nobody sees a traceback."""
+    with session_scope(cli_db, write=True) as session:
+        factories.make_contact(session, ensure_local_user(session))
+    tree = json.dumps({"where": {"op": "enrolled_in", "campaign_id": 1}})
+    result = CliRunner().invoke(cli, ["export", "--filter", tree])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "P3-04" in result.output
+
+
 def test_cli_export_rejects_a_filter_that_does_not_compile(cli_db: sessionmaker[Session]) -> None:
     result = CliRunner().invoke(cli, ["export", "--filter", '{"where": {"op": "bogus"}}'])
     assert result.exit_code == 1

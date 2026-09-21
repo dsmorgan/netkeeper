@@ -12,17 +12,20 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, get_args
 
 import factories
 import pytest
-from sqlalchemy import Boolean, Date, Enum, Integer, String
+from sqlalchemy import Boolean, Date, Enum, Integer, String, event
 from sqlalchemy.orm import Session
 
 from netkeeper.crm.filters import (
     FIELDS,
+    MAX_LIST_EXPANSIONS,
     NODE_TYPES,
     OPS,
     PLACEHOLDERS,
@@ -30,6 +33,7 @@ from netkeeper.crm.filters import (
     EmptyableField,
     FilterError,
     FilterTree,
+    ListReferenceError,
     OrderedField,
     SortKey,
     StringField,
@@ -44,13 +48,17 @@ from netkeeper.crm.filters import (
     parse_filter,
     parse_sort,
 )
+from netkeeper.crm.lists import list_members
 from netkeeper.models import (
     Contact,
+    ContactList,
     ContactMet,
     ContactSnapshot,
     ContactSource,
     ContactTag,
     EmailStatus,
+    ListKind,
+    ListMember,
     Tag,
     TagSource,
     User,
@@ -270,8 +278,10 @@ def matching(
 ) -> list[int]:
     """Ids the compiled filter returns, after checking the count query agrees."""
     tree = parse_filter({"where": where, "include_archived": include_archived})
-    ids = sorted(c.id for c in session.scalars(compile_filter(user, tree, now=now)))
-    assert session.scalar(compile_count(user, tree, now=now)) == len(ids)
+    ids = sorted(
+        c.id for c in session.scalars(compile_filter(user, tree, session=session, now=now))
+    )
+    assert session.scalar(compile_count(user, tree, session=session, now=now)) == len(ids)
     return ids
 
 
@@ -312,7 +322,7 @@ def test_field_sets_agree_with_fields_and_with_the_contact_columns() -> None:
 def test_every_op_has_one_node_type_and_placeholders_are_ops() -> None:
     assert len(OPS) == len(set(OPS)) == len(NODE_TYPES) == 27
     assert set(PLACEHOLDERS) < set(OPS)
-    assert set(PLACEHOLDERS.values()) == {"P1-08", "P3-04"}
+    assert set(PLACEHOLDERS.values()) == {"P3-04"}
 
 
 def test_examples_cover_every_op() -> None:
@@ -588,9 +598,9 @@ def test_an_unknown_timezone_falls_back_to_utc_with_a_warning(
     assert "Mars/Olympus" in caplog.text
 
 
-def test_now_must_be_aware(user: User) -> None:
+def test_now_must_be_aware(session: Session, user: User) -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
-        compile_filter(user, parse_filter({}), now=datetime(2026, 9, 20, 12, 0))
+        compile_filter(user, parse_filter({}), session=session, now=datetime(2026, 9, 20, 12, 0))
 
 
 def test_changed_jobs_within_days_looks_for_a_snapshot_in_the_window(
@@ -654,19 +664,18 @@ def test_archived_contacts_need_include_archived_and_merged_never_appear(
 # --- placeholders -----------------------------------------------------------
 
 PLACEHOLDER_NODES: dict[str, dict[str, Any]] = {
-    "list_member": {"op": "list_member", "list_id": 3},
     "enrolled_in": {"op": "enrolled_in", "campaign_id": 2},
     "replied_in": {"op": "replied_in", "campaign_id": 2},
 }
 
 
 @pytest.mark.parametrize("op", list(PLACEHOLDER_NODES))
-def test_placeholders_parse_but_do_not_compile(user: User, op: str) -> None:
+def test_placeholders_parse_but_do_not_compile(session: Session, user: User, op: str) -> None:
     node = PLACEHOLDER_NODES[op]
     tree = parse_filter({"where": {"op": "and", "children": [{"op": "has_email"}, node]}})
     assert tree.model_dump(mode="json")["where"]["children"][1] == node
     with pytest.raises(UnsupportedPredicate) as info:
-        compile_where(user, tree)
+        compile_where(user, tree, session=session)
     assert info.value.op == op
     assert info.value.item == PLACEHOLDERS[op]
     assert isinstance(info.value, FilterError)
@@ -677,8 +686,12 @@ def test_placeholders_parse_but_do_not_compile(user: User, op: str) -> None:
     )
 
 
-def test_placeholder_set_is_exactly_the_three(user: User) -> None:
+def test_placeholder_set_is_exactly_the_campaign_two(user: User) -> None:
     assert set(PLACEHOLDER_NODES) == set(PLACEHOLDERS)
+    assert set(PLACEHOLDERS) == {"enrolled_in", "replied_in"}, (
+        "list_member graduated with P1-27 (#73); a predicate leaves PLACEHOLDERS by "
+        "compiling, so anything else in here is new"
+    )
 
 
 # --- tags -------------------------------------------------------------------
@@ -727,6 +740,257 @@ def test_tag_any_all_none_by_name_case_insensitively(
     assert one({"op": "not", "child": {"op": "tag_any", "names": ["vp"]}}) == [untagged.id]
     assert one({"op": "tag_any", "names": ["vp"]}, other) == [theirs.id]
     assert one({"op": "tag_any", "names": ["founder"]}, other) == []
+
+
+# --- lists ------------------------------------------------------------------
+
+
+def _static_list(
+    session: Session, user: User, name: str, members: Sequence[Contact] = ()
+) -> ContactList:
+    row = ContactList(user_id=user.id, name=name, kind=ListKind.STATIC)
+    session.add(row)
+    session.flush()
+    for contact in members:
+        session.add(ListMember(user_id=user.id, list_id=row.id, contact_id=contact.id))
+    session.flush()
+    return row
+
+
+def _smart_list(
+    session: Session,
+    user: User,
+    name: str,
+    where: dict[str, Any] | None,
+    *,
+    include_archived: bool = False,
+) -> ContactList:
+    """A smart list written straight to the table, so a test can store what the service refuses."""
+    stored = parse_filter({"where": where, "include_archived": include_archived})
+    row = ContactList(
+        user_id=user.id, name=name, kind=ListKind.SMART, filter_json=stored.model_dump(mode="json")
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+@contextmanager
+def _statements(session: Session) -> Iterator[list[str]]:
+    """Every SQL statement the block issues, for the no-N+1 and no-I/O checks."""
+    engine = session.get_bind()
+    recorded: list[str] = []
+
+    def record(*args: Any) -> None:
+        recorded.append(args[2])
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        yield recorded
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+
+def test_list_member_of_a_static_list_is_its_members(
+    session: Session, user: User, other: User
+) -> None:
+    inside = factories.make_contact(session, user)
+    outside = factories.make_contact(session, user)
+    row = _static_list(session, user, "First 100", [inside])
+    # Another user's list of the same id space, and their own membership rows.
+    theirs = factories.make_contact(session, other)
+    _static_list(session, other, "Theirs", [theirs])
+
+    node = {"op": "list_member", "list_id": row.id}
+    assert matching(session, user, node) == [inside.id]
+    assert matching(session, user, {"op": "not", "child": node}) == [outside.id]
+    assert matching(session, other, node) == [], "another user's list id is not their list"
+
+
+def test_list_member_never_counts_an_archived_or_merged_member(
+    session: Session, user: User
+) -> None:
+    """The membership row outlives both, so the predicate has to say so itself.
+
+    ``include_archived`` on the outer tree widens what the *filter* returns; it
+    does not make an archived contact a member of a static list, because
+    ``netkeeper.crm.lists`` does not either.
+    """
+    live = factories.make_contact(session, user)
+    archived = factories.make_contact(session, user, archived_at=NOW)
+    merged = factories.make_contact(session, user, merged_into_id=live.id)
+    row = _static_list(session, user, "First 100", [live, archived, merged])
+
+    node = {"op": "list_member", "list_id": row.id}
+    assert matching(session, user, node) == [live.id]
+    assert matching(session, user, node, include_archived=True) == [live.id]
+    members, total = list_members(session, user, row.id, limit=50)
+    assert [c.id for c in members] == [live.id] and total == 1
+
+
+def test_list_member_of_a_smart_list_inlines_its_filter(session: Session, user: User) -> None:
+    met = factories.make_contact(session, user, met=ContactMet.MET)
+    met_archived = factories.make_contact(session, user, met=ContactMet.MET, archived_at=NOW)
+    factories.make_contact(session, user, met=ContactMet.NOT_MET)
+    where = {"op": "eq", "field": "met", "value": "met"}
+    plain = _smart_list(session, user, "Met", where)
+    with_archived = _smart_list(session, user, "Met (all)", where, include_archived=True)
+
+    assert matching(session, user, {"op": "list_member", "list_id": plain.id}) == [met.id]
+    # The list's own include_archived decides its membership; the outer tree's
+    # decides what the filter as a whole may return, and both have to allow it.
+    node = {"op": "list_member", "list_id": with_archived.id}
+    assert matching(session, user, node) == [met.id]
+    assert matching(session, user, node, include_archived=True) == [met.id, met_archived.id]
+
+
+def test_list_member_can_combine_with_anything_else(session: Session, user: User) -> None:
+    both = factories.make_contact(session, user, emails=["reach@example.test"])
+    no_email = factories.make_contact(session, user)
+    row = _static_list(session, user, "First 100", [both, no_email])
+    tree = {
+        "op": "and",
+        "children": [{"op": "list_member", "list_id": row.id}, {"op": "has_email"}],
+    }
+    assert matching(session, user, tree) == [both.id]
+
+
+def test_a_list_this_user_does_not_have_matches_nobody(
+    session: Session, user: User, other: User
+) -> None:
+    """Like a tag name they have never used. A deleted list must not 422 every page."""
+    mine = factories.make_contact(session, user)
+    theirs = factories.make_contact(session, other)
+    yours = _static_list(session, other, "Theirs", [theirs])
+
+    assert matching(session, user, {"op": "list_member", "list_id": 9999}) == []
+    assert matching(session, user, {"op": "list_member", "list_id": yours.id}) == []
+    # ...and the complement is everyone, not nobody: the leaf is still two-valued.
+    unknown = {"op": "not", "child": {"op": "list_member", "list_id": 9999}}
+    assert matching(session, user, unknown) == [mine.id]
+
+
+@pytest.mark.parametrize("kind", ["static", "smart"])
+def test_the_predicate_answers_exactly_what_the_list_page_shows(
+    session: Session, user: User, other: User, kind: str
+) -> None:
+    """The one pinning test: ``list_member`` and ``lists.list_members`` cannot drift.
+
+    Same people, same noise around them — archived, merged away, another user's
+    contact in another user's list of the same name — read once through the
+    list page and once through the filter compiler.
+    """
+    met = factories.make_contact(session, user, met=ContactMet.MET)
+    also_met = factories.make_contact(session, user, met=ContactMet.MET)
+    not_met = factories.make_contact(session, user, met=ContactMet.NOT_MET)
+    archived = factories.make_contact(session, user, met=ContactMet.MET, archived_at=NOW)
+    merged = factories.make_contact(session, user, met=ContactMet.MET, merged_into_id=met.id)
+    theirs = factories.make_contact(session, other, met=ContactMet.MET)
+    if kind == "static":
+        row = _static_list(session, user, "First 100", [met, also_met, archived, merged])
+        _static_list(session, other, "First 100", [theirs])
+    else:
+        where = {"op": "eq", "field": "met", "value": "met"}
+        row = _smart_list(session, user, "Met", where)
+        _smart_list(session, other, "Met", where)
+
+    page, total = list_members(session, user, row.id, limit=100)
+    by_page = sorted(contact.id for contact in page)
+    assert not_met.id not in by_page  # the control: in neither reading
+    assert by_page == matching(session, user, {"op": "list_member", "list_id": row.id})
+    assert total == len(by_page)
+    assert by_page == sorted([met.id, also_met.id])
+
+
+def test_a_smart_list_naming_a_static_one_nests_without_a_query_per_row(
+    session: Session, user: User
+) -> None:
+    """The nested shape, and the cost of it: lists are resolved per compile, not per contact."""
+    inside = factories.make_contact(session, user, met=ContactMet.MET)
+    wrong_met = factories.make_contact(session, user, met=ContactMet.NOT_MET)
+    outside = factories.make_contact(session, user, met=ContactMet.MET)
+    static = _static_list(session, user, "First 100", [inside, wrong_met])
+    smart = _smart_list(
+        session,
+        user,
+        "Met in the first 100",
+        {
+            "op": "and",
+            "children": [
+                {"op": "eq", "field": "met", "value": "met"},
+                {"op": "list_member", "list_id": static.id},
+            ],
+        },
+    )
+    outer = _smart_list(session, user, "Outer", {"op": "list_member", "list_id": smart.id})
+    assert outside.id != inside.id  # met, but not in the static list
+
+    tree = parse_filter({"where": {"op": "list_member", "list_id": outer.id}})
+    with _statements(session) as sql:
+        statement = compile_filter(user, tree, session=session, now=NOW)
+        compiled = str(statement.compile(compile_kwargs={"literal_binds": True}))
+        assert [c.id for c in session.scalars(statement)] == [inside.id]
+    selects = [text for text in sql if text.lstrip().upper().startswith("SELECT")]
+    # Three lists in the chain, one lookup each, plus the one statement that runs.
+    assert len(selects) == 4, selects
+    # And what it compiles to: one correlated EXISTS for the static list, the
+    # smart ones flattened into plain terms on contacts. No join, no subselect
+    # per row, nothing quadratic.
+    assert compiled.count("EXISTS") == 1
+    assert compiled.count("FROM list_members") == 1
+    assert " JOIN " not in compiled
+
+
+def test_compiling_a_tree_with_no_list_in_it_reads_nothing(session: Session, user: User) -> None:
+    """The compiler is still pure for every other tree; the session is there if it is needed."""
+    tree = parse_filter({"where": {"op": "and", "children": [{"op": "has_email"}, BROAD]}})
+    with _statements(session) as sql:
+        compile_where(user, tree, session=session, now=NOW)
+    assert sql == []
+
+
+def test_two_lists_that_name_each_other_are_an_error_not_a_hang(
+    session: Session, user: User
+) -> None:
+    """Only reachable by writing the rows directly; the service refuses to close a cycle."""
+    first = _smart_list(session, user, "First", {"op": "has_email"})
+    second = _smart_list(session, user, "Second", {"op": "list_member", "list_id": first.id})
+    first.filter_json = parse_filter(
+        {"where": {"op": "list_member", "list_id": second.id}}
+    ).model_dump(mode="json")
+    session.flush()
+
+    tree = parse_filter({"where": {"op": "list_member", "list_id": first.id}})
+    with pytest.raises(ListReferenceError) as info:
+        compile_where(user, tree, session=session, now=NOW)
+    assert info.value.list_ids == (first.id, second.id, first.id)
+    assert f"list {first.id} is defined in terms of itself" in str(info.value)
+    assert [issue.path for issue in info.value.issues] == [f"list[{second.id}].where"]
+    assert isinstance(info.value, FilterError)
+
+
+def test_a_list_that_names_itself_is_an_error(session: Session, user: User) -> None:
+    row = _smart_list(session, user, "Ouroboros", {"op": "has_email"})
+    row.filter_json = parse_filter({"where": {"op": "list_member", "list_id": row.id}}).model_dump(
+        mode="json"
+    )
+    session.flush()
+    with pytest.raises(ListReferenceError):
+        compile_where(
+            user, parse_filter({"where": {"op": "list_member", "list_id": row.id}}), session=session
+        )
+
+
+def test_a_filter_may_not_pull_in_unlimited_lists(session: Session, user: User) -> None:
+    """A chain no cycle guard would catch: each list names the next, none names itself."""
+    previous: ContactList | None = None
+    for index in range(MAX_LIST_EXPANSIONS + 2):
+        where = None if previous is None else {"op": "list_member", "list_id": previous.id}
+        previous = _smart_list(session, user, f"Chain {index}", where)
+    assert previous is not None
+    tree = parse_filter({"where": {"op": "list_member", "list_id": previous.id}})
+    with pytest.raises(ListReferenceError, match="more than"):
+        compile_where(user, tree, session=session)
 
 
 # --- invalid trees ----------------------------------------------------------
@@ -993,7 +1257,7 @@ def test_compile_update_applies_a_bulk_action_to_the_filter(
     mine_without = factories.make_contact(session, user)
     theirs = factories.make_contact(session, other, emails=["b@example.test"])
     tree = parse_filter({"where": {"op": "has_email"}})
-    statement = compile_update(user, tree, now=NOW)
+    statement = compile_update(user, tree, session=session, now=NOW)
     assert statement.get_execution_options()["synchronize_session"] is False
     session.execute(statement.values(met=ContactMet.MET))
     session.expire_all()
@@ -1002,9 +1266,14 @@ def test_compile_update_applies_a_bulk_action_to_the_filter(
     assert theirs.met is ContactMet.UNKNOWN
 
 
-def test_compiled_statements_are_scoped_and_every_subquery_names_the_user(user: User) -> None:
+def test_compiled_statements_are_scoped_and_every_subquery_names_the_user(
+    session: Session, user: User
+) -> None:
     tree = parse_filter({"where": BROAD})
-    for statement in (compile_filter(user, tree, now=NOW), compile_count(user, tree, now=NOW)):
+    for statement in (
+        compile_filter(user, tree, session=session, now=NOW),
+        compile_count(user, tree, session=session, now=NOW),
+    ):
         assert statement.get_execution_options()[SCOPE_OPTION] == user.id
         sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
         for table in (
@@ -1028,7 +1297,7 @@ def test_sort_is_case_insensitive_with_nulls_last_and_id_as_tiebreak(
     adams = factories.make_contact(session, user, last_name="adams", current_company="Same")
     brown = factories.make_contact(session, user, last_name="Brown", current_company="Same")
     carter = factories.make_contact(session, user, last_name="carter", current_company=None)
-    base = compile_filter(user, parse_filter({}), now=NOW)
+    base = compile_filter(user, parse_filter({}), session=session, now=NOW)
 
     def order(sort: list[dict[str, Any]]) -> list[int]:
         return [c.id for c in session.scalars(apply_sort(base, parse_sort(sort)))]
@@ -1049,7 +1318,7 @@ def test_sort_puts_empty_datetimes_last_in_both_directions(session: Session, use
     older = factories.make_contact(session, user, last_contacted_at=NOW - timedelta(days=9))
     newer = factories.make_contact(session, user, last_contacted_at=NOW - timedelta(days=1))
     never = factories.make_contact(session, user, last_contacted_at=None)
-    base = compile_filter(user, parse_filter({}), now=NOW)
+    base = compile_filter(user, parse_filter({}), session=session, now=NOW)
     asc = apply_sort(base, [SortKey(field="last_contacted_at")])
     desc = apply_sort(base, [SortKey(field="last_contacted_at", direction="desc")])
     assert [c.id for c in session.scalars(asc)] == [older.id, newer.id, never.id]
@@ -1069,7 +1338,7 @@ def test_apply_sort_replaces_an_earlier_ordering_and_keys_stack(
 
 def test_paginate_slices_after_the_sort(session: Session, user: User) -> None:
     ids = [factories.make_contact(session, user).id for _ in range(5)]
-    base = apply_sort(compile_filter(user, parse_filter({}), now=NOW), [])
+    base = apply_sort(compile_filter(user, parse_filter({}), session=session, now=NOW), [])
     assert [c.id for c in session.scalars(paginate(base, limit=2, offset=2))] == ids[2:4]
     assert [c.id for c in session.scalars(paginate(base, limit=10))] == ids
     assert [c.id for c in session.scalars(paginate(base, limit=2, offset=10))] == []
@@ -1128,7 +1397,7 @@ def test_every_example_compiles_or_is_a_placeholder(
 ) -> None:
     parsed = parse_filter(tree)
     try:
-        session.scalars(compile_filter(user, parsed, now=NOW)).all()
+        session.scalars(compile_filter(user, parsed, session=session, now=NOW)).all()
     except UnsupportedPredicate as exc:
         assert exc.op in PLACEHOLDERS
 

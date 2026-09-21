@@ -837,16 +837,24 @@ def export_cmd(
         install_scope_guard(factory)
         with session_scope(factory) as session:
             user = _local_user_or_exit(session)
-            body = export_stream(
-                session,
-                user,
-                preset=preset,
-                output_format=output_format,
-                headerless=headerless,
-                tree=tree,
-                sort=sort_keys,
-                now=now,
-            )
+            try:
+                body = export_stream(
+                    session,
+                    user,
+                    preset=preset,
+                    output_format=output_format,
+                    headerless=headerless,
+                    tree=tree,
+                    sort=sort_keys,
+                    now=now,
+                )
+            except FilterError as exc:
+                # Compiling is where a predicate the language parses but the
+                # compiler will not take shows up, and export_stream() does it
+                # before it yields anything (#95). Same message the API's 422
+                # carries, rather than a traceback over a half-written file.
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
             if out is not None:
                 with out.open("w", encoding="utf-8", newline="") as handle:
                     for chunk in body:
