@@ -65,6 +65,7 @@ API_PATHS = {
     "/api/v1/imports/{run_id}/preview",
     "/api/v1/imports/{run_id}/commit",
     "/api/v1/imports/{run_id}/rollback",
+    "/api/v1/exports",
 }
 
 
@@ -169,6 +170,7 @@ def test_known_api_modules_are_discovered() -> None:
         "autotag_rules",
         "contacts",
         "events",
+        "exports",
         "health",
         "imports",
         "interactions",

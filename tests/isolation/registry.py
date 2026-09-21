@@ -169,6 +169,12 @@ def _seed_autotag_rules(session: Session, user: User) -> int:
     return 1
 
 
+def _seed_exports(session: Session, user: User) -> int:
+    factories.make_contact(session, user, emails=["seeded@example.test"])
+    factories.make_contact(session, user)
+    return 2
+
+
 REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/contacts", seed_contacts, paged_count),
     ListEndpoint(
@@ -199,4 +205,5 @@ REGISTRY: list[ListEndpoint] = [
     ),
     ListEndpoint(f"{API_PREFIX}/tags", _seed_tags, array_count),
     ListEndpoint(f"{API_PREFIX}/autotag-rules", _seed_autotag_rules, array_count),
+    ListEndpoint(f"{API_PREFIX}/exports", _seed_exports, array_count),
 ]

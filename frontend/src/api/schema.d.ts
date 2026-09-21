@@ -569,6 +569,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/exports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export contacts as CSV, JSON, or vCard
+         * @description Stream ``preset`` in ``format`` for the contacts ``filter`` selects, in ``sort`` order.
+         *
+         *     ``headerless`` drops the CSV header row (the mailing-tool variant of
+         *     ``nine-column``; harmless, if unusual, on the other presets) and is ignored
+         *     by the other two formats.
+         */
+        get: operations["export_contacts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/health": {
         parameters: {
             query?: never;
@@ -3999,6 +4023,43 @@ export interface operations {
                 content: {
                     "text/event-stream": string;
                 };
+            };
+        };
+    };
+    export_contacts: {
+        parameters: {
+            query?: {
+                preset?: "nine-column" | "linkedin-archive" | "full" | "campaign-audience";
+                format?: "csv" | "json" | "vcard";
+                headerless?: boolean;
+                /** @description A FilterTree (spec 10.4) as JSON. Omitted: every contact. */
+                filter?: string | null;
+                /** @description A list of SortKey as JSON. Omitted: id ascending. */
+                sort?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The exported file, streamed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>[];
+                    "text/csv": string;
+                    "text/vcard": string;
+                };
+            };
+            /** @description An invalid filter or sort */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

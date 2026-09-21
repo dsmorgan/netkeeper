@@ -6698,6 +6698,123 @@
         ]
       }
     },
+    "/api/v1/exports": {
+      "get": {
+        "description": "Stream ``preset`` in ``format`` for the contacts ``filter`` selects, in ``sort`` order.\n\n``headerless`` drops the CSV header row (the mailing-tool variant of\n``nine-column``; harmless, if unusual, on the other presets) and is ignored\nby the other two formats.",
+        "operationId": "export_contacts",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "preset",
+            "required": false,
+            "schema": {
+              "default": "full",
+              "enum": [
+                "nine-column",
+                "linkedin-archive",
+                "full",
+                "campaign-audience"
+              ],
+              "title": "Preset",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "json",
+              "enum": [
+                "csv",
+                "json",
+                "vcard"
+              ],
+              "title": "Format",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "headerless",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Headerless",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "A FilterTree (spec 10.4) as JSON. Omitted: every contact.",
+            "in": "query",
+            "name": "filter",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A FilterTree (spec 10.4) as JSON. Omitted: every contact.",
+              "title": "Filter"
+            }
+          },
+          {
+            "description": "A list of SortKey as JSON. Omitted: id ascending.",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A list of SortKey as JSON. Omitted: id ascending.",
+              "title": "Sort"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/vcard": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The exported file, streamed."
+          },
+          "422": {
+            "description": "An invalid filter or sort"
+          }
+        },
+        "summary": "Export contacts as CSV, JSON, or vCard",
+        "tags": [
+          "exports"
+        ]
+      }
+    },
     "/api/v1/health": {
       "get": {
         "operationId": "get_health",
