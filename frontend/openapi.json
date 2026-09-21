@@ -1,12 +1,36 @@
 {
   "components": {
     "schemas": {
-      "And": {
+      "And-Input": {
         "additionalProperties": false,
         "properties": {
           "children": {
             "items": {
-              "$ref": "#/components/schemas/FilterNode"
+              "$ref": "#/components/schemas/FilterNode-Input"
+            },
+            "minItems": 1,
+            "title": "Children",
+            "type": "array"
+          },
+          "op": {
+            "const": "and",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "children"
+        ],
+        "title": "And",
+        "type": "object"
+      },
+      "And-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/FilterNode-Output"
             },
             "minItems": 1,
             "title": "Children",
@@ -469,7 +493,7 @@
           "filter": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/FilterTree"
+                "$ref": "#/components/schemas/FilterTree-Input"
               },
               {
                 "type": "null"
@@ -1596,7 +1620,7 @@
           "filter": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/FilterTree"
+                "$ref": "#/components/schemas/FilterTree-Input"
               },
               {
                 "type": "null"
@@ -1968,6 +1992,87 @@
         "title": "ContactSource",
         "type": "string"
       },
+      "ContactSummaryOut": {
+        "description": "A contact as a list or saved view shows it: enough to identify and open them.",
+        "properties": {
+          "current_company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Company"
+          },
+          "current_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Title"
+          },
+          "first_name": {
+            "title": "First Name",
+            "type": "string"
+          },
+          "headline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headline"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_name": {
+            "title": "Last Name",
+            "type": "string"
+          },
+          "li_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Url"
+          },
+          "met": {
+            "$ref": "#/components/schemas/ContactMet"
+          },
+          "preferred_name": {
+            "title": "Preferred Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "first_name",
+          "last_name",
+          "preferred_name",
+          "headline",
+          "current_title",
+          "current_company",
+          "met",
+          "li_url"
+        ],
+        "title": "ContactSummaryOut",
+        "type": "object"
+      },
       "ContactTagCreate": {
         "properties": {
           "tag_id": {
@@ -2205,10 +2310,10 @@
         "title": "Eq",
         "type": "object"
       },
-      "FilterNode": {
+      "FilterNode-Input": {
         "discriminator": {
           "mapping": {
-            "and": "#/components/schemas/And",
+            "and": "#/components/schemas/And-Input",
             "between": "#/components/schemas/Between",
             "changed_jobs_within_days": "#/components/schemas/ChangedJobsWithinDays",
             "connected_within_days": "#/components/schemas/ConnectedWithinDays",
@@ -2228,8 +2333,8 @@
             "lt": "#/components/schemas/Lt",
             "lte": "#/components/schemas/Lte",
             "neq": "#/components/schemas/Neq",
-            "not": "#/components/schemas/Not",
-            "or": "#/components/schemas/Or",
+            "not": "#/components/schemas/Not-Input",
+            "or": "#/components/schemas/Or-Input",
             "replied_in": "#/components/schemas/RepliedIn",
             "starts_with": "#/components/schemas/StartsWith",
             "tag_all": "#/components/schemas/TagAll",
@@ -2240,13 +2345,13 @@
         },
         "oneOf": [
           {
-            "$ref": "#/components/schemas/And"
+            "$ref": "#/components/schemas/And-Input"
           },
           {
-            "$ref": "#/components/schemas/Or"
+            "$ref": "#/components/schemas/Or-Input"
           },
           {
-            "$ref": "#/components/schemas/Not"
+            "$ref": "#/components/schemas/Not-Input"
           },
           {
             "$ref": "#/components/schemas/Eq"
@@ -2322,7 +2427,124 @@
           }
         ]
       },
-      "FilterTree": {
+      "FilterNode-Output": {
+        "discriminator": {
+          "mapping": {
+            "and": "#/components/schemas/And-Output",
+            "between": "#/components/schemas/Between",
+            "changed_jobs_within_days": "#/components/schemas/ChangedJobsWithinDays",
+            "connected_within_days": "#/components/schemas/ConnectedWithinDays",
+            "contains": "#/components/schemas/Contains",
+            "email_contains": "#/components/schemas/EmailContains",
+            "enrolled_in": "#/components/schemas/EnrolledIn",
+            "eq": "#/components/schemas/Eq",
+            "gt": "#/components/schemas/Gt",
+            "gte": "#/components/schemas/Gte",
+            "has_email": "#/components/schemas/HasEmail",
+            "has_li_url": "#/components/schemas/HasLiUrl",
+            "has_phone": "#/components/schemas/HasPhone",
+            "has_position": "#/components/schemas/HasPosition",
+            "is_empty": "#/components/schemas/IsEmpty",
+            "last_contacted": "#/components/schemas/LastContacted",
+            "list_member": "#/components/schemas/ListMember",
+            "lt": "#/components/schemas/Lt",
+            "lte": "#/components/schemas/Lte",
+            "neq": "#/components/schemas/Neq",
+            "not": "#/components/schemas/Not-Output",
+            "or": "#/components/schemas/Or-Output",
+            "replied_in": "#/components/schemas/RepliedIn",
+            "starts_with": "#/components/schemas/StartsWith",
+            "tag_all": "#/components/schemas/TagAll",
+            "tag_any": "#/components/schemas/TagAny",
+            "tag_none": "#/components/schemas/TagNone"
+          },
+          "propertyName": "op"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/And-Output"
+          },
+          {
+            "$ref": "#/components/schemas/Or-Output"
+          },
+          {
+            "$ref": "#/components/schemas/Not-Output"
+          },
+          {
+            "$ref": "#/components/schemas/Eq"
+          },
+          {
+            "$ref": "#/components/schemas/Neq"
+          },
+          {
+            "$ref": "#/components/schemas/Contains"
+          },
+          {
+            "$ref": "#/components/schemas/StartsWith"
+          },
+          {
+            "$ref": "#/components/schemas/IsEmpty"
+          },
+          {
+            "$ref": "#/components/schemas/Gt"
+          },
+          {
+            "$ref": "#/components/schemas/Gte"
+          },
+          {
+            "$ref": "#/components/schemas/Lt"
+          },
+          {
+            "$ref": "#/components/schemas/Lte"
+          },
+          {
+            "$ref": "#/components/schemas/Between"
+          },
+          {
+            "$ref": "#/components/schemas/HasEmail"
+          },
+          {
+            "$ref": "#/components/schemas/HasPhone"
+          },
+          {
+            "$ref": "#/components/schemas/HasLiUrl"
+          },
+          {
+            "$ref": "#/components/schemas/HasPosition"
+          },
+          {
+            "$ref": "#/components/schemas/EmailContains"
+          },
+          {
+            "$ref": "#/components/schemas/LastContacted"
+          },
+          {
+            "$ref": "#/components/schemas/ConnectedWithinDays"
+          },
+          {
+            "$ref": "#/components/schemas/ChangedJobsWithinDays"
+          },
+          {
+            "$ref": "#/components/schemas/TagAny"
+          },
+          {
+            "$ref": "#/components/schemas/TagAll"
+          },
+          {
+            "$ref": "#/components/schemas/TagNone"
+          },
+          {
+            "$ref": "#/components/schemas/ListMember"
+          },
+          {
+            "$ref": "#/components/schemas/EnrolledIn"
+          },
+          {
+            "$ref": "#/components/schemas/RepliedIn"
+          }
+        ]
+      },
+      "FilterTree-Input": {
         "additionalProperties": false,
         "description": "The root: a predicate (or none) and the archived-contacts switch.\n\nThe JSON schema carries ``x-netkeeper-fields``: each field's kind, label,\nthe ops it takes, and the values of an enum, for the builder.",
         "properties": {
@@ -2334,7 +2556,281 @@
           "where": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/FilterNode"
+                "$ref": "#/components/schemas/FilterNode-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "FilterTree",
+        "type": "object",
+        "x-netkeeper-fields": {
+          "archived_at": {
+            "kind": "datetime",
+            "label": "archived",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "connected_on": {
+            "kind": "date",
+            "label": "connected on",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "created_at": {
+            "kind": "datetime",
+            "label": "created",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "current_company": {
+            "kind": "string",
+            "label": "company",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "current_title": {
+            "kind": "string",
+            "label": "title",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "degree": {
+            "kind": "int",
+            "label": "degree",
+            "ops": [
+              "eq",
+              "neq",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "do_not_contact": {
+            "kind": "bool",
+            "label": "do not contact",
+            "ops": [
+              "eq",
+              "neq"
+            ]
+          },
+          "first_name": {
+            "kind": "string",
+            "label": "first name",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "headline": {
+            "kind": "string",
+            "label": "headline",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "last_contacted_at": {
+            "kind": "datetime",
+            "label": "last contacted",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "last_enriched_at": {
+            "kind": "datetime",
+            "label": "last enriched",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "last_name": {
+            "kind": "string",
+            "label": "last name",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "li_disconnected_at": {
+            "kind": "datetime",
+            "label": "disconnected on LinkedIn",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "li_public_id": {
+            "kind": "string",
+            "label": "LinkedIn id",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "location": {
+            "kind": "string",
+            "label": "location",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "met": {
+            "kind": "enum",
+            "label": "met",
+            "ops": [
+              "eq",
+              "neq"
+            ],
+            "values": [
+              "unknown",
+              "met",
+              "not_met",
+              "skip"
+            ]
+          },
+          "preferred_name": {
+            "kind": "string",
+            "label": "preferred name",
+            "ops": [
+              "eq",
+              "neq",
+              "contains",
+              "starts_with",
+              "is_empty"
+            ]
+          },
+          "source": {
+            "kind": "enum",
+            "label": "source",
+            "ops": [
+              "eq",
+              "neq"
+            ],
+            "values": [
+              "sync",
+              "archive",
+              "csv",
+              "manual"
+            ]
+          },
+          "triaged_at": {
+            "kind": "datetime",
+            "label": "triaged",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
+          "updated_at": {
+            "kind": "datetime",
+            "label": "updated",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          }
+        }
+      },
+      "FilterTree-Output": {
+        "additionalProperties": false,
+        "description": "The root: a predicate (or none) and the archived-contacts switch.\n\nThe JSON schema carries ``x-netkeeper-fields``: each field's kind, label,\nthe ops it takes, and the values of an enum, for the builder.",
+        "properties": {
+          "include_archived": {
+            "default": false,
+            "title": "Include Archived",
+            "type": "boolean"
+          },
+          "where": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterNode-Output"
               },
               {
                 "type": "null"
@@ -3906,6 +4402,44 @@
         "title": "LinkKind",
         "type": "string"
       },
+      "ListCreate": {
+        "properties": {
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterTree-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ListKind"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "title": "ListCreate",
+        "type": "object"
+      },
+      "ListKind": {
+        "description": "How a list's members are decided (spec 10.4).",
+        "enum": [
+          "static",
+          "smart"
+        ],
+        "title": "ListKind",
+        "type": "string"
+      },
       "ListMember": {
         "additionalProperties": false,
         "properties": {
@@ -3924,6 +4458,137 @@
           "list_id"
         ],
         "title": "ListMember",
+        "type": "object"
+      },
+      "ListMembersAddedOut": {
+        "properties": {
+          "added": {
+            "title": "Added",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "added"
+        ],
+        "title": "ListMembersAddedOut",
+        "type": "object"
+      },
+      "ListMembersIn": {
+        "properties": {
+          "contact_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "minItems": 1,
+            "title": "Contact Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "contact_ids"
+        ],
+        "title": "ListMembersIn",
+        "type": "object"
+      },
+      "ListMembersPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ContactSummaryOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "ListMembersPage",
+        "type": "object"
+      },
+      "ListOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterTree-Output"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ListKind"
+          },
+          "member_count": {
+            "title": "Member Count",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "filter",
+          "member_count",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ListOut",
+        "type": "object"
+      },
+      "ListPatch": {
+        "description": "Fields left out (or ``null``) are left alone; a smart list's filter cannot be cleared,\nonly replaced.",
+        "properties": {
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterTree-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "ListPatch",
         "type": "object"
       },
       "Lt": {
@@ -4109,11 +4774,30 @@
         "title": "Neq",
         "type": "object"
       },
-      "Not": {
+      "Not-Input": {
         "additionalProperties": false,
         "properties": {
           "child": {
-            "$ref": "#/components/schemas/FilterNode"
+            "$ref": "#/components/schemas/FilterNode-Input"
+          },
+          "op": {
+            "const": "not",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "child"
+        ],
+        "title": "Not",
+        "type": "object"
+      },
+      "Not-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "child": {
+            "$ref": "#/components/schemas/FilterNode-Output"
           },
           "op": {
             "const": "not",
@@ -4180,12 +4864,36 @@
         "title": "NotesOut",
         "type": "object"
       },
-      "Or": {
+      "Or-Input": {
         "additionalProperties": false,
         "properties": {
           "children": {
             "items": {
-              "$ref": "#/components/schemas/FilterNode"
+              "$ref": "#/components/schemas/FilterNode-Input"
+            },
+            "minItems": 1,
+            "title": "Children",
+            "type": "array"
+          },
+          "op": {
+            "const": "or",
+            "title": "Op",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "children"
+        ],
+        "title": "Or",
+        "type": "object"
+      },
+      "Or-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/FilterNode-Output"
             },
             "minItems": 1,
             "title": "Children",
@@ -4269,6 +4977,167 @@
         ],
         "title": "RuleField",
         "type": "string"
+      },
+      "SavedViewCreate": {
+        "properties": {
+          "columns": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Columns",
+            "type": "array"
+          },
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterTree-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "sort": {
+            "items": {
+              "$ref": "#/components/schemas/SortKey"
+            },
+            "title": "Sort",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "columns"
+        ],
+        "title": "SavedViewCreate",
+        "type": "object"
+      },
+      "SavedViewOut": {
+        "properties": {
+          "columns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Columns",
+            "type": "array"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterTree-Output"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sort": {
+            "items": {
+              "$ref": "#/components/schemas/SortKey"
+            },
+            "title": "Sort",
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "columns",
+          "sort",
+          "filter",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SavedViewOut",
+        "type": "object"
+      },
+      "SavedViewPatch": {
+        "description": "Fields left out are left alone; ``columns`` and ``sort`` replace the whole list when\ngiven; ``filter: null`` clears it (a view with no filter shows every contact).",
+        "properties": {
+          "columns": {
+            "anyOf": [
+              {
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Columns"
+          },
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterTree-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "sort": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/SortKey"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort"
+          }
+        },
+        "title": "SavedViewPatch",
+        "type": "object"
       },
       "SnapshotOut": {
         "description": "The headline and job as they were at ``observed_at`` (spec 8.1).",
@@ -7448,6 +8317,321 @@
         ]
       }
     },
+    "/api/v1/lists": {
+      "get": {
+        "description": "Every list, static and smart, with how many contacts are in it right now.",
+        "operationId": "list_lists",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ListOut"
+                  },
+                  "title": "Response List Lists",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "A name, kind/filter combination, or member request that cannot be stored"
+          }
+        },
+        "summary": "List Lists",
+        "tags": [
+          "lists"
+        ]
+      },
+      "post": {
+        "description": "Create a static or smart list. A smart list's filter is validated (parsed and\ncompiled) before it is stored; a static one starts with no members.",
+        "operationId": "create_list",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ListCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "A list or view by that name already exists"
+          },
+          "422": {
+            "description": "A name, kind/filter combination, or member request that cannot be stored"
+          }
+        },
+        "summary": "Create List",
+        "tags": [
+          "lists"
+        ]
+      }
+    },
+    "/api/v1/lists/{list_id}": {
+      "delete": {
+        "description": "Delete a list. Its members (if static) go with it.",
+        "operationId": "delete_list",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "list_id",
+            "required": true,
+            "schema": {
+              "title": "List Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such list, view, or contact for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete List",
+        "tags": [
+          "lists"
+        ]
+      },
+      "patch": {
+        "description": "Rename a list and/or, for a smart list, replace its filter. Fields left out, or a\n``filter`` of ``null``, are left alone.",
+        "operationId": "update_list",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "list_id",
+            "required": true,
+            "schema": {
+              "title": "List Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ListPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such list, view, or contact for this user"
+          },
+          "409": {
+            "description": "A list or view by that name already exists"
+          },
+          "422": {
+            "description": "A name, kind/filter combination, or member request that cannot be stored"
+          }
+        },
+        "summary": "Update List",
+        "tags": [
+          "lists"
+        ]
+      }
+    },
+    "/api/v1/lists/{list_id}/members": {
+      "get": {
+        "description": "One page of the list's members. For a smart list this is exactly what running its\nfilter returns right now; nothing is materialized.",
+        "operationId": "list_list_members",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "list_id",
+            "required": true,
+            "schema": {
+              "title": "List Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Members per page.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Members per page.",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Members to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Members to skip.",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListMembersPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such list, view, or contact for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List List Members",
+        "tags": [
+          "lists"
+        ]
+      },
+      "post": {
+        "description": "Add contacts to a static list. `422` for a smart list, which has no members to add.",
+        "operationId": "add_list_members",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "list_id",
+            "required": true,
+            "schema": {
+              "title": "List Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ListMembersIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListMembersAddedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such list, view, or contact for this user"
+          },
+          "422": {
+            "description": "A name, kind/filter combination, or member request that cannot be stored"
+          }
+        },
+        "summary": "Add List Members",
+        "tags": [
+          "lists"
+        ]
+      }
+    },
+    "/api/v1/lists/{list_id}/members/{contact_id}": {
+      "delete": {
+        "description": "Take a contact off a static list. `422` for a smart list.",
+        "operationId": "remove_list_member",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "list_id",
+            "required": true,
+            "schema": {
+              "title": "List Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such list, view, or contact for this user"
+          },
+          "422": {
+            "description": "A name, kind/filter combination, or member request that cannot be stored"
+          }
+        },
+        "summary": "Remove List Member",
+        "tags": [
+          "lists"
+        ]
+      }
+    },
     "/api/v1/me": {
       "get": {
         "operationId": "get_me",
@@ -7683,6 +8867,160 @@
         "summary": "Get Task",
         "tags": [
           "tasks"
+        ]
+      }
+    },
+    "/api/v1/views": {
+      "get": {
+        "description": "Every saved table view, by name.",
+        "operationId": "list_views",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SavedViewOut"
+                  },
+                  "title": "Response List Views",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "A name, kind/filter combination, or member request that cannot be stored"
+          }
+        },
+        "summary": "List Views",
+        "tags": [
+          "lists"
+        ]
+      },
+      "post": {
+        "description": "Save a column set, sort, and optional filter for the contacts table to restore.",
+        "operationId": "create_view",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SavedViewCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedViewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "A list or view by that name already exists"
+          },
+          "422": {
+            "description": "A name, kind/filter combination, or member request that cannot be stored"
+          }
+        },
+        "summary": "Create View",
+        "tags": [
+          "lists"
+        ]
+      }
+    },
+    "/api/v1/views/{view_id}": {
+      "delete": {
+        "description": "Delete a saved view.",
+        "operationId": "delete_view",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "view_id",
+            "required": true,
+            "schema": {
+              "title": "View Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such list, view, or contact for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete View",
+        "tags": [
+          "lists"
+        ]
+      },
+      "patch": {
+        "description": "Change any of a view's name, columns, sort, and filter. Fields left out are left\nalone; ``filter: null`` clears it.",
+        "operationId": "update_view",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "view_id",
+            "required": true,
+            "schema": {
+              "title": "View Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SavedViewPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedViewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such list, view, or contact for this user"
+          },
+          "409": {
+            "description": "A list or view by that name already exists"
+          },
+          "422": {
+            "description": "A name, kind/filter combination, or member request that cannot be stored"
+          }
+        },
+        "summary": "Update View",
+        "tags": [
+          "lists"
         ]
       }
     }

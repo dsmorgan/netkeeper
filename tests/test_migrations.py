@@ -772,6 +772,83 @@ def test_sqlite_only_marker_scan(source: str, markers: list[str]) -> None:
     assert _sqlite_only_markers(source) == markers
 
 
+# --- lists and saved views (0006) -------------------------------------------
+
+
+def _insert_list(
+    connection: Connection,
+    *,
+    id: int,
+    user_id: int,
+    name: str,
+    kind: str = "static",
+    filter_json: str | None = None,
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO lists (id, user_id, name, kind, filter_json, created_at, updated_at)"
+            " VALUES (:id, :user_id, :name, :kind, :filter_json, :now, :now)"
+        ),
+        {
+            "id": id,
+            "user_id": user_id,
+            "name": name,
+            "kind": kind,
+            "filter_json": filter_json,
+            "now": STAMP,
+        },
+    )
+
+
+def test_a_lists_kind_and_filter_must_agree_in_the_database(migration_engine: Engine) -> None:
+    """The repository's first cross-column CHECK, and the one thing 0006 promises that
+    Alembic's ``compare_metadata`` cannot see: it does not diff CHECK constraints, so
+    nothing else notices if a later migration drops this."""
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_list(connection, id=1, user_id=1, name="static ok")
+        _insert_list(connection, id=2, user_id=1, name="smart ok", kind="smart", filter_json="{}")
+    # A static list carrying a filter, a smart list without one, and an unknown kind.
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_list(connection, id=3, user_id=1, name="static with filter", filter_json="{}")
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_list(connection, id=4, user_id=1, name="smart without", kind="smart")
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_list(connection, id=5, user_id=1, name="bogus kind", kind="bogus")
+
+
+def test_a_list_name_is_unique_per_user_and_its_rows_cascade(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_list(connection, id=1, user_id=1, name="First 100")
+        _insert_list(connection, id=2, user_id=2, name="First 100")  # another user may reuse it
+        connection.execute(
+            text(
+                "INSERT INTO list_members (user_id, list_id, contact_id, added_at)"
+                " VALUES (1, 1, 1, :now)"
+            ),
+            {"now": STAMP},
+        )
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_list(connection, id=3, user_id=1, name="First 100")
+
+    # Deleting the contact takes its membership with it; the list stays.
+    with migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM contacts WHERE id = 1"))
+        assert connection.execute(text("SELECT count(*) FROM list_members")).scalar() == 0
+        assert connection.execute(text("SELECT count(*) FROM lists")).scalar() == 2
+
+    # Deleting the user takes the list and the saved views with it (ADR 0005).
+    with migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM users WHERE id = 1"))
+        assert (
+            connection.execute(text("SELECT count(*) FROM lists WHERE user_id = 1")).scalar() == 0
+        )
+
+
 def test_ci_runs_the_postgresql_params() -> None:
     """Without the URL the PostgreSQL params skip silently, so CI must always set it."""
     if not os.environ.get("GITHUB_ACTIONS"):

@@ -321,7 +321,7 @@ def lists_list() -> None:
         with session_scope(factory) as session:
             user = _local_user_or_exit(session)
             rows = list_lists(session, user)
-            counts = member_counts(session, user, [row.id for row in rows])
+            counts = member_counts(session, user, rows)
     finally:
         engine.dispose()
     if not rows:

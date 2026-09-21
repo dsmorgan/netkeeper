@@ -48,7 +48,7 @@ import logging
 from collections.abc import Sequence
 from typing import Any, Final
 
-from sqlalchemy import func
+from sqlalchemy import Select, func
 from sqlalchemy.orm import Session
 
 from netkeeper.crm.filters import (
@@ -71,7 +71,7 @@ from netkeeper.models import (
     SavedView,
     User,
 )
-from netkeeper.scoping import get_scoped, scoped, scoped_count, scoped_delete
+from netkeeper.scoping import get_scoped, scoped, scoped_delete
 from netkeeper.services.settings_kv import get_setting, set_setting
 
 log = logging.getLogger(__name__)
@@ -195,13 +195,6 @@ def _check_filter(user: User, tree: FilterTree) -> None:
     compile_where(user, tree)
 
 
-def _owned_contact(session: Session, user: User, contact_id: int) -> Contact:
-    contact = get_scoped(session, user, Contact, contact_id)
-    if contact is None:
-        raise ContactNotFound(f"no contact {contact_id}")
-    return contact
-
-
 # --- lists ----------------------------------------------------------------
 
 
@@ -306,7 +299,8 @@ def add_members(session: Session, user: User, list_id: int, contact_ids: Sequenc
 
     An id already a member, or repeated in ``contact_ids``, is not recounted.
     :class:`WrongListKind` for a smart list; :class:`ContactNotFound` for an id
-    that is not one of ``user``'s contacts.
+    that is not one of ``user``'s contacts. Checks ownership of every id in one
+    query, not one per id: "First 100" is exactly the batch this is for.
     """
     _require_writer(session)
     row = get_list(session, user, list_id)
@@ -315,8 +309,14 @@ def add_members(session: Session, user: User, list_id: int, contact_ids: Sequenc
     unique_ids = list(dict.fromkeys(contact_ids))
     if not unique_ids:
         return 0
-    for contact_id in unique_ids:
-        _owned_contact(session, user, contact_id)
+    owned_ids = set(
+        session.scalars(
+            scoped(user, Contact).with_only_columns(Contact.id).where(Contact.id.in_(unique_ids))
+        )
+    )
+    missing = [contact_id for contact_id in unique_ids if contact_id not in owned_ids]
+    if missing:
+        raise ContactNotFound(f"no contact {missing[0]}")
     existing = set(
         session.scalars(
             scoped(user, ListMember)
@@ -356,6 +356,35 @@ def remove_member(session: Session, user: User, list_id: int, contact_id: int) -
     return True
 
 
+def _static_members_base(user: User, row: ContactList) -> Select[tuple[Contact]]:
+    """The live contacts explicitly in static list ``row``: joined to their membership row.
+
+    "Live" matches what every smart list means by it by default
+    (:func:`netkeeper.crm.filters.compile_where`): not merged away
+    (``merged_into_id``) and not archived (``archived_at``). Excluding a
+    merged-away contact is not a choice — ``identity.merge()`` strips its
+    ``li_urn``/``li_public_id`` and moves its emails and phones to the
+    survivor, so the membership row would otherwise point at a tombstone with
+    a real person missing from the list. Excluding an archived one is a
+    deliberate choice to keep a static list's members reading the same as a
+    smart list's default (``include_archived=False``); a static list has no
+    override for it, so an archived member never shows here even though the
+    ``list_members`` row itself is left alone (it reappears if the contact is
+    unarchived). :func:`list_members` and :func:`member_count` share this
+    query so the two can never drift on what "live" means.
+    """
+    return (
+        scoped(user, Contact)
+        .join(ListMember, ListMember.contact_id == Contact.id)
+        .where(
+            ListMember.list_id == row.id,
+            ListMember.user_id == user.id,
+            Contact.merged_into_id.is_(None),
+            Contact.archived_at.is_(None),
+        )
+    )
+
+
 def list_members(
     session: Session, user: User, list_id: int, *, limit: int, offset: int = 0
 ) -> tuple[list[Contact], int]:
@@ -363,17 +392,15 @@ def list_members(
 
     A smart list's members are exactly what :func:`netkeeper.crm.filters.compile_filter`
     returns for its stored tree, run fresh: nothing here materializes them, so this
-    always agrees with a direct run of the filter (see the "done when" for P1-08).
-    :class:`ListNotFound`; ``ValueError`` for a bad page.
+    always agrees with a direct run of the filter (see the "done when" for P1-08). A
+    static list's members are its live rows (see :func:`_static_members_base`) — the
+    same liveness rule a smart list applies by default, so the two never quietly
+    disagree about who exists. :class:`ListNotFound`; ``ValueError`` for a bad page.
     """
     _check_page(limit, offset)
     row = get_list(session, user, list_id)
     if row.kind is ListKind.STATIC:
-        base = (
-            scoped(user, Contact)
-            .join(ListMember, ListMember.contact_id == Contact.id)
-            .where(ListMember.list_id == row.id, ListMember.user_id == user.id)
-        )
+        base = _static_members_base(user, row)
         total = session.scalar(base.with_only_columns(func.count())) or 0
         contacts = session.scalars(
             base.order_by(ListMember.added_at.desc(), Contact.id.desc()).limit(limit).offset(offset)
@@ -387,24 +414,29 @@ def list_members(
     return list(contacts), total
 
 
-def member_count(session: Session, user: User, list_id: int) -> int:
-    """How many contacts are in the list right now."""
-    row = get_list(session, user, list_id)
+def _member_count_for(session: Session, user: User, row: ContactList) -> int:
+    """:func:`member_count`'s logic, given the row already in hand (no re-fetch)."""
     if row.kind is ListKind.STATIC:
-        return (
-            session.scalar(scoped_count(user, ListMember).where(ListMember.list_id == row.id)) or 0
-        )
+        base = _static_members_base(user, row)
+        return session.scalar(base.with_only_columns(func.count())) or 0
     tree = parse_filter(row.filter_json)
     return session.scalar(compile_count(user, tree)) or 0
 
 
-def member_counts(session: Session, user: User, list_ids: Sequence[int]) -> dict[int, int]:
-    """:func:`member_count` for several lists at once, by id (0 for an empty one).
+def member_count(session: Session, user: User, list_id: int) -> int:
+    """How many live contacts are in the list right now (see :func:`_static_members_base`)."""
+    row = get_list(session, user, list_id)
+    return _member_count_for(session, user, row)
 
-    For ids already known to be ``user``'s own, typically from :func:`list_lists`:
-    like :func:`member_count`, :class:`ListNotFound` for one that is not.
+
+def member_counts(session: Session, user: User, rows: Sequence[ContactList]) -> dict[int, int]:
+    """:func:`member_count` for several already-loaded lists at once, by id (0 for an empty one).
+
+    Takes the rows themselves, typically ``list_lists(session, user)``'s result, not ids:
+    a caller that already has them (every current one does) never re-fetches what it holds,
+    which is what turned a single ``GET /lists`` into two statements per list.
     """
-    return {list_id: member_count(session, user, list_id) for list_id in list_ids}
+    return {row.id: _member_count_for(session, user, row) for row in rows}
 
 
 # --- saved views --------------------------------------------------------
@@ -506,13 +538,20 @@ def delete_view(session: Session, user: User, view_id: int) -> None:
 
 
 def ensure_validated_list(session: Session, user: User) -> ContactList | None:
-    """Seed the built-in "Validated" smart list for ``user`` once; the row created, or None.
+    """Seed the built-in "Validated" smart list for ``user`` once; the row created or
+    adopted, or None once already seeded.
 
     Idempotent: after the first call ``settings_kv`` records
     :data:`VALIDATED_SEEDED_KEY` and later calls return None, so a list the
     user deleted or renamed is never re-created. A list the user already has
-    named exactly :data:`VALIDATED_LIST_NAME` is reused as it is, the way
-    :func:`netkeeper.crm.tags.ensure_default_rules` reuses an existing tag.
+    named exactly :data:`VALIDATED_LIST_NAME` is *adopted* as it is, the way
+    :func:`netkeeper.crm.tags.ensure_default_rules` reuses an existing tag by
+    name — including when that list is a static one, which leaves the user
+    with a built-in named "Validated" that is not smart at all. Unreachable
+    today (nothing else creates a list by that name before this runs), and
+    ``tags.py``'s defaults have the same limitation for a tag a user
+    pre-creates by a default's name, so this is documented rather than
+    guarded against.
 
     The filter is :data:`VALIDATED_FILTER` (``met = "met"``), inferred from
     architecture.md section 3's workflow step 1.3, not a filter tree the spec
