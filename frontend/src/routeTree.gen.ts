@@ -21,6 +21,9 @@ import { Route as TemplatesRouteImport } from './routes/templates'
 import { Route as TriageRouteImport } from './routes/triage'
 import { Route as ContactsIndexRouteImport } from './routes/contacts.index'
 import { Route as ContactsContactIdRouteImport } from './routes/contacts.$contactId'
+import { Route as ImportsIndexRouteImport } from './routes/imports.index'
+import { Route as ImportsRunsIndexRouteImport } from './routes/imports.runs.index'
+import { Route as ImportsRunsRunIdRouteImport } from './routes/imports.runs.$runId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -82,12 +85,27 @@ const ContactsContactIdRoute = ContactsContactIdRouteImport.update({
   path: '/contacts/$contactId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ImportsIndexRoute = ImportsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => ImportsRoute,
+} as any)
+const ImportsRunsIndexRoute = ImportsRunsIndexRouteImport.update({
+  id: '/runs/',
+  path: '/runs/',
+  getParentRoute: () => ImportsRoute,
+} as any)
+const ImportsRunsRunIdRoute = ImportsRunsRunIdRouteImport.update({
+  id: '/runs/$runId',
+  path: '/runs/$runId',
+  getParentRoute: () => ImportsRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/campaigns': typeof CampaignsRoute
   '/exports': typeof ExportsRoute
-  '/imports': typeof ImportsRoute
+  '/imports': typeof ImportsRouteWithChildren
   '/inbox': typeof InboxRoute
   '/linkedin': typeof LinkedinRoute
   '/lists': typeof ListsRoute
@@ -96,12 +114,14 @@ export interface FileRoutesByFullPath {
   '/triage': typeof TriageRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/contacts/': typeof ContactsIndexRoute
+  '/imports/': typeof ImportsIndexRoute
+  '/imports/runs/$runId': typeof ImportsRunsRunIdRoute
+  '/imports/runs/': typeof ImportsRunsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/campaigns': typeof CampaignsRoute
   '/exports': typeof ExportsRoute
-  '/imports': typeof ImportsRoute
   '/inbox': typeof InboxRoute
   '/linkedin': typeof LinkedinRoute
   '/lists': typeof ListsRoute
@@ -110,13 +130,16 @@ export interface FileRoutesByTo {
   '/triage': typeof TriageRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/contacts': typeof ContactsIndexRoute
+  '/imports': typeof ImportsIndexRoute
+  '/imports/runs/$runId': typeof ImportsRunsRunIdRoute
+  '/imports/runs': typeof ImportsRunsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/campaigns': typeof CampaignsRoute
   '/exports': typeof ExportsRoute
-  '/imports': typeof ImportsRoute
+  '/imports': typeof ImportsRouteWithChildren
   '/inbox': typeof InboxRoute
   '/linkedin': typeof LinkedinRoute
   '/lists': typeof ListsRoute
@@ -125,6 +148,9 @@ export interface FileRoutesById {
   '/triage': typeof TriageRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
   '/contacts/': typeof ContactsIndexRoute
+  '/imports/': typeof ImportsIndexRoute
+  '/imports/runs/$runId': typeof ImportsRunsRunIdRoute
+  '/imports/runs/': typeof ImportsRunsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -141,12 +167,14 @@ export interface FileRouteTypes {
     | '/triage'
     | '/contacts/$contactId'
     | '/contacts/'
+    | '/imports/'
+    | '/imports/runs/$runId'
+    | '/imports/runs/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/campaigns'
     | '/exports'
-    | '/imports'
     | '/inbox'
     | '/linkedin'
     | '/lists'
@@ -155,6 +183,9 @@ export interface FileRouteTypes {
     | '/triage'
     | '/contacts/$contactId'
     | '/contacts'
+    | '/imports'
+    | '/imports/runs/$runId'
+    | '/imports/runs'
   id:
     | '__root__'
     | '/'
@@ -169,13 +200,16 @@ export interface FileRouteTypes {
     | '/triage'
     | '/contacts/$contactId'
     | '/contacts/'
+    | '/imports/'
+    | '/imports/runs/$runId'
+    | '/imports/runs/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   CampaignsRoute: typeof CampaignsRoute
   ExportsRoute: typeof ExportsRoute
-  ImportsRoute: typeof ImportsRoute
+  ImportsRoute: typeof ImportsRouteWithChildren
   InboxRoute: typeof InboxRoute
   LinkedinRoute: typeof LinkedinRoute
   ListsRoute: typeof ListsRoute
@@ -272,14 +306,50 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ContactsContactIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/imports/': {
+      id: '/imports/'
+      path: '/'
+      fullPath: '/imports/'
+      preLoaderRoute: typeof ImportsIndexRouteImport
+      parentRoute: typeof ImportsRoute
+    }
+    '/imports/runs/': {
+      id: '/imports/runs/'
+      path: '/runs'
+      fullPath: '/imports/runs/'
+      preLoaderRoute: typeof ImportsRunsIndexRouteImport
+      parentRoute: typeof ImportsRoute
+    }
+    '/imports/runs/$runId': {
+      id: '/imports/runs/$runId'
+      path: '/runs/$runId'
+      fullPath: '/imports/runs/$runId'
+      preLoaderRoute: typeof ImportsRunsRunIdRouteImport
+      parentRoute: typeof ImportsRoute
+    }
   }
 }
+
+interface ImportsRouteChildren {
+  ImportsIndexRoute: typeof ImportsIndexRoute
+  ImportsRunsRunIdRoute: typeof ImportsRunsRunIdRoute
+  ImportsRunsIndexRoute: typeof ImportsRunsIndexRoute
+}
+
+const ImportsRouteChildren: ImportsRouteChildren = {
+  ImportsIndexRoute: ImportsIndexRoute,
+  ImportsRunsRunIdRoute: ImportsRunsRunIdRoute,
+  ImportsRunsIndexRoute: ImportsRunsIndexRoute,
+}
+
+const ImportsRouteWithChildren =
+  ImportsRoute._addFileChildren(ImportsRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   CampaignsRoute: CampaignsRoute,
   ExportsRoute: ExportsRoute,
-  ImportsRoute: ImportsRoute,
+  ImportsRoute: ImportsRouteWithChildren,
   InboxRoute: InboxRoute,
   LinkedinRoute: LinkedinRoute,
   ListsRoute: ListsRoute,
