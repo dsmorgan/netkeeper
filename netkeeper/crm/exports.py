@@ -69,8 +69,10 @@ Every export goes through :func:`netkeeper.crm.filters.compile_filter` and
 :func:`netkeeper.crm.filters.apply_sort` — the same compiler the contacts
 table and smart lists use — and fetches in bounded batches with
 :func:`netkeeper.crm.filters.paginate` rather than loading the whole result
-set at once. Each function here is a generator, so the web layer can hand the
-whole thing to ``StreamingResponse`` without building the file in memory.
+set at once. The rendering is a generator, so the web layer can hand the whole
+thing to ``StreamingResponse`` without building the file in memory —
+:func:`export_stream` itself is not, so that compiling the filter, the one
+step that can fail, happens before the caller commits to a ``200``.
 """
 
 from __future__ import annotations
@@ -84,7 +86,7 @@ from datetime import UTC, date, datetime, tzinfo
 from typing import Any, Final, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import ColumnElement
+from sqlalchemy import ColumnElement, Select
 from sqlalchemy.orm import Session, selectinload
 
 from netkeeper.crm.filters import FilterTree, SortKey, apply_sort, compile_filter, paginate
@@ -112,7 +114,7 @@ def filename_for(preset: ExportPreset, output_format: ExportFormat) -> str:
 # --- streaming the rows -------------------------------------------------------
 
 
-def _iter_contacts(
+def _contacts_statement(
     session: Session,
     user: User,
     tree: FilterTree,
@@ -120,25 +122,24 @@ def _iter_contacts(
     *,
     now: datetime,
     extra_where: ColumnElement[bool] | None = None,
-) -> Iterator[Contact]:
-    """Every contact ``tree`` selects, ordered by ``sort``, fetched in bounded batches.
+) -> Select[tuple[Contact]]:
+    """The statement :func:`_iter_contacts` pages: ``tree`` compiled, sorted, children eager.
 
-    Reuses :func:`compile_filter`, :func:`apply_sort`, and :func:`paginate` from
-    the filter language rather than a second query path. Each batch is its own
-    complete, closed query (a ``LIMIT``/``OFFSET`` page, not a held-open server
-    cursor), so eager-loading the child collections below is safe on every
-    backend: nothing here shares a cursor with a lazy or ``selectin`` load the
-    way a straight ``yield_per`` stream would.
+    Reuses :func:`compile_filter` and :func:`apply_sort` from the filter
+    language rather than a second query path. Not a generator, and called
+    before the response body starts: this is where
+    :class:`~netkeeper.crm.filters.FilterError` comes from, and the caller can
+    still turn it into a 422 (#95).
 
     ``extra_where`` ANDs onto the compiled filter before sorting and paging —
     ``campaign-audience`` uses it to hold out ``do_not_contact`` rows regardless
     of what the caller's own filter says, so that preset can never produce a
     mail-merge file containing someone who asked to be left alone.
     """
-    statement = compile_filter(user, tree, now=now)
+    statement = compile_filter(user, tree, session=session, now=now)
     if extra_where is not None:
         statement = statement.where(extra_where)
-    base = apply_sort(statement, sort).options(
+    return apply_sort(statement, sort).options(
         selectinload(Contact.emails),
         selectinload(Contact.phones),
         selectinload(Contact.links),
@@ -146,6 +147,16 @@ def _iter_contacts(
         selectinload(Contact.snapshots),
         selectinload(Contact.tags),
     )
+
+
+def _iter_contacts(session: Session, base: Select[tuple[Contact]]) -> Iterator[Contact]:
+    """Every contact ``base`` selects, fetched in bounded batches.
+
+    Each batch is its own complete, closed query (a ``LIMIT``/``OFFSET`` page,
+    not a held-open server cursor), so eager-loading the child collections is
+    safe on every backend: nothing here shares a cursor with a lazy or
+    ``selectin`` load the way a straight ``yield_per`` stream would.
+    """
     offset = 0
     while True:
         batch = session.scalars(paginate(base, limit=_BATCH_SIZE, offset=offset)).all()
@@ -583,10 +594,40 @@ def export_stream(
     orders by; ``now`` is the instant relative fields (``years_since_connected``,
     and the filter's own relative windows) are computed from, fixed once per
     call so a long export is internally consistent.
+
+    **Not a generator.** It compiles ``tree`` and returns the iterator over the
+    rendered file, so a filter that cannot compile raises
+    :class:`~netkeeper.crm.filters.FilterError` *here*, to a caller that has
+    not sent a status line yet and can still answer 422. A generator would
+    defer the compile to the first ``next()``, which for
+    ``StreamingResponse`` is after the ``200`` is on the wire: the failure
+    would reach the client as a truncated file with a success status, which is
+    worse than a 500 because nothing about it looks like an error (#95).
     """
     today = _local_today(user, now)
     extra_where = Contact.do_not_contact.is_(False) if preset == "campaign-audience" else None
-    contacts = _iter_contacts(session, user, tree, sort, now=now, extra_where=extra_where)
+    base = _contacts_statement(session, user, tree, sort, now=now, extra_where=extra_where)
+    return _render(
+        session,
+        base,
+        preset=preset,
+        output_format=output_format,
+        headerless=headerless,
+        today=today,
+    )
+
+
+def _render(
+    session: Session,
+    base: Select[tuple[Contact]],
+    *,
+    preset: ExportPreset,
+    output_format: ExportFormat,
+    headerless: bool,
+    today: date,
+) -> Iterator[str]:
+    """:func:`export_stream`'s body, once everything that can fail early has."""
+    contacts = _iter_contacts(session, base)
     columns = _COLUMN_PRESETS[preset]
     if columns is None:  # "full"
         if output_format == "csv":

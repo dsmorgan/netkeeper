@@ -48,6 +48,11 @@ from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship, v
 
 from netkeeper.models.base import Base, TimestampMixin, UserOwned, UTCDateTime, string_enum, utcnow
 
+# For CONTACT_CHILDREN at the foot of this module: list_members names a contact
+# without being one of its children. netkeeper.models.lists imports only
+# netkeeper.models.base, so this direction is the only one there is.
+from netkeeper.models.lists import ListMember
+
 if TYPE_CHECKING:
     from netkeeper.models.tags import ContactTag, Tag
 
@@ -490,7 +495,7 @@ class Interaction(ContactChild, Base):
     contact: Mapped[Contact] = relationship(back_populates="interactions")
 
 
-CONTACT_CHILDREN: tuple[type[ContactChild], ...] = (
+CONTACT_CHILDREN: tuple[type[ContactChild] | type[ListMember], ...] = (
     ContactEmail,
     ContactPhone,
     ContactLink,
@@ -498,5 +503,15 @@ CONTACT_CHILDREN: tuple[type[ContactChild], ...] = (
     ContactSnapshot,
     ContactAlias,
     Interaction,
+    ListMember,
 )
-"""Every child table of ``contacts``, for tests and tooling that iterate them."""
+"""Every table that names a contact, for tests and tooling that iterate them.
+
+The first seven are :class:`ContactChild` subclasses — the contact's own rows,
+with its provenance columns. ``ListMember`` is not one of those: a membership
+row belongs to a *list* and names a contact, and carries none of the
+provenance. It is here because what this tuple is used for is "every row that
+points at a contact", which is what the merge tests walk to prove nothing is
+left pointing at the loser (#81). Anything needing only the provenance-bearing
+children wants :data:`netkeeper.crm.import_runs.CHILD_MODELS` or its own
+tuple, not this one."""

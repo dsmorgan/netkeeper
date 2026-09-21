@@ -64,6 +64,7 @@ from netkeeper.models import (
     ContactTagSuppression,
     EmailKind,
     LinkKind,
+    ListMember,
     PhoneKind,
     TagSource,
     User,
@@ -837,7 +838,9 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     recorded source, and its ``synced_values`` fill in from the loser's for the
     fields it has none for. Tag assignments and suppressions carry across under
     :func:`~netkeeper.crm.tags.tag_contact`'s precedence, one row per tag; see
-    :func:`_merge_tags`. The loser's URN and slug move to the survivor when it lacks
+    :func:`_merge_tags`. Static-list memberships carry across too, so the
+    survivor is in every list the loser was in; see :func:`_merge_list_members`.
+    The loser's URN and slug move to the survivor when it lacks
     them; otherwise the slug becomes an alias of the survivor and the URN is
     dropped. Both are cleared on the loser, whose ``merged_into_id`` points at
     the survivor. ``met`` takes the more decided value, ``do_not_contact`` is
@@ -878,6 +881,7 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     _merge_identity(session, user, survivor, loser)
     _merge_children(survivor, loser)
     _merge_tags(session, user, survivor, loser)
+    _merge_list_members(session, user, survivor, loser)
     _merge_scalars(survivor, loser)
     _merge_synced_values(survivor, loser)
     loser.merged_into_id = survivor.id
@@ -1019,6 +1023,50 @@ def _merge_tags(session: Session, user: User, survivor: Contact, loser: Contact)
             _keep_suppression(session, survivor, *blocked)
         else:
             _keep_assignment(session, survivor, *assigned)
+    session.flush()
+
+
+def _merge_list_members(session: Session, user: User, survivor: Contact, loser: Contact) -> None:
+    """Re-point the loser's static-list memberships at the survivor (spec 10.4; #81).
+
+    The rows are the person's place in every "First 100"-style list they were
+    put in by hand, and the person is not going anywhere — only one of their
+    two records is. Left alone, the row keeps naming the loser, which
+    :func:`netkeeper.crm.lists.list_members` skips as merged away, so the list
+    quietly comes back one member short and nobody is told.
+
+    A row whose list the survivor is already in is deleted rather than moved:
+    ``uq_list_members_user_id_list_id_contact_id`` allows one membership per
+    (list, contact), and the survivor's own row is the one to keep, being both
+    already correct and already ordered by its own ``added_at``. A moved row
+    keeps the ``added_at`` it had, which is when that person joined the list;
+    the merge is not a new addition.
+
+    Only static lists have rows here at all — a smart list's members are its
+    filter's result, which follows the survivor by itself.
+    """
+    mine = set(
+        session.scalars(
+            scoped(user, ListMember)
+            .with_only_columns(ListMember.list_id)
+            .where(ListMember.contact_id == survivor.id)
+        )
+    )
+    theirs = session.scalars(
+        scoped(user, ListMember)
+        .where(ListMember.contact_id == loser.id)
+        .order_by(ListMember.list_id)
+    ).all()
+    for row in theirs:
+        if row.list_id in mine:
+            session.delete(row)
+        else:
+            row.contact_id = survivor.id
+            mine.add(row.list_id)
+    if theirs:
+        log.debug(
+            "moved %d list memberships from contact %d to %d", len(theirs), loser.id, survivor.id
+        )
     session.flush()
 
 

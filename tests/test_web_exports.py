@@ -21,8 +21,9 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
 
+from netkeeper.crm.lists import add_members, create_list
 from netkeeper.db import session_scope
-from netkeeper.models import User, UserKind
+from netkeeper.models import ListKind, User, UserKind
 
 LOCAL_USER_ID = 1
 
@@ -130,6 +131,63 @@ async def test_invalid_sort_is_422(client: httpx.AsyncClient) -> None:
         "/api/v1/exports", params={"sort": json.dumps([{"field": "not-a-field"}])}
     )
     assert response.status_code == 422
+
+
+async def test_a_predicate_the_compiler_refuses_is_422_not_a_500(client: httpx.AsyncClient) -> None:
+    """#95: compiling happened inside the generator, so this escaped the handler entirely.
+
+    ``enrolled_in`` is the placeholder that is still a placeholder (campaigns,
+    P3-04). ``list_member`` was the one this was found with; it compiles now.
+    """
+    tree = {"where": {"op": "enrolled_in", "campaign_id": 1}}
+    response = await client.get("/api/v1/exports", params={"filter": json.dumps(tree)})
+    assert response.status_code == 422
+    assert "P3-04" in response.text
+
+
+async def test_a_refused_filter_never_starts_a_body(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """The other half of #95: a 200 that stops mid-file is worse than an error.
+
+    A ``StreamingResponse`` has sent its status line before the first chunk is
+    asked for, so the refusal has to come from the compile, before the response
+    exists. With contacts in the database, a lazily-compiled export would have
+    emitted the opening ``[`` and nothing else, under a ``200``.
+    """
+    with session_scope(_factory(running_app), write=True) as session:
+        for _ in range(3):
+            factories.make_contact(session, _local_user(session))
+    tree = {
+        "where": {
+            "op": "and",
+            "children": [{"op": "has_li_url"}, {"op": "replied_in", "campaign_id": 1}],
+        }
+    }
+    response = await client.get("/api/v1/exports", params={"filter": json.dumps(tree)})
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/json")
+    assert "content-disposition" not in response.headers
+    assert response.json()["detail"]
+    assert not response.text.startswith("[")
+
+
+async def test_a_static_list_exports_its_own_members(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """P1-27's "done when": the Export button on a list exports the list, not everyone."""
+    with session_scope(_factory(running_app), write=True) as session:
+        user = _local_user(session)
+        inside = factories.make_contact(session, user, current_company="Acme Corp")
+        factories.make_contact(session, user, current_company="Globex")
+        row = create_list(session, user, "First 100", ListKind.STATIC)
+        add_members(session, user, row.id, [inside.id])
+        list_id = row.id
+    tree = {"where": {"op": "list_member", "list_id": list_id}}
+    response = await client.get("/api/v1/exports", params={"filter": json.dumps(tree)})
+    assert response.status_code == 200
+    body = response.json()
+    assert [row["current_company"] for row in body] == ["Acme Corp"]
 
 
 async def test_filter_query_param_is_applied(

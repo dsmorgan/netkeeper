@@ -27,12 +27,15 @@ from netkeeper.models import (
     ContactAlias,
     ContactEmail,
     ContactLink,
+    ContactList,
     ContactMet,
     ContactPosition,
     ContactSnapshot,
     ContactSource,
     Interaction,
     InteractionKind,
+    ListKind,
+    ListMember,
     User,
     UserKind,
     UserOwned,
@@ -58,7 +61,11 @@ def users(session: Session) -> tuple[User, User]:
 
 
 def _with_every_child(session: Session, user: User) -> Contact:
-    """A contact with one row in each child table."""
+    """A contact with one row in every table that names a contact.
+
+    ``list_members`` is one of them (CONTACT_CHILDREN, #81), so it needs a
+    static list of its own to belong to.
+    """
     contact = factories.make_contact(
         session,
         user,
@@ -72,6 +79,11 @@ def _with_every_child(session: Session, user: User) -> Contact:
     contact.interactions.append(
         Interaction(user_id=user.id, kind=InteractionKind.NOTE, at=NOW, summary="hi")
     )
+    session.flush()
+    listing = ContactList(user_id=user.id, name="First 100", kind=ListKind.STATIC)
+    session.add(listing)
+    session.flush()
+    session.add(ListMember(user_id=user.id, list_id=listing.id, contact_id=contact.id))
     session.flush()
     return contact
 

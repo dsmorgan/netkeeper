@@ -204,11 +204,11 @@ async def test_a_predicate_that_is_not_built_yet_says_which_item_delivers_it(
 ) -> None:
     response = await client.post(
         "/api/v1/contacts/query",
-        json={"filter": {"where": {"op": "list_member", "list_id": 1}}},
+        json={"filter": {"where": {"op": "enrolled_in", "campaign_id": 1}}},
         headers=CSRF,
     )
     assert response.status_code == 422
-    assert "P1-08" in response.text
+    assert "P3-04" in response.text
 
 
 async def test_the_search_lists_by_substring(client: httpx.AsyncClient, people: list[int]) -> None:

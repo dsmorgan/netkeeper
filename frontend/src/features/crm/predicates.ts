@@ -250,7 +250,7 @@ export const PREDICATES: readonly PredicateSpec[] = [
     group: 'logic',
     hint: 'Members of a static or smart list.',
     unavailable:
-      'Lists exist, but the predicate that matches their members is not wired into the filter compiler yet. Tracked as issue #73; the server refuses a filter that uses it.',
+      'The server compiles this one now — issue #73 landed with P1-27, so a saved filter that uses it works. What is missing is here: the builder has no list picker yet, so there is no way to choose which list from this screen.',
     create: () => ({ op: 'list_member', list_id: 0 }),
     example: { op: 'list_member', list_id: 1 },
   },

@@ -117,7 +117,7 @@ async def test_smart_list_filter_is_validated_and_replaceable(client: httpx.Asyn
     url = f"/api/v1/lists/{row['id']}"
 
     unsupported = await client.patch(
-        url, json={"filter": {"where": {"op": "list_member", "list_id": 1}}}, headers=CSRF
+        url, json={"filter": {"where": {"op": "enrolled_in", "campaign_id": 1}}}, headers=CSRF
     )
     assert unsupported.status_code == 422
 

@@ -30,6 +30,7 @@ from netkeeper.crm.identity import (
     resolve,
     resolve_survivor,
 )
+from netkeeper.crm.lists import add_members, create_list, list_members, member_count
 from netkeeper.crm.provenance import (
     PROVENANCE_FIELDS,
     PROVENANCE_ORDER,
@@ -54,6 +55,8 @@ from netkeeper.models import (
     Interaction,
     InteractionKind,
     LinkKind,
+    ListKind,
+    ListMember,
     RuleField,
     Tag,
     TagSource,
@@ -923,6 +926,7 @@ def test_apply_across_writer_sessions_is_idempotent(session_factory: sessionmake
             "contact_snapshots": 0,
             "contact_aliases": 0,
             "interactions": 0,
+            "list_members": 0,
         }
 
 
@@ -1215,6 +1219,7 @@ def test_merge_moves_and_dedupes_children(writer: Session, users: tuple[User, Us
         "contact_snapshots": 2,
         "contact_aliases": 3,
         "interactions": 2,
+        "list_members": 0,
     }
     assert counts(writer, bob) == theirs
 
@@ -1849,3 +1854,116 @@ def test_merge_never_moves_another_users_tags(writer: Session, users: tuple[User
     writer.expire_all()
     assert assignments_of(writer, alice, mine) == {my_tag.id: (TagSource.MANUAL, None)}
     assert (assignments_of(writer, bob, theirs), suppressions_of(writer, bob, theirs)) == before
+
+
+# --- merge: static-list membership (#81) ------------------------------------
+
+
+def members_of(session: Session, user: User, list_id: int) -> list[int]:
+    """Contact ids of a static list, the row level, tombstones and all.
+
+    Deliberately not ``lists.list_members``, which hides a merged-away contact:
+    the point of these tests is which contact the *row* names.
+    """
+    rows = session.scalars(
+        scoped(user, ListMember).where(ListMember.list_id == list_id).order_by(ListMember.id)
+    )
+    return [row.contact_id for row in rows]
+
+
+def test_merge_moves_list_memberships_to_the_survivor(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """#81: the row kept naming the loser, so the person silently left the list."""
+    alice, _ = users
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    first = create_list(writer, alice, "First 100", ListKind.STATIC)
+    second = create_list(writer, alice, "Warm", ListKind.STATIC)
+    add_members(writer, alice, first.id, [loser.id])
+    add_members(writer, alice, second.id, [loser.id])
+
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+
+    assert members_of(writer, alice, first.id) == [survivor.id]
+    assert members_of(writer, alice, second.id) == [survivor.id]
+    assert [c.id for c in list_members(writer, alice, first.id, limit=50)[0]] == [survivor.id]
+
+
+def test_merge_dedupes_a_list_both_contacts_were_in(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """``uq_list_members_user_id_list_id_contact_id`` allows one row per person per list."""
+    alice, _ = users
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    row = create_list(writer, alice, "First 100", ListKind.STATIC)
+    add_members(writer, alice, row.id, [survivor.id, loser.id])
+    assert member_count(writer, alice, row.id) == 2
+
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+
+    assert members_of(writer, alice, row.id) == [survivor.id]
+    assert member_count(writer, alice, row.id) == 1
+
+
+def test_merge_leaves_no_row_pointing_at_the_loser(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """The assertion #81 asked for: CONTACT_CHILDREN now walks ``list_members`` too."""
+    alice, _ = users
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    shared = create_list(writer, alice, "Both", ListKind.STATIC)
+    only_loser = create_list(writer, alice, "Loser only", ListKind.STATIC)
+    add_members(writer, alice, shared.id, [survivor.id, loser.id])
+    add_members(writer, alice, only_loser.id, [loser.id])
+
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+
+    assert ListMember in CONTACT_CHILDREN
+    for child in CONTACT_CHILDREN:
+        assert writer.scalar(scoped_count(alice, child).where(child.contact_id == loser.id)) == 0, (
+            child.__name__
+        )
+
+
+def test_merge_never_moves_another_users_list_memberships(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    alice, bob = users
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    theirs = factories.make_contact(writer, bob)
+    mine = create_list(writer, alice, "First 100", ListKind.STATIC)
+    yours = create_list(writer, bob, "First 100", ListKind.STATIC)
+    add_members(writer, alice, mine.id, [loser.id])
+    add_members(writer, bob, yours.id, [theirs.id])
+
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+
+    assert members_of(writer, alice, mine.id) == [survivor.id]
+    assert members_of(writer, bob, yours.id) == [theirs.id]
+
+
+def test_merge_keeps_the_date_the_person_joined_the_list(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """A moved row keeps its ``added_at``: the merge is not a new addition."""
+    alice, _ = users
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    row = create_list(writer, alice, "First 100", ListKind.STATIC)
+    add_members(writer, alice, row.id, [loser.id])
+    membership = writer.scalars(scoped(alice, ListMember)).one()
+    added_at = membership.added_at
+
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+
+    moved = writer.scalars(scoped(alice, ListMember)).one()
+    assert (moved.contact_id, moved.added_at) == (survivor.id, added_at)
