@@ -55,7 +55,7 @@ import hmac
 import json
 import logging
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
 
@@ -109,9 +109,13 @@ class Signer:
 
     ``create_app`` makes one per process with :meth:`generated` and keeps it on
     ``app.state``; tests make one with a fixed key and a short ``ttl``.
+
+    ``key`` is kept out of the repr: the signer sits on ``app.state``, which
+    turns up in tracebacks and debug dumps, and a signing key is a secret like
+    any other (CLAUDE.md).
     """
 
-    key: bytes
+    key: bytes = field(repr=False)
     ttl: timedelta = TOKEN_TTL
 
     @classmethod

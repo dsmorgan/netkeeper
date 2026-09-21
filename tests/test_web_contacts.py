@@ -10,7 +10,8 @@ Every name, address and number here is invented.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+import itertools
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import factories
@@ -21,10 +22,19 @@ from isolation.harness import acting_as
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.crm import contacts as service
+from netkeeper.crm.filters import parse_filter
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.crm.provenance import record_synced_value
 from netkeeper.db import session_scope
-from netkeeper.models import ContactSnapshot, ContactSource, InteractionKind, User, UserKind
+from netkeeper.models import (
+    ContactMet,
+    ContactSnapshot,
+    ContactSource,
+    InteractionKind,
+    User,
+    UserKind,
+)
 from netkeeper.models.contacts import Contact
 from netkeeper.scoping import get_scoped
 
@@ -366,10 +376,13 @@ async def test_archive_is_soft_and_reversible(client: httpx.AsyncClient, people:
 # --- bulk with a count confirmation token -----------------------------------
 
 
-async def _count(client: httpx.AsyncClient, selection: Any, action: str) -> dict[str, Any]:
+async def _count(
+    client: httpx.AsyncClient, selection: Any, action: str, **written: Any
+) -> dict[str, Any]:
+    """Ask for the count and the token. ``written`` is the ``value`` and ``reason``."""
     response = await client.post(
         "/api/v1/contacts/bulk/count",
-        json={"selection": selection, "action": action},
+        json={"selection": selection, "action": action, **written},
         headers=CSRF,
     )
     assert response.status_code == 200, response.text
@@ -482,7 +495,7 @@ async def test_a_forged_token_is_refused(client: httpx.AsyncClient, people: list
 async def test_a_bulk_action_on_ids_ignores_the_order_they_are_sent_in(
     client: httpx.AsyncClient, people: list[int]
 ) -> None:
-    counted = await _count(client, {"ids": [people[0], people[1]]}, "set_met")
+    counted = await _count(client, {"ids": [people[0], people[1]]}, "set_met", value="met")
     assert counted["count"] == 2
     response = await client.post(
         "/api/v1/contacts/bulk",
@@ -500,21 +513,72 @@ async def test_a_bulk_action_on_ids_ignores_the_order_they_are_sent_in(
     assert {row["met"] for row in page["items"]} == {"met"}
 
 
+@pytest.mark.parametrize(
+    ("path", "extra"),
+    [("/api/v1/contacts/bulk/count", {}), ("/api/v1/contacts/bulk", {"token": "unused"})],
+)
 async def test_a_bulk_action_whose_value_does_not_fit_is_refused(
-    client: httpx.AsyncClient,
+    client: httpx.AsyncClient, path: str, extra: dict[str, Any]
 ) -> None:
+    """The count validates the value too, so a bad one fails before anything is counted."""
     response = await client.post(
-        "/api/v1/contacts/bulk/count",
-        json={"selection": EVERYONE, "action": "set_met"},
+        path,
+        json={"selection": EVERYONE, "action": "set_met", **extra},
         headers=CSRF,
     )
-    assert response.status_code == 200
-    bad = await client.post(
+    assert response.status_code == 422
+    assert "set_met needs value" in response.text
+
+
+async def test_a_token_cannot_execute_a_different_value(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    """ "Mark 2 people do-not-contact" and "clear it on 2 people" are two confirmations."""
+    counted = await _count(client, EVERYONE, "set_do_not_contact", value=True, reason="asked me to")
+    assert counted["count"] == 2
+
+    flipped = await client.post(
         "/api/v1/contacts/bulk",
-        json={"selection": EVERYONE, "action": "set_met", "token": response.json()["token"]},
+        json={
+            "selection": EVERYONE,
+            "action": "set_do_not_contact",
+            "value": False,
+            "token": counted["token"],
+        },
         headers=CSRF,
     )
-    assert bad.status_code == 422
+    assert flipped.status_code == 422, flipped.text
+    assert flipped.json()["reason"] == "selection"
+
+    # The reason is bound too: same value, different sentence.
+    reworded = await client.post(
+        "/api/v1/contacts/bulk",
+        json={
+            "selection": EVERYONE,
+            "action": "set_do_not_contact",
+            "value": True,
+            "reason": "no longer at the company",
+            "token": counted["token"],
+        },
+        headers=CSRF,
+    )
+    assert reworded.status_code == 422
+    assert reworded.json()["reason"] == "selection"
+
+    # What was confirmed still executes.
+    applied = await client.post(
+        "/api/v1/contacts/bulk",
+        json={
+            "selection": EVERYONE,
+            "action": "set_do_not_contact",
+            "value": True,
+            "reason": "asked me to",
+            "token": counted["token"],
+        },
+        headers=CSRF,
+    )
+    assert applied.status_code == 200, applied.text
+    assert applied.json() == {"affected": 2}
 
 
 async def test_a_selection_must_be_a_filter_or_ids_not_both(client: httpx.AsyncClient) -> None:
@@ -646,3 +710,249 @@ async def test_a_confirmation_token_does_not_travel_between_users(
     assert response.status_code == 422
     assert response.json()["reason"] == "user"
     assert (await _query(client))["total"] == 2
+
+
+# --- merge, and the merged-away convention (spec 8.2) -----------------------
+
+
+@pytest.fixture
+def merged(client: httpx.AsyncClient, people: list[int]) -> tuple[int, int]:
+    """``(survivor, merged_away)``: the designer folded into the engineer."""
+    return people[0], people[1]
+
+
+async def _merge(client: httpx.AsyncClient, survivor: int, loser: int) -> httpx.Response:
+    return await client.post(
+        f"/api/v1/contacts/{survivor}/merge", json={"loser_id": loser}, headers=CSRF
+    )
+
+
+async def test_a_merge_folds_the_loser_into_the_survivor(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    survivor_id, loser_id, _ = people
+    response = await _merge(client, survivor_id, loser_id)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == survivor_id
+    assert body["first_name"] == "Ada"  # the survivor's own fields win
+    assert body["merged_into_id"] is None
+    assert body["resolved_from"] is None
+    # The loser's children came across.
+    assert sorted(row["email"] for row in body["emails"]) == [
+        "ada.quill@example.test",
+        "bo.marsh@example.test",
+    ]
+    assert sum(row["is_primary"] for row in body["emails"]) == 1
+    # And the loser is gone from the table, without being deleted.
+    assert _names(await _query(client)) == ["Ada Quill"]
+
+
+async def test_a_merged_away_id_reads_as_its_survivor(
+    client: httpx.AsyncClient, merged: tuple[int, int]
+) -> None:
+    survivor_id, loser_id = merged
+    assert (await _merge(client, survivor_id, loser_id)).status_code == 200
+
+    response = await client.get(f"/api/v1/contacts/{loser_id}")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == survivor_id
+    assert body["first_name"] == "Ada"
+    assert body["resolved_from"] == loser_id, "a stale link still lands on the person"
+
+
+@pytest.mark.parametrize(
+    ("method", "suffix", "payload"),
+    [
+        ("PATCH", "", {"first_name": "Renamed"}),
+        ("POST", "/archive", None),
+        ("POST", "/unarchive", None),
+        ("POST", "/revert-field", {"field": "current_title"}),
+        ("POST", "/emails", {"email": "new@example.test"}),
+        ("POST", "/phones", {"raw": "+15550009999"}),
+        ("POST", "/links", {"url": "https://example.test/bo"}),
+    ],
+)
+async def test_every_write_to_a_merged_away_id_is_a_409_naming_the_survivor(
+    client: httpx.AsyncClient,
+    merged: tuple[int, int],
+    method: str,
+    suffix: str,
+    payload: dict[str, Any] | None,
+) -> None:
+    """The convention the module docstring states, on every route that follows it."""
+    survivor_id, loser_id = merged
+    assert (await _merge(client, survivor_id, loser_id)).status_code == 200
+
+    response = await client.request(
+        method, f"/api/v1/contacts/{loser_id}{suffix}", json=payload, headers=CSRF
+    )
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": "merged", "merged_into_id": survivor_id}
+
+
+async def test_merging_into_a_merged_away_id_is_refused(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    """Not silently redirected to the survivor: the caller asked for a row nothing will show."""
+    survivor_id, loser_id, third_id = people
+    assert (await _merge(client, survivor_id, loser_id)).status_code == 200
+
+    response = await _merge(client, loser_id, third_id)
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": "merged", "merged_into_id": survivor_id}
+
+
+async def test_a_contact_cannot_be_merged_into_itself(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    response = await _merge(client, people[0], people[0])
+    assert response.status_code == 409
+    assert "itself" in response.json()["detail"]
+
+
+async def test_a_loser_already_merged_elsewhere_is_refused(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    survivor_id, loser_id, other_id = people
+    assert (await _merge(client, survivor_id, loser_id)).status_code == 200
+
+    response = await _merge(client, other_id, loser_id)
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert str(survivor_id) in detail and str(other_id) in detail
+
+
+async def test_merging_an_unknown_loser_is_a_404(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    response = await _merge(client, people[0], 424242)
+    assert response.status_code == 404
+
+
+async def test_merging_the_same_pair_twice_is_a_no_op(
+    client: httpx.AsyncClient, merged: tuple[int, int]
+) -> None:
+    survivor_id, loser_id = merged
+    first = await _merge(client, survivor_id, loser_id)
+    second = await _merge(client, survivor_id, loser_id)
+    assert second.status_code == 200, second.text
+    assert second.json()["id"] == first.json()["id"] == survivor_id
+
+
+# --- bulk archive keeps the stamp a row already carries ---------------------
+
+
+async def test_bulk_archive_does_not_restamp_an_already_archived_contact(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    """``archived_at`` records when the contact left the table; it left once.
+
+    Reachable two ways, and both are here: an ``ids`` selection names archived
+    rows outright, and a filter with ``include_archived`` sweeps them in.
+    """
+    already, fresh = people[0], people[1]
+    first = await client.post(f"/api/v1/contacts/{already}/archive", headers=CSRF)
+    assert first.status_code == 200
+    stamped = first.json()["archived_at"]
+    assert stamped is not None
+
+    for selection in ({"ids": [already, fresh]}, {"filter": {"include_archived": True}}):
+        counted = await _count(client, selection, "archive")
+        applied = await client.post(
+            "/api/v1/contacts/bulk",
+            json={"selection": selection, "action": "archive", "token": counted["token"]},
+            headers=CSRF,
+        )
+        assert applied.status_code == 200, applied.text
+        assert applied.json() == {"affected": counted["count"]}, (
+            "every row the person confirmed is written, archived or not"
+        )
+
+        body = (await client.get(f"/api/v1/contacts/{already}")).json()
+        assert body["archived_at"] == stamped, f"{selection} re-stamped an archived contact"
+
+    # The one that was live did get a stamp, and not the other one's.
+    newly = (await client.get(f"/api/v1/contacts/{fresh}")).json()["archived_at"]
+    assert newly is not None and newly != stamped
+
+
+async def test_bulk_unarchive_then_archive_stamps_afresh(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    """Leaving the table again is a new fact, so it gets a new time."""
+    target = people[0]
+    first = (await client.post(f"/api/v1/contacts/{target}/archive", headers=CSRF)).json()
+    await client.post(f"/api/v1/contacts/{target}/unarchive", headers=CSRF)
+
+    selection = {"ids": [target]}
+    counted = await _count(client, selection, "archive")
+    applied = await client.post(
+        "/api/v1/contacts/bulk",
+        json={"selection": selection, "action": "archive", "token": counted["token"]},
+        headers=CSRF,
+    )
+    assert applied.status_code == 200, applied.text
+    again = (await client.get(f"/api/v1/contacts/{target}")).json()["archived_at"]
+    assert again is not None and again != first["archived_at"]
+
+
+# --- the service's clock ----------------------------------------------------
+
+
+def test_a_bulk_action_resolves_now_once(
+    factory: sessionmaker[Session], owner: User, people: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The count and the UPDATE must compile against one instant, not two.
+
+    A relative window compiles its own clock every time ``compile_where`` runs,
+    so leaving ``now`` unset in two places resolves it twice: the count can see
+    a contact the write then misses, which is the drift the confirmation token
+    exists to prevent, arriving through the back door. Pinned with a clock that
+    jumps a day per call, so the bug is a failure and not a race -- resolving
+    twice puts the count and the write a day apart and the contact seeded here
+    falls out of the window between them.
+    """
+    ticks = itertools.count()
+    start = datetime(2026, 4, 1, tzinfo=UTC)
+    filter_calls = 0
+
+    def service_clock() -> datetime:
+        return start + timedelta(days=next(ticks))
+
+    def filter_clock() -> datetime:
+        nonlocal filter_calls
+        filter_calls += 1
+        return service_clock()
+
+    monkeypatch.setattr("netkeeper.crm.contacts.utcnow", service_clock)
+    monkeypatch.setattr("netkeeper.crm.filters.utcnow", filter_clock)
+
+    with session_scope(factory, write=True) as session:
+        user = session.get(User, owner.id)
+        assert user is not None
+        contact = get_scoped(session, user, Contact, people[0])
+        assert contact is not None
+        contact.last_contacted_at = start - timedelta(hours=12)  # inside a one-day window at start
+        session.flush()
+
+        selection = service.Selection(
+            tree=parse_filter({"where": {"op": "last_contacted", "within_days": 1}})
+        )
+        # What the confirmation dialog counted, at the instant the token was minted.
+        confirmed = service.count_selection(session, user, selection, now=start)
+        assert confirmed == 1
+        # And the action, with no instant of its own: the service picks one and
+        # both statements must use it. Resolving twice raises CountMismatch here.
+        affected = service.bulk_update(
+            session,
+            user,
+            selection,
+            "set_met",
+            value=ContactMet.MET,
+            expected_count=confirmed,
+        )
+
+    assert affected == confirmed
+    assert filter_calls == 0, "the filter resolved its own clock instead of the one passed in"

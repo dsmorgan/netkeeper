@@ -43,6 +43,7 @@ from netkeeper.web.deps import Confirmations, CurrentUser, SessionDep, read_only
 from netkeeper.web.errors import ApiError
 from netkeeper.web.schemas import (
     CONTACT_COLUMNS,
+    BulkConfirmable,
     BulkCountIn,
     BulkCountOut,
     BulkIn,
@@ -244,12 +245,16 @@ def unarchive_contact(contact_id: int, user: CurrentUser, session: SessionDep) -
 @router.post(
     "/contacts/{contact_id}/merge",
     operation_id="merge_contacts",
-    responses={**NO_SUCH_CONTACT, 409: {"description": "The two cannot be merged"}},
+    responses={**WRITE, 409: {"description": "The two cannot be merged"}},
 )
 def merge_contacts(
     contact_id: int, body: MergeIn, user: CurrentUser, session: SessionDep
 ) -> ContactDetail:
-    """Fold `loser_id` into this contact (spec 8.2); the loser resolves here from then on."""
+    """Fold `loser_id` into this contact (spec 8.2); the loser resolves here from then on.
+
+    Merging into a merged-away id answers `409 merged` like every other write to
+    one, so the client retries against the survivor it names.
+    """
     with translate_errors():
         contact = service.merge_contacts(session, user, contact_id, body.loser_id)
     return _detail(session, user, contact, None)
@@ -283,7 +288,7 @@ def count_bulk_contacts(
     token, expires_at = confirmations.issue(
         user_id=user.id,
         action=body.action,
-        digest=_digest(body.selection),
+        digest=_digest(body),
         count=count,
     )
     return BulkCountOut(
@@ -310,7 +315,7 @@ def bulk_update_contacts(
     selection = _selection(body.selection)
     with translate_errors():
         confirmation = confirmations.verify(
-            body.token, user_id=user.id, action=body.action, digest=_digest(body.selection)
+            body.token, user_id=user.id, action=body.action, digest=_digest(body)
         )
         affected = service.bulk_update(
             session,
@@ -331,17 +336,24 @@ def _selection(selection: BulkSelection) -> service.Selection:
     )
 
 
-def _digest(selection: BulkSelection) -> str:
-    """What a confirmation token is bound to: the selection, spelled one way only.
+def _digest(body: BulkConfirmable) -> str:
+    """What a confirmation token is bound to, spelled one way only.
+
+    The selection and what would be written to it: the same count under
+    ``value: true`` and under ``value: false`` is two different confirmations,
+    so a token for one must not execute the other. The action is left out here
+    because it is signed as a field of its own, which is what lets a refusal
+    name it.
 
     Ids are deduplicated and sorted, so the same set of contacts digests the
     same however the client ordered them; the filter tree dumps with every
     field, so a tree that leaves ``include_archived`` out digests like one that
     spells the default out.
     """
-    payload: dict[str, Any] = selection.model_dump(mode="json")
-    if payload.get("ids"):
-        payload["ids"] = sorted(set(payload["ids"]))
+    payload: dict[str, Any] = body.model_dump(mode="json", exclude={"action", "token"})
+    ids = payload["selection"].get("ids")
+    if ids:
+        payload["selection"]["ids"] = sorted(set(ids))
     return selection_digest(payload)
 
 

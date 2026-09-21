@@ -66,10 +66,15 @@ def read_only[Endpoint: Callable[..., Any]](endpoint: Endpoint) -> Endpoint:
         @read_only
         def query_contacts(...) -> ContactPage: ...
 
-    A marked handler that writes anyway does not corrupt anything: the services
-    call ``_require_writer`` and raise ``RuntimeError`` rather than wait for a
-    lock they will not get. ``tests/test_web_deps.py`` also fails a marked route
-    whose method is safe already, which would only be noise.
+    The mark is a claim about the handler, not a guard on the session. A marked
+    handler that calls a service writer gets ``RuntimeError`` from that
+    service's ``_require_writer``, which is most of the surface; but a raw
+    ``session.add()`` and flush is not caught anywhere and will commit, on a
+    connection that never took the write lock. So the review question for a new
+    mark is "does every path through this handler only read", and
+    ``tests/test_web_deps.py`` keeps the list of marked routes, so adding one is
+    a visible change. ``tests/test_web_deps.py`` also fails a marked route whose
+    method is safe already, which would only be noise.
     """
     setattr(endpoint, READ_ONLY_ATTR, True)
     return endpoint
