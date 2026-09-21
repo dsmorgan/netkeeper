@@ -38,6 +38,34 @@ describe('toPlainText', () => {
   it('falls back to the raw string when there is nothing but a broken tag', () => {
     expect(toPlainText('<div class="unclosed')).toBe('<div class="unclosed')
   })
+
+  it('says nothing rather than printing an image-only body as markup (issue #92)', () => {
+    // A complete void element parses fine — into an element with no text — so
+    // the truncated-tag fallback used to catch it and print the tag verbatim.
+    // An InMail whose body is one inline image is common enough to matter.
+    expect(toPlainText('<img src=x onerror="alert(1)">')).toBeNull()
+    expect(toPlainText('<p></p>')).toBeNull()
+    expect(toPlainText('<img src=x><br>')).toBeNull()
+  })
+
+  it('still reads the text out of a body that has an image in it too', () => {
+    expect(toPlainText('<img src=x>Lunch on Thursday?')).toBe('Lunch on Thursday?')
+  })
+
+  it('keeps the paragraphs of text a person typed, when asked to', () => {
+    const notes = 'Met at the meetup.\n\nWants an intro to  the ops team.'
+    expect(toPlainText(notes, { keepLineBreaks: true })).toBe(
+      'Met at the meetup.\n\nWants an intro to the ops team.',
+    )
+    // Without the option it is one block, which is what a message body wants.
+    expect(toPlainText(notes)).toBe('Met at the meetup. Wants an intro to the ops team.')
+  })
+
+  it('strips markup out of a note without losing its line breaks', () => {
+    expect(
+      toPlainText('<b>Intro</b> wanted\nfor <i>the ops team</i>', { keepLineBreaks: true }),
+    ).toBe('Intro wanted\nfor the ops team')
+  })
 })
 
 describe('truncate', () => {

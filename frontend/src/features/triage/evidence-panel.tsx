@@ -7,10 +7,13 @@
  * Three fields come back as whatever was stored, HTML and all:
  * `evidence.messages.recent[].summary`, `evidence.timeline[].interaction.summary`,
  * and `contact.notes`. A LinkedIn InMail body is HTML and the archive can cut it
- * mid-tag (issue #75). All three are rendered as text — through `toPlainText`
- * for the message bodies, and as a plain string for the notes, which are never
- * parsed as Markdown here. `dangerouslySetInnerHTML` appears nowhere on this
- * screen and must not be added to it.
+ * mid-tag (issue #75). All three now go through `toPlainText` — the notes with
+ * their line breaks kept, since a person typed them and the paragraphs are
+ * theirs. Notes used to be rendered as a raw string on the grounds that they are
+ * user-authored rather than archive HTML, which is true but left markup pasted
+ * into a note showing as visible text (issue #92). Nothing here is ever parsed
+ * as Markdown, and `dangerouslySetInnerHTML` appears nowhere on this screen and
+ * must not be added to it.
  */
 
 import { Badge } from '@/components/ui/badge'
@@ -40,6 +43,7 @@ function kindLabel(kind: string): string {
 export function EvidencePanel({ card }: { card: TriageCard }) {
   const { contact, evidence } = card
   const { messages } = evidence
+  const notes = toPlainText(contact.notes, { keepLineBreaks: true })
   // A company the contact worked at with nobody else from the address book in
   // it is emitted with `contact_count: 0`. Ten past positions would then draw
   // ten rows that say nothing; only an overlap is evidence.
@@ -110,12 +114,12 @@ export function EvidencePanel({ card }: { card: TriageCard }) {
         )}
       </div>
 
-      {contact.notes !== null && contact.notes.trim() !== '' && (
+      {notes !== null && (
         <>
           <Separator />
           <div>
             <h3 className="font-medium">Notes</h3>
-            <p className="mt-1 whitespace-pre-wrap text-muted-foreground">{contact.notes}</p>
+            <p className="mt-1 whitespace-pre-wrap text-muted-foreground">{notes}</p>
           </div>
         </>
       )}
@@ -126,6 +130,10 @@ export function EvidencePanel({ card }: { card: TriageCard }) {
 function MessageRow({ message }: { message: Interaction }) {
   const body = toPlainText(message.summary)
   const inbound = INBOUND_KINDS.has(message.kind)
+  // A body that is only an inline image reads as nothing here, which is not the
+  // same as a message whose body was never stored. Saying which one it is costs
+  // a line and stops "No body stored" from being a small lie (issue #92).
+  const stored = (message.summary ?? '').trim() !== ''
   return (
     <li className="min-w-0 rounded-md bg-muted/40 px-2 py-1.5">
       <p className="flex flex-wrap items-baseline gap-x-2 text-xs text-muted-foreground">
@@ -134,7 +142,9 @@ function MessageRow({ message }: { message: Interaction }) {
         <span>{formatMinute(message.at)}</span>
       </p>
       {body === null ? (
-        <p className="text-muted-foreground italic">No body stored.</p>
+        <p className="text-muted-foreground italic">
+          {stored ? 'No readable text in this message.' : 'No body stored.'}
+        </p>
       ) : (
         <p className="mt-1 break-words">{truncate(body, 240)}</p>
       )}

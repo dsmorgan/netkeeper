@@ -120,6 +120,30 @@ describe('the triage screen', () => {
     expect(evidence.innerHTML).not.toContain('onerror')
   })
 
+  it('does not print an image-only message body as markup (issue #92)', async () => {
+    const backend = createFakeBackend({ contacts: 2, withMessages: 2 })
+    backend.byId(1).messageBody = '<img src=x onerror="alert(1)">'
+    renderTriage({ backend })
+
+    const evidence = await screen.findByRole('region', { name: 'Evidence' })
+    await waitFor(() => expect(evidence).toHaveTextContent(/No readable text in this message/))
+    expect(evidence).not.toHaveTextContent('onerror')
+    expect(evidence.innerHTML).not.toContain('onerror')
+  })
+
+  it('renders a note as text, markup and all (issue #92)', async () => {
+    const backend = createFakeBackend({ contacts: 2 })
+    backend.byId(1).notes = 'Intro to <img src=x onerror="alert(1)"> the ops team.\nCall Friday.'
+    renderTriage({ backend })
+
+    const evidence = await screen.findByRole('region', { name: 'Evidence' })
+    await waitFor(() => expect(evidence).toHaveTextContent(/Intro to the ops team/))
+    expect(evidence).not.toHaveTextContent('onerror')
+    expect(evidence.innerHTML).not.toContain('onerror')
+    // The line break a person typed survives the strip.
+    expect(evidence.textContent).toContain('the ops team.\nCall Friday.')
+  })
+
   it('leaves out a company nobody else in the address book is at', async () => {
     renderTriage({ contacts: 2, withMessages: 1 })
 

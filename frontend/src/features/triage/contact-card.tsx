@@ -1,6 +1,12 @@
 /**
  * The contact under triage: who they are, in the order you decide by.
  *
+ * The first line is always the position — where this contact sits in the run
+ * and how much of the queue is left — because the CP2 walkthrough could not
+ * tell (issue #114). The second, when it is there, says the card is one you
+ * stepped *back* to and what decision it already carries, so "back" can never
+ * be read as "undone": going back writes nothing, and the line says so.
+ *
  * The card is a polite, atomic live region. Moving to the next contact replaces
  * its contents without moving focus — focus stays wherever the person put it, so
  * the keyboard map keeps working — and a screen reader reads the new person out
@@ -17,6 +23,7 @@ import { ExternalLink } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 
 import { formatDay } from './format'
+import { passedStateLabel, type PassedCard } from './use-triage-queue'
 import type { TriageCard as Card } from './api'
 
 const MET_LABELS: Record<string, string> = {
@@ -26,7 +33,16 @@ const MET_LABELS: Record<string, string> = {
   skip: 'Skipped',
 }
 
-export function ContactCard({ card, position }: { card: Card; position: string }) {
+export function ContactCard({
+  card,
+  position,
+  review,
+}: {
+  card: Card
+  position: string
+  /** The trail entry this card came from, when `←` walked back to it. */
+  review: PassedCard | null
+}) {
   const { contact } = card
   const name = `${contact.preferred_name} ${contact.last_name}`.trim()
   const job = [contact.current_title, contact.current_company].filter(Boolean).join(' at ')
@@ -39,7 +55,20 @@ export function ContactCard({ card, position }: { card: Card; position: string }
       data-testid="triage-card"
       className="flex min-w-0 flex-col gap-3 rounded-xl bg-card p-4 ring-1 ring-foreground/10"
     >
-      <p className="text-xs text-muted-foreground">{position}</p>
+      <p data-testid="card-position" className="text-xs text-muted-foreground">
+        {position}
+      </p>
+
+      {review !== null && (
+        <p
+          data-testid="card-review"
+          className="rounded-md bg-muted px-2 py-1.5 text-xs ring-1 ring-foreground/10"
+        >
+          <span className="font-medium">Looking back.</span> {passedStateLabel(review)}. Coming here
+          wrote nothing — deciding again replaces it, and{' '}
+          <kbd className="rounded border px-1 font-mono">u</kbd> is the one that takes a write back.
+        </p>
+      )}
       <div className="min-w-0">
         <h2 className="font-heading text-xl leading-tight font-medium break-words">{name}</h2>
         {contact.preferred_name !== contact.first_name && (
