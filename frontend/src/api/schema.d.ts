@@ -684,13 +684,25 @@ export interface paths {
          * Import Archive
          * @description Import a LinkedIn export zip: connections, messages, and invitations (P1-20).
          *
-         *     Unpacked in memory — nothing is written to disk — and run through the same
-         *     :func:`netkeeper.crm.archive.import_archive` that ``netkeeper import archive``
-         *     uses on a path, so the two report the same counts for the same archive.
-         *     Re-uploading the same export adds nothing (see that function's idempotence).
-         *     A zip that is not a LinkedIn export, or one that fails a guard (its total
-         *     size, member count, compression ratio, or a member's path), answers 422
-         *     naming what was wrong; nothing is unpacked before those checks pass.
+         *     Read straight from the upload FastAPI has already received — ``file.file``
+         *     is the ``SpooledTemporaryFile`` the multipart parser wrote it to, and
+         *     :func:`netkeeper.linkedin.archive.open_archive` reads any seekable binary
+         *     stream, so nothing here copies it into a second in-memory buffer. That
+         *     parsing happens before this handler ever runs, on every upload regardless
+         *     of size, since neither this app nor its FastAPI defaults put a limit on a
+         *     multipart file part; whether that upload is one this importer can even use
+         *     is what is checked here, not whether it was safe to receive. This is a
+         *     plain (not ``async``) handler, like the rest of this router, so FastAPI
+         *     runs it in a worker thread rather than blocking the event loop on it.
+         *
+         *     Run through the same :func:`netkeeper.crm.archive.import_archive` that
+         *     ``netkeeper import archive`` uses on a path, so the two report the same
+         *     counts for the same archive. Re-uploading the same export adds nothing
+         *     (see that function's idempotence). A zip that is not a LinkedIn export, or
+         *     one that fails a guard (its total size, member count, compression ratio,
+         *     a member's path, or being password-protected), answers 422 naming what
+         *     was wrong — including one merely damaged in transit, never a 500 — and
+         *     nothing is decompressed before those checks pass.
          */
         post: operations["import_archive"];
         delete?: never;

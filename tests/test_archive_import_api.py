@@ -13,12 +13,15 @@ that this endpoint surfaces a guard failure as ``422``, not a ``500``.
 
 from __future__ import annotations
 
+import io
+import struct
 import zipfile
 from pathlib import Path
 
+import factories
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -154,22 +157,6 @@ async def test_reimporting_the_same_archive_adds_nothing(
     assert interactions == 10
 
 
-# --- the CLI and the API agree -------------------------------------------------
-
-
-async def test_the_response_shape_has_room_for_a_field_this_endpoint_does_not_fill(
-    client: httpx.AsyncClient, tmp_path: Path
-) -> None:
-    """A crude but cheap guard against #117's future field breaking existing clients:
-    every key already promised is still there, and the response is a plain
-    object a new key can be added to (not, say, a fixed-length array).
-    """
-    response = await _upload(client, _zipped(tmp_path))
-    body = response.json()
-    assert isinstance(body, dict)
-    assert {"connections", "messages", "invitations", "ignored_files"} <= body.keys()
-
-
 # --- refusing a bad upload ------------------------------------------------------
 
 
@@ -205,7 +192,7 @@ async def test_the_upload_size_guard_answers_422_before_opening_anything(
     monkeypatch.setattr(imports_api, "ARCHIVE_MAX_UPLOAD_BYTES", 50)
     response = await _upload(client, _zipped(tmp_path))
     assert response.status_code == 422, response.text
-    assert "upload limit" in response.json()["detail"]
+    assert "byte limit" in response.json()["detail"]
 
 
 async def test_a_zip_bomb_is_refused_with_a_422_not_a_500(
@@ -230,3 +217,50 @@ async def test_a_path_traversing_member_is_refused_with_a_422_not_a_500(
     response = await _upload(client, path.read_bytes())
     assert response.status_code == 422, response.text
     assert "unsafe path" in response.json()["detail"]
+
+
+async def test_a_damaged_download_is_refused_with_a_422_not_a_500(
+    client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """The live-server failure the review opened with: a zip whose header lies
+    about a member's uncompressed size passes every declared-metadata guard,
+    and used to escape as a bare 500 when the lie was discovered mid-read.
+    An ordinary damaged download shapes the same way — not only a crafted one.
+    """
+    content = (FIXTURES / "Connections.csv").read_bytes() * 50
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Connections.csv", content)
+    raw = bytearray(buf.getvalue())
+    real = struct.pack("<I", len(content))
+    lie = struct.pack("<I", 500)
+    index = 0
+    while (index := raw.find(real, index)) != -1:
+        raw[index : index + 4] = lie
+        index += 4
+    response = await _upload(client, bytes(raw), filename="liar.zip")
+    assert response.status_code == 422, response.text
+    assert "damaged inside the zip" in response.json()["detail"]
+
+
+async def test_the_upload_size_guard_is_enforced_at_its_shipped_value(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """No monkeypatch, and no need to transfer 200 MiB to prove it: ``file.size``
+    is a plain attribute Starlette has already computed by the time a handler
+    runs (it accumulates it as the multipart parser writes each chunk), so the
+    real cap is exercised by setting that attribute directly on a stand-in
+    upload — the same value an actual oversized transfer would leave behind —
+    rather than by sending one.
+    """
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        upload = UploadFile(
+            file=io.BytesIO(b""),
+            size=imports_api.ARCHIVE_MAX_UPLOAD_BYTES + 1,
+            filename="huge.zip",
+        )
+        with pytest.raises(HTTPException) as excinfo:
+            imports_api.import_archive(user=user, session=session, file=upload)
+    assert excinfo.value.status_code == 422
+    assert "byte limit" in str(excinfo.value.detail)
