@@ -1065,6 +1065,7 @@ describe('the archive shape: a zip, or a lone message/invitation file (P1-21)', 
     ['encrypted', 'This zip is password-protected'],
     ['malformed_table', 'netkeeper found the table it wanted but could not read it'],
     ['too_large', 'This file is bigger or stranger than a real LinkedIn export'],
+    ['too_many_members', 'This file is bigger or stranger than a real LinkedIn export'],
     ['unsafe_member_path', 'This zip has a file netkeeper will not open'],
     ['not_a_zip', "This doesn't look like a LinkedIn export"],
   ])('answers %s with its own guidance', async (code, headline) => {
