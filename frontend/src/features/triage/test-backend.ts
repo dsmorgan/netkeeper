@@ -251,7 +251,8 @@ interface FakeBatch {
   title: string
   met: ContactMet
   describe: (count: number) => string
-  covers: (contact: FakeContact) => boolean
+  /** ``others`` is every live contact, as the service's clauses read the table. */
+  covers: (contact: FakeContact, others: readonly FakeContact[]) => boolean
 }
 
 const BATCHES: readonly FakeBatch[] = [
@@ -269,8 +270,24 @@ const BATCHES: readonly FakeBatch[] = [
     met: 'not_met',
     describe: (count) =>
       `There is nothing on file for ${count} untriaged ${count === 1 ? 'person' : 'people'}: no messages, no invitation, no note, no tag of your own, and nobody else at their company — their card would be empty.`,
-    covers: (contact) =>
-      contact.messages === 0 && contact.notes === null && contact.tags.length === 0,
+    // `_card_carries_evidence`: the batch that argues from absence withholds
+    // anyone whose card has something on it, and a company somebody else in
+    // the address book is at counts. Leaving that clause out made this fake
+    // offer the batch for a fixture the service withholds every contact of —
+    // three companies over six contacts means everybody shares one.
+    covers: (contact, others) =>
+      contact.messages === 0 &&
+      contact.notes === null &&
+      contact.tags.length === 0 &&
+      !contact.do_not_contact &&
+      contact.preferred_name === contact.first_name &&
+      !others.some(
+        (other) =>
+          other.id !== contact.id &&
+          other.current_company !== null &&
+          other.current_company.trim().toLowerCase() ===
+            (contact.current_company ?? '').trim().toLowerCase(),
+      ),
   },
 ]
 
@@ -487,7 +504,10 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
 
   /** The contacts one batch covers, against the queue as it stands. */
   function covered(batch: FakeBatch, states: ContactMet[]): FakeContact[] {
-    return queue(states).filter(batch.covers)
+    const live = contacts.filter(
+      (contact) => contact.archivedAt === null && contact.mergedIntoId === null,
+    )
+    return queue(states).filter((contact) => batch.covers(contact, live))
   }
 
   async function handler(request: Request): Promise<Response> {
