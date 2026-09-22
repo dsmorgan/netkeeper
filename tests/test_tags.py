@@ -67,7 +67,7 @@ from netkeeper.models import (
     UserKind,
 )
 from netkeeper.scoping import scoped, unscoped
-from netkeeper.services.settings_kv import get_setting, set_setting
+from netkeeper.services.settings_kv import delete_setting, get_setting, set_setting
 from netkeeper.services.users import ensure_local_user
 
 NOW = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
@@ -688,6 +688,13 @@ def test_headline_and_company_rules_read_their_own_fields(writer: Session, user:
         ("Retired", {"retired"}),
         ("Retired Inc.", {"retired"}),
         ("Retired!", {"retired"}),
+        # Standing on its own, wherever in the value it stands.
+        ("Google (Retired)", {"retired"}),
+        ("Self-employed (Retired)", {"retired"}),
+        ("N/A - Retired", {"retired"}),
+        ("Currently Retired", {"retired"}),
+        ("Formerly Acme Corp, now Retired", {"retired"}),
+        ("Semi retired", {"retired"}),
         # Mid-name, the same word says who an organization serves. Everybody on
         # these payrolls is working.
         ("American Association of Retired Persons", set()),
@@ -994,6 +1001,27 @@ def test_an_unreadable_seeded_record_leaves_the_defaults_alone(
     assert {(rule.tag_id, rule.field, rule.pattern) for rule in list_rules(writer, user)} == before
     assert len(list_rules(writer, user)) == len(before), "no rule was added a second time"
     assert find_tag(writer, user, "vp") is None, "a default the user deleted came back"
+
+
+def test_seeding_a_second_time_never_adds_the_same_rule_twice(writer: Session, user: User) -> None:
+    """The record is a record, not the only thing standing between here and duplicates.
+
+    Lose it entirely -- a hand-edited database, a restore from before it was
+    written -- and every default is "never offered" again. A tag is reused by
+    name, so nothing makes a second "vp"; a rule has no such key, so without a
+    guard of its own every run would add another copy of all of them.
+    """
+    ensure_default_rules(writer, user)
+    before = {(rule.tag_id, rule.field, rule.pattern) for rule in list_rules(writer, user)}
+    delete_setting(writer, user, DEFAULTS_SEEDED_KEY)
+
+    assert ensure_default_rules(writer, user) == []
+
+    rules = list_rules(writer, user)
+    assert len(rules) == len(before), "a rule was seeded on top of the one already there"
+    assert {(rule.tag_id, rule.field, rule.pattern) for rule in rules} == before
+    # And the record is written again, so the next run reads a shape it knows.
+    assert get_setting(writer, user, DEFAULTS_SEEDED_KEY) == sorted(DEFAULT_TAG_NAMES)
 
 
 def test_ensure_default_rules_reuses_a_tag_the_user_already_has(

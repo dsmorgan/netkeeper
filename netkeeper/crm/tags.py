@@ -198,12 +198,21 @@ DEFAULTS: Final[tuple[DefaultRule, ...]] = (
         # name is the statement rather than the industry somebody works in.
         fields=(RuleField.TITLE, RuleField.HEADLINE, RuleField.COMPANY),
         patterns={
-            # Anchored, because in the middle of a company name the same word
-            # describes who an organization serves rather than the person:
-            # "American Association of Retired Persons" employs people who are
-            # working. At the front it is somebody answering "where do you
-            # work?" with "Retired" -- "Retired", "Retired Inc.", "Retired!".
-            RuleField.COMPANY: r"^\W*(retired|retiree|retiring)\b",
+            # A company name is somebody else's words, so where the word sits
+            # decides what it means. Inside a name it describes who an
+            # organization serves -- "American Association of Retired Persons"
+            # employs people who are working -- while standing on its own it is
+            # somebody answering "where do you work?": at the start
+            # ("Retired", "Retired Inc."), in brackets ("Google (Retired)"),
+            # after a separator ("N/A - Retired"), or after a word that says
+            # it is a state rather than a place ("Currently Retired").
+            # ``\u2013`` and ``\u2014`` are the en and em dashes, spelled as
+            # escapes because a linter cannot tell a deliberate one in a
+            # character class from a hyphen somebody pasted by accident.
+            RuleField.COMPANY: (
+                r"(?:^|[(\[,;/|\u2013\u2014-]|\b(?:currently|now|semi)\s)\s*"
+                r"(?:retired|retiree|retiring)\b"
+            ),
         },
     ),
 )
