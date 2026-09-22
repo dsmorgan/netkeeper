@@ -33,6 +33,7 @@ from netkeeper.models import (
     RuleField,
     Tag,
     TagMetSignal,
+    TagSource,
     TriageDecision,
     TriageDecisionKind,
     User,
@@ -733,8 +734,13 @@ def test_a_tag_you_gave_a_meaning_keeps_its_people_out_of_the_no_evidence_batch(
     recruiters = _signalled_tag(writer, user, "recruiter", TagMetSignal.NOT_MET)
     friends = _signalled_tag(writer, user, "friend", TagMetSignal.MET)
     recruiter, friend, stranger = _contacts(writer, user, 3)
-    tag_contact(writer, user, recruiter.id, recruiters.id)
-    tag_contact(writer, user, friend.id, friends.id)
+    # Both tags are a rule's, not a hand's. A tag the person placed themselves
+    # is evidence in its own right and would hold these two back through
+    # ``_card_carries_evidence`` whatever their meaning, which would leave the
+    # meaning itself untested: dropping the meaningful-tag clause stayed green
+    # when this used the default manual source.
+    tag_contact(writer, user, recruiter.id, recruiters.id, source=TagSource.RULE)
+    tag_contact(writer, user, friend.id, friends.id, source=TagSource.RULE)
     covered, total = module.suggestion_contacts(writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE)
     assert ([contact.id for contact in covered], total) == ([stranger.id], 1)
     assert _offers(writer, user)[module.SUGGESTION_NOT_MET_NO_EVIDENCE].count == 1
@@ -748,7 +754,9 @@ def test_the_no_evidence_preview_counts_with_every_clause(writer: Session, user:
     """
     tag = _signalled_tag(writer, user, "recruiter", TagMetSignal.NOT_MET)
     meaningful, messaged, noted, stranger = _contacts(writer, user, 4)
-    tag_contact(writer, user, meaningful.id, tag.id)
+    # A rule's tag, so this contact is held out by the meaning alone and each
+    # contact here is still held out by a different clause.
+    tag_contact(writer, user, meaningful.id, tag.id, source=TagSource.RULE)
     _message(writer, user, messaged)
     noted.notes = "met at the pottery fair"
     writer.flush()
