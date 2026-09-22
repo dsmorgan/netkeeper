@@ -931,7 +931,7 @@ def test_deleting_a_contact_or_its_user_takes_the_triage_log_with_it(
         assert list(remaining) == [3]
 
 
-# --- the user's own positions (0008) -----------------------------------------
+# --- the user's own positions (0009) -----------------------------------------
 
 
 def _insert_user_position(
@@ -978,7 +978,7 @@ def test_deleting_a_user_cascades_to_its_positions(migration_engine: Engine) -> 
     assert remaining == 2
 
 
-# --- plain-text message summaries (0009) --------------------------------------
+# --- plain-text message summaries (0010) --------------------------------------
 
 
 def _insert_interaction(
@@ -1008,12 +1008,12 @@ def _insert_interaction(
 
 
 def test_the_backfill_cleans_only_archive_sourced_summaries(migration_engine: Engine) -> None:
-    """B2 (pre-merge review of #127): migration 0009 had no test at all -- dropping its
+    """B2 (pre-merge review of #127): migration 0010 had no test at all -- dropping its
     ``source = 'archive'`` restriction, or gutting ``upgrade()`` entirely, left the whole
     suite green. This pins both: the archive row is cleaned, the other three sources are
     byte-identical, and a NULL summary is left alone rather than turned into a string.
     """
-    migrations.upgrade(migration_engine, "0008")
+    migrations.upgrade(migration_engine, "0009")
     html = "<p>Hello &amp; welcome</p>"
     with migration_engine.begin() as connection:
         _seed_users(connection, 1)
@@ -1029,7 +1029,7 @@ def test_the_backfill_cleans_only_archive_sourced_summaries(migration_engine: En
         _insert_interaction(
             connection, id=5, user_id=1, contact_id=1, summary=None, source="archive"
         )
-    migrations.upgrade(migration_engine, "0009")
+    migrations.upgrade(migration_engine, "0010")
     with migration_engine.begin() as connection:
         found = connection.execute(text("SELECT id, summary FROM interactions ORDER BY id")).all()
     rows: dict[int, str | None] = {row[0]: row[1] for row in found}
@@ -1045,7 +1045,7 @@ def test_the_backfill_never_leaves_a_known_tag_stored_even_via_entities(
 ) -> None:
     """The same entity-decode-before-strip ordering bug that #75's importer fix addresses
     applies to the backfill too, since it duplicates the same logic."""
-    migrations.upgrade(migration_engine, "0008")
+    migrations.upgrade(migration_engine, "0009")
     with migration_engine.begin() as connection:
         _seed_users(connection, 1)
         _insert_contact(connection, id=1, user_id=1)
@@ -1057,7 +1057,7 @@ def test_the_backfill_never_leaves_a_known_tag_stored_even_via_entities(
             summary="She wrote &lt;p&gt;hello&lt;/p&gt; in the box",
             source="archive",
         )
-    migrations.upgrade(migration_engine, "0009")
+    migrations.upgrade(migration_engine, "0010")
     with migration_engine.begin() as connection:
         summary = connection.execute(
             text("SELECT summary FROM interactions WHERE id = 1")

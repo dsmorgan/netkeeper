@@ -254,13 +254,19 @@ def test_a_manual_edit_survives_a_reimport_even_when_the_export_is_newer(
     writer.flush()
     edited_at = row.observed_at
 
-    # A re-import with a *newer* observation than the edit: must still not touch it.
+    # A re-import with a *newer* observation than the edit: must still not touch
+    # it. Timed from the edit's own stamp rather than from this module's fixed
+    # dates, because the edit is stamped with the real clock: once the wall
+    # clock passed those constants the re-import became the *older* of the two
+    # and the chronological guard alone carried the test, whether or not the
+    # sticky rule was there at all.
+    assert edited_at is not None
     result = import_positions(
         writer,
         user,
         [_row("Acme", "Lead", date(2020, 1, 1), date(2021, 1, 1))],
         source=ContactSource.ARCHIVE,
-        observed_at=LATER,
+        observed_at=edited_at + timedelta(days=1),
     )
     assert (result.updated, result.unchanged) == (0, 1)
     assert row.ended_on == date(2024, 1, 1)

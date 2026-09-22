@@ -123,8 +123,16 @@ _BLOCK_TAGS: Final[frozenset[str]] = frozenset(
 # off this list, because a single letter right after "<" is exactly the shape
 # a person's own plain-text angle brackets are most likely to collide with
 # ("<b and c>", "<i>" as a roman numeral aside). "img" has no useful text of
-# its own to keep.
-_INLINE_TAGS: Final[frozenset[str]] = frozenset({"a", "strong", "em", "u", "span", "img"})
+# its own to keep. "script" and "style" are here for a different reason: they
+# are the two tags nobody types as prose and the two whose stored source text
+# would most alarm anyone who read the column, so their text is kept and the
+# tag itself goes. Folded, not deleted with their contents: an unclosed
+# "<script" puts HTMLParser into CDATA mode and everything after it is the
+# element's content, so deleting content would lose the rest of the message --
+# the exact failure this conversion exists to avoid.
+_INLINE_TAGS: Final[frozenset[str]] = frozenset(
+    {"a", "strong", "em", "u", "span", "img", "script", "style"}
+)
 _KNOWN_TAGS: Final[frozenset[str]] = _BLOCK_TAGS | _INLINE_TAGS
 
 

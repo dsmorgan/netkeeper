@@ -453,6 +453,26 @@ def test_entity_encoded_markup_is_still_stripped_not_stored_literally(
     assert "<" not in summary and ">" not in summary
 
 
+def test_a_script_element_is_folded_away_and_keeps_its_text(
+    writer: Session, user: User, tmp_path: Path
+) -> None:
+    """Verification of #127 found these two stored as literal markup.
+
+    ``script`` and ``style`` are the two tags nobody types as prose and the two
+    whose source text would most alarm whoever read the column, so they are
+    folded like any other known tag. Their text is kept rather than deleted
+    with them: an unclosed ``<script`` puts the parser into CDATA mode, so
+    deleting content would take the rest of the message with it.
+    """
+    assert _imported_summary(writer, user, tmp_path, "<script>alert(1)</script>Real body") == (
+        "alert(1)Real body"
+    )
+    # The rest against the converter itself: one import per directory.
+    assert _html_to_text("&lt;script&gt;alert(1)&lt;/script&gt;") == "alert(1)"
+    assert _html_to_text("<script>alert(1)") == "alert(1)"
+    assert _html_to_text("<style>p { color: red }</style>After") == "p { color: red }After"
+
+
 def test_an_image_only_message_has_no_summary(writer: Session, user: User, tmp_path: Path) -> None:
     body = "<img src='https://example.test/x.png'>"
     assert _imported_summary(writer, user, tmp_path, body) is None
@@ -461,7 +481,7 @@ def test_an_image_only_message_has_no_summary(writer: Session, user: User, tmp_p
 def test_html_to_text_is_idempotent(writer: Session, user: User) -> None:
     """B3: applying the function to its own output must be a no-op, on the realistic real
     markup shape and on the entity-encoded and plain-angle-bracket cases above -- otherwise
-    the migration backfill (0009), which cannot know whether a row already went through
+    the migration backfill (0010), which cannot know whether a row already went through
     this, could keep changing a summary every time it is re-applied."""
     samples = [
         "<p class='spinmail-quill-editor'>Hello &amp; welcome</p>",
