@@ -30,6 +30,7 @@ function stats(overrides: Partial<ContactStats> = {}): ContactStats {
     with_email: 0,
     with_phone: 0,
     tagged: 0,
+    tagged_by_rule: 0,
     ...overrides,
   }
 }
@@ -121,7 +122,7 @@ describe('buildSetupSteps: the empty state', () => {
       },
       {
         key: 'review-tags',
-        title: 'Review your tags',
+        title: 'Review what was tagged automatically',
         detail: 'Nothing tagged yet',
         state: 'not_started',
         to: '/lists',
@@ -198,8 +199,8 @@ describe('buildSetupSteps: import', () => {
 })
 
 describe('buildSetupSteps: review tags', () => {
-  it('is a real "not started" with contacts and nothing tagged — a concrete, knowable next step', () => {
-    const steps = buildSetupSteps({ stats: stats({ total: 10, tagged: 0 }) })
+  it('is a real "not started" with contacts and nothing rule-tagged — a concrete, knowable next step', () => {
+    const steps = buildSetupSteps({ stats: stats({ total: 10, tagged_by_rule: 0 }) })
     expect(byKey(steps, 'review-tags')).toMatchObject({
       state: 'not_started',
       detail: 'Nothing tagged yet',
@@ -207,13 +208,29 @@ describe('buildSetupSteps: review tags', () => {
     })
   })
 
-  it('has no way to know "automatically" or "reviewed", so once tagged it shows no badge and no such claim', () => {
-    const steps = buildSetupSteps({ stats: stats({ total: 10, tagged: 4 }) })
+  it('is not fooled by a hand-applied tag: manual tagging alone is still "not started"', () => {
+    // `tagged` (any source) is 5 — somebody tagged five contacts by hand — but
+    // `tagged_by_rule` (TagSource.RULE only) is 0: no rule has ever run. This is
+    // the exact case #129's review caught: a manual tag must not read as
+    // automatic progress.
+    const steps = buildSetupSteps({ stats: stats({ total: 10, tagged: 5, tagged_by_rule: 0 }) })
+    expect(byKey(steps, 'review-tags')).toMatchObject({
+      state: 'not_started',
+      detail: 'Nothing tagged yet',
+      cta: 'Run auto-tag rules',
+    })
+  })
+
+  it('is real, genuine "done" once a rule has actually tagged someone — automatically is true again', () => {
+    // `tagged` is 6 (one hand-applied on top of five rule-tagged) but only the
+    // rule-sourced count drives this step, so the detail is exactly the
+    // rule-tagged count, not the broader "any tag" one.
+    const steps = buildSetupSteps({ stats: stats({ total: 10, tagged: 6, tagged_by_rule: 5 }) })
     const step = byKey(steps, 'review-tags')
-    expect(step.state).toBeNull()
-    expect(step.detail).toBe('4 contacts tagged')
-    expect(step.detail).not.toMatch(/automatically/)
-    expect(step.title).not.toMatch(/automatically/)
+    expect(step.state).toBe('done')
+    expect(step.detail).toBe('5 contacts tagged automatically')
+    expect(step.cta).toBe('Review tags')
+    expect(step.title).toBe('Review what was tagged automatically')
   })
 })
 

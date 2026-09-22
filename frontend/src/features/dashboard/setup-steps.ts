@@ -22,16 +22,19 @@
  *   lists still returns one. Counting raw length would read "Done" the
  *   moment a server has ever started, for a person who has built nothing, so
  *   this step never claims `done` or `not_started` — only the honest count.
+ *   There is no fix within this endpoint's response shape; tracked as its own
+ *   backend issue.
  *
- * "Review your tags" is not one of those two: `stats.tagged` is a real,
- * checkable count (a contact carrying any `ContactTag`), so `tagged === 0`
- * is a real `not_started`. What it is *not* is a count of automatic tags —
- * `ContactTag.source` is `manual | rule` and the stats endpoint does not
- * split on it, so a hand-applied tag counts the same as a rule's. Until the
- * stats endpoint adds a rule-sourced count, this step's title and detail
- * never say "automatically", and its `done`-shaped state (`tagged > 0`) is
- * `null` too — a real count, but not a claim about how it got there or
- * whether anyone reviewed it.
+ * "Review what was tagged automatically" is not one of those two:
+ * `stats.tagged_by_rule` counts a contact an auto-tag rule tagged
+ * (`TagSource.RULE` only, added alongside the pre-existing `tagged`, which
+ * counts any source and this step no longer reads), so `tagged_by_rule === 0`
+ * is a real `not_started` and `tagged_by_rule > 0` is real, genuine progress
+ * — both directions are as knowable as triage's. It reads the live count
+ * rather than assuming import always leaves it at zero, so the moment a
+ * future lane makes auto-tag rules run during import, a fresh import that
+ * already has rule-tagged contacts reads `done` immediately rather than
+ * telling somebody to run rules that already ran.
  */
 import type { ContactStats, ImportRunPage } from './api'
 import type { ListOut } from '@/features/crm/types'
@@ -106,19 +109,17 @@ export function buildSetupSteps({
 
   // --- review tags ------------------------------------------------------------
   //
-  // `tagged` is real; "automatically" is not (see module doc). `tagged === 0`
-  // is the one claim about this count that is both true and actionable — it
-  // is also true whether or not a later lane makes auto-tag rules run on
-  // import, since it reads the live count rather than assuming import always
-  // leaves it at zero.
+  // `tagged_by_rule` is real in both directions (see module doc): zero means
+  // not started, and it is where the "run the rules" action comes from; a
+  // real count above zero is done, not a guess.
 
-  const tagged = stats?.tagged ?? 0
-  const reviewNotStarted = !hasContacts || tagged === 0
-  const reviewState: StepState | null = reviewNotStarted ? 'not_started' : null
-  const reviewDetail = reviewNotStarted
-    ? 'Nothing tagged yet'
-    : `${plural(tagged, 'contact')} tagged`
-  const reviewCta = hasContacts && tagged === 0 ? 'Run auto-tag rules' : 'Review tags'
+  const taggedByRule = stats?.tagged_by_rule ?? 0
+  const reviewDone = hasContacts && taggedByRule > 0
+  const reviewState: StepState = reviewDone ? 'done' : 'not_started'
+  const reviewDetail = reviewDone
+    ? `${plural(taggedByRule, 'contact')} tagged automatically`
+    : 'Nothing tagged yet'
+  const reviewCta = hasContacts && taggedByRule === 0 ? 'Run auto-tag rules' : 'Review tags'
 
   // --- triage -----------------------------------------------------------------
 
@@ -163,7 +164,7 @@ export function buildSetupSteps({
     },
     {
       key: 'review-tags',
-      title: 'Review your tags',
+      title: 'Review what was tagged automatically',
       detail: reviewDetail,
       state: reviewState,
       to: '/lists',
