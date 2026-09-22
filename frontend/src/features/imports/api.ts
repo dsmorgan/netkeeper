@@ -3,6 +3,7 @@ import { queryOptions } from '@tanstack/react-query'
 import { api } from '@/api/client'
 
 import type {
+  ArchiveImportResult,
   ColumnMapping,
   Decision,
   ImportRun,
@@ -210,6 +211,30 @@ export async function rollbackRun(runId: number): Promise<RollbackResult> {
     params: { path: { run_id: runId } },
   })
   if (data === undefined) throw apiError(error, response, `POST /api/v1/imports/${runId}/rollback`)
+  return data
+}
+
+/**
+ * Upload the LinkedIn export zip, or one of its CSVs on its own, straight through.
+ *
+ * `POST /imports/archive` (P1-20) is the one multipart route in the API: no
+ * mapping, preview, or candidate step, because that pipeline has none. It takes
+ * the file as `multipart/form-data` rather than the JSON-with-text-content body
+ * the rest of this module uses, so it is sent as `FormData` rather than through
+ * `api.POST`'s usual JSON body. openapi-typescript renders a multipart field as
+ * a plain `string` in the generated types (there is no narrower type for
+ * "binary upload"), and openapi-fetch's default body serializer already passes
+ * a `FormData` instance through unchanged and lets the browser set the
+ * multipart boundary — so the cast below only papers over the generated type,
+ * it does not change what is actually sent.
+ */
+export async function importArchive(file: File): Promise<ArchiveImportResult> {
+  const form = new FormData()
+  form.append('file', file, file.name)
+  const { data, error, response } = await api.POST('/api/v1/imports/archive', {
+    body: form as unknown as { file: string },
+  })
+  if (data === undefined) throw apiError(error, response, 'POST /api/v1/imports/archive')
   return data
 }
 

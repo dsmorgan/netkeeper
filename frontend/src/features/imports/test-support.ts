@@ -4,9 +4,16 @@
  * Only the test files import this. Everyone in it is invented: `.example`
  * addresses and reserved `555-01xx` numbers, never a real person (CLAUDE.md).
  */
-import { jsonResponse } from '@/test/fetch'
+import { jsonResponse, registerFileContent } from '@/test/fetch'
 
-import type { ImportRow, ImportRun, Inspection, PresetList, PreviewRow } from './types'
+import type {
+  ArchiveImportResult,
+  ImportRow,
+  ImportRun,
+  Inspection,
+  PresetList,
+  PreviewRow,
+} from './types'
 
 export const HEADERS = [
   'First Name',
@@ -319,17 +326,26 @@ function queryComplaint(call: Call): string | null {
  * Routes `METHOD /path` to a handler, answers `/health` and `/me` for the app
  * shell, checks the query against what the route declares, and records every
  * call so a test can assert on what was sent.
+ *
+ * `POST /imports/archive` (P1-20/P1-21) is the one route that sends
+ * `multipart/form-data` rather than a JSON body — `call.body` comes back as
+ * the parsed `FormData` for it, so `(call.body as FormData).get('file')` reads
+ * the uploaded file, the same way a fake for it reads what was actually sent.
  */
 export function backend(handlers: Record<string, Handler>, calls: Call[] = []) {
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url)
-    const raw = request.method === 'GET' ? '' : await request.text()
-    const call: Call = {
-      method: request.method,
-      path: url.pathname,
-      query: url.searchParams,
-      body: raw === '' ? undefined : JSON.parse(raw),
+    let body: unknown
+    if (request.method !== 'GET') {
+      const contentType = request.headers.get('content-type') ?? ''
+      if (contentType.startsWith('multipart/form-data')) {
+        body = await request.formData()
+      } else {
+        const raw = await request.text()
+        body = raw === '' ? undefined : JSON.parse(raw)
+      }
     }
+    const call: Call = { method: request.method, path: url.pathname, query: url.searchParams, body }
     calls.push(call)
     const complaint = queryComplaint(call)
     if (complaint !== null) {
@@ -355,7 +371,66 @@ export function backend(handlers: Record<string, Handler>, calls: Call[] = []) {
 
 /** A CSV as the browser would hand it to the wizard. */
 export function csvFile(text = CSV_TEXT, name = 'connections.csv'): File {
-  return new File([text], name, { type: 'text/csv' })
+  return registerFileContent(new File([text], name, { type: 'text/csv' }), text)
+}
+
+/**
+ * A file that looks like the zip LinkedIn hands out, as far as the wizard can
+ * tell from it (P1-21).
+ *
+ * Its bytes are never real zip bytes — the wizard decides this is the archive
+ * shape from the file's name alone (`archiveKindOf`) and never opens it
+ * client-side, so there is nothing here for a real zip's structure to test;
+ * that belongs to the backend's own fixtures and PR124's tests, not these.
+ * `registerFileContent` (see `@/test/fetch`) is what lets a test's fake
+ * `POST /api/v1/imports/archive` read this content back out of the upload.
+ */
+export function zipFile(
+  name = 'export.zip',
+  content = 'not a real zip; the frontend never reads it',
+): File {
+  return registerFileContent(new File([content], name, { type: 'application/zip' }), content)
+}
+
+/** What `POST /imports/archive` answers for a successful archive import (P1-20). Invented. */
+export const ARCHIVE_RESULT: ArchiveImportResult = {
+  filename: 'export.zip',
+  observed_at: '2026-09-20T10:00:00Z',
+  owner_public_id: 'petronella-quill',
+  owner_by: 'traffic',
+  connections: {
+    rows: 9,
+    created: 7,
+    updated: 1,
+    needs_review: 1,
+    skipped: 0,
+    with_email: 2,
+    undated: 1,
+  },
+  messages: {
+    rows: 13,
+    conversations: 7,
+    attributed: 4,
+    no_counterpart: 1,
+    group_threads: 1,
+    unknown_contact: 1,
+    no_owner: 0,
+    added: 8,
+    already_present: 0,
+    undated: 1,
+    outbound: 3,
+    inbound: 5,
+  },
+  invitations: {
+    rows: 6,
+    added: 2,
+    already_present: 0,
+    unknown_contact: 1,
+    no_counterpart: 1,
+    undated: 1,
+    undirected: 1,
+  },
+  ignored_files: [],
 }
 
 /**

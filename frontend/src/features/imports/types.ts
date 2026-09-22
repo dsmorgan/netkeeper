@@ -40,3 +40,9 @@ export type Decision = NonNullable<CommitBody['decisions']>[number]
 export type RollbackResult = JsonOf<
   paths['/api/v1/imports/{run_id}/rollback']['post']['responses'][200]
 >
+
+/** What importing the archive zip, or one of its CSVs on its own, did (spec 10.5, P1-20). */
+export type ArchiveImportResult = JsonOf<paths['/api/v1/imports/archive']['post']['responses'][201]>
+export type ArchiveConnectionCounts = ArchiveImportResult['connections']
+export type ArchiveMessageCounts = ArchiveImportResult['messages']
+export type ArchiveInvitationCounts = ArchiveImportResult['invitations']

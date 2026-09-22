@@ -111,6 +111,13 @@ export function MappingStep({
                 instead.
               </p>
             )}
+            {detected === 'linkedin-archive' && (
+              <p>
+                This looks like a LinkedIn Connections export on its own, not the full archive, so
+                it carries no message or invitation history — drop the zip instead if you want those
+                too.
+              </p>
+            )}
           </Note>
 
           <div className="flex flex-wrap items-center gap-2">

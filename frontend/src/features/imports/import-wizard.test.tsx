@@ -6,6 +6,7 @@ import { renderApp } from '@/test/render'
 
 import {
   ARCHIVE_INSPECTION,
+  ARCHIVE_RESULT,
   CANDIDATE_ROW,
   COMMITTED_RUN,
   DRAFT_RUN,
@@ -17,6 +18,7 @@ import {
   backend,
   commitLike,
   csvFile,
+  zipFile,
 } from './test-support'
 
 /** `name\nÉlodie` in Windows-1252: the export shape issue #79 is about. */
@@ -49,7 +51,7 @@ function happyBackend(calls: Call[] = []) {
 }
 
 async function chooseFile() {
-  const input = screen.getByLabelText('CSV file')
+  const input = screen.getByLabelText('File to import')
   fireEvent.change(input, { target: { files: [csvFile()] } })
   return screen.findByText('Map the columns')
 }
@@ -73,7 +75,7 @@ describe('import wizard', () => {
     mockFetch(happyBackend())
     await renderApp('/imports')
 
-    expect(await screen.findByText('Choose a CSV')).toBeInTheDocument()
+    expect(await screen.findByText('Choose a file to import')).toBeInTheDocument()
     expect(screen.getByText(/up to 8 MB of it/)).toBeInTheDocument()
     expect(screen.getByRole('navigation', { name: 'Import steps' })).toBeInTheDocument()
   })
@@ -301,9 +303,9 @@ describe('a CSV no preset recognizes', () => {
       }),
     )
     await renderApp('/imports')
-    await screen.findByText('Choose a CSV')
+    await screen.findByText('Choose a file to import')
 
-    fireEvent.change(screen.getByLabelText('CSV file'), {
+    fireEvent.change(screen.getByLabelText('File to import'), {
       target: {
         files: [csvFile('Given,Surname,Mail\nHortensia,Blennerhassett,h@tarnish.example\n')],
       },
@@ -328,8 +330,8 @@ describe('a CSV no preset recognizes', () => {
       }),
     )
     await renderApp('/imports')
-    await screen.findByText('Choose a CSV')
-    fireEvent.change(screen.getByLabelText('CSV file'), {
+    await screen.findByText('Choose a file to import')
+    fireEvent.change(screen.getByLabelText('File to import'), {
       target: {
         files: [csvFile('Given,Surname,Mail\nHortensia,Blennerhassett,h@tarnish.example\n')],
       },
@@ -346,9 +348,9 @@ describe('file encoding (issue #79)', () => {
     const calls: Call[] = []
     mockFetch(happyBackend(calls))
     await renderApp('/imports')
-    await screen.findByText('Choose a CSV')
+    await screen.findByText('Choose a file to import')
 
-    fireEvent.change(screen.getByLabelText('CSV file'), {
+    fireEvent.change(screen.getByLabelText('File to import'), {
       target: { files: [windows1252File()] },
     })
     await screen.findByText('Map the columns')
@@ -579,9 +581,9 @@ describe('import wizard failures', () => {
     const calls: Call[] = []
     mockFetch(happyBackend(calls))
     await renderApp('/imports')
-    await screen.findByText('Choose a CSV')
+    await screen.findByText('Choose a file to import')
 
-    fireEvent.change(screen.getByLabelText('CSV file'), {
+    fireEvent.change(screen.getByLabelText('File to import'), {
       target: { files: [new File([], 'nothing.csv')] },
     })
 
@@ -603,9 +605,9 @@ describe('import wizard failures', () => {
       }),
     )
     await renderApp('/imports')
-    await screen.findByText('Choose a CSV')
+    await screen.findByText('Choose a file to import')
 
-    fireEvent.change(screen.getByLabelText('CSV file'), {
+    fireEvent.change(screen.getByLabelText('File to import'), {
       target: { files: [csvFile('Notes:\nnothing below this line\n')] },
     })
     expect(await screen.findByRole('alert')).toHaveTextContent(
@@ -635,5 +637,254 @@ describe('import wizard failures', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('database is locked')
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(await screen.findByText('Matches a contact')).toBeVisible()
+  })
+})
+
+describe('the archive shape: a zip, or a lone message/invitation file (P1-21)', () => {
+  async function chooseArchive(file: File) {
+    await screen.findByText('Choose a file to import')
+    fireEvent.change(screen.getByLabelText('File to import'), { target: { files: [file] } })
+  }
+
+  it('recognizes a zip and says so before anything is sent', async () => {
+    const calls: Call[] = []
+    mockFetch(backend({ 'GET /api/v1/imports/presets': () => jsonResponse(PRESETS) }, calls))
+    await renderApp('/imports')
+    await chooseArchive(zipFile('my-export.zip'))
+
+    expect(await screen.findByText('Recognized: a LinkedIn data archive')).toBeVisible()
+    expect(screen.getByText('my-export.zip')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Import' })).toBeEnabled()
+    // Recognizing it is not importing it.
+    expect(calls.some((call) => call.path === '/api/v1/imports/archive')).toBe(false)
+  })
+
+  it('backs out to the upload step without importing anything', async () => {
+    const calls: Call[] = []
+    mockFetch(backend({ 'GET /api/v1/imports/presets': () => jsonResponse(PRESETS) }, calls))
+    await renderApp('/imports')
+    await chooseArchive(zipFile())
+    await screen.findByText('Recognized: a LinkedIn data archive')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Choose a different file' }))
+
+    expect(await screen.findByText('Choose a file to import')).toBeVisible()
+    expect(calls.some((call) => call.path === '/api/v1/imports/archive')).toBe(false)
+  })
+
+  it('imports the zip on request and reports what each file contributed', async () => {
+    const calls: Call[] = []
+    mockFetch(
+      backend(
+        {
+          'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+          'POST /api/v1/imports/archive': () => jsonResponse(ARCHIVE_RESULT, 201),
+        },
+        calls,
+      ),
+    )
+    await renderApp('/imports')
+    await chooseArchive(zipFile('export.zip'))
+    await screen.findByText('Recognized: a LinkedIn data archive')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+
+    expect(await screen.findByText('Imported export.zip')).toBeVisible()
+    expect(
+      screen.getByText('7 new contacts, 1 updated, 8 message interactions, 2 invitations.'),
+    ).toBeVisible()
+    // Each file's own numbers, not one opaque total.
+    expect(screen.getByText('Connections.csv')).toBeVisible()
+    expect(screen.getByText('messages.csv')).toBeVisible()
+    expect(screen.getByText('Invitations.csv')).toBeVisible()
+    expect(screen.getByText(/1 more looked like someone you might already have/)).toBeVisible()
+
+    const upload = calls.find((call) => call.path === '/api/v1/imports/archive')
+    expect(upload?.method).toBe('POST')
+    // Not `toBeInstanceOf(File)`: the request that carried it was built by
+    // Node's real `Request`, which parses its own `multipart/form-data` body
+    // back into its own `File` class — a different one than the jsdom global
+    // this test file sees, even though it is the same file in every way that
+    // matters to the app. `.name` is what the endpoint actually reads.
+    const uploaded = (upload?.body as FormData).get('file') as { name?: unknown } | null
+    expect(uploaded).not.toBeNull()
+    expect(uploaded?.name).toBe('export.zip')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import another file' }))
+    expect(await screen.findByText('Choose a file to import')).toBeVisible()
+  })
+
+  it('names the files the archive carried but did not read', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/archive': () =>
+          jsonResponse({ ...ARCHIVE_RESULT, ignored_files: ['Positions.csv', 'Skills.csv'] }, 201),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(zipFile())
+    await screen.findByText('Recognized: a LinkedIn data archive')
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+    await screen.findByText(/^Imported/)
+
+    expect(screen.getByText("2 other files in the export weren't read.")).toBeVisible()
+    expect(screen.getByText(/Positions\.csv, Skills\.csv/)).toBeVisible()
+  })
+
+  it('recognizes a lone messages.csv and imports it with no mapping step', async () => {
+    const calls: Call[] = []
+    const messagesOnly = {
+      ...ARCHIVE_RESULT,
+      filename: 'messages.csv',
+      connections: { ...ARCHIVE_RESULT.connections, rows: 0, created: 0, updated: 0 },
+      invitations: { ...ARCHIVE_RESULT.invitations, rows: 0, added: 0 },
+    }
+    mockFetch(
+      backend(
+        {
+          'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+          'POST /api/v1/imports/archive': () => jsonResponse(messagesOnly, 201),
+        },
+        calls,
+      ),
+    )
+    await renderApp('/imports')
+    await chooseArchive(csvFile('CONVERSATION ID,FROM,TO,DATE,CONTENT\n', 'messages.csv'))
+
+    expect(
+      await screen.findByText('Recognized: your LinkedIn message history, on its own'),
+    ).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+
+    expect(await screen.findByText('Imported messages.csv')).toBeVisible()
+    // Only the file that was actually uploaded gets a card.
+    expect(screen.queryByText('Connections.csv')).toBeNull()
+    expect(screen.queryByText('Invitations.csv')).toBeNull()
+    expect(screen.getByText('messages.csv')).toBeVisible()
+
+    const upload = calls.find((call) => call.path === '/api/v1/imports/archive')
+    const uploaded = (upload?.body as FormData).get('file') as { name?: unknown } | null
+    expect(uploaded).not.toBeNull()
+    expect(uploaded?.name).toBe('messages.csv')
+  })
+
+  it('recognizes a lone Invitations.csv the same way', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/archive': () =>
+          jsonResponse(
+            {
+              ...ARCHIVE_RESULT,
+              filename: 'Invitations.csv',
+              connections: { ...ARCHIVE_RESULT.connections, rows: 0, created: 0, updated: 0 },
+              messages: { ...ARCHIVE_RESULT.messages, rows: 0, added: 0 },
+            },
+            201,
+          ),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(csvFile('Direction,From,To,Sent At\n', 'Invitations.csv'))
+
+    expect(
+      await screen.findByText('Recognized: your LinkedIn invitation history, on its own'),
+    ).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+    expect(await screen.findByText('Imported Invitations.csv')).toBeVisible()
+  })
+
+  it('still maps Connections.csv on its own, and says the zip carries more', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/inspect': () => jsonResponse(ARCHIVE_INSPECTION),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(csvFile(undefined, 'Connections.csv'))
+
+    expect(await screen.findByText('Map the columns')).toBeVisible()
+    expect(
+      screen.getByText(/This looks like a LinkedIn Connections export on its own/),
+    ).toBeVisible()
+  })
+
+  it('explains an export the endpoint does not recognize', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/archive': () =>
+          jsonResponse(
+            {
+              detail:
+                'random.zip: no Connections.csv, messages.csv, or Invitations.csv table in the archive',
+            },
+            422,
+          ),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(zipFile('random.zip'))
+    await screen.findByText('Recognized: a LinkedIn data archive')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      "This doesn't look like a LinkedIn export",
+    )
+    expect(screen.getByText(/random\.zip: no Connections\.csv/)).toBeVisible()
+    // The way out is still on screen, and so is another try.
+    expect(screen.getByRole('button', { name: 'Choose a different file' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Import' })).toBeEnabled()
+  })
+
+  it('explains a zip guard failure as a size or complexity problem, not jargon', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/archive': () =>
+          jsonResponse(
+            {
+              detail:
+                'bomb.zip: member Skills.csv compresses 500x, over the 100x ratio a real export ' +
+                'never approaches',
+            },
+            422,
+          ),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(zipFile('bomb.zip'))
+    await screen.findByText('Recognized: a LinkedIn data archive')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'This file is bigger or stranger than a real LinkedIn export',
+    )
+    expect(screen.getByText(/bomb\.zip: member Skills\.csv compresses 500x/)).toBeVisible()
+  })
+
+  it('falls back to a plain explanation for a file it cannot read at all', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/archive': () =>
+          jsonResponse(
+            { detail: 'garbage.zip: not a valid zip file (File is not a zip file)' },
+            422,
+          ),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(zipFile('garbage.zip'))
+    await screen.findByText('Recognized: a LinkedIn data archive')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent("netkeeper couldn't read this file")
+    expect(screen.getByText(/garbage\.zip: not a valid zip file/)).toBeVisible()
   })
 })
