@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -468,18 +469,19 @@ def import_csv_cmd(
     commit, so "decide them in the app" or a later ``--on-candidate`` names a
     run that is actually there to open or resume.
     """
-    parsed_mapping = _mapping_or_exit(mapping)
-    content = path.read_bytes()
-    draft = _create_draft(path.name, content, preset, parsed_mapping)
-    lines = [_run_report("draft", draft)]
-    if dry_run:
+    with _reporting_lock_races():
+        parsed_mapping = _mapping_or_exit(mapping)
+        content = path.read_bytes()
+        draft = _create_draft(path.name, content, preset, parsed_mapping)
+        lines = [_run_report("draft", draft)]
+        if dry_run:
+            typer.echo("\n".join(lines))
+            return
+        if draft.candidate_rows and on_candidate is None:
+            _refuse_undecided(draft.id, draft.candidate_rows)
+        committed = _commit_draft(draft, on_candidate)
+        lines.append(_run_report("committed", committed))
         typer.echo("\n".join(lines))
-        return
-    if draft.candidate_rows and on_candidate is None:
-        _refuse_undecided(draft.id, draft.candidate_rows)
-    committed = _commit_draft(draft, on_candidate)
-    lines.append(_run_report("committed", committed))
-    typer.echo("\n".join(lines))
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,6 +574,21 @@ def _commit_draft(draft: _RunSnapshot, on_candidate: OnCandidate | None) -> _Run
         engine.dispose()
 
 
+@contextmanager
+def _reporting_lock_races() -> Iterator[None]:
+    """Wrap a writing import command's whole body: a lost SQLite write-lock race must
+    not surface as a raw traceback. ``import csv``, ``resume``, and ``rm`` each open one
+    or more writer sessions (a refused ``resume --on-candidate new`` opens a second, for
+    the retry), and any of them can lose a race to a concurrent writer -- these are
+    destructive or state-changing commands, not the read-mostly ones.
+    """
+    try:
+        yield
+    except OperationalError as exc:
+        typer.echo(f"error: the database is busy ({exc.orig}); try again in a moment", err=True)
+        raise typer.Exit(code=1) from exc
+
+
 def _mapping_or_exit(raw: str | None) -> dict[str, str] | None:
     if raw is None:
         return None
@@ -641,24 +658,34 @@ def import_resume_cmd(
     when it was read -- the same divergence between the CLI and the API this
     item exists to close, reintroduced by trusting stale state here.
     """
-    if on_candidate == "skip":
-        committed = _resume_commit(run_id, skip_undecided=True)
+    with _reporting_lock_races():
+        if on_candidate == "skip":
+            committed = _resume_commit(run_id, skip_undecided=True)
+            typer.echo(_run_report("committed", committed))
+            return
+        try:
+            committed = _resume_commit(run_id)
+        except import_runs.UndecidedCandidates as exc:
+            if on_candidate is None:
+                _refuse_undecided(run_id, exc.row_numbers)
+            # --on-candidate new: decide exactly the rows commit() itself just said
+            # are still undecided, never a set read off the draft's stored
+            # resolution -- a row already resolved another way since the draft was
+            # read must not be handed a decision, which identity.apply() refuses
+            # for anything but a Candidate resolution and would otherwise silently
+            # skip.
+            decisions = {number: CreateNew() for number in exc.row_numbers}
+            try:
+                committed = _resume_commit(run_id, decisions=decisions)
+            except import_runs.UndecidedCandidates as retry_exc:
+                # The database moved again between the two commit() calls -- a
+                # narrow race the decisions above cannot close (its own issue:
+                # give commit() the bulk policy as a parameter so one
+                # transaction does both). Refuse cleanly rather than let this
+                # escape the except block that is already handling the first
+                # UndecidedCandidates.
+                _refuse_undecided(run_id, retry_exc.row_numbers)
         typer.echo(_run_report("committed", committed))
-        return
-    try:
-        committed = _resume_commit(run_id)
-    except import_runs.UndecidedCandidates as exc:
-        if on_candidate is None:
-            _refuse_undecided(run_id, exc.row_numbers)
-        # --on-candidate new: decide exactly the rows commit() itself just said
-        # are still undecided, never a set read off the draft's stored
-        # resolution -- a row already resolved another way since the draft was
-        # read must not be handed a decision, which identity.apply() refuses
-        # for anything but a Candidate resolution and would otherwise silently
-        # skip.
-        decisions = {number: CreateNew() for number in exc.row_numbers}
-        committed = _resume_commit(run_id, decisions=decisions)
-    typer.echo(_run_report("committed", committed))
 
 
 def _resume_commit(
@@ -761,11 +788,11 @@ def import_rm_cmd(
     ],
 ) -> None:
     """Delete a draft run and its rows (#90). Refuses a committed or rolled-back run."""
-    engine = make_engine(database_url())
-    try:
-        factory = make_session_factory(engine)
-        install_scope_guard(factory)
+    with _reporting_lock_races():
+        engine = make_engine(database_url())
         try:
+            factory = make_session_factory(engine)
+            install_scope_guard(factory)
             with session_scope(factory, write=True) as session:
                 user = _local_user_or_exit(session)
                 try:
@@ -773,14 +800,8 @@ def import_rm_cmd(
                 except (import_runs.ImportRunError, import_runs.CsvImportError) as exc:
                     typer.echo(f"error: {exc}", err=True)
                     raise typer.Exit(code=1) from exc
-        # A destructive command, unlike its read-mostly neighbours: losing a
-        # concurrent write-lock race (another writer mid-transaction) must not
-        # surface as a raw traceback here.
-        except OperationalError as exc:
-            typer.echo(f"error: the database is busy ({exc.orig}); try again in a moment", err=True)
-            raise typer.Exit(code=1) from exc
-    finally:
-        engine.dispose()
+        finally:
+            engine.dispose()
     typer.echo(f"deleted import run {run_id}")
 
 
