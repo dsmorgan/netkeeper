@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from re import _parser  # type: ignore[attr-defined]
-from typing import Any
+from typing import Any, cast
 
 import factories
 import pytest
@@ -682,6 +682,40 @@ def test_headline_and_company_rules_read_their_own_fields(writer: Session, user:
     assert names_on(writer, user, at_acme) == {"acme"}
 
 
+@pytest.mark.parametrize(
+    ("company", "expected"),
+    [
+        ("Retired", {"retired"}),
+        ("Retired Inc.", {"retired"}),
+        ("Retired!", {"retired"}),
+        # Mid-name, the same word says who an organization serves. Everybody on
+        # these payrolls is working.
+        ("American Association of Retired Persons", set()),
+        ("National Association of Retired Federal Employees", set()),
+        ("The Retired Enlisted Association", set()),
+        # And the industry, which the title pattern already refuses.
+        ("Sunrise Retirement Communities", set()),
+    ],
+    ids=str,
+)
+def test_the_retired_rule_reads_a_company_as_the_answer_not_the_industry(
+    writer: Session, user: User, company: str, expected: set[str]
+) -> None:
+    """ "Where do you work?" — "Retired." That is the only thing this reads.
+
+    The company pattern is anchored where the title pattern is not, because a
+    company name is somebody else's words: in the middle of one, "retired"
+    describes the people an organization exists for rather than the person on
+    the payroll.
+    """
+    ensure_default_rules(writer, user)
+    contact = factories.make_contact(
+        writer, user, current_title="Office Manager", headline=None, current_company=company
+    )
+    run_rules(writer, user)
+    assert names_on(writer, user, contact) == expected
+
+
 def test_a_run_credits_the_first_matching_rule_and_recredits_when_that_rule_goes(
     writer: Session, user: User
 ) -> None:
@@ -928,6 +962,38 @@ def test_the_old_seeded_flag_still_means_the_defaults_it_was_written_for(
     created = ensure_default_rules(writer, user)
     assert [rule.tag.name for rule in created] == ["retired", "retired", "retired"]
     assert ensure_default_rules(writer, user) == []
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    ["yes", 1, ["vp", 7], {"seeded": True}, []],
+    ids=["a string", "a number", "a list with a number in it", "an object", "an empty list"],
+)
+def test_an_unreadable_seeded_record_leaves_the_defaults_alone(
+    writer: Session, user: User, corrupt: object
+) -> None:
+    """The failure direction matters: reseeding duplicates every rule.
+
+    A tag is reused by name, so nothing makes a second "vp". A rule is not, so
+    a record read as "seeded nothing" adds another copy of all of them on every
+    run, and the rules list grows by twenty-nine each time. Reading an
+    unreadable record as "seeded everything" costs a user one missing default
+    at worst, which the log names.
+
+    An empty list is in here on purpose: it is the shape an unreadable record
+    is most likely to be *repaired* into by hand, and it means the same thing.
+    """
+    ensure_default_rules(writer, user)
+    vp = find_tag(writer, user, "vp")
+    assert vp is not None
+    delete_tag(writer, user, vp.id)
+    before = {(rule.tag_id, rule.field, rule.pattern) for rule in list_rules(writer, user)}
+    set_setting(writer, user, DEFAULTS_SEEDED_KEY, cast(Any, corrupt))
+
+    assert ensure_default_rules(writer, user) == []
+    assert {(rule.tag_id, rule.field, rule.pattern) for rule in list_rules(writer, user)} == before
+    assert len(list_rules(writer, user)) == len(before), "no rule was added a second time"
+    assert find_tag(writer, user, "vp") is None, "a default the user deleted came back"
 
 
 def test_ensure_default_rules_reuses_a_tag_the_user_already_has(
