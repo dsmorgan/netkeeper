@@ -170,3 +170,85 @@ describe('the triage screen', () => {
     expect(await screen.findByTestId('triage-card')).toHaveTextContent('Ada')
   })
 })
+
+describe('the counters while a decision is still in flight', () => {
+  /**
+   * The counters run ahead of the server by exactly one decision's worth, and
+   * `pending` says by how much. Both halves of that — adding on the keypress
+   * and subtracting when the answer lands — use the same two numbers, so any
+   * constant nets to zero and is invisible to a test that waits for the write
+   * before it looks. These three assert *during* the round trip, which is the
+   * only moment the numbers are the screen's own, and between them they pin
+   * both counters to what `netkeeper.crm.triage.progress` computes:
+   * `triaged = total - by_state[unknown]`, `remaining = sum(by_state[states])`.
+   */
+  function press(key: string) {
+    fireEvent.keyDown(window, { key })
+  }
+
+  it('Untriaged: m takes the contact out of the queue and adds a triage', async () => {
+    const { backend } = renderTriage({ contacts: 5, latencyMs: 120 })
+    await currentName()
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    press('m')
+
+    expect(screen.getByTestId('triage-progress')).toHaveTextContent('1 / 5')
+    expect(screen.getByTestId('triage-progress')).toHaveTextContent('4 left in this queue')
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+  })
+
+  it('Both: s keeps the contact in the queue, so only the triage count moves', async () => {
+    const { backend } = renderTriage({ contacts: 5, latencyMs: 120 })
+    await currentName()
+    fireEvent.click(screen.getByRole('button', { name: 'Both' }))
+    await waitFor(async () => expect(await currentName()).toContain('Ada'))
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    press('s')
+
+    // `skip` is one of the states this queue holds, so nobody left it.
+    expect(screen.getByTestId('triage-progress')).toHaveTextContent('1 / 5')
+    expect(screen.getByTestId('triage-progress')).toHaveTextContent('5 left in this queue')
+    await waitFor(() => expect(backend.byId(1).met).toBe('skip'))
+  })
+
+  it('a decision that only replaces another moves neither counter', async () => {
+    const { backend } = renderTriage({ contacts: 5, latencyMs: 120 })
+    await currentName()
+    press('m')
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    press('ArrowLeft')
+    press('n')
+
+    // Already triaged and already out of the queue, so changing the answer
+    // adds no triage and takes nobody off the count of what is left.
+    expect(screen.getByTestId('triage-progress')).toHaveTextContent('1 / 5')
+    expect(screen.getByTestId('triage-progress')).toHaveTextContent('4 left in this queue')
+    await waitFor(() => expect(backend.byId(1).met).toBe('not_met'))
+  })
+})
+
+describe('the fake backend answers the way the service does', () => {
+  it('drops an archived contact out of total and triaged, as progress does', async () => {
+    // `netkeeper.crm.triage.progress` groups over the live contacts only, so
+    // archiving somebody you had marked met takes them off both counts. The
+    // fake used to count every row, and this header was asserted against
+    // numbers the API does not produce.
+    const backend = createFakeBackend({ contacts: 5 })
+    renderTriage({ backend })
+    await currentName()
+
+    fireEvent.keyDown(window, { key: 'm' })
+    await waitFor(() => expect(screen.getByTestId('triage-progress')).toHaveTextContent('1 / 5'))
+
+    backend.archive(1)
+    // `→` writes nothing but its answer carries fresh counters.
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+
+    await waitFor(() => expect(screen.getByTestId('triage-progress')).toHaveTextContent('0 / 4'))
+    expect(screen.getByTestId('triage-progress')).toHaveTextContent('4 left in this queue')
+  })
+})

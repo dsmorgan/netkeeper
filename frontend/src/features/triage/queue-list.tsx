@@ -1,25 +1,29 @@
 /**
- * The queue, visible: what you have passed, where you are, and what is next.
+ * The queue, visible: what you have passed, where you are, and who is next.
  *
  * The CP2 walkthrough stopped on "it's not totally clear how you navigate — is
  * the list of un-triaged contacts?" (issue #114). It is, and this says so: the
  * contacts this run has already put on screen, each with the decision it
- * carries, then the contact on screen, then the ones already in hand.
+ * carries, then the contact on screen, then the ones in hand, then the rest of
+ * the queue in the order it will be served.
  *
- * The list claims only what the screen actually knows. The trail is local, and
- * the contacts ahead are the ones the prefetch has handed over — there is no
- * endpoint that lists the queue, so the tail is a count rather than a row per
- * person. Making one up out of `remaining` would be a guess at an order the
- * server never told us.
+ * The tail is real rows, not a guess. `POST /contacts/query` compiles to the
+ * same `WHERE` and the same `ORDER BY` as the triage queue's own statement, so
+ * the list *is* the queue rather than an approximation of it; `api.ts`
+ * documents the match line by line.
  *
- * Opening a contact from the trail is navigation: it moves the cursor and
- * writes nothing. Nothing here takes focus on its own and nothing is modal.
+ * **Focus.** Every row that can be pressed stays a button whatever the cursor
+ * is doing, so using one never destroys the element the click was on and drops
+ * focus to the document. The rows that cannot be pressed are never buttons, so
+ * they are never focused to begin with: a contact further down the queue cannot
+ * be opened, because reaching them means passing everybody in between, and that
+ * is a decision about thirty people rather than a navigation.
  */
 
 import { Badge } from '@/components/ui/badge'
 
 import { passedStateLabel, type PassedCard } from './use-triage-queue'
-import type { TriageCard } from './api'
+import type { QueuedContact, TriageCard } from './api'
 
 function nameOf(card: TriageCard): string {
   const { preferred_name, last_name } = card.contact
@@ -32,30 +36,45 @@ function toneOf(entry: PassedCard): 'secondary' | 'outline' | 'destructive' {
   return entry.decision === null ? 'outline' : 'secondary'
 }
 
+const ROW = 'flex w-full min-w-0 items-center justify-between gap-2 rounded-md px-2 py-1 text-left'
+const PRESSABLE =
+  `${ROW} hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none ` +
+  'aria-[current]:bg-muted aria-[current]:font-medium aria-[current]:ring-1 aria-[current]:ring-foreground/15'
+
 export function QueueList({
   passed,
   reviewIndex,
+  trailOffset,
+  seen,
   liveCard,
-  ahead,
-  remaining,
-  exhausted,
+  inHand,
+  waiting,
+  notShown,
+  error,
   filterLabel,
   onOpen,
   onResume,
-  onNext,
 }: {
   passed: readonly PassedCard[]
   reviewIndex: number | null
+  /** The run position of `passed[0]`, so a row can name its place past the cap. */
+  trailOffset: number
+  seen: number
   liveCard: TriageCard | null
-  ahead: readonly TriageCard[]
-  remaining: number
-  exhausted: boolean
+  inHand: readonly TriageCard[]
+  waiting: readonly QueuedContact[]
+  /**
+   * Contacts in the queue that no row below reaches: the page the look-ahead
+   * took, subtracted from the count that answer carried. `null` until it lands.
+   */
+  notShown: number | null
+  error: string | null
   filterLabel: string
   onOpen: (index: number) => void
   onResume: () => void
-  onNext: () => void
 }) {
   const reviewing = reviewIndex !== null
+
   return (
     <section
       aria-label="Queue"
@@ -65,15 +84,15 @@ export function QueueList({
       <div>
         <h3 className="font-medium">Queue · {filterLabel}</h3>
         <p className="text-xs text-muted-foreground">
-          {passed.length === 0
-            ? `${remaining} in this queue. It is worked through in order.`
-            : `${passed.length} seen so far in this run · ${remaining} left in this queue.`}
+          {seen === 0
+            ? 'Worked through in order, oldest connection first.'
+            : `${seen} seen so far in this run.`}
         </p>
       </div>
 
       <ol className="flex max-h-96 flex-col gap-0.5 overflow-y-auto text-sm">
         {passed.map((entry, index) => (
-          <li key={`${entry.card.contact.id}-${index}`}>
+          <li key={`${entry.card.contact.id}-${trailOffset + index}`}>
             <button
               type="button"
               // Spelled out rather than left to the name computation, so a
@@ -82,7 +101,7 @@ export function QueueList({
               aria-label={`${nameOf(entry.card)} — ${passedStateLabel(entry)}`}
               aria-current={reviewIndex === index ? 'true' : undefined}
               onClick={() => onOpen(index)}
-              className="flex w-full min-w-0 items-center justify-between gap-2 rounded-md px-2 py-1 text-left hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none aria-[current]:bg-muted aria-[current]:ring-1 aria-[current]:ring-foreground/15"
+              className={PRESSABLE}
             >
               <span className="min-w-0 truncate">{nameOf(entry.card)}</span>
               <Badge variant={toneOf(entry)}>{passedStateLabel(entry)}</Badge>
@@ -90,59 +109,47 @@ export function QueueList({
           </li>
         ))}
 
-        {liveCard !== null &&
-          (reviewing ? (
-            <li>
-              <button
-                type="button"
-                aria-label={`${nameOf(liveCard)} — Where you were`}
-                onClick={onResume}
-                className="flex w-full min-w-0 items-center justify-between gap-2 rounded-md px-2 py-1 text-left hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-              >
-                <span className="min-w-0 truncate">{nameOf(liveCard)}</span>
-                <Badge variant="outline">Where you were</Badge>
-              </button>
-            </li>
-          ) : (
-            <li
-              aria-current="true"
-              className="flex min-w-0 items-center justify-between gap-2 rounded-md bg-muted px-2 py-1 ring-1 ring-foreground/15"
+        {liveCard !== null && (
+          <li>
+            <button
+              type="button"
+              aria-label={`${nameOf(liveCard)} — ${reviewing ? 'Where you were' : 'On screen'}`}
+              aria-current={reviewing ? undefined : 'true'}
+              onClick={onResume}
+              className={PRESSABLE}
             >
-              <span className="min-w-0 truncate font-medium">{nameOf(liveCard)}</span>
-              <Badge variant="default">On screen</Badge>
-            </li>
-          ))}
+              <span className="min-w-0 truncate">{nameOf(liveCard)}</span>
+              <Badge variant={reviewing ? 'outline' : 'default'}>
+                {reviewing ? 'Where you were' : 'On screen'}
+              </Badge>
+            </button>
+          </li>
+        )}
 
-        {ahead.map((card, index) => (
-          <li key={card.contact.id}>
-            {/* Only from the live card: while the cursor is back in the trail,
-                "next" means stepping forward through it, and a row labelled
-                Next that did something else would be a small lie. */}
-            {index === 0 && !reviewing ? (
-              <button
-                type="button"
-                aria-label={`${nameOf(card)} — Next`}
-                onClick={onNext}
-                className="flex w-full min-w-0 items-center justify-between gap-2 rounded-md px-2 py-1 text-left hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-              >
-                <span className="min-w-0 truncate">{nameOf(card)}</span>
-                <Badge variant="outline">Next</Badge>
-              </button>
-            ) : (
-              <span className="flex min-w-0 items-center justify-between gap-2 px-2 py-1">
-                <span className="min-w-0 truncate">{nameOf(card)}</span>
-                <Badge variant="outline">In hand</Badge>
-              </span>
-            )}
+        {inHand.map((card) => (
+          <li key={card.contact.id} className={`${ROW} text-muted-foreground`}>
+            <span className="min-w-0 truncate">{nameOf(card)}</span>
+            <Badge variant="outline">Next</Badge>
+          </li>
+        ))}
+
+        {waiting.map((row) => (
+          <li key={row.id} className={`${ROW} text-muted-foreground`}>
+            <span className="min-w-0 truncate">{row.name}</span>
           </li>
         ))}
       </ol>
 
-      <p className="text-xs text-muted-foreground">
-        {exhausted
-          ? 'That is the end of this queue.'
-          : `More after these — ${remaining} left in this queue altogether.`}
-      </p>
+      {error !== null && (
+        <p className="text-xs text-destructive">
+          The contacts ahead could not be read ({error}), so this shows only what is in hand.
+        </p>
+      )}
+      {error === null && notShown !== null && (
+        <p className="text-xs text-muted-foreground">
+          {notShown === 0 ? 'That is the end of this queue.' : `…and ${notShown} more after these.`}
+        </p>
+      )}
     </section>
   )
 }
