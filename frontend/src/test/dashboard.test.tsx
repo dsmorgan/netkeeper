@@ -17,6 +17,7 @@ function statsBody(overrides: Record<string, number> = {}) {
     with_email: 0,
     with_phone: 0,
     tagged: 0,
+    tagged_by_rule: 0,
     ...overrides,
   }
 }
@@ -128,7 +129,7 @@ describe('dashboard: a fresh install with nothing imported', () => {
         cta: 'Import contacts',
       },
       {
-        title: '2. Review your tags',
+        title: '2. Review what was tagged automatically',
         detail: 'Nothing tagged yet',
         badge: 'Not started',
         href: '/lists',
@@ -164,8 +165,17 @@ describe('dashboard: a fresh install with nothing imported', () => {
 
 describe('dashboard: an account with contacts', () => {
   it('shows every step its real count, state, title, and destination, from the API alone', async () => {
+    // `tagged: 5` (any source) but `tagged_by_rule: 4` — one of the five was
+    // hand-applied, not the rules. The step must report the rule-only count.
     const seen = serveDashboard({
-      stats: statsBody({ total: 10, met: 5, not_met: 2, untriaged: 3, tagged: 4 }),
+      stats: statsBody({
+        total: 10,
+        met: 5,
+        not_met: 2,
+        untriaged: 3,
+        tagged: 5,
+        tagged_by_rule: 4,
+      }),
       lists: [
         seededValidatedList(),
         { id: 2, name: 'First 100', kind: 'static', member_count: 12 },
@@ -183,13 +193,13 @@ describe('dashboard: an account with contacts', () => {
         href: '/imports',
         cta: 'Import contacts',
       },
-      // `stats.tagged` counts any tag, hand-applied ones included (#129 review,
-      // finding 2) — the title and detail never say "automatically", and once
-      // there is a real count this step shows no badge, the same as export.
+      // Real, both directions, since the stats lane split tagged_by_rule
+      // (TagSource.RULE only) out from tagged (any source) — #129 review,
+      // finding 2. 4, not 5: the hand-applied tag doesn't count.
       {
-        title: '2. Review your tags',
-        detail: '4 contacts tagged',
-        badge: null,
+        title: '2. Review what was tagged automatically',
+        detail: '4 contacts tagged automatically',
+        badge: 'Done',
         href: '/lists',
         cta: 'Review tags',
       },
@@ -225,6 +235,23 @@ describe('dashboard: an account with contacts', () => {
     for (const request of seen) {
       expect(request.headers.get('X-Netkeeper-Client')).toBe('1')
     }
+  })
+
+  it('does not let a hand-applied tag read as automatic progress', async () => {
+    // Three contacts tagged by hand, none by a rule: `tagged: 3`, `tagged_by_rule: 0`.
+    serveDashboard({ stats: statsBody({ total: 10, tagged: 3, tagged_by_rule: 0 }) })
+    await renderApp('/')
+    const main = within(screen.getByRole('main'))
+    await main.findByText('10 contacts imported')
+
+    const reviewRow = renderedSteps()[1]
+    expect(reviewRow).toEqual({
+      title: '2. Review what was tagged automatically',
+      detail: 'Nothing tagged yet',
+      badge: 'Not started',
+      href: '/lists',
+      cta: 'Run auto-tag rules',
+    })
   })
 
   it('offers to resume an open draft instead of claiming the import step is done', async () => {
