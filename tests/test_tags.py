@@ -22,6 +22,7 @@ from netkeeper.crm import tags as svc
 from netkeeper.crm.tags import (
     DEFAULT_FIELDS,
     DEFAULT_PATTERNS,
+    DEFAULTS,
     DEFAULTS_SEEDED_KEY,
     ContactNotFound,
     DuplicateTag,
@@ -66,11 +67,12 @@ from netkeeper.models import (
     UserKind,
 )
 from netkeeper.scoping import scoped, unscoped
-from netkeeper.services.settings_kv import get_setting
+from netkeeper.services.settings_kv import get_setting, set_setting
 from netkeeper.services.users import ensure_local_user
 
 NOW = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
-DEFAULT_TAG_NAMES = [name for name, _ in DEFAULT_PATTERNS]
+DEFAULT_TAG_NAMES = [default.name for default in DEFAULTS]
+RULES_PER_SEED = sum(len(default.fields) for default in DEFAULTS)
 
 
 @contextmanager
@@ -117,6 +119,14 @@ TITLE_MATRIX: list[tuple[str, set[str]]] = [
     ("Associate Professor of Computer Science", {"academic"}),
     ("Research Scientist", {"academic"}),
     ("PhD Candidate", {"academic"}),
+    # The shapes a real address book actually holds, including the one that
+    # reads retired and is not: somebody who works in retirement planning.
+    ("Retired", {"retired"}),
+    # "Product Developer" is not one of the product pattern's shapes; the
+    # developer half is what the engineering rule reads.
+    ("Retired Technologist and Product Developer", {"retired", "engineering"}),
+    ("Telecom Solution Architect - Retired", {"retired"}),
+    ("Retirement Plan Consultant", {"consultant"}),
     ("Chief of Staff", set()),
     ("Barista", set()),
 ]
@@ -830,18 +840,26 @@ def test_default_patterns_are_the_spec_list_and_compile() -> None:
         "marketing",
         "consultant",
         "academic",
+        "retired",
     ]
     assert DEFAULT_FIELDS == (RuleField.TITLE, RuleField.HEADLINE)
-    for _, pattern in DEFAULT_PATTERNS:
-        compile_pattern(pattern)
-        assert not has_nested_unbounded_repeat(_parser.parse(pattern, re.IGNORECASE)), pattern
+    for default in DEFAULTS:
+        compile_pattern(default.pattern)
+        assert not has_nested_unbounded_repeat(_parser.parse(default.pattern, re.IGNORECASE)), (
+            default.pattern
+        )
+    # Only "retired" reads the company, where the name is the statement rather
+    # than the industry somebody happens to work in.
+    assert [default.name for default in DEFAULTS if RuleField.COMPANY in default.fields] == [
+        "retired"
+    ]
 
 
 def test_ensure_default_rules_seeds_once_and_never_recreates_a_deleted_default(
     writer: Session, user: User, other: User
 ) -> None:
     created = ensure_default_rules(writer, user)
-    assert len(created) == len(DEFAULT_PATTERNS) * len(DEFAULT_FIELDS)
+    assert len(created) == RULES_PER_SEED
     tags = list_tags(writer, user)
     assert [row.tag.name for row in tags] == sorted(DEFAULT_TAG_NAMES)
     assert all(row.tag.kind is TagKind.AUTO for row in tags)
@@ -853,7 +871,7 @@ def test_ensure_default_rules_seeds_once_and_never_recreates_a_deleted_default(
         ("vp", RuleField.HEADLINE),
     ]
     assert [r.position for r in rules] == list(range(len(rules)))
-    assert get_setting(writer, user, DEFAULTS_SEEDED_KEY) is True
+    assert get_setting(writer, user, DEFAULTS_SEEDED_KEY) == sorted(DEFAULT_TAG_NAMES)
     assert ensure_default_rules(writer, user) == []
     vp = find_tag(writer, user, "vp")
     assert vp is not None
@@ -866,13 +884,59 @@ def test_ensure_default_rules_seeds_once_and_never_recreates_a_deleted_default(
     assert len(ensure_default_rules(writer, other)) == len(created)
 
 
+def test_a_default_added_later_reaches_a_database_seeded_before_it_existed(
+    writer: Session, user: User
+) -> None:
+    """The record is which defaults were offered, not whether any were.
+
+    It used to be one boolean, so a default added after somebody started using
+    netkeeper never reached them: the first import wrote "seeded" and every
+    later run read it and stopped. A deleted default still stays deleted --
+    its name is in the record either way.
+    """
+    ensure_default_rules(writer, user)
+    retired = find_tag(writer, user, "retired")
+    assert retired is not None
+    delete_tag(writer, user, retired.id)
+    # Wind the record back to what a database seeded before "retired" existed
+    # holds: every name but that one.
+    set_setting(
+        writer,
+        user,
+        DEFAULTS_SEEDED_KEY,
+        sorted(name for name, _ in DEFAULT_PATTERNS),
+    )
+
+    created = ensure_default_rules(writer, user)
+
+    assert [rule.field for rule in created] == [
+        RuleField.TITLE,
+        RuleField.HEADLINE,
+        RuleField.COMPANY,
+    ]
+    assert find_tag(writer, user, "retired") is not None
+    # And nothing else was seeded twice.
+    assert len(list_tags(writer, user)) == len(DEFAULTS)
+    assert ensure_default_rules(writer, user) == []
+
+
+def test_the_old_seeded_flag_still_means_the_defaults_it_was_written_for(
+    writer: Session, user: User
+) -> None:
+    """`True` is what every database seeded before this shape carries."""
+    set_setting(writer, user, DEFAULTS_SEEDED_KEY, True)
+    created = ensure_default_rules(writer, user)
+    assert [rule.tag.name for rule in created] == ["retired", "retired", "retired"]
+    assert ensure_default_rules(writer, user) == []
+
+
 def test_ensure_default_rules_reuses_a_tag_the_user_already_has(
     writer: Session, user: User
 ) -> None:
     mine = create_tag(writer, user, "VP", color="#123456")
     ensure_default_rules(writer, user)
     tags = list_tags(writer, user)
-    assert len(tags) == len(DEFAULT_PATTERNS)
+    assert len(tags) == len(DEFAULTS)
     reused = find_tag(writer, user, "vp")
     assert reused is mine and (mine.name, mine.kind, mine.color) == (
         "VP",
@@ -908,7 +972,7 @@ def test_cli_tags_list_and_run_rules(tmp_path: Path, monkeypatch: pytest.MonkeyP
     result = runner.invoke(cli, ["tags", "run-rules"])
     assert result.exit_code == 0, result.stdout
     assert result.stdout.splitlines() == [
-        f"seeded {len(DEFAULT_PATTERNS) * len(DEFAULT_FIELDS)} default rules",
+        f"seeded {RULES_PER_SEED} default rules",
         "1 contacts: 2 tags added, 0 removed, 0 re-credited",
     ]
 

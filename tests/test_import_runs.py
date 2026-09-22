@@ -147,7 +147,10 @@ def test_committing_tags_the_contacts_it_wrote_and_counts_them(writer: Session, 
     # Every row that wrote a contact, counted per person: the file names Imogen
     # twice, and the second row matches the contact the first one created.
     assert committed.tagged_contacts == committed.matched_count + committed.created_count - 1
-    assert committed.tags_added == 2  # Fern, "Head of Kites", and Imogen, "Head of Pickles"
+    # Fern ("Head of Kites") and Imogen ("Head of Pickles") from the rule this
+    # test makes, and Wilhelmina from the "retired" default, whose headline in
+    # the fixture says so.
+    assert committed.tags_added == 3
     tagged = {
         row.contact_id
         for row in writer.scalars(scoped(user, ContactTag).where(ContactTag.tag_id == heads.id))

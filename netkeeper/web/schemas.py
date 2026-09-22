@@ -1367,6 +1367,12 @@ class TriageMessagesOut(BaseModel):
     last_at: datetime | None
     recent: list[InteractionOut]
     """Newest first. Their `summary` is a message body, returned verbatim: escape it."""
+    invitations: int = 0
+    """Invitations on file, which are not messages and are not counted as any.
+
+    An invitation is stored as the same kind of row as a message, so a card that
+    counted both said "1 message" over a contact who had only ever clicked
+    Connect. The batches never counted them; neither does this now."""
 
 
 class TriageEvidenceOut(BaseModel):

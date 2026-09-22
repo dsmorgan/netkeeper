@@ -11,12 +11,12 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.crm.tags import DEFAULT_FIELDS, DEFAULT_PATTERNS
+from netkeeper.crm.tags import DEFAULTS
 from netkeeper.db import session_scope
 from netkeeper.models import User
 
 CSRF = {"X-Netkeeper-Client": "1"}
-DEFAULT_RULE_COUNT = len(DEFAULT_PATTERNS) * len(DEFAULT_FIELDS)
+DEFAULT_RULE_COUNT = sum(len(default.fields) for default in DEFAULTS)
 
 
 @pytest.fixture
@@ -42,7 +42,7 @@ async def _tags_by_name(client: httpx.AsyncClient) -> dict[str, dict[str, Any]]:
 
 async def test_defaults_are_seeded_at_startup(client: httpx.AsyncClient) -> None:
     tags = await _tags_by_name(client)
-    assert set(tags) == {name for name, _ in DEFAULT_PATTERNS}
+    assert set(tags) == {default.name for default in DEFAULTS}
     assert all(tag["kind"] == "auto" and tag["contact_count"] == 0 for tag in tags.values())
     rules = await client.get("/api/v1/autotag-rules")
     assert rules.status_code == 200

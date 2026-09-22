@@ -89,6 +89,76 @@ describe('the triage keyboard map (spec 10.2)', () => {
     expect(backend.byId(1).tags[0]?.name).toBe('founder')
   })
 
+  it('t makes a tag that does not exist yet and puts it on, without leaving the run', async () => {
+    // The thing somebody thinks of while looking at a contact: "I met this one
+    // through that tool" is not a rule and never will be, and going away to
+    // make the tag loses the run and the thought.
+    const { backend } = renderTriage({ contacts: 2 })
+    await currentName()
+
+    press('t')
+    const picker = await screen.findByRole('group', { name: 'Tag this contact' })
+    fireEvent.change(within(picker).getByLabelText('Tag'), { target: { value: 'met at a meetup' } })
+
+    fireEvent.click(await within(picker).findByRole('button', { name: /^Make/ }))
+
+    await waitFor(() => expect(backend.byId(1).tags).toHaveLength(1))
+    expect(backend.byId(1).tags[0]?.name).toBe('met at a meetup')
+    // A tag the person put on themselves, which is what the batches read.
+    expect(backend.byId(1).tags[0]?.kind).toBe('manual')
+    // And it is on file for the next contact, without a reload.
+    expect(within(picker).getByRole('button', { name: /met at a meetup/ })).toBeInTheDocument()
+    expect(await within(picker).findByRole('button', { name: /founder/ })).toBeInTheDocument()
+  })
+
+  it('t makes the tag on Enter, so a run never needs the mouse', async () => {
+    const { backend } = renderTriage({ contacts: 2 })
+    await currentName()
+
+    press('t')
+    const picker = await screen.findByRole('group', { name: 'Tag this contact' })
+    const field = within(picker).getByLabelText('Tag')
+    fireEvent.change(field, { target: { value: 'ran a workshop with' } })
+    fireEvent.keyDown(field, { key: 'Enter' })
+
+    await waitFor(() => expect(backend.byId(1).tags).toHaveLength(1))
+    expect(backend.byId(1).tags[0]?.name).toBe('ran a workshop with')
+    // The box empties, so the next thing typed is the next tag.
+    expect(field).toHaveValue('')
+  })
+
+  it('offers no Make for a name already on file, whatever its case', async () => {
+    renderTriage({ contacts: 2 })
+    await currentName()
+
+    press('t')
+    const picker = await screen.findByRole('group', { name: 'Tag this contact' })
+    fireEvent.change(within(picker).getByLabelText('Tag'), { target: { value: '  FOUNDER ' } })
+
+    expect(await within(picker).findByRole('button', { name: /founder/ })).toBeInTheDocument()
+    expect(within(picker).queryByRole('button', { name: /^Make/ })).not.toBeInTheDocument()
+  })
+
+  it('puts on the tag that was already there rather than reporting a conflict', async () => {
+    // Another tab made it after this picker read the list. The person meant
+    // "this contact has that tag", and that is what they get.
+    const { backend } = renderTriage({ contacts: 2 })
+    await currentName()
+
+    press('t')
+    const picker = await screen.findByRole('group', { name: 'Tag this contact' })
+    fireEvent.change(within(picker).getByLabelText('Tag'), {
+      target: { value: 'spoke at a panel' },
+    })
+    backend.addTagBehindTheScenes('Spoke at a panel')
+
+    fireEvent.click(await within(picker).findByRole('button', { name: /^Make/ }))
+
+    await waitFor(() => expect(backend.byId(1).tags).toHaveLength(1))
+    expect(backend.byId(1).tags[0]?.name).toBe('Spoke at a panel')
+    expect(within(picker).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('t says that tagging is not on the triage undo stack', async () => {
     renderTriage({ contacts: 2 })
     await currentName()
