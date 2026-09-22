@@ -58,13 +58,14 @@ def test_catalog_lists_every_predicate(entries: dict[str, str]) -> None:
     assert sorted(entries) == sorted(OPS)
 
 
-BUILDER_ONLY = frozenset({"list_member"})
+BUILDER_ONLY: frozenset[str] = frozenset()
 """Ops the compiler takes that the builder still cannot offer.
 
-``list_member`` compiles (P1-27, #73), but picking a list needs a list picker
-the builder does not have; a filter that uses it is accepted everywhere the
-API takes one. Emptying this set is frontend work, and the entry's reason has
-to stop being true before its op may leave it.
+Empty, and the shape is what matters: ``list_member`` was here between P1-27
+(#73), which taught the compiler to inline a list, and P1-28, which gave the
+builder the picker that names one. An op belongs here only while the builder
+is the thing missing, and it leaves by getting its editor rather than by being
+re-explained.
 """
 
 

@@ -165,14 +165,20 @@ describe('a static list', () => {
     )
   })
 
-  it('offers no export button, and says why, because list_member does not compile', async () => {
+  it('exports its members, not everybody', async () => {
+    // The button was withheld until P1-27 taught the compiler `list_member`,
+    // because the only filter this screen could have sent was "everyone".
     mockApi(routes())
     renderWithClient(<ListsPanel />)
     await openList('First 100')
 
-    expect(await screen.findByText('No export button here yet')).toBeInTheDocument()
-    expect(screen.getByText(/issue #73/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /^Export/ })).toBeNull()
+    fireEvent.click(await screen.findByRole('button', { name: /^Export/ }))
+    const link = await screen.findByRole('link', { name: /Download/ })
+    const url = new URL(link.getAttribute('href') ?? '', 'http://localhost')
+    expect(JSON.parse(url.searchParams.get('filter') ?? '{}')).toEqual({
+      where: { op: 'list_member', list_id: 1 },
+      include_archived: false,
+    })
   })
 
   it('offers no filter builder, because membership is explicit', async () => {

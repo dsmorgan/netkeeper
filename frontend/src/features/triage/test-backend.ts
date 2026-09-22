@@ -102,6 +102,47 @@ const CONTACT_COLUMNS = [
  * The triage screen sends one shape: an `eq` on `met`, or an `or` of them.
  * Anything else is a bug in the caller and is reported as one.
  */
+interface AheadFilter {
+  states: ContactMet[]
+  decidedBy: 'manual' | 'automatic' | null
+}
+
+/**
+ * The look-ahead's filter, as far as this fake understands one.
+ *
+ * Two shapes and no others: the states alone, or the states `and` who decided
+ * them, which is what a review pass asks for. Anything else throws, because a
+ * fake that agrees with a filter the screen should not be sending is how a
+ * green suite ships a wrong list.
+ */
+function aheadFilterOf(where: unknown): AheadFilter {
+  if (where === null || where === undefined) {
+    throw new Error('the look-ahead must filter on met')
+  }
+  const node = where as { op?: string; field?: string; value?: unknown; children?: unknown[] }
+  if (node.op === 'and') {
+    const children = node.children ?? []
+    if (children.length !== 2) {
+      throw new Error('this fake understands one `and`: the states, then who decided them')
+    }
+    return { states: metStatesOf(children[0]), decidedBy: metSourceOf(children[1]) }
+  }
+  return { states: metStatesOf(where), decidedBy: null }
+}
+
+function metSourceOf(where: unknown): 'manual' | 'automatic' {
+  const node = where as { op?: string; field?: string; value?: unknown }
+  if (node.op !== 'eq' || node.field !== 'met_source') {
+    throw new Error(
+      `this fake expects eq on met_source here, not ${String(node.op)} on ${String(node.field)}`,
+    )
+  }
+  if (node.value !== 'manual' && node.value !== 'automatic') {
+    throw new Error(`${String(node.value)} is not a met_source`)
+  }
+  return node.value
+}
+
 function metStatesOf(where: unknown): ContactMet[] {
   if (where === null || where === undefined) {
     throw new Error('the look-ahead must filter on met')
@@ -169,17 +210,22 @@ export function makeContact(index: number, options: { messages?: number } = {}):
  * renamed the contact. Recording all three fields here made the fake stricter
  * than the API in one direction and blinder in the other.
  */
-type RecordedField = 'met' | 'triaged_at' | 'preferred_name'
+type RecordedField = 'met' | 'met_source' | 'triaged_at' | 'preferred_name'
 
+// `_MET_FIELDS`: a met decision writes the three together, so it records the
+// three and undo puts the three back — `met_source` among them, which is how
+// undoing a hand-made decision over a batch's leaves the contact in the review
+// queue exactly as the batch left it.
 const RECORDED_FIELDS: Record<FakeDecision['kind'], readonly RecordedField[]> = {
-  decide: ['met', 'triaged_at'],
-  bulk_met: ['met', 'triaged_at'],
+  decide: ['met', 'met_source', 'triaged_at'],
+  bulk_met: ['met', 'met_source', 'triaged_at'],
   preferred_name: ['preferred_name'],
 }
 
 /** One recorded column as the log stores it. Throws on a field the log never holds. */
 function readField(contact: FakeContact, name: string): string | null {
   if (name === 'met') return contact.met
+  if (name === 'met_source') return contact.met_source
   if (name === 'triaged_at') return contact.triaged_at
   if (name === 'preferred_name') return contact.preferred_name
   throw new Error(`the triage log does not record ${name}`)
@@ -233,20 +279,39 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
 
   function statesOf(search: URLSearchParams): ContactMet[] {
     const states = search.getAll('states') as ContactMet[]
-    return states.length === 0 ? ['unknown'] : states
+    if (states.length > 0) return states
+    // `_states`: with `decided_by` and no states named, the queue defaults to
+    // everything a batch can have decided rather than to the untriaged.
+    return decidedByOf(search) === null ? ['unknown'] : ['met', 'not_met']
   }
 
-  function queue(states: ContactMet[]): FakeContact[] {
+  /** `decided_by`: the review pass narrows the queue by who decided (#128). */
+  function decidedByOf(search: URLSearchParams): 'manual' | 'automatic' | null {
+    const value = search.get('decided_by')
+    return value === 'manual' || value === 'automatic' ? value : null
+  }
+
+  function queue(
+    states: ContactMet[],
+    decidedBy: 'manual' | 'automatic' | null = null,
+  ): FakeContact[] {
     return contacts.filter(
       (contact) =>
         states.includes(contact.met) &&
+        (decidedBy === null || contact.met_source === decidedBy) &&
         contact.archivedAt === null &&
         contact.mergedIntoId === null,
     )
   }
 
-  function nextContact(states: ContactMet[], afterId: number | null): FakeContact | null {
-    return queue(states).find((contact) => afterId === null || contact.id > afterId) ?? null
+  function nextContact(
+    states: ContactMet[],
+    afterId: number | null,
+    decidedBy: 'manual' | 'automatic' | null = null,
+  ): FakeContact | null {
+    return (
+      queue(states, decidedBy).find((contact) => afterId === null || contact.id > afterId) ?? null
+    )
   }
 
   function card(contact: FakeContact | null) {
@@ -306,7 +371,7 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
    * contacts. Archived and merged-away rows are excluded before grouping, so
    * archiving a contact you had marked met drops both `total` and `triaged`.
    */
-  function progress(states: ContactMet[]) {
+  function progress(states: ContactMet[], decidedBy: 'manual' | 'automatic' | null = null) {
     const live = contacts.filter(
       (contact) => contact.archivedAt === null && contact.mergedIntoId === null,
     )
@@ -316,8 +381,13 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
     return {
       total,
       triaged: total - (by_state.unknown ?? 0),
-      remaining: queue(states).length,
+      // `remaining` follows the queue being served, source and all, so the
+      // counter and the cards never disagree about what is left.
+      remaining: queue(states, decidedBy).length,
       by_state,
+      // The size of the review pass: every live contact a batch decided and
+      // nobody has answered since, whatever queue is being served.
+      automatic: live.filter((contact) => contact.met_source === 'automatic').length,
     }
   }
 
@@ -359,6 +429,25 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
     )
   }
 
+  /**
+   * The service refuses a batch pointed at an answer somebody gave (#128).
+   *
+   * `unknown` and `skip` are the only states a batch may reach: `skip` is "I
+   * passed on this one", not an answer. The count, the preview, and the apply
+   * all refuse alike, so a client can never be shown a batch it would then be
+   * refused for.
+   */
+  function batchStates(states: ContactMet[]): Response | null {
+    const answered = states.filter((state) => state !== 'unknown' && state !== 'skip')
+    if (answered.length === 0) return null
+    return jsonResponse(
+      {
+        detail: `a batch decides for people nobody has answered for, so it cannot be applied to ${answered.join(', ')}; the states it takes are skip, unknown`,
+      },
+      422,
+    )
+  }
+
   function suggestionCount(states: ContactMet[]): number {
     return queue(states).filter((contact) => contact.messages > 0).length
   }
@@ -368,6 +457,7 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
     seen.push({ method: request.method, path: url.pathname, search: url.searchParams })
     if (latency > 0) await new Promise((resolve) => setTimeout(resolve, latency))
     const states = statesOf(url.searchParams)
+    const decidedBy = decidedByOf(url.searchParams)
     const body: unknown =
       request.method === 'GET' || request.method === 'DELETE' ? null : await readJson(request)
 
@@ -387,10 +477,14 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
     if (url.pathname === '/api/v1/triage/next') {
       const afterParam = url.searchParams.get('after_id')
       const afterId = afterParam === null || afterParam === '' ? null : Number(afterParam)
-      const first = nextContact(states, afterId)
+      const first = nextContact(states, afterId, decidedBy)
       const prefetch = url.searchParams.get('prefetch') !== 'false'
-      const second = prefetch && first !== null ? nextContact(states, first.id) : null
-      return jsonResponse({ card: card(first), next: card(second), progress: progress(states) })
+      const second = prefetch && first !== null ? nextContact(states, first.id, decidedBy) : null
+      return jsonResponse({
+        card: card(first),
+        next: card(second),
+        progress: progress(states, decidedBy),
+      })
     }
 
     if (url.pathname === '/api/v1/triage/decisions') {
@@ -403,14 +497,16 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
       if (contact === undefined) return jsonResponse({ detail: 'no such contact' }, 404)
       const before = snapshot(contact, RECORDED_FIELDS.decide)
       contact.met = input.met
+      // Answering here is the person answering, whoever answered before.
+      contact.met_source = 'manual'
       contact.triaged_at = new Date().toISOString()
       const decision = record(contact, 'decide', before)
       const after = input.prefetch_after_id ?? contact.id
       return jsonResponse(
         {
           decision,
-          next: card(nextContact(states, after)),
-          progress: progress(states),
+          next: card(nextContact(states, after, decidedBy)),
+          progress: progress(states, decidedBy),
         },
         201,
       )
@@ -471,6 +567,8 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
         // preferred-name row does not put `met` back.
         for (const [name, value] of Object.entries(decision.before_state)) {
           if (name === 'met') contact.met = (value ?? 'unknown') as ContactMet
+          else if (name === 'met_source')
+            contact.met_source = (value ?? 'manual') as 'manual' | 'automatic'
           else if (name === 'triaged_at') contact.triaged_at = value
           else if (name === 'preferred_name') contact.preferred_name = value ?? contact.first_name
           else throw new Error(`the triage log does not record ${name}`)
@@ -484,7 +582,7 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
         batch_id: newest.batch_id,
         forced: input.force === true ? batch.map((decision) => decision.contact_id) : [],
         card: card(single),
-        progress: progress(states),
+        progress: progress(states, decidedBy),
       })
     }
 
@@ -515,12 +613,13 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
         offset?: number
         columns?: string[] | null
       }
-      let wanted: ContactMet[]
+      let ahead: AheadFilter
       try {
-        wanted = metStatesOf(input.filter?.where)
+        ahead = aheadFilterOf(input.filter?.where)
       } catch (failure) {
         return jsonResponse({ detail: String(failure) }, 422)
       }
+      const wanted = ahead.states
       if (input.filter?.include_archived === true) {
         return jsonResponse({ detail: 'the queue never includes archived contacts' }, 422)
       }
@@ -533,6 +632,7 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
         .filter(
           (contact) =>
             wanted.includes(contact.met) &&
+            (ahead.decidedBy === null || contact.met_source === ahead.decidedBy) &&
             contact.archivedAt === null &&
             contact.mergedIntoId === null,
         )
@@ -558,6 +658,8 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
     }
 
     if (url.pathname === '/api/v1/triage/suggestions') {
+      const refusal = batchStates(states)
+      if (refusal !== null) return refusal
       const count = suggestionCount(states)
       if (count === 0) return jsonResponse([])
       return jsonResponse([
@@ -566,8 +668,34 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
           title: 'Mark everyone with message history as met',
           description: `You have message threads with ${count} untriaged ${count === 1 ? 'person' : 'people'}.`,
           count,
+          // The service puts both on every offer: `met` is what the batch
+          // decides, which is the word the button says, and `tag_id` names the
+          // tag when the batch came from one.
+          met: 'met',
+          tag_id: null,
         },
       ])
+    }
+
+    const contactsMatch = /^\/api\/v1\/triage\/suggestions\/([^/]+)\/contacts$/.exec(url.pathname)
+    if (contactsMatch !== null) {
+      if (contactsMatch[1] !== 'met_with_messages') {
+        return jsonResponse({ detail: 'no suggestion by that key' }, 404)
+      }
+      const refusal = batchStates(states)
+      if (refusal !== null) return refusal
+      const matching = queue(states).filter((contact) => contact.messages > 0)
+      const limit = Number(url.searchParams.get('limit') ?? '50')
+      const offset = Number(url.searchParams.get('offset') ?? '0')
+      return jsonResponse({
+        items: matching
+          .slice(offset, offset + limit)
+          .map((contact) => card(contact)?.contact)
+          .filter((contact) => contact !== undefined),
+        total: matching.length,
+        limit,
+        offset,
+      })
     }
 
     const applyMatch = /^\/api\/v1\/triage\/suggestions\/([^/]+)\/apply$/.exec(url.pathname)
@@ -575,9 +703,20 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
       if (applyMatch[1] !== 'met_with_messages') {
         return jsonResponse({ detail: 'no suggestion by that key' }, 404)
       }
+      const refusal = batchStates(states)
+      if (refusal !== null) return refusal
       const input = (body ?? {}) as { expected_count?: number | null }
+      if (input.expected_count == null) {
+        // The body is required and so is the count in it: "apply whatever
+        // matches right now" is not a request the API takes, so a client that
+        // sends neither gets FastAPI's own 422 rather than a silent apply.
+        return jsonResponse(
+          { detail: [{ loc: ['body', 'expected_count'], msg: 'Field required' }] },
+          422,
+        )
+      }
       const matching = queue(states).filter((contact) => contact.messages > 0)
-      if (input.expected_count != null && input.expected_count !== matching.length) {
+      if (input.expected_count !== matching.length) {
         return jsonResponse(
           {
             detail: `the suggestion now matches ${matching.length} contacts, not the ${input.expected_count} you were shown; take the preview again`,
@@ -589,6 +728,9 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
       for (const contact of matching) {
         const before = snapshot(contact, RECORDED_FIELDS.bulk_met)
         contact.met = 'met'
+        // What the review pass serves, and what keeps a batch's decision from
+        // passing as one the person made.
+        contact.met_source = 'automatic'
         contact.triaged_at = new Date().toISOString()
         record(contact, 'bulk_met', before, batchId)
       }

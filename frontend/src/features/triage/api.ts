@@ -14,6 +14,7 @@ import { api } from '@/api/client'
 import type { components } from '@/api/schema'
 
 export type ContactMet = components['schemas']['ContactMet']
+export type MetSource = components['schemas']['MetSource']
 export type TriageCard = components['schemas']['TriageCardOut']
 export type TriageContact = components['schemas']['TriageContactOut']
 export type TriageEvidence = components['schemas']['TriageEvidenceOut']
@@ -39,12 +40,26 @@ type FilterNode = components['schemas']['FilterNode-Input']
 export const SUGGESTIONS_KEY = ['triage', 'suggestions'] as const
 
 /** The queue the screen is working through: the untriaged, the skipped, or both. */
-export type QueueFilter = 'unknown' | 'skip' | 'both'
+export type QueueFilter = 'unknown' | 'skip' | 'both' | 'automatic'
 
 /** The `states` query the API takes for a filter. Always explicit, never defaulted. */
 export function statesFor(filter: QueueFilter): ContactMet[] {
   if (filter === 'both') return ['unknown', 'skip']
+  // The review pass walks answers rather than questions: a batch can only have
+  // decided `met` or `not_met`, and those are the two states it serves back.
+  if (filter === 'automatic') return ['met', 'not_met']
   return [filter]
+}
+
+/**
+ * The `decided_by` this filter is served with, or `null` for the queues that
+ * do not ask the question.
+ *
+ * Only the review pass narrows by who decided. Everything else serves whoever
+ * is in the state, whether a person or a batch put them there.
+ */
+export function decidedByFor(filter: QueueFilter): MetSource | null {
+  return filter === 'automatic' ? 'automatic' : null
 }
 
 /** A non-2xx answer, with the status the screen branches on and the backend's wording. */
@@ -101,6 +116,7 @@ function fail(status: number, error: unknown, whenUnknown: string): never {
  */
 export async function fetchQueue(options: {
   states: ContactMet[]
+  decidedBy?: MetSource | null
   afterId?: number | null
   prefetch?: boolean
   signal?: AbortSignal
@@ -109,6 +125,7 @@ export async function fetchQueue(options: {
     params: {
       query: {
         states: options.states,
+        decided_by: options.decidedBy ?? null,
         after_id: options.afterId ?? null,
         prefetch: options.prefetch ?? true,
       },
@@ -128,9 +145,14 @@ export async function decide(options: {
   met: ContactMet
   prefetchAfterId: number | null
   states: ContactMet[]
+  decidedBy?: MetSource | null
 }): Promise<TriageDecisionResult> {
   const { data, error, response } = await api.POST('/api/v1/triage/decisions', {
-    params: { query: { states: options.states } },
+    // The queue is served the same way the answer serves the next card, so a
+    // review pass hands back the next contact still waiting to be reviewed --
+    // the one just answered has left that queue, because answering by hand is
+    // what `manual` means.
+    params: { query: { states: options.states, decided_by: options.decidedBy ?? null } },
     body: {
       contact_id: options.contactId,
       met: options.met,
@@ -148,9 +170,10 @@ export async function decide(options: {
 export async function undo(options: {
   force?: boolean
   states: ContactMet[]
+  decidedBy?: MetSource | null
 }): Promise<TriageUndoResult> {
   const { data, error, response } = await api.POST('/api/v1/triage/undo', {
-    params: { query: { states: options.states } },
+    params: { query: { states: options.states, decided_by: options.decidedBy ?? null } },
     body: { force: options.force ?? false },
   })
   if (data === undefined) fail(response.status, error, 'nothing was undone')
@@ -184,6 +207,39 @@ export async function fetchSuggestions(options: {
   })
   if (data === undefined) fail(response.status, error, 'the suggestions could not be read')
   return data
+}
+
+/**
+ * The contacts one batch covers, so it can be read before it is taken.
+ *
+ * A page of names, not the whole set: the point is to recognize the shape of
+ * what a batch would decide, and thirty names answer that as well as three
+ * hundred do. The total comes back either way, so the banner can say how many
+ * are not shown.
+ */
+export async function fetchSuggestionContacts(options: {
+  key: string
+  states: ContactMet[]
+  limit?: number
+  signal?: AbortSignal
+}): Promise<{ contacts: QueuedContact[]; total: number }> {
+  const { data, error, response } = await api.GET('/api/v1/triage/suggestions/{key}/contacts', {
+    params: {
+      path: { key: options.key },
+      query: { states: options.states, limit: options.limit ?? 10, offset: 0 },
+    },
+    signal: options.signal,
+  })
+  if (data === undefined)
+    fail(response.status, error, 'the contacts in this batch could not be read')
+  return {
+    contacts: data.items.map((contact) => ({
+      id: contact.id,
+      name: `${contact.preferred_name || contact.first_name} ${contact.last_name}`.trim(),
+      met: contact.met,
+    })),
+    total: data.total,
+  }
 }
 
 /**
@@ -237,6 +293,7 @@ export const AHEAD_PAGE = 100
  */
 export async function fetchQueueAhead(options: {
   states: ContactMet[]
+  decidedBy?: MetSource | null
   limit?: number
   signal?: AbortSignal
 }): Promise<{ contacts: QueuedContact[]; total: number }> {
@@ -245,12 +302,22 @@ export async function fetchQueueAhead(options: {
     field: 'met',
     value: state,
   }))
-  const where: FilterNode | null =
+  const byState: FilterNode | null =
     terms.length === 0
       ? null
       : terms.length === 1
         ? (terms[0] ?? null)
         : { op: 'or', children: terms }
+  // `met_source` is the same column `decided_by` narrows on, so the list ahead
+  // of a review pass is the review pass, not an approximation of it.
+  const decidedBy: FilterNode | null =
+    options.decidedBy == null ? null : { op: 'eq', field: 'met_source', value: options.decidedBy }
+  const where: FilterNode | null =
+    byState === null
+      ? decidedBy
+      : decidedBy === null
+        ? byState
+        : { op: 'and', children: [byState, decidedBy] }
   const { data, error, response } = await api.POST('/api/v1/contacts/query', {
     body: {
       filter: { include_archived: false, where },

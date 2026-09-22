@@ -152,7 +152,7 @@ describe('the predicate catalog and the filter language', () => {
   it('marks exactly the predicates the compiler refuses as unavailable', () => {
     // `filters.PLACEHOLDERS`; `tests/test_filter_builder.py` checks this side
     // against the backend's own dict, which is where a graduation shows up.
-    expect([...UNAVAILABLE_OPS].sort()).toEqual(['enrolled_in', 'list_member', 'replied_in'])
+    expect([...UNAVAILABLE_OPS].sort()).toEqual(['enrolled_in', 'replied_in'])
   })
 
   it('gives every unavailable predicate a reason worth reading', () => {

@@ -48,6 +48,7 @@ import {
   conflictFieldOf,
   decide as decideRequest,
   fetchQueue,
+  decidedByFor,
   fetchQueueAhead,
   setPreferredName,
   statesFor,
@@ -390,6 +391,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
   /** The look-ahead read in flight, kept off the decision chain and abortable. */
   const aheadRequest = useRef<AbortController | null>(null)
   const states = useMemo(() => statesFor(filter), [filter])
+  const decidedBy = useMemo(() => decidedByFor(filter), [filter])
 
   const commit = useCallback((update: (state: TriageQueueState) => TriageQueueState) => {
     stateRef.current = update(stateRef.current)
@@ -418,7 +420,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
     aheadRequest.current?.abort()
     const controller = new AbortController()
     aheadRequest.current = controller
-    void fetchQueueAhead({ states, signal: controller.signal }).then(
+    void fetchQueueAhead({ states, decidedBy, signal: controller.signal }).then(
       (page) => {
         if (controller.signal.aborted) return
         commit((state) => ({
@@ -437,7 +439,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
         }))
       },
     )
-  }, [commit, states])
+  }, [commit, decidedBy, states])
 
   const load = useCallback(async () => {
     commit((state) => ({
@@ -448,7 +450,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
     }))
     frontierRef.current = null
     try {
-      const queue = await fetchQueue({ states, prefetch: true })
+      const queue = await fetchQueue({ states, decidedBy, prefetch: true })
       const cards = [queue.card, queue.next].filter((card): card is TriageCard => card !== null)
       frontierRef.current = cards.at(-1)?.contact.id ?? null
       commit((state) => ({
@@ -466,7 +468,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
         loadError: messageOf(error, 'the triage queue could not be read'),
       }))
     }
-  }, [commit, refreshAhead, states])
+  }, [commit, decidedBy, refreshAhead, states])
 
   useEffect(() => {
     alive.current = true
@@ -574,6 +576,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
             met,
             prefetchAfterId: frontierRef.current,
             states,
+            decidedBy,
           })
           absorb(result.next, result.progress, settle)
         } catch (error) {
@@ -621,7 +624,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
       })
       return true
     },
-    [absorb, commit, enqueue, states],
+    [absorb, commit, decidedBy, enqueue, states],
   )
 
   const skipAhead = useCallback((): boolean => {
@@ -641,6 +644,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
       try {
         const queue = await fetchQueue({
           states,
+          decidedBy,
           afterId: frontierRef.current,
           prefetch: false,
         })
@@ -652,7 +656,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
       }
     })
     return true
-  }, [absorb, commit, enqueue, states])
+  }, [absorb, commit, decidedBy, enqueue, states])
 
   const back = useCallback(() => {
     commit((state) => {
@@ -760,7 +764,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
           return
         }
         try {
-          const result = await undoRequest({ force, states })
+          const result = await undoRequest({ force, states, decidedBy })
           const undone = taking === undefined ? 'the newest triage decision' : `“${taking.label}”`
           if (result.card === null) {
             // A bulk batch put many contacts back: the buffer no longer
@@ -865,7 +869,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
         }
       })
     },
-    [commit, enqueue, load, states],
+    [commit, decidedBy, enqueue, load, states],
   )
 
   const rename = useCallback(
