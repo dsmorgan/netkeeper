@@ -960,6 +960,7 @@ describe('the archive shape: a zip, or a lone message/invitation file (P1-21)', 
             {
               detail:
                 'random.zip: no Connections.csv, messages.csv, or Invitations.csv table in the archive',
+              code: 'wrong_archive',
             },
             422,
           ),
@@ -990,6 +991,7 @@ describe('the archive shape: a zip, or a lone message/invitation file (P1-21)', 
               detail:
                 'bomb.zip: member Skills.csv compresses 500x, over the 100x ratio a real export ' +
                 'never approaches',
+              code: 'compression_ratio_too_high',
             },
             422,
           ),
@@ -1059,33 +1061,60 @@ describe('the archive shape: a zip, or a lone message/invitation file (P1-21)', 
     expect(screen.getByText(/upload the file inside it/)).toBeVisible()
   })
 
-  it('falls back to a substring guess for a nested zip before a code exists', async () => {
-    // #124's own proposed fix for the nested-zip case (review finding 3):
-    // the backend already tells the person what to do, which the old
-    // default flatly contradicted by claiming the file was unrecognizable.
+  it.each([
+    ['encrypted', 'This zip is password-protected'],
+    ['malformed_table', 'netkeeper found the table it wanted but could not read it'],
+    ['too_large', 'This file is bigger or stranger than a real LinkedIn export'],
+    ['unsafe_member_path', 'This zip has a file netkeeper will not open'],
+    ['not_a_zip', "This doesn't look like a LinkedIn export"],
+  ])('answers %s with its own guidance', async (code, headline) => {
+    // The codes a person is least likely to hit and most likely to be
+    // confused by. One test each, because the mapping is the whole feature:
+    // the guidance is what tells them what to do, and the backend's message
+    // for these says what happened, not what to try next.
     mockFetch(
       backend({
         'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
         'POST /api/v1/imports/archive': () =>
-          jsonResponse(
-            {
-              detail:
-                'export.zip.zip contains another zip (export.zip); extract it and upload the ' +
-                'file inside.',
-            },
-            422,
-          ),
+          jsonResponse({ detail: `export.zip: refused as ${code}`, code }, 422),
       }),
     )
     await renderApp('/imports')
-    await chooseArchive(zipFile('export.zip.zip'))
+    await chooseArchive(zipFile('export.zip'))
+    await screen.findByText('Recognized: a LinkedIn data archive')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(headline)
+    expect(screen.getByText(new RegExp(`refused as ${code}`))).toBeVisible()
+  })
+
+  it('gives the honest default, not a wrong specific answer, when a refusal carries no code', async () => {
+    // Every archive refusal carries a code (#124), so this is a failure from
+    // somewhere else, or a backend older than the code it sends. The message
+    // below reads exactly like a corrupt download; guessing from its words is
+    // what this screen used to do, and what pointed people at the wrong next
+    // step when the backend reworded one. Saying less is the fix.
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/archive': () =>
+          jsonResponse({ detail: 'export.zip: corrupt central directory' }, 422),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(zipFile('export.zip'))
     await screen.findByText('Recognized: a LinkedIn data archive')
 
     fireEvent.click(screen.getByRole('button', { name: 'Import' }))
 
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent('This zip has another zip inside it')
-    // Never the old contradiction.
+    expect(alert).toHaveTextContent("netkeeper couldn't import this file")
+    // The backend's own words are still on screen, which is where the
+    // specific "what to do" lives when nothing here knows better.
+    expect(screen.getByText(/export\.zip: corrupt central directory/)).toBeVisible()
+    // And it never asserts what the file is.
+    expect(alert).not.toHaveTextContent("didn't come through in one piece")
     expect(alert).not.toHaveTextContent("doesn't look like a zip or a CSV")
   })
 
@@ -1098,7 +1127,7 @@ describe('the archive shape: a zip, or a lone message/invitation file (P1-21)', 
         'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
         'POST /api/v1/imports/archive': () =>
           jsonResponse(
-            { detail: 'export.zip: corrupt central directory', code: 'corrupt_archive' },
+            { detail: 'export.zip: damaged inside the zip (Bad CRC-32)', code: 'damaged' },
             422,
           ),
       }),
