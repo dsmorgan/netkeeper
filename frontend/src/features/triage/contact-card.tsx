@@ -14,6 +14,14 @@
  * region: it is long, it is for reading rather than for hearing announced, and
  * it is its own landmark.
  *
+ * That atomicity is why the "looking back" line carries `aria-hidden`. `←`
+ * changes the card *and* writes the screen's other live line, and an atomic
+ * region re-reads all of itself, so a reader heard the whole card and then a
+ * paraphrase of one of its sentences. The sentence has one owner now — the
+ * notice line, which is where "what just happened" belongs and is on screen as
+ * text either way. The card is left saying who this is; the notice says what
+ * pressing `←` did.
+ *
  * Nothing in here is a link that steals a key, and nothing is focusable except
  * the profile link, which sits last.
  */
@@ -62,6 +70,7 @@ export function ContactCard({
       {review !== null && (
         <p
           data-testid="card-review"
+          aria-hidden="true"
           className="rounded-md bg-muted px-2 py-1.5 text-xs ring-1 ring-foreground/10"
         >
           <span className="font-medium">Looking back.</span> {passedStateLabel(review)}. Coming here

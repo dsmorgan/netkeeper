@@ -297,3 +297,42 @@ describe('undo', () => {
     expect(picker).toBeInTheDocument()
   })
 })
+
+describe('undo against the service’s own conflict rule', () => {
+  it('is not refused because something else renamed the contact', async () => {
+    // `_diverged` iterates `row.after_state`, and a decide row records only
+    // `met` and `triaged_at` — so a rename in between is not this decision's
+    // business and undo goes through. The fake used to record `preferred_name`
+    // on a decide row and enforce it, which meant this screen was exercising a
+    // refusal the API cannot produce.
+    const { backend } = renderTriage({ contacts: 4 })
+    await currentName()
+
+    press('m')
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+    backend.diverge(1, { preferred_name: 'Adelaide' })
+
+    press('u')
+
+    await waitFor(() => expect(backend.byId(1).met).toBe('unknown'))
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    // The rename stands: undo put back what the decision recorded, and the
+    // decision never recorded a name.
+    expect(backend.byId(1).preferred_name).toBe('Adelaide')
+  })
+
+  it('is refused when the field the decision did record has moved', async () => {
+    const { backend } = renderTriage({ contacts: 4 })
+    await currentName()
+
+    press('m')
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+    backend.diverge(1, { triaged_at: '2030-01-01T00:00:00.000Z' })
+
+    press('u')
+
+    const prompt = await screen.findByRole('alertdialog')
+    expect(prompt).toHaveTextContent(/changed since you decided/i)
+    expect(backend.byId(1).met).toBe('met')
+  })
+})

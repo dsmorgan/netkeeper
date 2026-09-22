@@ -73,9 +73,33 @@ describe('stepping back through the run', () => {
 
     press('ArrowLeft')
     expect(screen.getByTestId('card-position')).toHaveTextContent(
-      'Looking back: 1 of the 1 you have already seen',
+      'Looking back: contact 1 of this run',
     )
   })
+
+  it('keeps counting the run past the point the trail stops remembering it', async () => {
+    // The trail is capped at a hundred cards; the run is not. Deriving the
+    // position from the trail froze this line at "contact 101" for the last
+    // five hundred of a six-hundred-person queue.
+    const { backend } = renderTriage({ contacts: 110 })
+    await currentName()
+
+    for (let index = 1; index <= 105; index += 1) {
+      press('m')
+      await waitFor(() => expect(backend.byId(index).met).toBe('met'))
+    }
+
+    expect(screen.getByTestId('card-position')).toHaveTextContent('Contact 106 of this run')
+    expect(screen.getByTestId('card-position')).toHaveTextContent('5 left in this queue')
+    expect(screen.getByTestId('triage-queue-list')).toHaveTextContent('105 seen so far in this run')
+
+    // And a card reached by walking back still names its place in the run, not
+    // its place in what is left of the trail.
+    press('ArrowLeft')
+    expect(screen.getByTestId('card-position')).toHaveTextContent(
+      'Looking back: contact 105 of this run',
+    )
+  }, 30_000)
 
   it('changes a decision from the trail and returns to where you were', async () => {
     const { backend } = renderTriage({ contacts: 5 })
@@ -325,5 +349,259 @@ describe('a decision that was refused', () => {
 
     press('m')
     await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+  })
+})
+
+describe('what the live line says about the card you stepped back to', () => {
+  /**
+   * The sentence is the thing that stops "back" being read as "undone", so each
+   * of its three shapes gets its own assertion. A constant in place of any of
+   * them used to pass the whole suite.
+   */
+  it('names the decision the contact actually carries', async () => {
+    const { backend } = renderTriage({ contacts: 5 })
+    await currentName()
+
+    press('n')
+    await waitFor(() => expect(backend.byId(1).met).toBe('not_met'))
+    press('ArrowLeft')
+
+    const notice = screen.getByTestId('triage-notice')
+    expect(notice).toHaveTextContent('who you marked not met')
+    expect(notice).not.toHaveTextContent('who you marked met.')
+  })
+
+  it('names a different decision for a different key', async () => {
+    const { backend } = renderTriage({ contacts: 5 })
+    await currentName()
+
+    press('s')
+    await waitFor(() => expect(backend.byId(1).met).toBe('skip'))
+    press('ArrowLeft')
+
+    expect(screen.getByTestId('triage-notice')).toHaveTextContent('who you marked skipped')
+  })
+
+  it('says so when the contact was only passed over', async () => {
+    const { backend } = renderTriage({ contacts: 5 })
+    await currentName()
+
+    press('ArrowRight')
+    await waitFor(async () => expect(await currentName()).toContain('Bo'))
+    press('ArrowLeft')
+
+    const notice = screen.getByTestId('triage-notice')
+    expect(notice).toHaveTextContent('You moved past them without deciding')
+    expect(notice).not.toHaveTextContent('you marked')
+    expect(backend.decisions).toHaveLength(0)
+  })
+
+  it('says so when the write for them never landed', async () => {
+    renderTriage({
+      contacts: 5,
+      intercept: async (request, next) => {
+        const { pathname } = new URL(request.url)
+        if (request.method === 'POST' && pathname === '/api/v1/triage/decisions') {
+          return jsonResponse({ detail: 'the database is locked' }, 500)
+        }
+        return next(request)
+      },
+    })
+    await currentName()
+
+    press('m')
+    await screen.findByRole('alert')
+    press('ArrowLeft')
+
+    const notice = screen.getByTestId('triage-notice')
+    expect(notice).toHaveTextContent('The last decision sent for them was not recorded')
+    expect(notice).toHaveTextContent('they are still untriaged')
+  })
+})
+
+describe('the trail cursor', () => {
+  it('steps exactly one contact at a time, in both directions', async () => {
+    // Every stop asserted, because a trail two deep clamps and hides an
+    // off-by-one: `at - 2` reaches the same card as `at - 1` at the far end.
+    const { backend } = renderTriage({ contacts: 6 })
+    await currentName()
+
+    for (const id of [1, 2, 3]) {
+      press('m')
+      await waitFor(() => expect(backend.byId(id).met).toBe('met'))
+    }
+    expect(await currentName()).toContain('Dev')
+
+    press('ArrowLeft')
+    expect(await currentName()).toContain('Cleo')
+    press('ArrowLeft')
+    expect(await currentName()).toContain('Bo')
+    press('ArrowLeft')
+    expect(await currentName()).toContain('Ada')
+
+    press('ArrowRight')
+    expect(await currentName()).toContain('Bo')
+    press('ArrowRight')
+    expect(await currentName()).toContain('Cleo')
+    press('ArrowRight')
+    expect(await currentName()).toContain('Dev')
+  })
+
+  it('opens the contact the list row names, not the one beside it', async () => {
+    const { backend } = renderTriage({ contacts: 6 })
+    await currentName()
+
+    for (const id of [1, 2, 3]) {
+      press('m')
+      await waitFor(() => expect(backend.byId(id).met).toBe('met'))
+    }
+
+    const list = screen.getByTestId('triage-queue-list')
+    fireEvent.click(within(list).getByRole('button', { name: /Bo Sample-2 — Met/ }))
+    expect(await currentName()).toContain('Bo')
+
+    fireEvent.click(within(list).getByRole('button', { name: /Ada Example-1 — Met/ }))
+    expect(await currentName()).toContain('Ada')
+  })
+})
+
+describe('the contacts ahead', () => {
+  it('lists the rest of the queue in the order it will be served', async () => {
+    renderTriage({ contacts: 6 })
+    await currentName()
+
+    const list = await screen.findByTestId('triage-queue-list')
+    // Ada is on screen and Bo is in hand; the other four come from
+    // `POST /contacts/query`, which compiles to the queue's own WHERE and
+    // ORDER BY. The list is the queue, not a guess at it.
+    await waitFor(() => expect(list).toHaveTextContent('Esme Fictional-5'))
+    const names = [...list.querySelectorAll('li')].map((row) => row.textContent ?? '')
+    expect(names).toHaveLength(6)
+    expect(names[0]).toContain('Ada Example-1')
+    expect(names[1]).toContain('Bo Sample-2')
+    expect(names[2]).toContain('Cleo Placeholder-3')
+    expect(names[5]).toContain('Finn Example-6')
+    expect(list).toHaveTextContent('That is the end of this queue.')
+  })
+
+  it('asks for the queue with the filter the screen is on', async () => {
+    const { backend } = renderTriage({ contacts: 4 })
+    await currentName()
+    await waitFor(() => expect(backend.countOf('/api/v1/contacts/query', 'POST')).toBe(1))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Skipped' }))
+
+    await waitFor(() => expect(backend.countOf('/api/v1/contacts/query', 'POST')).toBe(2))
+    // The fake refuses a filter it does not recognise with a 422, so a list
+    // that asked for the wrong set would show its error line rather than pass.
+    expect(screen.queryByText(/could not be read/i)).not.toBeInTheDocument()
+  })
+
+  it('drops a contact from the list once they have an answer', async () => {
+    const { backend } = renderTriage({ contacts: 6 })
+    await currentName()
+    const list = await screen.findByTestId('triage-queue-list')
+    await waitFor(() => expect(list).toHaveTextContent('Esme Fictional-5'))
+
+    press('m')
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+
+    // Ada is in the trail now, with her decision, and no longer counted among
+    // the ones waiting: the row that says "Met" is the only one naming her.
+    expect(within(list).getByRole('button', { name: /Ada Example-1 — Met/ })).toBeInTheDocument()
+    const naming = [...list.querySelectorAll('li')].filter((row) =>
+      (row.textContent ?? '').includes('Ada Example-1'),
+    )
+    expect(naming).toHaveLength(1)
+  })
+
+  it('carries on without the list when the queue cannot be read', async () => {
+    renderTriage({
+      contacts: 4,
+      intercept: (request, next) => {
+        if (new URL(request.url).pathname === '/api/v1/contacts/query') {
+          return Promise.resolve(jsonResponse({ detail: 'the database is locked' }, 500))
+        }
+        return next(request)
+      },
+    })
+    await currentName()
+
+    const list = await screen.findByTestId('triage-queue-list')
+    await waitFor(() => expect(list).toHaveTextContent(/could not be read/i))
+    // The run is not blocked on it.
+    expect(await currentName()).toContain('Ada')
+  })
+})
+
+describe('focus in the queue list', () => {
+  it('stays on the row you pressed when the cursor moves', async () => {
+    const { backend } = renderTriage({ contacts: 5 })
+    await currentName()
+
+    press('m')
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+
+    const list = screen.getByTestId('triage-queue-list')
+    const row = within(list).getByRole('button', { name: /Ada Example-1 — Met/ })
+    row.focus()
+    fireEvent.click(row)
+
+    expect(await currentName()).toContain('Ada')
+    expect(document.activeElement).toBe(row)
+  })
+
+  it('stays on the live row when it is used to come back', async () => {
+    const { backend } = renderTriage({ contacts: 5 })
+    await currentName()
+
+    press('m')
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+    press('ArrowLeft')
+
+    const list = screen.getByTestId('triage-queue-list')
+    const row = within(list).getByRole('button', { name: /Bo Sample-2 — Where you were/ })
+    row.focus()
+    fireEvent.click(row)
+
+    expect(await currentName()).toContain('Bo')
+    // The same element, relabelled — not replaced, which would drop focus to
+    // the document and send a keyboard user back to the top of the page.
+    expect(document.activeElement).toBe(row)
+    expect(row).toHaveAccessibleName('Bo Sample-2 — On screen')
+  })
+})
+
+describe('what a screen reader is told', () => {
+  it('does not say the same thing twice when the cursor moves', async () => {
+    // The card is an atomic live region, so `←` re-reads all of it. The
+    // "looking back" line used to be inside that and also paraphrased in the
+    // notice, which meant one key produced two announcements, the second a
+    // rewording of a sentence in the first. The notice owns it now; the line
+    // stays on screen for the eye.
+    const { backend } = renderTriage({ contacts: 5 })
+    await currentName()
+
+    press('n')
+    await waitFor(() => expect(backend.byId(1).met).toBe('not_met'))
+    press('ArrowLeft')
+
+    const review = await screen.findByTestId('card-review')
+    expect(review).toHaveAttribute('aria-hidden', 'true')
+    expect(review).toBeVisible()
+    expect(screen.getByTestId('triage-notice')).toHaveTextContent('who you marked not met')
+  })
+
+  it('adds no second announcement to a straight keyboard run', async () => {
+    const { backend } = renderTriage({ contacts: 5 })
+    await currentName()
+
+    press('m')
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+
+    // Only the card speaks: a decision at the head of the queue clears the
+    // notice rather than narrating what the card already says.
+    expect(screen.getByTestId('triage-notice')).toHaveTextContent('')
+    expect(screen.getByTestId('triage-notice').textContent).toBe('')
   })
 })

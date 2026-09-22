@@ -161,14 +161,22 @@ export function TriagePage() {
   const remaining = Math.max((progress?.remaining ?? 0) - queue.pending.removed, 0)
   const skipped = progress?.by_state.skip ?? 0
   const nextUndo = queue.undoable[0]
-  const seen = queue.passed.length
   const filterLabel = FILTERS.find((option) => option.value === filter)?.label ?? 'Untriaged'
   // Where this card sits, in the two terms a person asked for: which contact of
   // the run this is, and how much of the queue is still in front of them.
+  //
+  // The run position comes from `queue.seen`, not from the length of the trail.
+  // The trail is capped at a hundred cards; the run is not, and deriving one
+  // from the other froze this line at "contact 101" for the last five hundred
+  // of a six-hundred-person queue.
+  const runPosition =
+    queue.reviewIndex === null ? queue.seen + 1 : queue.trailOffset + queue.reviewIndex + 1
   const position =
     queue.reviewIndex === null
-      ? `Contact ${seen + 1} of this run · ${remaining} left in this queue`
-      : `Looking back: ${queue.reviewIndex + 1} of the ${seen} you have already seen · ${remaining} left in this queue`
+      ? `Contact ${runPosition} of this run · ${remaining} left in this queue`
+      : `Looking back: contact ${runPosition} of this run · ${remaining} left in this queue`
+  const notShown =
+    queue.aheadTotal === null ? null : Math.max(queue.aheadTotal - queue.ahead.length, 0)
 
   return (
     <div className="flex flex-col gap-4">
@@ -268,7 +276,7 @@ export function TriagePage() {
               <EmptyQueue
                 filter={filter}
                 skipped={skipped}
-                seen={seen}
+                seen={queue.seen}
                 onRevisitSkipped={() => setFilter('skip')}
                 canUndo={queue.undoable.length > 0}
                 onUndo={() => void queue.undo().then(previewAgain)}
@@ -305,18 +313,20 @@ export function TriagePage() {
             )}
           </div>
 
-          {(seen > 0 || queue.liveCard !== null) && (
+          {(queue.seen > 0 || queue.liveCard !== null) && (
             <QueueList
               passed={queue.passed}
               reviewIndex={queue.reviewIndex}
+              trailOffset={queue.trailOffset}
+              seen={queue.seen}
               liveCard={queue.liveCard}
-              ahead={queue.ahead}
-              remaining={remaining}
-              exhausted={queue.exhausted}
+              inHand={queue.inHand}
+              waiting={queue.waiting}
+              notShown={notShown}
+              error={queue.aheadError}
               filterLabel={filterLabel}
               onOpen={queue.goTo}
               onResume={queue.resume}
-              onNext={() => onAction('next')}
             />
           )}
         </div>

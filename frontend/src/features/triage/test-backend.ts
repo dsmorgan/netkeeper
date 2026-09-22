@@ -10,6 +10,13 @@
  * It also counts requests and can add latency, which is how the fifty-contacts
  * budget is measured rather than asserted.
  *
+ * Where it used to disagree with the service it now does not, and the three
+ * places that mattered are marked below: `progress` counts only live contacts,
+ * a decision row records exactly the fields the service records, and the undo
+ * conflict check reads those recorded fields rather than a list of its own.
+ * A fake that answers differently from the API is worse than no fake, because
+ * the suite goes green on behaviour the product does not have.
+ *
  * Every name, address, and number here is invented. Addresses are `.example`
  * and phone numbers are in the reserved `555-01xx` range (CLAUDE.md: no real
  * personal data in a fixture, ever).
@@ -73,6 +80,48 @@ export interface FakeBackend {
   setMessageCount(id: number, messages: number): void
 }
 
+/** The scalar columns `POST /contacts/query` returns when it is given none. */
+const CONTACT_COLUMNS = [
+  'first_name',
+  'last_name',
+  'preferred_name',
+  'headline',
+  'current_title',
+  'current_company',
+  'location',
+  'connected_on',
+  'met',
+  'triaged_at',
+  'do_not_contact',
+  'notes',
+] as const
+
+/**
+ * The met states a filter tree asks for, or a throw.
+ *
+ * The triage screen sends one shape: an `eq` on `met`, or an `or` of them.
+ * Anything else is a bug in the caller and is reported as one.
+ */
+function metStatesOf(where: unknown): ContactMet[] {
+  if (where === null || where === undefined) {
+    throw new Error('the look-ahead must filter on met')
+  }
+  const node = where as { op?: string; field?: string; value?: unknown; children?: unknown[] }
+  if (node.op === 'or') {
+    return (node.children ?? []).flatMap((child) => metStatesOf(child))
+  }
+  if (node.op !== 'eq' || node.field !== 'met') {
+    throw new Error(
+      `this fake only understands eq on met, not ${String(node.op)} on ${String(node.field)}`,
+    )
+  }
+  const value = node.value
+  if (value !== 'unknown' && value !== 'met' && value !== 'not_met' && value !== 'skip') {
+    throw new Error(`${String(value)} is not a met state`)
+  }
+  return [value]
+}
+
 function contactName(index: number): { first: string; last: string } {
   return {
     first: GIVEN[index % GIVEN.length] ?? 'Ada',
@@ -109,14 +158,36 @@ export function makeContact(index: number, options: { messages?: number } = {}):
   }
 }
 
-const QUEUE_FIELDS = ['met', 'triaged_at', 'preferred_name'] as const
+/**
+ * The fields each kind of decision row records, as `netkeeper.crm.triage` does.
+ *
+ * `decide` and `bulk_met` snapshot `(met, triaged_at)`; `set_preferred_name`
+ * snapshots `(preferred_name,)`. `_log` then derives `after_state` from the
+ * same keys, and `_diverged` iterates *those* keys — so a decide row's undo is
+ * refused when `triaged_at` moved and is **not** refused when something else
+ * renamed the contact. Recording all three fields here made the fake stricter
+ * than the API in one direction and blinder in the other.
+ */
+type RecordedField = 'met' | 'triaged_at' | 'preferred_name'
 
-function snapshot(contact: FakeContact): Record<string, string | null> {
-  return {
-    met: contact.met,
-    triaged_at: contact.triaged_at,
-    preferred_name: contact.preferred_name,
-  }
+const RECORDED_FIELDS: Record<FakeDecision['kind'], readonly RecordedField[]> = {
+  decide: ['met', 'triaged_at'],
+  bulk_met: ['met', 'triaged_at'],
+  preferred_name: ['preferred_name'],
+}
+
+/** One recorded column as the log stores it. Throws on a field the log never holds. */
+function readField(contact: FakeContact, name: string): string | null {
+  if (name === 'met') return contact.met
+  if (name === 'triaged_at') return contact.triaged_at
+  if (name === 'preferred_name') return contact.preferred_name
+  throw new Error(`the triage log does not record ${name}`)
+}
+
+function snapshot(contact: FakeContact, fields: Iterable<string>): Record<string, string | null> {
+  const out: Record<string, string | null> = {}
+  for (const field of fields) out[field] = readField(contact, field)
+  return out
 }
 
 export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend {
@@ -227,12 +298,21 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
     }
   }
 
+  /**
+   * `netkeeper.crm.triage.progress`: one grouped count over the **live**
+   * contacts. Archived and merged-away rows are excluded before grouping, so
+   * archiving a contact you had marked met drops both `total` and `triaged`.
+   */
   function progress(states: ContactMet[]) {
+    const live = contacts.filter(
+      (contact) => contact.archivedAt === null && contact.mergedIntoId === null,
+    )
     const by_state: Record<string, number> = { unknown: 0, met: 0, not_met: 0, skip: 0 }
-    for (const contact of contacts) by_state[contact.met] = (by_state[contact.met] ?? 0) + 1
+    for (const contact of live) by_state[contact.met] = (by_state[contact.met] ?? 0) + 1
+    const total = live.length
     return {
-      total: contacts.length,
-      triaged: contacts.filter((contact) => contact.met !== 'unknown').length,
+      total,
+      triaged: total - (by_state.unknown ?? 0),
       remaining: queue(states).length,
       by_state,
     }
@@ -249,7 +329,8 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
       contact_id: contact.id,
       kind,
       before_state: before,
-      after_state: snapshot(contact),
+      // `_log`: `after_state = _snapshot(contact, before)` — the same keys.
+      after_state: snapshot(contact, Object.keys(before)),
       batch_id: batchId,
       decided_at: new Date().toISOString(),
       undone_at: null,
@@ -317,7 +398,7 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
       }
       const contact = contacts.find((candidate) => candidate.id === input.contact_id)
       if (contact === undefined) return jsonResponse({ detail: 'no such contact' }, 404)
-      const before = snapshot(contact)
+      const before = snapshot(contact, RECORDED_FIELDS.decide)
       contact.met = input.met
       contact.triaged_at = new Date().toISOString()
       const decision = record(contact, 'decide', before)
@@ -363,15 +444,17 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
               'it was archived after the decision, so undo cannot put it back in the queue',
             )
           }
-          const now = snapshot(contact)
-          const field = QUEUE_FIELDS.find(
-            (name) => name !== 'triaged_at' && now[name] !== decision.after_state[name],
+          // `_diverged` iterates `row.after_state`, so which fields are
+          // checked is a property of the row, not a list kept here: a decide
+          // row is refused when `triaged_at` moved and never for a rename.
+          const field = Object.keys(decision.after_state).find(
+            (name) => readField(contact, name) !== decision.after_state[name],
           )
           if (field !== undefined) {
             return conflict(
               contact.id,
               field,
-              now[field] ?? null,
+              readField(contact, field),
               'something changed it after the decision, so undo would overwrite that change',
               decision.after_state[field] ?? null,
             )
@@ -381,9 +464,14 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
       const undoneAt = new Date().toISOString()
       for (const decision of batch) {
         const contact = byId(decision.contact_id)
-        contact.met = (decision.before_state.met ?? 'unknown') as ContactMet
-        contact.triaged_at = decision.before_state.triaged_at ?? null
-        contact.preferred_name = decision.before_state.preferred_name ?? contact.first_name
+        // `_restore`: every field of `before_state`, and only those. A
+        // preferred-name row does not put `met` back.
+        for (const [name, value] of Object.entries(decision.before_state)) {
+          if (name === 'met') contact.met = (value ?? 'unknown') as ContactMet
+          else if (name === 'triaged_at') contact.triaged_at = value
+          else if (name === 'preferred_name') contact.preferred_name = value ?? contact.first_name
+          else throw new Error(`the triage log does not record ${name}`)
+        }
         decision.undone_at = undoneAt
       }
       const single = batch.length === 1 ? byId(batch[0]!.contact_id) : null
@@ -401,13 +489,68 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
     if (nameMatch !== null) {
       const contact = byId(Number(nameMatch[1]))
       const input = body as { preferred_name: string }
-      const before = snapshot(contact)
+      const before = snapshot(contact, RECORDED_FIELDS.preferred_name)
       contact.preferred_name = input.preferred_name.trim() || contact.first_name
       const decision = record(contact, 'preferred_name', before)
       return jsonResponse({
         contact_id: contact.id,
         preferred_name: contact.preferred_name,
         decision,
+      })
+    }
+
+    // `POST /contacts/query`, as far as the triage screen uses it: the
+    // look-ahead list. Deliberately strict — anything the screen might send
+    // that this does not understand answers 422 rather than quietly returning
+    // the wrong set, because a fake that agrees with a wrong filter is how a
+    // green suite ships a broken list.
+    if (url.pathname === '/api/v1/contacts/query') {
+      const input = (body ?? {}) as {
+        filter?: { include_archived?: boolean; where?: unknown } | null
+        sort?: unknown[]
+        limit?: number
+        offset?: number
+        columns?: string[] | null
+      }
+      let wanted: ContactMet[]
+      try {
+        wanted = metStatesOf(input.filter?.where)
+      } catch (failure) {
+        return jsonResponse({ detail: String(failure) }, 422)
+      }
+      if (input.filter?.include_archived === true) {
+        return jsonResponse({ detail: 'the queue never includes archived contacts' }, 422)
+      }
+      if ((input.sort ?? []).length > 0) {
+        return jsonResponse({ detail: 'the queue is id order; this fake takes no sort' }, 422)
+      }
+      // `compile_where` excludes merged-away rows unconditionally and archived
+      // ones unless `include_archived`, which is exactly `_queue_where`.
+      const matching = contacts
+        .filter(
+          (contact) =>
+            wanted.includes(contact.met) &&
+            contact.archivedAt === null &&
+            contact.mergedIntoId === null,
+        )
+        // `apply_sort` ends every ordering with `Contact.id.asc()`, and with no
+        // sort keys that is the whole ordering.
+        .sort((a, b) => a.id - b.id)
+      const offset = input.offset ?? 0
+      const limit = input.limit ?? 50
+      const columns = input.columns ?? CONTACT_COLUMNS
+      return jsonResponse({
+        items: matching.slice(offset, offset + limit).map((contact) => ({
+          id: contact.id,
+          primary_email: null,
+          primary_phone: null,
+          // Only the columns asked for are set, as `_row` does it.
+          ...Object.fromEntries(
+            columns.map((name) => [name, contact[name as keyof FakeContact] ?? null]),
+          ),
+        })),
+        total: matching.length,
+        describe: wanted.join(' or '),
       })
     }
 
@@ -441,7 +584,7 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
       }
       const batchId = `batch-${nextDecisionId}`
       for (const contact of matching) {
-        const before = snapshot(contact)
+        const before = snapshot(contact, RECORDED_FIELDS.bulk_met)
         contact.met = 'met'
         contact.triaged_at = new Date().toISOString()
         record(contact, 'bulk_met', before, batchId)

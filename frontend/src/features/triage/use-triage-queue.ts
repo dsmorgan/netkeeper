@@ -41,18 +41,21 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
 
 import {
+  AHEAD_PAGE,
   LIVENESS_CONFLICTS,
   TriageError,
   applySuggestion,
   conflictFieldOf,
   decide as decideRequest,
   fetchQueue,
+  fetchQueueAhead,
   setPreferredName,
   statesFor,
   tagContact,
   undo as undoRequest,
   untagContact,
   type ContactMet,
+  type QueuedContact,
   type QueueFilter,
   type TriageCard,
   type TriageContact,
@@ -95,8 +98,30 @@ export interface TriageQueueState {
   cards: TriageCard[]
   /** Contacts already passed this run, oldest first. The `←` key walks this. */
   passed: PassedCard[]
+  /**
+   * How many contacts this run has moved past, which is **not** `passed.length`.
+   *
+   * The trail is capped, so its length stops growing at `MAX_PASSED` while the
+   * run goes on. Deriving the position from it froze the counter at "contact
+   * 101" for the remaining five hundred of a 616-person queue. This counts the
+   * run; the trail only remembers as much of it as it can hold.
+   */
+  seen: number
   /** Where `←` has walked to, or `null` when the live card is on screen. */
   reviewIndex: number | null
+  /**
+   * The contacts still waiting, from `POST /contacts/query` in queue order.
+   *
+   * A page taken from the head of the queue, so the rows before the frontier
+   * are cards already in hand and the caller shows only the ones past it.
+   */
+  ahead: QueuedContact[]
+  /** How many the queue holds altogether, as the same answer counted it. */
+  aheadTotal: number | null
+  /** That page was full, so there is more behind it and another can be asked for. */
+  aheadMore: boolean
+  /** The look-ahead could not be read. The run carries on without it. */
+  aheadError: string | null
   /** The last thing that happened, in the screen's own words. Never an error. */
   notice: string | null
   progress: TriageProgress | null
@@ -153,7 +178,12 @@ const INITIAL: TriageQueueState = {
   status: 'loading',
   cards: [],
   passed: [],
+  seen: 0,
   reviewIndex: null,
+  ahead: [],
+  aheadTotal: null,
+  aheadMore: false,
+  aheadError: null,
   notice: null,
   progress: null,
   pending: NO_PENDING,
@@ -177,6 +207,19 @@ const INITIAL: TriageQueueState = {
  */
 const MAX_PASSED = 100
 
+/** Ask for another page of the contacts ahead once the tail is this short. */
+const AHEAD_MIN = 10
+
+/**
+ * How many failed decisions are remembered, so the map is bounded like the trail.
+ *
+ * An entry only matters to an undo pressed underneath the decision it names,
+ * which is the same tick or the next few; keeping the newest fifty is far more
+ * than that needs and stops a long run with a flaky backend from growing a map
+ * nobody reads.
+ */
+const MAX_RETRACTED = 50
+
 /** What a bulk apply did, so the banner can re-preview instead of reporting a failure. */
 export type BulkOutcome =
   | { kind: 'applied'; applied: number }
@@ -191,7 +234,11 @@ export interface TriageQueue extends TriageQueueState {
   /** The head of the buffer, whatever `←` is looking at. */
   readonly liveCard: TriageCard | null
   /** The cards already in hand behind the live one. */
-  readonly ahead: readonly TriageCard[]
+  readonly inHand: readonly TriageCard[]
+  /** The contacts past everything in hand, in the order the queue will serve them. */
+  readonly waiting: readonly QueuedContact[]
+  /** The run position of `passed[0]`, so a trail entry can name its place in the run. */
+  readonly trailOffset: number
   /** True while the buffer is empty but more is coming. */
   readonly refilling: boolean
   /** The card on screen, read fresh — safe from a key pressed before a re-render. */
@@ -270,6 +317,19 @@ function reviewNotice(entry: PassedCard): string {
   return `Back at ${name}, who you marked ${MET_LABELS[entry.decision]}. Going back wrote nothing; deciding again replaces it.`
 }
 
+/**
+ * What the undo did to the contact's row in this run, when it has one.
+ *
+ * "The card did not change" is true of the card and false of the screen: the
+ * trail row for that contact visibly moves from Not met back to Met. Saying
+ * only the first half reads as "nothing happened", which is the one thing undo
+ * must never look like.
+ */
+function trailNote(passed: readonly PassedCard[], contactId: number): string {
+  const entry = passed.find((row) => row.card.contact.id === contactId)
+  return entry === undefined ? '' : ` Their row in this run reads ${passedStateLabel(entry)} now.`
+}
+
 /** How the trail names a contact's state, for the queue list's chips. */
 export function passedStateLabel(entry: PassedCard): string {
   if (entry.failed) return 'Not recorded'
@@ -277,7 +337,12 @@ export function passedStateLabel(entry: PassedCard): string {
   return { met: 'Met', not_met: 'Not met', skip: 'Skipped', unknown: 'Untriaged' }[entry.decision]
 }
 
-/** Drop the oldest of the trail once it is longer than a run needs. */
+/**
+ * Drop the oldest of the trail once it is longer than a run needs.
+ *
+ * Every caller also increments `seen`, which is the run's own counter and does
+ * not stop at the cap.
+ */
 function remember(passed: PassedCard[], entry: PassedCard): PassedCard[] {
   const next = [...passed, entry]
   return next.length > MAX_PASSED ? next.slice(next.length - MAX_PASSED) : next
@@ -322,6 +387,8 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
    * comes.
    */
   const retracted = useRef(new Map<number, string>())
+  /** The look-ahead read in flight, kept off the decision chain and abortable. */
+  const aheadRequest = useRef<AbortController | null>(null)
   const states = useMemo(() => statesFor(filter), [filter])
 
   const commit = useCallback((update: (state: TriageQueueState) => TriageQueueState) => {
@@ -338,6 +405,39 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
     )
     return run
   }, [])
+
+  /**
+   * Take a page of the contacts ahead.
+   *
+   * Deliberately **not** on the serialized chain: it is a read that touches
+   * neither the frontier nor the undo stack, and putting it there would make
+   * the next decision's `POST` queue behind it. A failure leaves the panel
+   * showing what is in hand and says so; the run does not depend on it.
+   */
+  const refreshAhead = useCallback(() => {
+    aheadRequest.current?.abort()
+    const controller = new AbortController()
+    aheadRequest.current = controller
+    void fetchQueueAhead({ states, signal: controller.signal }).then(
+      (page) => {
+        if (controller.signal.aborted) return
+        commit((state) => ({
+          ...state,
+          ahead: page.contacts,
+          aheadTotal: page.total,
+          aheadMore: page.contacts.length >= AHEAD_PAGE,
+          aheadError: null,
+        }))
+      },
+      (error: unknown) => {
+        if (controller.signal.aborted) return
+        commit((state) => ({
+          ...state,
+          aheadError: messageOf(error, 'the contacts ahead could not be read'),
+        }))
+      },
+    )
+  }, [commit, states])
 
   const load = useCallback(async () => {
     commit((state) => ({
@@ -358,6 +458,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
         progress: queue.progress,
         exhausted: queue.next === null,
       }))
+      refreshAhead()
     } catch (error) {
       commit((state) => ({
         ...state,
@@ -365,12 +466,13 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
         loadError: messageOf(error, 'the triage queue could not be read'),
       }))
     }
-  }, [commit, states])
+  }, [commit, refreshAhead, states])
 
   useEffect(() => {
     alive.current = true
     return () => {
       alive.current = false
+      aheadRequest.current?.abort()
     }
   }, [])
 
@@ -439,14 +541,17 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
           return {
             ...shared,
             cards: state.cards.slice(1),
+            seen: state.seen + 1,
             passed: remember(state.passed, { card: decided, decision: met, failed: false }),
             notice: null,
           }
         }
-        // Changing a decision from the trail. The buffer is untouched — the
+        // Changing a decision from the trail. Nothing leaves the buffer — the
         // contact is behind the frontier and was never going to be served
-        // again — and the cursor steps forward, so `← m` puts the person back
-        // where they were with one more key.
+        // again — though the answer's prefetch still lands in it through
+        // `absorb`, so the cards in hand run one further ahead than before.
+        // The cursor steps forward, so `← m` puts the person back where they
+        // were with one more key.
         const passed = state.passed.map((old, index) =>
           index === reviewIndex ? { card: decided, decision: met, failed: false } : old,
         )
@@ -480,6 +585,13 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
           // note keeps an undo already pressed underneath this decision from
           // reaching past it to the one before.
           retracted.current.set(seq, nameOf(card))
+          // Bounded like the trail: an entry is only ever read by an undo
+          // pressed underneath the decision it names.
+          while (retracted.current.size > MAX_RETRACTED) {
+            const oldest = retracted.current.keys().next()
+            if (oldest.done === true) break
+            retracted.current.delete(oldest.value)
+          }
           const unchanged: PassedCard = {
             card,
             decision: entry?.decision ?? (was === 'unknown' ? null : was),
@@ -518,6 +630,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
     commit((state) => ({
       ...state,
       cards: state.cards.slice(1),
+      seen: state.seen + 1,
       passed: remember(state.passed, { card, decision: null, failed: false }),
       undoConflict: null,
       notice: null,
@@ -596,11 +709,19 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
   )
 
   const resume = useCallback(() => {
-    commit((state) =>
-      state.reviewIndex === null
+    commit((state) => {
+      if (state.reviewIndex !== null) {
+        return { ...state, reviewIndex: null, notice: resumeNotice(state) }
+      }
+      // The row for the live card is a button whether or not the cursor is in
+      // the trail, so that using the list never destroys the element the click
+      // was on and drops focus to the document. Pressed here it has nothing to
+      // do, so it says so rather than looking broken.
+      const live = state.cards[0]
+      return live === undefined
         ? state
-        : { ...state, reviewIndex: null, notice: resumeNotice(state) },
-    )
+        : { ...state, notice: `You are on ${nameOf(live)} already.` }
+    })
   }, [commit, resumeNotice])
 
   const notify = useCallback(
@@ -716,7 +837,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
                       leftQueue
                         ? 'They were archived or merged away since, so they are not in this queue and the card did not change.'
                         : 'They are not in this queue, so the card did not change.'
-                    }`,
+                    }${trailNote(passed, restored.contact.id)}`,
             }
           })
         } catch (error) {
@@ -852,12 +973,28 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
   }, [enqueue, load])
 
   const state = stateRef.current
+  // The rows past everything already in hand. `frontierRef` is the furthest
+  // contact the server has handed over, so anything at or below it is either a
+  // card in the buffer or one already passed, and both are drawn from state
+  // that is more current than this page.
+  const frontier = frontierRef.current
+  const waiting = state.ahead.filter((row) => frontier === null || row.id > frontier)
+  // A page is only asked for again when the tail it left has nearly run out
+  // *and* that page was full, so a queue whose whole tail is in hand never
+  // asks twice and a long run asks about once every ninety contacts.
+  const wantsMore = state.status === 'ready' && state.aheadMore && waiting.length < AHEAD_MIN
+  useEffect(() => {
+    if (wantsMore) refreshAhead()
+  }, [wantsMore, refreshAhead])
+
   return {
     ...state,
     current: onScreen(state),
     reviewing: state.reviewIndex === null ? null : (state.passed[state.reviewIndex] ?? null),
     liveCard: state.cards[0] ?? null,
-    ahead: state.cards.slice(1),
+    inHand: state.cards.slice(1),
+    waiting,
+    trailOffset: state.seen - state.passed.length,
     refilling: state.status === 'ready' && state.cards.length === 0 && !state.exhausted,
     peek,
     decide,

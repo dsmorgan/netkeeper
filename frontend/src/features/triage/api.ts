@@ -30,6 +30,7 @@ export type Interaction = components['schemas']['InteractionOut']
 export type TimelineEntry = TriageEvidence['timeline'][number]
 export type TriageTag = components['schemas']['TriageTagOut']
 export type Tag = components['schemas']['TagOut']
+type FilterNode = components['schemas']['FilterNode-Input']
 
 /**
  * The query key prefix for the bulk suggestion's preview. The page invalidates
@@ -200,6 +201,75 @@ export async function applySuggestion(options: {
   })
   if (data === undefined) fail(response.status, error, 'the suggestion was not applied')
   return data
+}
+
+/** One contact waiting in the queue, as the look-ahead list draws it. */
+export interface QueuedContact {
+  id: number
+  name: string
+  met: ContactMet
+}
+
+/**
+ * How many of the contacts ahead are asked for at a time.
+ *
+ * The API caps a page at 200. A hundred fills the panel many times over and
+ * keeps the run from asking again every few contacts: on a 616-person queue
+ * this costs about seven reads for the whole run, against 616 decisions.
+ */
+export const AHEAD_PAGE = 100
+
+/**
+ * The contacts still waiting, in the order the queue will serve them.
+ *
+ * There is no triage endpoint that lists the queue — `GET /triage/next` serves
+ * one card and its successor — but the queue is not a private ordering:
+ * `netkeeper.crm.triage._queue_where` is `met IN states AND archived_at IS NULL
+ * AND merged_into_id IS NULL`, ordered by `id`. `POST /contacts/query` compiles
+ * to exactly that: `met` is a filterable enum field, `compile_where` adds
+ * `merged_into_id IS NULL` unconditionally and `archived_at IS NULL` unless
+ * `include_archived`, and `apply_sort` ends every ordering with `id ASC` — so
+ * an empty `sort` *is* the queue's order rather than an approximation of it.
+ *
+ * `offset` is always 0 and the answer is always the head of the queue, because
+ * a contact that gets a decision leaves the filter. The caller drops the rows
+ * it already holds cards for and asks again when the tail runs short.
+ */
+export async function fetchQueueAhead(options: {
+  states: ContactMet[]
+  limit?: number
+  signal?: AbortSignal
+}): Promise<{ contacts: QueuedContact[]; total: number }> {
+  const terms: FilterNode[] = options.states.map((state) => ({
+    op: 'eq',
+    field: 'met',
+    value: state,
+  }))
+  const where: FilterNode | null =
+    terms.length === 0
+      ? null
+      : terms.length === 1
+        ? (terms[0] ?? null)
+        : { op: 'or', children: terms }
+  const { data, error, response } = await api.POST('/api/v1/contacts/query', {
+    body: {
+      filter: { include_archived: false, where },
+      sort: [],
+      limit: options.limit ?? AHEAD_PAGE,
+      offset: 0,
+      columns: ['first_name', 'last_name', 'preferred_name', 'met'],
+    },
+    signal: options.signal,
+  })
+  if (data === undefined) fail(response.status, error, 'the contacts ahead could not be read')
+  return {
+    contacts: data.items.map((row) => ({
+      id: row.id,
+      name: `${row.preferred_name ?? row.first_name ?? ''} ${row.last_name ?? ''}`.trim(),
+      met: row.met ?? 'unknown',
+    })),
+    total: data.total,
+  }
 }
 
 /** Every tag, for the `t` key's picker. */
