@@ -464,6 +464,8 @@ class ContactStatsOut(BaseModel):
     with_email: int
     with_phone: int
     tagged: int
+    tagged_by_rule: int
+    """A contact with at least one auto-tag-rule-assigned tag; a subset of ``tagged``."""
 
 
 class ContactEmailOut(BaseModel):

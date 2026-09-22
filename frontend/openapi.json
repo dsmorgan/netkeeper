@@ -2019,6 +2019,10 @@
             "title": "Tagged",
             "type": "integer"
           },
+          "tagged_by_rule": {
+            "title": "Tagged By Rule",
+            "type": "integer"
+          },
           "total": {
             "title": "Total",
             "type": "integer"
@@ -2046,7 +2050,8 @@
           "merged_away",
           "with_email",
           "with_phone",
-          "tagged"
+          "tagged",
+          "tagged_by_rule"
         ],
         "title": "ContactStatsOut",
         "type": "object"

@@ -1946,6 +1946,8 @@ export interface components {
             skipped: number;
             /** Tagged */
             tagged: number;
+            /** Tagged By Rule */
+            tagged_by_rule: number;
             /** Total */
             total: number;
             /** Untriaged */

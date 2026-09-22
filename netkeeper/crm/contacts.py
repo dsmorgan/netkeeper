@@ -76,6 +76,7 @@ from netkeeper.models import (
     EmailStatus,
     LinkKind,
     PhoneKind,
+    TagSource,
     User,
     linkedin_profile_url,
     normalize_public_id,
@@ -213,9 +214,16 @@ class ContactStats:
 
     ``archived`` and ``merged_away`` are *not* part of ``total`` — they count
     the rows outside the live set, one line each for the two ways a contact
-    leaves it. ``with_email``, ``with_phone``, and ``tagged`` are also over the
-    live set, so every number in the table is a count out of the same
-    ``total``.
+    leaves it. ``with_email``, ``with_phone``, ``tagged``, and ``tagged_by_rule``
+    are also over the live set, so every number in the table is a count out of
+    the same ``total``.
+
+    ``tagged`` is "this contact carries a tag, from any source"; ``tagged_by_rule``
+    is "an auto-tag rule put one there" (:attr:`~netkeeper.models.TagSource.RULE`
+    only, not ``manual`` or ``llm``) — a dashboard that wants to say how many
+    contacts netkeeper tagged on its own needs the second number, and neither is
+    inferable from the other: a contact a rule tagged and a person then tagged by
+    hand too still counts in both.
     """
 
     total: int
@@ -228,6 +236,43 @@ class ContactStats:
     with_email: int
     with_phone: int
     tagged: int
+    tagged_by_rule: int
+
+
+def _has_child(user: User, model: type[ContactEmail] | type[ContactPhone]) -> ColumnElement[bool]:
+    """A correlated ``EXISTS`` for one of ``user``'s child rows on the outer ``Contact``.
+
+    Module level, not a closure inside :func:`contact_stats`, so a test can compile
+    it on its own and check the SQL text names ``user`` the same way
+    ``tests/test_filters.py``'s subquery-scoping test does for the filter
+    language: the runtime scope guard does not reach a
+    correlated subquery (it only inspects the outer statement), so this
+    ``model.user_id == user.id`` term is what actually keeps ``with_email`` and
+    ``with_phone`` to one user, not a pattern the guard would catch if it were
+    ever dropped.
+    """
+    return (
+        select(model.id)
+        .where(model.contact_id == Contact.id, model.user_id == user.id)
+        .correlate(Contact)
+        .exists()
+    )
+
+
+def _has_tag(user: User, *, source: TagSource | None = None) -> ColumnElement[bool]:
+    """The same correlated ``EXISTS``, over ``user``'s own :class:`ContactTag` rows.
+
+    ``source`` narrows it to one :class:`~netkeeper.models.TagSource` (``rule``,
+    for ``tagged_by_rule``); omitted, it is "any tag from anywhere", ``tagged``'s
+    question.
+    """
+    clauses: list[ColumnElement[bool]] = [
+        ContactTag.contact_id == Contact.id,
+        ContactTag.user_id == user.id,
+    ]
+    if source is not None:
+        clauses.append(ContactTag.source == source)
+    return select(ContactTag.id).where(*clauses).correlate(Contact).exists()
 
 
 def contact_stats(session: Session, user: User) -> ContactStats:
@@ -246,20 +291,6 @@ def contact_stats(session: Session, user: User) -> ContactStats:
             statement = statement.where(*clauses)
         return session.scalar(statement) or 0
 
-    def has_child(model: type[ContactEmail] | type[ContactPhone]) -> ColumnElement[bool]:
-        return (
-            select(model.id)
-            .where(model.contact_id == Contact.id, model.user_id == user.id)
-            .correlate(Contact)
-            .exists()
-        )
-
-    has_tag = (
-        select(ContactTag.id)
-        .where(ContactTag.contact_id == Contact.id, ContactTag.user_id == user.id)
-        .correlate(Contact)
-        .exists()
-    )
     return ContactStats(
         total=count(*live),
         met=count(*live, Contact.met == ContactMet.MET),
@@ -268,9 +299,10 @@ def contact_stats(session: Session, user: User) -> ContactStats:
         untriaged=count(*live, Contact.met == ContactMet.UNKNOWN),
         archived=count(Contact.archived_at.is_not(None)),
         merged_away=count(Contact.merged_into_id.is_not(None)),
-        with_email=count(*live, has_child(ContactEmail)),
-        with_phone=count(*live, has_child(ContactPhone)),
-        tagged=count(*live, has_tag),
+        with_email=count(*live, _has_child(user, ContactEmail)),
+        with_phone=count(*live, _has_child(user, ContactPhone)),
+        tagged=count(*live, _has_tag(user)),
+        tagged_by_rule=count(*live, _has_tag(user, source=TagSource.RULE)),
     )
 
 

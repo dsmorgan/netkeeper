@@ -14,6 +14,7 @@ import typer
 import uvicorn
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from netkeeper import __version__, migrations
@@ -454,7 +455,8 @@ def import_csv_cmd(
         typer.Option(
             "--on-candidate",
             help="How to resolve a row that matches more than one contact: "
-            "new (a separate contact) or skip (leave it out). Omitted: refuse and say which rows.",
+            "new (a separate contact) or skip (leave it out). Applies to every ambiguous "
+            "row in the file at once, not one at a time. Omitted: refuse and say which rows.",
         ),
     ] = None,
 ) -> None:
@@ -617,7 +619,8 @@ def import_resume_cmd(
         typer.Option(
             "--on-candidate",
             help="How to resolve a row that matches more than one contact: "
-            "new (a separate contact) or skip (leave it out). Omitted: refuse and say which rows.",
+            "new (a separate contact) or skip (leave it out). Applies to every row still "
+            "undecided in the run at once, not one at a time. Omitted: refuse and say which rows.",
         ),
     ] = None,
 ) -> None:
@@ -627,30 +630,66 @@ def import_resume_cmd(
     named run in place, so a run a refused commit named -- or one left by
     ``--dry-run`` -- is the one that gets finished, not a second draft next to
     it (#90). ``netkeeper import runs --status draft`` lists the candidates.
+
+    Unlike ``import csv``, where the read and the commit are the same instant,
+    time passes before a resume: a row this run once saw as a candidate may by
+    now be an outright match or a plain new contact, because someone decided
+    it another way, or a colliding contact was merged, edited, or deleted.
+    ``commit()`` re-resolves every row against the database as it is *now*
+    (``import_runs.py``), so this asks ``commit()`` itself which rows are
+    still undecided rather than trusting the resolution the draft recorded
+    when it was read -- the same divergence between the CLI and the API this
+    item exists to close, reintroduced by trusting stale state here.
     """
-    draft = _draft_snapshot(run_id)
-    if draft.candidate_rows and on_candidate is None:
-        _refuse_undecided(draft.id, draft.candidate_rows)
-    committed = _commit_draft(draft, on_candidate)
+    if on_candidate == "skip":
+        committed = _resume_commit(run_id, skip_undecided=True)
+        typer.echo(_run_report("committed", committed))
+        return
+    try:
+        committed = _resume_commit(run_id)
+    except import_runs.UndecidedCandidates as exc:
+        if on_candidate is None:
+            _refuse_undecided(run_id, exc.row_numbers)
+        # --on-candidate new: decide exactly the rows commit() itself just said
+        # are still undecided, never a set read off the draft's stored
+        # resolution -- a row already resolved another way since the draft was
+        # read must not be handed a decision, which identity.apply() refuses
+        # for anything but a Candidate resolution and would otherwise silently
+        # skip.
+        decisions = {number: CreateNew() for number in exc.row_numbers}
+        committed = _resume_commit(run_id, decisions=decisions)
     typer.echo(_run_report("committed", committed))
 
 
-def _draft_snapshot(run_id: int) -> _RunSnapshot:
+def _resume_commit(
+    run_id: int,
+    *,
+    decisions: dict[int, CreateNew] | None = None,
+    skip_undecided: bool = False,
+) -> _RunSnapshot:
+    """One ``commit()`` attempt on ``run_id``, in its own engine and transaction.
+
+    ``import_runs.UndecidedCandidates`` is let through uncaught: the caller
+    decides what a still-undecided row means for ``--on-candidate``. Every
+    other service error is reported and exits, as ``_commit_draft`` does.
+    """
     engine = make_engine(database_url())
     try:
         factory = make_session_factory(engine)
         install_scope_guard(factory)
-        with session_scope(factory) as session:
+        with session_scope(factory, write=True) as session:
             user = _local_user_or_exit(session)
             try:
-                run = import_runs.get_run(session, user, run_id)
-            except import_runs.RunNotFound as exc:
+                run = import_runs.commit(
+                    session, user, run_id, decisions=decisions, skip_undecided=skip_undecided
+                )
+            except import_runs.UndecidedCandidates:
+                raise
+            # Same defensive symmetry as _commit_draft's own except clause.
+            except (import_runs.ImportRunError, import_runs.CsvImportError) as exc:
                 typer.echo(f"error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
-            candidates = tuple(
-                row.row_number for row in run.rows if row.resolution is ImportResolution.CANDIDATE
-            )
-            return _snapshot_of(run, candidate_rows=candidates)
+            return _snapshot_of(run)
     finally:
         engine.dispose()
 
@@ -726,13 +765,20 @@ def import_rm_cmd(
     try:
         factory = make_session_factory(engine)
         install_scope_guard(factory)
-        with session_scope(factory, write=True) as session:
-            user = _local_user_or_exit(session)
-            try:
-                import_runs.delete_run(session, user, run_id)
-            except (import_runs.ImportRunError, import_runs.CsvImportError) as exc:
-                typer.echo(f"error: {exc}", err=True)
-                raise typer.Exit(code=1) from exc
+        try:
+            with session_scope(factory, write=True) as session:
+                user = _local_user_or_exit(session)
+                try:
+                    import_runs.delete_run(session, user, run_id)
+                except (import_runs.ImportRunError, import_runs.CsvImportError) as exc:
+                    typer.echo(f"error: {exc}", err=True)
+                    raise typer.Exit(code=1) from exc
+        # A destructive command, unlike its read-mostly neighbours: losing a
+        # concurrent write-lock race (another writer mid-transaction) must not
+        # surface as a raw traceback here.
+        except OperationalError as exc:
+            typer.echo(f"error: the database is busy ({exc.orig}); try again in a moment", err=True)
+            raise typer.Exit(code=1) from exc
     finally:
         engine.dispose()
     typer.echo(f"deleted import run {run_id}")
@@ -857,6 +903,7 @@ def _stats_rows(stats: ContactStats) -> list[tuple[str, str]]:
         ("with email", stats.with_email),
         ("with phone", stats.with_phone),
         ("tagged", stats.tagged),
+        ("tagged by rule", stats.tagged_by_rule),
     )
     return [(name, str(count)) for name, count in fields]
 

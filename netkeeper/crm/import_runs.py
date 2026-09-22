@@ -957,8 +957,10 @@ def delete_run(session: Session, user: User, run_id: int) -> None:
         raise RunNotDraft(
             f"import run {run.id} is {run.status.value}; only a draft run can be deleted"
         )
+    # No explicit expunge: the delete's own session synchronization already
+    # drops the run and its loaded rows from the identity map, the same way a
+    # bulk update's does elsewhere in this module.
     session.execute(scoped_delete(user, ImportRun).where(ImportRun.id == run.id))
-    session.expunge(run)
     log.info("deleted draft import run %d for user %d", run_id, user.id)
 
 
