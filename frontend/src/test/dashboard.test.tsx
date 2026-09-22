@@ -138,7 +138,7 @@ describe('dashboard: a fresh install with nothing imported', () => {
         cta: 'Import contacts',
       },
       {
-        title: '2. Review what was tagged automatically',
+        title: '2. Review what was tagged by a rule',
         detail: 'Nothing tagged yet',
         badge: 'Not started',
         href: '/lists',
@@ -208,8 +208,8 @@ describe('dashboard: an account with contacts', () => {
       // asks them to — so it reads the same as export, not "Done" (round 3).
       // 4, not 5: the hand-applied tag doesn't count either way.
       {
-        title: '2. Review what was tagged automatically',
-        detail: '4 contacts tagged automatically',
+        title: '2. Review what was tagged by a rule',
+        detail: '4 contacts tagged by a rule',
         badge: null,
         href: '/lists',
         cta: 'Review tags',
@@ -257,7 +257,7 @@ describe('dashboard: an account with contacts', () => {
 
     const reviewRow = renderedSteps()[1]
     expect(reviewRow).toEqual({
-      title: '2. Review what was tagged automatically',
+      title: '2. Review what was tagged by a rule',
       detail: 'Nothing tagged yet',
       badge: 'Not started',
       href: '/lists',
@@ -272,10 +272,10 @@ describe('dashboard: an account with contacts', () => {
     serveDashboard({ stats: statsBody({ total: 200, tagged_by_rule: 150 }) })
     await renderApp('/')
     const main = within(screen.getByRole('main'))
-    await main.findByText('150 contacts tagged automatically')
+    await main.findByText('150 contacts tagged by a rule')
 
     expect(renderedSteps()[1]).toMatchObject({
-      detail: '150 contacts tagged automatically',
+      detail: '150 contacts tagged by a rule',
       badge: null,
     })
   })

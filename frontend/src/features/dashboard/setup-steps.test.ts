@@ -122,7 +122,7 @@ describe('buildSetupSteps: the empty state', () => {
       },
       {
         key: 'review-tags',
-        title: 'Review what was tagged automatically',
+        title: 'Review what was tagged by a rule',
         detail: 'Nothing tagged yet',
         state: 'not_started',
         to: '/lists',
@@ -251,16 +251,16 @@ describe('buildSetupSteps: review tags', () => {
     const steps = buildSetupSteps({ stats: stats({ total: 10, tagged: 6, tagged_by_rule: 5 }) })
     const step = byKey(steps, 'review-tags')
     expect(step.state).toBeNull()
-    expect(step.detail).toBe('5 contacts tagged automatically')
+    expect(step.detail).toBe('5 contacts tagged by a rule')
     expect(step.cta).toBe('Review tags')
-    expect(step.title).toBe('Review what was tagged automatically')
+    expect(step.title).toBe('Review what was tagged by a rule')
   })
 
   it('is the sharp case: a big auto-tagging import must not read "Done" before anyone opens the app', () => {
     const steps = buildSetupSteps({ stats: stats({ total: 200, tagged_by_rule: 150 }) })
     expect(byKey(steps, 'review-tags')).toMatchObject({
       state: null,
-      detail: '150 contacts tagged automatically',
+      detail: '150 contacts tagged by a rule',
     })
   })
 })
