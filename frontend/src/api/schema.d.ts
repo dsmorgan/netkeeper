@@ -1339,7 +1339,9 @@ export interface paths {
          *
          *     A bulk apply is undone as one batch. `409` when the contact changed after the
          *     decision, so nothing is overwritten silently; `force` in the body restores
-         *     anyway.
+         *     anyway. Pass the `decided_by` the queue is being served with, as the other
+         *     two routes take it: the counters come back describing the queue the caller
+         *     is looking at, and an undo in a review pass puts a contact back into it.
          */
         post: operations["undo_triage"];
         delete?: never;
@@ -6840,6 +6842,8 @@ export interface operations {
             query?: {
                 /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided. */
                 states?: components["schemas"]["ContactMet"][] | null;
+                /** @description Narrow the queue to the contacts whose current `met` was decided this way. `automatic` is the review pass: what netkeeper decided for you, on the same cards, so you can check it. Deciding one by hand makes it `manual` and takes it out of that queue. */
+                decided_by?: components["schemas"]["MetSource"] | null;
             };
             header?: never;
             path?: never;

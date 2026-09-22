@@ -11217,7 +11217,7 @@
     },
     "/api/v1/triage/undo": {
       "post": {
-        "description": "Undo the newest triage action, restoring the previous state exactly.\n\nA bulk apply is undone as one batch. `409` when the contact changed after the\ndecision, so nothing is overwritten silently; `force` in the body restores\nanyway.",
+        "description": "Undo the newest triage action, restoring the previous state exactly.\n\nA bulk apply is undone as one batch. `409` when the contact changed after the\ndecision, so nothing is overwritten silently; `force` in the body restores\nanyway. Pass the `decided_by` the queue is being served with, as the other\ntwo routes take it: the counters come back describing the queue the caller\nis looking at, and an undo in a review pass puts a contact back into it.",
         "operationId": "undo_triage",
         "parameters": [
           {
@@ -11239,6 +11239,24 @@
               ],
               "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
               "title": "States"
+            }
+          },
+          {
+            "description": "Narrow the queue to the contacts whose current `met` was decided this way. `automatic` is the review pass: what netkeeper decided for you, on the same cards, so you can check it. Deciding one by hand makes it `manual` and takes it out of that queue.",
+            "in": "query",
+            "name": "decided_by",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/MetSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Narrow the queue to the contacts whose current `met` was decided this way. `automatic` is the review pass: what netkeeper decided for you, on the same cards, so you can check it. Deciding one by hand makes it `manual` and takes it out of that queue.",
+              "title": "Decided By"
             }
           }
         ],

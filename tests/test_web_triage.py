@@ -640,6 +640,55 @@ async def test_the_review_queue_walks_what_the_batch_decided(
     assert _contact_row(running_app, LOCAL_USER_ID, run_contacts[1]).met is ContactMet.NOT_MET
 
 
+async def test_undo_in_the_review_pass_counts_the_queue_it_was_pressed_in(
+    client: httpx.AsyncClient, run_contacts: list[int]
+) -> None:
+    """The counters an undo hands back describe the queue the caller is looking at.
+
+    All three routes take ``decided_by`` for the same reason: the number under
+    the card is the one that queue is being served with. Without it here, the
+    undo answered with every live ``met``/``not_met`` contact — every decision
+    the person had ever made by hand included — so the count jumped on the
+    press and settled again on the next read.
+    """
+    applied = await client.post(
+        f"{TRIAGE}/suggestions/met_with_messages/apply",
+        json={"expected_count": RUN_LENGTH - 1},
+        headers=CSRF,
+    )
+    assert applied.status_code == 200, applied.text
+    # A contact the batch never touched, answered by hand: it belongs to the
+    # same states the review queue serves and must never be counted in it.
+    mine = await client.post(
+        f"{TRIAGE}/decisions", json={"contact_id": run_contacts[0], "met": "met"}, headers=CSRF
+    )
+    assert mine.status_code == 201, mine.text
+    # One of the batch's, answered by hand, which is what takes it out.
+    corrected = await client.post(
+        f"{TRIAGE}/decisions",
+        json={"contact_id": run_contacts[1], "met": "not_met"},
+        params={"decided_by": "automatic"},
+        headers=CSRF,
+    )
+    assert corrected.status_code == 201, corrected.text
+    assert corrected.json()["progress"]["remaining"] == RUN_LENGTH - 2
+
+    undone = await client.post(
+        f"{TRIAGE}/undo",
+        json={},
+        params={"states": ["met", "not_met"], "decided_by": "automatic"},
+        headers=CSRF,
+    )
+    assert undone.status_code == 200, undone.text
+    # The undo put that contact back in the review queue, and the count says so.
+    assert undone.json()["progress"]["remaining"] == RUN_LENGTH - 1
+    assert undone.json()["progress"]["automatic"] == RUN_LENGTH - 1
+    following = await _get(
+        client, f"{TRIAGE}/next", states=["met", "not_met"], decided_by="automatic"
+    )
+    assert following["progress"]["remaining"] == undone.json()["progress"]["remaining"]
+
+
 async def test_a_decision_records_the_batch_it_came_from(
     running_app: FastAPI, client: httpx.AsyncClient, contact_id: int
 ) -> None:
