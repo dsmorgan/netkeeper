@@ -20,6 +20,7 @@ import { describe, expect, it } from 'vitest'
 
 import { jsonResponse } from '@/test/fetch'
 
+import { createFakeBackend } from './test-backend'
 import { currentName, renderTriage } from './test-render'
 
 function press(key: string) {
@@ -77,21 +78,33 @@ describe('stepping back through the run', () => {
     )
   })
 
-  it('keeps counting the run past the point the trail stops remembering it', async () => {
-    // The trail is capped at a hundred cards; the run is not. Deriving the
-    // position from the trail froze this line at "contact 101" for the last
-    // five hundred of a six-hundred-person queue.
+  it('keeps counting, and keeps the list ahead filled, past a hundred contacts', async () => {
+    // One long run, because both things it checks are properties of a long run
+    // and neither shows up in a short one. The trail is capped at a hundred
+    // cards and the look-ahead page holds a hundred rows, so a run of 105
+    // crosses both.
     const { backend } = renderTriage({ contacts: 110 })
     await currentName()
+    await waitFor(() => expect(backend.countOf('/api/v1/contacts/query', 'POST')).toBe(1))
 
     for (let index = 1; index <= 105; index += 1) {
       press('m')
       await waitFor(() => expect(backend.byId(index).met).toBe('met'))
     }
 
+    // The run is not capped, though the trail is. Deriving the position from
+    // the trail froze this line at "contact 101" for the last five hundred of
+    // a six-hundred-person queue.
     expect(screen.getByTestId('card-position')).toHaveTextContent('Contact 106 of this run')
     expect(screen.getByTestId('card-position')).toHaveTextContent('5 left in this queue')
     expect(screen.getByTestId('triage-queue-list')).toHaveTextContent('105 seen so far in this run')
+
+    // The first page ran out long ago, so a second was asked for and the list
+    // is still showing who is coming rather than quietly becoming a count.
+    await waitFor(() =>
+      expect(backend.countOf('/api/v1/contacts/query', 'POST')).toBeGreaterThan(1),
+    )
+    expect(screen.getByTestId('triage-queue-list')).toHaveTextContent('Hal Placeholder-108')
 
     // And a card reached by walking back still names its place in the run, not
     // its place in what is left of the trail.
@@ -100,6 +113,61 @@ describe('stepping back through the run', () => {
       'Looking back: contact 105 of this run',
     )
   }, 30_000)
+
+  it('counts a contact moved past without deciding', async () => {
+    // `→` is one of the three places the run counter moves, and the only one
+    // that writes nothing — so it is the one most easily left out.
+    renderTriage({ contacts: 6 })
+    await currentName()
+    expect(screen.getByTestId('card-position')).toHaveTextContent('Contact 1 of this run')
+
+    press('ArrowRight')
+    await waitFor(async () => expect(await currentName()).toContain('Bo'))
+    expect(screen.getByTestId('card-position')).toHaveTextContent('Contact 2 of this run')
+
+    press('ArrowRight')
+    await waitFor(async () => expect(await currentName()).toContain('Cleo'))
+    expect(screen.getByTestId('card-position')).toHaveTextContent('Contact 3 of this run')
+  })
+
+  it('walks the run position back when undo puts a contact in front of you again', async () => {
+    // Undo takes a contact out of the trail and puts them at the head of the
+    // queue: the run has un-passed them, so the counter has to come back with
+    // them. Leaving it alone froze the position — "Contact 5" while showing
+    // the fourth contact — and, because a trail row's number is derived from
+    // it, renumbered every row behind it too.
+    const { backend } = renderTriage({ contacts: 6 })
+    await currentName()
+
+    for (const id of [1, 2, 3, 4]) {
+      press('m')
+      await waitFor(() => expect(backend.byId(id).met).toBe('met'))
+    }
+    expect(await currentName()).toContain('Esme')
+    expect(screen.getByTestId('card-position')).toHaveTextContent('Contact 5 of this run')
+
+    press('u')
+    await waitFor(() => expect(backend.byId(4).met).toBe('unknown'))
+    expect(await currentName()).toContain('Dev')
+    expect(screen.getByTestId('card-position')).toHaveTextContent('Contact 4 of this run')
+
+    press('u')
+    await waitFor(() => expect(backend.byId(3).met).toBe('unknown'))
+    expect(await currentName()).toContain('Cleo')
+    expect(screen.getByTestId('card-position')).toHaveTextContent('Contact 3 of this run')
+
+    // And the rows behind it are numbered from the run, so they come back too.
+    press('ArrowLeft')
+    expect(await currentName()).toContain('Bo')
+    expect(screen.getByTestId('card-position')).toHaveTextContent(
+      'Looking back: contact 2 of this run',
+    )
+    press('ArrowLeft')
+    expect(await currentName()).toContain('Ada')
+    expect(screen.getByTestId('card-position')).toHaveTextContent(
+      'Looking back: contact 1 of this run',
+    )
+  })
 
   it('changes a decision from the trail and returns to where you were', async () => {
     const { backend } = renderTriage({ contacts: 5 })
@@ -497,7 +565,7 @@ describe('the contacts ahead', () => {
     expect(screen.queryByText(/could not be read/i)).not.toBeInTheDocument()
   })
 
-  it('drops a contact from the list once they have an answer', async () => {
+  it('moves a contact from the list ahead into the trail once they have an answer', async () => {
     const { backend } = renderTriage({ contacts: 6 })
     await currentName()
     const list = await screen.findByTestId('triage-queue-list')
@@ -513,6 +581,24 @@ describe('the contacts ahead', () => {
       (row.textContent ?? '').includes('Ada Example-1'),
     )
     expect(naming).toHaveLength(1)
+  })
+
+  it('lists only the contacts the filter asks for', async () => {
+    // A discriminator for the *query*, not for the client's own id cursor: the
+    // two skipped contacts in hand put the frontier at 6, so contact 7 sits
+    // past it and is only kept out of the list by the filter. A query that
+    // ignored `met` would draw them.
+    const backend = createFakeBackend({ contacts: 8 })
+    for (const id of [2, 6, 8]) backend.byId(id).met = 'skip'
+    renderTriage({ backend })
+    await currentName()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Skipped' }))
+    await waitFor(async () => expect(await currentName()).toContain('Bo'))
+
+    const list = await screen.findByTestId('triage-queue-list')
+    await waitFor(() => expect(list).toHaveTextContent('Hal Placeholder-8'))
+    expect(list).not.toHaveTextContent('Gita Sample-7')
   })
 
   it('carries on without the list when the queue cannot be read', async () => {
