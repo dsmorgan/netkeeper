@@ -9,6 +9,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
+import { createFakeBackend } from './test-backend'
 import { currentName, renderTriage } from './test-render'
 
 /** The banner row for one batch, which is how a test says which it means. */
@@ -230,7 +231,13 @@ describe('what netkeeper decided (P1-28)', () => {
     // button that assumed "met" read right for one of them and lied about the
     // other, which is the batch that argues from absence — the one somebody
     // most wants to read carefully before taking.
-    const { backend } = renderTriage({ contacts: 6, withMessages: 3 })
+    const backend = createFakeBackend({ contacts: 6, withMessages: 3 })
+    // The batch that argues from absence withholds anyone whose card shows a
+    // company somebody else is at, and the fixture's three companies over six
+    // contacts means everybody shares one. Give the three without messages a
+    // company of their own, which is what leaves their cards empty.
+    for (const id of [4, 5, 6]) backend.byId(id).current_company = `Solo Works ${id}`
+    renderTriage({ backend })
     await currentName()
 
     const messaged = await findBannerFor('met_with_messages')
@@ -247,6 +254,35 @@ describe('what netkeeper decided (P1-28)', () => {
     await waitFor(() => expect(backend.byId(4).met).toBe('not_met'))
     expect(backend.byId(1).met).toBe('unknown')
     expect(await screen.findByRole('status')).toHaveTextContent(/Marked 3 contacts as not met/)
+  })
+
+  it('reviews what a not-met batch decided, not only a met one', async () => {
+    // The review pass serves both states a batch can leave behind. Every other
+    // test here reviews a `met` batch, so dropping `not_met` from the queue's
+    // states would have left the suite green and the people netkeeper decided
+    // *not met* unreviewable — the half of the pass most worth checking.
+    const backend = createFakeBackend({ contacts: 6, withMessages: 3 })
+    for (const id of [4, 5, 6]) backend.byId(id).current_company = `Solo Works ${id}`
+    renderTriage({ backend })
+    await currentName()
+
+    fireEvent.click(
+      within(await findBannerFor('not_met_no_evidence')).getByRole('button', {
+        name: 'Mark 3 as not met',
+      }),
+    )
+    await waitFor(() => expect(backend.byId(4).met).toBe('not_met'))
+    expect(backend.byId(4).met_source).toBe('automatic')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Review them' }))
+
+    await waitFor(async () => expect(await currentName()).toContain('Dev'))
+    expect(screen.getByTestId('automatic-pass')).toHaveTextContent(
+      'are the 3 contacts netkeeper decided for you',
+    )
+    const ahead = screen.getByTestId('triage-queue-list')
+    expect(ahead).toHaveTextContent('Esme Fictional-5')
+    expect(ahead).not.toHaveTextContent('Ada Example-1')
   })
 
   it('says nothing at all until a batch has been accepted', async () => {
