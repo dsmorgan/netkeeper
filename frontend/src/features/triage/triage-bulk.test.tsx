@@ -6,24 +6,36 @@
  * failure to report but a preview to take again, and that is what this asserts.
  */
 
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import { currentName, renderTriage } from './test-render'
+
+/** The banner row for one batch, which is how a test says which it means. */
+function bannerFor(key: string): HTMLElement {
+  const row = document.querySelector(`[data-key="${key}"]`)
+  if (row === null) throw new Error(`no banner for ${key}`)
+  return row as HTMLElement
+}
+
+async function findBannerFor(key: string): Promise<HTMLElement> {
+  await waitFor(() => expect(document.querySelector(`[data-key="${key}"]`)).not.toBeNull())
+  return bannerFor(key)
+}
 
 describe('the bulk suggestion', () => {
   it('is not drawn when it matches nobody', async () => {
     renderTriage({ contacts: 4, withMessages: 0 })
     await currentName()
 
-    await waitFor(() => expect(screen.queryByTestId('bulk-suggestion')).not.toBeInTheDocument())
+    await waitFor(() => expect(document.querySelector('[data-key="met_with_messages"]')).toBeNull())
   })
 
   it('previews with a count and applies as one batch', async () => {
     const { backend } = renderTriage({ contacts: 6, withMessages: 3 })
     await currentName()
 
-    const banner = await screen.findByTestId('bulk-suggestion')
+    const banner = await findBannerFor('met_with_messages')
     expect(banner).toHaveTextContent('You have message threads with 3 untriaged people.')
 
     fireEvent.click(await screen.findByRole('button', { name: 'Mark 3 as met' }))
@@ -43,7 +55,7 @@ describe('the bulk suggestion', () => {
     await currentName()
     fireEvent.click(await screen.findByRole('button', { name: 'Mark 3 as met' }))
 
-    await waitFor(() => expect(screen.queryByTestId('bulk-suggestion')).not.toBeInTheDocument())
+    await waitFor(() => expect(document.querySelector('[data-key="met_with_messages"]')).toBeNull())
   })
 
   it('re-previews instead of erroring when the count moved', async () => {
@@ -77,7 +89,7 @@ describe('the bulk suggestion', () => {
     await waitFor(() => expect(backend.byId(1).met).toBe('unknown'))
     expect(backend.byId(2).met).toBe('unknown')
     expect(backend.byId(3).met).toBe('unknown')
-    expect(await screen.findByTestId('bulk-suggestion')).toHaveTextContent('3 untriaged people')
+    expect(await findBannerFor('met_with_messages')).toHaveTextContent('3 untriaged people')
   })
 
   it('moves the queue on when the batch empties the front of it', async () => {
@@ -138,7 +150,7 @@ describe('what netkeeper decided (P1-28)', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Review them' }))
     await waitFor(async () => expect(await currentName()).toContain('Ada'))
 
-    expect(screen.queryByTestId('bulk-suggestion')).not.toBeInTheDocument()
+    expect(screen.queryAllByTestId('bulk-suggestion')).toEqual([])
     const asked = backend.seen.filter(
       (request) =>
         request.path === '/api/v1/triage/suggestions' &&
@@ -167,10 +179,80 @@ describe('what netkeeper decided (P1-28)', () => {
     expect(await currentName()).toContain('Bo')
   })
 
+  it("serves the batch's work and then stops, never an answer of your own", async () => {
+    // The card itself comes from `/triage/next`, which narrows on who decided.
+    // Without that the queue would run on into the contacts answered by hand —
+    // they are in the same two states — and the review pass would never end.
+    const { backend } = renderTriage({ contacts: 6, withMessages: 3 })
+    await currentName()
+    await acceptTheBatch()
+    fireEvent.keyDown(window, { key: 'n' })
+    await waitFor(() => expect(backend.byId(4).met).toBe('not_met'))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Review them' }))
+    const seen: string[] = []
+    for (let index = 0; index < 3; index += 1) {
+      seen.push(await currentName())
+      fireEvent.keyDown(window, { key: 'm' })
+      await waitFor(() => expect(backend.byId(index + 1).met_source).toBe('manual'))
+    }
+
+    expect(await screen.findByText('Nothing left to review.')).toBeInTheDocument()
+    expect(seen.join(' ')).not.toContain('Dev')
+    expect(backend.byId(4).met_source).toBe('manual')
+  })
+
+  it('refills the review queue from the same narrowed queue it opened on', async () => {
+    // `→` is the path that asks `/triage/next` again mid-run. The first cards
+    // arrive with the load and every decision answers with its own successor,
+    // so a refill that forgot who decided is invisible until somebody moves on
+    // without deciding — and then the review pass quietly runs on into the
+    // answers they gave themselves.
+    const { backend } = renderTriage({ contacts: 6, withMessages: 3 })
+    await currentName()
+    await acceptTheBatch()
+    fireEvent.keyDown(window, { key: 'n' })
+    await waitFor(() => expect(backend.byId(4).met).toBe('not_met'))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Review them' }))
+    await waitFor(async () => expect(await currentName()).toContain('Ada'))
+    for (const name of ['Bo', 'Cleo']) {
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+      await waitFor(async () => expect(await currentName()).toContain(name))
+    }
+
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(await screen.findByText('Nothing left to review.')).toBeInTheDocument()
+  })
+
+  it('says what each batch decides, not what the first one does', async () => {
+    // Two batches are offered at once and they decide opposite things. A
+    // button that assumed "met" read right for one of them and lied about the
+    // other, which is the batch that argues from absence — the one somebody
+    // most wants to read carefully before taking.
+    const { backend } = renderTriage({ contacts: 6, withMessages: 3 })
+    await currentName()
+
+    const messaged = await findBannerFor('met_with_messages')
+    const nothing = bannerFor('not_met_no_evidence')
+    expect(within(messaged).getByRole('button', { name: /^Mark/ })).toHaveTextContent(
+      'Mark 3 as met',
+    )
+    expect(within(nothing).getByRole('button', { name: /^Mark/ })).toHaveTextContent(
+      'Mark 3 as not met',
+    )
+
+    fireEvent.click(within(nothing).getByRole('button', { name: 'Mark 3 as not met' }))
+
+    await waitFor(() => expect(backend.byId(4).met).toBe('not_met'))
+    expect(backend.byId(1).met).toBe('unknown')
+    expect(await screen.findByRole('status')).toHaveTextContent(/Marked 3 contacts as not met/)
+  })
+
   it('says nothing at all until a batch has been accepted', async () => {
     renderTriage({ contacts: 6, withMessages: 3 })
     await currentName()
-    await screen.findByTestId('bulk-suggestion')
+    await findBannerFor('met_with_messages')
 
     expect(screen.queryByTestId('automatic-pass')).not.toBeInTheDocument()
   })
@@ -178,9 +260,9 @@ describe('what netkeeper decided (P1-28)', () => {
   it('names the contacts a batch covers before it is applied', async () => {
     renderTriage({ contacts: 6, withMessages: 3 })
     await currentName()
-    await screen.findByTestId('bulk-suggestion')
+    await findBannerFor('met_with_messages')
 
-    fireEvent.click(screen.getByRole('button', { name: 'See who' }))
+    fireEvent.click(within(bannerFor('met_with_messages')).getByRole('button', { name: 'See who' }))
 
     const names = await screen.findByTestId('suggestion-contacts')
     expect(names).toHaveTextContent('Ada Example-1')

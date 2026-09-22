@@ -82,6 +82,7 @@ export function SuggestionBanner({
         <div
           key={suggestion.key}
           data-testid="bulk-suggestion"
+          data-key={suggestion.key}
           className="flex flex-col gap-2 rounded-lg bg-muted/60 px-3 py-2 ring-1 ring-foreground/10"
         >
           <div className="flex flex-wrap items-center justify-between gap-3">

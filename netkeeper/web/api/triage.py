@@ -196,18 +196,21 @@ def undo_triage(
     session: SessionDep,
     body: TriageUndoIn | None = None,
     states: States = None,
+    decided_by: DecidedBy = None,
 ) -> TriageUndoOut:
     """Undo the newest triage action, restoring the previous state exactly.
 
     A bulk apply is undone as one batch. `409` when the contact changed after the
     decision, so nothing is overwritten silently; `force` in the body restores
-    anyway.
+    anyway. Pass the `decided_by` the queue is being served with, as the other
+    two routes take it: the counters come back describing the queue the caller
+    is looking at, and an undo in a review pass puts a contact back into it.
     """
-    wanted = _states(states)
+    wanted = _states(states, decided_by)
     with translate_errors():
         undone = service.undo(session, user, force=body.force if body is not None else False)
         card = None if undone.contact is None else service.load_card(session, user, undone.contact)
-        counters = service.progress(session, user, states=wanted)
+        counters = service.progress(session, user, states=wanted, decided_by=decided_by)
     return TriageUndoOut(
         kind=undone.kind,
         decisions=undone.decisions,

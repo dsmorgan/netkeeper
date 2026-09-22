@@ -66,6 +66,14 @@ interface OpenOverlay {
 
 const CLOSED: OpenOverlay = { kind: 'none', contactId: null }
 
+/** What an empty queue is called, in the words of the queue that emptied. */
+const EMPTY_QUEUE: Record<QueueFilter, string> = {
+  unknown: 'Nothing left to triage.',
+  skip: 'Nothing skipped is left.',
+  both: 'Nothing left to triage.',
+  automatic: 'Nothing left to review.',
+}
+
 const FILTERS: ReadonlyArray<{ value: QueueFilter; label: string }> = [
   { value: 'unknown', label: 'Untriaged' },
   { value: 'skip', label: 'Skipped' },
@@ -514,9 +522,7 @@ function EmptyQueue({
       role="status"
       className="flex flex-col items-start gap-2 rounded-xl bg-card p-6 ring-1 ring-foreground/10"
     >
-      <p className="font-heading text-lg font-medium">
-        {filter === 'skip' ? 'Nothing skipped is left.' : 'Nothing left to triage.'}
-      </p>
+      <p className="font-heading text-lg font-medium">{EMPTY_QUEUE[filter]}</p>
       <p className="text-muted-foreground">
         {filter === 'unknown' && skipped > 0
           ? `${skipped} contacts are waiting under Skipped.`

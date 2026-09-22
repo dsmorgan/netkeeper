@@ -237,6 +237,43 @@ function snapshot(contact: FakeContact, fields: Iterable<string>): Record<string
   return out
 }
 
+/**
+ * The batches this fake offers, in the order the service's catalogue runs.
+ *
+ * Two, because one of them decides `not_met` and the screen says so: a
+ * catalogue with a single `met` batch cannot tell a button that reads the
+ * batch from one that assumes the answer. `covers` stands in for the service's
+ * clauses — message history for the first, and nothing on file at all for the
+ * second, which is the batch that argues from absence.
+ */
+interface FakeBatch {
+  key: string
+  title: string
+  met: ContactMet
+  describe: (count: number) => string
+  covers: (contact: FakeContact) => boolean
+}
+
+const BATCHES: readonly FakeBatch[] = [
+  {
+    key: 'met_with_messages',
+    title: 'Mark everyone with message history as met',
+    met: 'met',
+    describe: (count) =>
+      `You have message threads with ${count} untriaged ${count === 1 ? 'person' : 'people'}.`,
+    covers: (contact) => contact.messages > 0,
+  },
+  {
+    key: 'not_met_no_evidence',
+    title: 'Mark everyone there is no evidence about as not met',
+    met: 'not_met',
+    describe: (count) =>
+      `There is nothing on file for ${count} untriaged ${count === 1 ? 'person' : 'people'}: no messages, no invitation, no note, no tag of your own, and nobody else at their company — their card would be empty.`,
+    covers: (contact) =>
+      contact.messages === 0 && contact.notes === null && contact.tags.length === 0,
+  },
+]
+
 export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend {
   const total = options.contacts ?? 6
   const withMessages = options.withMessages ?? 0
@@ -448,8 +485,9 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
     )
   }
 
-  function suggestionCount(states: ContactMet[]): number {
-    return queue(states).filter((contact) => contact.messages > 0).length
+  /** The contacts one batch covers, against the queue as it stands. */
+  function covered(batch: FakeBatch, states: ContactMet[]): FakeContact[] {
+    return queue(states).filter(batch.covers)
   }
 
   async function handler(request: Request): Promise<Response> {
@@ -660,31 +698,34 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
     if (url.pathname === '/api/v1/triage/suggestions') {
       const refusal = batchStates(states)
       if (refusal !== null) return refusal
-      const count = suggestionCount(states)
-      if (count === 0) return jsonResponse([])
-      return jsonResponse([
-        {
-          key: 'met_with_messages',
-          title: 'Mark everyone with message history as met',
-          description: `You have message threads with ${count} untriaged ${count === 1 ? 'person' : 'people'}.`,
-          count,
-          // The service puts both on every offer: `met` is what the batch
-          // decides, which is the word the button says, and `tag_id` names the
-          // tag when the batch came from one.
-          met: 'met',
-          tag_id: null,
-        },
-      ])
+      // A batch matching nobody is not offered, and the counts are taken
+      // against the queue as it stands, so accepting one shrinks the other.
+      return jsonResponse(
+        BATCHES.map((batch) => ({ batch, count: covered(batch, states).length }))
+          .filter(({ count }) => count > 0)
+          .map(({ batch, count }) => ({
+            key: batch.key,
+            title: batch.title,
+            description: batch.describe(count),
+            count,
+            // The service puts both on every offer: `met` is what the batch
+            // decides, which is the word the button says, and `tag_id` names
+            // the tag when the batch came from one.
+            met: batch.met,
+            tag_id: null,
+          })),
+      )
     }
 
     const contactsMatch = /^\/api\/v1\/triage\/suggestions\/([^/]+)\/contacts$/.exec(url.pathname)
     if (contactsMatch !== null) {
-      if (contactsMatch[1] !== 'met_with_messages') {
+      const batch = BATCHES.find((candidate) => candidate.key === contactsMatch[1])
+      if (batch === undefined) {
         return jsonResponse({ detail: 'no suggestion by that key' }, 404)
       }
       const refusal = batchStates(states)
       if (refusal !== null) return refusal
-      const matching = queue(states).filter((contact) => contact.messages > 0)
+      const matching = covered(batch, states)
       const limit = Number(url.searchParams.get('limit') ?? '50')
       const offset = Number(url.searchParams.get('offset') ?? '0')
       return jsonResponse({
@@ -700,7 +741,8 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
 
     const applyMatch = /^\/api\/v1\/triage\/suggestions\/([^/]+)\/apply$/.exec(url.pathname)
     if (applyMatch !== null) {
-      if (applyMatch[1] !== 'met_with_messages') {
+      const batch = BATCHES.find((candidate) => candidate.key === applyMatch[1])
+      if (batch === undefined) {
         return jsonResponse({ detail: 'no suggestion by that key' }, 404)
       }
       const refusal = batchStates(states)
@@ -715,7 +757,7 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
           422,
         )
       }
-      const matching = queue(states).filter((contact) => contact.messages > 0)
+      const matching = covered(batch, states)
       if (input.expected_count !== matching.length) {
         return jsonResponse(
           {
@@ -727,7 +769,7 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
       const batchId = `batch-${nextDecisionId}`
       for (const contact of matching) {
         const before = snapshot(contact, RECORDED_FIELDS.bulk_met)
-        contact.met = 'met'
+        contact.met = batch.met
         // What the review pass serves, and what keeps a batch's decision from
         // passing as one the person made.
         contact.met_source = 'automatic'
@@ -735,7 +777,8 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
         record(contact, 'bulk_met', before, batchId)
       }
       return jsonResponse({
-        key: 'met_with_messages',
+        key: batch.key,
+        met: batch.met,
         applied: matching.length,
         batch_id: batchId,
         progress: progress(states),
