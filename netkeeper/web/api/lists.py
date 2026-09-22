@@ -58,18 +58,20 @@ def translate_errors() -> Iterator[None]:
         service.InvalidListValue,
         service.InvalidViewValue,
         service.WrongListKind,
+        service.BreaksAnotherList,
         FilterError,
     ) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-def _list_out(row: ContactList, member_count: int) -> ListOut:
+def _list_out(row: ContactList, count: service.ListCount) -> ListOut:
     return ListOut(
         id=row.id,
         name=row.name,
         kind=row.kind,
         filter=None if row.filter_json is None else parse_filter(row.filter_json),
-        member_count=member_count,
+        member_count=count.count,
+        broken=count.broken,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -96,11 +98,17 @@ def _member_out(contact: Contact) -> ContactSummaryOut:
 
 @router.get("/lists", operation_id="list_lists", responses=INVALID)
 def list_lists(user: CurrentUser, session: SessionDep) -> list[ListOut]:
-    """Every list, static and smart, with how many contacts are in it right now."""
+    """Every list, static and smart, with how many contacts are in it right now.
+
+    A list whose filter does not compile is listed like any other, with
+    ``broken`` saying why and no count, rather than failing the request: this
+    is the page someone would use to find and fix it, so one bad list may not
+    hide the rest (:func:`netkeeper.crm.lists.member_counts`).
+    """
     with translate_errors():
         rows = service.list_lists(session, user)
         counts = service.member_counts(session, user, rows)
-        return [_list_out(row, counts.get(row.id, 0)) for row in rows]
+        return [_list_out(row, counts.get(row.id, service.ListCount(0))) for row in rows]
 
 
 @router.post(
@@ -111,7 +119,7 @@ def create_list(body: ListCreate, user: CurrentUser, session: SessionDep) -> Lis
     compiled) before it is stored; a static one starts with no members."""
     with translate_errors():
         row = service.create_list(session, user, body.name, body.kind, filter=body.filter)
-    return _list_out(row, 0)
+    return _list_out(row, service.ListCount(0))
 
 
 @router.patch(
@@ -123,8 +131,8 @@ def update_list(list_id: int, body: ListPatch, user: CurrentUser, session: Sessi
     filter_arg = service.UNSET if body.filter is None else body.filter
     with translate_errors():
         row = service.update_list(session, user, list_id, name=body.name, filter=filter_arg)
-    count = service.member_count(session, user, row.id)
-    return _list_out(row, count)
+        count = service.member_count(session, user, row.id)
+    return _list_out(row, service.ListCount(count))
 
 
 @router.delete("/lists/{list_id}", operation_id="delete_list", status_code=204, responses=NOT_FOUND)

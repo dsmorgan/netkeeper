@@ -52,9 +52,17 @@ Semantics
 
 Lists
 -----
-``list_member`` means exactly what :func:`netkeeper.crm.lists.list_members`
-returns for that list, so the predicate and the list page can never disagree
-about who is in it (``tests/test_filters.py`` pins the two together):
+``list_member`` selects the members :func:`netkeeper.crm.lists.list_members`
+would return for that list, and then the tree it sits in applies its own rules
+to them, as it does to every predicate. For every list whose own membership
+excludes archived contacts — every static list, and every smart list at the
+default — the predicate and the list page agree outright, and
+``tests/test_filters.py`` pins them together. The exception is a smart list
+that sets ``include_archived`` itself: it holds people the default tree
+excludes, so its page can show someone an export of it does not, until the
+filter asks for archived contacts too. That one is not fixable in this
+direction — a predicate cannot put back a contact the tree around it has
+already excluded — so it is stated rather than claimed away.
 
 - A **static** list is an ``EXISTS`` over ``list_members`` for the id, plus the
   liveness ``netkeeper.crm.lists`` applies to a static list's own page: an
@@ -71,7 +79,11 @@ the ``lists`` table, and a predicate over lists cannot be resolved from the
 node alone. Nothing else here reads the database, so a tree with no
 ``list_member`` in it compiles without a single query. What a compile does
 cost is one indexed row lookup per *distinct* list id, cached for the compile
-— never one per contact.
+— never one per contact. A caller compiling many trees at once (the lists
+page; the guard that recompiles every list after a write) hands
+:func:`compile_where` the user's lists under ``all_lists`` and pays one query
+for the lot: without that, a page over a long chain of lists is quadratic in
+the number of lists, which is the shape this whole design exists to avoid.
 
 Two lists can name each other, so :class:`_Compiler` carries the ids it is
 already standing in for and raises :class:`ListReferenceError` on a reference
@@ -85,7 +97,15 @@ the one below it twice would otherwise inline exponentially.
 A ``list_member`` naming a list this user does not have (deleted, or someone
 else's) matches no contact, the way a tag name they have never used does. It
 is not an error: a list deleted out from under a saved filter would otherwise
-turn every page that reads that filter into a 422.
+turn every page that reads that filter into a 422. That is a rule for
+*compiling*, which is to say for reads. Storing such a reference is refused
+(:func:`netkeeper.crm.lists.check_list_references`), because the id a list is
+about to be given does not exist yet either, and a filter allowed to name it
+would be handed that very row — which is how two ordinary writes used to close
+a cycle. A reference can still come to name a *different* list than it did,
+on a backend that hands a deleted id back (SQLite does, a sequence does not);
+``netkeeper.crm.lists`` refuses the write when that breaks a list and logs the
+lists that lose theirs when one is deleted.
 
 Errors
 ------
@@ -101,7 +121,7 @@ document at all.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any, Final, Literal, Self, assert_never, get_args
@@ -747,7 +767,11 @@ class UnsupportedPredicate(FilterError):
 
 
 class ListReferenceError(FilterError):
-    """``list_member`` reaches a list the compiler will not expand: a cycle, or too many.
+    """A ``list_member`` the compiler will not take: a cycle, too many lists, or no such list.
+
+    The last of those is a *write-time* refusal only
+    (:func:`netkeeper.crm.lists.check_list_references`); compiling a stored
+    filter that names a list since deleted matches nobody rather than raising.
 
     ``list_ids`` is the chain it was expanding when it stopped, outermost first.
     """
@@ -808,6 +832,34 @@ def parse_sort(data: Any) -> list[SortKey]:
         raise FilterError.from_validation(exc) from None
 
 
+def list_ids_in(tree: FilterTree) -> dict[int, str]:
+    """Every list ``tree`` names directly, with the path of the node that names it.
+
+    Only this tree's own nodes: a list it names carries its own tree, which was
+    checked when *it* was written. :func:`netkeeper.crm.lists.check_list_references`
+    uses this to refuse a write that names a list the user does not have — the
+    write-time half of the rule that says compiling such a reference matches
+    nobody (see "Lists" in the module docstring).
+    """
+    found: dict[int, str] = {}
+
+    def walk(node: FilterNode, path: str) -> None:
+        match node:
+            case And() | Or():
+                for index, child in enumerate(node.children):
+                    walk(child, f"{path}.children[{index}]")
+            case Not():
+                walk(node.child, f"{path}.child")
+            case ListMember():
+                found.setdefault(node.list_id, path)
+            case _:
+                return
+
+    if tree.where is not None:
+        walk(tree.where, "where")
+    return found
+
+
 # --- the compiler -----------------------------------------------------------
 
 
@@ -818,6 +870,7 @@ def compile_where(
     session: Session,
     now: datetime | None = None,
     expanding: Sequence[int] = (),
+    all_lists: Mapping[int, ContactList] | None = None,
 ) -> ColumnElement[bool]:
     """The ``WHERE`` clause of ``tree`` for ``user``, to put on a scoped statement.
 
@@ -832,11 +885,20 @@ def compile_where(
     the list ids this tree already stands for, so a ``list_member`` back to one
     of them is a cycle: :func:`netkeeper.crm.lists.update_list` passes the list
     whose filter it is about to store.
+
+    ``all_lists`` is **every** list of this user, by id, for a caller that
+    already holds them: compiling then reads nothing at all, and a reference to
+    an id the mapping does not carry means the user has no such list. It is for
+    the callers that compile several trees in one breath — the lists page, the
+    guard that recompiles every list after a write — where looking each list up
+    per compile turns one page into hundreds of statements. A partial mapping
+    would quietly make real lists match nobody, so pass all of them or none.
     """
     clock = _Clock.at(user, now)
     clauses = _liveness(tree)
     if tree.where is not None:
-        clauses.append(_Compiler(user, clock, session, expanding).node(tree.where, "where"))
+        compiler = _Compiler(user, clock, session, expanding, all_lists)
+        clauses.append(compiler.node(tree.where, "where"))
     return and_(*clauses)
 
 
@@ -849,17 +911,29 @@ def _liveness(tree: FilterTree) -> list[ColumnElement[bool]]:
 
 
 def compile_filter(
-    user: User, tree: FilterTree, *, session: Session, now: datetime | None = None
+    user: User,
+    tree: FilterTree,
+    *,
+    session: Session,
+    now: datetime | None = None,
+    all_lists: Mapping[int, ContactList] | None = None,
 ) -> Select[tuple[Contact]]:
     """``scoped(user, Contact)`` filtered by ``tree``. Sort and page it with the helpers below."""
-    return scoped(user, Contact).where(compile_where(user, tree, session=session, now=now))
+    where = compile_where(user, tree, session=session, now=now, all_lists=all_lists)
+    return scoped(user, Contact).where(where)
 
 
 def compile_count(
-    user: User, tree: FilterTree, *, session: Session, now: datetime | None = None
+    user: User,
+    tree: FilterTree,
+    *,
+    session: Session,
+    now: datetime | None = None,
+    all_lists: Mapping[int, ContactList] | None = None,
 ) -> Select[tuple[int]]:
     """``scoped_count(user, Contact)`` filtered by ``tree``."""
-    return scoped_count(user, Contact).where(compile_where(user, tree, session=session, now=now))
+    where = compile_where(user, tree, session=session, now=now, all_lists=all_lists)
+    return scoped_count(user, Contact).where(where)
 
 
 def compile_update(
@@ -941,12 +1015,18 @@ MAX_LIST_EXPANSIONS: Final = 32
 
 class _Compiler:
     def __init__(
-        self, user: User, clock: _Clock, session: Session, expanding: Sequence[int] = ()
+        self,
+        user: User,
+        clock: _Clock,
+        session: Session,
+        expanding: Sequence[int] = (),
+        all_lists: Mapping[int, ContactList] | None = None,
     ) -> None:
         self.user = user
         self.clock = clock
         self.session = session
         self._expanding: tuple[int, ...] = tuple(expanding)
+        self._all_lists = all_lists
         self._lists: dict[int, ContactList | None] = {}
         self._expansions = 0
 
@@ -1075,17 +1155,16 @@ class _Compiler:
         if row is None:
             return false()
         if row.kind is ListKind.STATIC:
-            # The EXISTS says "has a row"; the liveness terms say "and is still a
-            # person", which is what netkeeper.crm.lists._static_members_base adds
-            # to the same join. A membership row outlives its contact being
-            # archived or merged away, so neither is dropped for us by the outer
-            # tree: include_archived on *this* tree does not make an archived
-            # contact a member of a static list.
-            return and_(
-                Contact.merged_into_id.is_(None),
-                Contact.archived_at.is_(None),
-                self._members_of(row.id).exists(),
-            )
+            # The EXISTS says "has a row"; ``archived_at`` says "and is still in
+            # the address book", which is what netkeeper.crm.lists
+            # ._static_members_base adds to the same join. It is repeated here
+            # because it is the *predicate's* term, not the tree's: a membership
+            # row outlives its contact being archived, and ``include_archived``
+            # on the tree around this node must not turn an archived contact
+            # back into a member of a static list. ``merged_into_id`` needs no
+            # such term: _liveness() adds it on every path and no tree can turn
+            # it off.
+            return and_(Contact.archived_at.is_(None), self._members_of(row.id).exists())
         return self._inline(row, path)
 
     def _list(self, list_id: int) -> ContactList | None:
@@ -1098,6 +1177,8 @@ class _Compiler:
         flushes a list it has just created before it compiles anything naming
         it, so nothing is missed by not flushing here.
         """
+        if self._all_lists is not None:
+            return self._all_lists.get(list_id)
         if list_id not in self._lists:
             with self.session.no_autoflush:
                 self._lists[list_id] = get_scoped(self.session, self.user, ContactList, list_id)

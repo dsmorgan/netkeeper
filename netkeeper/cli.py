@@ -26,7 +26,7 @@ from netkeeper.crm.contacts import ContactStats, contact_stats
 from netkeeper.crm.exports import ExportFormat, ExportPreset, export_stream
 from netkeeper.crm.filters import FilterError, FilterTree, SortKey, parse_filter, parse_sort
 from netkeeper.crm.identity import CreateNew
-from netkeeper.crm.lists import list_lists, list_views, member_counts
+from netkeeper.crm.lists import ListCount, list_lists, list_views, member_counts
 from netkeeper.crm.tags import ensure_default_rules, list_tags, run_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.linkedin.archive import ArchiveFormatError, open_archive
@@ -343,8 +343,15 @@ def lists_list() -> None:
     if not rows:
         typer.echo("no lists")
         return
-    table = [(row.name, row.kind.value, str(counts.get(row.id, 0))) for row in rows]
+    table = [(row.name, row.kind.value, _member_cell(counts.get(row.id))) for row in rows]
     typer.echo(_format_table(("NAME", "KIND", "MEMBERS"), table), nl=False)
+
+
+def _member_cell(count: ListCount | None) -> str:
+    """The MEMBERS cell: the number, or why there is no number for that one list."""
+    if count is None:
+        return "0"
+    return "broken" if count.broken else str(count.count)
 
 
 @lists_app.command("views")

@@ -995,6 +995,16 @@ class ListOut(BaseModel):
     kind: ListKind
     filter: FilterTree | None
     member_count: int
+    broken: str | None = None
+    """Why this list's filter does not compile, for the rare list where it does not.
+
+    ``null`` for every healthy list, which is every list under ordinary use.
+    When it is set, ``member_count`` is 0 because there is no number to give,
+    and opening the list answers 422 with this same reason. It is here so that
+    one list that cannot be counted does not cost the person the page that
+    would let them fix it.
+    """
+
     created_at: datetime
     updated_at: datetime
 

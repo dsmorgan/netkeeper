@@ -4577,6 +4577,17 @@
       },
       "ListOut": {
         "properties": {
+          "broken": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Broken"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -9247,7 +9258,7 @@
     },
     "/api/v1/lists": {
       "get": {
-        "description": "Every list, static and smart, with how many contacts are in it right now.",
+        "description": "Every list, static and smart, with how many contacts are in it right now.\n\nA list whose filter does not compile is listed like any other, with\n``broken`` saying why and no count, rather than failing the request: this\nis the page someone would use to find and fix it, so one bad list may not\nhide the rest (:func:`netkeeper.crm.lists.member_counts`).",
         "operationId": "list_lists",
         "responses": {
           "200": {

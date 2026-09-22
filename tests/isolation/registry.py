@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from netkeeper.crm import import_runs as import_service
 from netkeeper.crm import lists as list_service
 from netkeeper.crm import tags as tag_service
+from netkeeper.crm.filters import parse_filter
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.models import (
     Contact,
@@ -207,6 +208,43 @@ def _seed_list_members(session: Session, user: User) -> int:
     return 1
 
 
+def _seed_list_query(session: Session, user: User) -> int:
+    """Two reachable contacts of ``user``, and a smart list of ``user``'s that holds them.
+
+    For the ``list_member`` predicate (P1-27): the filter names a list id, so
+    the harness's crossed call hands one user the other's list id, and nothing
+    of the owner's may come back.
+
+    The list is *smart* on purpose. A static list would cross weakly: its
+    membership rows name the owner's contacts, which the caller's own scoping
+    already keeps out, so the answer is empty either way. A smart list is
+    inlined — its stored tree is compiled against whoever is asking — so a
+    lookup that stopped being scoped would answer the caller with their own
+    contacts under the owner's definition, which is both a leak of that
+    definition and an oracle for which list ids exist. Here that shows up as a
+    crossed call returning rows.
+    """
+    for index in range(2):
+        factories.make_contact(session, user, emails=[f"list-{user.id}-{index}@example.test"])
+    list_service.create_list(
+        session,
+        user,
+        "isolation",
+        ListKind.SMART,
+        filter=parse_filter({"where": {"op": "has_email"}}),
+    )
+    return 2
+
+
+def list_member_body(session: Session, user: User) -> Body:
+    """``POST /contacts/query`` filtered to ``user``'s own first list."""
+    return {
+        "filter": {
+            "where": {"op": "list_member", "list_id": int(own_list(session, user)["list_id"])}
+        }
+    }
+
+
 def _seed_views(session: Session, user: User) -> int:
     list_service.create_view(session, user, "seeded", ["first_name", "last_name"])
     return 1
@@ -240,6 +278,13 @@ REGISTRY: list[ListEndpoint] = [
         paged_count,
         method="POST",
         body={"filter": {"where": {"op": "has_li_url"}}, "sort": [{"field": "last_name"}]},
+    ),
+    ListEndpoint(
+        f"{API_PREFIX}/contacts/query",
+        _seed_list_query,
+        paged_count,
+        method="POST",
+        body=list_member_body,
     ),
     ListEndpoint(
         f"{API_PREFIX}/contacts/{{contact_id}}/interactions",

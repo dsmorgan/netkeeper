@@ -77,7 +77,10 @@ async def assert_isolated(app: FastAPI, endpoint: ListEndpoint) -> None:
     resource (both users' paths are the same) there is nothing to cross.
 
     A ``POST`` list is called with ``endpoint.body`` (built per user when it is a
-    callable) and the CSRF header; the crossed call sends the owner's body.
+    callable) and the CSRF header; the crossed call sends the owner's body, and
+    happens whenever the url *or* the body differs between the two users — a
+    body naming the owner's list is as much a crossed request as a url naming
+    their contact.
     """
     factory: sessionmaker[Session] = app.state.session_factory
     with session_scope(factory, write=True) as session:  # seeds read, then write
@@ -113,8 +116,19 @@ async def assert_isolated(app: FastAPI, endpoint: ListEndpoint) -> None:
     seeded_calls = [call for call in calls if call.seeded]
     for viewer in seeded_calls:
         for owner in seeded_calls:
-            if viewer is not owner and viewer.url != owner.url:
+            if viewer is not owner and _crossable(viewer, owner):
                 await _check_crossed(app, endpoint, viewer, owner)
+
+
+def _crossable(viewer: _Call, owner: _Call) -> bool:
+    """Whether asking ``viewer`` for ``owner``'s call names anything of the owner's.
+
+    The url is one way a request names a resource; a ``POST`` list's body is the
+    other, and a body built per user (``ListEndpoint.body`` as a callable) is how
+    an endpoint says which of the owner's rows it is about — a list id, say. When
+    both are the same for both users there is nothing to cross.
+    """
+    return viewer.url != owner.url or viewer.body != owner.body
 
 
 def path_fields(path: str) -> list[str]:

@@ -6,6 +6,7 @@ from collections.abc import Iterator
 
 import factories
 import pytest
+from sqlalchemy import event
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.crm import identity
@@ -20,10 +21,12 @@ from netkeeper.crm.lists import (
     DuplicateViewName,
     InvalidListValue,
     InvalidViewValue,
+    ListCount,
     ListNotFound,
     ViewNotFound,
     WrongListKind,
     add_members,
+    broken_lists,
     create_list,
     create_view,
     delete_list,
@@ -42,7 +45,7 @@ from netkeeper.crm.lists import (
     update_view,
 )
 from netkeeper.db import session_scope
-from netkeeper.models import ContactMet, ListKind, User, UserKind
+from netkeeper.models import ContactList, ContactMet, ListKind, User, UserKind
 from netkeeper.services.settings_kv import get_setting
 
 # --- fixtures -----------------------------------------------------------
@@ -211,7 +214,8 @@ def test_member_counts_batches_several_lists(writer: Session, user: User) -> Non
     c1 = factories.make_contact(writer, user)
     add_members(writer, user, a.id, [c1.id])
     counts = member_counts(writer, user, [a, b])
-    assert counts == {a.id: 1, b.id: 0}
+    assert counts == {a.id: ListCount(1), b.id: ListCount(0)}
+    assert all(count.broken is None for count in counts.values())
 
 
 # --- smart list membership: the "done when" for P1-08 -----------------------
@@ -540,3 +544,165 @@ def test_user_b_cannot_read_or_modify_user_as_saved_view(
 def test_writes_need_a_writer_session(session: Session, user: User) -> None:
     with pytest.raises(RuntimeError):
         create_list(session, user, "x", ListKind.STATIC)
+
+
+# --- a write may not break another list (#126 review) -----------------------
+
+
+def test_a_filter_may_not_name_a_list_that_does_not_exist(writer: Session, user: User) -> None:
+    """Write time only: the same reference on a read matches nobody, deliberately.
+
+    The id a list is about to be given does not exist while its filter is being
+    validated, so "matches nobody" made a forward reference to that id
+    acceptable — and the row then became the list its own filter named.
+    """
+    with pytest.raises(FilterError, match="there is no list 999"):
+        create_list(
+            writer,
+            user,
+            "forward",
+            ListKind.SMART,
+            filter=parse_filter({"where": {"op": "list_member", "list_id": 999}}),
+        )
+    assert find_list(writer, user, "forward") is None
+
+
+def test_a_saved_view_may_not_name_a_list_that_does_not_exist(writer: Session, user: User) -> None:
+    """A view carries a filter too, and gets the same check for the same reason."""
+    with pytest.raises(FilterError, match="there is no list 999"):
+        create_view(
+            writer,
+            user,
+            "forward",
+            ["first_name"],
+            filter=parse_filter({"where": {"op": "list_member", "list_id": 999}}),
+        )
+
+
+def test_a_write_that_would_break_another_list_is_refused(writer: Session, user: User) -> None:
+    """The guard that walks up: this edit is fine in itself and ruins the list above it."""
+    first = create_list(
+        writer, user, "First", ListKind.SMART, filter=parse_filter({"where": {"op": "has_email"}})
+    )
+    second = create_list(
+        writer,
+        user,
+        "Second",
+        ListKind.SMART,
+        filter=parse_filter({"where": {"op": "list_member", "list_id": first.id}}),
+    )
+    # First naming Second closes First -> Second -> First. Its own validation
+    # catches this one; the point here is that the refusal leaves both readable.
+    with pytest.raises(FilterError):
+        update_list(
+            writer,
+            user,
+            first.id,
+            filter=parse_filter({"where": {"op": "list_member", "list_id": second.id}}),
+        )
+    assert member_count(writer, user, first.id) == 0
+    assert member_count(writer, user, second.id) == 0
+    assert broken_lists(writer, user) == {}
+
+
+def test_a_list_that_was_already_broken_never_blocks_an_unrelated_write(
+    writer: Session, user: User
+) -> None:
+    """``before`` is compared against, not "nothing is broken": otherwise one bad
+    list would freeze every other write, including the one that would fix it."""
+    good = create_list(writer, user, "Good", ListKind.STATIC)
+    bad = create_list(
+        writer, user, "Bad", ListKind.SMART, filter=parse_filter({"where": {"op": "has_email"}})
+    )
+    bad.filter_json = {"where": {"op": "list_member", "list_id": bad.id}}
+    writer.flush()
+    assert set(broken_lists(writer, user)) == {bad.id}
+
+    renamed = update_list(writer, user, good.id, name="Still good")
+    assert renamed.name == "Still good"
+    created = create_list(writer, user, "Another", ListKind.STATIC)
+    assert created.id
+
+    # ...and the write that fixes the broken list is allowed too.
+    fixed = update_list(writer, user, bad.id, filter=parse_filter({"where": {"op": "has_phone"}}))
+    assert fixed.filter_json == {"where": {"op": "has_phone"}, "include_archived": False}
+    assert broken_lists(writer, user) == {}
+
+
+def test_deleting_a_list_warns_about_the_filters_that_named_it(
+    writer: Session, user: User, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A delete is never refused — the reference just matches nobody — but it is said out loud.
+
+    On SQLite the next list created can be handed the deleted id, at which point
+    that filter quietly means the new list. The guard on writes refuses the
+    version of that which breaks something; this is how the version that does
+    not becomes visible.
+    """
+    target = create_list(writer, user, "Target", ListKind.STATIC)
+    naming = create_list(
+        writer,
+        user,
+        "Naming",
+        ListKind.SMART,
+        filter=parse_filter({"where": {"op": "list_member", "list_id": target.id}}),
+    )
+    with caplog.at_level("WARNING", logger="netkeeper.crm.lists"):
+        delete_list(writer, user, target.id)
+    assert f"list {naming.id}" in caplog.text
+    assert member_count(writer, user, naming.id) == 0
+
+
+def test_member_counts_marks_one_broken_list_instead_of_failing(
+    writer: Session, user: User
+) -> None:
+    """The containment: the page that lists every list keeps listing them."""
+    good = create_list(writer, user, "Good", ListKind.STATIC)
+    contact = factories.make_contact(writer, user)
+    add_members(writer, user, good.id, [contact.id])
+    bad = create_list(
+        writer, user, "Bad", ListKind.SMART, filter=parse_filter({"where": {"op": "has_email"}})
+    )
+    bad.filter_json = {"where": {"op": "list_member", "list_id": bad.id}}
+    writer.flush()
+
+    counts = member_counts(writer, user, [good, bad])
+    assert counts[good.id] == ListCount(1)
+    assert counts[bad.id].count == 0
+    assert counts[bad.id].broken is not None
+    assert "defined in terms of itself" in (counts[bad.id].broken or "")
+    # Asked about that one list by name, the error is still an error.
+    with pytest.raises(FilterError):
+        member_count(writer, user, bad.id)
+
+
+def test_a_page_of_counts_looks_the_lists_up_once(writer: Session, user: User) -> None:
+    """Not quadratic in the number of lists: the page resolves every name from one query.
+
+    Compiling looks a list up per distinct id, which is right for one tree and
+    wrong for a page that compiles every list the user has — worse the longer
+    the chains, because each compile walks its own. ``all_lists`` is what the
+    page hands the compiler instead.
+    """
+    chain: list[ContactList] = []
+    for index in range(8):
+        where = None if not chain else {"op": "list_member", "list_id": chain[-1].id}
+        chain.append(
+            create_list(
+                writer, user, f"chain{index}", ListKind.SMART, filter=parse_filter({"where": where})
+            )
+        )
+    statements: list[str] = []
+
+    def record(*args: object) -> None:
+        statements.append(str(args[2]))
+
+    engine = writer.get_bind()
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        counts = member_counts(writer, user, chain)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert len(counts) == len(chain)
+    lookups = [text for text in statements if "FROM lists" in text]
+    assert len(lookups) == 1, lookups

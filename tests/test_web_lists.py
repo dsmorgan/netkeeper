@@ -11,8 +11,10 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.crm.filters import MAX_LIST_EXPANSIONS
 from netkeeper.db import session_scope
-from netkeeper.models import ContactMet, User
+from netkeeper.models import ContactList, ContactMet, User
+from netkeeper.scoping import get_scoped
 
 CSRF = {"X-Netkeeper-Client": "1"}
 
@@ -269,3 +271,176 @@ async def test_view_crud(client: httpx.AsyncClient) -> None:
     assert (await client.delete(url, headers=CSRF)).status_code == 404
     listed = await client.get("/api/v1/views")
     assert listed.json() == []
+
+
+# --- a write may not take the lists page down (#126 review) -----------------
+
+
+async def _create_list(client: httpx.AsyncClient, name: str, **body: Any) -> httpx.Response:
+    return await client.post("/api/v1/lists", json={"name": name, **body}, headers=CSRF)
+
+
+def _smart(where: dict[str, Any]) -> dict[str, Any]:
+    return {"kind": "smart", "filter": {"where": where}}
+
+
+async def test_a_filter_may_not_name_a_list_that_does_not_exist_yet(
+    client: httpx.AsyncClient,
+) -> None:
+    """The two-POST cycle from the review, route one.
+
+    Ids are handed out in order, so a filter naming the id it is *about* to be
+    given used to be accepted — a list that matches nobody at validation time
+    and itself a moment later. The second POST then closed the ring and every
+    page that counts a list answered 422.
+    """
+    before = await _lists_by_name(client)
+    taken = max(row["id"] for row in before.values())
+
+    first = await _create_list(client, "A", **_smart({"op": "list_member", "list_id": taken + 2}))
+    assert first.status_code == 422, first.text
+    assert f"there is no list {taken + 2}" in first.text
+
+    # ...and nothing was stored: the page is intact and A is not on it.
+    after = await _lists_by_name(client)
+    assert "A" not in after
+    assert set(after) == set(before)
+
+
+async def test_a_list_may_not_name_the_id_a_deleted_one_left_behind(
+    client: httpx.AsyncClient,
+) -> None:
+    """The one-POST self-cycle: delete a list to free its id, then name that id.
+
+    SQLite hands the id of the highest deleted row straight back, so the new
+    list was created *as* the list its own filter named.
+    """
+    made = await _create_list(client, "Temporary", kind="static")
+    assert made.status_code == 201
+    freed = made.json()["id"]
+    assert (await client.delete(f"/api/v1/lists/{freed}", headers=CSRF)).status_code == 204
+
+    refused = await _create_list(
+        client, "Ouroboros", **_smart({"op": "list_member", "list_id": freed})
+    )
+    assert refused.status_code == 422, refused.text
+    assert f"there is no list {freed}" in refused.text
+    assert (await client.get("/api/v1/lists")).status_code == 200
+
+
+async def test_a_new_list_may_not_take_over_a_dangling_reference_and_close_a_cycle(
+    client: httpx.AsyncClient,
+) -> None:
+    """The same route with a real dangling reference, and no id prediction at all.
+
+    A filter that named a list when it was written outlives that list, and
+    SQLite hands the id of the highest deleted row to the next insert. So the
+    new list can *become* the list an existing filter names — and if it names
+    that filter's list back, the ring closes with ordinary requests. Only
+    walking up from the write catches this one.
+    """
+    holder = await _create_list(client, "Holder", **_smart({"op": "has_email"}))
+    holder_id = holder.json()["id"]
+    target = await _create_list(client, "Target", kind="static")
+    target_id = target.json()["id"]
+    assert target_id > holder_id, "Target has to be the highest row for its id to come back"
+    patched = await client.patch(
+        f"/api/v1/lists/{holder_id}",
+        json={"filter": {"where": {"op": "list_member", "list_id": target_id}}},
+        headers=CSRF,
+    )
+    assert patched.status_code == 200, patched.text
+    assert (await client.delete(f"/api/v1/lists/{target_id}", headers=CSRF)).status_code == 204
+
+    # Holder's reference now dangles and matches nobody; the page still works.
+    lists = await _lists_by_name(client)
+    assert lists["Holder"]["member_count"] == 0
+    assert lists["Holder"]["broken"] is None
+
+    # A new list naming Holder, handed Target's id back, would close Holder -> it -> Holder.
+    closing = await _create_list(
+        client, "Closing", **_smart({"op": "list_member", "list_id": holder_id})
+    )
+    assert closing.status_code == 422, closing.text
+    assert "would leave list" in closing.text and "defined in terms of itself" in closing.text
+    page = await client.get("/api/v1/lists")
+    assert page.status_code == 200
+    assert "Closing" not in {row["name"] for row in page.json()}
+
+
+async def test_an_edit_below_the_expansion_cap_may_not_break_a_list_above_it(
+    client: httpx.AsyncClient,
+) -> None:
+    """The PATCH route from the review: a save that costs one inline, and breaks a list at 32.
+
+    The guard that looks down from the tree being written sees a single
+    ``list_member``. Only walking up — recompiling the user's lists after the
+    write — sees that the list naming the top of the chain now pulls in 33.
+    """
+    previous: int | None = None
+    for index in range(MAX_LIST_EXPANSIONS):
+        where = None if previous is None else {"op": "list_member", "list_id": previous}
+        body = {"kind": "smart", "filter": {"where": where}}
+        made = await _create_list(client, f"C{index}", **body)
+        assert made.status_code == 201, made.text
+        previous = made.json()["id"]
+    assert previous is not None
+    dependent = await _create_list(
+        client, "Dependent", **_smart({"op": "list_member", "list_id": previous})
+    )
+    assert dependent.status_code == 201, "a filter at the cap is allowed"
+    assert (await client.get("/api/v1/lists")).status_code == 200
+
+    # Smart, because only a smart list is inlined: a static one is an EXISTS and
+    # costs the cap nothing.
+    leaf = await _create_list(client, "Leaf", **_smart({"op": "has_email"}))
+    leaf_id = leaf.json()["id"]
+    bottom = (await _lists_by_name(client))["C0"]["id"]
+    patched = await client.patch(
+        f"/api/v1/lists/{bottom}",
+        json={"filter": {"where": {"op": "list_member", "list_id": leaf_id}}},
+        headers=CSRF,
+    )
+    assert patched.status_code == 422, patched.text
+    assert "would leave list" in patched.text and "more than" in patched.text
+
+    page = await client.get("/api/v1/lists")
+    assert page.status_code == 200
+    assert all(row["broken"] is None for row in page.json())
+
+
+async def test_one_list_that_cannot_compile_does_not_hide_the_others(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """The containment, reached the only way left: by writing the row behind the API's back.
+
+    Nothing the API offers can produce this state any more. If something else
+    does, the page that lists every list still lists them — with the one that
+    cannot be counted saying so — because that is the page someone would use to
+    delete it.
+    """
+    good = await _create_list(client, "Good", kind="static")
+    assert good.status_code == 201
+    bad = await _create_list(client, "Self", **_smart({"op": "has_email"}))
+    bad_id = bad.json()["id"]
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = session.scalars(select(User)).one()
+        row = get_scoped(session, user, ContactList, bad_id)
+        assert row is not None
+        row.filter_json = {"where": {"op": "list_member", "list_id": bad_id}}
+
+    page = await client.get("/api/v1/lists")
+    assert page.status_code == 200
+    rows = {row["name"]: row for row in page.json()}
+    assert set(rows) == {"Validated", "Good", "Self"}
+    assert rows["Good"]["broken"] is None
+    assert rows["Self"]["broken"] is not None
+    assert "defined in terms of itself" in rows["Self"]["broken"]
+    assert rows["Self"]["member_count"] == 0
+
+    # Asking about that one list still says what is wrong, and it can be deleted.
+    members = await client.get(f"/api/v1/lists/{bad_id}/members")
+    assert members.status_code == 422
+    assert (await client.delete(f"/api/v1/lists/{bad_id}", headers=CSRF)).status_code == 204
+    assert (await client.get("/api/v1/lists")).status_code == 200

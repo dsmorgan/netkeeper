@@ -23,10 +23,28 @@ What this module decides
   opens the list.
 - A filter may name another list (``list_member``), which is why compiling one
   now takes the session: a smart list it names is inlined from the ``lists``
-  table. :func:`update_list` passes the list being written as ``list_id`` so
-  the cycle it would close is refused at that write, not at everyone's next
-  read. A ``list_member`` naming a list that is later deleted quietly matches
-  nobody rather than breaking every page that reads the filter.
+  table. That makes a write on one list able to break *another*, so three
+  guards stand between a ``POST`` and a list nobody can read:
+
+  1. :func:`check_list_references` refuses a ``list_member`` naming a list
+     this user does not have. On a read the same reference matches nobody, on
+     purpose — deleting a list must not take down the filters that name it —
+     but at write time the leniency was a hole: the id a new list is *about*
+     to be given does not exist yet, so a filter could name it and then be
+     handed that row, which closed a cycle in two ordinary requests.
+  2. :func:`update_list` passes the list being written as ``list_id``, so a
+     tree that reaches back to its own list is refused at the write that
+     would close the cycle, rather than at everyone's next read.
+  3. :func:`_guard_dependents` walks the other way. The first two look *down*
+     from the tree being stored and cannot see the lists that name it: one at
+     the expansion cap is broken by an edit one link below, whose own save
+     costs a single inline. So every write compiles the user's smart lists
+     before and after itself and refuses to be the change that broke one.
+
+  And if a broken list ever exists anyway — data edited around the API, or a
+  fourth way nobody has thought of — :func:`member_counts` marks that one list
+  broken instead of failing the whole page (:class:`ListCount`). One list must
+  not be able to hide every other.
 - A saved view (:func:`create_view`, :func:`update_view`) is a name, a column
   set, a sort, and an optional filter for the contacts table (spec 10.1). It
   never has members; it is restored by the frontend, not evaluated here.
@@ -54,17 +72,21 @@ from __future__ import annotations
 import enum
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Final
 
 from sqlalchemy import Select, func
 from sqlalchemy.orm import Session
 
 from netkeeper.crm.filters import (
+    FilterError,
     FilterTree,
+    ListReferenceError,
     SortKey,
     compile_count,
     compile_filter,
     compile_where,
+    list_ids_in,
     parse_filter,
 )
 from netkeeper.db import is_writer
@@ -141,6 +163,10 @@ class WrongListKind(ListError, ValueError):
     """An operation that only makes sense for the other kind of list."""
 
 
+class BreaksAnotherList(ListError, ValueError):
+    """The write is fine in itself but would leave one of the user's other lists unreadable."""
+
+
 # --- results ------------------------------------------------------------
 
 
@@ -197,6 +223,23 @@ def _clean_columns(columns: Sequence[str]) -> list[str]:
     return cleaned
 
 
+def check_list_references(session: Session, user: User, tree: FilterTree) -> None:
+    """Refuse a ``list_member`` naming a list ``user`` does not have. Write time only.
+
+    Compiling such a reference matches nobody, deliberately, so that deleting
+    one list cannot take down every page that reads a filter naming it
+    (:mod:`netkeeper.crm.filters`). That leniency is safe on a *read* and unsafe
+    on a *write*: the id a new list is about to be given does not exist yet, so
+    a filter could name it, be accepted, and then be handed that very row —
+    which is how two ordinary ``POST``\\ s used to close a cycle (#126 review).
+    Refusing the reference here closes it, and no legitimate write needs it: the
+    list you mean to name already exists when you name it.
+    """
+    for list_id, path in list_ids_in(tree).items():
+        if get_scoped(session, user, ContactList, list_id) is None:
+            raise ListReferenceError(path, f"there is no list {list_id}", (list_id,))
+
+
 def _check_filter(
     session: Session, user: User, tree: FilterTree, *, list_id: int | None = None
 ) -> None:
@@ -210,8 +253,81 @@ def _check_filter(
     at the write that would close the cycle. Without it the write would succeed
     against the list's *stored* tree and the cycle would surface later as a 422
     on every page that reads either list.
+
+    This is the guard walking *down* from the tree being written.
+    :func:`_guard_dependents` walks up.
     """
+    check_list_references(session, user, tree)
     compile_where(user, tree, session=session, expanding=() if list_id is None else (list_id,))
+
+
+def all_lists(session: Session, user: User) -> dict[int, ContactList]:
+    """Every list of ``user`` by id, in one query, for the compiler to resolve names against.
+
+    Compiling looks a list up per distinct id otherwise, which is right for one
+    tree and wrong for a caller compiling every list the user has: that turned
+    one lists page over a long chain into hundreds of statements.
+    """
+    return {row.id: row for row in session.scalars(scoped(user, ContactList))}
+
+
+def broken_lists(session: Session, user: User) -> dict[int, str]:
+    """Every smart list of ``user`` whose stored filter does not compile now, and why.
+
+    Empty in every ordinary state. A list gets in here by naming lists that
+    reach back to it, or by pulling in more than
+    :data:`~netkeeper.crm.filters.MAX_LIST_EXPANSIONS` of them — states the
+    writes below refuse to create, but which data edited around the API can
+    still reach, and which the read side has to survive rather than compound.
+    """
+    broken: dict[int, str] = {}
+    everything = all_lists(session, user)
+    for row in everything.values():
+        if row.kind is not ListKind.SMART:
+            continue
+        try:
+            compile_where(
+                user,
+                parse_filter(row.filter_json),
+                session=session,
+                expanding=(row.id,),
+                all_lists=everything,
+            )
+        except FilterError as exc:
+            broken[row.id] = str(exc)
+    return broken
+
+
+def _guard_dependents(session: Session, user: User, before: dict[int, str]) -> None:
+    """Undo-by-raising: a write may not break a list that was working before it.
+
+    The write-time checks above walk *down* from the tree being stored, which
+    is blind to the lists that name *it*: a list at the expansion cap is broken
+    by an edit one link below it, whose own save costs a single inline and
+    passes (#126 review). This walks up instead, by the cheap route — compile
+    every smart list of this user before the write and after it, and refuse the
+    write if that turned a working list into a broken one.
+
+    Compared against ``before`` rather than against "nothing is broken", so a
+    list that was already broken never blocks the edit that would fix it, or
+    any unrelated edit.
+
+    The cost is two passes over one user's smart lists, on a list write: four
+    statements for an ordinary user, and bounded by :func:`all_lists` rather
+    than by the depth of their chains. A list write is a human action and lists
+    are few, so that is the right side to spend on.
+    """
+    newly = {
+        list_id: reason
+        for list_id, reason in broken_lists(session, user).items()
+        if list_id not in before
+    }
+    if not newly:
+        return
+    list_id, reason = next(iter(sorted(newly.items())))
+    row = get_scoped(session, user, ContactList, list_id)
+    name = f" ({row.name!r})" if row is not None else ""
+    raise BreaksAnotherList(f"this change would leave list {list_id}{name} unreadable: {reason}")
 
 
 # --- lists ----------------------------------------------------------------
@@ -244,15 +360,24 @@ def create_list(
     A static list (``kind=ListKind.STATIC``) takes no filter; a smart list needs
     one, validated with :func:`_check_filter`. :class:`InvalidListValue` when
     the kind and the presence of ``filter`` disagree.
+
+    Creating a list can break an existing one, which is why this takes the same
+    :func:`_guard_dependents` pass an edit does: ids are handed out by the
+    database, and a filter saved when list 3 existed, outliving that list,
+    means the *new* list 3 the moment one is created (SQLite hands the id back;
+    a sequence does not). :class:`BreaksAnotherList` when that closes a cycle
+    or overruns the expansion cap.
     """
     _require_writer(session)
     cleaned = _clean_name(name, max_length=LIST_NAME_MAX_LENGTH, what="list")
     if find_list(session, user, cleaned) is not None:
         raise DuplicateListName(f"a list named {cleaned!r} already exists")
+    before = broken_lists(session, user)
     stored = _prepare_filter(session, user, kind, filter)
     row = ContactList(user_id=user.id, name=cleaned, kind=kind, filter_json=stored)
     session.add(row)
     session.flush()
+    _guard_dependents(session, user, before)
     log.debug("created list %d %r (%s) for user %d", row.id, row.name, kind.value, user.id)
     return row
 
@@ -282,9 +407,12 @@ def update_list(
 
     ``filter`` left at :data:`UNSET` leaves it untouched. :class:`WrongListKind`
     for a filter on a static list; :class:`InvalidListValue` for a bad filter
-    or name; :class:`DuplicateListName` for a name collision.
+    or name; :class:`DuplicateListName` for a name collision;
+    :class:`BreaksAnotherList` when the new filter is fine in itself but leaves
+    a list that names this one unreadable (:func:`_guard_dependents`).
     """
     _require_writer(session)
+    before = broken_lists(session, user)
     row = get_list(session, user, list_id)
     if name is not None:
         cleaned = _clean_name(name, max_length=LIST_NAME_MAX_LENGTH, what="list")
@@ -300,16 +428,36 @@ def update_list(
         _check_filter(session, user, filter, list_id=row.id)
         row.filter_json = filter.model_dump(mode="json")
     session.flush()
+    _guard_dependents(session, user, before)
     return row
 
 
 def delete_list(session: Session, user: User, list_id: int) -> None:
-    """Delete a list; the database cascades to its members (if static)."""
+    """Delete a list; the database cascades to its members (if static).
+
+    Never refused: a filter naming a deleted list matches nobody, so a delete
+    cannot leave another list unreadable. It can leave one quietly meaning less
+    than it says, so the lists that name this one are logged as they lose it.
+    """
     _require_writer(session)
     row = get_list(session, user, list_id)
+    naming = _lists_naming(session, user, row.id)
     session.execute(scoped_delete(user, ContactList).where(ContactList.id == row.id))
     session.expunge(row)
+    if naming:
+        log.warning(
+            "deleted list %d for user %d; %s now names a list that is gone and matches nobody",
+            list_id,
+            user.id,
+            ", ".join(f"list {other}" for other in naming),
+        )
     log.debug("deleted list %d for user %d", list_id, user.id)
+
+
+def _lists_naming(session: Session, user: User, list_id: int) -> list[int]:
+    """The ids of ``user``'s smart lists whose own filter names ``list_id`` directly."""
+    smart = session.scalars(scoped(user, ContactList).where(ContactList.kind == ListKind.SMART))
+    return [row.id for row in smart if list_id in list_ids_in(parse_filter(row.filter_json))]
 
 
 # --- membership -------------------------------------------------------------
@@ -435,13 +583,23 @@ def list_members(
     return list(contacts), total
 
 
-def _member_count_for(session: Session, user: User, row: ContactList) -> int:
-    """:func:`member_count`'s logic, given the row already in hand (no re-fetch)."""
+def _member_count_for(
+    session: Session,
+    user: User,
+    row: ContactList,
+    everything: dict[int, ContactList] | None = None,
+) -> int:
+    """:func:`member_count`'s logic, given the row already in hand (no re-fetch).
+
+    ``everything`` is :func:`all_lists`' result when the caller has it, so a
+    page of counts resolves every ``list_member`` in it from one query.
+    """
     if row.kind is ListKind.STATIC:
         base = _static_members_base(user, row)
         return session.scalar(base.with_only_columns(func.count())) or 0
     tree = parse_filter(row.filter_json)
-    return session.scalar(compile_count(user, tree, session=session)) or 0
+    statement = compile_count(user, tree, session=session, all_lists=everything)
+    return session.scalar(statement) or 0
 
 
 def member_count(session: Session, user: User, list_id: int) -> int:
@@ -450,14 +608,45 @@ def member_count(session: Session, user: User, list_id: int) -> int:
     return _member_count_for(session, user, row)
 
 
-def member_counts(session: Session, user: User, rows: Sequence[ContactList]) -> dict[int, int]:
+@dataclass(frozen=True)
+class ListCount:
+    """How many members a list has, or why nobody can say.
+
+    ``broken`` is the reason its filter does not compile, for the one list it
+    belongs to; ``count`` is 0 then, because there is no number to give.
+    """
+
+    count: int
+    broken: str | None = None
+
+
+def member_counts(
+    session: Session, user: User, rows: Sequence[ContactList]
+) -> dict[int, ListCount]:
     """:func:`member_count` for several already-loaded lists at once, by id (0 for an empty one).
 
     Takes the rows themselves, typically ``list_lists(session, user)``'s result, not ids:
     a caller that already has them (every current one does) never re-fetches what it holds,
     which is what turned a single ``GET /lists`` into two statements per list.
+
+    **One list may not take the page down with it.** A filter that does not
+    compile is counted as :class:`ListCount` with its reason rather than
+    raised, so the answer still names every list the user has — including the
+    broken one, which is the only place they can see that it is broken and
+    which one it is. The writes above try hard to make this state unreachable;
+    if one gets through anyway, the page that would let someone fix it is the
+    last thing that should fail. :func:`member_count`, asked about one list,
+    still raises: a caller who named that list wants the error.
     """
-    return {row.id: _member_count_for(session, user, row) for row in rows}
+    counts: dict[int, ListCount] = {}
+    everything = all_lists(session, user)
+    for row in rows:
+        try:
+            counts[row.id] = ListCount(_member_count_for(session, user, row, everything))
+        except FilterError as exc:
+            log.warning("list %d of user %d does not compile: %s", row.id, user.id, exc)
+            counts[row.id] = ListCount(0, str(exc))
+    return counts
 
 
 # --- saved views --------------------------------------------------------
