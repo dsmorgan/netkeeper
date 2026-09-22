@@ -75,6 +75,10 @@ function draftRun(id: number): ImportRunPage['items'][number] {
     matched_count: 3,
     created_count: 4,
     skipped_count: 0,
+    // A draft has not run the rules yet; a committed run carries what they did.
+    tagged_contacts: 0,
+    tags_added: 0,
+    tags_removed: 0,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
     committed_at: null,
