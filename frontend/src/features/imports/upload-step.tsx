@@ -48,14 +48,20 @@ export function UploadStep({ onSelect, pending, pendingName, error }: UploadStep
           <div
             onDragOver={(event) => {
               event.preventDefault()
-              setDragging(true)
+              if (!pending) setDragging(true)
             }}
             onDragLeave={() => setDragging(false)}
             onDrop={(event) => {
               event.preventDefault()
               setDragging(false)
-              take(event.dataTransfer.files)
+              // The input and the button both go inert while a file is being
+              // read; the drop target used to stay live regardless, so a drop
+              // mid-read could race the read it interrupted (review finding
+              // 5) and, either way, ignored the same "busy" state visible two
+              // inches away.
+              if (!pending) take(event.dataTransfer.files)
             }}
+            aria-disabled={pending}
             className={cn(
               'flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-8 text-center',
               dragging ? 'border-primary bg-muted' : 'border-border',
@@ -137,8 +143,8 @@ function GettingYourData() {
               message and invitation history, and a connections-only export leaves both out.
             </li>
             <li>
-              Request it and wait. LinkedIn emails you a download link — often within an hour,
-              sometimes as long as a day; budget for 1 to 24 hours.
+              Request it and wait. LinkedIn emails you a download link — usually well under a day;
+              budget for 1 to 24 hours.
             </li>
             <li>
               Download the zip from that email and choose it above, or drop it onto this page. There
@@ -154,8 +160,9 @@ function GettingYourData() {
             <strong className="text-foreground">Connections.csv</strong> imports your contact list,
             and <strong className="text-foreground">messages.csv</strong> or{' '}
             <strong className="text-foreground">Invitations.csv</strong> each add that file&rsquo;s
-            history to contacts you already have. The rest of what LinkedIn includes (skills,
-            positions, education, and the like) is not read yet, whichever way you import.
+            history to contacts you already have. This screen&rsquo;s archive path doesn&rsquo;t
+            read anything else LinkedIn includes yet (skills, positions, education, and the like) —
+            though a file like that can still be picked here and mapped by hand as a generic CSV.
           </p>
         </div>
       </CardContent>

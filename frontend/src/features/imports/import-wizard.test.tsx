@@ -672,6 +672,45 @@ describe('the archive shape: a zip, or a lone message/invitation file (P1-21)', 
     expect(calls.some((call) => call.path === '/api/v1/imports/archive')).toBe(false)
   })
 
+  it('recovers cleanly when a zip is dropped while an abandoned CSV is still being read', async () => {
+    // The race review finding 5 caught: `open.mutate` for the CSV is still in
+    // flight (nothing here awaits it) when the zip is chosen, which switches
+    // straight to the archive screen — recognizing a file by its name alone
+    // is synchronous. The CSV's `inspect` call resolves on its own later; if
+    // that stale result still lands, backing out of the archive screen would
+    // show the mapping screen for a file nobody chose this time.
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/inspect': () => jsonResponse(ARCHIVE_INSPECTION),
+      }),
+    )
+    await renderApp('/imports')
+    const input = await screen.findByLabelText('File to import')
+    fireEvent.change(input, { target: { files: [csvFile(undefined, 'Connections.csv')] } })
+    fireEvent.change(input, { target: { files: [zipFile('export.zip')] } })
+
+    expect(await screen.findByText('Recognized: a LinkedIn data archive')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Choose a different file' }))
+
+    expect(await screen.findByText('Choose a file to import')).toBeVisible()
+    expect(screen.queryByText('Map the columns')).toBeNull()
+  })
+
+  it("shows its own step nav, not the CSV pipeline's", async () => {
+    mockFetch(backend({ 'GET /api/v1/imports/presets': () => jsonResponse(PRESETS) }))
+    await renderApp('/imports')
+    await chooseArchive(zipFile())
+    await screen.findByText('Recognized: a LinkedIn data archive')
+
+    const nav = within(screen.getByRole('navigation', { name: 'Import steps' }))
+    expect(nav.getByText('Review')).toBeVisible()
+    expect(nav.queryByText('Map columns')).toBeNull()
+    expect(nav.queryByText('Preview')).toBeNull()
+    expect(nav.queryByText('Candidates')).toBeNull()
+    expect(nav.queryByText('Commit')).toBeNull()
+  })
+
   it('imports the zip on request and reports what each file contributed', async () => {
     const calls: Call[] = []
     mockFetch(
@@ -691,13 +730,18 @@ describe('the archive shape: a zip, or a lone message/invitation file (P1-21)', 
 
     expect(await screen.findByText('Imported export.zip')).toBeVisible()
     expect(
-      screen.getByText('7 new contacts, 1 updated, 8 message interactions, 2 invitations.'),
+      screen.getByText(
+        '7 new contacts, 1 contact updated, 1 needs a closer look, 8 message interactions, ' +
+          '2 invitations.',
+      ),
     ).toBeVisible()
     // Each file's own numbers, not one opaque total.
     expect(screen.getByText('Connections.csv')).toBeVisible()
     expect(screen.getByText('messages.csv')).toBeVisible()
     expect(screen.getByText('Invitations.csv')).toBeVisible()
     expect(screen.getByText(/1 more looked like someone you might already have/)).toBeVisible()
+    // Not on the History tab, and not undoable from there.
+    expect(screen.getByText(/doesn.t appear on the History tab/)).toBeVisible()
 
     const upload = calls.find((call) => call.path === '/api/v1/imports/archive')
     expect(upload?.method).toBe('POST')
@@ -706,15 +750,106 @@ describe('the archive shape: a zip, or a lone message/invitation file (P1-21)', 
     // back into its own `File` class — a different one than the jsdom global
     // this test file sees, even though it is the same file in every way that
     // matters to the app. `.name` is what the endpoint actually reads.
-    const uploaded = (upload?.body as FormData).get('file') as { name?: unknown } | null
+    const uploaded = (upload?.body as FormData).get('file') as ({ name?: unknown } & Blob) | null
     expect(uploaded).not.toBeNull()
     expect(uploaded?.name).toBe('export.zip')
+    // The bytes themselves, not only the field name and filename: the whole
+    // point of `registerFileContent`/`fileContents` in `@/test/fetch` is that
+    // an upload's content actually reaches the request, so assert on it here
+    // rather than leaving that machinery unexercised (review finding 11).
+    await expect(uploaded?.text()).resolves.toBe('not a real zip; the frontend never reads it')
 
     fireEvent.click(screen.getByRole('button', { name: 'Import another file' }))
     expect(await screen.findByText('Choose a file to import')).toBeVisible()
   })
 
-  it('names the files the archive carried but did not read', async () => {
+  it('never says nothing happened when the whole point was that nothing matched (messages only)', async () => {
+    // Case A from review finding 1: a lone `messages.csv` into a database
+    // that doesn't have those contacts yet — the exact path the "already
+    // unzipped it by hand" panel recommends. 4,211 rows, 0 attributed.
+    const noMatch = {
+      ...ARCHIVE_RESULT,
+      filename: 'messages.csv',
+      connections: {
+        ...ARCHIVE_RESULT.connections,
+        rows: 0,
+        created: 0,
+        updated: 0,
+        needs_review: 0,
+      },
+      messages: {
+        rows: 4211,
+        conversations: 812,
+        attributed: 0,
+        no_counterpart: 20,
+        group_threads: 24,
+        unknown_contact: 768,
+        no_owner: 0,
+        added: 0,
+        already_present: 0,
+        undated: 3,
+        outbound: 0,
+        inbound: 0,
+      },
+      invitations: { ...ARCHIVE_RESULT.invitations, rows: 0, added: 0 },
+    }
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/archive': () => jsonResponse(noMatch, 201),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(csvFile('CONVERSATION ID,FROM,TO,DATE,CONTENT\n', 'messages.csv'))
+    await screen.findByText('Recognized: your LinkedIn message history, on its own')
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+
+    await screen.findByText('Imported messages.csv')
+    expect(screen.queryByText(/Nothing new/)).toBeNull()
+    expect(
+      screen.getByText(/Read 4211 message rows, but none of them matched a contact already here/),
+    ).toBeVisible()
+    expect(screen.getByText(/import your connections first/)).toBeVisible()
+  })
+
+  it('never says nothing happened when every connection needs a decision instead', async () => {
+    // Case B from review finding 1.
+    const allNeedsReview = {
+      ...ARCHIVE_RESULT,
+      connections: {
+        rows: 620,
+        created: 0,
+        updated: 0,
+        needs_review: 620,
+        skipped: 0,
+        with_email: 0,
+        undated: 0,
+      },
+      messages: { ...ARCHIVE_RESULT.messages, rows: 0, attributed: 0, added: 0 },
+      invitations: { ...ARCHIVE_RESULT.invitations, rows: 0, added: 0 },
+    }
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/archive': () => jsonResponse(allNeedsReview, 201),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(zipFile('export.zip'))
+    await screen.findByText('Recognized: a LinkedIn data archive')
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+
+    await screen.findByText(/^Imported/)
+    expect(screen.queryByText(/Nothing new/)).toBeNull()
+    expect(screen.getByText('620 need a closer look.')).toBeVisible()
+    // The advice now says to unzip first, which is what actually gets
+    // somebody from "I uploaded the zip" to "Connections.csv on its own"
+    // (review finding 7 — the panel promises no unzipping for the zip path,
+    // so the one place that stops being true has to say so).
+    expect(screen.getByText(/unzip the archive/i)).toBeVisible()
+  })
+
+  it('names the files the archive carried but did not read, without overclaiming the count', async () => {
     mockFetch(
       backend({
         'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
@@ -728,8 +863,13 @@ describe('the archive shape: a zip, or a lone message/invitation file (P1-21)', 
     fireEvent.click(screen.getByRole('button', { name: 'Import' }))
     await screen.findByText(/^Imported/)
 
-    expect(screen.getByText("2 other files in the export weren't read.")).toBeVisible()
+    // Not "the rest of the export" (review finding 8): `ignored_files` is
+    // only the unrecognized `.csv` tables, not every file a real export has.
+    expect(
+      screen.getByText(/netkeeper also found 2 other tables in the export and didn.t read them\./),
+    ).toBeVisible()
     expect(screen.getByText(/Positions\.csv, Skills\.csv/)).toBeVisible()
+    expect(screen.queryByText(/the rest of the export/)).toBeNull()
   })
 
   it('recognizes a lone messages.csv and imports it with no mapping step', async () => {
@@ -867,24 +1007,146 @@ describe('the archive shape: a zip, or a lone message/invitation file (P1-21)', 
     expect(screen.getByText(/bomb\.zip: member Skills\.csv compresses 500x/)).toBeVisible()
   })
 
-  it('falls back to a plain explanation for a file it cannot read at all', async () => {
+  it("falls back to a plain, non-contradictory explanation for a message it doesn't recognize", async () => {
+    // Not one of the three current guesses, and no `code` — this is what a
+    // message #124 reworded (or one this PR never anticipated) looks like.
+    // The old default asserted "doesn't look like a zip or a CSV netkeeper
+    // recognizes," which review finding 3 caught contradicting the backend's
+    // own, more specific text in two real cases. Nothing here should ever
+    // say what the file *is*.
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/archive': () =>
+          jsonResponse({ detail: 'export.zip: unexpected end of central directory record' }, 422),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(zipFile('export.zip'))
+    await screen.findByText('Recognized: a LinkedIn data archive')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent("netkeeper couldn't import this file")
+    expect(screen.getByText(/downloading a fresh copy from LinkedIn/)).toBeVisible()
+    expect(
+      screen.getByText(/export\.zip: unexpected end of central directory record/),
+    ).toBeVisible()
+  })
+
+  it("keys guidance off a machine-readable code when the backend sends one, even if the message doesn't match anything guessed", async () => {
+    // Built against a shape that has not landed (see archive-flow.tsx's own
+    // comment): once the archive lane adds `code` to a 422, guidance no
+    // longer depends on matching its prose at all.
     mockFetch(
       backend({
         'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
         'POST /api/v1/imports/archive': () =>
           jsonResponse(
-            { detail: 'garbage.zip: not a valid zip file (File is not a zip file)' },
+            { detail: 'a message shaped nothing like any guess in this file', code: 'nested_zip' },
             422,
           ),
       }),
     )
     await renderApp('/imports')
-    await chooseArchive(zipFile('garbage.zip'))
+    await chooseArchive(zipFile('export.zip.zip'))
     await screen.findByText('Recognized: a LinkedIn data archive')
 
     fireEvent.click(screen.getByRole('button', { name: 'Import' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent("netkeeper couldn't read this file")
-    expect(screen.getByText(/garbage\.zip: not a valid zip file/)).toBeVisible()
+    expect(await screen.findByRole('alert')).toHaveTextContent('This zip has another zip inside it')
+    expect(screen.getByText(/upload the file inside it/)).toBeVisible()
+  })
+
+  it('falls back to a substring guess for a nested zip before a code exists', async () => {
+    // #124's own proposed fix for the nested-zip case (review finding 3):
+    // the backend already tells the person what to do, which the old
+    // default flatly contradicted by claiming the file was unrecognizable.
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/archive': () =>
+          jsonResponse(
+            {
+              detail:
+                'export.zip.zip contains another zip (export.zip); extract it and upload the ' +
+                'file inside.',
+            },
+            422,
+          ),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(zipFile('export.zip.zip'))
+    await screen.findByText('Recognized: a LinkedIn data archive')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('This zip has another zip inside it')
+    // Never the old contradiction.
+    expect(alert).not.toHaveTextContent("doesn't look like a zip or a CSV")
+  })
+
+  it('never tells someone to check they uploaded the right file when they already did (a corrupt download)', async () => {
+    // #124 blocker 1: a corrupt/truncated download is "the likeliest failure
+    // a real person will hit" per that PR's own review. Keyed by code here,
+    // since the exact wording of the message it lands with is unknown.
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/archive': () =>
+          jsonResponse(
+            { detail: 'export.zip: corrupt central directory', code: 'corrupt_archive' },
+            422,
+          ),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(zipFile('export.zip'))
+    await screen.findByText('Recognized: a LinkedIn data archive')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent("didn't come through in one piece")
+    expect(screen.getByText(/[Dd]ownload the export again/)).toBeVisible()
+    expect(alert).not.toHaveTextContent(/uploading the zip LinkedIn emailed you/)
+  })
+})
+
+describe('the "getting your data" panel (P1-21 item 3)', () => {
+  // The whole reason this PR exists, per review finding 2: nothing asserted
+  // a word of it before, so the menu path, the "ask for the full archive"
+  // advice, the timing, and "nothing to unzip first" could all be deleted or
+  // silently reworded.
+  it('explains how to request the export from LinkedIn and which file to pick by hand', async () => {
+    mockFetch(backend({ 'GET /api/v1/imports/presets': () => jsonResponse(PRESETS) }))
+    await renderApp('/imports')
+    await screen.findByText('Choose a file to import')
+
+    expect(screen.getByText('Getting your data from LinkedIn')).toBeVisible()
+    expect(screen.getByText('Settings & Privacy')).toBeVisible()
+    expect(screen.getByText('Data privacy')).toBeVisible()
+    expect(screen.getByText('Get a copy of your data')).toBeVisible()
+    expect(screen.getByText(/Ask for your full data archive, not just Connections/)).toBeVisible()
+    expect(screen.getByText(/budget for 1 to 24 hours/)).toBeVisible()
+    expect(screen.getByText(/nothing to unzip first/i)).toBeVisible()
+
+    expect(screen.getByText('Already unzipped it by hand?')).toBeVisible()
+    // The sentence has `Connections.csv`/`messages.csv`/`Invitations.csv` as
+    // their own `<strong>` elements, so it is matched as one block of text
+    // by its full content rather than by a substring `getByText` alone can't
+    // see across element boundaries.
+    const byHand = screen.getByText(
+      (_text, element) =>
+        element?.tagName === 'P' &&
+        (element.textContent ?? '').includes('Picking through the extracted files yourself') &&
+        (element.textContent ?? '').includes('Connections.csv') &&
+        (element.textContent ?? '').includes('messages.csv') &&
+        (element.textContent ?? '').includes('Invitations.csv'),
+    )
+    expect(byHand).toBeVisible()
   })
 })
