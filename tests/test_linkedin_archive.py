@@ -264,7 +264,7 @@ def test_a_doubly_named_zip_extension_still_opens_normally(tmp_path: Path) -> No
     doubled = zipped.with_name("export.zip.zip")
     zipped.rename(doubled)
     with open_archive(doubled) as archive:
-        assert len(archive.members) == 4
+        assert len(archive.members) == 5
 
 
 def test_a_zip_nested_inside_a_zip_is_refused_not_unwrapped(tmp_path: Path) -> None:

@@ -358,7 +358,7 @@ Done when: the CLI, the dashboard, and the triage screen take their counts from 
 **P1-26 Your own positions, and the overlap that comes from them** · lane core · M
 Goal: `Positions.csv` in the archive fills a table of the user's own job history, editable by hand; the triage card carries genuine you-and-them overlap with its date range, named apart from the address-book count, which stays (#84). Message bodies are stored as plain text rather than raw HTML fragments (#75).
 Depends on: P1-03, P1-09.
-Done when: a contact who worked where you worked says so with the years, the address-book count keeps its own name, and no stored summary contains markup.
+Done when: a contact who worked where you worked says so with the years, the address-book count keeps its own name, and no stored summary contains a tag LinkedIn's editor emits (text inside an unrecognized tag is kept verbatim, brackets and all, rather than deleted for looking tag-shaped — losing what somebody wrote is the worse failure, and every renderer escapes this field regardless).
 
 **P1-27 The list_member predicate, its 500, and merge** · lane core · M
 Goal: `list_member` compiles — a subquery over `list_members` for a static list, the stored tree inlined for a smart one, with a visited-set guard so two lists cannot reference each other forever; `GET /exports` turns an unavailable predicate into a 422 before the first chunk (#95); `identity.merge` re-points `list_members`, and `ListMember` joins `CONTACT_CHILDREN` (#81).

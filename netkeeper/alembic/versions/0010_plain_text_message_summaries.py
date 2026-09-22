@@ -30,8 +30,8 @@ trimmed at a different point than a fresh import of the same archive would
 produce today. Nothing to do about it -- the original text is gone -- but
 worth knowing rather than discovering by diffing the two.
 
-Revision ID: 0009
-Revises: 0008
+Revision ID: 0010
+Revises: 0009
 Create Date: 2026-09-21 00:00:00 UTC
 """
 
@@ -43,15 +43,15 @@ from html.parser import HTMLParser
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0009"
-down_revision: str | None = "0008"
+revision: str = "0010"
+down_revision: str | None = "0009"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 _BLOCK_TAGS = frozenset(
     {"p", "div", "br", "li", "tr", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol"}
 )
-_INLINE_TAGS = frozenset({"a", "strong", "em", "u", "span", "img"})
+_INLINE_TAGS = frozenset({"a", "strong", "em", "u", "span", "img", "script", "style"})
 
 
 class _TextExtractor(HTMLParser):
