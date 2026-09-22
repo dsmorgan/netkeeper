@@ -2,15 +2,26 @@ import { Check } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 
-import { STEPS, STEP_LABELS, type Step } from './steps'
+import { CSV_STEPS, STEP_LABELS, type Step } from './steps'
 
-/** Where the import has got to, and how far is left. */
-export function StepNav({ current }: { current: Step }) {
-  const position = STEPS.indexOf(current)
+/**
+ * Where the import has got to, and how far is left.
+ *
+ * `steps` defaults to the CSV pipeline's five steps; the archive flow passes
+ * `ARCHIVE_STEPS` so its own, shorter shape is what shows (spec 10.5, P1-21).
+ */
+export function StepNav({
+  current,
+  steps = CSV_STEPS,
+}: {
+  current: Step
+  steps?: readonly Step[]
+}) {
+  const position = steps.indexOf(current)
   return (
     <nav aria-label="Import steps">
       <ol className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-        {STEPS.map((step, index) => {
+        {steps.map((step, index) => {
           const done = index < position
           const here = index === position
           return (

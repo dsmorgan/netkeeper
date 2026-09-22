@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRef, useState } from 'react'
 
 import { createRun, importKeys, inspectFile, presetsQuery, runQuery, savePreset } from './api'
+import { type ArchiveKind, archiveKindOf } from './archive-kind'
+import { ArchiveImportFlow } from './archive-flow'
 import { DraftReview } from './draft-review'
 import { asColumnMapping } from './fields'
 import { MappingStep } from './mapping-step'
@@ -68,6 +70,12 @@ function NewImport() {
   const [mapping, setMapping] = useState<ColumnMapping>({})
   const [run, setRun] = useState<ImportRun | null>(null)
   const [savedPreset, setSavedPreset] = useState<string | null>(null)
+  // The archive shape (spec 10.5, P1-21): a zip, or a lone `messages.csv` /
+  // `Invitations.csv`, neither of which goes through `open` below at all —
+  // `archiveKindOf` decides which shape a chosen file gets before anything
+  // is read. `Connections.csv` on its own is not one of these; it keeps going
+  // through the CSV shape, which is the only one that can review a candidate.
+  const [archive, setArchive] = useState<{ file: File; kind: ArchiveKind } | null>(null)
   const queryClient = useQueryClient()
 
   // A draft already read with this exact mapping, so stepping back to the
@@ -159,6 +167,17 @@ function NewImport() {
     reinspect.mutate({ name, mapping: explicit })
   }
 
+  if (archive !== null) {
+    return (
+      <ArchiveImportFlow
+        file={archive.file}
+        kind={archive.kind}
+        onBack={() => setArchive(null)}
+        onRestart={() => setArchive(null)}
+      />
+    )
+  }
+
   if (run !== null && file !== null) {
     return (
       <DraftReview
@@ -244,7 +263,14 @@ function NewImport() {
     <div className="flex flex-col gap-4">
       <StepNav current="upload" />
       <UploadStep
-        onSelect={(picked) => open.mutate({ picked })}
+        onSelect={(picked) => {
+          const kind = archiveKindOf(picked.name)
+          if (kind !== null) {
+            setArchive({ file: picked, kind })
+            return
+          }
+          open.mutate({ picked })
+        }}
         pending={open.isPending}
         pendingName={open.variables?.picked.name ?? null}
         error={open.isError ? message(open.error) : null}
