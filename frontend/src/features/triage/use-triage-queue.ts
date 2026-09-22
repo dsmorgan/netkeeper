@@ -818,11 +818,19 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
               state.reviewIndex === null || state.reviewIndex < passed.length
                 ? state.reviewIndex
                 : null
+            // A contact the trail let go of is one the run has *un*-passed, so
+            // the run's own counter walks back with it. Counted from the trail
+            // rather than from `returning`, because that is the branch where a
+            // row is actually dropped and this can only ever be 0 or 1: leaving
+            // it out froze the position and, through `trailOffset`, renumbered
+            // every row behind it as well.
+            const unpassed = state.passed.length - passed.length
             return {
               ...state,
               status: 'ready',
               cards,
               passed,
+              seen: state.seen - unpassed,
               reviewIndex: returning ? null : reviewIndex,
               progress: result.progress,
               undoConflict: null,
