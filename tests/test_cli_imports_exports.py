@@ -20,6 +20,7 @@ import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import factories
 import httpx
@@ -31,7 +32,7 @@ from netkeeper import migrations
 from netkeeper.cli import app as cli
 from netkeeper.config import Settings
 from netkeeper.crm import import_runs, triage
-from netkeeper.crm.contacts import _has_child, _has_tag, contact_stats, merge_contacts
+from netkeeper.crm.contacts import _has_child, _has_tag, add_email, contact_stats, merge_contacts
 from netkeeper.crm.exports import export_stream
 from netkeeper.crm.filters import FilterTree
 from netkeeper.crm.tags import create_tag, tag_contact
@@ -269,18 +270,48 @@ def test_cli_import_resume_finishes_the_named_run_instead_of_a_second_one(
 def test_cli_import_resume_without_on_candidate_refuses_again_naming_the_same_run(
     cli_db: sessionmaker[Session],
 ) -> None:
+    """The refusal path runs a full `commit()` and relies on its rollback to leave nothing
+    behind: `commit()` applies the two unambiguous rows before it finds row 3 still
+    undecided and raises, so this snapshots contacts and rows before and after to pin that
+    `session_scope`'s rollback really undoes that -- not only that the draft is still
+    counted as one draft.
+    """
     _seed_candidate(cli_db)
     draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
     assert draft.exit_code == 0, draft.output
     run_id = _run_id(draft.output, "draft")
 
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        before_contacts = sorted(
+            (c.id, c.first_name, c.last_name, c.current_company)
+            for c in session.scalars(scoped(user, Contact))
+        )
+        before_run = import_runs.get_run(session, user, run_id)
+        assert before_run.status.value == "draft"
+        before_rows = [
+            (row.row_number, row.resolution.value, row.contact_id) for row in before_run.rows
+        ]
+
     result = CliRunner().invoke(cli, ["import", "resume", str(run_id)])
     assert result.exit_code == 1
     assert f"import run {run_id}" in result.output
     assert f"netkeeper import resume {run_id} --on-candidate new" in result.output
+
     with cli_db() as session:
         user = ensure_local_user(session)
         assert import_runs.list_runs(session, user)[1] == 1  # still just the one draft
+        after_contacts = sorted(
+            (c.id, c.first_name, c.last_name, c.current_company)
+            for c in session.scalars(scoped(user, Contact))
+        )
+        after_run = import_runs.get_run(session, user, run_id)
+        assert after_run.status.value == "draft"
+        after_rows = [
+            (row.row_number, row.resolution.value, row.contact_id) for row in after_run.rows
+        ]
+        assert after_contacts == before_contacts
+        assert after_rows == before_rows
 
 
 def test_cli_import_resume_on_candidate_skip_matches_what_commit_would_do(
@@ -380,6 +411,67 @@ def test_cli_import_resume_on_candidate_new_does_not_touch_a_row_that_now_matche
         assert session.scalar(scoped_count(user, Contact)) == 3
 
 
+def test_cli_import_resume_reresolves_a_row_into_an_outright_match(
+    cli_db: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """The other way the database can move between the draft and the resume: not the
+    collision disappearing (the tests above), but the row's own identity showing up on the
+    contact it was ambiguous with -- an email added to it in the app. A silent duplicate
+    here would be the failure that actually matters: a real person's record failing to
+    link, with no error at all to notice. `identity.resolve()` checks email before falling
+    back to the name+company candidate rule, so once the address is there the row is a
+    plain match, not a candidate and not a new contact.
+    """
+    with session_scope(cli_db, write=True) as session:
+        user = ensure_local_user(session)
+        factories.make_contact(
+            session,
+            user,
+            first_name="Thaddeus",
+            last_name="Ravensworth",
+            current_company="Wobblegong Analytics",
+            li_urn=None,
+            li_public_id=None,
+        )
+
+    content = (
+        "LinkedIn Profile URL,Email Address,First Name,Last Name,CityState,"
+        "Current Company,Current Job Title,Phone Number\n"
+        ',thaddeus@wobblegong.example,Thaddeus,Ravensworth,"Cinder Flats, Farland",'
+        "Wobblegong Analytics,Junior Wobbler,\n"
+    )
+    path = tmp_path / "thaddeus.csv"
+    path.write_text(content)
+    draft = CliRunner().invoke(cli, ["import", "csv", str(path), "--dry-run"])
+    assert draft.exit_code == 0, draft.output
+    run_id = _run_id(draft.output, "draft")
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        # Ambiguous by name and company alone; the seeded contact has no email yet.
+        assert import_runs.get_run(session, user, run_id).candidate_count == 1
+
+    # Someone adds the missing address to the existing contact in the app.
+    with session_scope(cli_db, write=True) as session:
+        user = ensure_local_user(session)
+        thaddeus = session.scalars(
+            scoped(user, Contact).where(
+                Contact.first_name == "Thaddeus", Contact.last_name == "Ravensworth"
+            )
+        ).one()
+        add_email(session, user, thaddeus.id, "thaddeus@wobblegong.example")
+
+    result = CliRunner().invoke(cli, ["import", "resume", str(run_id)])
+    assert result.exit_code == 0, result.output
+    assert (
+        f"committed run {run_id}: 1 rows from 'thaddeus.csv' (nine-column); "
+        "1 matched, 0 created, 0 candidate(s), 0 skipped"
+    ) in result.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        # Still one contact: the row matched the existing one, it did not duplicate it.
+        assert session.scalar(scoped_count(user, Contact)) == 1
+
+
 def test_cli_import_resume_of_a_committed_run_is_a_clean_error(
     cli_db: sessionmaker[Session],
 ) -> None:
@@ -464,22 +556,17 @@ def test_cli_import_rm_of_an_unknown_run_reports_a_clean_error(
     assert "no import run 999" in result.output
 
 
-def test_cli_import_rm_reports_a_clean_error_on_a_write_lock_race(
-    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`rollback` and `csv` share this same shape (an uncaught OperationalError out of
-    session_scope), and that predates this PR and is not its to fix. But `rm` is new and
-    destructive, this repo's own tests assert no raw traceback for a command's failures,
-    and losing a concurrent write-lock race is one `rm` can hit like any other writer.
-    """
-    draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
-    assert draft.exit_code == 0, draft.output
-    run_id = _run_id(draft.output, "draft")
+def _write_lock_race(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch, argv: list[str]
+) -> Any:
+    """Invoke ``argv`` while another writer holds the SQLite write lock; the CliRunner
+    result comes back once the lock is released.
 
-    # A short busy_timeout on the *contending* connection, so this proves the failure is
-    # reported cleanly without waiting out the real 5-second default. import_rm_cmd opens
-    # a brand new engine at call time, after this patch takes effect, so it is the one
-    # that picks up the shorter wait; the lock-holder thread below does not need to.
+    A short busy_timeout on the *contending* connection, so this proves the failure is
+    reported cleanly without waiting out the real 5-second default: every import command
+    opens a brand new engine at call time, after this patch takes effect, so it is the one
+    that picks up the shorter wait; the lock-holder thread below does not need to.
+    """
     monkeypatch.setattr("netkeeper.db.SQLITE_BUSY_TIMEOUT_MS", 50)
     holder_ready = threading.Event()
     release_holder = threading.Event()
@@ -494,10 +581,24 @@ def test_cli_import_rm_reports_a_clean_error_on_a_write_lock_race(
     holder.start()
     try:
         assert holder_ready.wait(timeout=5), "the lock-holding thread never started"
-        result = CliRunner().invoke(cli, ["import", "rm", str(run_id)])
+        return CliRunner().invoke(cli, argv)
     finally:
         release_holder.set()
         holder.join(timeout=5)
+
+
+def test_cli_import_rm_reports_a_clean_error_on_a_write_lock_race(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`rm` is destructive; losing a concurrent write-lock race must not surface as a raw
+    traceback, the same guarantee `csv` and `resume` get below (`_reporting_lock_races`,
+    netkeeper/cli.py) -- all three are writers, not read-mostly.
+    """
+    draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
+    assert draft.exit_code == 0, draft.output
+    run_id = _run_id(draft.output, "draft")
+
+    result = _write_lock_race(cli_db, monkeypatch, ["import", "rm", str(run_id)])
 
     assert result.exit_code == 1
     assert "Traceback" not in result.output
@@ -506,6 +607,74 @@ def test_cli_import_rm_reports_a_clean_error_on_a_write_lock_race(
         user = ensure_local_user(session)
         # Refused, not half-deleted: the draft is still there to try again.
         assert import_runs.get_run(session, user, run_id).status.value == "draft"
+
+
+def test_cli_import_csv_reports_a_clean_error_on_a_write_lock_race(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _write_lock_race(cli_db, monkeypatch, ["import", "csv", str(NINE_COLUMN_SAMPLE)])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "locked" in result.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        assert session.scalar(scoped_count(user, Contact)) == 0
+
+
+def test_cli_import_resume_reports_a_clean_error_on_a_write_lock_race(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`resume` opens a writer session at least once and, on a retried
+    ``--on-candidate new``, twice -- the most exposed of the three to this race.
+    """
+    draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
+    assert draft.exit_code == 0, draft.output
+    run_id = _run_id(draft.output, "draft")
+
+    result = _write_lock_race(cli_db, monkeypatch, ["import", "resume", str(run_id)])
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "locked" in result.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        assert import_runs.get_run(session, user, run_id).status.value == "draft"
+
+
+def test_cli_import_resume_on_candidate_new_refuses_cleanly_when_the_retry_is_still_undecided(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression this pins: the retry commit() -- deciding exactly the rows the first
+    attempt found undecided -- sat inside the `except UndecidedCandidates` block handling
+    that first attempt. If the database moved again in between and the retry itself found a
+    row still undecided (a narrow race: its own issue, since the real fix is giving
+    commit() the bulk policy so one transaction does both), the old code let that second
+    UndecidedCandidates escape uncaught -- a raw traceback. Mocking commit() to keep
+    finding a row undecided on the second call reproduces that without a genuine
+    two-process race.
+    """
+    _seed_candidate(cli_db)
+    draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
+    assert draft.exit_code == 0, draft.output
+    run_id = _run_id(draft.output, "draft")
+
+    real_commit = import_runs.commit
+    calls = 0
+
+    def flaky_commit(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls >= 2:
+            raise import_runs.UndecidedCandidates([3])
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(import_runs, "commit", flaky_commit)
+
+    result = CliRunner().invoke(cli, ["import", "resume", str(run_id), "--on-candidate", "new"])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert f"import run {run_id}" in result.output
+    assert calls == 2  # the first attempt, then the retry that is still undecided
 
 
 def test_cli_import_csv_of_an_unusable_file_reports_a_clean_error(
@@ -892,6 +1061,17 @@ async def test_get_contact_stats_agrees_with_the_cli_and_triage_progress(
         factories.make_contact(session, user, met=ContactMet.UNKNOWN)
         archived = factories.make_contact(session, user, met=ContactMet.MET)
         archived.archived_at = archived.created_at
+        # Two tagged contacts, one by hand and one by rule, so `tagged` (any
+        # source) and `tagged_by_rule` (rule only) are genuinely different
+        # numbers -- a fixture where every tag happened to be rule-sourced
+        # would pass even if the endpoint served `tagged`'s value under
+        # `tagged_by_rule`'s name.
+        by_hand = factories.make_contact(session, user)
+        by_rule = factories.make_contact(session, user)
+        manual_tag = create_tag(session, user, "seeded-manual")
+        rule_tag = create_tag(session, user, "seeded-rule")
+        tag_contact(session, user, by_hand.id, manual_tag.id, source=TagSource.MANUAL)
+        tag_contact(session, user, by_rule.id, rule_tag.id, source=TagSource.RULE)
 
     cli_result = CliRunner().invoke(cli, ["contacts", "stats"])
     assert cli_result.exit_code == 0, cli_result.output
@@ -924,11 +1104,16 @@ async def test_get_contact_stats_agrees_with_the_cli_and_triage_progress(
     assert api["not_met"] == cli_rows["not met"] == progress.by_state[ContactMet.NOT_MET]
     assert api["skipped"] == cli_rows["skipped"] == progress.by_state[ContactMet.SKIP]
     assert api["untriaged"] == cli_rows["untriaged"] == progress.by_state[ContactMet.UNKNOWN]
-    # Concretely, not just "whatever the other two say": 5 contacts made, 1
-    # outside the live set (archived), so total is 4 and met is 1.
-    assert api["total"] == 4
+    # Concretely, not just "whatever the other two say": 7 contacts made, 1
+    # outside the live set (archived), so total is 6 and met is 1.
+    assert api["total"] == 6
     assert api["met"] == 1
     assert api["archived"] == cli_rows["archived"] == 1
+    # tagged_by_rule is the field a dashboard renders (#90 follow-up review): a
+    # drift here must fail this test, not only the cross-user one. Both tagged
+    # contacts count in `tagged`; only the rule-sourced one counts here too.
+    assert api["tagged"] == cli_rows["tagged"] == 2
+    assert api["tagged_by_rule"] == cli_rows["tagged by rule"] == 1
 
 
 # --- help --------------------------------------------------------------------
