@@ -27,12 +27,16 @@ export function DashboardPage() {
   const stream = useEventStreamStatus()
 
   if (stats.isPending) {
-    return <p className="text-muted-foreground">Checking your setup…</p>
+    return (
+      <p role="status" className="text-muted-foreground">
+        Checking your setup…
+      </p>
+    )
   }
 
   if (stats.isError) {
     return (
-      <Card size="sm" className="max-w-xl">
+      <Card size="sm" className="max-w-xl" role="alert">
         <CardHeader>
           <CardTitle>Backend unreachable</CardTitle>
         </CardHeader>

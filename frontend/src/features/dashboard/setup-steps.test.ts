@@ -1,13 +1,21 @@
 /**
  * `buildSetupSteps` is the state logic behind the dashboard (issue #115): a
  * pure function of the API responses, so every state it can land on — done,
- * in progress, not started, and the honest fourth "not tracked" — is tested
- * without rendering anything.
+ * in progress, not started, and the no-badge case where nothing can verify
+ * completion — is tested without rendering anything.
+ *
+ * PR #129's review found five mutations (retitling a step, blanking a title,
+ * repointing review-tags', triage's, or build-list's route) that left every
+ * test here green, because nothing asserted a step's `title`, `to`, or `cta`
+ * except import's. `shape()` below reads all three off every step, and the
+ * "renders the real five steps" tests assert the whole array with `toEqual`,
+ * so a wrong title or a swapped destination fails here, not just in a visual
+ * review.
  */
 import { describe, expect, it } from 'vitest'
 
 import type { ContactStats, ImportRunPage } from './api'
-import { buildSetupSteps } from './setup-steps'
+import { buildSetupSteps, type SetupStep } from './setup-steps'
 import type { ListOut } from '@/features/crm/types'
 
 function stats(overrides: Partial<ContactStats> = {}): ContactStats {
@@ -26,7 +34,7 @@ function stats(overrides: Partial<ContactStats> = {}): ContactStats {
   }
 }
 
-function list(id: number): ListOut {
+function list(id: number, overrides: Partial<ListOut> = {}): ListOut {
   return {
     id,
     name: `List ${id}`,
@@ -35,7 +43,22 @@ function list(id: number): ListOut {
     member_count: 0,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
+    ...overrides,
   }
+}
+
+/**
+ * `GET /api/v1/lists` on a real server: `ensure_validated_list` seeds this
+ * smart list at every start (`netkeeper/web/app.py`), and nothing in the
+ * response marks it as built-in. A fixture that defaults to `[]` is the one
+ * PR #129's review caught the fake diverging from the server on.
+ */
+function seededValidatedList(): ListOut {
+  return list(1, {
+    name: 'Validated',
+    kind: 'smart',
+    filter: { where: { op: 'eq', field: 'met', value: 'met' }, include_archived: false },
+  })
 }
 
 function draftRun(id: number): ImportRunPage['items'][number] {
@@ -58,31 +81,76 @@ function draftRun(id: number): ImportRunPage['items'][number] {
   }
 }
 
-function byKey(steps: ReturnType<typeof buildSetupSteps>, key: string) {
+function byKey(steps: SetupStep[], key: string) {
   const step = steps.find((candidate) => candidate.key === key)
   if (step === undefined) throw new Error(`no step ${key}`)
   return step
 }
 
+/** Every field a person or a test can observe, for one `toEqual` per scenario. */
+function shape(steps: SetupStep[]) {
+  return steps.map(({ key, title, detail, state, to, cta }) => ({
+    key,
+    title,
+    detail,
+    state,
+    to,
+    cta,
+  }))
+}
+
 describe('buildSetupSteps: the empty state', () => {
-  it('tells a fresh install to import first, and marks every later step not started', () => {
-    const steps = buildSetupSteps({ stats: stats() })
+  it('renders the real five steps, in order, with their real titles, routes, and controls', () => {
+    // The seeded list is present even here: it exists from the first server
+    // start, before any contact does (finding 1). Build-a-list still reads
+    // no badge, not "not started", because that count was never zero.
+    const steps = buildSetupSteps({
+      stats: stats(),
+      openImports: { items: [], total: 0 },
+      lists: [seededValidatedList()],
+    })
 
-    expect(byKey(steps, 'import')).toMatchObject({ state: 'not_started', cta: 'Import contacts' })
-    expect(byKey(steps, 'review-tags').state).toBe('not_started')
-    expect(byKey(steps, 'triage').state).toBe('not_started')
-    expect(byKey(steps, 'build-list').state).toBe('not_started')
-    expect(byKey(steps, 'export').state).toBe('not_started')
-  })
-
-  it('always returns the five steps in setup order', () => {
-    const steps = buildSetupSteps({ stats: stats() })
-    expect(steps.map((step) => step.key)).toEqual([
-      'import',
-      'review-tags',
-      'triage',
-      'build-list',
-      'export',
+    expect(shape(steps)).toEqual([
+      {
+        key: 'import',
+        title: 'Import your data',
+        detail: 'Nothing imported yet',
+        state: 'not_started',
+        to: '/imports',
+        cta: 'Import contacts',
+      },
+      {
+        key: 'review-tags',
+        title: 'Review your tags',
+        detail: 'Nothing tagged yet',
+        state: 'not_started',
+        to: '/lists',
+        cta: 'Review tags',
+      },
+      {
+        key: 'triage',
+        title: 'Triage',
+        detail: 'Nothing to triage yet',
+        state: 'not_started',
+        to: '/triage',
+        cta: 'Continue triage',
+      },
+      {
+        key: 'build-list',
+        title: 'Build a list',
+        detail: '1 list',
+        state: null,
+        to: '/lists',
+        cta: 'Open lists',
+      },
+      {
+        key: 'export',
+        title: 'Export',
+        detail: 'Nothing to export yet',
+        state: 'not_started',
+        to: '/exports',
+        cta: 'Export contacts',
+      },
     ])
   })
 })
@@ -109,18 +177,43 @@ describe('buildSetupSteps: import', () => {
     })
   })
 
-  it('reports "not tracked" rather than a false "done" when the draft query itself fails', () => {
+  it('says which draft it resumes when several are open', () => {
+    const steps = buildSetupSteps({
+      stats: stats({ total: 5 }),
+      openImports: { items: [draftRun(9), draftRun(3)], total: 2 },
+    })
+    expect(byKey(steps, 'import')).toMatchObject({
+      detail: '2 draft imports waiting to be finished — resuming the most recent',
+      search: { run: 9 },
+    })
+  })
+
+  it('shows no badge, not a false "done", when the draft query itself fails', () => {
     const steps = buildSetupSteps({ stats: stats({ total: 5 }), openImportsUnavailable: true })
-    expect(byKey(steps, 'import').state).toBe('unknown')
+    expect(byKey(steps, 'import')).toMatchObject({
+      state: null,
+      detail: '5 contacts imported; open imports could not be checked',
+    })
   })
 })
 
 describe('buildSetupSteps: review tags', () => {
-  it('has no way to know "reviewed", so it never claims done — only the tagged count', () => {
+  it('is a real "not started" with contacts and nothing tagged — a concrete, knowable next step', () => {
+    const steps = buildSetupSteps({ stats: stats({ total: 10, tagged: 0 }) })
+    expect(byKey(steps, 'review-tags')).toMatchObject({
+      state: 'not_started',
+      detail: 'Nothing tagged yet',
+      cta: 'Run auto-tag rules',
+    })
+  })
+
+  it('has no way to know "automatically" or "reviewed", so once tagged it shows no badge and no such claim', () => {
     const steps = buildSetupSteps({ stats: stats({ total: 10, tagged: 4 }) })
     const step = byKey(steps, 'review-tags')
-    expect(step.state).toBe('unknown')
-    expect(step.detail).toBe('4 contacts tagged automatically')
+    expect(step.state).toBeNull()
+    expect(step.detail).toBe('4 contacts tagged')
+    expect(step.detail).not.toMatch(/automatically/)
+    expect(step.title).not.toMatch(/automatically/)
   })
 })
 
@@ -140,26 +233,37 @@ describe('buildSetupSteps: triage', () => {
 })
 
 describe('buildSetupSteps: build a list', () => {
-  it('is done once a list exists', () => {
-    const steps = buildSetupSteps({ stats: stats({ total: 10 }), lists: [list(1), list(2)] })
-    expect(byKey(steps, 'build-list')).toMatchObject({ state: 'done', detail: '2 lists built' })
+  it('never claims done or not started — GET /lists always includes the seeded "Validated" list', () => {
+    const steps = buildSetupSteps({
+      stats: stats({ total: 10 }),
+      lists: [seededValidatedList(), list(2)],
+    })
+    expect(byKey(steps, 'build-list')).toMatchObject({ state: null, detail: '2 lists' })
   })
 
-  it('is not started with contacts but no lists', () => {
-    const steps = buildSetupSteps({ stats: stats({ total: 10 }), lists: [] })
-    expect(byKey(steps, 'build-list').state).toBe('not_started')
+  it('shows no badge with contacts and only the seeded list — not a false "done"', () => {
+    const steps = buildSetupSteps({ stats: stats({ total: 10 }), lists: [seededValidatedList()] })
+    expect(byKey(steps, 'build-list')).toMatchObject({ state: null, detail: '1 list' })
   })
 
-  it('reports "not tracked" rather than a false "not started" when the lists query fails', () => {
+  it('shows no badge before any contact either — the seeded list predates import', () => {
+    const steps = buildSetupSteps({ stats: stats({ total: 0 }), lists: [seededValidatedList()] })
+    expect(byKey(steps, 'build-list')).toMatchObject({ state: null, detail: '1 list' })
+  })
+
+  it('reports the count could not be checked, not a guess, when the lists query fails', () => {
     const steps = buildSetupSteps({ stats: stats({ total: 10 }), listsUnavailable: true })
-    expect(byKey(steps, 'build-list').state).toBe('unknown')
+    expect(byKey(steps, 'build-list')).toMatchObject({
+      state: null,
+      detail: 'List count could not be checked',
+    })
   })
 })
 
 describe('buildSetupSteps: export', () => {
   it('has no tracked signal at all once there is something to export', () => {
     const steps = buildSetupSteps({ stats: stats({ total: 10 }) })
-    expect(byKey(steps, 'export').state).toBe('unknown')
+    expect(byKey(steps, 'export')).toMatchObject({ state: null })
   })
 
   it('is not started with nothing imported', () => {
