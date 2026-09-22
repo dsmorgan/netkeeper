@@ -1,21 +1,22 @@
-"""CLI counterparts of import, export, and contacts stats (P1-16, issue #25).
+"""CLI counterparts of import, export, and contacts stats (P1-16, issue #25, #90).
 
 Each command drives the same service functions its API counterpart does, so
 most tests assert on the exact fixture-derived counts the service layer's own
 tests use (``tests/test_archive_import.py``) or compare the CLI's output
 against a direct call to the service function on the same database.
-``netkeeper contacts stats`` has no ``GET /contacts/stats`` route of its own,
-but it is not exempt from this: it shares ``netkeeper.crm.triage.progress()``'s
+``netkeeper contacts stats`` shares ``netkeeper.crm.triage.progress()``'s
 live-rows baseline (``archived_at IS NULL AND merged_into_id IS NULL``) for its
 four ``ContactMet`` counts and ``total``, the same numbers ``GET /triage/next``
-et al. surface as ``TriageProgressOut``, and a dedicated test below pins the
-two together so they cannot quietly drift apart.
+et al. surface as ``TriageProgressOut`` and ``GET /contacts/stats`` now surfaces
+too (P1-25); a dedicated test below pins all three together so they cannot
+quietly drift apart.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,12 +31,12 @@ from netkeeper import migrations
 from netkeeper.cli import app as cli
 from netkeeper.config import Settings
 from netkeeper.crm import import_runs, triage
-from netkeeper.crm.contacts import contact_stats, merge_contacts
+from netkeeper.crm.contacts import _has_child, _has_tag, contact_stats, merge_contacts
 from netkeeper.crm.exports import export_stream
 from netkeeper.crm.filters import FilterTree
 from netkeeper.crm.tags import create_tag, tag_contact
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
-from netkeeper.models import Contact, ContactMet, Interaction
+from netkeeper.models import Contact, ContactEmail, ContactMet, ContactPhone, Interaction, TagSource
 from netkeeper.scoping import install_scope_guard, scoped, scoped_count
 from netkeeper.services.users import ensure_local_user
 from netkeeper.web.app import create_app
@@ -282,6 +283,103 @@ def test_cli_import_resume_without_on_candidate_refuses_again_naming_the_same_ru
         assert import_runs.list_runs(session, user)[1] == 1  # still just the one draft
 
 
+def test_cli_import_resume_on_candidate_skip_matches_what_commit_would_do(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """The one of the three `--on-candidate` paths that was already correct before this fix:
+    `skip_undecided=True` passes no decisions and lets `commit()` re-resolve on its own.
+    """
+    _seed_candidate(cli_db)
+    draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
+    assert draft.exit_code == 0, draft.output
+    run_id = _run_id(draft.output, "draft")
+
+    result = CliRunner().invoke(cli, ["import", "resume", str(run_id), "--on-candidate", "skip"])
+    assert result.exit_code == 0, result.output
+    assert (
+        f"committed run {run_id}: 3 rows from 'nine-column-sample.csv' (nine-column); "
+        "0 matched, 2 created, 0 candidate(s), 1 skipped"
+    ) in result.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        # The seeded Thaddeus, plus the two unambiguous rows; the CSV's Thaddeus
+        # was left out, not merged into the seeded contact.
+        assert session.scalar(scoped_count(user, Contact)) == 3
+
+
+# --- resume against a database that moved since the draft (#90 review finding 1) --------
+
+
+def _delete_seeded_candidate(factory: sessionmaker[Session]) -> None:
+    """Remove the contact `_seed_candidate` made, as if the ambiguity resolved itself
+    between the draft and the resume -- a merge, an edit, or a manual delete.
+    """
+    with session_scope(factory, write=True) as session:
+        user = ensure_local_user(session)
+        thaddeus = session.scalars(
+            scoped(user, Contact).where(
+                Contact.first_name == "Thaddeus", Contact.last_name == "Ravensworth"
+            )
+        ).one()
+        session.delete(thaddeus)
+
+
+def test_cli_import_resume_reresolves_against_the_database_as_it_is_now(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """`import resume` exists because time passes between the draft and the finish --
+    unlike `import csv`, where the read and the commit are the same instant. Here the
+    colliding contact is deleted after the draft is read, so the row that was a
+    candidate at draft time is a plain new contact by the time resume runs; resume must
+    ask `commit()` what is true now, not replay what the draft recorded.
+    """
+    _seed_candidate(cli_db)
+    draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
+    assert draft.exit_code == 0, draft.output
+    run_id = _run_id(draft.output, "draft")
+
+    _delete_seeded_candidate(cli_db)
+
+    result = CliRunner().invoke(cli, ["import", "resume", str(run_id)])
+    assert result.exit_code == 0, result.output
+    assert (
+        f"committed run {run_id}: 3 rows from 'nine-column-sample.csv' (nine-column); "
+        "0 matched, 3 created, 0 candidate(s), 0 skipped"
+    ) in result.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        # The seeded contact was deleted; all 3 rows land fresh.
+        assert session.scalar(scoped_count(user, Contact)) == 3
+
+
+def test_cli_import_resume_on_candidate_new_does_not_touch_a_row_that_now_matches(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """The bug this pins: the old code decided `--on-candidate new` from the draft's
+    stale, stored resolution, so it handed `identity.apply()` a `CreateNew()` decision for
+    a row that, by resume time, had already stopped being a candidate. `apply()` refuses
+    a decision on anything but a `Candidate` resolution, so the row was silently skipped
+    ("a decision applies to a Candidate resolution only") instead of imported. Deriving
+    the decisions from what `commit()` itself reports as still undecided closes that.
+    """
+    _seed_candidate(cli_db)
+    draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
+    assert draft.exit_code == 0, draft.output
+    run_id = _run_id(draft.output, "draft")
+
+    _delete_seeded_candidate(cli_db)
+
+    result = CliRunner().invoke(cli, ["import", "resume", str(run_id), "--on-candidate", "new"])
+    assert result.exit_code == 0, result.output
+    assert (
+        f"committed run {run_id}: 3 rows from 'nine-column-sample.csv' (nine-column); "
+        "0 matched, 3 created, 0 candidate(s), 0 skipped"
+    ) in result.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        assert session.scalar(scoped_count(user, Contact)) == 3
+
+
 def test_cli_import_resume_of_a_committed_run_is_a_clean_error(
     cli_db: sessionmaker[Session],
 ) -> None:
@@ -364,6 +462,50 @@ def test_cli_import_rm_of_an_unknown_run_reports_a_clean_error(
     assert result.exit_code == 1
     assert "Traceback" not in result.output
     assert "no import run 999" in result.output
+
+
+def test_cli_import_rm_reports_a_clean_error_on_a_write_lock_race(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`rollback` and `csv` share this same shape (an uncaught OperationalError out of
+    session_scope), and that predates this PR and is not its to fix. But `rm` is new and
+    destructive, this repo's own tests assert no raw traceback for a command's failures,
+    and losing a concurrent write-lock race is one `rm` can hit like any other writer.
+    """
+    draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
+    assert draft.exit_code == 0, draft.output
+    run_id = _run_id(draft.output, "draft")
+
+    # A short busy_timeout on the *contending* connection, so this proves the failure is
+    # reported cleanly without waiting out the real 5-second default. import_rm_cmd opens
+    # a brand new engine at call time, after this patch takes effect, so it is the one
+    # that picks up the shorter wait; the lock-holder thread below does not need to.
+    monkeypatch.setattr("netkeeper.db.SQLITE_BUSY_TIMEOUT_MS", 50)
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def hold_the_write_lock() -> None:
+        with session_scope(cli_db, write=True) as session:
+            ensure_local_user(session)  # the write lock is taken at BEGIN IMMEDIATE, here
+            holder_ready.set()
+            release_holder.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_the_write_lock)
+    holder.start()
+    try:
+        assert holder_ready.wait(timeout=5), "the lock-holding thread never started"
+        result = CliRunner().invoke(cli, ["import", "rm", str(run_id)])
+    finally:
+        release_holder.set()
+        holder.join(timeout=5)
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "locked" in result.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        # Refused, not half-deleted: the draft is still there to try again.
+        assert import_runs.get_run(session, user, run_id).status.value == "draft"
 
 
 def test_cli_import_csv_of_an_unusable_file_reports_a_clean_error(
@@ -552,6 +694,9 @@ def test_cli_contacts_stats_matches_a_direct_call_to_the_service(
         tagged = factories.make_contact(session, user)
         tag = create_tag(session, user, "vp")
         tag_contact(session, user, tagged.id, tag.id)
+        tagged_by_rule = factories.make_contact(session, user)
+        rule_tag = create_tag(session, user, "director")
+        tag_contact(session, user, tagged_by_rule.id, rule_tag.id, source=TagSource.RULE)
         # Both MET, so identity.MET_RANK ties and the merge leaves survivor.met
         # as it already was: MET either way, so the loser's own MET is what
         # would have added a spurious second "met" for one person pre-fix.
@@ -580,25 +725,29 @@ def test_cli_contacts_stats_matches_a_direct_call_to_the_service(
     assert rows["with email"] == str(expected.with_email)
     assert rows["with phone"] == str(expected.with_phone)
     assert rows["tagged"] == str(expected.tagged)
+    assert rows["tagged by rule"] == str(expected.tagged_by_rule)
     assert footer == (
         f"total ({expected.total}) counts live contacts only: not archived, not merged away. "
         "archived and merged away are separate counts of what total leaves out."
     )
-    # And the numbers actually mean what they say: 10 contacts made, 2 outside
-    # the live set (archived, merged away), so total is 8; met is the plain
+    # And the numbers actually mean what they say: 11 contacts made, 2 outside
+    # the live set (archived, merged away), so total is 9; met is the plain
     # MET contact plus the survivor (also MET) — the archived MET and the
     # loser's own MET, both outside the live set, add nothing.
-    assert expected.total == 8
+    assert expected.total == 9
     assert expected.met == 2
     assert expected.not_met == 1
     assert expected.skipped == 1
-    assert expected.untriaged == 4
+    assert expected.untriaged == 5
     assert expected.met + expected.not_met + expected.skipped + expected.untriaged == expected.total
     assert expected.archived == 1
     assert expected.merged_away == 1
     assert expected.with_email == 1
     assert expected.with_phone == 1
-    assert expected.tagged == 1
+    # Both the manually tagged and the rule-tagged contact carry some tag;
+    # only the second is rule-sourced.
+    assert expected.tagged == 2
+    assert expected.tagged_by_rule == 1
 
 
 def test_contact_stats_agrees_with_triage_progress_on_the_four_states(
@@ -677,6 +826,44 @@ def test_cli_contacts_stats_does_not_leak_across_users(cli_db: sessionmaker[Sess
         after = contact_stats(session, user)
 
     assert after == before
+
+
+def test_contact_stats_child_subqueries_name_the_user_in_their_own_where(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """The runtime scope guard only inspects the outer statement (netkeeper.scoping), so
+    the ``user_id`` term inside each correlated ``EXISTS`` in ``_has_child``/``_has_tag`` is
+    the only thing keeping ``with_email``, ``with_phone``, ``tagged``, and ``tagged_by_rule``
+    to one user -- defense in depth, the same convention ``tests/test_filters.py``'s
+    ``test_compiled_statements_are_scoped_and_every_subquery_names_the_user`` pins for the
+    filter language.
+
+    Reading the compiled SQL, not counting rows, is what catches that term being dropped: a
+    correlated ``EXISTS`` against a table already narrowed to one contact by ``contact_id``
+    returns the same *result* with or without its own ``user_id`` clause, because a child
+    row's ``contact_id`` already determines which user it belongs to -- proven by hand:
+    giving a second user their own contacts, emails, phones, and tags of both sources (as
+    the test above does) still passes with that clause deleted. Only the query's shape can
+    catch it. ``tagged_by_rule`` gets the same check on its extra ``source`` clause, since
+    without it the query is just ``tagged`` again under another name.
+    """
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        for clause, table in (
+            (_has_child(user, ContactEmail), "contact_emails"),
+            (_has_child(user, ContactPhone), "contact_phones"),
+            (_has_tag(user), "contact_tags"),
+            (_has_tag(user, source=TagSource.RULE), "contact_tags"),
+        ):
+            statement = scoped_count(user, Contact).where(clause)
+            sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
+            assert f"{table}.user_id = {user.id}" in sql, table
+        rule_sql = str(
+            scoped_count(user, Contact)
+            .where(_has_tag(user, source=TagSource.RULE))
+            .compile(compile_kwargs={"literal_binds": True})
+        )
+        assert "contact_tags.source = 'rule'" in rule_sql
 
 
 def test_cli_contacts_stats_with_no_contacts_is_all_zero(cli_db: sessionmaker[Session]) -> None:

@@ -26,12 +26,14 @@ from netkeeper.crm import contacts as service
 from netkeeper.crm.filters import parse_filter
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.crm.provenance import record_synced_value
+from netkeeper.crm.tags import create_tag, tag_contact
 from netkeeper.db import session_scope
 from netkeeper.models import (
     ContactMet,
     ContactSnapshot,
     ContactSource,
     InteractionKind,
+    TagSource,
     User,
     UserKind,
 )
@@ -262,6 +264,7 @@ async def test_stats_matches_a_direct_call_to_the_service(
         "with_email": expected.with_email,
         "with_phone": expected.with_phone,
         "tagged": expected.tagged,
+        "tagged_by_rule": expected.tagged_by_rule,
     }
 
 
@@ -684,14 +687,45 @@ async def test_another_user_reads_nothing_of_the_owners(
 async def test_stats_does_not_count_another_users_contacts(
     client: httpx.AsyncClient, running_app: FastAPI, intruder: User, people: list[int]
 ) -> None:
-    with acting_as(running_app, intruder.id):
-        empty = await client.get("/api/v1/contacts/stats")
-        assert empty.status_code == 200
-        assert all(count == 0 for count in empty.json().values())
+    """The intruder gets two contacts -- one carrying a manual tag, one carrying a
+    rule-sourced tag, plus an email and a phone -- numbers that differ from the owner's
+    ``people`` fixture and from each other, so a leak in either the user filter or the
+    tag-source filter shows up as a wrong count, not just a nonzero one.
+    """
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        theirs_user = session.get(User, intruder.id)
+        assert theirs_user is not None
+        by_hand = factories.make_contact(
+            session, theirs_user, emails=["intruder@example.test"], phones=["+15550009999"]
+        )
+        by_rule = factories.make_contact(session, theirs_user)
+        manual_tag = create_tag(session, theirs_user, "seeded-manual")
+        rule_tag = create_tag(session, theirs_user, "seeded-rule")
+        tag_contact(session, theirs_user, by_hand.id, manual_tag.id, source=TagSource.MANUAL)
+        tag_contact(session, theirs_user, by_rule.id, rule_tag.id, source=TagSource.RULE)
 
-    # The owner's own numbers are unaffected by the intruder's request.
+    with acting_as(running_app, intruder.id):
+        response = await client.get("/api/v1/contacts/stats")
+        assert response.status_code == 200
+        body = response.json()
+    assert body["total"] == 2
+    assert body["with_email"] == 1
+    assert body["with_phone"] == 1
+    assert body["tagged"] == 2  # both contacts carry some tag
+    assert body["tagged_by_rule"] == 1  # only the rule-sourced one
+    assert body["archived"] == 0
+    assert body["merged_away"] == 0
+
+    # The owner's own numbers are exactly `people`'s, unaffected by the intruder's data.
     owned = await client.get("/api/v1/contacts/stats")
-    assert owned.json()["total"] == 2
+    owned_body = owned.json()
+    assert owned_body["total"] == 2
+    assert owned_body["with_email"] == 2
+    assert owned_body["with_phone"] == 1
+    assert owned_body["tagged"] == 0
+    assert owned_body["tagged_by_rule"] == 0
+    assert owned_body["archived"] == 1
 
 
 async def test_another_user_cannot_patch_archive_or_revert_the_owners_contacts(
