@@ -22,7 +22,7 @@ from netkeeper.crm.archive import (
 )
 from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
 from netkeeper.crm.provenance import SOURCE_RANK, revert_to_synced, set_manual_field
-from netkeeper.crm.tags import create_rule, create_tag
+from netkeeper.crm.tags import contact_tags, create_rule, create_tag, list_rules
 from netkeeper.db import session_scope
 from netkeeper.linkedin.archive import Archive, open_archive
 from netkeeper.models import (
@@ -148,7 +148,6 @@ def test_the_rules_run_over_what_the_import_touched(
     # The duplicate row of Ada resolves to the contact the first one created, so
     # a person repeated in the file is examined once, not once per row.
     assert report.tagging.contacts == report.connections.created
-    assert report.tagging.added == 1  # Ada, the one Staff Engineer in the file
     tagged = {
         row.contact_id
         for row in writer.scalars(scoped(user, ContactTag).where(ContactTag.tag_id == engineers.id))
@@ -156,6 +155,22 @@ def test_the_rules_run_over_what_the_import_touched(
     ada = _contacts(writer, user)["ada-fictional"]
     assert tagged == {ada.id}, "the contact the file named, and nobody else"
     assert untouched.id not in tagged
+
+
+def test_an_import_seeds_the_default_rules_before_it_runs_them(
+    writer: Session, user: User, archive: Archive
+) -> None:
+    """`netkeeper import archive` on a database the server has never started on.
+
+    Nothing else seeds the defaults on that path, and rules nobody has seeded
+    tag nobody, which is the cold-start this item exists to prevent (#64).
+    """
+    assert list_rules(writer, user) == [], "no rules before the import"
+    report = _run(writer, user, archive)
+    assert list_rules(writer, user), "the import seeded the default rule set"
+    assert report.tagging.added > 0
+    ada = _contacts(writer, user)["ada-fictional"]
+    assert "engineering" in {row.tag.name for row in contact_tags(writer, user, ada.id)}
 
 
 def test_observed_at_defaults_to_the_export_time(

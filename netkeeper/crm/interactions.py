@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final, Literal, cast
 
-from sqlalchemy import ColumnElement, CursorResult, func
+from sqlalchemy import ColumnElement, CursorResult, func, or_
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
@@ -84,17 +84,33 @@ importer has ever written. :func:`is_invitation` is the one reader.
 def is_invitation() -> ColumnElement[bool]:
     """SQL: this interaction is an invitation rather than a message.
 
+    The marker is a whole token: the summary is exactly ``"LinkedIn
+    invitation"``, or it is that followed by ``":"`` and the note. A message
+    that opens "LinkedIn invitation requests are piling up" is prose about
+    invitations and stays message history, where it belongs.
+
     ``substr`` rather than ``LIKE``: ``LIKE`` ignores case on SQLite and honors
     it on PostgreSQL, and the marker is written in one spelling, so an exact
     comparison is both the intent and the portable rendering. A NULL summary
     compares NULL and so is not an invitation.
     """
-    return func.substr(Interaction.summary, 1, len(INVITATION_SUMMARY)) == INVITATION_SUMMARY
+    return or_(
+        Interaction.summary == INVITATION_SUMMARY,
+        has_invitation_note(),
+    )
 
 
 def has_invitation_note() -> ColumnElement[bool]:
-    """SQL: this interaction is an invitation that carried a note someone wrote."""
-    marker = f"{INVITATION_SUMMARY}: "
+    """SQL: this interaction is an invitation that carried a note someone wrote.
+
+    Matched on ``"LinkedIn invitation:"`` and not on the space after it. The
+    space is what the importer writes, but a later pass over stored summaries
+    may not keep it — P1-26 strips HTML from archive rows and trims each line,
+    which turns ``"LinkedIn invitation: <p>hello</p>"`` into
+    ``"LinkedIn invitation:\nhello"`` — and a note that stops being one because
+    its body opened with a block tag would leave this batch silently.
+    """
+    marker = f"{INVITATION_SUMMARY}:"
     return func.substr(Interaction.summary, 1, len(marker)) == marker
 
 

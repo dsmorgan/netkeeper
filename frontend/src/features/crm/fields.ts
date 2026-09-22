@@ -84,6 +84,7 @@ export const CONTACT_COLUMNS = [
   'connected_on',
   'degree',
   'met',
+  'met_source',
   'triaged_at',
   'do_not_contact',
   'do_not_contact_reason',

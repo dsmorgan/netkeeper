@@ -563,6 +563,40 @@ async def test_a_bulk_action_on_ids_ignores_the_order_they_are_sent_in(
     assert {row["met"] for row in page["items"]} == {"met"}
 
 
+async def test_deciding_met_here_is_the_person_s_own_answer(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    """Both routes out of the triage review queue: one contact, and a bulk selection.
+
+    A batch leaves ``met_source`` ``automatic`` and the review queue serves it
+    back (spec 10.2). Answering here is the person answering, so both routes
+    write ``manual`` — without that the review queue never empties.
+    """
+    edited = await client.patch(f"/api/v1/contacts/{people[0]}", json={"met": "met"}, headers=CSRF)
+    assert edited.status_code == 200, edited.text
+    assert (edited.json()["met"], edited.json()["met_source"]) == ("met", "manual")
+
+    counted = await _count(client, {"ids": [people[1]]}, "set_met", value="not_met")
+    applied = await client.post(
+        "/api/v1/contacts/bulk",
+        json={
+            "selection": {"ids": [people[1]]},
+            "action": "set_met",
+            "value": "not_met",
+            "token": counted["token"],
+        },
+        headers=CSRF,
+    )
+    assert applied.status_code == 200, applied.text
+    page = await _query(client, columns=["met", "met_source"])
+    assert {(row["met"], row["met_source"]) for row in page["items"]} == {
+        ("met", "manual"),
+        ("not_met", "manual"),
+    }
+    detail = await client.get(f"/api/v1/contacts/{people[1]}")
+    assert detail.json()["met_source"] == "manual"
+
+
 @pytest.mark.parametrize(
     ("path", "extra"),
     [("/api/v1/contacts/bulk/count", {}), ("/api/v1/contacts/bulk", {"token": "unused"})],

@@ -1080,6 +1080,9 @@
           "met": {
             "$ref": "#/components/schemas/ContactMet"
           },
+          "met_source": {
+            "$ref": "#/components/schemas/MetSource"
+          },
           "notes": {
             "anyOf": [
               {
@@ -1198,6 +1201,7 @@
           "connected_on",
           "degree",
           "met",
+          "met_source",
           "triaged_at",
           "do_not_contact",
           "do_not_contact_reason",
@@ -1864,6 +1868,7 @@
                     "connected_on",
                     "degree",
                     "met",
+                    "met_source",
                     "triaged_at",
                     "do_not_contact",
                     "do_not_contact_reason",
@@ -2159,6 +2164,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/ContactMet"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "met_source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MetSource"
               },
               {
                 "type": "null"
@@ -6700,20 +6715,17 @@
         "type": "object"
       },
       "TriageSuggestionApplyIn": {
-        "description": "``expected_count`` is the count the banner showed; a different one answers `409`.",
+        "description": "``expected_count`` is the count the banner showed; a different one answers `409`.\n\nRequired, and the guard is the point: a batch decides for people nobody has\nlooked at, so \"apply whatever matches right now\" is not a request this API\ntakes. The count comes back from ``GET /triage/suggestions`` and from this\nbatch's own ``contacts`` page.",
         "properties": {
           "expected_count": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expected Count"
+            "minimum": 0.0,
+            "title": "Expected Count",
+            "type": "integer"
           }
         },
+        "required": [
+          "expected_count"
+        ],
         "title": "TriageSuggestionApplyIn",
         "type": "object"
       },
@@ -10567,7 +10579,7 @@
     },
     "/api/v1/triage/suggestions/{key}/apply": {
       "post": {
-        "description": "Apply a bulk suggestion as one batch that a single undo takes back.\n\nSend the `expected_count` the banner showed: a set that has moved on since\nanswers `409` rather than touching more people than the banner named. Every\ncontact it touches is left marked `automatic`, so `/triage/next` with\n`decided_by=automatic` serves exactly this batch's work back for review.",
+        "description": "Apply a bulk suggestion as one batch that a single undo takes back.\n\n`expected_count` is required and is the count the banner showed: a set that\nhas moved on since answers `409` rather than touching more people than the\nbanner named, and there is no form of this request that skips the guard.\nEvery contact it touches is left marked `automatic`, so `/triage/next` with\n`decided_by=automatic` serves exactly this batch's work back for review.\n\nA batch only ever reaches contacts nobody has answered for, so `states`\noutside `unknown` and `skip` answers `422` and writes nothing.",
         "operationId": "apply_triage_suggestion",
         "parameters": [
           {
@@ -10605,18 +10617,11 @@
           "content": {
             "application/json": {
               "schema": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/TriageSuggestionApplyIn"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "title": "Body"
+                "$ref": "#/components/schemas/TriageSuggestionApplyIn"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -10636,14 +10641,7 @@
             "description": "The suggestion matches a different count now"
           },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "A batch cannot be pointed at contacts somebody has answered for"
           }
         },
         "summary": "Apply Triage Suggestion",
@@ -10730,14 +10728,7 @@
             "description": "No suggestion by that key"
           },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "A batch cannot be pointed at contacts somebody has answered for"
           }
         },
         "summary": "List Triage Suggestion Contacts",

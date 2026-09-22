@@ -1402,6 +1402,44 @@ def test_merge_carries_who_decided_met(writer: Session, users: tuple[User, User]
     assert (survivor.met, survivor.met_source) == (ContactMet.MET, MetSource.AUTOMATIC)
 
 
+def test_merge_keeps_the_answer_the_person_gave_over_the_same_one_a_batch_gave(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """Same value, two sources: the person's own answer is the one that survives.
+
+    Ranking alone cannot choose here — the values are equal, so the survivor
+    keeps theirs — and keeping ``automatic`` would throw away a confirmation
+    and leave the survivor in the review queue for a decision that has already
+    been reviewed.
+    """
+    alice, _ = users
+    survivor = factories.make_contact(
+        writer, alice, met=ContactMet.MET, met_source=MetSource.AUTOMATIC, triaged_at=NOW
+    )
+    loser = factories.make_contact(
+        writer, alice, met=ContactMet.MET, met_source=MetSource.MANUAL, triaged_at=LATER
+    )
+    merge(writer, alice, survivor.id, loser.id)
+    assert (survivor.met, survivor.met_source) == (ContactMet.MET, MetSource.MANUAL)
+    # The value did not move, so neither did the moment it was decided.
+    assert survivor.triaged_at == NOW
+
+
+def test_merge_does_not_let_a_batch_overwrite_the_person_s_own_answer(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """The other direction: a batch's ``met`` never relabels a decision made by hand."""
+    alice, _ = users
+    survivor = factories.make_contact(
+        writer, alice, met=ContactMet.MET, met_source=MetSource.MANUAL, triaged_at=NOW
+    )
+    loser = factories.make_contact(
+        writer, alice, met=ContactMet.MET, met_source=MetSource.AUTOMATIC, triaged_at=LATER
+    )
+    merge(writer, alice, survivor.id, loser.id)
+    assert (survivor.met, survivor.met_source) == (ContactMet.MET, MetSource.MANUAL)
+
+
 def test_merge_person_fields(writer: Session, users: tuple[User, User]) -> None:
     alice, _ = users
     survivor = factories.make_contact(

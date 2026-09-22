@@ -19,8 +19,11 @@ synced value.
 
 ``met`` is a person-owned field with a second column beside it: ``met_source``
 says whether the person decided it or a triage batch they accepted did, and
-:func:`set_met` is the only way either is written (spec 10.2). No import touches
-either one.
+:func:`set_met` is how a decision writes the pair (spec 10.2). Two paths write
+the columns directly and each says why: :func:`netkeeper.crm.triage._restore`
+puts back what a decision recorded, which is not a new decision, and
+:func:`netkeeper.crm.contacts.bulk_update` sets both in one UPDATE over rows it
+never loads. No import touches either one.
 
 This module is the rule, :func:`set_manual_field` and :func:`set_met` for what a
 person owns, and the ledger. Applying the rule to an incoming row, and recording
@@ -98,8 +101,9 @@ def set_met(contact: Contact, value: ContactMet, *, source: MetSource) -> None:
     ``met`` is a field the person owns: no sync, archive, or CSV import writes
     it, and :func:`may_overwrite` says so. But the person is not the only one who
     decides it any more — a triage batch they accepted decides in bulk — so the
-    contact carries ``met_source`` beside the value, and every write of one goes
-    through here. ``MetSource.AUTOMATIC`` is netkeeper's own answer, waiting to
+    contact carries ``met_source`` beside the value, and every write that is a
+    *decision* goes through here (the module docstring names the two that are
+    not, and why). ``MetSource.AUTOMATIC`` is netkeeper's own answer, waiting to
     be reviewed; ``MetSource.MANUAL`` is the person's, and replacing an automatic
     answer with a manual one is what closes the review.
 

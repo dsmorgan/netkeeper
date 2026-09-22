@@ -61,6 +61,9 @@ UNDO_CONFLICT: Responses = {
 }
 COUNT_CHANGED: Responses = {409: {"description": "The suggestion matches a different count now"}}
 NO_SUCH_SUGGESTION: Responses = {404: {"description": "No suggestion by that key"}}
+ALREADY_DECIDED: Responses = {
+    422: {"description": "A batch cannot be pointed at contacts somebody has answered for"}
+}
 
 States = Annotated[
     list[ContactMet] | None,
@@ -107,6 +110,8 @@ def translate_errors() -> Iterator[None]:
         raise HTTPException(status_code=404, detail="nothing to undo") from exc
     except (service.UndoConflict, service.CountChanged) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except service.AlreadyDecided as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except service.InvalidDecision as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -254,7 +259,7 @@ def list_triage_suggestions(
 @router.get(
     "/triage/suggestions/{key}/contacts",
     operation_id="list_triage_suggestion_contacts",
-    responses=NO_SUCH_SUGGESTION,
+    responses={**NO_SUCH_SUGGESTION, **ALREADY_DECIDED},
 )
 def list_triage_suggestion_contacts(
     key: str,
@@ -275,6 +280,8 @@ def list_triage_suggestion_contacts(
         page, total = service.suggestion_contacts(
             session, user, key, states=_states(states), limit=limit, offset=offset
         )
+    except service.AlreadyDecided as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except service.InvalidDecision as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return TriageSuggestionPage(
@@ -288,28 +295,33 @@ def list_triage_suggestion_contacts(
 @router.post(
     "/triage/suggestions/{key}/apply",
     operation_id="apply_triage_suggestion",
-    responses={**NO_SUCH_SUGGESTION, **COUNT_CHANGED},
+    responses={**NO_SUCH_SUGGESTION, **COUNT_CHANGED, **ALREADY_DECIDED},
 )
 def apply_triage_suggestion(
     key: str,
+    body: TriageSuggestionApplyIn,
     user: CurrentUser,
     session: SessionDep,
-    body: TriageSuggestionApplyIn | None = None,
     states: States = None,
 ) -> TriageSuggestionApplyOut:
     """Apply a bulk suggestion as one batch that a single undo takes back.
 
-    Send the `expected_count` the banner showed: a set that has moved on since
-    answers `409` rather than touching more people than the banner named. Every
-    contact it touches is left marked `automatic`, so `/triage/next` with
+    `expected_count` is required and is the count the banner showed: a set that
+    has moved on since answers `409` rather than touching more people than the
+    banner named, and there is no form of this request that skips the guard.
+    Every contact it touches is left marked `automatic`, so `/triage/next` with
     `decided_by=automatic` serves exactly this batch's work back for review.
+
+    A batch only ever reaches contacts nobody has answered for, so `states`
+    outside `unknown` and `skip` answers `422` and writes nothing.
     """
     wanted = _states(states)
-    expected = body.expected_count if body is not None else None
     try:
         applied = service.apply_suggestion(
-            session, user, key, states=wanted, expected_count=expected
+            session, user, key, states=wanted, expected_count=body.expected_count
         )
+    except service.AlreadyDecided as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except service.InvalidDecision as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except service.CountChanged as exc:

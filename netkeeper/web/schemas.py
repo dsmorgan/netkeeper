@@ -352,6 +352,7 @@ ContactColumn = Literal[
     "connected_on",
     "degree",
     "met",
+    "met_source",
     "triaged_at",
     "do_not_contact",
     "do_not_contact_reason",
@@ -430,6 +431,8 @@ class ContactRow(BaseModel):
     connected_on: date | None = None
     degree: int | None = None
     met: ContactMet | None = None
+    met_source: MetSource | None = None
+    """Who decided ``met``: the person, or a triage batch they accepted (spec 10.2)."""
     triaged_at: datetime | None = None
     do_not_contact: bool | None = None
     do_not_contact_reason: str | None = None
@@ -564,6 +567,12 @@ class ContactDetail(BaseModel):
     connected_on: date | None
     degree: int
     met: ContactMet
+    met_source: MetSource
+    """Who decided ``met``: the person, or a triage batch they accepted (spec 10.2).
+
+    ``automatic`` is a decision waiting to be reviewed, which a screen showing
+    ``met`` should say out loud; the triage review queue serves exactly these.
+    """
     triaged_at: datetime | None
     do_not_contact: bool
     do_not_contact_reason: str | None
@@ -1410,9 +1419,15 @@ class TriageSuggestionPage(BaseModel):
 
 
 class TriageSuggestionApplyIn(BaseModel):
-    """``expected_count`` is the count the banner showed; a different one answers `409`."""
+    """``expected_count`` is the count the banner showed; a different one answers `409`.
 
-    expected_count: int | None = None
+    Required, and the guard is the point: a batch decides for people nobody has
+    looked at, so "apply whatever matches right now" is not a request this API
+    takes. The count comes back from ``GET /triage/suggestions`` and from this
+    batch's own ``contacts`` page.
+    """
+
+    expected_count: int = Field(ge=0)
 
 
 class TriageSuggestionApplyOut(BaseModel):
