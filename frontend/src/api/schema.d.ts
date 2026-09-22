@@ -702,7 +702,10 @@ export interface paths {
          *     one that fails a guard (its total size, member count, compression ratio,
          *     a member's path, or being password-protected), answers 422 naming what
          *     was wrong — including one merely damaged in transit, never a 500 — and
-         *     nothing is decompressed before those checks pass.
+         *     nothing is decompressed before those checks pass. The body
+         *     (:class:`~netkeeper.web.schemas.ArchiveRefusalOut`) carries a ``code``
+         *     (:class:`~netkeeper.linkedin.archive.ArchiveRefusalCode`) alongside the
+         *     message on every refusal, so a client can act on why without parsing it.
          */
         post: operations["import_archive"];
         delete?: never;
@@ -1426,6 +1429,35 @@ export interface components {
             undated: number;
             /** Unknown Contact */
             unknown_contact: number;
+        };
+        /**
+         * ArchiveRefusalCode
+         * @description Why an upload was refused, stable across a reword of the message.
+         *
+         *     The API endpoint this feeds (P1-20) puts one of these on every ``422`` it
+         *     answers for a bad archive, alongside the human-readable message, so the
+         *     wizard built on top of it (P1-21) can key off the code instead of
+         *     matching the message's words — which broke the moment this module's own
+         *     wording changed underneath it. Named for what happened, not for which
+         *     guard or code path happens to catch it today, so a later refactor here
+         *     never forces a rename a client has to follow.
+         * @enum {string}
+         */
+        ArchiveRefusalCode: "not_a_zip" | "wrong_archive" | "nested_zip" | "encrypted" | "damaged" | "malformed_table" | "too_large" | "too_many_members" | "compression_ratio_too_high" | "unsafe_member_path";
+        /**
+         * ArchiveRefusalOut
+         * @description The ``422`` body of a refused archive upload.
+         *
+         *     ``detail`` is the human-readable reason, free to reword; ``code`` is what
+         *     a client should actually switch on (:class:`~netkeeper.linkedin.archive.ArchiveRefusalCode`),
+         *     present on every refusal this endpoint can produce, and stable across a
+         *     reword of ``detail`` — the wizard this feeds (P1-21) keys off it rather
+         *     than matching words in the message.
+         */
+        ArchiveRefusalOut: {
+            code: components["schemas"]["ArchiveRefusalCode"];
+            /** Detail */
+            detail: string;
         };
         /** AutotagRuleCreate */
         AutotagRuleCreate: {
@@ -5204,7 +5236,9 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ArchiveRefusalOut"];
+                };
             };
         };
     };

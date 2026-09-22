@@ -40,7 +40,7 @@ from netkeeper.crm.archive import ArchiveImport
 from netkeeper.crm.archive import import_archive as run_archive_import
 from netkeeper.crm.identity import CreateNew, Decision, MergeInto
 from netkeeper.crm.importer import PRESETS
-from netkeeper.linkedin.archive import ArchiveFormatError, open_archive
+from netkeeper.linkedin.archive import ArchiveFormatError, ArchiveRefusalCode, open_archive
 from netkeeper.models import (
     ContactSource,
     ImportDecisionKind,
@@ -50,11 +50,13 @@ from netkeeper.models import (
     ImportStatus,
 )
 from netkeeper.web.deps import CurrentUser, SessionDep
+from netkeeper.web.errors import ApiError
 from netkeeper.web.schemas import (
     ArchiveConnectionCountsOut,
     ArchiveImportOut,
     ArchiveInvitationCountsOut,
     ArchiveMessageCountsOut,
+    ArchiveRefusalOut,
     ImportChangeOut,
     ImportCommitIn,
     ImportDecisionIn,
@@ -115,7 +117,7 @@ def translate_errors() -> Iterator[None]:
     ) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ArchiveFormatError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise ApiError(422, {"detail": str(exc), "code": exc.code.value}) from exc
 
 
 def run_out(run: ImportRun) -> ImportRunOut:
@@ -268,6 +270,17 @@ def inspect_import_file(body: ImportInspectIn, user: CurrentUser) -> ImportInspe
 
 # --- the LinkedIn archive (spec 10.5, 14.1; P1-20) ---------------------------
 
+ARCHIVE_INVALID: Responses = {
+    422: {
+        "model": ArchiveRefusalOut,
+        "description": "A file or a mapping that cannot be used",
+    }
+}
+"""Every refusal from this endpoint carries a ``code`` (:class:`ArchiveRefusalCode`)
+alongside its message — unlike the shared :data:`INVALID`, whose 422 has no
+fixed shape because the CSV wizard's refusals have no client depending on one.
+"""
+
 ARCHIVE_MAX_UPLOAD_BYTES: Final = 200 * 1024 * 1024
 """``file.size`` above this is refused before the upload is opened as a zip.
 
@@ -332,7 +345,7 @@ def archive_report_out(
     "/imports/archive",
     operation_id="import_archive",
     status_code=201,
-    responses=INVALID,
+    responses=ARCHIVE_INVALID,
 )
 def import_archive(
     user: CurrentUser,
@@ -361,13 +374,21 @@ def import_archive(
     one that fails a guard (its total size, member count, compression ratio,
     a member's path, or being password-protected), answers 422 naming what
     was wrong — including one merely damaged in transit, never a 500 — and
-    nothing is decompressed before those checks pass.
+    nothing is decompressed before those checks pass. The body
+    (:class:`~netkeeper.web.schemas.ArchiveRefusalOut`) carries a ``code``
+    (:class:`~netkeeper.linkedin.archive.ArchiveRefusalCode`) alongside the
+    message on every refusal, so a client can act on why without parsing it.
     """
     name = file.filename or "upload.zip"
     if file.size is not None and file.size > ARCHIVE_MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"{name}: {file.size} bytes, over the {ARCHIVE_MAX_UPLOAD_BYTES} byte limit",
+        raise ApiError(
+            422,
+            {
+                "detail": (
+                    f"{name}: {file.size} bytes, over the {ARCHIVE_MAX_UPLOAD_BYTES} byte limit"
+                ),
+                "code": ArchiveRefusalCode.TOO_LARGE.value,
+            },
         )
     with translate_errors(), open_archive(file.file, filename=name) as archive:
         report = run_archive_import(session, user, archive)
