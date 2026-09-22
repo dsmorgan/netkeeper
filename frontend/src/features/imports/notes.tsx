@@ -52,11 +52,29 @@ export function ErrorNote({ children }: { children: ReactNode }) {
   )
 }
 
-/** Something the person should read before deciding, but which is not an error. */
-export function Note({ children, tone = 'info' }: { children: ReactNode; tone?: 'info' | 'warn' }) {
+/**
+ * Something the person should read before deciding, but which is not an error.
+ *
+ * `role` is opt-in and omitted by default (unchanged behavior for every
+ * existing caller). Pass `"status"` when the note carries something a screen
+ * reader needs to hear as it appears rather than only find by reading —
+ * archive-flow.tsx's guidance body and its `needs_review` callout are the
+ * first callers, since those are the one way out of a state this pipeline
+ * cannot otherwise resolve, and a plain `<div>` says nothing on its own.
+ */
+export function Note({
+  children,
+  tone = 'info',
+  role,
+}: {
+  children: ReactNode
+  tone?: 'info' | 'warn'
+  role?: 'status'
+}) {
   const Icon = tone === 'warn' ? AlertTriangle : Info
   return (
     <div
+      role={role}
       className={cn(
         'flex items-start gap-2 rounded-lg px-3 py-2',
         tone === 'warn'

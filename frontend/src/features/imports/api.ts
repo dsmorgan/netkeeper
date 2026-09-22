@@ -19,11 +19,24 @@ import type {
 /** A failed call, carrying the status so a caller can tell 409 from 422. */
 export class ApiError extends Error {
   readonly status: number
+  /**
+   * A machine-readable refusal code, when the backend sends one.
+   *
+   * No import route sends this today — every 422 is still a bare `detail`
+   * string. This is here for `POST /imports/archive`'s error guidance
+   * (`archive-flow.tsx`), which needs something sturdier than matching
+   * substrings of the backend's prose: keying guidance off a code instead
+   * means a reworded message can't silently point a person at the wrong next
+   * step. `null` until the backend actually adds one; see that file's own
+   * comment for the assumed shape and the PR that assumes it.
+   */
+  readonly code: string | null
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code: string | null = null) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.code = code
   }
 }
 
@@ -32,21 +45,36 @@ export class ApiError extends Error {
  *
  * The import routes answer 404, 409, and 422 with FastAPI's `{"detail": ...}`,
  * which the OpenAPI export declares as an empty body, so the shape is checked
- * here at runtime rather than trusted from the generated types.
+ * here at runtime rather than trusted from the generated types. `code` is
+ * read defensively from either a sibling `{"detail": "...", "code": "..."}`
+ * or a nested `{"detail": {"message": "...", "code": "..."}}`, since neither
+ * shape exists on the backend yet and either is a plausible way to add one
+ * without breaking the plain-string `detail` every other route still sends.
  */
 export function apiError(error: unknown, response: Response, what: string): ApiError {
-  const detail = (error as { detail?: unknown } | null | undefined)?.detail
+  const body = error as { detail?: unknown; code?: unknown } | null | undefined
+  const nestedDetail = body?.detail as { message?: unknown; code?: unknown } | undefined
+  const code =
+    typeof body?.code === 'string'
+      ? body.code
+      : typeof nestedDetail?.code === 'string'
+        ? nestedDetail.code
+        : null
+  const detail = body?.detail
   if (typeof detail === 'string' && detail !== '') {
-    return new ApiError(detail, response.status)
+    return new ApiError(detail, response.status, code)
+  }
+  if (typeof nestedDetail?.message === 'string' && nestedDetail.message !== '') {
+    return new ApiError(nestedDetail.message, response.status, code)
   }
   if (Array.isArray(detail)) {
     const first: unknown = detail[0]
     const message = (first as { msg?: unknown } | undefined)?.msg
     if (typeof message === 'string' && message !== '') {
-      return new ApiError(message, response.status)
+      return new ApiError(message, response.status, code)
     }
   }
-  return new ApiError(`${what} returned ${response.status}`, response.status)
+  return new ApiError(`${what} returned ${response.status}`, response.status, code)
 }
 
 export const importKeys = {
@@ -230,7 +258,13 @@ export async function rollbackRun(runId: number): Promise<RollbackResult> {
  */
 export async function importArchive(file: File): Promise<ArchiveImportResult> {
   const form = new FormData()
-  form.append('file', file, file.name)
+  // No explicit filename argument: `file` is already a `File`, whose own
+  // `.name` is what `FormData.append(name, aFile)` puts in the multipart
+  // part on its own. Passing a third argument here — even the same string —
+  // makes `FormData.append` construct a *new* File object per its own spec,
+  // which is otherwise harmless but broke identity-based lookups in the test
+  // harness (`fileContents` in `@/test/fetch`) for no behavioral gain.
+  form.append('file', file)
   const { data, error, response } = await api.POST('/api/v1/imports/archive', {
     body: form as unknown as { file: string },
   })

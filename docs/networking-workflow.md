@@ -22,7 +22,7 @@ The goal is a 35% response rate across the two emails. A first email alone typic
 
 Decide who in your network you have actually met. This is the foundation for everything after it.
 
-1. Export your connections. In LinkedIn, go to **Settings & Privacy > Data privacy > Get a copy of your data** and request only **Connections**. The download link arrives within 24 hours, usually sooner. The archive holds a `Connections.csv` with name, profile URL, company, position, and the date you connected.
+1. Export your connections. In LinkedIn, go to **Settings & Privacy > Data privacy > Get a copy of your data** and request your full data archive, not just Connections — the fuller export also carries your message and invitation history, which a tool automating this method can use as triage evidence later even though this stage only needs `Connections.csv`. The download link arrives within 24 hours, usually sooner.
 2. Mark the people you have met. Go down the list and flag anyone you have spoken with in person, on a video call, or in a real conversation. Do not judge whether they can help you, what their title is, or how long it has been. If you have met them once, they count.
 3. Keep the flagged rows as your validated list. Keep the original export as a backup.
 

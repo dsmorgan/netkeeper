@@ -24,6 +24,14 @@ export function registerFileContent(file: File, content: string): File {
   return file
 }
 
+/** A value as it goes inside a `"..."`-quoted multipart header parameter. */
+function quotedParam(value: string): string {
+  // What Node's own multipart writer and every browser do with a `"` or a
+  // line break in a filename or field name, so a crafted fixture name can't
+  // break out of the header line it's quoted into.
+  return value.replace(/\r/g, '%0D').replace(/\n/g, '%0A').replace(/"/g, '%22')
+}
+
 /**
  * A `multipart/form-data` body, built by hand from a `FormData`'s own entries.
  *
@@ -45,16 +53,17 @@ function encodeMultipart(form: FormData): { body: string; contentType: string } 
   for (const [name, value] of form.entries()) {
     if (typeof value === 'string') {
       parts.push(
-        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`,
+        `--${boundary}\r\nContent-Disposition: form-data; name="${quotedParam(name)}"\r\n\r\n` +
+          `${value}\r\n`,
       )
       continue
     }
-    const filename = value.name
+    const filename = quotedParam(value.name)
     const type = value.type || 'application/octet-stream'
     const content = fileContents.get(value) ?? ''
     parts.push(
-      `--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${filename}"\r\n` +
-        `Content-Type: ${type}\r\n\r\n${content}\r\n`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="${quotedParam(name)}"; ` +
+        `filename="${filename}"\r\nContent-Type: ${type}\r\n\r\n${content}\r\n`,
     )
   }
   parts.push(`--${boundary}--\r\n`)
@@ -64,15 +73,24 @@ function encodeMultipart(form: FormData): { body: string; contentType: string } 
 /**
  * Node's `Request` rejects relative URLs, but the app uses them: the client's
  * `baseUrl` is empty and a browser resolves against the page origin. Resolve
- * against jsdom's location instead so the same code runs under vitest. A
- * `FormData` body is re-encoded by hand first; see `encodeMultipart` above.
+ * against jsdom's location instead so the same code runs under vitest.
+ *
+ * A `FormData` body is re-encoded by hand first (see `encodeMultipart`
+ * above) — but only when nothing has already set a content-type. Real app
+ * code never does (a browser has to pick the multipart boundary itself, so
+ * setting one is a bug), so re-encoding only fires on the same path a real
+ * upload takes. If it ever did, silently fixing the header here would hide
+ * exactly the bug that matters most on this route; passing the untouched
+ * `FormData` through instead means a wrong content-type fails the same way
+ * jsdom's `FormData` failed against a real `Request` before this file
+ * existed, which is a real failure rather than a quietly repaired one.
  */
 class RelativeRequest extends Request {
   constructor(input: RequestInfo | URL, init?: RequestInit) {
     const url = typeof input === 'string' ? new URL(input, window.location.href) : input
-    if (init?.body instanceof FormData) {
+    const headers = new Headers(init?.headers)
+    if (init?.body instanceof FormData && !headers.has('content-type')) {
       const { body, contentType } = encodeMultipart(init.body)
-      const headers = new Headers(init.headers)
       headers.set('content-type', contentType)
       super(url, { ...init, body, headers })
     } else {

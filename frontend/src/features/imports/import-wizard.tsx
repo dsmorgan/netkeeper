@@ -91,6 +91,13 @@ function NewImport() {
       return { picked, read, inspected: await inspectFile({ content: read.content }) }
     },
     onSuccess: ({ picked, read, inspected }) => {
+      // An archive file dropped while this CSV was still being read wins:
+      // applying a stale read on top of it landed the person back on the
+      // mapping screen for a file they had already abandoned (review finding
+      // 5). `archive` here is always the render this callback actually runs
+      // in — react-query rebinds `onSuccess` on every render — not the one
+      // `mutate()` was called from.
+      if (archive !== null) return
       setChosen(picked)
       setFile(read)
       setInspection(inspected)
@@ -168,12 +175,23 @@ function NewImport() {
   }
 
   if (archive !== null) {
+    // Leaving the archive screen always lands on a clean upload step: any CSV
+    // state a race left behind (see `open`'s `onSuccess` guard above) is
+    // cleared here too, so nothing abandoned resurfaces as "Map the columns"
+    // for a file nobody chose this time (review finding 5).
+    const leaveArchive = () => {
+      setArchive(null)
+      setChosen(null)
+      setFile(null)
+      setInspection(null)
+      lastRead.current = null
+    }
     return (
       <ArchiveImportFlow
         file={archive.file}
         kind={archive.kind}
-        onBack={() => setArchive(null)}
-        onRestart={() => setArchive(null)}
+        onBack={leaveArchive}
+        onRestart={leaveArchive}
       />
     )
   }

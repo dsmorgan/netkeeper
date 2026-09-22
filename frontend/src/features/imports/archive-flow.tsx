@@ -1,10 +1,11 @@
 import { useMutation } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
+import { useEffect, useRef } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 
-import { importArchive } from './api'
+import { ApiError, importArchive } from './api'
 import type { ArchiveKind } from './archive-kind'
 import { ErrorNote, Note } from './notes'
 import { StepNav } from './step-nav'
@@ -18,6 +19,22 @@ import type {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** `count` with `singular`/`plural` chosen to agree with it. */
+function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
+  return count === 1 ? singular : pluralForm
+}
+
+/** Moves focus to `ref`'s element once, when the screen it belongs to first appears. */
+function useAnnounceOnMount(ref: React.RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    ref.current?.focus()
+    // Once, on mount: this is what tells a screen reader user the screen just
+    // changed (spec 10.5, P1-21 review finding 9), not something to repeat on
+    // every re-render (a pending state, a retry) while the person stays put.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 }
 
 const KIND_TITLE: Record<ArchiveKind, string> = {
@@ -39,62 +56,119 @@ const KIND_EXPLANATION: Record<ArchiveKind, string> = {
     'a new one.',
 }
 
+type Guidance = { headline: string; body: string }
+
 /**
- * Guidance for one of #124's 422s, keyed by a substring of its own message.
+ * Guidance for one of #124's 422s, keyed by a machine-readable code first.
  *
- * Every case still ends with the backend's exact text (`ArchiveErrorNote`
- * below), so nothing here has to be the whole story — only enough to say what
- * to do next without the person having to parse a guard's own error message.
+ * **This is built against a shape that has not landed.** No 422 from
+ * `POST /imports/archive` carries a `code` today — every one is still a bare
+ * `detail` string (`apiError` in `api.ts` reads `code` defensively from
+ * either shape, and gets `null` from every response the backend sends right
+ * now). The keys below (`not_a_linkedin_export`, `unsafe_member_path`,
+ * `zip_guard_exceeded`, `nested_zip`, `corrupt_archive`) are this PR's guess
+ * at names the archive lane might use; treat them as a proposal, not a
+ * contract, and rename to match whatever actually ships.
+ *
+ * The substring matching below them is what the previous version of this
+ * screen keyed everything off, and review caught it breaking on two messages
+ * #124's own fix round is adding: a nested zip (whose new message tells the
+ * person exactly what to do — extract the inner file — which the old default
+ * flatly contradicted) and a corrupt download (which needs "download it
+ * again," not "check you have the right file," since they already do). It's
+ * kept as a second-tier guess, in case those messages land before a `code`
+ * does, but a reworded message now falls through to `DEFAULT_ARCHIVE_ERROR`
+ * instead of a wrong specific answer — the fix that actually matters here:
+ * the default no longer asserts what the file *is*, only that netkeeper
+ * couldn't use it, which stays true no matter what the backend ends up
+ * saying. The backend's own message is always shown too (`ArchiveErrorNote`
+ * below), so nothing here has to be the whole story.
  */
-const ARCHIVE_ERROR_GUIDANCE: ReadonlyArray<{
-  test: RegExp
-  headline: string
-  body: string
-}> = [
-  {
-    test: /no Connections\.csv, messages\.csv, or Invitations\.csv|not a LinkedIn archive zip/i,
+const KNOWN_CODES: Record<string, Guidance> = {
+  not_a_linkedin_export: {
     headline: "This doesn't look like a LinkedIn export",
     body:
       'netkeeper looked for a Connections, messages, or Invitations table and found none. Make ' +
       'sure this is the zip LinkedIn emailed you, or one of Connections.csv, messages.csv, ' +
-      'Invitations.csv extracted from it — and not some other zip or CSV.',
+      'Invitations.csv extracted from it.',
   },
-  {
-    test: /unsafe path/i,
+  unsafe_member_path: {
     headline: 'This zip has a file netkeeper will not open',
     body:
       "One of the files inside has a path netkeeper refuses to trust. That isn't how a real " +
       'LinkedIn export is put together — request a fresh export from LinkedIn and try that ' +
       'download instead of this file.',
   },
-  {
-    test: /member limit|byte limit|uncompressed|compresses \d|compression ratio|upload limit/i,
+  zip_guard_exceeded: {
     headline: 'This file is bigger or stranger than a real LinkedIn export',
     body:
       'netkeeper refused it before opening it, as a precaution — a real export is nowhere near ' +
       'this large or this densely compressed. If this genuinely is your export, request a fresh ' +
       'copy from LinkedIn and try that download.',
   },
+  nested_zip: {
+    headline: 'This zip has another zip inside it',
+    body: "That's one unzip too many for netkeeper to guess at safely — open this one and upload the file inside it instead of the outer zip.",
+  },
+  corrupt_archive: {
+    headline: "This file didn't come through in one piece",
+    body: "It looks damaged or incomplete rather than the wrong file. Download the export again from LinkedIn's email and try that copy.",
+  },
+}
+
+const ARCHIVE_ERROR_GUIDANCE: ReadonlyArray<{ test: RegExp; guidance: Guidance }> = [
+  {
+    test: /no Connections\.csv, messages\.csv, or Invitations\.csv|not a LinkedIn archive zip/i,
+    guidance: KNOWN_CODES.not_a_linkedin_export!,
+  },
+  { test: /unsafe path/i, guidance: KNOWN_CODES.unsafe_member_path! },
+  {
+    test: /member limit|byte limit|uncompressed|compresses \d|compression ratio|upload limit/i,
+    guidance: KNOWN_CODES.zip_guard_exceeded!,
+  },
+  {
+    test: /contains another zip|extract (?:it|the inner file)|nested zip/i,
+    guidance: KNOWN_CODES.nested_zip!,
+  },
+  {
+    test: /corrupt|damaged|truncated|incomplete|bad ?zip|zlib/i,
+    guidance: KNOWN_CODES.corrupt_archive!,
+  },
 ]
 
-const DEFAULT_ARCHIVE_ERROR = {
-  headline: "netkeeper couldn't read this file",
+/**
+ * Never asserts what the file *is* — only that netkeeper couldn't use it —
+ * so it stays honest for a message this screen doesn't recognize, including
+ * one that doesn't exist yet. The backend's own text is always shown right
+ * below it (`ArchiveErrorNote`), which is where the specific "what to do"
+ * lives when nothing above knows better.
+ */
+const DEFAULT_ARCHIVE_ERROR: Guidance = {
+  headline: "netkeeper couldn't import this file",
   body:
-    "This doesn't look like a zip or a CSV netkeeper recognizes. Make sure you're uploading the " +
-    'zip LinkedIn emailed you, or one of Connections.csv, messages.csv, Invitations.csv extracted ' +
-    'from it.',
+    "What it reported is below. If that doesn't say what to do, try downloading a fresh copy " +
+    'from LinkedIn and use that, or double-check you picked the file this screen names.',
 }
 
-function archiveGuidance(detail: string): { headline: string; body: string } {
-  return ARCHIVE_ERROR_GUIDANCE.find(({ test }) => test.test(detail)) ?? DEFAULT_ARCHIVE_ERROR
+function archiveGuidance(error: unknown): Guidance {
+  const code = error instanceof ApiError ? error.code : null
+  if (code !== null && code in KNOWN_CODES) return KNOWN_CODES[code]!
+  const detail = message(error)
+  return (
+    ARCHIVE_ERROR_GUIDANCE.find(({ test }) => test.test(detail))?.guidance ?? DEFAULT_ARCHIVE_ERROR
+  )
 }
 
-function ArchiveErrorNote({ detail, filename }: { detail: string; filename: string }) {
-  const { headline, body } = archiveGuidance(detail)
+function ArchiveErrorNote({ error, filename }: { error: unknown; filename: string }) {
+  const { headline, body } = archiveGuidance(error)
+  const detail = message(error)
   return (
     <>
       <ErrorNote>{headline}</ErrorNote>
-      <Note tone="warn">
+      {/* `role="status"` so the one thing to do next is heard, not only the
+          headline above it (review finding 9) — this is the whole point of
+          `archiveGuidance`, and a silent `<div>` buried it before. */}
+      <Note tone="warn" role="status">
         <p>{body}</p>
         <p className="text-xs">
           {filename}: {detail}
@@ -124,6 +198,8 @@ export function ArchiveImportFlow({ file, kind, onBack, onRestart }: ArchiveImpo
   const upload = useMutation({
     mutationFn: () => importArchive(file),
   })
+  const headingRef = useRef<HTMLDivElement>(null)
+  useAnnounceOnMount(headingRef)
 
   if (upload.isSuccess) {
     return <ArchiveResult result={upload.data} onRestart={onRestart} />
@@ -133,8 +209,19 @@ export function ArchiveImportFlow({ file, kind, onBack, onRestart }: ArchiveImpo
     <div className="flex max-w-3xl flex-col gap-4">
       <StepNav current="review" steps={ARCHIVE_STEPS} />
       <Card>
-        <CardHeader>
-          <CardTitle>{KIND_TITLE[kind]}</CardTitle>
+        {/* `role="status"`: this line is the one chance to back out before
+            anything is sent, and a screen reader user gets nothing today —
+            the same silence review finding 9 measured on the result screen. */}
+        <CardHeader role="status">
+          <CardTitle
+            ref={headingRef}
+            tabIndex={-1}
+            role="heading"
+            aria-level={2}
+            className="outline-none"
+          >
+            {KIND_TITLE[kind]}
+          </CardTitle>
           <CardDescription>{file.name}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -146,9 +233,7 @@ export function ArchiveImportFlow({ file, kind, onBack, onRestart }: ArchiveImpo
               exactly what it did.
             </p>
           </Note>
-          {upload.isError && (
-            <ArchiveErrorNote detail={message(upload.error)} filename={file.name} />
-          )}
+          {upload.isError && <ArchiveErrorNote error={upload.error} filename={file.name} />}
         </CardContent>
       </Card>
       <div className="flex items-center gap-2">
@@ -163,25 +248,57 @@ export function ArchiveImportFlow({ file, kind, onBack, onRestart }: ArchiveImpo
   )
 }
 
-/** One line naming whatever this import actually did, skipping what it didn't. */
+/**
+ * One line naming whatever this import actually did.
+ *
+ * Never "nothing new" when the cards beneath it say otherwise (review finding
+ * 1): a lone `messages.csv`/`Invitations.csv` can read hundreds of rows and
+ * match none of them to a contact already here, and a `Connections.csv` can
+ * resolve every row to a candidate it cannot write — both real, both distinct
+ * from "everything here was already there," and both previously reported as
+ * the same "nothing new" line as a genuine idempotent re-import.
+ */
 function summary(result: ArchiveImportResult): string {
-  const parts: string[] = []
   const { connections, messages, invitations } = result
+  const parts: string[] = []
   if (connections.created > 0) {
-    parts.push(`${connections.created} new ${connections.created === 1 ? 'contact' : 'contacts'}`)
+    parts.push(`${connections.created} new ${plural(connections.created, 'contact')}`)
   }
   if (connections.updated > 0) {
-    parts.push(`${connections.updated} updated`)
+    parts.push(`${connections.updated} ${plural(connections.updated, 'contact')} updated`)
+  }
+  if (connections.needs_review > 0) {
+    parts.push(
+      `${connections.needs_review} ${plural(connections.needs_review, 'needs', 'need')} a closer look`,
+    )
   }
   if (messages.added > 0) {
-    parts.push(`${messages.added} message ${messages.added === 1 ? 'interaction' : 'interactions'}`)
+    parts.push(`${messages.added} message ${plural(messages.added, 'interaction')}`)
   }
   if (invitations.added > 0) {
-    parts.push(`${invitations.added} ${invitations.added === 1 ? 'invitation' : 'invitations'}`)
+    parts.push(`${invitations.added} ${plural(invitations.added, 'invitation')}`)
   }
-  return parts.length > 0
-    ? `${parts.join(', ')}.`
-    : 'Nothing new — everything here was already there.'
+  if (parts.length > 0) return `${parts.join(', ')}.`
+
+  if (messages.rows > 0 && messages.attributed === 0) {
+    return (
+      `Read ${messages.rows} message ${plural(messages.rows, 'row')}, but none of them matched ` +
+      'a contact already here — import your connections first.'
+    )
+  }
+  if (invitations.rows > 0 && invitations.added === 0 && invitations.already_present === 0) {
+    return (
+      `Read ${invitations.rows} invitation ${plural(invitations.rows, 'row')}, but none of them ` +
+      'matched a contact already here — import your connections first.'
+    )
+  }
+  if (connections.rows > 0 && connections.skipped === connections.rows) {
+    return (
+      `Read ${connections.rows} ${plural(connections.rows, 'row')} in Connections.csv, but none ` +
+      'of them named anybody netkeeper could identify.'
+    )
+  }
+  return 'Nothing new — everything here was already there.'
 }
 
 function CountsList({ items }: { items: ReadonlyArray<[string, number]> }) {
@@ -218,16 +335,19 @@ function ConnectionsCard({ counts }: { counts: ArchiveConnectionCounts }) {
           ]}
         />
         {counts.needs_review > 0 && (
-          <Note tone="warn">
+          // `role="status"`: the only route out of this state is the advice
+          // in the second paragraph, which a screen reader user needs to
+          // hear, not just find (review finding 9).
+          <Note tone="warn" role="status">
             <p>
               {counts.needs_review} more looked like someone you might already have, but not closely
-              enough to be sure automatically, so {counts.needs_review === 1 ? 'it' : 'they'}{' '}
-              {counts.needs_review === 1 ? "wasn't" : "weren't"} created or merged.
+              enough to be sure automatically, so {plural(counts.needs_review, 'it', 'they')}{' '}
+              {plural(counts.needs_review, "wasn't", "weren't")} created or merged.
             </p>
             <p>
-              To decide {counts.needs_review === 1 ? 'it' : 'each one'}, import another file: choose
-              Connections.csv on its own next time, not the zip — that goes through mapping and
-              candidate review, which this screen does not have.
+              To decide {plural(counts.needs_review, 'it', 'each one')}: unzip the archive if you
+              haven&rsquo;t already, then import the Connections.csv inside it on its own, not the
+              zip — that goes through mapping and candidate review, which this screen does not have.
             </p>
           </Note>
         )}
@@ -262,11 +382,11 @@ function MessagesCard({ counts }: { counts: ArchiveMessageCounts }) {
           ]}
         />
         {counts.no_owner > 0 && (
-          <Note tone="warn">
+          <Note tone="warn" role="status">
             <p>
-              {counts.no_owner} {counts.no_owner === 1 ? 'conversation' : 'conversations'} could not
-              be read because netkeeper could not tell which participant was you. The rest of the
-              file was still read.
+              {counts.no_owner} {plural(counts.no_owner, 'conversation')} could not be read because
+              netkeeper could not tell which participant was you. The rest of the file was still
+              read.
             </p>
           </Note>
         )}
@@ -309,7 +429,11 @@ function InvitationsCard({ counts }: { counts: ArchiveInvitationCounts }) {
  * There is no run behind this the way a CSV import has one: the archive
  * endpoint writes straight into the database in its own transaction and never
  * creates an `import_run` row, so there is nothing here to open from history
- * or roll back later — this screen, right now, is the only record of it.
+ * or roll back later — this screen, right now, is the only record of it. The
+ * screen says so directly (review finding 6, tracked as #132 for the gap
+ * itself): the Imports page puts a History tab right above this result, and
+ * finding this import isn't in it is a worse way to learn that than being
+ * told up front.
  */
 function ArchiveResult({
   result,
@@ -319,14 +443,32 @@ function ArchiveResult({
   onRestart: () => void
 }) {
   const ignored = result.ignored_files
+  const headingRef = useRef<HTMLDivElement>(null)
+  useAnnounceOnMount(headingRef)
   return (
     <div className="flex max-w-3xl flex-col gap-4">
       <StepNav current="result" steps={ARCHIVE_STEPS} />
       <Card>
-        <CardHeader>
-          <CardTitle>Imported {result.filename}</CardTitle>
+        <CardHeader role="status">
+          <CardTitle
+            ref={headingRef}
+            tabIndex={-1}
+            role="heading"
+            aria-level={2}
+            className="outline-none"
+          >
+            Imported {result.filename}
+          </CardTitle>
           <CardDescription>{summary(result)}</CardDescription>
         </CardHeader>
+        <CardContent>
+          <Note>
+            <p>
+              Unlike a CSV import, this doesn&rsquo;t appear on the History tab and can&rsquo;t be
+              rolled back from there — this screen is the only record of what it did.
+            </p>
+          </Note>
+        </CardContent>
       </Card>
 
       <ConnectionsCard counts={result.connections} />
@@ -336,12 +478,14 @@ function ArchiveResult({
       {ignored.length > 0 && (
         <Note>
           <p className="font-medium">
-            {ignored.length} other {ignored.length === 1 ? 'file' : 'files'} in the export{' '}
-            {ignored.length === 1 ? "wasn't" : "weren't"} read.
+            netkeeper also found {ignored.length} other {plural(ignored.length, 'table')} in the
+            export and didn&rsquo;t read {plural(ignored.length, 'it', 'them')}.
           </p>
           <p>
-            netkeeper reads Connections.csv, messages.csv, and Invitations.csv today. The rest of
-            the export was left exactly as it was: {ignored.join(', ')}.
+            netkeeper reads Connections.csv, messages.csv, and Invitations.csv today; everything
+            else it recognized as a table is listed here, untouched: {ignored.join(', ')}. (A real
+            export usually has other files too — a profile file, assistant chat logs, anything that
+            isn&rsquo;t a table — that don&rsquo;t show up in this list either way.)
           </p>
         </Note>
       )}
