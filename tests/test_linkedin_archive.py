@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import struct
 import subprocess
 import sys
 import zipfile
@@ -253,7 +254,10 @@ def test_a_zip_nested_inside_a_zip_is_refused_not_unwrapped(tmp_path: Path) -> N
     doubled extension, not an actual nested zip — the CSVs sit directly in the one
     zip a person downloads. A genuinely nested zip (someone re-zipping their own
     download, say) is refused rather than silently unwrapped a level, since real
-    exports never need that and guessing how far to unwrap is its own hazard.
+    exports never need that and guessing how far to unwrap is its own hazard —
+    but the refusal names the nested zip and says what to do about it, rather
+    than sending someone looking for a ``Connections.csv`` that is one level
+    down (issue #124 review finding 5).
     """
     inner = tmp_path / "inner.zip"
     with zipfile.ZipFile(inner, "w") as zf:
@@ -261,8 +265,29 @@ def test_a_zip_nested_inside_a_zip_is_refused_not_unwrapped(tmp_path: Path) -> N
     outer = tmp_path / "export.zip.zip"
     with zipfile.ZipFile(outer, "w") as zf:
         zf.write(inner, arcname="export.zip")
-    with pytest.raises(ArchiveFormatError, match=r"no Connections\.csv"), open_archive(outer):
+    with pytest.raises(ArchiveFormatError) as excinfo, open_archive(outer):
         pass
+    message = str(excinfo.value)
+    assert "no Connections.csv" in message
+    assert "contains another zip (export.zip)" in message
+    assert "extract it and upload the file inside" in message
+
+
+def test_a_zip_with_several_members_and_no_table_gets_the_plain_message(
+    tmp_path: Path,
+) -> None:
+    """The nested-zip hint only fires for a lone nested zip; several unreadable
+    members (none of them the LinkedIn tables) get the ordinary message, not a
+    guess about which one might be a zip to extract.
+    """
+    path = tmp_path / "export.zip"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("Skills.csv", "Name\nMade up\n")
+        zf.writestr("inner-a.zip", b"not really a zip")
+        zf.writestr("inner-b.zip", b"not really a zip either")
+    with pytest.raises(ArchiveFormatError) as excinfo, open_archive(path):
+        pass
+    assert "contains another zip" not in str(excinfo.value)
 
 
 # --- zip guards (P1-20) ------------------------------------------------------
@@ -343,6 +368,246 @@ def test_a_member_path_that_would_escape_the_archive_is_refused(
         zf.writestr(member_name, "First Name,Last Name,URL,Connected On\n")
     with pytest.raises(ArchiveFormatError, match="unsafe path"), open_archive(path):
         pass
+
+
+def test_a_directory_bounds_a_huge_non_csv_file_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The directory path sums every file toward the total, not only the
+    ``.csv``-looking ones, matching the zip path (issue #124 review finding 7).
+    """
+    monkeypatch.setattr(linkedin_archive, "MAX_TOTAL_UNCOMPRESSED_BYTES", 100)
+    (tmp_path / "Connections.csv").write_text("First Name\na\n", encoding="utf-8")
+    (tmp_path / "attachment.bin").write_bytes(b"x" * 200)
+    with pytest.raises(ArchiveFormatError, match="across its files"), open_archive(tmp_path):
+        pass
+
+
+# --- a damaged or hostile zip does not become a 500 (issue #124 review finding 1) --
+
+
+def _zip_with_false_declared_size(tmp_path: Path, content: bytes, declared: int) -> Path:
+    """A zip whose one member's declared uncompressed size does not match its real one.
+
+    Built by finding the real size as a 4-byte little-endian integer in the
+    zip's own bytes — it appears in both the local file header and the
+    central directory record — and overwriting every occurrence. ``zipfile``
+    will not write a lie like this through its normal API (``writestr``
+    always sets ``file_size`` from the real data), which is exactly why a
+    reader has to survive one arriving some other way: a truncated download,
+    or a deliberately crafted file.
+    """
+    path = tmp_path / "liar.zip"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Connections.csv", content)
+    raw = bytearray(buf.getvalue())
+    real = struct.pack("<I", len(content))
+    lie = struct.pack("<I", declared)
+    index = 0
+    replaced = 0
+    while (index := raw.find(real, index)) != -1:
+        raw[index : index + 4] = lie
+        index += 4
+        replaced += 1
+    assert replaced >= 2, "expected the real size in both the local and central headers"
+    path.write_bytes(bytes(raw))
+    return path
+
+
+def test_a_declared_size_that_understates_the_real_one_is_refused_not_a_traceback(
+    tmp_path: Path,
+) -> None:
+    """Every guard here reads only declared metadata, so a lying header passes
+    all of them; the lie is caught when the CRC no longer matches what was
+    actually decompressed — an ``ArchiveFormatError``, not the bare
+    ``zipfile.BadZipFile`` that used to escape uncaught.
+    """
+    content = (
+        b"First Name,Last Name,URL,Email Address,Company,Position,Connected On\n"
+        + b"A,B,https://example.invalid/in/x,,C,D,01 Jan 2020\n" * 2000
+    )
+    path = _zip_with_false_declared_size(tmp_path, content, declared=500)
+    with (
+        pytest.raises(ArchiveFormatError, match="damaged inside the zip"),
+        open_archive(path) as archive,
+    ):
+        for member in archive.members:
+            if member.kind is ArchiveKind.CONNECTIONS:
+                list(archive.connections(member))
+
+
+def test_flipped_bytes_in_the_deflate_stream_are_refused_not_a_traceback(
+    tmp_path: Path,
+) -> None:
+    """An ordinary damaged download — not a crafted one — hits the same path:
+    a real declared size, a compressed stream corrupted in transit.
+    """
+    content = (
+        b"First Name,Last Name,URL,Email Address,Company,Position,Connected On\n"
+        + b"A,B,https://example.invalid/in/x,,C,D,01 Jan 2020\n" * 2000
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Connections.csv", content)
+    raw = bytearray(buf.getvalue())
+    # Flip a run of bytes strictly inside the compressed data: after the local
+    # file header and its filename, comfortably before the central directory
+    # (which a flip landing in would break the zip itself, rather than the
+    # file it holds — a different failure than the one this test is for).
+    local_header_end = 30 + len(b"Connections.csv")
+    central_dir_start = raw.find(b"PK\x01\x02")
+    assert central_dir_start != -1
+    compressed_region = central_dir_start - local_header_end
+    assert compressed_region > 400, "fixture too small to flip safely inside it"
+    start = local_header_end + compressed_region // 2
+    for offset in range(200):
+        raw[start + offset] ^= 0xFF
+    path = tmp_path / "corrupt-deflate.zip"
+    path.write_bytes(bytes(raw))
+    with (
+        pytest.raises(ArchiveFormatError, match="damaged inside the zip"),
+        open_archive(path) as archive,
+    ):
+        for member in archive.members:
+            if member.kind is ArchiveKind.CONNECTIONS:
+                list(archive.connections(member))
+
+
+def _zip_with_encrypted_member(tmp_path: Path) -> Path:
+    """A zip whose one member's General Purpose Bit Flag claims encryption.
+
+    Not genuinely encrypted content — the stdlib ``zipfile`` module cannot
+    write that — only enough to reach the check that reads the flag before
+    ``zf.open`` ever tries to decrypt anything.
+    """
+    path = tmp_path / "encrypted.zip"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "Connections.csv",
+            "First Name,Last Name,URL,Connected On\nA,B,https://example.invalid/in/x,01 Jan 2020\n",
+        )
+    raw = bytearray(buf.getvalue())
+    local_index = raw.find(b"PK\x03\x04")
+    assert local_index != -1
+    raw[local_index + 6] |= 0x01
+    central_index = raw.find(b"PK\x01\x02")
+    assert central_index != -1
+    raw[central_index + 8] |= 0x01
+    path.write_bytes(bytes(raw))
+    return path
+
+
+def test_an_encrypted_member_is_refused_with_a_clean_message(tmp_path: Path) -> None:
+    """The message names the file, not a ``repr(ZipInfo(...))`` (nit from the review)."""
+    path = _zip_with_encrypted_member(tmp_path)
+    with pytest.raises(ArchiveFormatError) as excinfo, open_archive(path):
+        pass
+    message = str(excinfo.value)
+    assert "encrypted" in message
+    assert "ZipInfo" not in message
+
+
+# --- the shipped guard values, not a monkeypatched stand-in (review finding 4) --
+
+
+def test_the_member_size_cap_is_enforced_at_its_shipped_value() -> None:
+    info = zipfile.ZipInfo(filename="messages.csv")
+    info.file_size = linkedin_archive.MAX_MEMBER_BYTES + 1
+    info.compress_size = 1000
+    with pytest.raises(ArchiveFormatError, match="byte limit"):
+        linkedin_archive._guard_zip_members([info], "test.zip")
+
+
+def test_the_total_uncompressed_cap_is_enforced_at_its_shipped_value() -> None:
+    info = zipfile.ZipInfo(filename="Skills.csv")
+    info.file_size = linkedin_archive.MAX_TOTAL_UNCOMPRESSED_BYTES + 1
+    # Comfortably under the ratio cap, so it is the total-size guard being
+    # tested here, not the ratio guard tripping first on the same member.
+    info.compress_size = info.file_size // 2
+    with pytest.raises(ArchiveFormatError, match="uncompressed"):
+        linkedin_archive._guard_zip_members([info], "test.zip")
+
+
+def test_the_member_count_cap_is_enforced_at_its_shipped_value() -> None:
+    infos = []
+    for index in range(linkedin_archive.MAX_MEMBERS + 1):
+        info = zipfile.ZipInfo(filename=f"f{index}.csv")
+        info.file_size = 0
+        info.compress_size = 0
+        infos.append(info)
+    with pytest.raises(ArchiveFormatError, match="member limit"):
+        linkedin_archive._guard_zip_members(infos, "test.zip")
+
+
+def test_the_compression_ratio_cap_is_enforced_at_its_shipped_value() -> None:
+    info = zipfile.ZipInfo(filename="Skills.csv")
+    info.file_size = linkedin_archive.COMPRESSION_RATIO_FLOOR_BYTES + 1
+    info.compress_size = info.file_size // (linkedin_archive.MAX_COMPRESSION_RATIO + 1)
+    with pytest.raises(ArchiveFormatError, match="compresses"):
+        linkedin_archive._guard_zip_members([info], "test.zip")
+
+
+def test_a_member_at_the_compression_ratio_floor_is_not_judged_by_ratio() -> None:
+    """At or below the floor, no ratio — however extreme — trips the guard."""
+    info = zipfile.ZipInfo(filename="Skills.csv")
+    info.file_size = linkedin_archive.COMPRESSION_RATIO_FLOOR_BYTES
+    info.compress_size = 1
+    linkedin_archive._guard_zip_members([info], "test.zip")  # does not raise
+
+
+def test_a_real_deflated_member_over_the_shipped_ratio_and_floor_is_refused(
+    tmp_path: Path,
+) -> None:
+    """No monkeypatch: an actual zip, actually deflated, past the shipped values."""
+    path = tmp_path / "bomb.zip"
+    payload = b"0" * (linkedin_archive.COMPRESSION_RATIO_FLOOR_BYTES + 1)
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Skills.csv", payload)
+    with pytest.raises(ArchiveFormatError, match="compresses"), open_archive(path):
+        pass
+
+
+def test_declared_member_count_matches_a_small_real_zip() -> None:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("a.csv", "x")
+        zf.writestr("b.csv", "y")
+    assert linkedin_archive._declared_member_count(buf) == 2
+
+
+def test_a_zip_declaring_more_members_than_the_shipped_cap_is_refused_cheaply() -> None:
+    """No monkeypatch: built with one more member than ``MAX_MEMBERS`` actually
+    allows, and refused before :class:`zipfile.ZipFile` parses a single entry.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
+        for index in range(linkedin_archive.MAX_MEMBERS + 1):
+            zf.writestr(str(index), b"")
+    with pytest.raises(ArchiveFormatError, match="member limit"), open_archive(buf):
+        pass
+
+
+def test_declared_member_count_is_not_fooled_by_an_understated_entries_field() -> None:
+    """``zipfile`` itself does not trust the entry-count field either: it reads
+    central-directory records until it has consumed the declared *byte size*.
+    Understating the count field while leaving the byte size honest must not
+    buy a smaller answer than the byte size alone already implies.
+    """
+    buf = io.BytesIO()
+    real_count = 200
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
+        for index in range(real_count):
+            zf.writestr(f"f{index}", b"")
+    raw = bytearray(buf.getvalue())
+    eocd_index = raw.rfind(b"PK\x05\x06")
+    assert eocd_index != -1
+    real_entries = struct.unpack_from("<H", raw, eocd_index + 10)[0]
+    assert real_entries == real_count
+    struct.pack_into("<H", raw, eocd_index + 10, 1)  # lie: claim only one entry
+    count = linkedin_archive._declared_member_count(io.BytesIO(bytes(raw)))
+    assert count >= real_count
 
 
 def test_one_csv_opens_on_its_own() -> None:

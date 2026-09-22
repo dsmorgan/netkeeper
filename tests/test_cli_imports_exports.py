@@ -18,6 +18,7 @@ import json
 import re
 import threading
 import zipfile
+from collections import Counter
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +27,8 @@ from typing import Any
 import factories
 import httpx
 import pytest
+from fastapi import FastAPI
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 from typer.testing import CliRunner
 
@@ -38,7 +41,15 @@ from netkeeper.crm.exports import export_stream
 from netkeeper.crm.filters import FilterTree
 from netkeeper.crm.tags import create_tag, tag_contact
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
-from netkeeper.models import Contact, ContactEmail, ContactMet, ContactPhone, Interaction, TagSource
+from netkeeper.models import (
+    Contact,
+    ContactEmail,
+    ContactMet,
+    ContactPhone,
+    Interaction,
+    TagSource,
+    User,
+)
 from netkeeper.scoping import install_scope_guard, scoped, scoped_count
 from netkeeper.services.users import ensure_local_user
 from netkeeper.web.app import create_app
@@ -124,21 +135,19 @@ def test_cli_import_archive_of_a_missing_path_is_a_usage_error(
     assert "does not exist" in _plain(result.output)
 
 
-async def test_the_cli_and_the_api_report_the_same_counts_for_the_same_archive(
-    client: httpx.AsyncClient, tmp_path: Path
-) -> None:
-    """P1-20's own "done when": the same zip, imported independently by each,
-    into two separate databases, agrees on every number the CLI prints.
+def _fresh_cli_database(tmp_path: Path, dirname: str) -> str:
+    """A migrated database with the local user, at its own path, and its URL.
 
-    This deliberately does not use the ``cli_db`` fixture: it monkeypatches
-    ``$NETKEEPER_DATABASE_URL`` for the whole test, which ``database_url()``
-    prefers over any path given to it (CLAUDE.md), and the ``client`` fixture's
-    own database is built from a path the same way (``bare_engine``) — the two
-    would collide onto one database instead of being the independent ones this
-    test needs. ``env=`` on just this ``invoke`` call scopes the override to
-    the CLI's own process-wide state for exactly as long as that call runs.
+    Not the ``cli_db`` fixture: that one monkeypatches ``$NETKEEPER_DATABASE_URL``
+    for the whole test, which ``database_url()`` prefers over any path given to
+    it (CLAUDE.md) — and the ``client``/``running_app`` fixtures' own database
+    is built from a path the same way (``bare_engine``), so the two would
+    collide onto one database instead of being the independent ones a
+    CLI-versus-API comparison needs. Pass the returned URL as ``env=`` on just
+    the ``CliRunner().invoke`` call instead, which scopes the override to the
+    CLI's own process-wide state for exactly as long as that call runs.
     """
-    cli_dir = tmp_path / "cli-db"
+    cli_dir = tmp_path / dirname
     cli_dir.mkdir()
     cli_url = database_url(cli_dir)
     cli_engine = make_engine(cli_url)
@@ -148,6 +157,16 @@ async def test_the_cli_and_the_api_report_the_same_counts_for_the_same_archive(
     with session_scope(cli_factory, write=True) as session:
         ensure_local_user(session)
     cli_engine.dispose()
+    return cli_url
+
+
+async def test_the_cli_and_the_api_report_the_same_counts_for_the_same_archive(
+    client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """P1-20's own "done when": the same zip, imported independently by each,
+    into two separate databases, agrees on every number the CLI prints.
+    """
+    cli_url = _fresh_cli_database(tmp_path, "cli-db")
 
     zipped = tmp_path / "export.zip"
     with zipfile.ZipFile(zipped, "w") as zf:
@@ -203,6 +222,100 @@ async def test_the_cli_and_the_api_report_the_same_counts_for_the_same_archive(
         body["invitations"]["rows"],
         body["invitations"]["added"],
     ]
+
+
+def _key(contact: Contact) -> str:
+    """A contact's profile slug, or its name for the one fixture row with none."""
+    return contact.li_public_id or contact.first_name
+
+
+def _contact_snapshot(session: Session, user: User) -> dict[str, tuple[object, ...]]:
+    return {
+        _key(contact): (
+            contact.first_name,
+            contact.last_name,
+            contact.current_company,
+            contact.current_title,
+            contact.connected_on,
+        )
+        for contact in session.scalars(scoped(user, Contact))
+    }
+
+
+def _email_snapshot(session: Session, user: User) -> set[tuple[str, str]]:
+    names = {contact.id: _key(contact) for contact in session.scalars(scoped(user, Contact))}
+    return {
+        (names[email.contact_id], email.email)
+        for email in session.scalars(scoped(user, ContactEmail))
+    }
+
+
+def _interaction_snapshot(session: Session, user: User) -> Counter[tuple[str, str, datetime]]:
+    """A multiset, not a set: the fixture has two rows the archive genuinely
+    writes as two separate interactions (same contact, kind, and instant —
+    see ``crm/archive.py``'s "a file that says it twice writes it twice"), so
+    collapsing duplicates here would hide exactly the case that matters most.
+    """
+    names = {contact.id: _key(contact) for contact in session.scalars(scoped(user, Contact))}
+    return Counter(
+        (names[row.contact_id], row.kind.value, row.at)
+        for row in session.scalars(scoped(user, Interaction))
+    )
+
+
+async def test_the_cli_and_the_api_write_the_same_rows_for_the_same_archive(
+    client: httpx.AsyncClient, running_app: FastAPI, tmp_path: Path
+) -> None:
+    """Counts agreeing is not the same as the two writing the same rows: every
+    contact, email, and interaction the CLI wrote for the same archive exists
+    in the API's database too, and nothing else does. Keyed on a profile slug
+    (or a name, for the one fixture row with none) — what an archive import
+    itself determines identity from — rather than either database's own
+    surrogate ids, which have no reason to agree across two separate runs, and
+    excluding anything wall-clock (``created_at``/``updated_at``): everything
+    compared here comes from the archive's own rows, so it is deterministic.
+    """
+    cli_url = _fresh_cli_database(tmp_path, "cli-db-rows")
+
+    zipped = tmp_path / "export-rows.zip"
+    with zipfile.ZipFile(zipped, "w") as zf:
+        for source in sorted(FIXTURES_ARCHIVE.iterdir()):
+            zf.write(source, arcname=source.name)
+
+    cli_result = CliRunner().invoke(
+        cli, ["import", "archive", str(zipped)], env={"NETKEEPER_DATABASE_URL": cli_url}
+    )
+    assert cli_result.exit_code == 0, cli_result.output
+
+    response = await client.post(
+        "/api/v1/imports/archive",
+        headers={"X-Netkeeper-Client": "1"},
+        files={"file": ("export-rows.zip", zipped.read_bytes(), "application/zip")},
+    )
+    assert response.status_code == 201, response.text
+
+    cli_engine = make_engine(cli_url)
+    cli_factory = make_session_factory(cli_engine)
+    install_scope_guard(cli_factory)
+    with session_scope(cli_factory) as session:
+        cli_user = ensure_local_user(session)
+        cli_contacts = _contact_snapshot(session, cli_user)
+        cli_emails = _email_snapshot(session, cli_user)
+        cli_interactions = _interaction_snapshot(session, cli_user)
+    cli_engine.dispose()
+
+    api_factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(api_factory) as session:
+        api_user = session.scalars(select(User)).one()
+        api_contacts = _contact_snapshot(session, api_user)
+        api_emails = _email_snapshot(session, api_user)
+        api_interactions = _interaction_snapshot(session, api_user)
+
+    assert api_contacts == cli_contacts
+    assert len(cli_contacts) == 7
+    assert api_emails == cli_emails
+    assert api_interactions == cli_interactions
+    assert sum(cli_interactions.values()) == 10
 
 
 # --- import csv -----------------------------------------------------------

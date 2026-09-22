@@ -40,7 +40,9 @@ import enum
 import io
 import logging
 import re
+import struct
 import zipfile
+import zlib
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
@@ -64,22 +66,50 @@ FIELD_SIZE_LIMIT: Final = 16 * 1024 * 1024
 MAX_MEMBER_BYTES: Final = 512 * 1024 * 1024
 # Every declared uncompressed size in a zip, summed, refused before any member
 # is opened. A real export's total is a couple of megabytes (the sample this
-# was checked against: about 1.4 MB across thirty-odd members); this stays far
-# above that while still bounding what a hostile zip can make this process hold.
-MAX_TOTAL_UNCOMPRESSED_BYTES: Final = 1024 * 1024 * 1024
-# How many members a zip may declare. A real export runs to a few dozen; this
-# leaves generous room to grow and still refuses a "many tiny files" bomb.
-MAX_MEMBERS: Final = 500
+# was checked against: about 1.4 MB across thirty-odd members, 34 files); 64 MiB
+# is still about 45x that, but it also directly bounds how much decompression a
+# hostile zip can buy under the ratio guard below, so it is kept much closer to
+# a real export's size than :data:`MAX_MEMBER_BYTES` is.
+MAX_TOTAL_UNCOMPRESSED_BYTES: Final = 64 * 1024 * 1024
+# How many members a zip may declare. The sample above has 34 files, and a
+# "Basic" LinkedIn export is not the largest kind: a "Complete" export, or one
+# with message attachments, plausibly has several times that. This is checked
+# from the End Of Central Directory record before :class:`zipfile.ZipFile` ever
+# parses an entry (:func:`_declared_member_count`), so raising it does not
+# raise the cost of refusing a "many tiny files" zip — that cost is paid only
+# up to whatever a hostile zip declares, and a zip declaring more than this is
+# refused without a single entry being materialized.
+MAX_MEMBERS: Final = 5000
 # A member's declared uncompressed size divided by its declared compressed
 # size, refused above this ratio — the classic zip bomb shape, a few bytes of
 # input inflating to gigabytes. Ordinary CSV text under DEFLATE rarely clears
 # single digits. The ratio is only judged once a member is big enough for the
 # question to matter (below the floor, a high ratio is just DEFLATE doing well
-# on a short repetitive cell, not a bomb).
+# on a short repetitive cell, not a bomb); the sample archive's largest member,
+# messages.csv, compresses at under 6x and stays well under the floor too, so
+# nothing in a real export exercises this branch — the boundary is exercised by
+# test, not by any export this was checked against.
 MAX_COMPRESSION_RATIO: Final = 100
 COMPRESSION_RATIO_FLOOR_BYTES: Final = 8 * 1024 * 1024
 # Zip member timestamps older than LinkedIn itself are placeholders, not the export time.
 EARLIEST_EXPORT: Final = datetime(2003, 1, 1, tzinfo=UTC)
+
+# The signature and fixed-size layout of the record :func:`_declared_member_count`
+# reads: the End Of Central Directory record (and, for a zip large enough to
+# need it, the Zip64 locator and record that stand in for its 16-bit fields).
+_EOCD_SIGNATURE: Final = b"PK\x05\x06"
+_EOCD_FIXED_SIZE: Final = 22
+_EOCD_MAX_COMMENT: Final = 65535
+_ZIP64_EOCD_LOCATOR_SIGNATURE: Final = b"PK\x06\x07"
+_ZIP64_EOCD_LOCATOR_SIZE: Final = 20
+_ZIP64_EOCD_SIGNATURE: Final = b"PK\x06\x06"
+_ZIP64_EOCD_FIXED_SIZE: Final = 56
+# The fixed part of one central-directory record, before its variable-length
+# filename, extra field, and comment (``zipfile.sizeCentralDir``). A record
+# cannot be smaller than this, so the central directory's declared byte size
+# divided by it is an upper bound on how many entries it could possibly hold —
+# read alongside the entry count itself, in case the two disagree.
+_CENTRAL_DIR_RECORD_MIN_SIZE: Final = 46
 
 _PROFILE_URL = re.compile(r"linkedin\.com/in/([^/?#]+)", re.IGNORECASE)
 
@@ -715,6 +745,16 @@ def _open(handle: IO[bytes], name: str) -> Archive:
 
 
 def _open_zip(handle: IO[bytes], name: str) -> Archive:
+    # Read before ``zipfile.ZipFile`` ever runs, from the End Of Central
+    # Directory record alone: a zip that declares more members than the limit
+    # is refused without a single ``ZipInfo`` being built. ``ZipFile.__init__``
+    # parses every central-directory entry up front, so checking only after
+    # (as :func:`_guard_zip_members` used to) still pays for all of them first.
+    declared = _declared_member_count(handle)
+    if declared > MAX_MEMBERS:
+        raise ArchiveFormatError(
+            f"{name}: {declared} members in the zip, over the {MAX_MEMBERS} member limit"
+        )
     try:
         zf = zipfile.ZipFile(handle)
     except zipfile.BadZipFile as exc:
@@ -740,21 +780,100 @@ def _open_zip(handle: IO[bytes], name: str) -> Archive:
         raise
     if not _has_rows_to_import(members):
         zf.close()
-        raise ArchiveFormatError(
-            f"{name}: no Connections.csv, messages.csv, or Invitations.csv table in the archive"
-        )
+        raise ArchiveFormatError(f"{name}: {_no_table_reason(infos)}")
     return Archive(name, members, zf.close, ignored=ignored)
+
+
+def _declared_member_count(handle: IO[bytes]) -> int:
+    """An upper bound on the zip's central-directory entries, unparsed.
+
+    Read from the End Of Central Directory record — the last handful of bytes
+    of the file, not the whole thing — so a zip declaring far more members
+    than :data:`MAX_MEMBERS` is refused before :class:`zipfile.ZipFile` spends
+    any time or memory building a :class:`zipfile.ZipInfo` per entry (it does
+    not trust the entry-count field either: it reads central-directory records
+    until it has consumed the *declared byte size*, so a mismatched pair of
+    fields is exactly the case this has to catch, not only the honest one).
+    The greater of the entry-count field and (central directory size divided
+    by the smallest a record can be) is returned, so understating one while
+    inflating the other buys nothing. Zip64's extension (more than 65 535
+    entries, which sets the 16-bit count field to that sentinel and stores the
+    real numbers in a second record) is followed when present. ``0`` when the
+    record cannot be found at all; that is not a claim the zip is empty, only
+    that whatever is wrong with it is for :class:`zipfile.ZipFile` to raise on
+    next, in its own words.
+    """
+    handle.seek(0, io.SEEK_END)
+    file_size = handle.tell()
+    window = min(file_size, _EOCD_FIXED_SIZE + _EOCD_MAX_COMMENT)
+    handle.seek(file_size - window)
+    tail = handle.read(window)
+    index = tail.rfind(_EOCD_SIGNATURE)
+    if index == -1 or len(tail) - index < _EOCD_FIXED_SIZE:
+        return 0
+    eocd = tail[index : index + _EOCD_FIXED_SIZE]
+    entries: int = struct.unpack_from("<H", eocd, 10)[0]
+    central_dir_size: int = struct.unpack_from("<I", eocd, 12)[0]
+    central_dir_offset: int = struct.unpack_from("<I", eocd, 16)[0]
+    bound = central_dir_size // _CENTRAL_DIR_RECORD_MIN_SIZE
+    if entries != 0xFFFF and central_dir_offset != 0xFFFFFFFF:
+        return max(entries, bound)
+    locator_start = file_size - window + index - _ZIP64_EOCD_LOCATOR_SIZE
+    if locator_start < 0:
+        return max(entries, bound)
+    handle.seek(locator_start)
+    locator = handle.read(_ZIP64_EOCD_LOCATOR_SIZE)
+    if locator[:4] != _ZIP64_EOCD_LOCATOR_SIGNATURE:
+        return max(entries, bound)
+    zip64_eocd_offset: int = struct.unpack_from("<Q", locator, 8)[0]
+    handle.seek(zip64_eocd_offset)
+    record = handle.read(_ZIP64_EOCD_FIXED_SIZE)
+    if record[:4] != _ZIP64_EOCD_SIGNATURE or len(record) < _ZIP64_EOCD_FIXED_SIZE:
+        return max(entries, bound)
+    zip64_entries: int = struct.unpack_from("<Q", record, 32)[0]
+    zip64_central_dir_size: int = struct.unpack_from("<Q", record, 40)[0]
+    return max(zip64_entries, zip64_central_dir_size // _CENTRAL_DIR_RECORD_MIN_SIZE)
+
+
+def _no_table_reason(infos: Sequence[zipfile.ZipInfo]) -> str:
+    """Why ``infos`` held nothing to import: a plain miss, or a zip inside the zip.
+
+    LinkedIn's own download is not nested — its doubled ``.zip.zip`` name is
+    only that, checked by hand against a real export — so this never unwraps
+    one; it only makes the dead end explicit when the zip a person uploaded
+    really does hold nothing but another zip (their own file manager or mail
+    client having wrapped the download again, say), instead of sending them
+    looking for a ``Connections.csv`` that is one level down.
+    """
+    default = "no Connections.csv, messages.csv, or Invitations.csv table in the archive"
+    nested = [info.filename for info in infos if _looks_like_nested_zip(info.filename)]
+    if len(nested) == 1:
+        inner = nested[0]
+        return (
+            f"{default} — but it contains another zip ({inner}); "
+            "extract it and upload the file inside"
+        )
+    return default
+
+
+def _looks_like_nested_zip(path: str) -> bool:
+    base = path.replace("\\", "/").split("/")[-1]
+    return base.lower().endswith(".zip") and not base.startswith("._")
 
 
 def _guard_zip_members(infos: Sequence[zipfile.ZipInfo], name: str) -> None:
     """Refuse a hostile zip on its declared metadata, before any member is opened.
 
-    Every check here reads only what the zip's central directory already
-    states — a member count, a declared path, a declared size, a declared
-    compressed size — so refusing one costs nothing: nothing is decompressed
-    to find out. Checked over every member, not only the ``.csv``-looking
-    ones, because a bomb does not have to look like a table to cost something
-    if it were opened.
+    By the time this runs, ``infos`` already exists — :func:`_declared_member_count`
+    is what keeps a zip declaring far too many members from paying to build it
+    in the first place, checked before :class:`zipfile.ZipFile` parses a single
+    entry. The count is checked again here in case that estimate and what
+    :class:`zipfile.ZipFile` actually materialized disagree; every other check
+    reads only what the central directory already states for each member — a
+    declared path, a declared size, a declared compressed size — so refusing
+    one costs no decompression. Checked over every member, not only the
+    ``.csv``-looking ones, because a bomb does not have to look like a table to
+    cost something if it were opened.
     """
     if len(infos) > MAX_MEMBERS:
         raise ArchiveFormatError(
@@ -807,12 +926,13 @@ def _open_dir(root: Path, name: str) -> Archive:
     paths = [path for path in sorted(root.rglob("*")) if path.is_file()]
     if len(paths) > MAX_MEMBERS:
         raise ArchiveFormatError(f"{name}: {len(paths)} files, over the {MAX_MEMBERS} file limit")
+    # Sizes are checked over every file, not only the ``.csv``-looking ones —
+    # the same "a bomb does not have to look like a table" reasoning as the
+    # zip guard (:func:`_guard_zip_members`), so the two paths agree on what a
+    # directory this large is allowed to cost, not only a zip this large.
     total = 0
     for path in paths:
         relative = path.relative_to(root).as_posix()
-        if not _looks_like_csv(relative):
-            continue
-        member_name = f"{name}:{relative}"
         size = path.stat().st_size
         if size > MAX_MEMBER_BYTES:
             raise ArchiveFormatError(
@@ -823,6 +943,9 @@ def _open_dir(root: Path, name: str) -> Archive:
             raise ArchiveFormatError(
                 f"{name}: more than {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes across its files"
             )
+        if not _looks_like_csv(relative):
+            continue
+        member_name = f"{name}:{relative}"
         opener = _path_opener(path, member_name)
         with opener() as text:
             header, _ = _table(text, member_name)
@@ -906,13 +1029,29 @@ def _plausible(stamp: datetime) -> datetime | None:
 def _zip_opener(zf: zipfile.ZipFile, info: zipfile.ZipInfo, name: str) -> _TextOpener:
     @contextmanager
     def opener() -> Iterator[TextIO]:
+        if info.flag_bits & 0x1:
+            # Checked from the central directory, before ``zf.open`` ever runs: an
+            # encrypted member's ``RuntimeError`` embeds ``repr(ZipInfo)``, which
+            # is not a message to show a person.
+            raise ArchiveFormatError(
+                f"{name}: the zip is encrypted; netkeeper cannot read a password-protected export"
+            )
         try:
             raw = zf.open(info)
         except (zipfile.BadZipFile, NotImplementedError, RuntimeError) as exc:
-            # A corrupt member, an unsupported compression method, or encryption.
+            # A corrupt member or an unsupported compression method.
             raise ArchiveFormatError(f"{name}: cannot be opened ({exc})") from exc
         with raw:
-            yield io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
+            try:
+                yield io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
+            except (zipfile.BadZipFile, zlib.error, EOFError, csv.Error) as exc:
+                # zipfile decompresses and CRC-checks lazily, as the reader pulls
+                # bytes through this wrapper — a declared size that understates
+                # the real one, or a flipped byte in the deflate stream, surfaces
+                # here rather than at ``zf.open``, from deep inside whatever was
+                # reading (the header scan, or a row reader mid-file). An ordinary
+                # damaged download hits this exact path, not only a crafted one.
+                raise ArchiveFormatError(f"{name}: damaged inside the zip ({exc})") from exc
 
     return opener
 

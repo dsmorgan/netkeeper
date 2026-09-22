@@ -19,7 +19,7 @@ handler either returns and the session commits, or it raises and nothing lands.
 The rules the service applies are :mod:`netkeeper.crm.import_runs`.
 
 ``POST /imports/archive`` (P1-20) is a different shape: the LinkedIn export zip
-itself, unpacked in memory and run straight through
+itself, uploaded and run straight through
 :func:`netkeeper.crm.archive.import_archive` in this request's one transaction —
 no draft, no preview, no candidate review, because that pipeline has none; a
 connection row that resolves to a candidate is counted and left for a later
@@ -29,7 +29,6 @@ with the run-based screens above except the router and the CSRF guard.
 
 from __future__ import annotations
 
-import io
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Annotated, Any, Final
@@ -270,14 +269,18 @@ def inspect_import_file(body: ImportInspectIn, user: CurrentUser) -> ImportInspe
 # --- the LinkedIn archive (spec 10.5, 14.1; P1-20) ---------------------------
 
 ARCHIVE_MAX_UPLOAD_BYTES: Final = 200 * 1024 * 1024
-"""The raw upload read before it is even opened as a zip.
+"""``file.size`` above this is refused before the upload is opened as a zip.
 
 Far above any real export — the sample this endpoint was checked against is
 under half a megabyte — so this only stops a mistaken, unrelated multi-gigabyte
-upload from being read into memory at all. What guards an upload that *is* a
-zip (total uncompressed size, member count, compression ratio, member paths)
-lives in :mod:`netkeeper.linkedin.archive`, so the CLI's ``import archive`` gets
-the same protection against a hostile archive that this endpoint does.
+upload from being processed at all. It is not a request-body limit: Starlette's
+multipart parser has already received and spooled the whole upload (to memory,
+then to the server's temp directory past 1 MiB) by the time a handler ever
+runs, and nothing in this app puts a ceiling on that — see the endpoint
+docstring below. What guards an upload that *is* a zip (total uncompressed
+size, member count, compression ratio, member paths) lives in
+:mod:`netkeeper.linkedin.archive`, so the CLI's ``import archive`` gets the
+same protection against a hostile archive that this endpoint does.
 """
 
 
@@ -331,7 +334,7 @@ def archive_report_out(
     status_code=201,
     responses=INVALID,
 )
-async def import_archive(
+def import_archive(
     user: CurrentUser,
     session: SessionDep,
     file: Annotated[
@@ -340,22 +343,33 @@ async def import_archive(
 ) -> ArchiveImportOut:
     """Import a LinkedIn export zip: connections, messages, and invitations (P1-20).
 
-    Unpacked in memory — nothing is written to disk — and run through the same
-    :func:`netkeeper.crm.archive.import_archive` that ``netkeeper import archive``
-    uses on a path, so the two report the same counts for the same archive.
-    Re-uploading the same export adds nothing (see that function's idempotence).
-    A zip that is not a LinkedIn export, or one that fails a guard (its total
-    size, member count, compression ratio, or a member's path), answers 422
-    naming what was wrong; nothing is unpacked before those checks pass.
+    Read straight from the upload FastAPI has already received — ``file.file``
+    is the ``SpooledTemporaryFile`` the multipart parser wrote it to, and
+    :func:`netkeeper.linkedin.archive.open_archive` reads any seekable binary
+    stream, so nothing here copies it into a second in-memory buffer. That
+    parsing happens before this handler ever runs, on every upload regardless
+    of size, since neither this app nor its FastAPI defaults put a limit on a
+    multipart file part; whether that upload is one this importer can even use
+    is what is checked here, not whether it was safe to receive. This is a
+    plain (not ``async``) handler, like the rest of this router, so FastAPI
+    runs it in a worker thread rather than blocking the event loop on it.
+
+    Run through the same :func:`netkeeper.crm.archive.import_archive` that
+    ``netkeeper import archive`` uses on a path, so the two report the same
+    counts for the same archive. Re-uploading the same export adds nothing
+    (see that function's idempotence). A zip that is not a LinkedIn export, or
+    one that fails a guard (its total size, member count, compression ratio,
+    a member's path, or being password-protected), answers 422 naming what
+    was wrong — including one merely damaged in transit, never a 500 — and
+    nothing is decompressed before those checks pass.
     """
     name = file.filename or "upload.zip"
-    data = await file.read(ARCHIVE_MAX_UPLOAD_BYTES + 1)
-    if len(data) > ARCHIVE_MAX_UPLOAD_BYTES:
+    if file.size is not None and file.size > ARCHIVE_MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=422,
-            detail=f"{name}: over the {ARCHIVE_MAX_UPLOAD_BYTES} byte upload limit",
+            detail=f"{name}: {file.size} bytes, over the {ARCHIVE_MAX_UPLOAD_BYTES} byte limit",
         )
-    with translate_errors(), open_archive(io.BytesIO(data), filename=name) as archive:
+    with translate_errors(), open_archive(file.file, filename=name) as archive:
         report = run_archive_import(session, user, archive)
         ignored_files = list(archive.ignored)
     return archive_report_out(report, filename=name, ignored_files=ignored_files)
