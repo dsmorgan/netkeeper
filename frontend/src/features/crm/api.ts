@@ -185,6 +185,12 @@ export const listsQuery = queryOptions({
     if (data === undefined) fail(error, response.status, 'could not load the lists')
     return data
   },
+  // The dashboard's "build a list" step reads `isError` to tell an unavailable
+  // count apart from a real zero (P1-24 review #1): production builds the
+  // client as a bare `QueryClient()`, so without this the default three
+  // retries keep `isError` false — and `data` `undefined`, which the step
+  // reads as zero — for several seconds after `/lists` starts failing.
+  retry: false,
 })
 
 export async function createList(body: {
