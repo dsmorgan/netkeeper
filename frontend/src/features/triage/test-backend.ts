@@ -33,6 +33,8 @@ const COMPANIES = ['Example Corp', 'Sample Industries', 'Placeholder Labs'] as c
 export interface FakeContact extends TriageContact {
   /** How many message interactions the evidence panel reports. */
   messages: number
+  /** Invitations on file, which the service counts apart from the messages. */
+  invitations: number
   /** The body the newest message carries, verbatim, however unpleasant. */
   messageBody: string | null
   /** Set by `archive`; undo then refuses the way the service does. */
@@ -65,7 +67,7 @@ export interface FakeBackendOptions {
 export interface FakeBackend {
   handler: (request: Request) => Promise<Response>
   /** Every request seen, in order. */
-  seen: Array<{ method: string; path: string; search: URLSearchParams }>
+  seen: Array<{ method: string; path: string; search: URLSearchParams; body?: unknown }>
   countOf(path: string, method?: string): number
   contacts: FakeContact[]
   byId(id: number): FakeContact
@@ -196,6 +198,7 @@ export function makeContact(index: number, options: { messages?: number } = {}):
     tags: [],
     updated_at: '2026-01-02T03:04:05Z',
     messages,
+    invitations: 0,
     messageBody: messages > 0 ? 'Good to meet you at the Example Corp meetup.' : null,
     archivedAt: null,
     mergedIntoId: null,
@@ -408,6 +411,10 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
           first_at: messages > 0 ? '2024-03-04T10:11:00Z' : null,
           last_at: messages > 0 ? '2024-03-04T10:11:00Z' : null,
           recent,
+          // Counted, never among the messages: `_messages` asks the same
+          // question the batches ask. The rows themselves are not modelled
+          // here -- what this fake is for is the counting.
+          invitations: contact.invitations,
         },
         timeline: recent.map((interaction) => ({
           kind: 'interaction' as const,
@@ -514,12 +521,15 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
 
   async function handler(request: Request): Promise<Response> {
     const url = new URL(request.url)
-    seen.push({ method: request.method, path: url.pathname, search: url.searchParams })
     if (latency > 0) await new Promise((resolve) => setTimeout(resolve, latency))
     const states = statesOf(url.searchParams)
     const decidedBy = decidedByOf(url.searchParams)
     const body: unknown =
       request.method === 'GET' || request.method === 'DELETE' ? null : await readJson(request)
+    // Recorded with the body, so a test can pin what went over the wire and not
+    // only what this fake made of it: a field the fake defaults the same way
+    // the server does is a field a client can stop sending unnoticed.
+    seen.push({ method: request.method, path: url.pathname, search: url.searchParams, body })
 
     // The app shell polls these; they are not what this fake is about.
     if (url.pathname === '/api/v1/health') return jsonResponse({ status: 'ok', version: 'test' })

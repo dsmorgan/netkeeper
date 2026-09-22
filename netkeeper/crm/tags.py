@@ -58,8 +58,8 @@ from __future__ import annotations
 import enum
 import logging
 import re
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 
 # ``re.compile``'s own parser (``sre_parse`` is its deprecated alias, and importing
 # that warns). Private, but its tree is the honest way to see a nested repeat.
@@ -117,11 +117,21 @@ DEFAULT_FIELDS: Final[tuple[RuleField, ...]] = (RuleField.TITLE, RuleField.HEADL
 
 @dataclass(frozen=True, slots=True)
 class DefaultRule:
-    """One default tag, its pattern, and the fields it is searched in."""
+    """One default tag, the fields it is searched in, and what it looks for.
+
+    ``pattern`` is what every field takes unless ``patterns`` names another for
+    one of them: a word that means one thing in a job title can mean something
+    else in a company name, and the only default that reads a company needs to
+    say so rather than reuse a pattern written for titles.
+    """
 
     name: str
     pattern: str
     fields: tuple[RuleField, ...] = DEFAULT_FIELDS
+    patterns: Mapping[RuleField, str] = field(default_factory=dict)
+
+    def pattern_for(self, rule_field: RuleField) -> str:
+        return self.patterns.get(rule_field, self.pattern)
 
 
 DEFAULT_PATTERNS: Final[tuple[tuple[str, str], ...]] = (
@@ -187,6 +197,14 @@ DEFAULTS: Final[tuple[DefaultRule, ...]] = (
         # say it only there -- and unlike "sales" or "engineering" the company
         # name is the statement rather than the industry somebody works in.
         fields=(RuleField.TITLE, RuleField.HEADLINE, RuleField.COMPANY),
+        patterns={
+            # Anchored, because in the middle of a company name the same word
+            # describes who an organization serves rather than the person:
+            # "American Association of Retired Persons" employs people who are
+            # working. At the front it is somebody answering "where do you
+            # work?" with "Retired" -- "Retired", "Retired Inc.", "Retired!".
+            RuleField.COMPANY: r"^\W*(retired|retiree|retiring)\b",
+        },
     ),
 )
 """Every default tag, in display order."""
@@ -986,12 +1004,21 @@ def ensure_default_rules(session: Session, user: User) -> list[AutotagRule]:
     if not wanted:
         return []
     created: list[AutotagRule] = []
+    # What this user already has, so seeding twice cannot mean the same rule
+    # twice. A tag is reused by name and a rule has no such key, so without
+    # this a record that came back unreadable -- or an empty list, which reads
+    # as "nothing offered yet" and cannot be told from a new user -- would add
+    # another copy of every default rule on every run.
+    existing = {(rule.tag_id, rule.field, rule.pattern) for rule in list_rules(session, user)}
     for default in wanted:
         tag = find_tag(session, user, default.name)
         if tag is None:
             tag = create_tag(session, user, default.name, kind=TagKind.AUTO)
-        for field in default.fields:
-            created.append(create_rule(session, user, tag.id, field, default.pattern))
+        for rule_field in default.fields:
+            pattern = default.pattern_for(rule_field)
+            if (tag.id, rule_field, pattern) in existing:
+                continue
+            created.append(create_rule(session, user, tag.id, rule_field, pattern))
     set_setting(
         session, user, DEFAULTS_SEEDED_KEY, sorted(seeded | {default.name for default in wanted})
     )
@@ -1005,12 +1032,28 @@ def _seeded_names(session: Session, user: User) -> set[str]:
     The record used to be one boolean, which answered "has this user been
     seeded" and could not answer "with what" -- so a default added later never
     reached anybody who had started before it existed. It is a list of names
-    now, and `True` from the old shape means every default that existed when it
-    was written, which is all of them but the ones added since.
+    now, and ``True`` from the old shape means every default that existed when
+    it was written, which is all of them but the ones added since.
+
+    A value in neither shape -- a number, a string, a list with something
+    other than names in it, or an empty list, which this never writes because a
+    seeding that happened always named something -- is read as **everything**,
+    so a database whose record cannot be understood is left alone. The other direction is worse
+    than it looks: "seeded nothing" reseeds, and while a tag is reused by name,
+    a rule is not, so every run would add another copy of all of them. Missing
+    entirely is a different thing from unreadable, and still means a new user.
     """
     stored = get_setting(session, user, DEFAULTS_SEEDED_KEY)
+    if stored is None:
+        return set()
+    if isinstance(stored, list) and stored and all(isinstance(name, str) for name in stored):
+        return set(stored)
     if stored is True:
         return {name for name, _ in DEFAULT_PATTERNS}
-    if isinstance(stored, list):
-        return {name for name in stored if isinstance(name, str)}
-    return set()
+    log.warning(
+        "user %d has an unreadable %s (%r); leaving the defaults alone",
+        user.id,
+        DEFAULTS_SEEDED_KEY,
+        stored,
+    )
+    return {default.name for default in DEFAULTS}

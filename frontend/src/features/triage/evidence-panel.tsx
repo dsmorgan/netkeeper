@@ -57,7 +57,7 @@ export function EvidencePanel({ card }: { card: TriageCard }) {
           <p className="text-muted-foreground">
             No message history. Nothing here says the two of you have written to each other.
             {messages.invitations > 0 &&
-              ` An invitation is on file, under the timeline; clicking Connect is not a conversation, so it is not counted here.`}
+              ` ${plural(messages.invitations, 'invitation is', 'invitations are')} on file, under the timeline; clicking Connect is not a conversation, so it is not counted here.`}
           </p>
         ) : (
           <>

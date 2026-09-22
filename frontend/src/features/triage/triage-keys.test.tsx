@@ -106,6 +106,13 @@ describe('the triage keyboard map (spec 10.2)', () => {
     expect(backend.byId(1).tags[0]?.name).toBe('met at a meetup')
     // A tag the person put on themselves, which is what the batches read.
     expect(backend.byId(1).tags[0]?.kind).toBe('manual')
+    // Asserted on the wire, not on what the fake made of it: the server
+    // defaults this field the same way, so a client that stopped sending it
+    // would look right here and be wrong about what it asked for.
+    const made = backend.seen.find(
+      (request) => request.method === 'POST' && request.path === '/api/v1/tags',
+    )
+    expect(made?.body).toEqual({ name: 'met at a meetup', kind: 'manual' })
     // And it is on file for the next contact, without a reload.
     expect(within(picker).getByRole('button', { name: /met at a meetup/ })).toBeInTheDocument()
     expect(await within(picker).findByRole('button', { name: /founder/ })).toBeInTheDocument()
