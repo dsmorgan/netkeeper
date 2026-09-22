@@ -13,9 +13,22 @@ Restricted to ``source = 'archive'``: those are the only rows this code path
 ever wrote, and a person's own typed note or manually-entered interaction is
 never touched, even if it happens to contain an angle bracket.
 
-The cleanup logic is duplicated from the importer's own helper rather than
-imported: a migration is frozen history and must not track the application's
-own modules.
+The cleanup logic mirrors the archive importer's own ``_html_to_text`` helper
+rather than importing it: a migration is frozen history and must not track
+the application's own modules. Only a tag
+LinkedIn's own rich-text editor is actually known to emit is stripped; an
+unrecognized bracketed word is put back verbatim rather than guessed at,
+because a person's own plain text -- an email address in angle brackets, a
+placeholder -- must not be deleted by a cleanup pass. See the importer's
+docstring for the full reasoning; keep the two in step if one changes, since
+this file is the one place that reasoning cannot be shared by import.
+
+Not a perfect match for a re-import, though: a summary already cut to
+``SUMMARY_MAX_CHARS`` at the old, raw character boundary lost whatever came
+after that cut long before this migration runs, so a long body ends up
+trimmed at a different point than a fresh import of the same archive would
+produce today. Nothing to do about it -- the original text is gone -- but
+worth knowing rather than discovering by diffing the two.
 
 Revision ID: 0009
 Revises: 0008
@@ -38,6 +51,7 @@ depends_on: str | Sequence[str] | None = None
 _BLOCK_TAGS = frozenset(
     {"p", "div", "br", "li", "tr", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol"}
 )
+_INLINE_TAGS = frozenset({"a", "strong", "em", "u", "span", "img"})
 
 
 class _TextExtractor(HTMLParser):
@@ -48,10 +62,18 @@ class _TextExtractor(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _BLOCK_TAGS:
             self._parts.append("\n")
+        elif tag in _INLINE_TAGS:
+            pass
+        else:
+            self._parts.append(self.get_starttag_text() or "")
 
     def handle_endtag(self, tag: str) -> None:
         if tag in _BLOCK_TAGS:
             self._parts.append("\n")
+        elif tag in _INLINE_TAGS:
+            pass
+        else:
+            self._parts.append(f"</{tag}>")
 
     def handle_data(self, data: str) -> None:
         self._parts.append(data)
@@ -60,12 +82,18 @@ class _TextExtractor(HTMLParser):
         return "".join(self._parts)
 
 
-def _plain_text(value: str) -> str:
+def _plain_pass(value: str) -> str:
     parser = _TextExtractor()
     parser.feed(value)
     parser.close()
     lines = (line.strip() for line in parser.text().splitlines())
     return "\n".join(line for line in lines if line)
+
+
+def _plain_text(value: str) -> str:
+    # Run twice: see the archive importer's _html_to_text on why one pass is not
+    # enough for a tag spelled out with entities (e.g. "&lt;p&gt;").
+    return _plain_pass(_plain_pass(value))
 
 
 def upgrade() -> None:

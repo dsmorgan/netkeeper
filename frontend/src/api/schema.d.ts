@@ -3114,16 +3114,24 @@ export interface components {
          *
          *     The actual LinkedIn "you both worked at X" signal (#84), computed from the
          *     user's own job history (``/me/positions``) against this contact's. Unlike
-         *     :class:`SharedCompanyOut`, a match here means the two date ranges are not
+         *     :class:`SharedCompanyOut`, a match here means the two sides are not
          *     provably disjoint -- a stint known to have ended before the other started
-         *     is excluded. ``started_on``/``ended_on`` are the tightest span the evidence
-         *     can stand behind; either or both are ``null`` when a bound is not known on
-         *     either side (a still-current position, or one nobody ever dated), which
-         *     still counts as overlap on the company alone.
+         *     is excluded.
+         *
+         *     ``confirmed`` says whether ``started_on``/``ended_on`` are real: they are
+         *     only ever filled in from a pairing where **both** sides carry an actual
+         *     date. Most contacts today carry no dated position at all, only a current
+         *     company with no known start, which is why most matches come back
+         *     unconfirmed: real evidence that the company matches, but no evidence of
+         *     *when*, so `started_on` and `ended_on` are both `null` rather than
+         *     borrowed from whichever side happens to have a date -- a client must not
+         *     render years next to an unconfirmed match, or show one as fact.
          */
         OverlapOut: {
             /** Company */
             company: string;
+            /** Confirmed */
+            confirmed: boolean;
             /** Ended On */
             ended_on: string | null;
             /** Started On */
@@ -3818,7 +3826,18 @@ export interface components {
             /** Title */
             title?: string | null;
         };
-        /** UserPositionOut */
+        /**
+         * UserPositionOut
+         * @description One stint of the user's own job history.
+         *
+         *     ``source`` is ``manual`` for a row added or edited here, or whatever
+         *     source last wrote it (``archive`` today). A **manual edit wins
+         *     permanently**: once ``source`` is ``manual``, re-importing the LinkedIn
+         *     archive never overwrites this row again, at any date, until it is edited
+         *     or deleted by hand. There is no revert-to-imported-value ledger for this
+         *     table the way `contacts` has for its LinkedIn fields (`synced_values`) --
+         *     the edit is a one-way trip today.
+         */
         UserPositionOut: {
             /** Company */
             company: string | null;

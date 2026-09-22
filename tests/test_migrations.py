@@ -931,6 +931,141 @@ def test_deleting_a_contact_or_its_user_takes_the_triage_log_with_it(
         assert list(remaining) == [3]
 
 
+# --- the user's own positions (0008) -----------------------------------------
+
+
+def _insert_user_position(
+    connection: Connection,
+    *,
+    id: int,
+    user_id: int,
+    company: str = "Acme",
+    source: str = "archive",
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO user_positions (id, user_id, company, is_current, source,"
+            " observed_at, created_at, updated_at)"
+            " VALUES (:id, :user_id, :company, false, :source, :t, :t, :t)"
+        ),
+        {"id": id, "user_id": user_id, "company": company, "source": source, "t": STAMP},
+    )
+
+
+def test_migration_creates_the_user_positions_table(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    assert "user_positions" in set(inspect(migration_engine).get_table_names())
+
+
+def test_user_position_source_is_checked_by_the_database(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_user_position(connection, id=1, user_id=1)
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_user_position(connection, id=2, user_id=1, source="bogus")
+
+
+def test_deleting_a_user_cascades_to_its_positions(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine)
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        _insert_user_position(connection, id=1, user_id=1)
+        _insert_user_position(connection, id=2, user_id=2)
+        connection.execute(text("DELETE FROM users WHERE id = 1"))
+        assert _count(connection, "user_positions") == 1
+        remaining = connection.execute(text("SELECT user_id FROM user_positions")).scalar()
+    assert remaining == 2
+
+
+# --- plain-text message summaries (0009) --------------------------------------
+
+
+def _insert_interaction(
+    connection: Connection,
+    *,
+    id: int,
+    user_id: int,
+    contact_id: int,
+    summary: str | None,
+    source: str = "archive",
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO interactions (id, user_id, contact_id, kind, at, summary, source,"
+            " observed_at, created_at, updated_at)"
+            " VALUES (:id, :user_id, :contact_id, 'li_in', :t, :summary, :source, :t, :t, :t)"
+        ),
+        {
+            "id": id,
+            "user_id": user_id,
+            "contact_id": contact_id,
+            "summary": summary,
+            "source": source,
+            "t": STAMP,
+        },
+    )
+
+
+def test_the_backfill_cleans_only_archive_sourced_summaries(migration_engine: Engine) -> None:
+    """B2 (pre-merge review of #127): migration 0009 had no test at all -- dropping its
+    ``source = 'archive'`` restriction, or gutting ``upgrade()`` entirely, left the whole
+    suite green. This pins both: the archive row is cleaned, the other three sources are
+    byte-identical, and a NULL summary is left alone rather than turned into a string.
+    """
+    migrations.upgrade(migration_engine, "0008")
+    html = "<p>Hello &amp; welcome</p>"
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_interaction(
+            connection, id=1, user_id=1, contact_id=1, summary=html, source="archive"
+        )
+        _insert_interaction(
+            connection, id=2, user_id=1, contact_id=1, summary=html, source="manual"
+        )
+        _insert_interaction(connection, id=3, user_id=1, contact_id=1, summary=html, source="sync")
+        _insert_interaction(connection, id=4, user_id=1, contact_id=1, summary=html, source="csv")
+        _insert_interaction(
+            connection, id=5, user_id=1, contact_id=1, summary=None, source="archive"
+        )
+    migrations.upgrade(migration_engine, "0009")
+    with migration_engine.begin() as connection:
+        found = connection.execute(text("SELECT id, summary FROM interactions ORDER BY id")).all()
+    rows: dict[int, str | None] = {row[0]: row[1] for row in found}
+    assert rows[1] == "Hello & welcome"  # the only row the backfill is allowed to touch
+    assert rows[2] == html
+    assert rows[3] == html
+    assert rows[4] == html
+    assert rows[5] is None  # a NULL summary is left alone, not turned into the string "None"
+
+
+def test_the_backfill_never_leaves_a_known_tag_stored_even_via_entities(
+    migration_engine: Engine,
+) -> None:
+    """The same entity-decode-before-strip ordering bug that #75's importer fix addresses
+    applies to the backfill too, since it duplicates the same logic."""
+    migrations.upgrade(migration_engine, "0008")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_interaction(
+            connection,
+            id=1,
+            user_id=1,
+            contact_id=1,
+            summary="She wrote &lt;p&gt;hello&lt;/p&gt; in the box",
+            source="archive",
+        )
+    migrations.upgrade(migration_engine, "0009")
+    with migration_engine.begin() as connection:
+        summary = connection.execute(
+            text("SELECT summary FROM interactions WHERE id = 1")
+        ).scalar_one()
+    assert summary == "She wrote\nhello\nin the box"
+    assert "<" not in summary and ">" not in summary
+
+
 def test_ci_runs_the_postgresql_params() -> None:
     """Without the URL the PostgreSQL params skip silently, so CI must always set it."""
     if not os.environ.get("GITHUB_ACTIONS"):

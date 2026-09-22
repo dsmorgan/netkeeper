@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.crm.archive import (
     SUMMARY_MAX_CHARS,
     ArchiveImport,
+    _html_to_text,
     import_archive,
 )
 from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
@@ -392,6 +393,88 @@ def test_html_message_bodies_become_plain_text(writer: Session, user: User, tmp_
     summary = _interactions(writer, user)[0].summary
     assert summary == "Hello & welcome\nSecond line, cut off mid tag"
     assert "<" not in summary and ">" not in summary
+
+
+def _imported_summary(writer: Session, user: User, tmp_path: Path, body: str) -> str | None:
+    """Import a one-message archive carrying ``body`` and return the resulting summary."""
+    export = tmp_path / "export"
+    export.mkdir()
+    (export / "Connections.csv").write_text(
+        "First Name,Last Name,URL,Email Address,Company,Position,Connected On\n"
+        "Ada,Fictional,https://www.linkedin.com/in/ada-fictional,,Works,Eng,12 Mar 2019\n",
+        encoding="utf-8",
+    )
+    (export / "messages.csv").write_text(
+        "CONVERSATION ID,CONVERSATION TITLE,FROM,SENDER PROFILE URL,TO,"
+        "RECIPIENT PROFILE URLS,DATE,SUBJECT,CONTENT,FOLDER\n"
+        f"c1,,Nettie Keeperton,https://www.linkedin.com/in/nettie-keeperton,Ada Fictional,"
+        f'https://www.linkedin.com/in/ada-fictional,2023-05-01 14:22:10 UTC,,"{body}",INBOX\n',
+        encoding="utf-8",
+    )
+    with open_archive(export) as opened:
+        import_archive(
+            writer, user, opened, observed_at=OBSERVED, owner_public_id="nettie-keeperton"
+        )
+    return _interactions(writer, user)[0].summary
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            "Forwarding from Ada <ada@example.test> for you.",
+            "Forwarding from Ada <ada@example.test> for you.",
+        ),
+        ("the placeholder is <name> here", "the placeholder is <name> here"),
+        ("compare a <b and c > d", "compare a <b and c > d"),
+    ],
+)
+def test_plain_text_with_angle_brackets_is_not_mistaken_for_markup(
+    writer: Session, user: User, tmp_path: Path, body: str, expected: str
+) -> None:
+    """B3 (pre-merge review of #127): a message that was never HTML in the first place --
+    an email address in angle brackets, a "<name>" placeholder, coincidental text that
+    happens to start with a short tag-shaped word -- must not be silently deleted."""
+    assert _imported_summary(writer, user, tmp_path, body) == expected
+
+
+def test_entity_encoded_markup_is_still_stripped_not_stored_literally(
+    writer: Session, user: User, tmp_path: Path
+) -> None:
+    """B3: unescaping happens as the parser reads plain data and is never re-examined as a
+    tag within the same pass, so a body that spells a real tag with entities
+    (``&lt;p&gt;``) used to decode into a literal ``<p>...</p>`` sitting in the stored
+    summary -- markup surviving the exact importer whose "done when" is that none does."""
+    summary = _imported_summary(
+        writer, user, tmp_path, "She wrote &lt;p&gt;hello&lt;/p&gt; in the box"
+    )
+    assert summary == "She wrote\nhello\nin the box"
+    assert summary is not None
+    assert "<" not in summary and ">" not in summary
+
+
+def test_an_image_only_message_has_no_summary(writer: Session, user: User, tmp_path: Path) -> None:
+    body = "<img src='https://example.test/x.png'>"
+    assert _imported_summary(writer, user, tmp_path, body) is None
+
+
+def test_html_to_text_is_idempotent(writer: Session, user: User) -> None:
+    """B3: applying the function to its own output must be a no-op, on the realistic real
+    markup shape and on the entity-encoded and plain-angle-bracket cases above -- otherwise
+    the migration backfill (0009), which cannot know whether a row already went through
+    this, could keep changing a summary every time it is re-applied."""
+    samples = [
+        "<p class='spinmail-quill-editor'>Hello &amp; welcome</p>",
+        "She wrote &lt;p&gt;hello&lt;/p&gt; in the box",
+        "&lt;script&gt;alert(1)&lt;/script&gt;",
+        "Forwarding from Ada <ada@example.test> for you.",
+        "the placeholder is <name> here",
+        "compare a <b and c > d",
+    ]
+    for sample in samples:
+        once = _html_to_text(sample)
+        twice = _html_to_text(once)
+        assert once == twice, sample
 
 
 def test_a_long_plain_text_body_is_cut_on_a_word_boundary(

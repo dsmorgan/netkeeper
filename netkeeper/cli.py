@@ -414,7 +414,7 @@ def _archive_report(report: ArchiveImport) -> str:
             f"connections: {c.rows} rows, {c.created} created, {c.updated} updated, "
             f"{c.skipped} skipped, {c.needs_review} needs review",
             f"positions: {p.rows} rows, {p.created} created, {p.updated} updated, "
-            f"{p.skipped} skipped",
+            f"{p.unchanged} unchanged, {p.skipped} skipped",
             f"messages: {m.rows} rows in {m.conversations} conversations "
             f"({m.attributed} attributed, {m.no_counterpart} no counterparty, "
             f"{m.group_threads} group, {m.unknown_contact} not a contact); "

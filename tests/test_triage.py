@@ -225,7 +225,21 @@ def test_shared_companies_never_count_another_user_s_contacts(writer: Session, u
 # --- the you-and-them overlap (#84) ------------------------------------------
 
 
-def test_worked_together_reports_the_overlapping_years(writer: Session, user: User) -> None:
+def test_normalize_company_folds_case_punctuation_and_one_suffix() -> None:
+    """Direct on the function: an integration test that only ever feeds it a suffix on
+    both sides (``"Acme, Inc."`` vs ``"ACME INC"``) would still pass with suffix-folding
+    deleted entirely, since case and punctuation alone would already match them."""
+    assert module._normalize_company("Acme, Inc.") == module._normalize_company("acme inc")
+    assert module._normalize_company("Acme") == module._normalize_company("Acme Corp")
+    assert module._normalize_company("Acme") == module._normalize_company("Acme, Inc.")
+    # A substring must not collide: dropping a suffix is not the same as truncating.
+    assert module._normalize_company("Acme") != module._normalize_company("Acme Systems")
+    assert module._normalize_company("Sun") != module._normalize_company("Sunrise Bakery")
+
+
+def test_worked_together_reports_the_overlapping_years_when_both_sides_are_dated(
+    writer: Session, user: User
+) -> None:
     factories.make_user_position(
         writer,
         user,
@@ -247,16 +261,48 @@ def test_worked_together_reports_the_overlapping_years(writer: Session, user: Us
         ],
     )
     overlap = module.load_card(writer, user, contact).evidence.worked_together
-    assert [(item.company, item.started_on, item.ended_on) for item in overlap] == [
-        ("Northwind Pottery", date(2020, 1, 1), date(2021, 1, 1))
+    assert [(item.company, item.confirmed, item.started_on, item.ended_on) for item in overlap] == [
+        ("Northwind Pottery", True, date(2020, 1, 1), date(2021, 1, 1))
     ]
 
 
-def test_worked_together_matches_company_names_loosely(writer: Session, user: User) -> None:
+def test_worked_together_matches_company_names_loosely_when_dated(
+    writer: Session, user: User
+) -> None:
+    """The loose match and the confirmed-years claim are independent properties; this
+    covers both at once so a normalization regression cannot hide behind an unconfirmed
+    result the way an undated fixture would."""
+    factories.make_user_position(
+        writer, user, company="Acme, Inc.", started_on=date(2019, 1, 1), ended_on=date(2021, 1, 1)
+    )
+    contact = factories.make_contact(
+        writer,
+        user,
+        current_company="Somewhere Else",
+        positions=[
+            {
+                "company": "ACME INC",
+                "started_on": date(2020, 1, 1),
+                "ended_on": date(2022, 1, 1),
+                "is_current": False,
+            }
+        ],
+    )
+    overlap = module.load_card(writer, user, contact).evidence.worked_together
+    assert [(item.company, item.confirmed, item.started_on, item.ended_on) for item in overlap] == [
+        ("ACME INC", True, date(2020, 1, 1), date(2021, 1, 1))
+    ]  # the contact's own spelling
+
+
+def test_worked_together_matches_company_names_loosely_when_undated(
+    writer: Session, user: User
+) -> None:
     factories.make_user_position(writer, user, company="Acme, Inc.")
     contact = factories.make_contact(writer, user, current_company="ACME INC")
     overlap = module.load_card(writer, user, contact).evidence.worked_together
-    assert [item.company for item in overlap] == ["ACME INC"]  # the contact's own spelling
+    assert [(item.company, item.confirmed, item.started_on, item.ended_on) for item in overlap] == [
+        ("ACME INC", False, None, None)
+    ]
 
 
 def test_worked_together_excludes_provably_disjoint_stints(writer: Session, user: User) -> None:
@@ -313,31 +359,59 @@ def test_worked_together_handles_a_position_with_no_dates_at_all(
 ) -> None:
     """Undated on the user's side, and the contact is only known through current_company
     (no ContactPosition row at all, exactly what the archive importer creates today):
-    the company still matches, and no year is claimed either way."""
+    the company still matches, but is unconfirmed, and no year is claimed either way."""
     factories.make_user_position(writer, user, company="Northwind Pottery")
     contact = factories.make_contact(writer, user, current_company="Northwind Pottery")
     overlap = module.load_card(writer, user, contact).evidence.worked_together
-    assert [(item.company, item.started_on, item.ended_on) for item in overlap] == [
-        ("Northwind Pottery", None, None)
+    assert [(item.company, item.confirmed, item.started_on, item.ended_on) for item in overlap] == [
+        ("Northwind Pottery", False, None, None)
     ]
 
 
-def test_worked_together_uses_the_contacts_current_company_with_no_dated_position(
+def test_worked_together_never_borrows_the_users_own_dates_for_an_undated_contact(
     writer: Session, user: User
 ) -> None:
+    """B1 (pre-merge review of #127): the contact carries no dated position at all -- only
+    a bare current_company, exactly what every contact the archive importer creates looks
+    like today -- so nothing says the two of them were ever there at the same time. The
+    user's own 2005-2008 tenure must never be reported as the years this contact overlapped;
+    the honest claim is company-only and unconfirmed, for both a contact who was never
+    verified to overlap and one who provably joined decades later."""
     factories.make_user_position(
         writer,
         user,
-        company="Northwind Pottery",
-        started_on=date(2019, 1, 1),
-        ended_on=date(2021, 1, 1),
+        company="Northwind Pottery, Inc.",
+        started_on=date(2005, 1, 1),
+        ended_on=date(2008, 12, 1),
     )
-    contact = factories.make_contact(writer, user, current_company="Northwind Pottery")
+    never_verified = factories.make_contact(writer, user, current_company="Northwind Pottery, Inc.")
+    joined_decades_later = factories.make_contact(writer, user, current_company="Northwind Pottery")
+    for contact in (never_verified, joined_decades_later):
+        overlap = module.load_card(writer, user, contact).evidence.worked_together
+        assert [
+            (item.company, item.confirmed, item.started_on, item.ended_on) for item in overlap
+        ] == [(contact.current_company, False, None, None)]
+
+
+def test_worked_together_does_not_let_an_undated_current_company_rescue_a_disjoint_match(
+    writer: Session, user: User
+) -> None:
+    """B1 (pre-merge review of #127): the contact has *both* a dated position (proving they
+    joined in 2020, well after the user left in 2005) and a current_company at the same
+    company. The dated position correctly excludes the match; the undated current_company
+    entry for the very same company must not reinstate it with borrowed years -- or at all,
+    since real, dated evidence says they did not overlap."""
+    factories.make_user_position(
+        writer, user, company="Acme", started_on=date(2000, 1, 1), ended_on=date(2005, 1, 1)
+    )
+    contact = factories.make_contact(
+        writer,
+        user,
+        current_company="Acme",
+        positions=[{"company": "Acme", "started_on": date(2020, 1, 1), "is_current": True}],
+    )
     overlap = module.load_card(writer, user, contact).evidence.worked_together
-    # The contact's side carries no dates at all, so the user's own dates stand.
-    assert [(item.company, item.started_on, item.ended_on) for item in overlap] == [
-        ("Northwind Pottery", date(2019, 1, 1), date(2021, 1, 1))
-    ]
+    assert overlap == []
 
 
 def test_worked_together_is_independent_of_shared_companies(writer: Session, user: User) -> None:

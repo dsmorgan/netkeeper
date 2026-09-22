@@ -13,13 +13,33 @@ this table at all.
 Re-import matches a row by the natural key contact positions already use
 (:func:`netkeeper.crm.identity.position_key`: company and title case-folded,
 plus the start date), so importing the same archive twice does not duplicate
-a stint. A match is only refreshed when the new observation is at least as new
-as the one already recorded -- the same chronological rule the contact child
-tables use (see ``_refresh`` in :mod:`netkeeper.crm.identity`), never the full
-per-field ranking ``contacts`` has, because a position here is edited whole,
-not field by field. A row added or edited by hand keeps its own key and its
-own ``manual`` source; a later import only ever touches a row whose key it
-matches, and even then only forward in time.
+a stint.
+
+**Manual edits win, and stay won (P1-18's contract, adopted here rather than
+the contact child tables' weaker one).** Once a row's ``source`` is
+``manual`` -- whether it was added by hand or an archive-sourced row was
+later edited through this API -- :func:`import_positions` never writes to it
+again, at any observed time, until the person edits it again or deletes it. A
+row that has never been touched by hand keeps the contact child tables'
+ordinary rule instead: an import may refresh it, but only when the new
+observation is at least as new as the one already recorded (see ``_refresh``
+in :mod:`netkeeper.crm.identity`), so an older, previously-exported archive
+re-imported later does not clobber a newer one.
+
+There is deliberately no ``synced_values`` equivalent here: unlike a
+``contacts`` field, a manual edit is not reversible back to what an import
+last reported. If that turns out to matter in practice, it is a follow-up,
+not assumed away silently -- the one-way trip is a real, documented
+trade-off (#127 review), not an accident.
+
+A manual edit that changes ``company``, ``title``, or ``started_on`` --
+the natural key itself -- moves the row out of the key an import would
+otherwise find it under. The next import of the *same* archive therefore
+does not recognize the edited row as "the same" stint: it is left alone (per
+the rule above), and a fresh row is created from the archive's own values for
+that key. This is a known, accepted limit of natural-key matching, not
+something this module tries to paper over; it is the same limit
+:mod:`netkeeper.crm.identity` already accepts for a contact's positions.
 
 Transactions belong to the caller. Nothing here commits. Every writer reads
 before it writes, so it needs a writer session (``session_scope(factory,
@@ -67,11 +87,18 @@ type Missing = Literal[_Missing.MISSING]
 
 @dataclass(slots=True)
 class PositionCounts:
-    """What importing ``Positions.csv`` did. ``rows`` is every non-blank data row read."""
+    """What importing ``Positions.csv`` did. ``rows`` is every non-blank data row read.
+
+    ``unchanged`` is a match that was left exactly as it was: its ``source``
+    is already ``manual`` (which an import never overwrites, see the module
+    docstring), or its recorded observation is already at least as new as
+    this one.
+    """
 
     rows: int = 0
     created: int = 0
     updated: int = 0
+    unchanged: int = 0
     skipped: int = 0
     undated: int = 0
 
@@ -203,11 +230,13 @@ def import_positions(
     """Upsert ``rows`` (typically ``Positions.csv``) as ``user``'s own positions.
 
     Matched by :func:`~netkeeper.crm.identity.position_key`. A row that
-    matches nothing existing is created; one that matches an existing row is
-    refreshed only when ``observed_at`` is at least as new as what that row
-    already carries, so re-importing an archive exported before a person's own
-    edit never quietly undoes it. A row with neither a title nor a company
-    identifies nothing and is only counted, never written.
+    matches nothing existing is created. A row that matches an existing one is
+    left alone -- counted as ``unchanged``, never written -- when that row's
+    ``source`` is already ``manual`` (a person's own edit outranks every
+    import, permanently: see the module docstring) or when ``observed_at`` is
+    older than what the row already carries; otherwise it is refreshed. A row
+    with neither a title nor a company identifies nothing and is only
+    counted, never written.
 
     ``RuntimeError`` when ``session`` is not a writer; ``ValueError`` for a
     naive ``observed_at``.
@@ -243,7 +272,9 @@ def import_positions(
             session.add(created)
             existing[key] = created
             counts.created += 1
-        elif observed_at >= found.observed_at:
+        elif found.source is ContactSource.MANUAL or observed_at < found.observed_at:
+            counts.unchanged += 1
+        else:
             found.source = source
             found.observed_at = observed_at
             if row.ended_on is not None:

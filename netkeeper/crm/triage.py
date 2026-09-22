@@ -62,7 +62,10 @@ and current company. They answer different questions, they are named
 differently on :class:`Evidence`, and neither implies the other -- a person
 can be connected to someone at a company they once shared without either of
 them knowing it, and can also know someone they never worked with. See each
-class's docstring for what it actually counts.
+class's docstring for what it actually counts, and see :class:`Overlap` in
+particular on ``confirmed``: a same-company match is real evidence even when
+no date on either side can be trusted, but it must never be reported with
+years that were never actually verified.
 
 The evidence load costs a fixed number of queries whatever a contact carries;
 ``tests/test_web_triage.py`` counts them and fails if that stops being true.
@@ -339,23 +342,32 @@ class Overlap:
     (:func:`_normalize_company`) -- because neither source spells a company
     the same way twice.
 
-    A same-company match is only reported when the two sides' date ranges are
-    not *provably* disjoint: a stint that is known to have ended before the
-    other started is excluded, which is what makes this "genuine" rather than
-    the looser company-only match :class:`SharedCompany` makes. ``started_on``
-    and ``ended_on`` are the tightest span the evidence can actually stand
-    behind -- the later of the two starts and the earlier of the two ends,
-    each using whichever side has a value when the other does not. A position
-    with no end date is "current" and never closes its own end of the window;
-    a position with no dates at all closes neither end, so it still counts as
-    overlap (the company matched) but pins down no year. Both fields are
-    ``None`` when every position at this company, on both sides, is entirely
-    undated: company evidence with nothing to say about *when*.
+    A same-company match is only reported when the two sides are not
+    *provably* disjoint: a stint that is known to have ended before the other
+    started is excluded, which is what makes this "genuine" rather than the
+    looser company-only match :class:`SharedCompany` makes.
+
+    ``confirmed`` says whether ``started_on``/``ended_on`` mean anything.
+    Years are only ever computed from a pairing where **both** sides carry a
+    real date -- the later of the two starts and the earlier of the two ends
+    (a position with no end date is "current" and never closes its own end of
+    the window). Most contacts today carry no dated position at all: the
+    archive importer writes no :class:`~netkeeper.models.ContactPosition` rows
+    (P1-03 never fills ``IncomingContact.positions``), so the only fact
+    available is ``current_company`` with no start date whatsoever. That is
+    real evidence that a match is possible -- it can never be *disproven* --
+    but it is not evidence of *when*, and borrowing the user's own dates to
+    fill that gap would assert a fact nobody actually recorded: someone who
+    joined years after the user left would wrongly come back as having
+    overlapped during the user's own tenure. So an unconfirmed match always
+    carries ``started_on`` and ``ended_on`` both ``None``: "you were both at
+    this company at some point" and nothing more precise than that.
     """
 
     company: str
     started_on: date | None
     ended_on: date | None
+    confirmed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1097,16 +1109,27 @@ class _Span:
     currently-current stint cannot claim to overlap a stint that is known to
     have ended years ago; a stint with no dates at all, current or not, stays
     unbounded, because there is nothing to bound it with.
+
+    ``dated`` is what separates real evidence from a guess: true when this
+    side carries at least one actual date (a start, an end, or both), false
+    when nothing at all is known about *when* -- the synthetic span
+    :func:`_their_position_windows` makes for a bare ``current_company`` is
+    the only ``dated=False`` case in practice today. :func:`_best_window`
+    never computes a year from a pairing where either side is undated, no
+    matter how "not disjoint" that pairing is: not being disjoint only means
+    nothing rules the overlap out, not that a date is known.
     """
 
     start: date | None
     end: date | None
     bound: date | None
+    dated: bool
 
 
 def _span(start: date | None, end: date | None, *, current: bool) -> _Span:
     bound = utcnow().date() if current and end is None else end
-    return _Span(start=start, end=end, bound=bound)
+    dated = start is not None or end is not None
+    return _Span(start=start, end=end, bound=bound, dated=dated)
 
 
 def _disjoint(a: _Span, b: _Span) -> bool:
@@ -1134,25 +1157,45 @@ def _earlier(a: date | None, b: date | None) -> date | None:
     return min(a, b)
 
 
-def _best_window(mine: list[_Span], theirs: list[_Span]) -> tuple[date | None, date | None] | None:
-    """The most informative overlap window among every non-disjoint pairing, or ``None``.
+def _best_window(
+    mine: list[_Span], theirs: list[_Span]
+) -> tuple[tuple[date | None, date | None], bool] | None:
+    """The overlap window and whether it is a dated, confirmed one, or ``None`` for no match.
 
-    ``None`` only when every pairing is provably disjoint, which is what makes
-    :class:`Overlap` a genuine claim rather than the same-company-ever match
-    :class:`SharedCompany` makes. Among the pairings that survive, the one
-    that pins down the most wins: two known bounds beat one, one beats none.
+    ``None`` only when every pairing is provably disjoint -- proof that they
+    were *not* there together beats a pairing that merely fails to rule it
+    out, so a company with only disjoint pairings gets no entry at all.
+
+    Among the pairings that are not disjoint, a **dated** one -- both sides
+    carry a real date (:attr:`_Span.dated`) -- always wins, and its window is
+    the later of the two starts and the earlier of the two ends (ties broken
+    by which pins down the most). Only a dated pairing is ever returned with
+    ``confirmed=True`` and real dates. Failing that, any surviving
+    *undated* pairing (one or both sides carry no date at all, so nothing
+    rules it out but nothing confirms it either) still reports a match --
+    "you were both at this company at some point" -- but never borrows a date
+    from the side that happens to have one: ``confirmed=False`` and both
+    dates ``None``.
     """
-    best: tuple[date | None, date | None] | None = None
-    best_score = -1
+    best_dated: tuple[date | None, date | None] | None = None
+    best_dated_score = -1
+    any_undated_match = False
     for a in mine:
         for b in theirs:
             if _disjoint(a, b):
                 continue
-            start, end = _later(a.start, b.start), _earlier(a.end, b.end)
-            score = (start is not None) + (end is not None)
-            if score > best_score:
-                best, best_score = (start, end), score
-    return best
+            if a.dated and b.dated:
+                start, end = _later(a.start, b.start), _earlier(a.end, b.end)
+                score = (start is not None) + (end is not None)
+                if score > best_dated_score:
+                    best_dated, best_dated_score = (start, end), score
+            else:
+                any_undated_match = True
+    if best_dated is not None:
+        return best_dated, True
+    if any_undated_match:
+        return (None, None), False
+    return None
 
 
 def _my_position_windows(session: Session, user: User) -> dict[str, list[_Span]]:
@@ -1173,10 +1216,14 @@ def _their_position_windows(contact: Contact) -> dict[str, tuple[str, list[_Span
 
     Reads ``contact.positions``, already loaded by :func:`_shared_companies`
     earlier in the same :func:`_evidence` call, so this adds no query of its
-    own. The synthetic entry for ``current_company`` (no dates at all, but
-    known to be ongoing) is what lets a contact who carries no dated
-    ``ContactPosition`` rows -- true of every contact the archive importer
-    creates today -- still participate in overlap at all.
+    own. The synthetic, undated entry for ``current_company`` is added only
+    when no ``ContactPosition`` already covers that company: it exists so a
+    contact who carries no dated position at all -- true of every contact the
+    archive importer creates today -- still participates in overlap, but it
+    must never *override* a real, dated position at the same company, which
+    is exactly what letting both entries stand would do (the undated one is
+    never provably disjoint from anything, so it would resurrect a match the
+    dated one correctly ruled out).
     """
     windows: dict[str, tuple[str, list[_Span]]] = {}
 
@@ -1191,7 +1238,9 @@ def _their_position_windows(contact: Contact) -> dict[str, tuple[str, list[_Span
 
     for row in contact.positions:
         add(row.company, row.started_on, row.ended_on, current=row.is_current)
-    add(contact.current_company, None, None, current=True)
+    current_key = _normalize_company((contact.current_company or "").strip())
+    if current_key and current_key not in windows:
+        add(contact.current_company, None, None, current=True)
     return windows
 
 
@@ -1201,8 +1250,11 @@ def _worked_together(session: Session, user: User, contact: Contact) -> list[Ove
     One query for the user's own positions (a handful of rows read once per
     card); the matching itself is Python, because it is the loose,
     punctuation-and-suffix-insensitive kind :func:`_normalize_company` does,
-    not something a database index can do. Sorted by company so the panel is
-    stable across requests.
+    not something a database index can do. Sorted by the normalized company
+    key rather than either side's spelling, so a duplicate stint under two
+    slightly different spellings (see :mod:`netkeeper.crm.positions` on why
+    re-import can create one) never makes the order depend on which one a
+    request happened to load first.
     """
     mine = _my_position_windows(session, user)
     theirs = _their_position_windows(contact)
@@ -1211,12 +1263,14 @@ def _worked_together(session: Session, user: User, contact: Contact) -> list[Ove
         my_spans = mine.get(key)
         if my_spans is None:
             continue
-        window = _best_window(my_spans, their_spans)
-        if window is None:
+        result = _best_window(my_spans, their_spans)
+        if result is None:
             continue
-        started_on, ended_on = window
-        overlaps.append(Overlap(company=display, started_on=started_on, ended_on=ended_on))
-    overlaps.sort(key=lambda item: item.company.casefold())
+        (started_on, ended_on), confirmed = result
+        overlaps.append(
+            Overlap(company=display, started_on=started_on, ended_on=ended_on, confirmed=confirmed)
+        )
+    overlaps.sort(key=lambda item: _normalize_company(item.company))
     return overlaps
 
 
