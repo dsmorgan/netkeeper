@@ -24,9 +24,11 @@
  *   this step never claims `done` or `not_started` — only the honest count.
  *   There is no fix within this endpoint's response shape; tracked as its own
  *   backend issue.
- * - **Review what was tagged automatically**, once `stats.tagged_by_rule`
- *   (`TagSource.RULE` only, distinct from `tagged`, which counts any source
- *   and this step does not read) is above zero, is the same conflation as
+ * - **Review what was tagged by a rule**, once `stats.tagged_by_rule`
+ *   (`TagSource.RULE` only, distinct from `tagged`, which counts any source,
+ *   and from `TagSource.LLM`, which this step also does not read — nothing
+ *   writes it yet, but "automatically" would already be the wrong word for a
+ *   count that deliberately excludes it) is above zero, is the same conflation as
  *   build-a-list's, just on the other side: `tagged_by_rule > 0` is a fact
  *   about the rules, not about whether the person has reviewed what the
  *   rules did — and the step's own title is an instruction to *them*. Sharp
@@ -138,7 +140,7 @@ export function buildSetupSteps({
   const reviewState: StepState | null = reviewNotStarted ? 'not_started' : null
   const reviewDetail = reviewNotStarted
     ? 'Nothing tagged yet'
-    : `${plural(taggedByRule, 'contact')} tagged automatically`
+    : `${plural(taggedByRule, 'contact')} tagged by a rule`
   const reviewCta = hasContacts && taggedByRule === 0 ? 'Run auto-tag rules' : 'Review tags'
 
   // --- triage -----------------------------------------------------------------
@@ -185,7 +187,7 @@ export function buildSetupSteps({
     },
     {
       key: 'review-tags',
-      title: 'Review what was tagged automatically',
+      title: 'Review what was tagged by a rule',
       detail: reviewDetail,
       state: reviewState,
       to: '/lists',
