@@ -33,6 +33,7 @@ from netkeeper.models import (
     ContactSnapshot,
     ContactSource,
     InteractionKind,
+    MetSource,
     TagSource,
     User,
     UserKind,
@@ -564,14 +565,33 @@ async def test_a_bulk_action_on_ids_ignores_the_order_they_are_sent_in(
 
 
 async def test_deciding_met_here_is_the_person_s_own_answer(
-    client: httpx.AsyncClient, people: list[int]
+    client: httpx.AsyncClient,
+    factory: sessionmaker[Session],
+    owner: User,
+    people: list[int],
 ) -> None:
     """Both routes out of the triage review queue: one contact, and a bulk selection.
 
     A batch leaves ``met_source`` ``automatic`` and the review queue serves it
     back (spec 10.2). Answering here is the person answering, so both routes
     write ``manual`` — without that the review queue never empties.
+
+    Both contacts start where a batch left them. The column's own default is
+    ``manual``, so a fresh contact reads correct even when nothing writes the
+    column at all: dropping either write stayed green until these two rows
+    started out ``automatic``.
     """
+    with session_scope(factory, write=True) as session:
+        user = session.get(User, owner.id)
+        assert user is not None
+        for contact_id in people[:2]:
+            contact = get_scoped(session, user, Contact, contact_id)
+            assert contact is not None
+            contact.met = ContactMet.NOT_MET
+            contact.met_source = MetSource.AUTOMATIC
+    waiting = await _query(client, columns=["met_source"])
+    assert [row["met_source"] for row in waiting["items"]][:2] == ["automatic", "automatic"]
+
     edited = await client.patch(f"/api/v1/contacts/{people[0]}", json={"met": "met"}, headers=CSRF)
     assert edited.status_code == 200, edited.text
     assert (edited.json()["met"], edited.json()["met_source"]) == ("met", "manual")
