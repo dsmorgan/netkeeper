@@ -110,20 +110,48 @@ _BOUNDARY_LOOKBACK: Final = 200
 
 # Tags that separate the plain text they wrap from what comes next; folded to
 # a newline rather than deleted so "<p>one</p><p>two</p>" reads as two lines,
-# not "onetwo".
+# not "onetwo". Only tags LinkedIn's own rich-text editor (Quill, per the
+# "spinmail-quill-editor" class LinkedIn ships) is actually known to emit: an
+# arbitrary bracketed word is not assumed to be one of these (see
+# _KNOWN_TAGS below on why that assumption is exactly the bug this replaced).
 _BLOCK_TAGS: Final[frozenset[str]] = frozenset(
     {"p", "div", "br", "li", "tr", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol"}
 )
+# Formatting tags folded away with no separator, so the text they wrap reads
+# as part of the surrounding sentence. Quill's own defaults for bold/italic
+# are "strong"/"em", not the shorter "b"/"i" -- which are deliberately left
+# off this list, because a single letter right after "<" is exactly the shape
+# a person's own plain-text angle brackets are most likely to collide with
+# ("<b and c>", "<i>" as a roman numeral aside). "img" has no useful text of
+# its own to keep.
+_INLINE_TAGS: Final[frozenset[str]] = frozenset({"a", "strong", "em", "u", "span", "img"})
+_KNOWN_TAGS: Final[frozenset[str]] = _BLOCK_TAGS | _INLINE_TAGS
 
 
 class _TextExtractor(HTMLParser):
-    """Plain text from an HTML fragment: entities unescaped, tags dropped (#75).
+    """Plain text from an HTML fragment: entities unescaped, known tags dropped (#75).
 
     ``convert_charrefs=True`` does the unescaping. An unterminated tag at the
     end -- exactly the shape a body cut at a raw character limit used to leave
     behind -- is simply never emitted: the parser buffers it waiting for a
     ``>`` that never comes and drops the buffer on :meth:`close`, which is why
     this runs on the full body *before* :func:`_trim` cuts it, not after.
+
+    A tag whose name is not in :data:`_KNOWN_TAGS` is not assumed to be markup
+    at all: its exact source text is put back rather than discarded
+    (:meth:`HTMLParser.get_starttag_text`, or a reconstructed ``</tag>`` for
+    an end tag, since the parser keeps no equivalent for those). LinkedIn's
+    own editor never emits anything outside the known set, so this only ever
+    preserves the other case -- a person's own text that happens to contain a
+    ``<``, an email address in angle brackets, a ``<placeholder>``, or
+    anything else no importer should be guessing is safe to delete. The
+    tradeoff is real: an unrecognized element (a genuinely unusual tag, or
+    deliberately adversarial input) can end up stored looking tag-shaped.
+    That is an accepted cost here, not an oversight -- losing what someone
+    actually wrote is the worse failure, and the API's own contract already
+    requires every renderer to escape this field regardless of what an
+    importer thought it was (see ``InteractionOut.summary``), so nothing
+    downstream trusts this text to be markup-free for safety.
     """
 
     def __init__(self) -> None:
@@ -133,10 +161,18 @@ class _TextExtractor(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _BLOCK_TAGS:
             self._parts.append("\n")
+        elif tag in _INLINE_TAGS:
+            pass
+        else:
+            self._parts.append(self.get_starttag_text() or "")
 
     def handle_endtag(self, tag: str) -> None:
         if tag in _BLOCK_TAGS:
             self._parts.append("\n")
+        elif tag in _INLINE_TAGS:
+            pass
+        else:
+            self._parts.append(f"</{tag}>")
 
     def handle_data(self, data: str) -> None:
         self._parts.append(data)
@@ -145,20 +181,33 @@ class _TextExtractor(HTMLParser):
         return "".join(self._parts)
 
 
+def _plain_pass(value: str) -> str:
+    parser = _TextExtractor()
+    parser.feed(value)
+    parser.close()
+    lines = (line.strip() for line in parser.text().splitlines())
+    return "\n".join(line for line in lines if line)
+
+
 def _html_to_text(value: str) -> str:
-    """``value`` as plain text: entities unescaped, tags stripped, blank lines dropped (#75).
+    """``value`` as plain text: entities unescaped, known tags stripped (#75).
 
     LinkedIn InMail arrives as an HTML fragment
     (``<p class="spinmail-quill-editor">...</p>``); the evidence panel is worth
     more when it shows what was actually written than when it shows markup, so
     this runs at import and what lands in ``interactions.summary`` is text a
     person can read.
+
+    Run twice. Unescaping happens inline as the parser reads *data* -- a body
+    that says ``&lt;p&gt;`` rather than ``<p>`` decodes to a literal ``<p>``
+    sitting in that data, never reinterpreted as a tag within the same pass,
+    so the first pass alone would leave a real, recognized tag sitting in the
+    output as plain text once unescaped. The second pass parses whatever the
+    first pass revealed the same way the first parsed the original text, so a
+    real tag is stripped either way it arrives; once nothing new is revealed
+    the second pass is a no-op, so the result is stable under further passes.
     """
-    parser = _TextExtractor()
-    parser.feed(value)
-    parser.close()
-    lines = (line.strip() for line in parser.text().splitlines())
-    return "\n".join(line for line in lines if line)
+    return _plain_pass(_plain_pass(value))
 
 
 @dataclass(slots=True)
@@ -334,6 +383,7 @@ def _import_positions(
     counts.rows += counted.rows
     counts.created += counted.created
     counts.updated += counted.updated
+    counts.unchanged += counted.unchanged
     counts.skipped += counted.skipped
     counts.undated += counted.undated
 

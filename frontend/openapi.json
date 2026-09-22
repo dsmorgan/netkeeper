@@ -5298,11 +5298,15 @@
         "type": "object"
       },
       "OverlapOut": {
-        "description": "Genuine you-and-them overlap: the same company, and the years it is known to overlap.\n\nThe actual LinkedIn \"you both worked at X\" signal (#84), computed from the\nuser's own job history (``/me/positions``) against this contact's. Unlike\n:class:`SharedCompanyOut`, a match here means the two date ranges are not\nprovably disjoint -- a stint known to have ended before the other started\nis excluded. ``started_on``/``ended_on`` are the tightest span the evidence\ncan stand behind; either or both are ``null`` when a bound is not known on\neither side (a still-current position, or one nobody ever dated), which\nstill counts as overlap on the company alone.",
+        "description": "Genuine you-and-them overlap: the same company, and the years it is known to overlap.\n\nThe actual LinkedIn \"you both worked at X\" signal (#84), computed from the\nuser's own job history (``/me/positions``) against this contact's. Unlike\n:class:`SharedCompanyOut`, a match here means the two sides are not\nprovably disjoint -- a stint known to have ended before the other started\nis excluded.\n\n``confirmed`` says whether ``started_on``/``ended_on`` are real: they are\nonly ever filled in from a pairing where **both** sides carry an actual\ndate. Most contacts today carry no dated position at all, only a current\ncompany with no known start, which is why most matches come back\nunconfirmed: real evidence that the company matches, but no evidence of\n*when*, so `started_on` and `ended_on` are both `null` rather than\nborrowed from whichever side happens to have a date -- a client must not\nrender years next to an unconfirmed match, or show one as fact.",
         "properties": {
           "company": {
             "title": "Company",
             "type": "string"
+          },
+          "confirmed": {
+            "title": "Confirmed",
+            "type": "boolean"
           },
           "ended_on": {
             "anyOf": [
@@ -5332,7 +5336,8 @@
         "required": [
           "company",
           "started_on",
-          "ended_on"
+          "ended_on",
+          "confirmed"
         ],
         "title": "OverlapOut",
         "type": "object"
@@ -7116,6 +7121,7 @@
         "type": "object"
       },
       "UserPositionOut": {
+        "description": "One stint of the user's own job history.\n\n``source`` is ``manual`` for a row added or edited here, or whatever\nsource last wrote it (``archive`` today). A **manual edit wins\npermanently**: once ``source`` is ``manual``, re-importing the LinkedIn\narchive never overwrites this row again, at any date, until it is edited\nor deleted by hand. There is no revert-to-imported-value ledger for this\ntable the way `contacts` has for its LinkedIn fields (`synced_values`) --\nthe edit is a one-way trip today.",
         "properties": {
           "company": {
             "anyOf": [

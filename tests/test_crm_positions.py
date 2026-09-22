@@ -170,6 +170,7 @@ def test_import_positions_creates_and_counts(writer: Session, user: User) -> Non
     counts = import_positions(writer, user, rows, source=ContactSource.ARCHIVE, observed_at=NOW)
     assert counts.rows == 4
     assert counts.created == 3
+    assert counts.unchanged == 0
     assert counts.skipped == 1
     assert counts.undated == 1  # "Undated Co" has no start date
 
@@ -212,10 +213,87 @@ def test_import_positions_refreshes_an_open_ended_row_when_a_newer_export_closes
     assert row.is_current is False
 
 
-def test_import_positions_does_not_undo_a_manual_edit_from_an_older_export(
+def test_import_positions_counts_an_older_reimport_as_unchanged(
     writer: Session, user: User
 ) -> None:
-    """A re-import exported before a person's own edit must not overwrite it."""
+    import_positions(
+        writer,
+        user,
+        [_row("Acme", "Lead", date(2020, 1, 1), None)],
+        source=ContactSource.ARCHIVE,
+        observed_at=NOW,
+    )
+    result = import_positions(
+        writer,
+        user,
+        [_row("Acme", "Lead", date(2020, 1, 1), None)],
+        source=ContactSource.ARCHIVE,
+        observed_at=EARLIER,
+    )
+    assert (result.updated, result.unchanged) == (0, 1)
+
+
+def test_a_manual_edit_survives_a_reimport_even_when_the_export_is_newer(
+    writer: Session, user: User
+) -> None:
+    """The sticky rule (module docstring, decided on the pre-merge review of #127): once a
+    row's source is manual, an import never writes to it again at any observed time -- not
+    just one exported before the edit. Edits ``ended_on``, not a natural-key field, so this
+    actually exercises the chronological/sticky guard rather than sidestepping it by making
+    the edited row invisible to the natural-key match (see the "editing a key field" test
+    below for that separate scenario)."""
+    import_positions(
+        writer,
+        user,
+        [_row("Acme", "Lead", date(2020, 1, 1), date(2021, 1, 1))],
+        source=ContactSource.ARCHIVE,
+        observed_at=EARLIER,
+    )
+    (row,) = list(writer.scalars(scoped(user, UserPosition)))
+    update_position(writer, user, row.id, ended_on=date(2024, 1, 1))
+    writer.flush()
+    edited_at = row.observed_at
+
+    # A re-import with a *newer* observation than the edit: must still not touch it.
+    result = import_positions(
+        writer,
+        user,
+        [_row("Acme", "Lead", date(2020, 1, 1), date(2021, 1, 1))],
+        source=ContactSource.ARCHIVE,
+        observed_at=LATER,
+    )
+    assert (result.updated, result.unchanged) == (0, 1)
+    assert row.ended_on == date(2024, 1, 1)
+    assert row.is_current is False
+    assert row.source is ContactSource.MANUAL
+    assert row.observed_at == edited_at
+
+
+def test_import_positions_leaves_a_manually_added_row_alone_too(
+    writer: Session, user: User
+) -> None:
+    """The sticky rule applies to a row that was never archive-sourced at all, not only to
+    one an import wrote and a person later edited."""
+    row = add_position(writer, user, company="Acme", title="Lead", started_on=date(2020, 1, 1))
+    result = import_positions(
+        writer,
+        user,
+        [_row("Acme", "Lead", date(2020, 1, 1), date(2022, 1, 1))],
+        source=ContactSource.ARCHIVE,
+        observed_at=NOW,
+    )
+    assert (result.created, result.updated, result.unchanged) == (0, 0, 1)
+    assert row.ended_on is None
+    assert row.source is ContactSource.MANUAL
+
+
+def test_editing_a_key_field_is_not_matched_by_a_later_reimport(
+    writer: Session, user: User
+) -> None:
+    """A known, accepted limit of natural-key matching (module docstring): editing
+    ``title`` -- part of the key -- moves the row out from under the key an import
+    would look for, so the next import of the very same archive does not find it and
+    creates an additional row instead of updating the one that was renamed."""
     import_positions(
         writer,
         user,
@@ -224,21 +302,20 @@ def test_import_positions_does_not_undo_a_manual_edit_from_an_older_export(
         observed_at=EARLIER,
     )
     (row,) = list(writer.scalars(scoped(user, UserPosition)))
-    update_position(writer, user, row.id, title="Staff Lead")  # observed_at is "now" (utcnow)
-    writer.flush()
-    edited_at = row.observed_at
+    update_position(writer, user, row.id, title="Staff Lead")
 
-    # A re-import of an archive exported before the edit: must not touch it.
-    import_positions(
+    result = import_positions(
         writer,
         user,
         [_row("Acme", "Lead", date(2020, 1, 1), None)],
         source=ContactSource.ARCHIVE,
-        observed_at=EARLIER,
+        observed_at=LATER,
     )
-    assert row.title == "Staff Lead"
-    assert row.source is ContactSource.MANUAL
-    assert row.observed_at == edited_at
+    assert result.created == 1  # the archive's own row: not matched to the renamed one
+    rows = list(writer.scalars(scoped(user, UserPosition)))
+    assert len(rows) == 2
+    assert {r.title for r in rows} == {"Staff Lead", "Lead"}
+    assert {r.source for r in rows} == {ContactSource.MANUAL, ContactSource.ARCHIVE}
 
 
 def test_import_positions_requires_a_writer_session(
