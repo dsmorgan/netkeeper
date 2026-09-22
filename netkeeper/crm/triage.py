@@ -384,6 +384,15 @@ class MessageEvidence:
     first_at: datetime | None
     last_at: datetime | None
     recent: list[Interaction] = field(default_factory=list)
+    invitations: int = 0
+    """Invitations on file, counted apart from the messages and never among them.
+
+    The importer stores an invitation as an ``li_in``/``li_out`` row like a
+    message (:data:`~netkeeper.crm.interactions.INVITATION_SUMMARY` is the only
+    thing that tells them apart), and the batches have always excluded them --
+    clicking Connect is not a conversation. The panel used to count them anyway,
+    so a contact whose whole history was one invitation read "1 message" over a
+    card whose only row said *LinkedIn invitation*."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1010,10 +1019,18 @@ def _evidence(session: Session, user: User, contact: Contact) -> Evidence:
 
 
 def _messages(session: Session, user: User, contact: Contact) -> MessageEvidence:
-    """The message counts in one query, then the newest few in another."""
-    base = scoped(user, Interaction).where(
+    """The message counts in one query, the newest few in another, invitations apart.
+
+    Invitations are the same kind of row as a message and are not one, so they
+    are counted on their own and left out of everything else here: the same
+    question :func:`_messaged` asks, asked once for the batch and once for the
+    card that batch could have shown.
+    """
+    history = scoped(user, Interaction).where(
         Interaction.contact_id == contact.id, Interaction.kind.in_(sorted(MESSAGE_KINDS))
     )
+    base = history.where(~is_invitation())
+    invitations = session.scalar(history.where(is_invitation()).with_only_columns(func.count()))
     outbound = case((Interaction.kind.in_(sorted(OUTBOUND_KINDS)), 1), else_=0)
     total, sent, first_at, last_at = session.execute(
         base.with_only_columns(
@@ -1027,6 +1044,7 @@ def _messages(session: Session, user: User, contact: Contact) -> MessageEvidence
         base.order_by(Interaction.at.desc(), Interaction.id.desc()).limit(RECENT_MESSAGES)
     ).all()
     return MessageEvidence(
+        invitations=invitations or 0,
         total=total,
         inbound=total - sent,
         outbound=sent,

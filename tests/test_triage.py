@@ -183,6 +183,41 @@ def test_a_card_with_no_messages_reports_nothing(writer: Session, user: User) ->
     assert messages.first_at is None and messages.last_at is None and messages.recent == []
 
 
+def test_an_invitation_is_not_counted_as_a_message_on_the_card(writer: Session, user: User) -> None:
+    """The card asks what the batch asks: clicking Connect is not a conversation.
+
+    The importer writes an invitation as the same kind of row as a message, so a
+    contact whose whole history is one invitation used to read "1 message" over
+    a card whose only line said *LinkedIn invitation* -- the panel and
+    :func:`_messaged` disagreeing about the same person.
+    """
+    invited = factories.make_contact(writer, user)
+    _message(writer, user, invited, outbound=False, at=EARLIER, summary=INVITATION_SUMMARY)
+    messages = module.load_card(writer, user, invited).evidence.messages
+    assert (messages.total, messages.inbound, messages.outbound) == (0, 0, 0)
+    assert (messages.invitations, messages.recent) == (1, [])
+    assert messages.first_at is None and messages.last_at is None
+    # And the invitation is still on the card, under the timeline, where it says
+    # what it is.
+    timeline = module.load_card(writer, user, invited).evidence.timeline
+    assert [getattr(entry.row, "summary", None) for entry in timeline] == [INVITATION_SUMMARY]
+
+
+def test_a_card_counts_the_messages_beside_an_invitation_without_it(
+    writer: Session, user: User
+) -> None:
+    both = factories.make_contact(writer, user)
+    _message(writer, user, both, outbound=False, at=LONG_AGO, summary=INVITATION_SUMMARY)
+    _message(writer, user, both, outbound=True, at=EARLIER, summary="good to connect")
+    _message(writer, user, both, outbound=False, at=NOW, summary="likewise")
+    messages = module.load_card(writer, user, both).evidence.messages
+    assert (messages.total, messages.outbound, messages.inbound) == (2, 1, 1)
+    assert messages.invitations == 1
+    # The window is the conversation's, not the invitation's.
+    assert (messages.first_at, messages.last_at) == (EARLIER, NOW)
+    assert [row.summary for row in messages.recent] == ["likewise", "good to connect"]
+
+
 def test_a_card_carries_the_timeline_and_the_notes(writer: Session, user: User) -> None:
     contact = factories.make_contact(writer, user, notes="knows the org inside out")
     add_interaction(writer, user, contact.id, InteractionKind.NOTE, EARLIER, "a note")

@@ -3644,6 +3644,11 @@ export interface components {
             first_at: string | null;
             /** Inbound */
             inbound: number;
+            /**
+             * Invitations
+             * @default 0
+             */
+            invitations: number;
             /** Last At */
             last_at: string | null;
             /** Outbound */

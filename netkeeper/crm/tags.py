@@ -111,6 +111,19 @@ _COLOR: Final = re.compile(r"#[0-9a-fA-F]{6}")
 # edits them in the UI, and a headline like "Advisor to CEOs" is a false
 # positive the suppression row exists for. Each pattern is searched with
 # re.IGNORECASE, so the letter case here is for reading.
+DEFAULT_FIELDS: Final[tuple[RuleField, ...]] = (RuleField.TITLE, RuleField.HEADLINE)
+"""The fields a default pattern gets a rule for unless it names its own."""
+
+
+@dataclass(frozen=True, slots=True)
+class DefaultRule:
+    """One default tag, its pattern, and the fields it is searched in."""
+
+    name: str
+    pattern: str
+    fields: tuple[RuleField, ...] = DEFAULT_FIELDS
+
+
 DEFAULT_PATTERNS: Final[tuple[tuple[str, str], ...]] = (
     (
         "c-suite",
@@ -158,10 +171,25 @@ DEFAULT_PATTERNS: Final[tuple[tuple[str, str], ...]] = (
         r"|PhD|Ph\.?D|postdoc(toral)?|faculty|dean|academic|scholar)\b",
     ),
 )
-"""``(tag name, pattern)`` for every default tag, in display order."""
+"""``(tag name, pattern)`` for the defaults that take the usual fields."""
 
-DEFAULT_FIELDS: Final[tuple[RuleField, ...]] = (RuleField.TITLE, RuleField.HEADLINE)
-"""The fields each default pattern gets a rule for."""
+DEFAULTS: Final[tuple[DefaultRule, ...]] = (
+    *(DefaultRule(name, pattern) for name, pattern in DEFAULT_PATTERNS),
+    DefaultRule(
+        "retired",
+        # ``retired``, ``retiree``, ``retiring`` -- and deliberately not
+        # ``retirement``, which is the word in the titles of people who work
+        # *in* retirement: a retirement planner is not retired.
+        r"\b(retired|retiree|retiring)\b",
+        # The one default that searches the company too. "Retired" as an
+        # employer is how LinkedIn says it as often as a title does -- in the
+        # reference address book, eight people say it in the title and two more
+        # say it only there -- and unlike "sales" or "engineering" the company
+        # name is the statement rather than the industry somebody works in.
+        fields=(RuleField.TITLE, RuleField.HEADLINE, RuleField.COMPANY),
+    ),
+)
+"""Every default tag, in display order."""
 
 
 # --- errors -----------------------------------------------------------------
@@ -953,15 +981,36 @@ def ensure_default_rules(session: Session, user: User) -> list[AutotagRule]:
     name is reused as it is.
     """
     _require_writer(session)
-    if get_setting(session, user, DEFAULTS_SEEDED_KEY) is True:
+    seeded = _seeded_names(session, user)
+    wanted = [default for default in DEFAULTS if default.name not in seeded]
+    if not wanted:
         return []
     created: list[AutotagRule] = []
-    for name, pattern in DEFAULT_PATTERNS:
-        tag = find_tag(session, user, name)
+    for default in wanted:
+        tag = find_tag(session, user, default.name)
         if tag is None:
-            tag = create_tag(session, user, name, kind=TagKind.AUTO)
-        for field in DEFAULT_FIELDS:
-            created.append(create_rule(session, user, tag.id, field, pattern))
-    set_setting(session, user, DEFAULTS_SEEDED_KEY, True)
+            tag = create_tag(session, user, default.name, kind=TagKind.AUTO)
+        for field in default.fields:
+            created.append(create_rule(session, user, tag.id, field, default.pattern))
+    set_setting(
+        session, user, DEFAULTS_SEEDED_KEY, sorted(seeded | {default.name for default in wanted})
+    )
     log.info("seeded %d default auto-tag rules for user %d", len(created), user.id)
     return created
+
+
+def _seeded_names(session: Session, user: User) -> set[str]:
+    """Which defaults this user has ever been offered, by tag name.
+
+    The record used to be one boolean, which answered "has this user been
+    seeded" and could not answer "with what" -- so a default added later never
+    reached anybody who had started before it existed. It is a list of names
+    now, and `True` from the old shape means every default that existed when it
+    was written, which is all of them but the ones added since.
+    """
+    stored = get_setting(session, user, DEFAULTS_SEEDED_KEY)
+    if stored is True:
+        return {name for name, _ in DEFAULT_PATTERNS}
+    if isinstance(stored, list):
+        return {name for name in stored if isinstance(name, str)}
+    return set()

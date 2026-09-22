@@ -78,6 +78,8 @@ export interface FakeBackend {
   mergeAway(id: number, into: number): void
   /** Move the suggestion's set, so the next apply answers 409. */
   setMessageCount(id: number, messages: number): void
+  /** Make a tag behind the screen's back, so creating that name answers 409. */
+  addTagBehindTheScenes(name: string): Tag
 }
 
 /** The scalar columns `POST /contacts/query` returns when it is given none. */
@@ -530,7 +532,30 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
         timezone: 'UTC',
       })
     }
-    if (url.pathname === '/api/v1/tags') return jsonResponse(tags)
+    if (url.pathname === '/api/v1/tags') {
+      if (request.method !== 'POST') return jsonResponse(tags)
+      // `create_tag`: a name is unique per user under `tag_name_key`, which
+      // folds case and surrounding space, and a repeat is a 409 rather than a
+      // second tag.
+      const input = (body ?? {}) as { name?: string; kind?: string }
+      const name = (input.name ?? '').trim()
+      if (name === '') return jsonResponse({ detail: 'a tag needs a name' }, 422)
+      if (tags.some((tag) => tag.name.trim().toLowerCase() === name.toLowerCase())) {
+        return jsonResponse({ detail: `a tag called ${name} already exists` }, 409)
+      }
+      const made: Tag = {
+        id: Math.max(0, ...tags.map((tag) => tag.id)) + 1,
+        name,
+        color: null,
+        kind: (input.kind ?? 'manual') as Tag['kind'],
+        met_signal: null,
+        contact_count: 0,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      }
+      tags.push(made)
+      return jsonResponse(made, 201)
+    }
 
     if (url.pathname === '/api/v1/triage/next') {
       const afterParam = url.searchParams.get('after_id')
@@ -836,6 +861,20 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
   return {
     handler,
     seen,
+    addTagBehindTheScenes(name) {
+      const made: Tag = {
+        id: Math.max(0, ...tags.map((tag) => tag.id)) + 1,
+        name,
+        color: null,
+        kind: 'manual',
+        met_signal: null,
+        contact_count: 0,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      }
+      tags.push(made)
+      return made
+    },
     countOf(path, method) {
       return seen.filter(
         (entry) => entry.path === path && (method === undefined || entry.method === method),

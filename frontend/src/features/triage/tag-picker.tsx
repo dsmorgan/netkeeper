@@ -5,6 +5,12 @@
  * close. Focus is in a text field the whole time, which is exactly why the
  * global key map stands aside: `m` here types an `m`.
  *
+ * A name that matches no tag offers to make one. A tag somebody thinks of
+ * while looking at a contact ("I met this one through that tool") is not a
+ * rule and never will be, and leaving triage to go and create it loses both
+ * the run and the thought. What it makes is a `manual` tag, because the
+ * person is the one who said it, and the batches read that difference.
+ *
  * Tagging is **not** part of the triage undo stack. It writes through the
  * contacts API (P1-07); the triage log only records decisions and preferred-name
  * edits. So `u` after `t` reaches past the tag to the decision before it, and
@@ -17,7 +23,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 
-import { fetchTags, type Tag, type TriageTag } from './api'
+import { createTag, fetchTags, TriageError, type Tag, type TriageTag } from './api'
 
 export function TagPicker({
   applied,
@@ -34,6 +40,7 @@ export function TagPicker({
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [highlight, setHighlight] = useState(0)
+  const [making, setMaking] = useState(false)
   const input = useRef<HTMLInputElement>(null)
   const returnTo = useRef<Element | null>(null)
 
@@ -70,6 +77,47 @@ export function TagPicker({
   function toggle(tag: Tag) {
     if (appliedIds.has(tag.id)) onRemove(tag.id)
     else onAdd({ id: tag.id, name: tag.name, color: tag.color, kind: tag.kind })
+  }
+
+  const wanted = query.trim()
+  /** True when nothing on file is this name, so making one is the only way to it. */
+  const isNew =
+    wanted !== '' && !(tags ?? []).some((tag) => tag.name.toLowerCase() === wanted.toLowerCase())
+
+  async function make() {
+    if (!isNew || making) return
+    setMaking(true)
+    setError(null)
+    try {
+      const tag = await createTag(wanted)
+      setTags((current) => [...(current ?? []), tag])
+      onAdd({ id: tag.id, name: tag.name, color: tag.color, kind: tag.kind })
+      setQuery('')
+      setHighlight(0)
+    } catch (failure: unknown) {
+      // Somebody else's tab, or a name that normalizes onto one already there:
+      // the list is stale, so take it again and apply what was already there
+      // rather than telling the person their own idea is a conflict.
+      if (failure instanceof TriageError && failure.status === 409) {
+        const found = await fetchTags().catch(() => null)
+        const existing = found?.find((tag) => tag.name.toLowerCase() === wanted.toLowerCase())
+        if (found !== null) setTags(found)
+        if (existing !== undefined) {
+          onAdd({
+            id: existing.id,
+            name: existing.name,
+            color: existing.color,
+            kind: existing.kind,
+          })
+          setQuery('')
+          setHighlight(0)
+          setMaking(false)
+          return
+        }
+      }
+      setError(failure instanceof Error ? failure.message : 'the tag was not created')
+    }
+    setMaking(false)
   }
 
   return (
@@ -112,7 +160,10 @@ export function TagPicker({
             if (event.key === 'Enter') {
               event.preventDefault()
               const tag = matches[index]
+              // Enter on a name nothing matches makes it, which is the whole
+              // point of typing a name nothing matches.
               if (tag !== undefined) toggle(tag)
+              else if (isNew) void make()
             }
           }}
         />
@@ -123,7 +174,19 @@ export function TagPicker({
 
       {error !== null && <p role="alert">Tags unavailable: {error}</p>}
       {tags === null && error === null && <p className="text-muted-foreground">Loading tags…</p>}
-      {tags !== null && matches.length === 0 && (
+      {tags !== null && isNew && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" disabled={making} onClick={() => void make()}>
+            {making ? 'Making…' : `Make “${wanted}” and put it on`}
+          </Button>
+          <span className="text-xs text-muted-foreground">
+            {matches.length === 0
+              ? 'No tag matches that yet.'
+              : 'Or pick one of the matches below.'}
+          </span>
+        </div>
+      )}
+      {tags !== null && matches.length === 0 && !isNew && (
         <p className="text-muted-foreground">No tag matches that.</p>
       )}
 

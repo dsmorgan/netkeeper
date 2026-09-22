@@ -346,6 +346,26 @@ export async function fetchTags(signal?: AbortSignal): Promise<Tag[]> {
   return data
 }
 
+/**
+ * Make a tag from the triage screen and hand it back to be applied.
+ *
+ * A tag somebody thinks of while looking at a contact is the reason this is
+ * here: "I met this one through <that tool>" is not a rule and never will be,
+ * and leaving triage to make the tag loses the run and the thought. `manual`
+ * because the person is the one who said it — a rule's tag is not evidence
+ * that they know anybody, and the batches read the difference.
+ *
+ * A name that already exists answers `409`; the caller re-reads the list and
+ * applies the tag that was already there, which is what the person meant.
+ */
+export async function createTag(name: string): Promise<Tag> {
+  const { data, error, response } = await api.POST('/api/v1/tags', {
+    body: { name, kind: 'manual' },
+  })
+  if (data === undefined) fail(response.status, error, 'the tag was not created')
+  return data
+}
+
 /** Put a manual tag on the contact under triage. */
 export async function tagContact(contactId: number, tagId: number): Promise<void> {
   const { error, response } = await api.POST('/api/v1/contacts/{contact_id}/tags', {

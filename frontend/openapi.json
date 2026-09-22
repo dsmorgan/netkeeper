@@ -6680,6 +6680,11 @@
             "title": "Inbound",
             "type": "integer"
           },
+          "invitations": {
+            "default": 0,
+            "title": "Invitations",
+            "type": "integer"
+          },
           "last_at": {
             "anyOf": [
               {

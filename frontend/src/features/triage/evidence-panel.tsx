@@ -56,6 +56,8 @@ export function EvidencePanel({ card }: { card: TriageCard }) {
         {messages.total === 0 ? (
           <p className="text-muted-foreground">
             No message history. Nothing here says the two of you have written to each other.
+            {messages.invitations > 0 &&
+              ` An invitation is on file, under the timeline; clicking Connect is not a conversation, so it is not counted here.`}
           </p>
         ) : (
           <>
@@ -63,6 +65,8 @@ export function EvidencePanel({ card }: { card: TriageCard }) {
               {plural(messages.total, 'message', 'messages')} · {messages.inbound} in,{' '}
               {messages.outbound} out · {formatDay(messages.first_at)} to{' '}
               {formatDay(messages.last_at)}
+              {messages.invitations > 0 &&
+                ` · ${plural(messages.invitations, 'invitation', 'invitations')} besides, not counted here`}
             </p>
             <ul className="mt-2 flex flex-col gap-2">
               {messages.recent.map((message) => (
