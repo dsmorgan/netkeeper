@@ -196,6 +196,27 @@ describe('buildSetupSteps: import', () => {
       detail: '5 contacts imported; open imports could not be checked',
     })
   })
+
+  it('shows no badge while the draft query is still in flight — not a "done" the answer might contradict', () => {
+    // contacts/stats gates the whole page, but the drafts query is its own
+    // fetch on its own clock: without openImportsPending, the window between
+    // the two answering renders "Done" for a contact count that might have
+    // a draft still open, which is exactly what the drafts query exists to
+    // catch (#129 review round 3, verified with a 400ms probe).
+    const steps = buildSetupSteps({ stats: stats({ total: 5 }), openImportsPending: true })
+    expect(byKey(steps, 'import')).toMatchObject({
+      state: null,
+      detail: '5 contacts imported; checking for open imports…',
+    })
+  })
+
+  it('shows no badge while pending on a fresh install too', () => {
+    const steps = buildSetupSteps({ stats: stats(), openImportsPending: true })
+    expect(byKey(steps, 'import')).toMatchObject({
+      state: null,
+      detail: 'Checking for open imports…',
+    })
+  })
 })
 
 describe('buildSetupSteps: review tags', () => {
@@ -221,16 +242,26 @@ describe('buildSetupSteps: review tags', () => {
     })
   })
 
-  it('is real, genuine "done" once a rule has actually tagged someone — automatically is true again', () => {
-    // `tagged` is 6 (one hand-applied on top of five rule-tagged) but only the
-    // rule-sourced count drives this step, so the detail is exactly the
-    // rule-tagged count, not the broader "any tag" one.
+  it('shows no badge once a rule has tagged someone — the count is a system fact, not that the person reviewed it', () => {
+    // A rule ran and tagged five contacts (`tagged: 6` includes one hand-applied
+    // on top). That is real progress by the rules, but not proof the person
+    // reviewed what the rules did — the same conflation build-a-list already
+    // avoids (#129 review round 3) — so this is `null`, not `done`, with the
+    // real, rule-only count in the detail line.
     const steps = buildSetupSteps({ stats: stats({ total: 10, tagged: 6, tagged_by_rule: 5 }) })
     const step = byKey(steps, 'review-tags')
-    expect(step.state).toBe('done')
+    expect(step.state).toBeNull()
     expect(step.detail).toBe('5 contacts tagged automatically')
     expect(step.cta).toBe('Review tags')
     expect(step.title).toBe('Review what was tagged automatically')
+  })
+
+  it('is the sharp case: a big auto-tagging import must not read "Done" before anyone opens the app', () => {
+    const steps = buildSetupSteps({ stats: stats({ total: 200, tagged_by_rule: 150 }) })
+    expect(byKey(steps, 'review-tags')).toMatchObject({
+      state: null,
+      detail: '150 contacts tagged automatically',
+    })
   })
 })
 
@@ -255,7 +286,20 @@ describe('buildSetupSteps: build a list', () => {
       stats: stats({ total: 10 }),
       lists: [seededValidatedList(), list(2)],
     })
-    expect(byKey(steps, 'build-list')).toMatchObject({ state: null, detail: '2 lists' })
+    expect(byKey(steps, 'build-list')).toMatchObject({
+      state: null,
+      detail: '2 lists',
+      cta: 'Open lists',
+    })
+  })
+
+  it('offers to build one, not "open lists", when the count is genuinely zero', () => {
+    const steps = buildSetupSteps({ stats: stats({ total: 10 }), lists: [] })
+    expect(byKey(steps, 'build-list')).toMatchObject({
+      state: null,
+      detail: '0 lists',
+      cta: 'Build a list',
+    })
   })
 
   it('shows no badge with contacts and only the seeded list — not a false "done"', () => {

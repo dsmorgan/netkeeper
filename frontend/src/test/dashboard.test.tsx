@@ -60,6 +60,15 @@ function seededValidatedList() {
   }
 }
 
+/** A promise a test resolves on its own schedule, to hold a query in `isPending`. */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
 /** Routes the three queries the dashboard makes; anything else answers 404. */
 function serveDashboard({
   stats,
@@ -193,13 +202,15 @@ describe('dashboard: an account with contacts', () => {
         href: '/imports',
         cta: 'Import contacts',
       },
-      // Real, both directions, since the stats lane split tagged_by_rule
-      // (TagSource.RULE only) out from tagged (any source) — #129 review,
-      // finding 2. 4, not 5: the hand-applied tag doesn't count.
+      // Real count, but no badge: tagged_by_rule > 0 (split from tagged, any
+      // source, by the stats lane — #129 review round 2) says the rules ran,
+      // not that the person reviewed what they did, and this step's own title
+      // asks them to — so it reads the same as export, not "Done" (round 3).
+      // 4, not 5: the hand-applied tag doesn't count either way.
       {
         title: '2. Review what was tagged automatically',
         detail: '4 contacts tagged automatically',
-        badge: 'Done',
+        badge: null,
         href: '/lists',
         cta: 'Review tags',
       },
@@ -254,6 +265,21 @@ describe('dashboard: an account with contacts', () => {
     })
   })
 
+  it('does not tell a big auto-tagging import "Done" before anyone has opened the app', async () => {
+    // The sharp case from setup-steps.ts's module doc: a 200-contact import
+    // that auto-tags 150 is a fact about the rules, not that the person has
+    // reviewed anything.
+    serveDashboard({ stats: statsBody({ total: 200, tagged_by_rule: 150 }) })
+    await renderApp('/')
+    const main = within(screen.getByRole('main'))
+    await main.findByText('150 contacts tagged automatically')
+
+    expect(renderedSteps()[1]).toMatchObject({
+      detail: '150 contacts tagged automatically',
+      badge: null,
+    })
+  })
+
   it('offers to resume an open draft instead of claiming the import step is done', async () => {
     serveDashboard({
       stats: statsBody({ total: 5 }),
@@ -281,6 +307,59 @@ describe('dashboard: an account with contacts', () => {
     // never connects, so the inline indicator that replaced the card reads the
     // same way here.
     expect(main.getByText('Live updates disconnected')).toBeInTheDocument()
+  })
+})
+
+describe('dashboard: while a query is still in flight', () => {
+  it('announces the checking state to assistive tech', async () => {
+    const statsGate = deferred<Response>()
+    mockFetch((request) => {
+      const url = new URL(request.url)
+      if (url.pathname === '/api/v1/health')
+        return jsonResponse({ status: 'ok', version: '0.0.1-test' })
+      if (url.pathname === '/api/v1/contacts/stats') return statsGate.promise
+      return new Response('not found', { status: 404 })
+    })
+    await renderApp('/')
+    const main = within(screen.getByRole('main'))
+
+    // role="status" (#129 review round 3) so a screen reader hears the page is
+    // working before it has anything else to say — the `role="alert"` sibling
+    // for the error case was already asserted; this had not been.
+    expect(main.getByRole('status')).toHaveTextContent('Checking your setup…')
+
+    statsGate.resolve(jsonResponse(statsBody()))
+    expect(await main.findByText('Start here')).toBeInTheDocument()
+  })
+
+  it('does not render "Done" for the import step while the drafts query is still answering', async () => {
+    // Verified against the real timing this guards: a 400ms-delayed drafts
+    // response reproduced the flash before `openImportsPending` existed
+    // (#129 review round 3). This uses a controlled promise instead of a
+    // real delay so the test is exact and instant rather than timing-based.
+    const draftsGate = deferred<Response>()
+    mockFetch((request) => {
+      const url = new URL(request.url)
+      if (url.pathname === '/api/v1/health')
+        return jsonResponse({ status: 'ok', version: '0.0.1-test' })
+      if (url.pathname === '/api/v1/contacts/stats') return jsonResponse(statsBody({ total: 5 }))
+      if (url.pathname === '/api/v1/imports' && url.searchParams.get('status') === 'draft') {
+        return draftsGate.promise
+      }
+      if (url.pathname === '/api/v1/lists') return jsonResponse([seededValidatedList()])
+      return new Response('not found', { status: 404 })
+    })
+    await renderApp('/')
+    const main = within(screen.getByRole('main'))
+
+    await main.findByText('5 contacts imported; checking for open imports…')
+    const [importRowBefore] = renderedSteps()
+    expect(importRowBefore?.badge).toBeNull()
+
+    draftsGate.resolve(jsonResponse({ items: [], total: 0 }))
+    await main.findByText('5 contacts imported')
+    const [importRowAfter] = renderedSteps()
+    expect(importRowAfter?.badge).toBe('Done')
   })
 })
 

@@ -54,6 +54,7 @@ export function DashboardPage() {
   const steps = buildSetupSteps({
     stats: stats.data,
     openImports: openImports.data,
+    openImportsPending: openImports.isPending,
     openImportsUnavailable: openImports.isError,
     lists: lists.data,
     listsUnavailable: lists.isError,
