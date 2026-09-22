@@ -512,6 +512,23 @@ def test_an_encrypted_member_is_refused_with_a_clean_message(tmp_path: Path) -> 
 # --- the shipped guard values, not a monkeypatched stand-in (review finding 4) --
 
 
+def test_the_guard_values_themselves_are_the_ones_that_were_reasoned_about() -> None:
+    """The numbers, pinned — not the boundary logic, which the tests below cover.
+
+    Every other guard test sizes its fixture from the live constant, so it
+    stays true however the constant moves: raising ``MAX_MEMBERS`` to a million
+    keeps them all green while the guard stops guarding anything. These are the
+    values each constant's own comment argues for, against a real export of
+    about 1.4 MB across thirty-odd members. Changing one is a decision, so it
+    changes this line too, and the comment beside the constant with it.
+    """
+    assert linkedin_archive.MAX_MEMBER_BYTES == 512 * 1024 * 1024
+    assert linkedin_archive.MAX_TOTAL_UNCOMPRESSED_BYTES == 64 * 1024 * 1024
+    assert linkedin_archive.MAX_MEMBERS == 5000
+    assert linkedin_archive.MAX_COMPRESSION_RATIO == 100
+    assert linkedin_archive.COMPRESSION_RATIO_FLOOR_BYTES == 8 * 1024 * 1024
+
+
 def test_the_member_size_cap_is_enforced_at_its_shipped_value() -> None:
     info = zipfile.ZipInfo(filename="messages.csv")
     info.file_size = linkedin_archive.MAX_MEMBER_BYTES + 1

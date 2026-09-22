@@ -255,6 +255,13 @@ async def test_a_damaged_download_is_refused_with_a_422_not_a_500(
     assert body["code"] == ArchiveRefusalCode.DAMAGED.value
 
 
+def test_the_upload_cap_is_the_value_that_was_reasoned_about() -> None:
+    """The number, pinned. The test below sizes its upload from the constant, so
+    it stays green if the cap is raised to something that bounds nothing; this
+    is the line that has to change when the cap does."""
+    assert imports_api.ARCHIVE_MAX_UPLOAD_BYTES == 200 * 1024 * 1024
+
+
 async def test_the_upload_size_guard_is_enforced_at_its_shipped_value(
     session_factory: sessionmaker[Session],
 ) -> None:
