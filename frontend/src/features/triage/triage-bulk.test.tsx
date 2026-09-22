@@ -90,3 +90,101 @@ describe('the bulk suggestion', () => {
     await waitFor(async () => expect(await currentName()).toContain('Dev'))
   })
 })
+
+describe('what netkeeper decided (P1-28)', () => {
+  /** Accepts the offered batch, which is what leaves decisions to review. */
+  async function acceptTheBatch() {
+    fireEvent.click(await screen.findByRole('button', { name: /^Mark \d+ as met$/ }))
+    await screen.findByRole('status')
+  }
+
+  it('says how many are waiting, and opens the queue that walks them', async () => {
+    const { backend } = renderTriage({ contacts: 6, withMessages: 3 })
+    await currentName()
+    await acceptTheBatch()
+
+    const prompt = await screen.findByTestId('automatic-pass')
+    expect(prompt).toHaveTextContent('netkeeper decided 3 contacts from a batch you accepted')
+
+    // An answer of the person's own, in a state the review queue also serves:
+    // it must stay out of it, which is the whole point of `decided_by`.
+    fireEvent.keyDown(window, { key: 'n' })
+    await waitFor(() => expect(backend.byId(4).met).toBe('not_met'))
+    expect(backend.byId(4).met_source).toBe('manual')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review them' }))
+
+    // The queue now serves the contacts the batch decided, not the untriaged
+    // and not the one answered by hand.
+    await waitFor(async () => expect(await currentName()).toContain('Ada'))
+    expect(backend.byId(1).met).toBe('met')
+    const ahead = screen.getByTestId('triage-queue-list')
+    expect(ahead).not.toHaveTextContent('Dev Testerly-4')
+    expect(screen.getByRole('button', { name: 'Reviewing' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    expect(screen.getByTestId('automatic-pass')).toHaveTextContent(
+      'are the 3 contacts netkeeper decided for you, waiting to be checked',
+    )
+  })
+
+  it('offers no batch while reviewing, because a batch never reaches an answer', async () => {
+    // The service refuses `met`/`not_met` outright (422), so asking at all
+    // would be a request this screen knows better than to send.
+    const { backend } = renderTriage({ contacts: 6, withMessages: 3 })
+    await currentName()
+    await acceptTheBatch()
+    fireEvent.click(await screen.findByRole('button', { name: 'Review them' }))
+    await waitFor(async () => expect(await currentName()).toContain('Ada'))
+
+    expect(screen.queryByTestId('bulk-suggestion')).not.toBeInTheDocument()
+    const asked = backend.seen.filter(
+      (request) =>
+        request.path === '/api/v1/triage/suggestions' &&
+        request.search.getAll('states').includes('met'),
+    )
+    expect(asked).toEqual([])
+  })
+
+  it('takes a contact out of the review queue when you answer it yourself', async () => {
+    const { backend } = renderTriage({ contacts: 6, withMessages: 3 })
+    await currentName()
+    await acceptTheBatch()
+    fireEvent.click(await screen.findByRole('button', { name: 'Review them' }))
+    await waitFor(async () => expect(await currentName()).toContain('Ada'))
+
+    // `m` on the card in front: the same answer, now the person's own.
+    fireEvent.keyDown(window, { key: 'm' })
+    await waitFor(() => expect(backend.byId(1).met_source).toBe('manual'))
+    expect(backend.byId(1).met).toBe('met')
+    await waitFor(() =>
+      expect(screen.getByTestId('automatic-pass')).toHaveTextContent(
+        'are the 2 contacts netkeeper decided for you',
+      ),
+    )
+    // And the queue moved on to the next one still waiting to be checked.
+    expect(await currentName()).toContain('Bo')
+  })
+
+  it('says nothing at all until a batch has been accepted', async () => {
+    renderTriage({ contacts: 6, withMessages: 3 })
+    await currentName()
+    await screen.findByTestId('bulk-suggestion')
+
+    expect(screen.queryByTestId('automatic-pass')).not.toBeInTheDocument()
+  })
+
+  it('names the contacts a batch covers before it is applied', async () => {
+    renderTriage({ contacts: 6, withMessages: 3 })
+    await currentName()
+    await screen.findByTestId('bulk-suggestion')
+
+    fireEvent.click(screen.getByRole('button', { name: 'See who' }))
+
+    const names = await screen.findByTestId('suggestion-contacts')
+    expect(names).toHaveTextContent('Ada Example-1')
+    expect(names).toHaveTextContent('Cleo Placeholder-3')
+    expect(names).not.toHaveTextContent('Dev Testerly-4')
+  })
+})

@@ -98,7 +98,7 @@ describe('every predicate is reachable from the builder', () => {
     expect(LANGUAGE_OPS.length).toBeGreaterThan(0)
   })
 
-  it('makes the twenty-four usable predicates clickable', () => {
+  it('makes the twenty-five usable predicates clickable', () => {
     mockApi(countRoute())
     const { container } = renderWithClient(<Harness initial={emptyTree()} />)
     openPalette()
@@ -109,22 +109,24 @@ describe('every predicate is reachable from the builder', () => {
       expect(element?.tagName, spec.op).toBe('BUTTON')
       expect(element?.getAttribute('aria-disabled')).toBeNull()
     }
-    expect(usable).toHaveLength(LANGUAGE_OPS.length - 3)
+    expect(usable).toHaveLength(LANGUAGE_OPS.length - 2)
   })
 
-  it('shows the three the server refuses as unavailable, with the reason', () => {
+  it('shows the two the server refuses as unavailable, with the reason', () => {
+    // `list_member` was the third until P1-27 taught the compiler to inline a
+    // list; it is an ordinary clickable predicate now, with a picker of its own.
     mockApi(countRoute())
     const { container } = renderWithClient(<Harness initial={emptyTree()} />)
     openPalette()
 
-    for (const op of ['list_member', 'enrolled_in', 'replied_in']) {
+    for (const op of ['enrolled_in', 'replied_in']) {
       const element = container.querySelector(`[data-op="${op}"]`)
       expect(element, op).not.toBeNull()
       expect(element?.getAttribute('data-unavailable')).toBe('true')
       expect(element?.getAttribute('aria-disabled')).toBe('true')
       expect(element?.tagName).not.toBe('BUTTON')
     }
-    expect(screen.getByText(/issue #73/)).toBeInTheDocument()
+    expect(container.querySelector('[data-op="list_member"]')?.tagName).toBe('BUTTON')
     expect(screen.getAllByText(/P3-04/).length).toBe(2)
   })
 })
@@ -229,12 +231,74 @@ describe('an existing filter', () => {
   it('explains a placeholder it was given rather than dropping it', () => {
     mockApi(countRoute())
     renderWithClient(
+      <Harness
+        initial={{ include_archived: false, where: { op: 'enrolled_in', campaign_id: 4 } }}
+      />,
+    )
+    expect(screen.getByText(/campaign #4/)).toBeInTheDocument()
+    // Once beside the node and once in the "not ready to run" summary.
+    expect(screen.getAllByText(/P3-04/)).toHaveLength(2)
+    expect(screen.getByRole('status')).toHaveTextContent(/finish the conditions/i)
+  })
+})
+
+describe('choosing which list', () => {
+  const LISTS = [
+    { id: 1, name: 'Warm intros', kind: 'static', member_count: 12 },
+    { id: 2, name: 'Validated', kind: 'smart', member_count: 40 },
+  ]
+
+  function listsRoute() {
+    return { 'GET /api/v1/lists': () => jsonResponse(LISTS) }
+  }
+
+  it('starts on nobody and writes the list the picker chooses', async () => {
+    // `list_id: 0` is what the palette creates and no list has that id, so a
+    // row left alone selects nobody rather than quietly selecting the first
+    // list somebody happens to have.
+    mockApi({ ...countRoute(), ...listsRoute() })
+    renderWithClient(<Harness initial={emptyTree()} />)
+    openPalette()
+    pick('list_member')
+    expect(tree().where).toEqual({ op: 'list_member', list_id: 0 })
+
+    const picker = await screen.findByRole('combobox', { name: 'List' })
+    expect(picker).toHaveValue('0')
+    // The options arrive with the lists, a request later than the picker.
+    await screen.findByRole('option', { name: /Validated/ })
+    fireEvent.change(picker, { target: { value: '2' } })
+
+    expect(tree().where).toEqual({ op: 'list_member', list_id: 2 })
+  })
+
+  it('keeps a list that is no longer there, and says so', async () => {
+    // Dropping the id would quietly change what a saved filter means; the
+    // filter matches nobody either way, and this way the person can see why.
+    mockApi({ ...countRoute(), ...listsRoute() })
+    renderWithClient(
       <Harness initial={{ include_archived: false, where: { op: 'list_member', list_id: 4 } }} />,
     )
-    expect(screen.getByText(/list #4/)).toBeInTheDocument()
-    // Once beside the node and once in the "not ready to run" summary.
-    expect(screen.getAllByText(/issue #73/)).toHaveLength(2)
-    expect(screen.getByRole('status')).toHaveTextContent(/finish the conditions/i)
+
+    const picker = await screen.findByRole('combobox', { name: 'List' })
+    expect(picker).toHaveValue('4')
+    expect(within(picker).getByRole('option', { name: /no longer there/ })).toBeInTheDocument()
+    expect(screen.getByText(/no longer there\. It matches nobody/)).toBeInTheDocument()
+    expect(tree().where).toEqual({ op: 'list_member', list_id: 4 })
+  })
+
+  it('says the lists could not be read rather than showing an empty picker', async () => {
+    mockApi({
+      ...countRoute(),
+      'GET /api/v1/lists': () => jsonResponse({ detail: 'the database is locked' }, 500),
+    })
+    renderWithClient(
+      <Harness initial={{ include_archived: false, where: { op: 'list_member', list_id: 4 } }} />,
+    )
+
+    expect(
+      await screen.findByText(/could not be read, so this row still names list #4/),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'List' })).not.toBeInTheDocument()
   })
 })
 

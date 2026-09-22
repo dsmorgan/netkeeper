@@ -248,9 +248,7 @@ export const PREDICATES: readonly PredicateSpec[] = [
     op: 'list_member',
     label: 'is in the list',
     group: 'logic',
-    hint: 'Members of a static or smart list.',
-    unavailable:
-      'The server compiles this one now — issue #73 landed with P1-27, so a saved filter that uses it works. What is missing is here: the builder has no list picker yet, so there is no way to choose which list from this screen.',
+    hint: 'Members of a static or smart list. A smart list is inlined, so its own filter is asked at the same time as this one.',
     create: () => ({ op: 'list_member', list_id: 0 }),
     example: { op: 'list_member', list_id: 1 },
   },

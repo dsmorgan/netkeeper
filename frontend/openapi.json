@@ -2617,6 +2617,7 @@
               "location",
               "li_public_id",
               "met",
+              "met_source",
               "source",
               "degree",
               "connected_on",
@@ -3113,6 +3114,18 @@
               "skip"
             ]
           },
+          "met_source": {
+            "kind": "enum",
+            "label": "decided by",
+            "ops": [
+              "eq",
+              "neq"
+            ],
+            "values": [
+              "manual",
+              "automatic"
+            ]
+          },
           "preferred_name": {
             "kind": "string",
             "label": "preferred name",
@@ -3385,6 +3398,18 @@
               "met",
               "not_met",
               "skip"
+            ]
+          },
+          "met_source": {
+            "kind": "enum",
+            "label": "decided by",
+            "ops": [
+              "eq",
+              "neq"
+            ],
+            "values": [
+              "manual",
+              "automatic"
             ]
           },
           "preferred_name": {
@@ -5116,6 +5141,7 @@
               "location",
               "li_public_id",
               "met",
+              "met_source",
               "source",
               "degree",
               "connected_on",
@@ -5732,6 +5758,7 @@
               "location",
               "li_public_id",
               "met",
+              "met_source",
               "source",
               "degree",
               "connected_on",

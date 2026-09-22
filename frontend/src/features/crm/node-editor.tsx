@@ -7,6 +7,7 @@
  * always a predicate the language allows rather than one the server would
  * refuse.
  */
+import { useQuery } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { ChevronRight, X } from 'lucide-react'
 
@@ -15,6 +16,7 @@ import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 
+import { listsQuery } from './api'
 import { Callout } from './controls'
 import { FIELDS, OPS_BY_KIND, fieldSpec } from './fields'
 import type { FieldKind } from './fields'
@@ -201,6 +203,58 @@ function ScalarEditor({ kind, values, value, label, onChange }: ScalarEditorProp
         />
       )
   }
+}
+
+// --- list picker -------------------------------------------------------------
+
+/**
+ * Which list `list_member` names.
+ *
+ * `list_id: 0` is what the palette creates, and no list has that id, so a row
+ * left alone selects nobody rather than silently selecting the first list —
+ * the count under the builder says zero and the reason is on screen. A list
+ * the picker does not know (deleted since the filter was saved, most often)
+ * keeps its id and says so, because dropping it would quietly change what a
+ * saved filter means.
+ */
+function ListPicker({ listId, onChange }: { listId: number; onChange: (listId: number) => void }) {
+  const lists = useQuery(listsQuery)
+  const known = lists.data ?? []
+  const missing = listId !== 0 && !known.some((list) => list.id === listId)
+
+  if (lists.isError) {
+    return (
+      <span className="text-sm text-muted-foreground">
+        The lists could not be read, so this row still names list #{listId}.
+      </span>
+    )
+  }
+  if (!lists.isPending && known.length === 0) {
+    return <span className="text-sm text-muted-foreground">No lists yet — make one first.</span>
+  }
+  return (
+    <>
+      <Select
+        aria-label="List"
+        value={String(listId)}
+        onChange={(event) => onChange(Number(event.target.value))}
+      >
+        <option value="0">Choose a list…</option>
+        {missing && <option value={String(listId)}>list #{listId} (no longer there)</option>}
+        {known.map((list) => (
+          <option key={list.id} value={String(list.id)}>
+            {list.name} ({list.kind})
+          </option>
+        ))}
+      </Select>
+      {missing && (
+        <span className="text-sm text-muted-foreground">
+          This filter names a list that is no longer there. It matches nobody until you choose
+          another.
+        </span>
+      )}
+    </>
+  )
 }
 
 // --- tag chips ---------------------------------------------------------------
@@ -596,10 +650,9 @@ function LeafControls({ node, path, tags, onChange }: LeafProps) {
       )
     case 'list_member':
       return (
-        <UnavailableLeaf
-          label={spec.label}
-          reason={spec.unavailable ?? ''}
-          detail={`list #${node.list_id}`}
+        <ListPicker
+          listId={node.list_id}
+          onChange={(listId) => onChange(path, { ...node, list_id: listId })}
         />
       )
     case 'enrolled_in':

@@ -158,6 +158,7 @@ from netkeeper.models import (
     ContactTag,
     EmailStatus,
     ListKind,
+    MetSource,
     Tag,
     User,
     tag_name_key,
@@ -195,6 +196,7 @@ AnyField = Literal[
     "location",
     "li_public_id",
     "met",
+    "met_source",
     "source",
     "degree",
     "connected_on",
@@ -240,8 +242,13 @@ EmptyableField = Literal[
 FieldKind = Literal["string", "enum", "int", "date", "datetime", "bool"]
 
 _STRING_FIELDS: Final[tuple[str, ...]] = get_args(StringField)
-_ENUM_FIELDS: Final[dict[str, type[ContactMet] | type[ContactSource]]] = {
+_ENUM_FIELDS: Final[dict[str, type[ContactMet] | type[ContactSource] | type[MetSource]]] = {
     "met": ContactMet,
+    # Who decided ``met``: the person, or a batch they accepted (spec 10.2).
+    # Filterable because the review pass is a question about the whole address
+    # book, not only about the triage queue: "what did netkeeper decide for me"
+    # has an answer in the contacts table too.
+    "met_source": MetSource,
     "source": ContactSource,
 }
 _INT_FIELDS: Final[tuple[str, ...]] = ("degree",)
@@ -276,6 +283,7 @@ _LABELS: Final[dict[str, str]] = {
     "location": "location",
     "li_public_id": "LinkedIn id",
     "met": "met",
+    "met_source": "decided by",
     "source": "source",
     "degree": "degree",
     "connected_on": "connected on",
@@ -1364,6 +1372,12 @@ def _describe_eq(field: str, value: str | int | bool, *, negated: bool) -> str:
     if field == "do_not_contact":
         wanted = bool(value) != negated
         return "do not contact" if wanted else "ok to contact"
+    if field == "met_source" and isinstance(value, str):
+        # "decided by netkeeper" and "decided by you", because the column's own
+        # words ("automatic", "manual") name the mechanism rather than the
+        # person, and this line is read by somebody choosing what to look at.
+        phrase = "decided by netkeeper" if value == "automatic" else "decided by you"
+        return f"not {phrase}" if negated else phrase
     if field == "source":
         return f"not from {value}" if negated else f"from {value}"
     shown = f'"{value}"' if isinstance(value, str) else str(value)

@@ -2350,7 +2350,7 @@ export interface components {
              * Field
              * @enum {string}
              */
-            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at" | "do_not_contact";
+            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "met_source" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at" | "do_not_contact";
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -3041,7 +3041,7 @@ export interface components {
              * Field
              * @enum {string}
              */
-            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at" | "do_not_contact";
+            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "met_source" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at" | "do_not_contact";
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -3295,7 +3295,7 @@ export interface components {
              * Field
              * @enum {string}
              */
-            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at" | "do_not_contact";
+            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "met_source" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at" | "do_not_contact";
         };
         /** StartsWith */
         StartsWith: {

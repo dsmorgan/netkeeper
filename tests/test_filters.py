@@ -59,6 +59,7 @@ from netkeeper.models import (
     EmailStatus,
     ListKind,
     ListMember,
+    MetSource,
     Tag,
     TagSource,
     User,
@@ -377,6 +378,27 @@ def test_eq_on_enum_int_and_bool_fields(session: Session, user: User) -> None:
     assert matching(session, user, {"op": "eq", "field": "source", "value": "manual"}) == [
         met.id,
         not_met.id,
+    ]
+
+
+def test_eq_on_who_decided_met(session: Session, user: User) -> None:
+    """The review pass, asked of the whole address book rather than of the queue.
+
+    ``met_source`` is the column a triage batch writes ``automatic`` into
+    (spec 10.2), so "what did netkeeper decide for me" is a filter, not only a
+    triage mode. The default is ``manual``, which is what a contact nobody has
+    answered for carries too — the question is only meaningful together with
+    ``met``.
+    """
+    theirs = factories.make_contact(
+        session, user, met=ContactMet.NOT_MET, met_source=MetSource.AUTOMATIC
+    )
+    mine = factories.make_contact(session, user, met=ContactMet.MET, met_source=MetSource.MANUAL)
+    assert matching(session, user, {"op": "eq", "field": "met_source", "value": "automatic"}) == [
+        theirs.id
+    ]
+    assert matching(session, user, {"op": "neq", "field": "met_source", "value": "automatic"}) == [
+        mine.id
     ]
 
 
@@ -1478,6 +1500,11 @@ def test_describe_of_the_remaining_phrasings() -> None:
     assert one({"op": "eq", "field": "do_not_contact", "value": True}) == "do not contact"
     assert one({"op": "neq", "field": "do_not_contact", "value": False}) == "do not contact"
     assert one({"op": "eq", "field": "source", "value": "sync"}) == "from sync"
+    assert one({"op": "eq", "field": "met_source", "value": "automatic"}) == "decided by netkeeper"
+    assert one({"op": "eq", "field": "met_source", "value": "manual"}) == "decided by you"
+    assert one({"op": "neq", "field": "met_source", "value": "automatic"}) == (
+        "not decided by netkeeper"
+    )
     assert one({"op": "neq", "field": "degree", "value": 1}) == "degree is not 1"
     assert one({"op": "gt", "field": "degree", "value": 1}) == "degree more than 1"
     assert one({"op": "lt", "field": "degree", "value": 3}) == "degree less than 3"

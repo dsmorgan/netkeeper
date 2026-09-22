@@ -43,6 +43,12 @@ export const FIELDS: readonly FieldSpec[] = [
   { name: 'location', kind: 'string', label: 'location' },
   { name: 'li_public_id', kind: 'string', label: 'LinkedIn id' },
   { name: 'met', kind: 'enum', label: 'met', values: ['unknown', 'met', 'not_met', 'skip'] },
+  {
+    name: 'met_source',
+    kind: 'enum',
+    label: 'decided by',
+    values: ['manual', 'automatic'],
+  },
   { name: 'source', kind: 'enum', label: 'source', values: ['sync', 'archive', 'csv', 'manual'] },
   { name: 'degree', kind: 'int', label: 'degree' },
   { name: 'connected_on', kind: 'date', label: 'connected on' },

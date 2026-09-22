@@ -23,8 +23,10 @@ import { Button } from '@/components/ui/button'
 
 import {
   SUGGESTIONS_KEY,
+  fetchSuggestionContacts,
   fetchSuggestions,
   statesFor,
+  type ContactMet,
   type QueueFilter,
   type TriageSuggestion,
 } from './api'
@@ -40,6 +42,8 @@ export function SuggestionBanner({
   const [notice, setNotice] = useState<string | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  /** Which batch has its names open, by key. One at a time: they are long. */
+  const [showing, setShowing] = useState<string | null>(null)
 
   // A suggestion is an offer, not the screen's job: a preview that fails simply
   // means no banner, so the error branch is left to fall through to `[]`.
@@ -57,7 +61,7 @@ export function SuggestionBanner({
     const outcome = await onApply(suggestion.key, suggestion.count)
     if (outcome.kind === 'applied') {
       setNotice(
-        `Marked ${outcome.applied} ${outcome.applied === 1 ? 'contact' : 'contacts'} as met, as one batch. Press u to take the whole batch back.`,
+        `Marked ${outcome.applied} ${outcome.applied === 1 ? 'contact' : 'contacts'} as ${verb(suggestion.met)}, as one batch. Press u to take the whole batch back.`,
       )
     } else if (outcome.kind === 'count-changed') {
       setNotice(
@@ -78,17 +82,32 @@ export function SuggestionBanner({
         <div
           key={suggestion.key}
           data-testid="bulk-suggestion"
-          className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-muted/60 px-3 py-2 ring-1 ring-foreground/10"
+          className="flex flex-col gap-2 rounded-lg bg-muted/60 px-3 py-2 ring-1 ring-foreground/10"
         >
-          <div className="min-w-0">
-            <p className="font-medium">{suggestion.description}</p>
-            <p className="text-sm text-muted-foreground">
-              {suggestion.title} · applies to {suggestion.count}, as one batch you can undo.
-            </p>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="font-medium">{suggestion.description}</p>
+              <p className="text-sm text-muted-foreground">
+                {suggestion.title} · applies to {suggestion.count}, as one batch you can undo.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="ghost"
+                aria-expanded={showing === suggestion.key}
+                onClick={() => setShowing(showing === suggestion.key ? null : suggestion.key)}
+              >
+                {showing === suggestion.key ? 'Hide who' : 'See who'}
+              </Button>
+              <Button size="sm" disabled={busy} onClick={() => void apply(suggestion)}>
+                {busy ? 'Applying…' : `Mark ${suggestion.count} as ${verb(suggestion.met)}`}
+              </Button>
+            </div>
           </div>
-          <Button size="sm" disabled={busy} onClick={() => void apply(suggestion)}>
-            {busy ? 'Applying…' : `Mark ${suggestion.count} as met`}
-          </Button>
+          {showing === suggestion.key && (
+            <WhoThisCovers suggestion={suggestion} states={statesFor(filter)} />
+          )}
         </div>
       ))}
       {notice !== null && (
@@ -101,6 +120,52 @@ export function SuggestionBanner({
           {problem}
         </p>
       )}
+    </div>
+  )
+}
+
+/** What a batch decides, in the words the button and the notice both use. */
+function verb(met: ContactMet): string {
+  return met === 'met' ? 'met' : 'not met'
+}
+
+/**
+ * The names behind one batch, read before it is taken.
+ *
+ * A batch that argues from absence ("nothing on file for 257 people") is the
+ * one worth reading first, and "which 257?" has no answer anywhere else on
+ * this screen. Ten names and a count is enough to recognize whether the batch
+ * is what you think it is; the queue itself is where the rest are.
+ */
+function WhoThisCovers({
+  suggestion,
+  states,
+}: {
+  suggestion: TriageSuggestion
+  states: ContactMet[]
+}) {
+  const page = useQuery({
+    queryKey: [...SUGGESTIONS_KEY, suggestion.key, 'contacts', states],
+    queryFn: ({ signal }) =>
+      fetchSuggestionContacts({ key: suggestion.key, states, limit: 10, signal }),
+    retry: false,
+  })
+
+  if (page.isPending) return <p className="text-sm text-muted-foreground">Reading the names…</p>
+  if (page.isError) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        The names could not be read, so this shows the count alone.
+      </p>
+    )
+  }
+  const rest = page.data.total - page.data.contacts.length
+  return (
+    <div data-testid="suggestion-contacts" className="text-sm text-muted-foreground">
+      <p>
+        {page.data.contacts.map((contact) => contact.name).join(', ')}
+        {rest > 0 && `, and ${rest} more`}.
+      </p>
     </div>
   )
 }

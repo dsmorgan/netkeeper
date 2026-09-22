@@ -70,7 +70,65 @@ const FILTERS: ReadonlyArray<{ value: QueueFilter; label: string }> = [
   { value: 'unknown', label: 'Untriaged' },
   { value: 'skip', label: 'Skipped' },
   { value: 'both', label: 'Both' },
+  // The review pass (P1-22): the contacts a batch decided and nobody has
+  // looked at since. Answering one by hand is what takes it out of here.
+  { value: 'automatic', label: 'Reviewing' },
 ]
+
+/**
+ * What netkeeper decided, and the way into checking it.
+ *
+ * The first thing after an import should be the work already done rather than
+ * the first stranger (P1-22), so this says how much there is and offers the
+ * queue that walks it. It draws nothing when no batch has been accepted, which
+ * is every session until one is.
+ */
+function AutomaticPass({
+  waiting,
+  reviewing,
+  onReview,
+}: {
+  waiting: number
+  reviewing: boolean
+  onReview: () => void
+}) {
+  if (reviewing) {
+    return (
+      <p
+        data-testid="automatic-pass"
+        className="rounded-lg bg-muted/60 px-3 py-2 text-sm ring-1 ring-foreground/10"
+      >
+        {waiting === 0 ? (
+          <>
+            Nothing left to review — every decision netkeeper made has been checked. The other
+            queues are where the untriaged are.
+          </>
+        ) : (
+          <>
+            These {waiting === 1 ? 'is the one contact' : `are the ${waiting} contacts`} netkeeper
+            decided for you, waiting to be checked. Answering one yourself takes it out of this
+            queue; <kbd>u</kbd> puts it back.
+          </>
+        )}
+      </p>
+    )
+  }
+  if (waiting === 0) return null
+  return (
+    <div
+      data-testid="automatic-pass"
+      className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-muted/60 px-3 py-2 ring-1 ring-foreground/10"
+    >
+      <p className="min-w-0 text-sm">
+        netkeeper decided {waiting} {waiting === 1 ? 'contact' : 'contacts'} from a batch you
+        accepted. None of them has been checked yet.
+      </p>
+      <Button size="sm" variant="secondary" onClick={onReview}>
+        Review {waiting === 1 ? 'it' : 'them'}
+      </Button>
+    </div>
+  )
+}
 
 export function TriagePage() {
   const [filter, setFilter] = useState<QueueFilter>('unknown')
@@ -160,6 +218,10 @@ export function TriagePage() {
   const total = progress?.total ?? 0
   const remaining = Math.max((progress?.remaining ?? 0) - queue.pending.removed, 0)
   const skipped = progress?.by_state.skip ?? 0
+  // How many decisions a batch made that nobody has looked at since. The
+  // number the review pass exists for, and the one that says whether to
+  // mention it at all.
+  const automatic = progress?.automatic ?? 0
   const nextUndo = queue.undoable[0]
   const filterLabel = FILTERS.find((option) => option.value === filter)?.label ?? 'Untriaged'
   // Where this card sits, in the two terms a person asked for: which contact of
@@ -210,6 +272,12 @@ export function TriagePage() {
         </p>
       </div>
 
+      <AutomaticPass
+        waiting={automatic}
+        reviewing={filter === 'automatic'}
+        onReview={() => setFilter('automatic')}
+      />
+
       <ActionBar onAction={onAction} />
 
       <p
@@ -220,10 +288,14 @@ export function TriagePage() {
         {queue.notice}
       </p>
 
-      <SuggestionBanner
-        filter={filter}
-        onApply={(key, expectedCount) => queue.applyBulk(key, expectedCount)}
-      />
+      {/* A batch only ever reaches contacts nobody has answered for, so the
+          review pass has none to offer: asking for them there is a 422. */}
+      {filter !== 'automatic' && (
+        <SuggestionBanner
+          filter={filter}
+          onApply={(key, expectedCount) => queue.applyBulk(key, expectedCount)}
+        />
+      )}
 
       {queue.undoConflict !== null && (
         <UndoConflict

@@ -147,6 +147,20 @@ function NewListForm() {
   )
 }
 
+/**
+ * The filter an export runs for one list.
+ *
+ * A smart list *is* its filter. A static list is its members, which the
+ * language names with `list_member` — the predicate the compiler refused until
+ * P1-27 (#73), which is why exporting a static list used to mean exporting
+ * everybody and the button was withheld rather than offered wrong. The server
+ * reads the membership rows, so this stays right as the list changes.
+ */
+function exportFilter(list: ListOut): FilterTree {
+  if (list.kind === 'smart') return list.filter ?? emptyTree()
+  return { where: { op: 'list_member', list_id: list.id }, include_archived: false }
+}
+
 function ListDetail({ list, onDeleted }: { list: ListOut; onDeleted: () => void }) {
   const client = useQueryClient()
   const tags = useQuery(tagsQuery)
@@ -177,13 +191,11 @@ function ListDetail({ list, onDeleted }: { list: ListOut; onDeleted: () => void 
         </CardHeader>
         <CardContent className="space-y-2">
           <div className="flex flex-wrap items-center gap-2">
-            {list.kind === 'smart' && (
-              <ExportDialog
-                filter={list.filter ?? emptyTree()}
-                listName={list.name}
-                listCount={list.member_count}
-              />
-            )}
+            <ExportDialog
+              filter={exportFilter(list)}
+              listName={list.name}
+              listCount={list.member_count}
+            />
             <Button
               variant="destructive"
               onClick={() => remove.mutate()}
@@ -192,17 +204,6 @@ function ListDetail({ list, onDeleted }: { list: ListOut; onDeleted: () => void 
               Delete list
             </Button>
           </div>
-          {list.kind === 'static' && (
-            <Callout tone="info" title="No export button here yet">
-              <p>
-                An export takes a filter, and the predicate that selects a static list’s members —
-                <code className="px-1 font-mono text-xs">list_member</code> — is the one the filter
-                compiler still refuses (issue #73). Offering an Export button here would export
-                every contact instead of these ones, so there is none. Export from the contacts
-                table, or keep the group as a smart list.
-              </p>
-            </Callout>
-          )}
         </CardContent>
       </Card>
 
