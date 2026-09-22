@@ -81,7 +81,7 @@ from netkeeper.crm.importer import (
     resolve_mapping,
 )
 from netkeeper.crm.provenance import PROVENANCE_ORDER, may_overwrite
-from netkeeper.crm.tags import run_rules
+from netkeeper.crm.tags import ensure_default_rules, run_rules
 from netkeeper.db import is_writer
 from netkeeper.models import (
     Contact,
@@ -855,7 +855,10 @@ def commit(
     run.committed_at = utcnow()
     # The rules, over the contacts this commit wrote and no others, in the same
     # transaction (spec 10.3, #64). A file that lands leaves its contacts tagged;
-    # one that raises takes the tags with it.
+    # one that raises takes the tags with it. The defaults are seeded first, so a
+    # CSV imported from the CLI before the server has ever run still tags; the
+    # call is idempotent and a default the user deleted stays deleted.
+    ensure_default_rules(session, user)
     tagging = run_rules(session, user, _written_contacts(outcomes))
     run.tagged_contacts = tagging.contacts
     run.tags_added = tagging.added

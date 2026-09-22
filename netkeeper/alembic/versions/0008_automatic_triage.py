@@ -92,6 +92,10 @@ def downgrade() -> None:
         batch.drop_constraint("tag_met_signal", type_="check")
         batch.drop_column("met_signal")
 
+    # Dropping the column launders every automatic decision at once: the
+    # contacts keep whatever ``met`` a batch gave them and lose all trace that
+    # a batch, rather than the person, decided it. The review queue is a query
+    # over this column, so downgrading empties it by erasing it.
     op.drop_index("ix_contacts_user_id_met_source", table_name="contacts")
     with op.batch_alter_table("contacts") as batch:
         batch.drop_constraint("contact_met_source", type_="check")

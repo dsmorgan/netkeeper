@@ -28,6 +28,7 @@ from netkeeper.models import (
     ContactSnapshot,
     ContactSource,
     InteractionKind,
+    MetSource,
     User,
     UserKind,
 )
@@ -531,8 +532,49 @@ async def test_a_stale_count_stops_the_apply(
 async def test_an_unknown_suggestion_key_is_not_found(
     running_app: FastAPI, client: httpx.AsyncClient, contact_id: int
 ) -> None:
-    response = await client.post(f"{TRIAGE}/suggestions/no-such-key/apply", json={}, headers=CSRF)
+    response = await client.post(
+        f"{TRIAGE}/suggestions/no-such-key/apply", json={"expected_count": 0}, headers=CSRF
+    )
     assert response.status_code == 404, response.text
+
+
+async def test_applying_without_the_count_the_banner_showed_is_refused(
+    running_app: FastAPI, client: httpx.AsyncClient, contact_id: int
+) -> None:
+    """The guard is not opt-in: there is no form of the request that skips it."""
+    response = await client.post(
+        f"{TRIAGE}/suggestions/met_with_messages/apply", json={}, headers=CSRF
+    )
+    assert response.status_code == 422, response.text
+    assert _contact_row(running_app, LOCAL_USER_ID, contact_id).met is ContactMet.UNKNOWN
+
+
+async def test_a_batch_refuses_to_reach_a_decision_somebody_made(
+    running_app: FastAPI, client: httpx.AsyncClient, run_contacts: list[int]
+) -> None:
+    """`states` cannot point a batch at an answer the person gave (`met_source` laundering)."""
+    assert (await _decide(client, run_contacts[1], "not_met")).status_code == 201
+    decided = _contact_row(running_app, LOCAL_USER_ID, run_contacts[1])
+    assert (decided.met, decided.met_source) == (ContactMet.NOT_MET, MetSource.MANUAL)
+
+    for path, method in (
+        (f"{TRIAGE}/suggestions", "GET"),
+        (f"{TRIAGE}/suggestions/met_with_messages/contacts", "GET"),
+    ):
+        response = await client.request(method, path, params={"states": ["unknown", "not_met"]})
+        assert response.status_code == 422, (path, response.text)
+    applied = await client.post(
+        f"{TRIAGE}/suggestions/met_with_messages/apply",
+        json={"expected_count": RUN_LENGTH - 1},
+        params={"states": ["unknown", "not_met"]},
+        headers=CSRF,
+    )
+    assert applied.status_code == 422, applied.text
+
+    after = _contact_row(running_app, LOCAL_USER_ID, run_contacts[1])
+    assert (after.met, after.met_source) == (ContactMet.NOT_MET, MetSource.MANUAL)
+    review = await _get(client, f"{TRIAGE}/next", decided_by="automatic")
+    assert review["card"] is None, "their own answer did not become a batch's"
 
 
 # --- the preview, and reviewing what was decided ----------------------------
@@ -565,7 +607,9 @@ async def test_the_review_queue_walks_what_the_batch_decided(
 ) -> None:
     """After a batch, `/triage/next?decided_by=automatic` is the pass over its work."""
     applied = await client.post(
-        f"{TRIAGE}/suggestions/met_with_messages/apply", json={}, headers=CSRF
+        f"{TRIAGE}/suggestions/met_with_messages/apply",
+        json={"expected_count": RUN_LENGTH - 1},
+        headers=CSRF,
     )
     assert applied.status_code == 200, applied.text
     body = applied.json()
@@ -665,7 +709,7 @@ async def test_another_user_is_never_served_or_allowed_to_act_on_these_contacts(
     suggestions = await client.get(f"{TRIAGE}/suggestions")
     assert suggestions.json() == [], "A's message history suggests nothing to B"
     apply_response = await client.post(
-        f"{TRIAGE}/suggestions/met_with_messages/apply", json={}, headers=CSRF
+        f"{TRIAGE}/suggestions/met_with_messages/apply", json={"expected_count": 0}, headers=CSRF
     )
     assert apply_response.json()["applied"] == 0
     preview = await client.get(f"{TRIAGE}/suggestions/met_with_messages/contacts")

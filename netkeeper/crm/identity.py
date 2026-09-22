@@ -65,6 +65,7 @@ from netkeeper.models import (
     EmailKind,
     LinkKind,
     ListMember,
+    MetSource,
     PhoneKind,
     TagSource,
     User,
@@ -1139,6 +1140,11 @@ def _merge_scalars(survivor: Contact, loser: Contact) -> None:
         survivor.met = loser.met
         survivor.met_source = loser.met_source
         survivor.triaged_at = loser.triaged_at
+    elif loser.met_source is MetSource.MANUAL and survivor.met_source is MetSource.AUTOMATIC:
+        # The same answer, but one of them is the person's own. Keeping the
+        # batch's would throw away a confirmation and leave the survivor in the
+        # review queue for a decision that has already been reviewed.
+        survivor.met_source = MetSource.MANUAL
     if loser.do_not_contact:
         if not survivor.do_not_contact:
             survivor.do_not_contact = True

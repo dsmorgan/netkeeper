@@ -97,12 +97,14 @@ from netkeeper.db import is_writer
 from netkeeper.models import (
     Contact,
     ContactMet,
+    ContactPosition,
     ContactTag,
     Interaction,
     InteractionKind,
     MetSource,
     Tag,
     TagMetSignal,
+    TagSource,
     TriageDecision,
     TriageDecisionKind,
     User,
@@ -164,6 +166,16 @@ SUGGESTION_NOT_MET_NO_EVIDENCE: Final[str] = "not_met_no_evidence"
 
 TAG_KEY_PREFIX: Final[str] = "tag:"
 """``tag:<id>``: the batch for one tag the user gave a meaning (``Tag.met_signal``)."""
+
+BATCH_STATES: Final[frozenset[ContactMet]] = frozenset({ContactMet.UNKNOWN, ContactMet.SKIP})
+"""The only states a batch may reach: nobody has answered for these people yet.
+
+``skip`` is "I passed on this one", not an answer, so a batch may still offer
+it. ``met`` and ``not_met`` are answers, and a batch that overwrote one would
+turn the person's own decision into netkeeper's — the mirror image of the rule
+this module exists to keep, and it would push a contact they had already
+reviewed back into the review queue. :class:`AlreadyDecided` says so instead.
+"""
 
 # Contacts per statement when a bulk apply walks its matches.
 _CHUNK: Final[int] = 500
@@ -234,6 +246,23 @@ class UndoConflict(RuntimeError):
         super().__init__(
             f"contact {contact_id} has {field}={found!r} where the decision left "
             f"{expected!r}; {reason}"
+        )
+
+
+class AlreadyDecided(ValueError):
+    """A batch was pointed at contacts whose ``met`` is somebody's own answer.
+
+    ``states`` names what the queue holds, and for a batch that is
+    :data:`BATCH_STATES` and nothing else.
+    """
+
+    def __init__(self, states: Iterable[ContactMet]) -> None:
+        self.states = tuple(states)
+        shown = ", ".join(state.value for state in self.states)
+        allowed = ", ".join(sorted(state.value for state in BATCH_STATES))
+        super().__init__(
+            f"a batch decides for people nobody has answered for, so it cannot be applied "
+            f"to {shown}; the states it takes are {allowed}"
         )
 
 
@@ -436,10 +465,11 @@ def progress(
 ) -> Progress:
     """How far triage has got, from one grouped count over the live contacts.
 
-    Still one query: the group is ``(met, met_source)``, which gives both the
-    per-state counts and ``automatic``, the size of the review pass.
-    ``remaining`` follows the queue being served, so it counts only the
-    automatic contacts when ``decided_by`` says so.
+    Still one query: the group is ``(met, met_source)``, which gives the
+    per-state counts, ``automatic`` (the size of the review pass), and the
+    per-source split ``remaining`` needs. ``remaining`` counts the queue being
+    served: the states asked for, narrowed to the source ``decided_by`` names,
+    so the counter and :func:`next_contact` never disagree about what is left.
     """
     statement = (
         scoped(user, Contact)
@@ -448,15 +478,19 @@ def progress(
         .group_by(Contact.met, Contact.met_source)
     )
     by_state = dict.fromkeys(ContactMet, 0)
-    automatic = dict.fromkeys(ContactMet, 0)
+    by_source: dict[MetSource, dict[ContactMet, int]] = {
+        source: dict.fromkeys(ContactMet, 0) for source in MetSource
+    }
     for met, source, count in session.execute(statement).all():
         state = ContactMet(met)
         by_state[state] += count
-        if MetSource(source) is MetSource.AUTOMATIC:
-            automatic[state] += count
+        by_source[MetSource(source)][state] += count
+    automatic = by_source[MetSource.AUTOMATIC]
     total = sum(by_state.values())
     wanted = _states(states)
-    counted = automatic if decided_by is MetSource.AUTOMATIC else by_state
+    # ``remaining`` counts the queue being served, so it follows ``decided_by``
+    # whichever source that names -- not only ``automatic``.
+    counted = by_state if decided_by is None else by_source[MetSource(decided_by)]
     return Progress(
         total=total,
         triaged=total - by_state[ContactMet.UNKNOWN],
@@ -630,11 +664,14 @@ def suggestions(
 
     Every count is taken against the queue as it stands, so accepting one batch
     shrinks the others: a contact only ever belongs to whichever batch reaches
-    them first, and the counts refresh after each apply.
+    them first, and the counts refresh after each apply. ``states`` may only be
+    :data:`BATCH_STATES`; :class:`AlreadyDecided` for anything a person has
+    answered themselves.
     """
+    wanted = _batch_states(states)
     offers: list[Suggestion] = []
     for batch in _catalogue(session, user):
-        count = session.scalar(_queue_count(user, states).where(*batch.where)) or 0
+        count = session.scalar(_queue_count(user, wanted).where(*batch.where)) or 0
         if count:
             offers.append(batch.offer(count))
     return offers
@@ -658,14 +695,15 @@ def suggestion_contacts(
     contacts, and their tags in one go rather than one query per row (a tag is
     why some of these batches exist, so the rows carry them). Writes nothing.
     :class:`InvalidDecision` for an unknown key, a limit under 1, or a negative
-    offset.
+    offset; :class:`AlreadyDecided` for a state outside :data:`BATCH_STATES`.
     """
     batch = _batch_by_key(session, user, key)
+    wanted = _batch_states(states)
     if limit < 1 or offset < 0:
         raise InvalidDecision("limit must be at least 1 and offset cannot be negative")
-    total = session.scalar(_queue_count(user, states).where(*batch.where)) or 0
+    total = session.scalar(_queue_count(user, wanted).where(*batch.where)) or 0
     page = session.scalars(
-        _queue(user, states)
+        _queue(user, wanted)
         .where(*batch.where)
         .order_by(Contact.id)
         .limit(limit)
@@ -694,14 +732,22 @@ def apply_suggestion(
     a contact that was already ``not_met`` — and the log can always say what
     netkeeper decided and why. Each contact is left with ``met_source`` set to
     ``automatic``, which is what the review queue serves and what keeps this from
-    passing as a decision the person made. :class:`InvalidDecision` for an
-    unknown key; ``RuntimeError`` when ``session`` is not a writer.
+    passing as a decision the person made.
+
+    It reaches only the contacts in :data:`BATCH_STATES`, whatever ``states``
+    asks for: overwriting an answer the person gave would replace their
+    ``manual`` with ``automatic`` and put a contact they had already reviewed
+    back in the review queue, which is this module's promise run backwards.
+    :class:`AlreadyDecided` says so, and nothing is written.
+    :class:`InvalidDecision` for an unknown key; ``RuntimeError`` when
+    ``session`` is not a writer.
     """
     _require_writer(session)
     batch = _batch_by_key(session, user, key)
+    wanted = _batch_states(states)
     moment = at if at is not None else utcnow()
     _require_aware(moment)
-    statement = _queue(user, states).where(*batch.where).order_by(Contact.id)
+    statement = _queue(user, wanted).where(*batch.where).order_by(Contact.id)
     matches = list(session.scalars(statement).all())
     if expected_count is not None and expected_count != len(matches):
         raise CountChanged(expected_count, len(matches))
@@ -760,11 +806,12 @@ def _catalogue(session: Session, user: User) -> list[_Batch]:
       is the stronger evidence of the two. A rule never decides ``met`` on its
       own — it tags, and a batch the person accepts turns tags into decisions.
     * **No evidence at all.** No interaction of any kind on file, no tag the
-      user has given a meaning, and nobody at their company you have met or
-      written to. This is the one batch that argues from absence, so it is
-      offered last, described plainly, and hedged everywhere it can be: the
-      shared-company test keeps back the people an evidence panel would have
-      something to say about, even though it leaves them for the manual pass.
+      user has given a meaning, and nothing on the card
+      (:func:`_card_carries_evidence`). This is the one batch that argues from
+      absence, so it is offered last, described plainly, and held to one rule:
+      nobody is decided in bulk while the card the batch could have shown has
+      something on it. What the panel counts is what the batch withholds on —
+      the same question, asked once in :func:`_shared_companies` and once here.
     """
     return [
         _Batch(
@@ -794,13 +841,13 @@ def _catalogue(session: Session, user: User) -> list[_Batch]:
             title="Mark everyone there is no evidence about as not met",
             template=(
                 "There is nothing on file for {count} untriaged {people}: no messages, "
-                "no invitation, no tag you have given a meaning, and nobody you have met "
-                "or written to at their company."
+                "no invitation, no note, no tag of your own, and nobody else at their "
+                "company — their card would be empty."
             ),
             where=(
                 _has_no_interactions(user),
                 ~_carries_a_meaningful_tag(user),
-                ~_shares_a_company_with_someone_known(user),
+                ~_card_carries_evidence(user),
             ),
         ),
     ]
@@ -863,6 +910,19 @@ def _signalled_tag(session: Session, user: User, key: str) -> Tag:
             "give it a meaning before triaging by it"
         )
     return tag
+
+
+def _batch_states(states: Sequence[ContactMet]) -> list[ContactMet]:
+    """``states`` as a batch may use them, or :class:`AlreadyDecided`.
+
+    The count, the preview, and the apply all pass through here, so a client can
+    never be shown a batch it would be refused for.
+    """
+    wanted = _states(states)
+    answered = [state for state in wanted if state not in BATCH_STATES]
+    if answered:
+        raise AlreadyDecided(answered)
+    return wanted
 
 
 def _people(count: int) -> str:
@@ -1215,30 +1275,106 @@ def _carries_tag(tag: Tag) -> ColumnElement[bool]:
     )
 
 
-def _shares_a_company_with_someone_known(user: User) -> ColumnElement[bool]:
-    """The contacts at a company where you have met, or written to, somebody else.
+def _card_carries_evidence(user: User) -> ColumnElement[bool]:
+    """The contacts whose card has something on it, whatever that something is.
 
-    The weakest of the signals and the only one used to *withhold* a decision
-    rather than make one: the "no evidence" batch keeps these people back for the
-    manual pass, because their evidence panel has something to show and a batch
-    should not decide over the top of it. Matched on the current company only,
-    without regard to case or surrounding space, as
-    :func:`_shared_companies` counts it.
+    The rule the "no evidence" batch is built on: nobody is decided in bulk
+    while the card that batch could have shown has something to say about them.
+    So this is the panel's own question, asked of the database — one clause per
+    thing :class:`Card` carries that a batch does not otherwise read:
+
+    * a company somebody else in the address book is at (:func:`_shared_companies`
+      is the panel, and :func:`_shares_a_company_the_panel_shows` asks exactly
+      what it counts, past positions and all);
+    * a note the person typed, which ``TriageContactOut`` carries and calls part
+      of the evidence panel;
+    * a tag the person put on by hand — a rule's tag is not evidence *they* know
+      this contact, but their own is;
+    * a preferred name they set with the ``p`` key, which is a thing only triage
+      writes;
+    * ``do_not_contact``, which is a decision about this person already.
+
+    The last four never fire on a freshly imported archive. They fire on the
+    second import, when somebody has been using netkeeper for a month, met
+    someone, written a note about them and not got round to triaging them — and
+    the review pass is exactly where they would find out netkeeper had ignored
+    their own note.
+    """
+    return or_(
+        _shares_a_company_the_panel_shows(user),
+        func.trim(func.coalesce(Contact.notes, "")) != "",
+        _carries_a_hand_placed_tag(user),
+        _has_a_chosen_preferred_name(),
+        Contact.do_not_contact.is_(True),
+    )
+
+
+def _shares_a_company_the_panel_shows(user: User) -> ColumnElement[bool]:
+    """The contacts whose card shows a company with somebody else in it.
+
+    Exactly what :func:`_shared_companies` counts, so the batch and the panel
+    cannot disagree: every company this contact is at *or has been at*
+    (``contact_positions``), against the current company of every other live
+    contact, without regard to case or surrounding space. ``other.id !=
+    Contact.id`` is the panel's "other contacts" and keeps a contact from
+    withholding itself.
+
+    Correlated, so it costs a lookup per candidate row rather than one scan;
+    ``ix_contacts_user_id_current_company`` is what that lookup uses.
     """
     other = aliased(Contact)
-    named = func.trim(func.coalesce(Contact.current_company, "")) != ""
-    known = (
-        select(func.lower(func.trim(other.current_company)))
-        .where(
-            other.user_id == user.id,
-            other.archived_at.is_(None),
-            other.merged_into_id.is_(None),
-            func.trim(func.coalesce(other.current_company, "")) != "",
-            or_(other.met == ContactMet.MET, other.id.in_(_message_senders(user))),
-        )
-        .distinct()
+    theirs = func.lower(func.trim(other.current_company))
+    live = (
+        other.user_id == user.id,
+        other.id != Contact.id,
+        other.archived_at.is_(None),
+        other.merged_into_id.is_(None),
+        func.trim(func.coalesce(other.current_company, "")) != "",
     )
-    return and_(named, func.lower(func.trim(Contact.current_company)).in_(known))
+    # Two ``EXISTS`` rather than one with a nested subquery: a subquery two
+    # levels down does not correlate back to the outer ``contacts`` row, and
+    # silently reads "any position of anybody" instead of "this contact's".
+    at_the_same_company = select(other.id).where(
+        *live, theirs == func.lower(func.trim(Contact.current_company))
+    )
+    where_they_used_to_be = (
+        select(other.id)
+        .join(
+            ContactPosition,
+            and_(
+                ContactPosition.user_id == user.id,
+                ContactPosition.contact_id == Contact.id,
+                func.trim(func.coalesce(ContactPosition.company, "")) != "",
+                theirs == func.lower(func.trim(ContactPosition.company)),
+            ),
+        )
+        .where(*live)
+    )
+    return or_(at_the_same_company.exists(), where_they_used_to_be.exists())
+
+
+def _carries_a_hand_placed_tag(user: User) -> ColumnElement[bool]:
+    """The contacts carrying a tag the person put on themselves.
+
+    ``manual`` only: a rule's tag says what a pattern matched, and nearly every
+    imported contact carries one, so it is no evidence that the person knows
+    this contact. Theirs is.
+    """
+    return Contact.id.in_(
+        select(ContactTag.contact_id).where(
+            ContactTag.user_id == user.id, ContactTag.source == TagSource.MANUAL
+        )
+    )
+
+
+def _has_a_chosen_preferred_name() -> ColumnElement[bool]:
+    """The contacts whose preferred name is not simply their first name.
+
+    The column defaults to ``first_name`` and the ``p`` key is what changes it,
+    so a difference is a thing the person typed about this contact.
+    """
+    chosen = func.trim(Contact.preferred_name)
+    return and_(chosen != "", chosen != func.trim(Contact.first_name))
 
 
 def _states(states: Sequence[ContactMet]) -> list[ContactMet]:

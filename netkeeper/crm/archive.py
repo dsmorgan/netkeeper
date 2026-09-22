@@ -43,7 +43,10 @@ two. Interactions a person entered by hand are never matched against, so an
 import cannot swallow one, and cannot be blocked by one either.
 
 The auto-tag rules run at the end of the import, over the contacts it created
-or enriched and no others, in the same transaction (spec 10.3, #64). So an
+or enriched and no others, in the same transaction (spec 10.3, #64), and the
+default rule set is seeded first when this user has never had it: an import is
+often the first thing that happens to a database, and rules nobody has seeded
+tag nobody. So an
 address book is tagged the moment it lands rather than when somebody finds the
 button, and a failed import takes its tags down with it. The counts are in
 ``ArchiveImport.tagging``. A row that resolved to a candidate was not written,
@@ -74,7 +77,7 @@ from netkeeper.crm.identity import (
     resolve,
 )
 from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
-from netkeeper.crm.tags import RuleRun, run_rules
+from netkeeper.crm.tags import RuleRun, ensure_default_rules, run_rules
 from netkeeper.db import is_writer
 from netkeeper.linkedin.archive import (
     Archive,
@@ -223,6 +226,12 @@ def import_archive(
     # The rules, over the contacts this import touched and no others, in the
     # caller's transaction (spec 10.3, #64): a freshly imported address book is
     # tagged when the import returns, with no button to find and press first.
+    # The defaults are seeded here too, because an import is often the first
+    # thing that ever happens to a database -- `netkeeper import archive` before
+    # the server has ever started -- and rules that do not exist tag nobody.
+    # It is idempotent and records itself, so a default the user deleted stays
+    # deleted (netkeeper.crm.tags.ensure_default_rules).
+    ensure_default_rules(session, user)
     report.tagging = run_rules(session, user, sorted(set(touched)))
     log.info(
         "archive %s imported for user %d: %d connections (%d created, %d updated, "

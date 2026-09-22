@@ -1235,10 +1235,14 @@ export interface paths {
          * Apply Triage Suggestion
          * @description Apply a bulk suggestion as one batch that a single undo takes back.
          *
-         *     Send the `expected_count` the banner showed: a set that has moved on since
-         *     answers `409` rather than touching more people than the banner named. Every
-         *     contact it touches is left marked `automatic`, so `/triage/next` with
+         *     `expected_count` is required and is the count the banner showed: a set that
+         *     has moved on since answers `409` rather than touching more people than the
+         *     banner named, and there is no form of this request that skips the guard.
+         *     Every contact it touches is left marked `automatic`, so `/triage/next` with
          *     `decided_by=automatic` serves exactly this batch's work back for review.
+         *
+         *     A batch only ever reaches contacts nobody has answered for, so `states`
+         *     outside `unknown` and `skip` answers `422` and writes nothing.
          */
         post: operations["apply_triage_suggestion"];
         delete?: never;
@@ -1811,6 +1815,7 @@ export interface components {
             /** Merged Into Id */
             merged_into_id: number | null;
             met: components["schemas"]["ContactMet"];
+            met_source: components["schemas"]["MetSource"];
             /** Notes */
             notes: string | null;
             /** Overridden Fields */
@@ -2048,7 +2053,7 @@ export interface components {
          */
         ContactQuery: {
             /** Columns */
-            columns?: ("li_urn" | "li_public_id" | "li_url" | "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "connected_on" | "degree" | "met" | "triaged_at" | "do_not_contact" | "do_not_contact_reason" | "li_missing_count" | "li_disconnected_at" | "last_enriched_at" | "enrich_priority" | "last_contacted_at" | "notes" | "archived_at" | "source" | "created_at" | "updated_at")[] | null;
+            columns?: ("li_urn" | "li_public_id" | "li_url" | "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "connected_on" | "degree" | "met" | "met_source" | "triaged_at" | "do_not_contact" | "do_not_contact_reason" | "li_missing_count" | "li_disconnected_at" | "last_enriched_at" | "enrich_priority" | "last_contacted_at" | "notes" | "archived_at" | "source" | "created_at" | "updated_at")[] | null;
             filter?: components["schemas"]["FilterTree-Input"] | null;
             /**
              * Limit
@@ -2121,6 +2126,7 @@ export interface components {
             /** Location */
             location?: string | null;
             met?: components["schemas"]["ContactMet"] | null;
+            met_source?: components["schemas"]["MetSource"] | null;
             /** Notes */
             notes?: string | null;
             /** Preferred Name */
@@ -3595,10 +3601,15 @@ export interface components {
         /**
          * TriageSuggestionApplyIn
          * @description ``expected_count`` is the count the banner showed; a different one answers `409`.
+         *
+         *     Required, and the guard is the point: a batch decides for people nobody has
+         *     looked at, so "apply whatever matches right now" is not a request this API
+         *     takes. The count comes back from ``GET /triage/suggestions`` and from this
+         *     batch's own ``contacts`` page.
          */
         TriageSuggestionApplyIn: {
             /** Expected Count */
-            expected_count?: number | null;
+            expected_count: number;
         };
         /**
          * TriageSuggestionApplyOut
@@ -6450,9 +6461,9 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: {
+        requestBody: {
             content: {
-                "application/json": components["schemas"]["TriageSuggestionApplyIn"] | null;
+                "application/json": components["schemas"]["TriageSuggestionApplyIn"];
             };
         };
         responses: {
@@ -6479,14 +6490,12 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Validation Error */
+            /** @description A batch cannot be pointed at contacts somebody has answered for */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
+                content?: never;
             };
         };
     };
@@ -6524,14 +6533,12 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Validation Error */
+            /** @description A batch cannot be pointed at contacts somebody has answered for */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
+                content?: never;
             };
         };
     };

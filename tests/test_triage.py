@@ -659,6 +659,44 @@ def test_an_invitation_note_is_its_own_batch(writer: Session, user: User) -> Non
     assert (_met(bare), _met(wrote)) == (ContactMet.UNKNOWN, ContactMet.UNKNOWN)
 
 
+def test_the_invitation_marker_is_a_whole_token(writer: Session, user: User) -> None:
+    """Prose about invitations is message history; a note is still a note without its space.
+
+    The second half is the shape P1-26 leaves behind: it strips HTML from
+    archive summaries and trims each line, so a note whose body opened with a
+    block tag becomes ``"LinkedIn invitation:\n…"``. Matching the space would
+    drop those people out of this batch silently.
+    """
+    prose, trimmed = _contacts(writer, user, 2)
+    add_interaction(
+        writer,
+        user,
+        prose.id,
+        InteractionKind.LI_IN,
+        EARLIER,
+        f"{INVITATION_SUMMARY} requests are piling up, can we talk Tuesday?",
+        source=ContactSource.ARCHIVE,
+    )
+    add_interaction(
+        writer,
+        user,
+        trimmed.id,
+        InteractionKind.LI_IN,
+        EARLIER,
+        f"{INVITATION_SUMMARY}:\nlovely to meet you at the summit",
+        source=ContactSource.ARCHIVE,
+    )
+    offers = _offers(writer, user)
+    assert offers[module.SUGGESTION_MET_WITH_MESSAGES].count == 1
+    assert offers[module.SUGGESTION_MET_INVITATION_NOTE].count == 1
+    messaged, _total = module.suggestion_contacts(writer, user, module.SUGGESTION_MET_WITH_MESSAGES)
+    invited, _total = module.suggestion_contacts(
+        writer, user, module.SUGGESTION_MET_INVITATION_NOTE
+    )
+    assert [contact.id for contact in messaged] == [prose.id]
+    assert [contact.id for contact in invited] == [trimmed.id]
+
+
 def test_a_note_from_someone_you_went_on_to_write_to_stays_in_the_stronger_batch(
     writer: Session, user: User
 ) -> None:
@@ -684,22 +722,127 @@ def test_the_no_evidence_batch_takes_only_the_contacts_nothing_is_known_about(
     assert ([contact.id for contact in covered], total) == ([blank.id], 1)
 
 
-def test_the_no_evidence_batch_keeps_back_a_colleague_of_someone_you_know(
+def test_a_tag_you_gave_a_meaning_keeps_its_people_out_of_the_no_evidence_batch(
     writer: Session, user: User
 ) -> None:
-    """A company where you have met or written to somebody is evidence the panel will show."""
-    known = factories.make_contact(writer, user, current_company="Northwind Pottery")
-    _message(writer, user, known)
-    colleague = factories.make_contact(writer, user, current_company="northwind pottery")
-    stranger = factories.make_contact(writer, user, current_company="Somewhere Else")
+    """The two batches must not both cover one person, and the meaningful tag wins.
+
+    Without this, a tag the user said means *met* would stop holding its people
+    back and accepting the "no evidence" batch first would mark them not met.
+    """
+    recruiters = _signalled_tag(writer, user, "recruiter", TagMetSignal.NOT_MET)
+    friends = _signalled_tag(writer, user, "friend", TagMetSignal.MET)
+    recruiter, friend, stranger = _contacts(writer, user, 3)
+    tag_contact(writer, user, recruiter.id, recruiters.id)
+    tag_contact(writer, user, friend.id, friends.id)
+    covered, total = module.suggestion_contacts(writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE)
+    assert ([contact.id for contact in covered], total) == ([stranger.id], 1)
+    assert _offers(writer, user)[module.SUGGESTION_NOT_MET_NO_EVIDENCE].count == 1
+
+
+def test_the_no_evidence_preview_counts_with_every_clause(writer: Session, user: User) -> None:
+    """``total`` is what the banner shows and what comes back as ``expected_count``.
+
+    Each contact here is held out by a different clause, so a ``total`` computed
+    from fewer clauses than the page counts somebody the page does not list.
+    """
+    tag = _signalled_tag(writer, user, "recruiter", TagMetSignal.NOT_MET)
+    meaningful, messaged, noted, stranger = _contacts(writer, user, 4)
+    tag_contact(writer, user, meaningful.id, tag.id)
+    _message(writer, user, messaged)
+    noted.notes = "met at the pottery fair"
+    writer.flush()
+    covered, total = module.suggestion_contacts(writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE)
+    assert ([contact.id for contact in covered], total) == ([stranger.id], 1)
+    applied = module.apply_suggestion(
+        writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE, expected_count=total
+    )
+    assert applied.applied == total, "the count the preview showed is the count that applied"
+
+
+@pytest.mark.parametrize(
+    "touch",
+    [
+        pytest.param(lambda c: setattr(c, "notes", "met her at PyCon"), id="a note"),
+        pytest.param(lambda c: setattr(c, "preferred_name", "Bobbie"), id="a preferred name"),
+        pytest.param(lambda c: setattr(c, "do_not_contact", True), id="do not contact"),
+    ],
+)
+def test_the_no_evidence_batch_leaves_anyone_you_have_touched_alone(
+    writer: Session, user: User, touch: Any
+) -> None:
+    """The batch never decides over something the card would show (spec 10.2)."""
+    touched, stranger = _contacts(writer, user, 2)
+    touch(touched)
+    writer.flush()
+    covered, total = module.suggestion_contacts(writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE)
+    assert ([contact.id for contact in covered], total) == ([stranger.id], 1)
+
+
+def test_a_tag_you_placed_yourself_holds_a_contact_back_and_a_rule_s_does_not(
+    writer: Session, user: User
+) -> None:
+    """Yours says you know them. A rule's says a pattern matched, and nearly all of them do."""
+    tag = create_tag(writer, user, "pottery")
+    create_rule(writer, user, tag.id, RuleField.TITLE, r"\bpotter\b")
+    by_hand, by_rule = _contacts(writer, user, 2, current_title="Potter")
+    tag_contact(writer, user, by_hand.id, tag.id)
+    assert run_rules(writer, user, [by_rule.id]).added == 1
     covered, _total = module.suggestion_contacts(
         writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE
     )
-    assert [contact.id for contact in covered] == [stranger.id]
-    factories.make_contact(writer, user, current_company="Somewhere Else", met=ContactMet.MET)
-    after, _total = module.suggestion_contacts(writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE)
-    assert after == [], "a contact already marked met makes their company known too"
-    assert colleague.met is ContactMet.UNKNOWN
+    assert [contact.id for contact in covered] == [by_rule.id]
+
+
+def test_the_no_evidence_batch_withholds_exactly_what_the_card_would_show(
+    writer: Session, user: User
+) -> None:
+    """The clause and the panel ask the same question, so neither can decide over the other.
+
+    ``_shared_companies`` counts *anybody else* at a company the contact is at
+    or has been at. Whoever it counts, the batch leaves alone.
+    """
+    colleague = factories.make_contact(writer, user, current_company="Northwind Pottery")
+    factories.make_contact(writer, user, current_company="northwind pottery")
+    alumnus = factories.make_contact(
+        writer,
+        user,
+        current_company="Quiet Consulting",
+        positions=[{"title": "Potter", "company": "Blue Harbor Tools", "is_current": False}],
+    )
+    # The panel's own asymmetry (spec 10.2): this contact's side counts their
+    # current company and every past position, while the others are matched on
+    # current company alone. So the alumnus's card shows the overlap and this
+    # one's does not, and the batch mirrors that rather than second-guessing it.
+    still_there = factories.make_contact(writer, user, current_company="Blue Harbor Tools")
+    alone = factories.make_contact(writer, user, current_company="Somewhere Else")
+
+    for contact in (colleague, alumnus):
+        shown = module.load_card(writer, user, contact).evidence.shared_companies
+        assert any(item.contact_count for item in shown), "their card has an overlap on it"
+    for contact in (still_there, alone):
+        assert all(
+            not item.contact_count
+            for item in module.load_card(writer, user, contact).evidence.shared_companies
+        ), "and theirs has nothing on it"
+    covered, total = module.suggestion_contacts(writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE)
+    assert ([contact.id for contact in covered], total) == ([still_there.id, alone.id], 2)
+
+
+def test_a_contact_alone_at_their_company_does_not_withhold_themselves(
+    writer: Session, user: User
+) -> None:
+    """The panel counts the *other* contacts there, and so does the clause."""
+    alone = factories.make_contact(writer, user, current_company="Northwind Pottery")
+    covered, _total = module.suggestion_contacts(
+        writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE, states=(ContactMet.SKIP,)
+    )
+    assert covered == [], "and nobody is in the skip queue yet"
+    module.decide(writer, user, alone.id, ContactMet.SKIP)
+    skipped, _total = module.suggestion_contacts(
+        writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE, states=(ContactMet.SKIP,)
+    )
+    assert [contact.id for contact in skipped] == [alone.id]
 
 
 def test_a_tag_says_nothing_until_the_user_gives_it_a_meaning(writer: Session, user: User) -> None:

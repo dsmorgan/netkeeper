@@ -67,6 +67,7 @@ export function contactDetail(overrides: Partial<ContactDetail> = {}): ContactDe
     connected_on: '2024-03-01',
     degree: 1,
     met: 'unknown',
+    met_source: 'manual',
     triaged_at: null,
     do_not_contact: false,
     do_not_contact_reason: null,
