@@ -8,10 +8,10 @@
  * builds, not by reshaping the page around it.
  *
  * `StepState` has three values, and all three describe the *user's*
- * progress. A step whose completion nothing can verify does not get a fourth
- * state wedged into that ladder — its `state` is `null` (no badge), and its
- * `detail` says the true thing in words instead. Two steps land there once
- * there are contacts to act on:
+ * progress — not a system fact about them. A step whose completion nothing
+ * can verify does not get a fourth state wedged into that ladder — its
+ * `state` is `null` (no badge), and its `detail` says the true thing in
+ * words instead. Three steps land there once there are contacts to act on:
  *
  * - **Export** has no signal at all: exports are a browser download, not a
  *   tracked action, and nothing in the API records that one ran.
@@ -24,17 +24,19 @@
  *   this step never claims `done` or `not_started` — only the honest count.
  *   There is no fix within this endpoint's response shape; tracked as its own
  *   backend issue.
- *
- * "Review what was tagged automatically" is not one of those two:
- * `stats.tagged_by_rule` counts a contact an auto-tag rule tagged
- * (`TagSource.RULE` only, added alongside the pre-existing `tagged`, which
- * counts any source and this step no longer reads), so `tagged_by_rule === 0`
- * is a real `not_started` and `tagged_by_rule > 0` is real, genuine progress
- * — both directions are as knowable as triage's. It reads the live count
- * rather than assuming import always leaves it at zero, so the moment a
- * future lane makes auto-tag rules run during import, a fresh import that
- * already has rule-tagged contacts reads `done` immediately rather than
- * telling somebody to run rules that already ran.
+ * - **Review what was tagged automatically**, once `stats.tagged_by_rule`
+ *   (`TagSource.RULE` only, distinct from `tagged`, which counts any source
+ *   and this step does not read) is above zero, is the same conflation as
+ *   build-a-list's, just on the other side: `tagged_by_rule > 0` is a fact
+ *   about the rules, not about whether the person has reviewed what the
+ *   rules did — and the step's own title is an instruction to *them*. Sharp
+ *   case: a 200-contact import that auto-tags 150 must not render "Done"
+ *   before anyone has opened the app. So `tagged_by_rule === 0` is a real
+ *   `not_started` (the one direction a badge can honestly claim — there is
+ *   categorically nothing to review yet, and "run the rules" is a concrete
+ *   next action), but `tagged_by_rule > 0` is `null`, the same as export and
+ *   build-a-list, with the real count in the detail line instead of a claim
+ *   nobody reviewed anything.
  */
 import type { ContactStats, ImportRunPage } from './api'
 import type { ListOut } from '@/features/crm/types'
@@ -61,6 +63,14 @@ export interface SetupStepInputs {
   stats: ContactStats | undefined
   /** `undefined` when the draft-imports query has not answered; drafts are then assumed unknown. */
   openImports?: ImportRunPage
+  /**
+   * True before the draft-imports query has answered for the first time.
+   * `contacts/stats` gates the page, but the drafts query is its own fetch
+   * on its own clock — without this, the window between the two answering
+   * renders "Done" (no drafts known yet reads the same as none existing),
+   * which is exactly the wrong claim the query exists to prevent.
+   */
+  openImportsPending?: boolean
   /** True when the draft-imports query itself failed, so the import step says so rather than guessing "done". */
   openImportsUnavailable?: boolean
   lists?: ListOut[]
@@ -75,6 +85,7 @@ function plural(count: number, noun: string): string {
 export function buildSetupSteps({
   stats,
   openImports,
+  openImportsPending = false,
   openImportsUnavailable = false,
   lists,
   listsUnavailable = false,
@@ -84,41 +95,50 @@ export function buildSetupSteps({
 
   // --- import ---------------------------------------------------------------
 
-  const draftsKnown = !openImportsUnavailable
+  const draftsKnown = !openImportsPending && !openImportsUnavailable
   const draftTotal = draftsKnown ? (openImports?.total ?? 0) : 0
   const newestDraftId = openImports?.items[0]?.id
 
-  const importState: StepState | null = !draftsKnown
+  const importState: StepState | null = openImportsPending
     ? null
-    : draftTotal > 0
-      ? 'in_progress'
-      : hasContacts
-        ? 'done'
-        : 'not_started'
-  const importDetail = !draftsKnown
+    : !draftsKnown
+      ? null
+      : draftTotal > 0
+        ? 'in_progress'
+        : hasContacts
+          ? 'done'
+          : 'not_started'
+  const importDetail = openImportsPending
     ? hasContacts
-      ? `${plural(total, 'contact')} imported; open imports could not be checked`
-      : 'Open imports could not be checked'
-    : draftTotal > 0
-      ? `${plural(draftTotal, 'draft import')} waiting to be finished` +
-        (draftTotal > 1 ? ' — resuming the most recent' : '')
-      : hasContacts
-        ? `${plural(total, 'contact')} imported`
-        : 'Nothing imported yet'
+      ? `${plural(total, 'contact')} imported; checking for open imports…`
+      : 'Checking for open imports…'
+    : !draftsKnown
+      ? hasContacts
+        ? `${plural(total, 'contact')} imported; open imports could not be checked`
+        : 'Open imports could not be checked'
+      : draftTotal > 0
+        ? `${plural(draftTotal, 'draft import')} waiting to be finished` +
+          (draftTotal > 1 ? ' — resuming the most recent' : '')
+        : hasContacts
+          ? `${plural(total, 'contact')} imported`
+          : 'Nothing imported yet'
   const importCta = draftsKnown && draftTotal > 0 ? 'Continue this import' : 'Import contacts'
 
   // --- review tags ------------------------------------------------------------
   //
-  // `tagged_by_rule` is real in both directions (see module doc): zero means
-  // not started, and it is where the "run the rules" action comes from; a
-  // real count above zero is done, not a guess.
+  // `tagged_by_rule === 0` is a real `not_started`: there is categorically
+  // nothing to review yet, and "run the rules" is the concrete action. Above
+  // zero is not `done` — that count says the rules ran, not that the person
+  // reviewed what they did, and this step's title asks *them* to (see module
+  // doc) — so it is `null`, the honest count with no badge, same as export
+  // and build-a-list.
 
   const taggedByRule = stats?.tagged_by_rule ?? 0
-  const reviewDone = hasContacts && taggedByRule > 0
-  const reviewState: StepState = reviewDone ? 'done' : 'not_started'
-  const reviewDetail = reviewDone
-    ? `${plural(taggedByRule, 'contact')} tagged automatically`
-    : 'Nothing tagged yet'
+  const reviewNotStarted = !hasContacts || taggedByRule === 0
+  const reviewState: StepState | null = reviewNotStarted ? 'not_started' : null
+  const reviewDetail = reviewNotStarted
+    ? 'Nothing tagged yet'
+    : `${plural(taggedByRule, 'contact')} tagged automatically`
   const reviewCta = hasContacts && taggedByRule === 0 ? 'Run auto-tag rules' : 'Review tags'
 
   // --- triage -----------------------------------------------------------------
@@ -141,6 +161,7 @@ export function buildSetupSteps({
   const listsKnown = !listsUnavailable
   const listCount = lists?.length ?? 0
   const listDetail = listsKnown ? plural(listCount, 'list') : 'List count could not be checked'
+  const listCta = listCount > 0 ? 'Open lists' : 'Build a list'
 
   // --- export -------------------------------------------------------------------
 
@@ -184,7 +205,7 @@ export function buildSetupSteps({
       detail: listDetail,
       state: null,
       to: '/lists',
-      cta: 'Open lists',
+      cta: listCta,
     },
     {
       key: 'export',
