@@ -20,7 +20,7 @@ from typing import Any, get_args
 
 import factories
 import pytest
-from sqlalchemy import Boolean, Date, Enum, Integer, String, event
+from sqlalchemy import Boolean, Date, Enum, Integer, String, event, inspect
 from sqlalchemy.orm import Session
 
 from netkeeper.crm.filters import (
@@ -836,9 +836,13 @@ def test_list_member_of_a_smart_list_inlines_its_filter(session: Session, user: 
     plain = _smart_list(session, user, "Met", where)
     with_archived = _smart_list(session, user, "Met (all)", where, include_archived=True)
 
-    assert matching(session, user, {"op": "list_member", "list_id": plain.id}) == [met.id]
-    # The list's own include_archived decides its membership; the outer tree's
-    # decides what the filter as a whole may return, and both have to allow it.
+    plain_node = {"op": "list_member", "list_id": plain.id}
+    assert matching(session, user, plain_node) == [met.id]
+    # The inlined list keeps its own include_archived even when the tree around
+    # it asks for archived contacts: they are not members of *that* list.
+    assert matching(session, user, plain_node, include_archived=True) == [met.id]
+    # And the other way: a list that does include them offers them, and the tree
+    # around it still has to allow them through.
     node = {"op": "list_member", "list_id": with_archived.id}
     assert matching(session, user, node) == [met.id]
     assert matching(session, user, node, include_archived=True) == [met.id, met_archived.id]
@@ -874,11 +878,16 @@ def test_a_list_this_user_does_not_have_matches_nobody(
 def test_the_predicate_answers_exactly_what_the_list_page_shows(
     session: Session, user: User, other: User, kind: str
 ) -> None:
-    """The one pinning test: ``list_member`` and ``lists.list_members`` cannot drift.
+    """The pinning test: ``list_member`` and ``lists.list_members`` cannot drift.
 
     Same people, same noise around them — archived, merged away, another user's
     contact in another user's list of the same name — read once through the
     list page and once through the filter compiler.
+
+    For every list whose own membership excludes archived contacts, which is
+    every static list and every smart list at the default, the two agree
+    outright. The one list that can hold someone a filter around it will not
+    return has its own test below.
     """
     met = factories.make_contact(session, user, met=ContactMet.MET)
     also_met = factories.make_contact(session, user, met=ContactMet.MET)
@@ -900,6 +909,37 @@ def test_the_predicate_answers_exactly_what_the_list_page_shows(
     assert by_page == matching(session, user, {"op": "list_member", "list_id": row.id})
     assert total == len(by_page)
     assert by_page == sorted([met.id, also_met.id])
+
+
+def test_a_smart_list_that_includes_archived_is_the_one_reading_that_can_differ(
+    session: Session, user: User
+) -> None:
+    """The exception to the test above, pinned so the claim stays honest.
+
+    ``list_member`` selects the list's members and the tree around it then
+    applies its own rules to them, as it does to every predicate. A smart list
+    whose stored tree sets ``include_archived`` holds people the default tree
+    excludes, so its page can show someone an export of it does not — until the
+    filter asks for archived contacts too, and then they agree again. Neither
+    reading can be made to fit the other: a predicate cannot put back a contact
+    the tree around it has already excluded.
+    """
+    live = factories.make_contact(session, user, met=ContactMet.MET)
+    archived = factories.make_contact(session, user, met=ContactMet.MET, archived_at=NOW)
+    row = _smart_list(
+        session,
+        user,
+        "Met (all)",
+        {"op": "eq", "field": "met", "value": "met"},
+        include_archived=True,
+    )
+    node = {"op": "list_member", "list_id": row.id}
+
+    page, total = list_members(session, user, row.id, limit=100)
+    assert sorted(contact.id for contact in page) == sorted([live.id, archived.id])
+    assert total == 2
+    assert matching(session, user, node) == [live.id], "the default tree keeps archived out"
+    assert matching(session, user, node, include_archived=True) == sorted([live.id, archived.id])
 
 
 def test_a_smart_list_naming_a_static_one_nests_without_a_query_per_row(
@@ -981,16 +1021,69 @@ def test_a_list_that_names_itself_is_an_error(session: Session, user: User) -> N
         )
 
 
-def test_a_filter_may_not_pull_in_unlimited_lists(session: Session, user: User) -> None:
-    """A chain no cycle guard would catch: each list names the next, none names itself."""
+def _chain(session: Session, user: User, length: int) -> ContactList:
+    """``length`` smart lists, each naming the one before it; the last is returned.
+
+    Naming the last from a tree costs exactly ``length`` inlines, which is what
+    makes the cap's boundary testable from the outside.
+    """
     previous: ContactList | None = None
-    for index in range(MAX_LIST_EXPANSIONS + 2):
+    for index in range(length):
         where = None if previous is None else {"op": "list_member", "list_id": previous.id}
         previous = _smart_list(session, user, f"Chain {index}", where)
     assert previous is not None
-    tree = parse_filter({"where": {"op": "list_member", "list_id": previous.id}})
-    with pytest.raises(ListReferenceError, match="more than"):
+    return previous
+
+
+def test_a_filter_may_pull_in_exactly_the_cap_and_no_more(session: Session, user: User) -> None:
+    """The boundary, from both sides: a chain no cycle guard would catch, at 32 and at 33.
+
+    Counted over the whole compile, not per list: ``MAX_LIST_EXPANSIONS`` is how
+    many lists one tree may inline in total. A pair of cases pins which side of
+    the comparison the cap sits on, where one deep chain would pass either way.
+    """
+    at_the_cap = _chain(session, user, MAX_LIST_EXPANSIONS)
+    tree = parse_filter({"where": {"op": "list_member", "list_id": at_the_cap.id}})
+    compile_where(user, tree, session=session)  # 32 inlines: allowed
+
+    one_too_many = _smart_list(
+        session, user, "One more", {"op": "list_member", "list_id": at_the_cap.id}
+    )
+    over = parse_filter({"where": {"op": "list_member", "list_id": one_too_many.id}})
+    with pytest.raises(ListReferenceError, match="more than") as info:
+        compile_where(user, over, session=session)
+    assert info.value.list_ids[0] == one_too_many.id
+
+
+def test_two_trees_naming_the_same_list_pay_for_it_once(session: Session, user: User) -> None:
+    """The per-compile cache, and the only shape that can see it: one id, named twice.
+
+    Without it a tree that names a list in both halves of an ``or`` — or a chain
+    that fans out — would look the list up once per mention, which is the
+    per-node cost the design exists to avoid.
+    """
+    inside = factories.make_contact(session, user)
+    row = _static_list(session, user, "First 100", [inside])
+    node = {"op": "list_member", "list_id": row.id}
+    tree = parse_filter({"where": {"op": "or", "children": [node, {"op": "not", "child": node}]}})
+    with _statements(session) as sql:
         compile_where(user, tree, session=session)
+    assert len(sql) == 1, sql
+
+
+def test_compiling_does_not_flush_the_caller_half_written_row(session: Session, user: User) -> None:
+    """``_list``'s ``no_autoflush``: reading a list is not the caller's write.
+
+    ``netkeeper.crm.lists.update_list`` sets the new name and then validates the
+    new filter. Without the guard, the read the compiler does to resolve a
+    ``list_member`` autoflushes that rename — a write nobody asked for, on the
+    way to deciding whether to write at all.
+    """
+    row = _static_list(session, user, "First 100")
+    row.name = "Renamed"
+    tree = parse_filter({"where": {"op": "list_member", "list_id": row.id}})
+    compile_where(user, tree, session=session)
+    assert inspect(row).modified, "compiling flushed a change the caller had not committed to"
 
 
 # --- invalid trees ----------------------------------------------------------
@@ -1211,20 +1304,31 @@ def test_parse_sort_validates_each_key() -> None:
 
 # --- scoping ----------------------------------------------------------------
 
-BROAD: dict[str, Any] = {
-    "op": "or",
-    "children": [
-        {"op": "has_email"},
-        {"op": "has_phone"},
-        {"op": "has_position"},
-        {"op": "email_contains", "value": "example"},
-        {"op": "changed_jobs_within_days", "days": 30},
-        {"op": "eq", "field": "met", "value": "met"},
-        {"op": "tag_any", "names": ["vp"]},
-        {"op": "tag_all", "names": ["vp", "founder"]},
-        {"op": "tag_none", "names": ["recruiter"]},
-    ],
-}
+BROAD_CHILDREN: list[dict[str, Any]] = [
+    {"op": "has_email"},
+    {"op": "has_phone"},
+    {"op": "has_position"},
+    {"op": "email_contains", "value": "example"},
+    {"op": "changed_jobs_within_days", "days": 30},
+    {"op": "eq", "field": "met", "value": "met"},
+    {"op": "tag_any", "names": ["vp"]},
+    {"op": "tag_all", "names": ["vp", "founder"]},
+    {"op": "tag_none", "names": ["recruiter"]},
+]
+
+BROAD: dict[str, Any] = {"op": "or", "children": BROAD_CHILDREN}
+"""Every predicate that compiles to a subquery, and no ``list_member``: a caller
+that wants one has to name a list, which only ``BROAD_WITH_LIST`` can."""
+
+
+def broad_with_list(list_id: int) -> dict[str, Any]:
+    """:data:`BROAD` plus membership of ``list_id``, for the scoping guard.
+
+    A ``list_member`` naming a list that does not exist compiles to ``false``
+    and emits no subquery at all, so the guard below would walk straight past
+    the one table it is there to check. It takes a real list id.
+    """
+    return {"op": "or", "children": [*BROAD_CHILDREN, {"op": "list_member", "list_id": list_id}]}
 
 
 def test_a_compiled_filter_never_returns_another_users_contact(
@@ -1269,7 +1373,15 @@ def test_compile_update_applies_a_bulk_action_to_the_filter(
 def test_compiled_statements_are_scoped_and_every_subquery_names_the_user(
     session: Session, user: User
 ) -> None:
-    tree = parse_filter({"where": BROAD})
+    """Every table a predicate reaches carries this user's id, in the SQL itself.
+
+    ``list_members`` is in here because nothing else would catch its term going
+    missing: the filter still answers correctly for one user, and only a page
+    over somebody else's big list would ever show it, as a slow query rather
+    than as a wrong one.
+    """
+    row = _static_list(session, user, "First 100")
+    tree = parse_filter({"where": broad_with_list(row.id)})
     for statement in (
         compile_filter(user, tree, session=session, now=NOW),
         compile_count(user, tree, session=session, now=NOW),
@@ -1283,6 +1395,7 @@ def test_compiled_statements_are_scoped_and_every_subquery_names_the_user(
             "contact_snapshots",
             "contact_tags",
             "tags",
+            "list_members",
         ):
             assert f"{table}.user_id = {user.id}" in sql, table
         assert f"contacts.user_id = {user.id}" in sql

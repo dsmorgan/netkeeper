@@ -550,9 +550,19 @@ Static lists are explicit membership with an `added_at`, for the "First 100" sty
 
 **How `list_member` compiles, as built (P1-27).** A static list becomes a correlated `EXISTS` over `list_members` for that id, which needs nothing but the id. A smart list is its stored tree, inlined into the filter being compiled — so a list defined in terms of another list is one flat statement, not a query per contact and not a materialized set. Three rules follow from making the predicate mean what the list page means:
 
-- **Liveness.** A static list's members are live contacts: archived or merged away, they are not members, whatever `include_archived` says on the filter around them, because a membership row outlives either. A smart list's own `include_archived` decides its membership, and the outer filter still applies its own on top.
-- **Cycles.** Two lists could otherwise define each other. The compiler carries the ids it is already standing in for and refuses a reference back to one; `update_list` seeds that set with the list being written, so the cycle is refused at the save that would close it rather than discovered by whoever next opens either list. A cap on how many lists one filter may pull in (32) bounds the other blowup, a chain of lists each naming the one below it twice.
+- **Liveness.** A static list's members are live contacts: archived or merged away, they are not members, whatever `include_archived` says on the filter around them, because a membership row outlives either. A smart list's own `include_archived` decides its membership, and the outer filter still applies its own on top. So `list_member` selects the list's members and the surrounding tree then rules on them like any other predicate: the two readings agree for every list whose membership excludes archived contacts, and a smart list that sets `include_archived` itself is the one case where its page can show someone that a filter around it, at the default, will not return.
+- **Cycles.** Two lists could otherwise define each other. The compiler carries the ids it is already standing in for and refuses a reference back to one. A cap on how many lists one filter may pull in (32) bounds the other blowup, a chain of lists each naming the one below it twice.
 - **A reference to a list that is not there** — deleted, or another user's — matches no contact, the way a tag name nobody has used does. Turning it into an error would mean deleting one list could 422 every page that reads another.
+
+**Which leaves the writes, which is where the danger actually is.** A filter that compiles is not the same as a filter that is safe to store, because storing one can break a *different* list. Three guards, all in `netkeeper.crm.lists`:
+
+1. A `list_member` naming a list the user does not have is refused **at write time**, even though compiling one is deliberately lenient. Ids are handed out in order, so the id a new list is about to be given does not exist while its own filter is being validated: a forward reference was accepted and then handed that very row, which closed a cycle in two ordinary `POST`s.
+2. `update_list` tells the compiler which list it is about to become, so a tree that reaches back to its own list is refused at the write that would close the cycle.
+3. Every list write compiles the user's smart lists before and after itself and refuses to be the change that broke one. The first two guards look *down* from the tree being stored and cannot see the lists that name it: one at the expansion cap is broken by an edit one link below it, whose own save costs a single inline and passes. Comparing against what was already broken, rather than against "nothing is broken", keeps a list that is already unreadable from blocking the edit that would fix it.
+
+And should a broken list exist anyway — data edited around the API — `GET /lists` marks that one list `broken` with the reason instead of failing: it is the page someone would use to find and delete it, so one bad list may not hide the rest. Asking about that list by id still answers 422.
+
+Ids are not reused by a sequence but are by SQLite, so a reference whose list was deleted can come to name a later list with that id. The guards above refuse the version of that which breaks something; deleting a list logs the lists that named it, so the version that does not break anything is at least visible.
 
 Because a smart list's tree lives in the `lists` table, compiling a filter is no longer a pure function of the tree: it takes a session. It reads nothing for a filter with no `list_member` in it, and one indexed row per distinct list id for one that has, at compile time rather than per contact.
 
@@ -570,7 +580,7 @@ Field-level provenance: an imported value never overwrites a value from a more a
 
 ### 10.6 Export
 
-Presets: `nine-column`, `linkedin-archive`, `full`, `campaign-audience`. Formats: CSV, JSON, vCard 4.0. Exports respect the current filter and strip internal counters. A static list exports its own members through `list_member` (10.4), so the Export button on a list means the list.
+Presets: `nine-column`, `linkedin-archive`, `full`, `campaign-audience`. Formats: CSV, JSON, vCard 4.0. Exports respect the current filter and strip internal counters. A list exports its own members through `list_member` (10.4): the same people its page shows, except for a smart list that sets `include_archived` itself, whose archived members need the export's filter to ask for them too.
 
 An export is streamed, so everything that can refuse it has to happen before the first chunk: the filter is parsed and compiled while the request can still become a `422`. Once a `200` is on the wire a failure can only truncate the file, which is worse than an error because nothing about it looks like one (P1-27).
 

@@ -887,6 +887,11 @@ export interface paths {
         /**
          * List Lists
          * @description Every list, static and smart, with how many contacts are in it right now.
+         *
+         *     A list whose filter does not compile is listed like any other, with
+         *     ``broken`` saying why and no count, rather than failing the request: this
+         *     is the page someone would use to find and fix it, so one bad list may not
+         *     hide the rest (:func:`netkeeper.crm.lists.member_counts`).
          */
         get: operations["list_lists"];
         put?: never;
@@ -2658,6 +2663,8 @@ export interface components {
         };
         /** ListOut */
         ListOut: {
+            /** Broken */
+            broken?: string | null;
             /**
              * Created At
              * Format: date-time
