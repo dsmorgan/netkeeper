@@ -15,6 +15,7 @@ import type {
   ArchiveImportResult,
   ArchiveInvitationCounts,
   ArchiveMessageCounts,
+  ArchiveRefusalCode,
 } from './types'
 
 function message(error: unknown): string {
@@ -59,89 +60,90 @@ const KIND_EXPLANATION: Record<ArchiveKind, string> = {
 type Guidance = { headline: string; body: string }
 
 /**
- * Guidance for one of #124's 422s, keyed by a machine-readable code first.
+ * Guidance for a refused archive upload, keyed by the backend's own code.
  *
- * **This is built against a shape that has not landed.** No 422 from
- * `POST /imports/archive` carries a `code` today — every one is still a bare
- * `detail` string (`apiError` in `api.ts` reads `code` defensively from
- * either shape, and gets `null` from every response the backend sends right
- * now). The keys below (`not_a_linkedin_export`, `unsafe_member_path`,
- * `zip_guard_exceeded`, `nested_zip`, `corrupt_archive`) are this PR's guess
- * at names the archive lane might use; treat them as a proposal, not a
- * contract, and rename to match whatever actually ships.
+ * Every `422` from `POST /imports/archive` carries an `ArchiveRefusalCode`
+ * beside its message (#124), so nothing here reads the message's words: a
+ * reword on the backend used to send a person to the wrong next step, which
+ * is what the substring matching this replaced did. `Record` over the
+ * generated union, so a code the backend adds is a type error here rather
+ * than a case that quietly falls through to the default.
  *
- * The substring matching below them is what the previous version of this
- * screen keyed everything off, and review caught it breaking on two messages
- * #124's own fix round is adding: a nested zip (whose new message tells the
- * person exactly what to do — extract the inner file — which the old default
- * flatly contradicted) and a corrupt download (which needs "download it
- * again," not "check you have the right file," since they already do). It's
- * kept as a second-tier guess, in case those messages land before a `code`
- * does, but a reworded message now falls through to `DEFAULT_ARCHIVE_ERROR`
- * instead of a wrong specific answer — the fix that actually matters here:
- * the default no longer asserts what the file *is*, only that netkeeper
- * couldn't use it, which stays true no matter what the backend ends up
- * saying. The backend's own message is always shown too (`ArchiveErrorNote`
- * below), so nothing here has to be the whole story.
+ * Several codes share one answer on purpose — a person who uploaded the wrong
+ * file does not care whether it failed the member count or the size cap, only
+ * what to do next — but the backend's own message is always shown underneath
+ * (`ArchiveErrorNote`), so the specific reason is never lost.
  */
-const KNOWN_CODES: Record<string, Guidance> = {
-  not_a_linkedin_export: {
-    headline: "This doesn't look like a LinkedIn export",
-    body:
-      'netkeeper looked for a Connections, messages, or Invitations table and found none. Make ' +
-      'sure this is the zip LinkedIn emailed you, or one of Connections.csv, messages.csv, ' +
-      'Invitations.csv extracted from it.',
-  },
-  unsafe_member_path: {
-    headline: 'This zip has a file netkeeper will not open',
-    body:
-      "One of the files inside has a path netkeeper refuses to trust. That isn't how a real " +
-      'LinkedIn export is put together — request a fresh export from LinkedIn and try that ' +
-      'download instead of this file.',
-  },
-  zip_guard_exceeded: {
-    headline: 'This file is bigger or stranger than a real LinkedIn export',
-    body:
-      'netkeeper refused it before opening it, as a precaution — a real export is nowhere near ' +
-      'this large or this densely compressed. If this genuinely is your export, request a fresh ' +
-      'copy from LinkedIn and try that download.',
-  },
-  nested_zip: {
-    headline: 'This zip has another zip inside it',
-    body: "That's one unzip too many for netkeeper to guess at safely — open this one and upload the file inside it instead of the outer zip.",
-  },
-  corrupt_archive: {
-    headline: "This file didn't come through in one piece",
-    body: "It looks damaged or incomplete rather than the wrong file. Download the export again from LinkedIn's email and try that copy.",
-  },
+const NOT_A_LINKEDIN_EXPORT: Guidance = {
+  headline: "This doesn't look like a LinkedIn export",
+  body:
+    'netkeeper looked for a Connections, messages, or Invitations table and found none. Make ' +
+    'sure this is the zip LinkedIn emailed you, or one of Connections.csv, messages.csv, ' +
+    'Invitations.csv extracted from it.',
 }
 
-const ARCHIVE_ERROR_GUIDANCE: ReadonlyArray<{ test: RegExp; guidance: Guidance }> = [
-  {
-    test: /no Connections\.csv, messages\.csv, or Invitations\.csv|not a LinkedIn archive zip/i,
-    guidance: KNOWN_CODES.not_a_linkedin_export!,
-  },
-  { test: /unsafe path/i, guidance: KNOWN_CODES.unsafe_member_path! },
-  {
-    test: /member limit|byte limit|uncompressed|compresses \d|compression ratio|upload limit/i,
-    guidance: KNOWN_CODES.zip_guard_exceeded!,
-  },
-  {
-    test: /contains another zip|extract (?:it|the inner file)|nested zip/i,
-    guidance: KNOWN_CODES.nested_zip!,
-  },
-  {
-    test: /corrupt|damaged|truncated|incomplete|bad ?zip|zlib/i,
-    guidance: KNOWN_CODES.corrupt_archive!,
-  },
-]
+const UNSAFE_MEMBER_PATH: Guidance = {
+  headline: 'This zip has a file netkeeper will not open',
+  body:
+    "One of the files inside has a path netkeeper refuses to trust. That isn't how a real " +
+    'LinkedIn export is put together — request a fresh export from LinkedIn and try that ' +
+    'download instead of this file.',
+}
+
+const OVER_A_GUARD: Guidance = {
+  headline: 'This file is bigger or stranger than a real LinkedIn export',
+  body:
+    'netkeeper refused it before opening it, as a precaution — a real export is nowhere near ' +
+    'this large or this densely compressed. If this genuinely is your export, request a fresh ' +
+    'copy from LinkedIn and try that download.',
+}
+
+const NESTED_ZIP: Guidance = {
+  headline: 'This zip has another zip inside it',
+  body: "That's one unzip too many for netkeeper to guess at safely — open this one and upload the file inside it instead of the outer zip.",
+}
+
+const DAMAGED: Guidance = {
+  headline: "This file didn't come through in one piece",
+  body: "It looks damaged or incomplete rather than the wrong file. Download the export again from LinkedIn's email and try that copy.",
+}
+
+const ENCRYPTED: Guidance = {
+  headline: 'This zip is password-protected',
+  body:
+    'netkeeper cannot open it, and LinkedIn does not put a password on an export — so this is ' +
+    'either a zip you made yourself or one from somewhere else. Upload the export as LinkedIn ' +
+    'sent it.',
+}
+
+const MALFORMED_TABLE: Guidance = {
+  headline: 'netkeeper found the table it wanted but could not read it',
+  body:
+    'One of the tables inside is missing a column netkeeper needs, or is not readable as text ' +
+    'at all. If this file has been opened and re-saved by a spreadsheet, use the original ' +
+    'download from LinkedIn instead.',
+}
+
+const KNOWN_CODES: Record<ArchiveRefusalCode, Guidance> = {
+  not_a_zip: NOT_A_LINKEDIN_EXPORT,
+  wrong_archive: NOT_A_LINKEDIN_EXPORT,
+  nested_zip: NESTED_ZIP,
+  encrypted: ENCRYPTED,
+  damaged: DAMAGED,
+  malformed_table: MALFORMED_TABLE,
+  too_large: OVER_A_GUARD,
+  too_many_members: OVER_A_GUARD,
+  compression_ratio_too_high: OVER_A_GUARD,
+  unsafe_member_path: UNSAFE_MEMBER_PATH,
+}
 
 /**
- * Never asserts what the file *is* — only that netkeeper couldn't use it —
- * so it stays honest for a message this screen doesn't recognize, including
- * one that doesn't exist yet. The backend's own text is always shown right
- * below it (`ArchiveErrorNote`), which is where the specific "what to do"
- * lives when nothing above knows better.
+ * Never asserts what the file *is* — only that netkeeper couldn't use it — so
+ * it stays honest for anything that reaches this screen without a code: a
+ * failure from somewhere other than the archive endpoint's own refusals, or a
+ * backend older than the code it sends. The backend's own text is always shown
+ * right below it (`ArchiveErrorNote`), which is where the specific "what to
+ * do" lives when nothing above knows better.
  */
 const DEFAULT_ARCHIVE_ERROR: Guidance = {
   headline: "netkeeper couldn't import this file",
@@ -150,13 +152,14 @@ const DEFAULT_ARCHIVE_ERROR: Guidance = {
     'from LinkedIn and use that, or double-check you picked the file this screen names.',
 }
 
+function isRefusalCode(code: string): code is ArchiveRefusalCode {
+  return code in KNOWN_CODES
+}
+
 function archiveGuidance(error: unknown): Guidance {
   const code = error instanceof ApiError ? error.code : null
-  if (code !== null && code in KNOWN_CODES) return KNOWN_CODES[code]!
-  const detail = message(error)
-  return (
-    ARCHIVE_ERROR_GUIDANCE.find(({ test }) => test.test(detail))?.guidance ?? DEFAULT_ARCHIVE_ERROR
-  )
+  if (code !== null && isRefusalCode(code)) return KNOWN_CODES[code]
+  return DEFAULT_ARCHIVE_ERROR
 }
 
 function ArchiveErrorNote({ error, filename }: { error: unknown; filename: string }) {

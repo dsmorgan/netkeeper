@@ -45,4 +45,16 @@ export type RollbackResult = JsonOf<
 export type ArchiveImportResult = JsonOf<paths['/api/v1/imports/archive']['post']['responses'][201]>
 export type ArchiveConnectionCounts = ArchiveImportResult['connections']
 export type ArchiveMessageCounts = ArchiveImportResult['messages']
+
+/**
+ * Why an archive upload was refused, as the backend names it.
+ *
+ * Every `422` from `POST /imports/archive` carries one of these beside its
+ * message, so guidance keys off the code rather than the message's words.
+ * Derived from the generated schema, so a code the backend adds or renames
+ * is a type error in `archive-flow.tsx` rather than a case that silently
+ * falls through to the default.
+ */
+export type ArchiveRefusal = JsonOf<paths['/api/v1/imports/archive']['post']['responses'][422]>
+export type ArchiveRefusalCode = ArchiveRefusal['code']
 export type ArchiveInvitationCounts = ArchiveImportResult['invitations']

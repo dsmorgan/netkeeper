@@ -22,13 +22,11 @@ export class ApiError extends Error {
   /**
    * A machine-readable refusal code, when the backend sends one.
    *
-   * No import route sends this today — every 422 is still a bare `detail`
-   * string. This is here for `POST /imports/archive`'s error guidance
-   * (`archive-flow.tsx`), which needs something sturdier than matching
-   * substrings of the backend's prose: keying guidance off a code instead
-   * means a reworded message can't silently point a person at the wrong next
-   * step. `null` until the backend actually adds one; see that file's own
-   * comment for the assumed shape and the PR that assumes it.
+   * `POST /imports/archive` puts an `ArchiveRefusalCode` on every 422 it
+   * answers (#124), which is what its error guidance keys off
+   * (`archive-flow.tsx`): a reworded message can no longer point a person at
+   * the wrong next step. The other import routes still answer with a bare
+   * `detail` string, so this is `null` for them.
    */
   readonly code: string | null
 
@@ -45,11 +43,10 @@ export class ApiError extends Error {
  *
  * The import routes answer 404, 409, and 422 with FastAPI's `{"detail": ...}`,
  * which the OpenAPI export declares as an empty body, so the shape is checked
- * here at runtime rather than trusted from the generated types. `code` is
- * read defensively from either a sibling `{"detail": "...", "code": "..."}`
- * or a nested `{"detail": {"message": "...", "code": "..."}}`, since neither
- * shape exists on the backend yet and either is a plausible way to add one
- * without breaking the plain-string `detail` every other route still sends.
+ * here at runtime rather than trusted from the generated types. An archive
+ * refusal is `{"detail": "...", "code": "..."}`; `code` is also read from a
+ * nested `{"detail": {"message": "...", "code": "..."}}`, which is how a route
+ * that cannot give up its plain-string `detail` would have to carry one.
  */
 export function apiError(error: unknown, response: Response, what: string): ApiError {
   const body = error as { detail?: unknown; code?: unknown } | null | undefined
