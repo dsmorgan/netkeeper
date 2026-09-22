@@ -127,11 +127,56 @@ NOT_CONVERSATIONS: Final[frozenset[str]] = frozenset(
 )
 
 
+class ArchiveRefusalCode(enum.StrEnum):
+    """Why an upload was refused, stable across a reword of the message.
+
+    The API endpoint this feeds (P1-20) puts one of these on every ``422`` it
+    answers for a bad archive, alongside the human-readable message, so the
+    wizard built on top of it (P1-21) can key off the code instead of
+    matching the message's words — which broke the moment this module's own
+    wording changed underneath it. Named for what happened, not for which
+    guard or code path happens to catch it today, so a later refactor here
+    never forces a rename a client has to follow.
+    """
+
+    NOT_A_ZIP = "not_a_zip"
+    """The upload is not a zip, and not a single recognizable table either."""
+    WRONG_ARCHIVE = "wrong_archive"
+    """A real zip (or directory, or single table), but none of the three this
+    importer reads are anywhere in it."""
+    NESTED_ZIP = "nested_zip"
+    """The zip holds nothing but another zip. Not unwrapped; extract it by hand."""
+    ENCRYPTED = "encrypted"
+    """A member is password-protected."""
+    DAMAGED = "damaged"
+    """A member's declared metadata does not match its actual bytes — a lie or
+    (far more often) an ordinary corruption in transit."""
+    MALFORMED_TABLE = "malformed_table"
+    """A recognized table is missing a column the reader needs, or a table's
+    rows are not readable as UTF-8 CSV at all."""
+    TOO_LARGE = "too_large"
+    """The upload itself, the zip's total declared size, or one member's
+    declared size, is over its limit."""
+    TOO_MANY_MEMBERS = "too_many_members"
+    """The zip (or directory) declares more members than the limit."""
+    COMPRESSION_RATIO_TOO_HIGH = "compression_ratio_too_high"
+    """A member's declared compression ratio marks it as a zip bomb."""
+    UNSAFE_MEMBER_PATH = "unsafe_member_path"
+    """A member's path would escape wherever it was ever used as one."""
+
+
 class ArchiveFormatError(ValueError):
     """The file is not a LinkedIn archive, or one of its tables cannot be read.
 
-    The message names the file (and inside a zip, the member) the problem is in.
+    The message names the file (and inside a zip, the member) the problem is
+    in; ``code`` is the stable, machine-readable reason behind it
+    (:class:`ArchiveRefusalCode`), required on every instance so a refusal can
+    never reach a caller without one.
     """
+
+    def __init__(self, message: str, code: ArchiveRefusalCode) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ArchiveKind(enum.StrEnum):
@@ -414,7 +459,9 @@ def _records(text: TextIO, name: str) -> Iterator[list[str]]:
     try:
         yield from csv.reader(text)
     except (csv.Error, UnicodeDecodeError) as exc:
-        raise ArchiveFormatError(f"{name}: cannot be read as UTF-8 CSV: {exc}") from exc
+        raise ArchiveFormatError(
+            f"{name}: cannot be read as UTF-8 CSV: {exc}", ArchiveRefusalCode.MALFORMED_TABLE
+        ) from exc
 
 
 def _find_header(records: Iterator[list[str]], name: str) -> _Header | None:
@@ -435,7 +482,8 @@ def _find_header(records: Iterator[list[str]], name: str) -> _Header | None:
             if missing:
                 raise ArchiveFormatError(
                     f"{name}: the {layout.kind.value} table is missing "
-                    f"column(s) {', '.join(missing)}"
+                    f"column(s) {', '.join(missing)}",
+                    ArchiveRefusalCode.MALFORMED_TABLE,
                 )
             columns: dict[str, int] = {}
             for position, column in enumerate(names):
@@ -574,9 +622,14 @@ def read_profile(text: TextIO, name: str = "Profile.csv") -> Iterator[ProfileRow
 
 def _expect(header: _Header | None, kind: ArchiveKind, name: str) -> _Header:
     if header is None:
-        raise ArchiveFormatError(f"{name}: no LinkedIn {kind.value} table header found")
+        raise ArchiveFormatError(
+            f"{name}: no LinkedIn {kind.value} table header found", ArchiveRefusalCode.WRONG_ARCHIVE
+        )
     if header.kind is not kind:
-        raise ArchiveFormatError(f"{name}: this is the {header.kind.value} table, not {kind.value}")
+        raise ArchiveFormatError(
+            f"{name}: this is the {header.kind.value} table, not {kind.value}",
+            ArchiveRefusalCode.WRONG_ARCHIVE,
+        )
     return header
 
 
@@ -753,12 +806,15 @@ def _open_zip(handle: IO[bytes], name: str) -> Archive:
     declared = _declared_member_count(handle)
     if declared > MAX_MEMBERS:
         raise ArchiveFormatError(
-            f"{name}: {declared} members in the zip, over the {MAX_MEMBERS} member limit"
+            f"{name}: {declared} members in the zip, over the {MAX_MEMBERS} member limit",
+            ArchiveRefusalCode.TOO_MANY_MEMBERS,
         )
     try:
         zf = zipfile.ZipFile(handle)
     except zipfile.BadZipFile as exc:
-        raise ArchiveFormatError(f"{name}: not a valid zip file ({exc})") from exc
+        raise ArchiveFormatError(
+            f"{name}: not a valid zip file ({exc})", ArchiveRefusalCode.NOT_A_ZIP
+        ) from exc
     members: list[tuple[ArchiveMember, _TextOpener]] = []
     ignored: list[str] = []
     try:
@@ -780,7 +836,8 @@ def _open_zip(handle: IO[bytes], name: str) -> Archive:
         raise
     if not _has_rows_to_import(members):
         zf.close()
-        raise ArchiveFormatError(f"{name}: {_no_table_reason(infos)}")
+        reason, code = _no_table_reason(infos)
+        raise ArchiveFormatError(f"{name}: {reason}", code)
     return Archive(name, members, zf.close, ignored=ignored)
 
 
@@ -835,7 +892,7 @@ def _declared_member_count(handle: IO[bytes]) -> int:
     return max(zip64_entries, zip64_central_dir_size // _CENTRAL_DIR_RECORD_MIN_SIZE)
 
 
-def _no_table_reason(infos: Sequence[zipfile.ZipInfo]) -> str:
+def _no_table_reason(infos: Sequence[zipfile.ZipInfo]) -> tuple[str, ArchiveRefusalCode]:
     """Why ``infos`` held nothing to import: a plain miss, or a zip inside the zip.
 
     LinkedIn's own download is not nested — its doubled ``.zip.zip`` name is
@@ -849,11 +906,12 @@ def _no_table_reason(infos: Sequence[zipfile.ZipInfo]) -> str:
     nested = [info.filename for info in infos if _looks_like_nested_zip(info.filename)]
     if len(nested) == 1:
         inner = nested[0]
-        return (
+        message = (
             f"{default} — but it contains another zip ({inner}); "
             "extract it and upload the file inside"
         )
-    return default
+        return message, ArchiveRefusalCode.NESTED_ZIP
+    return default, ArchiveRefusalCode.WRONG_ARCHIVE
 
 
 def _looks_like_nested_zip(path: str) -> bool:
@@ -877,29 +935,36 @@ def _guard_zip_members(infos: Sequence[zipfile.ZipInfo], name: str) -> None:
     """
     if len(infos) > MAX_MEMBERS:
         raise ArchiveFormatError(
-            f"{name}: {len(infos)} members in the zip, over the {MAX_MEMBERS} member limit"
+            f"{name}: {len(infos)} members in the zip, over the {MAX_MEMBERS} member limit",
+            ArchiveRefusalCode.TOO_MANY_MEMBERS,
         )
     total = 0
     for info in infos:
         if not _is_safe_member_path(info.filename):
-            raise ArchiveFormatError(f"{name}: member {info.filename!r} has an unsafe path")
+            raise ArchiveFormatError(
+                f"{name}: member {info.filename!r} has an unsafe path",
+                ArchiveRefusalCode.UNSAFE_MEMBER_PATH,
+            )
         if info.file_size > MAX_MEMBER_BYTES:
             raise ArchiveFormatError(
                 f"{name}: member {info.filename} is {info.file_size} bytes uncompressed, "
-                f"over the {MAX_MEMBER_BYTES} byte limit"
+                f"over the {MAX_MEMBER_BYTES} byte limit",
+                ArchiveRefusalCode.TOO_LARGE,
             )
         if info.file_size > COMPRESSION_RATIO_FLOOR_BYTES:
             ratio = info.file_size / max(info.compress_size, 1)
             if ratio > MAX_COMPRESSION_RATIO:
                 raise ArchiveFormatError(
                     f"{name}: member {info.filename} compresses {ratio:.0f}x, over the "
-                    f"{MAX_COMPRESSION_RATIO}x ratio a real export never approaches"
+                    f"{MAX_COMPRESSION_RATIO}x ratio a real export never approaches",
+                    ArchiveRefusalCode.COMPRESSION_RATIO_TOO_HIGH,
                 )
         total += info.file_size
         if total > MAX_TOTAL_UNCOMPRESSED_BYTES:
             raise ArchiveFormatError(
                 f"{name}: more than {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes uncompressed "
-                "across its members"
+                "across its members",
+                ArchiveRefusalCode.TOO_LARGE,
             )
 
 
@@ -925,7 +990,10 @@ def _open_dir(root: Path, name: str) -> Archive:
     ignored: list[str] = []
     paths = [path for path in sorted(root.rglob("*")) if path.is_file()]
     if len(paths) > MAX_MEMBERS:
-        raise ArchiveFormatError(f"{name}: {len(paths)} files, over the {MAX_MEMBERS} file limit")
+        raise ArchiveFormatError(
+            f"{name}: {len(paths)} files, over the {MAX_MEMBERS} file limit",
+            ArchiveRefusalCode.TOO_MANY_MEMBERS,
+        )
     # Sizes are checked over every file, not only the ``.csv``-looking ones —
     # the same "a bomb does not have to look like a table" reasoning as the
     # zip guard (:func:`_guard_zip_members`), so the two paths agree on what a
@@ -936,12 +1004,15 @@ def _open_dir(root: Path, name: str) -> Archive:
         size = path.stat().st_size
         if size > MAX_MEMBER_BYTES:
             raise ArchiveFormatError(
-                f"{name}: member {relative} is {size} bytes, over the {MAX_MEMBER_BYTES} byte limit"
+                f"{name}: member {relative} is {size} bytes, "
+                f"over the {MAX_MEMBER_BYTES} byte limit",
+                ArchiveRefusalCode.TOO_LARGE,
             )
         total += size
         if total > MAX_TOTAL_UNCOMPRESSED_BYTES:
             raise ArchiveFormatError(
-                f"{name}: more than {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes across its files"
+                f"{name}: more than {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes across its files",
+                ArchiveRefusalCode.TOO_LARGE,
             )
         if not _looks_like_csv(relative):
             continue
@@ -956,7 +1027,8 @@ def _open_dir(root: Path, name: str) -> Archive:
         members.append((ArchiveMember(relative, header.kind, _file_time(path)), opener))
     if not _has_rows_to_import(members):
         raise ArchiveFormatError(
-            f"{name}: no Connections.csv, messages.csv, or Invitations.csv table in the directory"
+            f"{name}: no Connections.csv, messages.csv, or Invitations.csv table in the directory",
+            ArchiveRefusalCode.WRONG_ARCHIVE,
         )
     return Archive(name, members, lambda: None, ignored=ignored)
 
@@ -965,11 +1037,17 @@ def _open_csv(handle: IO[bytes], name: str) -> Archive:
     opener = _stream_opener(handle, name)
     with opener() as text:
         header, _ = _table(text, name)
-    if header is None or header.kind not in IMPORTABLE_KINDS:
-        # Profile.csv on its own is recognizable but holds nothing to import.
+    if header is None:
         raise ArchiveFormatError(
             f"{name}: not a LinkedIn archive zip, and no Connections.csv, messages.csv, or "
-            "Invitations.csv header in its first lines"
+            "Invitations.csv header in its first lines",
+            ArchiveRefusalCode.NOT_A_ZIP,
+        )
+    if header.kind not in IMPORTABLE_KINDS:
+        # Profile.csv on its own is recognizable but holds nothing to import.
+        raise ArchiveFormatError(
+            f"{name}: this is the {header.kind.value} table, which nothing here imports",
+            ArchiveRefusalCode.WRONG_ARCHIVE,
         )
     return Archive(name, [(ArchiveMember(name, header.kind, None), opener)], lambda: None)
 
@@ -1034,13 +1112,16 @@ def _zip_opener(zf: zipfile.ZipFile, info: zipfile.ZipInfo, name: str) -> _TextO
             # encrypted member's ``RuntimeError`` embeds ``repr(ZipInfo)``, which
             # is not a message to show a person.
             raise ArchiveFormatError(
-                f"{name}: the zip is encrypted; netkeeper cannot read a password-protected export"
+                f"{name}: the zip is encrypted; netkeeper cannot read a password-protected export",
+                ArchiveRefusalCode.ENCRYPTED,
             )
         try:
             raw = zf.open(info)
         except (zipfile.BadZipFile, NotImplementedError, RuntimeError) as exc:
             # A corrupt member or an unsupported compression method.
-            raise ArchiveFormatError(f"{name}: cannot be opened ({exc})") from exc
+            raise ArchiveFormatError(
+                f"{name}: cannot be opened ({exc})", ArchiveRefusalCode.DAMAGED
+            ) from exc
         with raw:
             try:
                 yield io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
@@ -1051,7 +1132,9 @@ def _zip_opener(zf: zipfile.ZipFile, info: zipfile.ZipInfo, name: str) -> _TextO
                 # here rather than at ``zf.open``, from deep inside whatever was
                 # reading (the header scan, or a row reader mid-file). An ordinary
                 # damaged download hits this exact path, not only a crafted one.
-                raise ArchiveFormatError(f"{name}: damaged inside the zip ({exc})") from exc
+                raise ArchiveFormatError(
+                    f"{name}: damaged inside the zip ({exc})", ArchiveRefusalCode.DAMAGED
+                ) from exc
 
     return opener
 
@@ -1062,7 +1145,9 @@ def _path_opener(path: Path, name: str) -> _TextOpener:
         try:
             handle = path.open("r", encoding="utf-8-sig", newline="")
         except OSError as exc:
-            raise ArchiveFormatError(f"{name}: cannot be opened ({exc})") from exc
+            raise ArchiveFormatError(
+                f"{name}: cannot be opened ({exc})", ArchiveRefusalCode.DAMAGED
+            ) from exc
         with handle:
             yield handle
 

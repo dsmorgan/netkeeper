@@ -21,15 +21,17 @@ from pathlib import Path
 import factories
 import httpx
 import pytest
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.db import session_scope
 from netkeeper.linkedin import archive as linkedin_archive
+from netkeeper.linkedin.archive import ArchiveRefusalCode
 from netkeeper.models import Contact, Interaction, User
 from netkeeper.scoping import scoped_count
 from netkeeper.web.api import imports as imports_api
+from netkeeper.web.errors import ApiError
 
 CSRF = {"X-Netkeeper-Client": "1"}
 FIXTURES = Path(__file__).parent / "fixtures" / "archive"
@@ -176,14 +178,16 @@ async def test_a_zip_that_is_not_a_linkedin_export_answers_422_naming_the_file(
         zf.writestr("Skills.csv", "Name\nMade up\n")
     response = await _upload(client, path.read_bytes(), filename="random.zip")
     assert response.status_code == 422, response.text
-    detail = response.json()["detail"]
-    assert "random.zip" in detail
-    assert "Connections.csv" in detail
+    body = response.json()
+    assert "random.zip" in body["detail"]
+    assert "Connections.csv" in body["detail"]
+    assert body["code"] == ArchiveRefusalCode.WRONG_ARCHIVE.value
 
 
 async def test_garbage_bytes_answer_422_not_500(client: httpx.AsyncClient) -> None:
     response = await _upload(client, b"this is not a zip file at all")
     assert response.status_code == 422, response.text
+    assert response.json()["code"] == ArchiveRefusalCode.NOT_A_ZIP.value
 
 
 async def test_the_upload_size_guard_answers_422_before_opening_anything(
@@ -192,7 +196,9 @@ async def test_the_upload_size_guard_answers_422_before_opening_anything(
     monkeypatch.setattr(imports_api, "ARCHIVE_MAX_UPLOAD_BYTES", 50)
     response = await _upload(client, _zipped(tmp_path))
     assert response.status_code == 422, response.text
-    assert "byte limit" in response.json()["detail"]
+    body = response.json()
+    assert "byte limit" in body["detail"]
+    assert body["code"] == ArchiveRefusalCode.TOO_LARGE.value
 
 
 async def test_a_zip_bomb_is_refused_with_a_422_not_a_500(
@@ -205,7 +211,9 @@ async def test_a_zip_bomb_is_refused_with_a_422_not_a_500(
         zf.writestr("Skills.csv", "0" * 100_000, compress_type=zipfile.ZIP_DEFLATED)
     response = await _upload(client, path.read_bytes(), filename="bomb.zip")
     assert response.status_code == 422, response.text
-    assert "compresses" in response.json()["detail"]
+    body = response.json()
+    assert "compresses" in body["detail"]
+    assert body["code"] == ArchiveRefusalCode.COMPRESSION_RATIO_TOO_HIGH.value
 
 
 async def test_a_path_traversing_member_is_refused_with_a_422_not_a_500(
@@ -216,7 +224,9 @@ async def test_a_path_traversing_member_is_refused_with_a_422_not_a_500(
         zf.writestr("../../etc/passwd.csv", "First Name,Last Name,URL,Connected On\n")
     response = await _upload(client, path.read_bytes())
     assert response.status_code == 422, response.text
-    assert "unsafe path" in response.json()["detail"]
+    body = response.json()
+    assert "unsafe path" in body["detail"]
+    assert body["code"] == ArchiveRefusalCode.UNSAFE_MEMBER_PATH.value
 
 
 async def test_a_damaged_download_is_refused_with_a_422_not_a_500(
@@ -240,7 +250,9 @@ async def test_a_damaged_download_is_refused_with_a_422_not_a_500(
         index += 4
     response = await _upload(client, bytes(raw), filename="liar.zip")
     assert response.status_code == 422, response.text
-    assert "damaged inside the zip" in response.json()["detail"]
+    body = response.json()
+    assert "damaged inside the zip" in body["detail"]
+    assert body["code"] == ArchiveRefusalCode.DAMAGED.value
 
 
 async def test_the_upload_size_guard_is_enforced_at_its_shipped_value(
@@ -260,7 +272,149 @@ async def test_the_upload_size_guard_is_enforced_at_its_shipped_value(
             size=imports_api.ARCHIVE_MAX_UPLOAD_BYTES + 1,
             filename="huge.zip",
         )
-        with pytest.raises(HTTPException) as excinfo:
+        with pytest.raises(ApiError) as excinfo:
             imports_api.import_archive(user=user, session=session, file=upload)
     assert excinfo.value.status_code == 422
-    assert "byte limit" in str(excinfo.value.detail)
+    assert "byte limit" in excinfo.value.body["detail"]
+    assert excinfo.value.body["code"] == ArchiveRefusalCode.TOO_LARGE.value
+
+
+# --- every refusal carries a code, not just most of them ---------------------
+#
+# The wizard built on top of this endpoint (P1-21) keys off ``code``, not the
+# words in ``detail`` — substring-matching another layer's prose is exactly
+# what broke it against this endpoint's own message changes. The guarantee
+# that matters is not "some refusals carry a code" but "every one does", so
+# this builds one real scenario per :class:`ArchiveRefusalCode` member and
+# then asserts the set of codes exercised is the whole enum: a new refusal
+# added without a scenario here fails this test, not just a code review.
+
+
+def _garbage_bytes() -> bytes:
+    return b"this is not a zip file at all"
+
+
+def _wrong_archive_zip_bytes(tmp_path: Path) -> bytes:
+    path = tmp_path / "wrong.zip"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("Skills.csv", "Name\nMade up\n")
+    return path.read_bytes()
+
+
+def _nested_zip_bytes(tmp_path: Path) -> bytes:
+    inner = tmp_path / "inner.zip"
+    with zipfile.ZipFile(inner, "w") as zf:
+        zf.writestr("Connections.csv", "First Name,Last Name,URL,Connected On\n")
+    outer = tmp_path / "export.zip.zip"
+    with zipfile.ZipFile(outer, "w") as zf:
+        zf.write(inner, arcname="export.zip")
+    return outer.read_bytes()
+
+
+def _encrypted_zip_bytes() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "Connections.csv",
+            "First Name,Last Name,URL,Connected On\nA,B,https://example.invalid/in/x,01 Jan 2020\n",
+        )
+    raw = bytearray(buf.getvalue())
+    local_index = raw.find(b"PK\x03\x04")
+    assert local_index != -1
+    raw[local_index + 6] |= 0x01
+    central_index = raw.find(b"PK\x01\x02")
+    assert central_index != -1
+    raw[central_index + 8] |= 0x01
+    return bytes(raw)
+
+
+def _damaged_zip_bytes() -> bytes:
+    content = (FIXTURES / "Connections.csv").read_bytes() * 20
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Connections.csv", content)
+    raw = bytearray(buf.getvalue())
+    real = struct.pack("<I", len(content))
+    lie = struct.pack("<I", 50)
+    index = 0
+    while (index := raw.find(real, index)) != -1:
+        raw[index : index + 4] = lie
+        index += 4
+    return bytes(raw)
+
+
+def _malformed_table_zip_bytes() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        # A Connections table missing the "URL" column its reader needs.
+        zf.writestr("Connections.csv", "First Name,Last Name,Connected On\nA,B,01 Jan 2020\n")
+    return buf.getvalue()
+
+
+def _too_many_members_zip_bytes(tmp_path: Path) -> bytes:
+    path = tmp_path / "many.zip"
+    with zipfile.ZipFile(path, "w") as zf:
+        for index in range(3):
+            zf.writestr(f"f{index}.csv", "Name\nMade up\n")
+    return path.read_bytes()
+
+
+def _compression_ratio_zip_bytes() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Skills.csv", "0" * 100_000)
+    return buf.getvalue()
+
+
+def _unsafe_member_path_zip_bytes() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("../../etc/passwd.csv", "First Name,Last Name,URL,Connected On\n")
+    return buf.getvalue()
+
+
+async def _assert_refusal(client: httpx.AsyncClient, data: bytes, code: ArchiveRefusalCode) -> None:
+    response = await _upload(client, data, filename=f"{code.value}.zip")
+    assert response.status_code == 422, f"{code}: expected 422, got {response.status_code}"
+    body = response.json()
+    assert body["code"] == code.value, f"{code}: response carried {body!r}"
+    assert body["detail"], f"{code}: detail was empty"
+
+
+async def test_every_refusal_code_is_reachable_and_present_on_the_response(
+    client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    seen: set[ArchiveRefusalCode] = set()
+
+    async def check(data: bytes, code: ArchiveRefusalCode) -> None:
+        await _assert_refusal(client, data, code)
+        seen.add(code)
+
+    await check(_garbage_bytes(), ArchiveRefusalCode.NOT_A_ZIP)
+    await check(_wrong_archive_zip_bytes(tmp_path), ArchiveRefusalCode.WRONG_ARCHIVE)
+    await check(_nested_zip_bytes(tmp_path), ArchiveRefusalCode.NESTED_ZIP)
+    await check(_encrypted_zip_bytes(), ArchiveRefusalCode.ENCRYPTED)
+    await check(_damaged_zip_bytes(), ArchiveRefusalCode.DAMAGED)
+    await check(_malformed_table_zip_bytes(), ArchiveRefusalCode.MALFORMED_TABLE)
+    await check(_unsafe_member_path_zip_bytes(), ArchiveRefusalCode.UNSAFE_MEMBER_PATH)
+
+    # These three need a guard patched small enough for ordinary test-sized
+    # data to trip it; scoped to just their own upload so one does not also
+    # catch another scenario's zip before it reaches the code being tested.
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(linkedin_archive, "MAX_MEMBERS", 2)
+        await check(_too_many_members_zip_bytes(tmp_path), ArchiveRefusalCode.TOO_MANY_MEMBERS)
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(linkedin_archive, "MAX_COMPRESSION_RATIO", 10)
+        m.setattr(linkedin_archive, "COMPRESSION_RATIO_FLOOR_BYTES", 100)
+        await check(_compression_ratio_zip_bytes(), ArchiveRefusalCode.COMPRESSION_RATIO_TOO_HIGH)
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(imports_api, "ARCHIVE_MAX_UPLOAD_BYTES", 50)
+        await check(_zipped(tmp_path), ArchiveRefusalCode.TOO_LARGE)
+
+    assert seen == set(ArchiveRefusalCode), (
+        f"no scenario covers {set(ArchiveRefusalCode) - seen}; "
+        "every refusal code needs one, not just most"
+    )

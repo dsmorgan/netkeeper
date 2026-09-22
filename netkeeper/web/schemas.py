@@ -20,6 +20,7 @@ from netkeeper.crm.importer import ImportField
 from netkeeper.crm.interactions import TimelineEntry
 from netkeeper.crm.lists import MAX_COLUMNS
 from netkeeper.crm.tags import PATTERN_MAX_LENGTH, InvalidPattern, compile_pattern
+from netkeeper.linkedin.archive import ArchiveRefusalCode
 from netkeeper.models import (
     LIST_NAME_MAX_LENGTH,
     TAG_NAME_MAX_LENGTH,
@@ -1049,6 +1050,20 @@ class ArchiveImportOut(BaseModel):
     invitations: ArchiveInvitationCountsOut
     ignored_files: list[str]
     """Tables the archive carried that no importer reads yet, such as ``Positions.csv``."""
+
+
+class ArchiveRefusalOut(BaseModel):
+    """The ``422`` body of a refused archive upload.
+
+    ``detail`` is the human-readable reason, free to reword; ``code`` is what
+    a client should actually switch on (:class:`~netkeeper.linkedin.archive.ArchiveRefusalCode`),
+    present on every refusal this endpoint can produce, and stable across a
+    reword of ``detail`` — the wizard this feeds (P1-21) keys off it rather
+    than matching words in the message.
+    """
+
+    detail: str
+    code: ArchiveRefusalCode
 
 
 # --- lists and saved views (spec 10.1, 10.4; P1-08) --------------------------
