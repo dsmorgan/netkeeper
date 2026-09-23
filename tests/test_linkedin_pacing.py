@@ -25,8 +25,9 @@ import random
 import statistics
 import subprocess
 import sys
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -35,6 +36,10 @@ from netkeeper.linkedin import pacing
 # What ADR 0005 keeps out of the extractor (spec 9.10). Same list
 # tests/test_linkedin_archive.py uses for archive.py and conversations.py.
 FORBIDDEN_IMPORTS = ("netkeeper.models", "netkeeper.crm", "netkeeper.db", "sqlalchemy")
+
+# 2026 US transitions in America/New_York: spring forward 2026-03-08 02:00 EST -> 03:00 EDT,
+# fall back 2026-11-01 02:00 EDT -> 01:00 EST. Used only by the next_window_start DST tests.
+_NY = "America/New_York"
 
 
 def test_extractor_boundary_pacing_pulls_in_nothing_forbidden() -> None:
@@ -62,6 +67,35 @@ def test_extractor_boundary_pacing_pulls_in_nothing_forbidden() -> None:
         if name == forbidden or name.startswith(f"{forbidden}.")
     ]
     assert leaked == [], f"netkeeper/linkedin/pacing.py pulled in {leaked}"
+
+
+# --- Appendix C / config.example.toml: the defaults themselves --------------
+
+
+def test_module_defaults_match_appendix_c_and_config_example_toml() -> None:
+    """Every default this module ships pinned against its spec value, exactly.
+
+    Every other test in this file passes its own arguments (deliberately, to
+    prove the function honors them — see the ``uses_its_..._argument`` tests
+    throughout), which means none of them ever exercises the *default*
+    values these constants provide. A fat-fingered default — Appendix C's
+    warm-up start silently becoming 5 instead of 20, say — would sail
+    through the rest of the suite. This is the one place that would catch
+    it: a plain equality check against the value spec Appendix C (and, for
+    active hours, Appendix B's ``config.example.toml``) actually states.
+    """
+    assert pacing.DEFAULT_DELAY_MEDIAN_S == 25.0
+    assert pacing.DEFAULT_DELAY_SIGMA == 0.6
+    assert pacing.DEFAULT_TAIL_P == 0.08
+    assert pacing.DEFAULT_TAIL_RANGE_S == (120.0, 480.0)
+    assert pacing.DEFAULT_BURST_SIZE_RANGE == (8, 15)
+    assert pacing.DEFAULT_BURST_BREAK_RANGE_S == (300.0, 1200.0)
+    assert pacing.DEFAULT_WARMUP_START == 20
+    assert pacing.DEFAULT_WARMUP_STEP == 10
+    assert pacing.DEFAULT_WEEKEND_MULTIPLIER == 0.5
+    # config.example.toml's [linkedin] active_hours entry: 08:30 through 21:30.
+    assert time(8, 30) == pacing.DEFAULT_ACTIVE_START
+    assert time(21, 30) == pacing.DEFAULT_ACTIVE_END
 
 
 # --- human_delay --------------------------------------------------------
@@ -276,6 +310,32 @@ def test_plan_burst_sizes_uses_its_size_range_argument() -> None:
     assert 0 < sizes[-1] <= 4
 
 
+@pytest.mark.parametrize(
+    "size_range",
+    [
+        (0, 0),  # would loop forever: rng.randint(0, 0) is always 0, remaining never shrinks
+        (0, 4),  # a burst of 0 visits is not a burst; low end below 1 is never valid
+        (-2, 4),
+        (5, 3),  # high below low
+    ],
+)
+def test_plan_burst_sizes_rejects_an_invalid_size_range(size_range: tuple[int, int]) -> None:
+    """``burst_size`` is a user-facing config knob (``[linkedin.pacing]`` in
+    ``config.example.toml``); a typo there must raise here, not hang or silently produce
+    zero-length bursts. ``(0, 0)`` is the sharpest case: unvalidated, it is an infinite loop,
+    not merely a bad plan — caught with a timeout in review, not caught by the suite at all.
+    """
+    with pytest.raises(ValueError, match="size_range"):
+        pacing.plan_burst_sizes(random.Random(1), 10, size_range=size_range)
+
+
+def test_plan_burst_sizes_validates_before_the_count_shortcut() -> None:
+    """The validation applies even to a call that would otherwise return ``()`` immediately,
+    so a bad ``size_range`` is never masked by also passing ``count <= 0``."""
+    with pytest.raises(ValueError, match="size_range"):
+        pacing.plan_burst_sizes(random.Random(1), 0, size_range=(0, 0))
+
+
 def test_burst_break_within_configured_range_and_bounded_mean() -> None:
     """Uniform over ``break_range_s``: min/max are exact invariants; the mean is a loose
     sanity check (expected 750 at the default (300, 1200) range; measured ~742)."""
@@ -393,6 +453,103 @@ def test_next_window_start_after_start_rolls_to_the_next_day() -> None:
     assert nxt == datetime(2026, 9, 24, 2, 0, tzinfo=UTC)
 
 
+# --- next_window_start across a DST transition ------------------------
+
+# Every next_window_start test above uses 2026-09-22/23, nowhere near a DST transition, so
+# none of them would notice next_window_start silently adding 24 hours of UTC instead of a
+# day of local wall time — the two agree except right around a transition. These sweep both
+# 2026 US transitions in America/New_York (spring forward 2026-03-08, fall back 2026-11-01).
+
+
+def test_next_window_start_keeps_the_local_wall_time_across_spring_forward() -> None:
+    """The window opens at 08:30 *local*, not 24 hours after yesterday's opening.
+
+    The day the clocks jump forward is 23 hours long, so adding 24 hours in
+    UTC would park the job at 09:30 local. Adding a day of wall time and
+    converting afterwards keeps it at 08:30.
+    """
+    now_utc = datetime(2026, 3, 7, 19, 0, tzinfo=UTC)  # 14:00 EST, the day before
+    nxt = pacing.next_window_start(now_utc, _NY, start=time(8, 30))
+    assert nxt == datetime(2026, 3, 8, 12, 30, tzinfo=UTC)  # 08:30 EDT, not 13:30Z
+    assert nxt.astimezone(ZoneInfo(_NY)).time() == time(8, 30)
+
+
+def test_next_window_start_keeps_the_local_wall_time_across_fall_back() -> None:
+    """Mirror case: the fall-back day is 25 hours long, so a UTC +24h would fire at 07:30 local."""
+    now_utc = datetime(2026, 10, 31, 18, 0, tzinfo=UTC)  # 14:00 EDT, the day before
+    nxt = pacing.next_window_start(now_utc, _NY, start=time(8, 30))
+    assert nxt == datetime(2026, 11, 1, 13, 30, tzinfo=UTC)  # 08:30 EST, not 12:30Z
+    assert nxt.astimezone(ZoneInfo(_NY)).time() == time(8, 30)
+
+
+def test_next_window_start_in_the_spring_forward_gap_lands_just_after_the_jump() -> None:
+    """A start time that does not exist on the transition day resolves forward, not backward.
+
+    02:30 never happens on 2026-03-08. The returned instant is the first
+    real moment at or after it (03:30 EDT), which is inside the window,
+    rather than an instant an hour *before* the window opens.
+    """
+    now_utc = datetime(2026, 3, 7, 14, 0, tzinfo=UTC)  # 09:00 EST, already past 02:30
+    nxt = pacing.next_window_start(now_utc, _NY, start=time(2, 30))
+    assert nxt > now_utc
+    local = nxt.astimezone(ZoneInfo(_NY))
+    assert local.date() == date(2026, 3, 8)
+    assert local.time() >= time(2, 30)
+    assert pacing.is_active_at(nxt, _NY, start=time(2, 30), end=time(21, 30)) is True
+
+
+def test_next_window_start_in_the_fall_back_repeated_hour_is_unambiguous_and_future() -> None:
+    """01:30 happens twice on 2026-11-01; whichever is picked must still be in the future.
+
+    From inside the *second* pass of the repeated hour (01:15 EST) the first
+    01:30 is gone, so the next opening is the second one, 15 minutes out —
+    not a naive "today's 01:30", which would already be in the past.
+    """
+    now_utc = datetime(2026, 11, 1, 6, 15, tzinfo=UTC)  # 01:15 EST, the repeat
+    nxt = pacing.next_window_start(now_utc, _NY, start=time(1, 30))
+    assert nxt > now_utc
+    assert nxt == datetime(2026, 11, 1, 6, 30, tzinfo=UTC)
+
+
+def test_next_window_start_from_the_repeated_hours_first_pass_parks_tomorrow() -> None:
+    """The documented arguable-but-correct case: called from the *first* pass of the
+    repeated hour with a ``start`` earlier in that hour, this skips the *second* pass of
+    today's same local hour and parks for tomorrow instead — see :func:`next_window_start`'s
+    docstring. "Now" is 01:45 EDT, the first pass (fold=0); ``start`` is 01:15, earlier in
+    the hour. The second pass's 01:15 (fold=1, 06:15 UTC) is a real, later, same-day
+    instant, but it is never considered here, because ``candidate`` inherits "now"'s fold
+    rather than trying both.
+    """
+    now_utc = datetime(2026, 11, 1, 5, 45, tzinfo=UTC)  # 01:45 EDT, first pass
+    nxt = pacing.next_window_start(now_utc, _NY, start=time(1, 15))
+    assert nxt > now_utc
+    # Not the same day's second-pass 01:15 (2026-11-01 06:15 UTC, still in the future) —
+    # tomorrow's first-pass-equivalent 01:15 instead.
+    assert nxt == datetime(2026, 11, 2, 6, 15, tzinfo=UTC)
+    assert nxt.astimezone(ZoneInfo(_NY)) == datetime(2026, 11, 2, 1, 15, tzinfo=ZoneInfo(_NY))
+
+
+@pytest.mark.parametrize("start", [time(8, 30), time(2, 30), time(1, 30), time(0, 0)])
+@pytest.mark.parametrize(
+    "first_day", [datetime(2026, 3, 6, tzinfo=UTC), datetime(2026, 10, 30, tzinfo=UTC)]
+)
+def test_next_window_start_is_strictly_future_every_quarter_hour_across_a_transition(
+    start: time, first_day: datetime
+) -> None:
+    """The one invariant a parked one-shot job depends on, swept over both transitions.
+
+    A returned instant that is not strictly in the future makes the
+    scheduler re-fire immediately and spin. Checked every 15 minutes across
+    4 days straddling each transition, for four different ``start`` times
+    including one (01:30) that falls inside the fall-back repeated hour and
+    one (02:30) that falls inside the spring-forward gap.
+    """
+    now = first_day
+    while now < first_day + timedelta(days=4):
+        assert pacing.next_window_start(now, _NY, start=start) > now
+        now += timedelta(minutes=15)
+
+
 # --- warm-up -----------------------------------------------------------
 
 
@@ -471,6 +628,62 @@ def test_plan_enrichment_different_seed_differs() -> None:
     plan1 = pacing.plan_enrichment(random.Random(1), 30)
     plan2 = pacing.plan_enrichment(random.Random(2), 30)
     assert plan1 != plan2
+
+
+def test_plan_enrichment_forwards_all_three_profile_arguments() -> None:
+    """``delay``, ``burst``, and ``scroll`` must actually reach the functions they parametrize.
+
+    Every other ``plan_enrichment`` test in this file passes the *default*
+    profiles, so none of them would notice ``plan_enrichment`` silently
+    calling ``human_delay(rng)``, ``scroll_like_a_person(rng)``, and
+    ``plan_burst_sizes(rng, visit_count)`` with no forwarding at all — the
+    defaults would produce a plausible-looking plan either way. This test
+    passes profiles far outside their defaults specifically so that using
+    the real defaults instead would be unmistakable: spec 9.7's heat
+    response ("while warm, human_delay medians stretch") is exactly the
+    caller this guards — P2-05/P2-07 will express that stretch as
+    ``DelayProfile(median=...)``, and a forwarding regression here would
+    silently put every gap back to 25s at full heat.
+    """
+    delay = pacing.DelayProfile(median=1000.0, sigma=0.05, tail_p=0.0, tail_range=(0.0, 0.0))
+    burst = pacing.BurstProfile(size_range=(2, 3), break_range_s=(5000.0, 6000.0))
+    scroll = pacing.ScrollProfile(
+        steps_range=(1, 1),
+        delta_range_px=(500, 500),
+        pause_range_s=(0.1, 0.1),
+        back_up_p=0.0,
+        back_up_delta_range_px=(1, 1),
+        dwell_median_s=1.0,
+        dwell_sigma=0.01,
+    )
+    plan = pacing.plan_enrichment(random.Random(5), 30, delay=delay, burst=burst, scroll=scroll)
+
+    # burst: every burst but the last sized 2 or 3 (default range is 8-15).
+    assert all(2 <= size <= 3 for size in plan.burst_sizes[:-1])
+
+    # scroll: every visit's plan is exactly the one fixed step this profile allows
+    # (default steps_range is 3-9 wheel events of variable magnitude).
+    for step in plan.steps:
+        assert len(step.scroll.steps) == 1
+        assert step.scroll.steps[0].delta_px == 500
+        assert step.scroll.steps[0].pause_s == pytest.approx(0.1)
+        assert 0.5 <= step.scroll.dwell_s <= 2.0  # tight around dwell_median_s=1.0
+
+    # delay: ordinary gaps land near median=1000 (default median is 25); burst-break
+    # gaps land inside break_range_s=(5000, 6000) (default range is (300, 1200)).
+    ordinary_gaps = [
+        step.delay_after_s
+        for step in plan.steps
+        if step.delay_after_s is not None and not step.burst_break
+    ]
+    burst_gaps = [
+        step.delay_after_s
+        for step in plan.steps
+        if step.burst_break and step.delay_after_s is not None
+    ]
+    assert ordinary_gaps and burst_gaps  # the run has at least one of each
+    assert all(800 <= gap <= 1200 for gap in ordinary_gaps)
+    assert all(5000 <= gap <= 6000 for gap in burst_gaps)
 
 
 def test_plan_enrichment_burst_sizes_sum_to_visit_count() -> None:
