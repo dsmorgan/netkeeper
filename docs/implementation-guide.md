@@ -126,13 +126,14 @@ Drift signals to watch for at every checkpoint:
 
 ### CP3: extractor safety review, before the first live run
 
-- **Demo:** `netkeeper preflight` against your Chrome; `netkeeper rehearse` against the neutral site with the request log; `netkeeper simulate --days 14 --throttles 2` showing budgets, warm-up, heat; the posture page with every protection on.
+- **Demo:** `netkeeper preflight` against your Chrome; `netkeeper rehearse` against the neutral site with the request log; `netkeeper simulate --days 14 --throttles 2` showing budgets, warm-up, heat; `netkeeper posture` with every protection on (the Settings page that shows the same report arrives with P2-12); the browser smoke suite passing on your Chrome (`NETKEEPER_BROWSER_TESTS=1`).
 - **Questions:** Are the defaults in Appendix C what the code does? Is there any path that launches a browser? Does a checkpoint response stop the run with no retry? Does the budget stop between profiles, never mid-profile? Does `linkedin/` import nothing from `models/`?
 - **Re-read:** ADR 0002, spec sections 9.5 to 9.7, 9.10.
-- **Then:** one supervised live incremental sync with `profile_visits_per_day = 5`, watching the tab.
+- **Outcome:** a safety review only. Nothing here contacts LinkedIn beyond logging in to the netkeeper Chrome profile. The first supervised live run moved to CP4 (CP3 decision), because it needs connections sync (P2-06), which is not one of this checkpoint's items.
 
 ### CP4: a week of scheduled runs
 
+- **First:** one supervised live incremental sync with `profile_visits_per_day = 5`, watching the tab. Before it, verify the Voyager endpoint constants against a DevTools capture from your own session (#149), and confirm only one browser client per account across processes (#153). Moved here from CP3.
 - **Demo:** Runs page for the week: every run, its counts, budget spend per day, heat history, any `Throttled` or `Checkpoint`.
 - **Questions:** Any throttle at all? If so, on which endpoint, and did the probes pass? Did the warm-up ramp as designed? Did contacts you pinned get enriched first? Did any contact get a wrong email (spot-check ten against the overlay by hand)?
 - **Re-read:** spec section 9.8, the igtracker lesson about 429s that are not rate limits.
