@@ -57,6 +57,11 @@ from netkeeper.services.backup import (
 from netkeeper.services.pacing import profiles as pacing_profiles
 from netkeeper.services.posture import SINGLE_ACCOUNT_ID, SessionProbe, posture
 from netkeeper.services.posture import render as render_posture
+from netkeeper.services.simulate_run import DEFAULT_DAYS as DEFAULT_SIMULATION_DAYS
+from netkeeper.services.simulate_run import DEFAULT_SEED as DEFAULT_SIMULATION_SEED
+from netkeeper.services.simulate_run import DEFAULT_THROTTLES as DEFAULT_SIMULATION_THROTTLES
+from netkeeper.services.simulate_run import InvalidSimulation, run_simulation
+from netkeeper.services.simulate_run import render as render_simulation
 from netkeeper.services.users import ensure_local_user
 from netkeeper.web.app import create_app, openapi_json
 
@@ -562,6 +567,52 @@ def _report_rehearsal(rehearsal: Rehearsal, log: Path | None) -> None:
 def _provider(settings: Settings) -> AttachBrowserProvider:
     """The one provider there is, pointed at the configured debug port (ADR 0002)."""
     return AttachBrowserProvider(settings.linkedin.cdp_url)
+
+
+@app.command("simulate")
+def simulate_command(
+    ctx: typer.Context,
+    days: Annotated[
+        int, typer.Option(help="How many simulated days to replay.")
+    ] = DEFAULT_SIMULATION_DAYS,
+    throttles: Annotated[
+        int,
+        typer.Option(help="How many Throttled outcomes to inject, at points drawn from --seed."),
+    ] = DEFAULT_SIMULATION_THROTTLES,
+    seed: Annotated[
+        int,
+        typer.Option(help="Seeds the throttle placement. The same seed always repeats."),
+    ] = DEFAULT_SIMULATION_SEED,
+) -> None:
+    """What would N simulated days do to your account? Answered without doing any of it.
+
+    Replays a deterministic virtual clock against your config's budgets, pacing,
+    heat, active hours, and timezone -- never against your real data. This command
+    builds its own throwaway SQLite database in a temporary directory, seeded cold
+    (no counters carried over from a real run), and deletes it again before
+    returning. It attaches to no browser and makes no request to linkedin.com or
+    anywhere else.
+
+    For every simulated day it shows the warm-up ramp, the weekend damping, how
+    many of the derived profile-visit budget were actually used, the heat score
+    and whether browser jobs were skipped, and how many of the injected throttles
+    landed that day, plus how many times each scheduled job kind fired. Each
+    injected throttle is fed through the real heat-raising call, so its
+    consequences -- heat rising, delays' cooldown multiplier stretching, the
+    per-run budget shrinking, and, with enough of them close together, the skip
+    threshold tripping -- are the genuine ones a live run would see, not a
+    picture of them.
+    """
+    state = ctx.ensure_object(CliState)
+    settings = _load_settings_or_exit(state)
+    try:
+        report = asyncio.run(
+            run_simulation(days=days, throttles=throttles, seed=seed, settings=settings)
+        )
+    except InvalidSimulation as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(render_simulation(report), nl=False)
 
 
 @backup_app.callback()

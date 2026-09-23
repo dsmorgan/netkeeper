@@ -707,9 +707,24 @@ def _callers_of(function: str) -> set[Path]:
     name was imported. ``posture.py`` is excluded because reading a counter is
     not enforcing a limit, and ``rehearse.py`` because a rehearsal is by
     definition not the live run whose budget has to be enforced.
+
+    ``simulate_run.py`` is excluded for the same reason as ``rehearse.py``,
+    P2-11's other rehearsal command: its injected job handler calls
+    ``budgets.consume``, ``raise_heat``, ``warmup_budget``, and
+    ``apply_weekend_multiplier`` for real, against a scratch database it
+    creates and deletes itself (see that module's docstring) -- but spending a
+    *simulated* account's budget is not production enforcement, whatever
+    functions it happens to call to do it convincingly. Counting it here would
+    shrink ``UNENFORCED_TODAY`` over a gap that has not actually closed: no
+    live job calls any of these four yet. #156's PR added this line rather
+    than let the list shrink on its own.
     """
     package = Path(browser_safety.PACKAGE)
-    ignore = {package / "services" / "posture.py", package / "linkedin" / "rehearse.py"}
+    ignore = {
+        package / "services" / "posture.py",
+        package / "linkedin" / "rehearse.py",
+        package / "services" / "simulate_run.py",
+    }
     found: set[Path] = set()
     for path in browser_safety.python_files(package):
         if path in ignore:
