@@ -421,8 +421,38 @@ async def test_a_fresh_install_runs_the_full_sync_on_day_zero(db_path: str, owne
     assert START + timedelta(minutes=CATCHUP_BOUNDS[0]) <= full[0].at
     assert full[0].at <= START + timedelta(minutes=CATCHUP_BOUNDS[1])
     assert full[0].is_catchup is False
-    fired_minutes = [int(f.at.timestamp() // 60) for f in result.fires if f.fired]
-    assert len(fired_minutes) == len(set(fired_minutes))
+
+
+async def test_a_fresh_install_after_hours_runs_the_full_sync_first_and_alone(
+    db_path: str, owner: User
+) -> None:
+    """Installed at 22:00, outside 08:30-21:30: the full sync, enrich (22:00 + 3 h)
+    and inbox all snap to 08:30, so they really contend. The full sync still
+    runs that morning, and no two kinds share a minute."""
+    installed = START + timedelta(hours=22)
+    morning = START + timedelta(days=1, hours=8, minutes=30)
+
+    result = await simulate.simulate(
+        _make_factory(db_path),
+        owner,
+        ACCOUNT,
+        start=installed,
+        end=morning + timedelta(hours=1),
+        seed=0,
+        active_start=time(8, 30),
+        active_end=time(21, 30),
+    )
+
+    fired = [f for f in result.fires if f.fired]
+    assert [f.at for f in _full_syncs(result)] == [morning]
+    contenders = [f for f in fired if f.at < morning + timedelta(minutes=10)]
+    assert {f.kind for f in contenders} == {
+        scheduler.JobKind.CONNECTIONS_FULL,
+        scheduler.JobKind.ENRICH,
+        scheduler.JobKind.INBOX,
+    }
+    minutes = [int(f.at.timestamp() // 60) for f in fired]
+    assert len(minutes) == len(set(minutes))
 
 
 async def test_restarting_an_established_install_does_not_rerun_the_full_sync(

@@ -179,10 +179,12 @@ def default_registry() -> JobRegistry:
 class JobSchedule:
     """How often ``kind`` runs, and whether it waits for active hours (spec 9.5).
 
-    ``run_on_first_setup`` makes a kind that has *never* been scheduled for
-    this account due right away (after the catch-up jitter) instead of one
-    interval out. Only a missing row counts as first setup: a restart, a
-    catch-up, and a timing-parameter change all leave it alone. Not part of
+    ``run_on_first_setup`` makes a kind that has *never fired* for this
+    account due right away (after the catch-up jitter) instead of one
+    interval out -- on the first schedule, and again if its timing changes
+    before that first fire (a timezone or active-hours edit during
+    onboarding must not push it a whole interval away). Once it has fired, a
+    timing change reschedules one interval out like any other kind. Not part of
     :class:`ScheduleFingerprint`, because it says nothing about when an
     established schedule fires.
     """
@@ -373,11 +375,13 @@ class ScheduleFingerprint:
 @dataclass(frozen=True, slots=True)
 class _JobState:
     """What is persisted per ``(account_id, kind)``: the due time, the fingerprint
-    that produced it, and whether that due time is a pending catch-up fire."""
+    that produced it, whether that due time is a pending catch-up fire, and
+    whether the kind has ever fired (:func:`record_fired` sets it)."""
 
     due: datetime
     fingerprint: ScheduleFingerprint
     is_catchup: bool = False
+    fired_once: bool = False
 
 
 def _key(account_id: int, kind: JobKind) -> str:
@@ -401,6 +405,9 @@ def _load_state(session: Session, user: User, account_id: int, kind: JobKind) ->
         due=datetime.fromisoformat(str(raw["due"])),
         fingerprint=ScheduleFingerprint.from_json(fingerprint_raw),
         is_catchup=bool(raw.get("is_catchup", False)),
+        # A row written before this flag existed counts as fired: the
+        # conservative reading, which never adds a run nobody scheduled.
+        fired_once=bool(raw.get("fired_once", True)),
     )
 
 
@@ -416,6 +423,7 @@ def _store_state(
             "due": state.due.isoformat(),
             "fingerprint": state.fingerprint.to_json(),
             "is_catchup": state.is_catchup,
+            "fired_once": state.fired_once,
         },
     )
 
@@ -479,10 +487,11 @@ def establish_schedule(
         schedule, tz=tz, active_start=active_start, active_end=active_end
     )
     existing = _load_state(session, user, account_id, kind)
-    # Only a missing row is first setup. A changed fingerprint also arrives
-    # with prior_due=None below, but it is an established schedule being
-    # retimed, not a new install, so it keeps the fresh ``now + interval``.
-    first_setup = existing is None and schedule.run_on_first_setup
+    # First setup is "has never fired", not "has no row": the row is written
+    # the moment the schedule is set, and a timing change before the first
+    # fire must keep that fire soon rather than push it an interval out (#161).
+    fired_once = existing is not None and existing.fired_once
+    first_setup = schedule.run_on_first_setup and not fired_once
     if existing is not None and existing.fingerprint == fingerprint:
         if existing.due > now:
             return ScheduleResult(
@@ -494,6 +503,9 @@ def establish_schedule(
     due, is_catchup, reason = compute_due(
         prior_due, now=now, interval=schedule.interval, rng=rng, first_setup=first_setup
     )
+    if existing is not None and prior_due is None:
+        # compute_due cannot tell "never scheduled" from "retimed"; say which.
+        reason = "timing changed before the first fire" if first_setup else "timing changed"
     due = _snap_to_active_hours(
         due,
         tz,
@@ -506,7 +518,7 @@ def establish_schedule(
         user,
         account_id,
         kind,
-        _JobState(due=due, fingerprint=fingerprint, is_catchup=is_catchup),
+        _JobState(due=due, fingerprint=fingerprint, is_catchup=is_catchup, fired_once=fired_once),
     )
     return ScheduleResult(due=due, changed=True, is_catchup=is_catchup, reason=reason)
 
@@ -609,6 +621,7 @@ def record_fired(
     tz: str,
     active_start: time = pacing.DEFAULT_ACTIVE_START,
     active_end: time = pacing.DEFAULT_ACTIVE_END,
+    handler_ran: bool = True,
 ) -> datetime:
     """Advance ``kind``'s due time to the next cycle after a fire (executed or
     heat-skipped -- either way, this fire happened and the cadence moves on).
@@ -616,6 +629,10 @@ def record_fired(
     Anchored to ``due`` -- the time this fire *was scheduled for* -- not
     ``now``, so the cadence never drifts with polling latency or how long the
     handler took to run. The new due time is never a pending catch-up.
+
+    ``handler_ran`` is False for a heat-skipped fire: the cadence moves on,
+    but the kind has not yet *run*, so a ``run_on_first_setup`` kind keeps its
+    first-setup standing (see :class:`JobSchedule`).
     """
     _require_writer(session, "scheduler.record_fired")
     state = _load_state(session, user, account_id, kind)
@@ -631,7 +648,13 @@ def record_fired(
         end=active_end,
         respect_active_hours=schedule.respect_active_hours,
     )
-    _store_state(session, user, account_id, kind, replace(state, due=next_due, is_catchup=False))
+    _store_state(
+        session,
+        user,
+        account_id,
+        kind,
+        replace(state, due=next_due, is_catchup=False, fired_once=state.fired_once or handler_ran),
+    )
     return next_due
 
 
@@ -748,6 +771,7 @@ async def poll_and_fire(
             tz=tz,
             active_start=active_start,
             active_end=active_end,
+            handler_ran=skipped_reason is None,
         )
     fired = skipped_reason is None
     if fired:

@@ -26,6 +26,7 @@ from netkeeper.models import User
 from netkeeper.models.base import utcnow
 from netkeeper.services import heat, scheduler
 from netkeeper.services.scheduler import DEFAULT_SCHEDULES
+from netkeeper.services.settings_kv import get_setting, set_setting
 
 NOW = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 ACCOUNT = 1
@@ -1014,17 +1015,118 @@ def test_restarting_an_established_full_sync_does_not_run_it_again(
     assert restart.due == fired_at + timedelta(days=7)
 
 
-def test_retiming_an_established_full_sync_is_not_first_setup(writer: Session, user: User) -> None:
-    """A changed fingerprint also reaches ``compute_due`` with no prior due time,
-    but it is an established schedule being retimed: one interval out, as before."""
-    _establish(writer, user, schedule=FULL)
-    later = NOW + timedelta(hours=1)
+def _fire(writer: Session, user: User, due: datetime, *, handler_ran: bool = True) -> None:
+    scheduler.record_fired(
+        writer,
+        user,
+        ACCOUNT,
+        FULL.kind,
+        due=due,
+        schedule=FULL,
+        tz="UTC",
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+        handler_ran=handler_ran,
+    )
+
+
+def test_retiming_a_full_sync_that_has_fired_is_one_interval_out(
+    writer: Session, user: User
+) -> None:
+    """Once the first full sync has run, a timing change is an ordinary retime."""
+    first = _establish(writer, user, schedule=FULL)
+    _fire(writer, user, first.due)
+    later = first.due + timedelta(hours=1)
 
     retimed = _establish(
         writer, user, now=later, schedule=FULL, active_start=time(0, 0), active_end=time(23, 59)
     )
 
-    assert retimed.reason == "no stored schedule yet"
+    assert retimed.reason == "timing changed"
+    assert retimed.due == later + timedelta(days=7)
+
+
+def test_a_second_retime_after_the_first_fire_is_still_one_interval_out(
+    writer: Session, user: User
+) -> None:
+    """A retime carries the fired flag forward rather than resetting it."""
+    first = _establish(writer, user, schedule=FULL)
+    _fire(writer, user, first.due)
+    _establish(
+        writer,
+        user,
+        now=first.due + timedelta(hours=1),
+        schedule=FULL,
+        active_start=time(0, 0),
+        active_end=time(23, 59),
+    )
+    later = first.due + timedelta(hours=2)
+
+    again = _establish(
+        writer, user, now=later, schedule=FULL, active_start=time(1, 0), active_end=time(23, 59)
+    )
+
+    assert again.due == later + timedelta(days=7)
+
+
+def test_retiming_a_full_sync_before_its_first_fire_keeps_it_soon(
+    writer: Session, user: User
+) -> None:
+    """The review's case: set up at 12:00, active hours edited at 12:10, before
+    the pending first full sync fired. It stays due soon, snapped into the *new*
+    hours (13:00-21:00, so 12:15-12:30 moves to 13:00) -- not a week out."""
+    _establish(writer, user, schedule=FULL)  # NOW is 12:00
+    edited = NOW + timedelta(minutes=10)
+
+    retimed = _establish(
+        writer, user, now=edited, schedule=FULL, active_start=time(13, 0), active_end=time(21, 0)
+    )
+
+    assert retimed.reason == "timing changed before the first fire"
+    assert retimed.due == datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
+
+
+def test_retiming_before_the_first_fire_inside_the_new_hours_keeps_the_jitter(
+    writer: Session, user: User
+) -> None:
+    _establish(writer, user, schedule=FULL)
+    edited = NOW + timedelta(minutes=10)
+
+    retimed = _establish(
+        writer, user, now=edited, schedule=FULL, active_start=time(9, 0), active_end=time(17, 0)
+    )
+
+    _assert_in_catchup_window(retimed.due, edited)
+
+
+def test_a_heat_skipped_first_fire_has_not_run_the_full_sync(writer: Session, user: User) -> None:
+    """A skip advances the cadence but builds no baseline, so first setup still stands."""
+    first = _establish(writer, user, schedule=FULL)
+    _fire(writer, user, first.due, handler_ran=False)
+    later = first.due + timedelta(hours=1)
+
+    retimed = _establish(
+        writer, user, now=later, schedule=FULL, active_start=time(0, 0), active_end=time(23, 59)
+    )
+
+    _assert_in_catchup_window(retimed.due, later)
+
+
+def test_a_row_from_before_the_fired_flag_counts_as_fired(writer: Session, user: User) -> None:
+    """The conservative reading of an old row: no extra full sync on a retime."""
+    first = _establish(writer, user, schedule=FULL)
+    key = f"scheduler.job.{ACCOUNT}.{FULL.kind.value}"
+    stored = get_setting(writer, user, key)
+    assert isinstance(stored, dict)
+    raw = dict(stored)
+    del raw["fired_once"]
+    set_setting(writer, user, key, raw)
+    later = first.due - timedelta(minutes=1)
+
+    retimed = _establish(
+        writer, user, now=later, schedule=FULL, active_start=time(0, 0), active_end=time(23, 59)
+    )
+
     assert retimed.due == later + timedelta(days=7)
 
 
