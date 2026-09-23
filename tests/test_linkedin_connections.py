@@ -441,7 +441,9 @@ async def test_a_total_of_zero_neither_ends_the_run_nor_completes_it() -> None:
 
     result, sink, _ = await _run(fetch, page_size=40)
 
-    assert fetch.starts == [0, 40, 80]  # read to the short page regardless
+    # The short page at 80 reaches no reported total (there is none), so one more
+    # request confirms the end with an empty page.
+    assert fetch.starts == [0, 40, 80, 100]
     assert len(sink.urns) == 100
     assert result.reason is StopReason.END_OF_LIST
     assert not result.complete
@@ -477,3 +479,45 @@ async def test_an_honest_trailing_empty_page_reporting_zero_still_completes() ->
     result, _, _ = await _run(fetch, page_size=40)
     assert fetch.starts == [0, 40, 80]
     assert result.complete
+
+
+# --- a short page in the middle of the list ------------------------------------------
+
+
+async def test_a_short_page_before_the_total_is_read_past_not_the_end() -> None:
+    """Offset 40 serves 39 of 40; the run carries on from 79 and completes."""
+    people = _hundred()
+    under_filled = Scripted(200, page_body(people[40:79], start=40, count=40, total=100))
+    fetch = FakeVoyagerFetch(people, script={1: under_filled})
+
+    result, _, _ = await _run(fetch, page_size=40)
+
+    assert fetch.starts == [0, 40, 79]
+    assert result.reason is StopReason.END_OF_LIST
+    assert len(result.seen_urns) == 100
+    assert result.complete
+
+
+async def test_a_short_page_that_reaches_the_total_is_the_end() -> None:
+    fetch = FakeVoyagerFetch(_hundred())
+    result, _, _ = await _run(fetch, page_size=40)
+    assert fetch.starts == [0, 40, 80]  # 80 + 20 reaches 100: no extra request
+    assert result.complete
+
+
+async def test_endless_full_pages_stop_at_the_page_budget() -> None:
+    """A source that never runs out (or a total that never arrives) is bounded."""
+    endless = [Person(1000 + i, f"Given{i}", f"Family{i}", None) for i in range(1000)]
+    fetch = FakeVoyagerFetch(endless, total=0)
+
+    result, _, _ = await _run(fetch, page_size=40, page_budget=5)
+
+    assert len(fetch.requests) == 5
+    assert result.reason is StopReason.PAGE_BUDGET
+    assert not result.complete
+
+
+async def test_every_slug_on_every_page_is_reported() -> None:
+    fetch = FakeVoyagerFetch(list(PEOPLE))
+    result, _, _ = await _run(fetch)
+    assert result.seen_public_ids == {person.slug for person in PEOPLE}

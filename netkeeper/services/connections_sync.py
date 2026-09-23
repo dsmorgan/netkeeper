@@ -254,6 +254,8 @@ async def sync_connections(
                 result.seen_urns,
                 observed_at=clock(),
                 disconnect_after_misses=settings.disconnect_after_misses,
+                seen_public_ids=result.seen_public_ids,
+                held_for_review=frozenset(counts.review_contact_ids),
             )
     return SyncRunReport(
         account_id=account_id,

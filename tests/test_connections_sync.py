@@ -611,3 +611,34 @@ async def test_no_run_starts_while_the_session_is_flagged(
         assert clear_session_flag(session, user)
     await _sync(session_factory, user_id, later, at=NOW + timedelta(days=2))
     assert later.requests != []
+
+
+async def test_a_partial_urn_change_disconnects_nobody_it_holds_for_review(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """The re-review's attack: 16 of 200 (8%) come back under a new URN, same slug.
+
+    Each of the 16 resolves to a candidate: under both limits, so aging runs.
+    They are still connections, and they are the rows waiting for a person.
+    """
+    people = _many(200)
+    await _sync(session_factory, user_id, FakeVoyagerFetch(people))
+    changed = {p.urn for p in people[100:116]}
+    renumbered = [replace(p, urn_prefix="ACoAANEW") if p.urn in changed else p for p in people]
+
+    reports = [
+        await _sync(
+            session_factory,
+            user_id,
+            FakeVoyagerFetch(renumbered),
+            at=NOW + timedelta(days=7 * week),
+        )
+        for week in (1, 2)
+    ]
+
+    assert all(r.pages.needs_review == 16 for r in reports)
+    assert all(r.aging is not None and r.aging.refused is None for r in reports)
+    assert all(r.aging is not None and r.aging.missed == 0 for r in reports)
+    contacts = _contacts(session_factory, user_id)
+    assert all((contacts[urn].li_missing_count, contacts[urn].li_disconnected_at) == (0, None)
+               for urn in changed)  # fmt: skip
