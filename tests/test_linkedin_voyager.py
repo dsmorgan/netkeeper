@@ -18,11 +18,15 @@ a deliberately unguarded version of its parser and confirmed to fail with
 
 from __future__ import annotations
 
+import copy
 import json
 import subprocess
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -55,7 +59,17 @@ from netkeeper.linkedin.voyager import (
 
 FIXTURES = Path(__file__).parent / "fixtures" / "voyager"
 # What ADR 0005 keeps out of the extractor (mirrors test_linkedin_archive.py).
-FORBIDDEN_IMPORTS = ("netkeeper.models", "netkeeper.crm", "netkeeper.db", "sqlalchemy")
+# #145 (branch p2-01-browser, not yet on main) consolidates this and its sibling
+# copies into a single sweep in tests/boundary.py. Once that lands, delete this
+# list and this module's boundary test and confirm the shared sweep covers
+# netkeeper/linkedin/voyager.py; until then, keep this list in sync by hand.
+FORBIDDEN_IMPORTS = (
+    "netkeeper.models",
+    "netkeeper.crm",
+    "netkeeper.db",
+    "netkeeper.scoping",
+    "sqlalchemy",
+)
 
 
 def _body(name: str) -> str:
@@ -111,6 +125,19 @@ class TestStripJessionid:
     def test_a_lone_quote_character_is_left_alone(self) -> None:
         # Too short to be "quoted": stripping it would just discard the value.
         assert strip_jsessionid('"') == '"'
+
+    def test_empty_string(self) -> None:
+        assert strip_jsessionid("") == ""
+
+    def test_two_quote_characters_is_the_empty_value_quoted(self) -> None:
+        # '""' is a quoted empty string, not a lone quote: it strips to "".
+        assert strip_jsessionid('""') == ""
+
+    def test_only_the_outer_quote_pair_is_stripped(self) -> None:
+        # Deliberate: this strips exactly one layer of quoting (the cookie's
+        # own), not every quote character in the value. A cookie value that
+        # legitimately contains a quote keeps it.
+        assert strip_jsessionid('"ajax:12"34"') == 'ajax:12"34'
 
 
 class TestBuildHeaders:
@@ -813,3 +840,301 @@ class TestParseConversationsPage:
                     }
                 )
             )
+
+
+# =============================================================================
+# Systematic guard-coverage sweep (review on #147)
+#
+# The hand-written malformed-input tests above each name one field and one
+# way it can go wrong; they read well, but nothing stops a future edit from
+# adding a field, reading it with a bare subscript, and joining the silently
+# untested set — that is exactly what happened to five guards a mutation
+# sample caught (see the module-level comment below the sweep's fixtures).
+#
+# This sweep instead walks every dict key in each parser's own happy-path
+# fixture, at every depth, and for each one generates two mutated copies:
+# the key removed, and the key's value replaced with something of an
+# incompatible JSON type. It asserts what "guarded" means for every one of
+# them, with no field left for a human to remember to cover:
+#
+#   removed   -> RouteChanged, unless the field is genuinely optional or the
+#                parser never reads it at all
+#   wrong type -> RouteChanged, unless the parser never reads the field at
+#                all (an optional field still validates its shape once it's
+#                present, so "optional" is not an exemption here)
+#
+# ``_Sweep.optional``/``.unused`` are the only escape hatches, and they are
+# closed lists of exact paths, not patterns: a path this sweep discovers in
+# the fixture that is in neither set defaults to "required", so a new field
+# added to a fixture without a matching guard (or an explicit decision that
+# it's optional/unused) fails this test the moment it's added, rather than
+# extending an untested set nobody notices growing.
+# =============================================================================
+
+PathStep = str | int
+FieldPath = tuple[PathStep, ...]
+
+
+def _walk_dict_paths(obj: object, prefix: FieldPath = ()) -> list[FieldPath]:
+    """Every path to a dict key in ``obj``, at any depth, including inside list items.
+
+    List indices themselves are never yielded as removable/mutable "keys" —
+    only object keys are, which is what "missing field" and "wrong-shaped
+    field" mean for a JSON document. Recursing into a list still finds every
+    dict key inside its items.
+    """
+    paths: list[FieldPath] = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            path = (*prefix, key)
+            paths.append(path)
+            paths.extend(_walk_dict_paths(value, path))
+    elif isinstance(obj, list):
+        for index, value in enumerate(obj):
+            paths.extend(_walk_dict_paths(value, (*prefix, index)))
+    return paths
+
+
+def _without_path(obj: object, path: FieldPath) -> object:
+    """A deep copy of ``obj`` with the dict key at ``path`` deleted."""
+    mutated: Any = copy.deepcopy(obj)
+    container = mutated
+    for step in path[:-1]:
+        container = container[step]
+    del container[path[-1]]
+    return mutated
+
+
+def _mismatched_value(original: object) -> object:
+    """Something of a JSON type incompatible with ``original``'s.
+
+    Order matters: ``bool`` is checked before ``int`` because
+    ``isinstance(True, int)`` is ``True`` in Python, and a bool swapped for
+    another bool-ish value would not actually exercise the type guard.
+    """
+    if isinstance(original, bool):
+        return "not-a-bool"
+    if isinstance(original, dict):
+        return "not-a-dict"
+    if isinstance(original, list):
+        return {"not": "a-list"}
+    if isinstance(original, str):
+        return ["not", "a-string"]
+    if isinstance(original, int):
+        return ["not", "an-int"]
+    if original is None:
+        # A field the fixture already sets to null (e.g. an absent optional
+        # object, spelled explicitly rather than omitted). There's no type
+        # to avoid matching, so use a JSON type this module never checks for
+        # (float) -- guaranteed to fail every ``_expect`` in voyager.py.
+        return 12345.6789
+    raise AssertionError(f"no mismatched-type case in this sweep for {type(original)}")
+
+
+def _with_wrong_type(obj: object, path: FieldPath) -> object:
+    """A deep copy of ``obj`` with the value at ``path`` replaced by an incompatible type."""
+    mutated: Any = copy.deepcopy(obj)
+    container = mutated
+    for step in path[:-1]:
+        container = container[step]
+    container[path[-1]] = _mismatched_value(container[path[-1]])
+    return mutated
+
+
+def _path_id(path: FieldPath) -> str:
+    return "".join(f"[{step}]" if isinstance(step, int) else f".{step}" for step in path).lstrip(
+        "."
+    )
+
+
+@dataclass(frozen=True)
+class _Sweep:
+    """One parser, its happy-path fixture, and the two allowlists that make the sweep provable.
+
+    ``optional``: paths the parser reads through ``_optional_field`` (or
+    equivalent) — absent is fine, but present-and-wrong-shaped still raises.
+    ``unused``: paths the parser never reads at all — LinkedIn sends them,
+    nothing here looks at them, so neither removing them nor corrupting
+    their type can raise. Every path in ``unused`` or ``optional`` was
+    confirmed against the current parser before being added here; a path
+    that is not is "required" by default, which is the point.
+    """
+
+    name: str
+    fixture: str
+    parser: Callable[[str], object]
+    optional: frozenset[FieldPath]
+    unused: frozenset[FieldPath]
+
+    def load(self) -> object:
+        return json.loads(_body(self.fixture))
+
+
+_CONNECTIONS_SWEEP = _Sweep(
+    name="connections",
+    fixture="connections_page.json",
+    parser=parse_connections_page,
+    optional=frozenset(
+        {
+            ("data", "elements", 0, "createdAt"),
+            ("data", "elements", 1, "createdAt"),
+            ("included", 0, "headline"),
+            ("included", 1, "headline"),
+        }
+    ),
+    # $type rides along on every included entity but this parser only ever
+    # reads entityUrn/publicIdentifier/firstName/lastName/headline off one.
+    unused=frozenset(
+        {
+            ("included", 0, "$type"),
+            ("included", 1, "$type"),
+        }
+    ),
+)
+
+_CONTACT_INFO_SWEEP = _Sweep(
+    name="contact_info",
+    fixture="contact_info.json",
+    parser=parse_contact_info,
+    # The three list fields are each optional as a whole (nobody has to share
+    # an email, phone, website, or handle); item_key is required within an
+    # item once the list itself is present.
+    optional=frozenset(
+        {
+            ("emailAddress",),
+            ("phoneNumbers",),
+            ("websites",),
+            ("twitterHandles",),
+        }
+    ),
+    # Only item_key is read out of a phoneNumbers/websites entry -- "type"
+    # and "category" ride along in the real payload and are never consulted.
+    unused=frozenset(
+        {
+            ("phoneNumbers", 0, "type"),
+            ("websites", 0, "category"),
+            ("websites", 0, "category", "type"),
+        }
+    ),
+)
+
+_PROFILE_DETAILS_SWEEP = _Sweep(
+    name="profile_details",
+    fixture="profile_details.json",
+    parser=parse_profile_details,
+    optional=frozenset(
+        {
+            ("data", "headline"),
+            ("data", "geoLocationName"),
+            ("included", 0, "dateRange", "start"),
+            ("included", 0, "dateRange", "start", "year"),
+            ("included", 0, "dateRange", "start", "month"),
+            ("included", 1, "dateRange", "start"),
+            ("included", 1, "dateRange", "start", "year"),
+            ("included", 1, "dateRange", "start", "month"),
+            ("included", 1, "dateRange", "end"),
+            ("included", 1, "dateRange", "end", "year"),
+            ("included", 1, "dateRange", "end", "month"),
+            ("included", 2, "degreeName"),
+            ("included", 2, "fieldOfStudy"),
+            ("included", 2, "dateRange", "start"),
+            ("included", 2, "dateRange", "start", "year"),
+            ("included", 2, "dateRange", "end"),
+            ("included", 2, "dateRange", "end", "year"),
+        }
+    ),
+    # entityUrn on an included Position/Education/Skill entity is never read
+    # (only the top-card's own entityUrn, under "data", is); a Skill entity's
+    # "name" is ignored entirely, since this parser only extracts positions
+    # and education out of "included" (see parse_profile_details's docstring
+    # on why an unrecognized $type is skipped, not rejected).
+    unused=frozenset(
+        {
+            ("included", 0, "entityUrn"),
+            ("included", 1, "entityUrn"),
+            ("included", 2, "entityUrn"),
+            ("included", 3, "entityUrn"),
+            ("included", 3, "name"),
+        }
+    ),
+)
+
+_CONVERSATIONS_SWEEP = _Sweep(
+    name="conversations",
+    fixture="conversations_page.json",
+    parser=parse_conversations_page,
+    optional=frozenset(
+        {
+            ("data", "elements", 0, "participants", 0, "publicIdentifier"),
+            ("data", "elements", 0, "lastMessage"),
+            ("data", "elements", 0, "lastMessage", "body"),
+            ("data", "elements", 0, "lastMessage", "sender"),
+            ("data", "elements", 1, "participants", 0, "publicIdentifier"),
+            ("data", "elements", 1, "participants", 1, "publicIdentifier"),
+            ("data", "elements", 1, "lastMessage"),
+        }
+    ),
+    # lastMessage carries its own entityUrn in the real payload; this parser
+    # only reads lastMessage.body.text and lastMessage.sender.entityUrn.
+    unused=frozenset(
+        {
+            ("data", "elements", 0, "lastMessage", "entityUrn"),
+        }
+    ),
+)
+
+_SWEEPS = (_CONNECTIONS_SWEEP, _CONTACT_INFO_SWEEP, _PROFILE_DETAILS_SWEEP, _CONVERSATIONS_SWEEP)
+
+
+def _sweep_cases() -> list[tuple[_Sweep, FieldPath]]:
+    cases: list[tuple[_Sweep, FieldPath]] = []
+    for sweep in _SWEEPS:
+        for path in _walk_dict_paths(sweep.load()):
+            cases.append((sweep, path))
+    return cases
+
+
+_SWEEP_CASES = _sweep_cases()
+_SWEEP_IDS = [f"{sweep.name}:{_path_id(path)}" for sweep, path in _SWEEP_CASES]
+
+
+@pytest.mark.parametrize(("sweep", "path"), _SWEEP_CASES, ids=_SWEEP_IDS)
+def test_every_field_removed_is_route_changed_or_declared_optional(
+    sweep: _Sweep, path: FieldPath
+) -> None:
+    fixture = sweep.load()
+    body = json.dumps(_without_path(fixture, path))
+    if path in sweep.optional or path in sweep.unused:
+        sweep.parser(body)  # must not raise
+    else:
+        with pytest.raises(RouteChanged):
+            sweep.parser(body)
+
+
+@pytest.mark.parametrize(("sweep", "path"), _SWEEP_CASES, ids=_SWEEP_IDS)
+def test_every_field_wrong_type_is_route_changed_unless_declared_unused(
+    sweep: _Sweep, path: FieldPath
+) -> None:
+    fixture = sweep.load()
+    body = json.dumps(_with_wrong_type(fixture, path))
+    if path in sweep.unused:
+        sweep.parser(body)  # must not raise: nothing reads this field
+    else:
+        # Note: unlike the removal sweep, "optional" is not an exemption
+        # here -- a field that's fine to omit is still validated once present.
+        with pytest.raises(RouteChanged):
+            sweep.parser(body)
+
+
+def test_every_declared_optional_or_unused_path_actually_exists_in_its_fixture() -> None:
+    """Guards the allowlists themselves against drift.
+
+    If a fixture is ever edited and a path in ``optional``/``unused`` stops
+    existing, the sweep above simply stops generating a case for it --
+    silently shrinking coverage rather than failing. This walks each
+    fixture once and confirms every declared path is still there.
+    """
+    for sweep in _SWEEPS:
+        found = set(_walk_dict_paths(sweep.load()))
+        stale = (sweep.optional | sweep.unused) - found
+        assert stale == set(), f"{sweep.name}: declared paths no longer in the fixture: {stale}"
