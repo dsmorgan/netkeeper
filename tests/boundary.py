@@ -85,3 +85,41 @@ def imports_pulled_in_by(module: str) -> list[str]:
         raise AssertionError(f"importing {module} failed:\n{result.stderr}")
     loaded: list[str] = json.loads(result.stdout)
     return [name for name in loaded if is_forbidden(name)]
+
+
+# --- the one mapping module (P2-14) -------------------------------------------------
+
+#: Spec 9.10's "Out" column as it exists so far: what the extractor hands the core.
+#: A module that imports one of these modules, or one of these names, handles
+#: extractor results. ``ProfileHarvest``, ``InboxDelta``, and ``MessageOutcome`` join
+#: with the jobs that return them (P2-07, P4). ``voyager.ConnectionSummary`` is named
+#: alone because the rest of ``voyager`` is request plumbing, not results.
+RESULT_MODULES = ("netkeeper.linkedin.connections",)
+RESULT_TYPES = ("netkeeper.linkedin.voyager.ConnectionSummary",)
+
+#: The modules allowed to turn an extractor result into rows: spec 9.10's
+#: ``crm/apply.py``, and nothing else.
+MAPPING_MODULES = ("netkeeper/crm/apply.py",)
+
+#: Models a module may name alongside a result without mapping it onto a table.
+#: ``User`` is the owner handle every core function takes, not a place results land.
+NOT_A_DESTINATION = ("netkeeper.models.User", "netkeeper.models.user.User")
+
+
+def maps_results(names: set[str], model_names: set[str]) -> bool:
+    """Whether a module that imports and reads ``names`` handles a result and names a table.
+
+    ``names`` is what the module imports (``module`` and ``module.member``) and
+    every qualified name it reads; ``model_names`` is every mapped model's
+    qualified name. Imports decide the first half because a mapper need not
+    spell a result's type anywhere but its import: ``page.connections`` names no
+    type at all.
+    """
+    handles = any(_names(name, RESULT_MODULES) or name in RESULT_TYPES for name in names)
+    destinations = set(model_names) - set(NOT_A_DESTINATION)
+    return handles and any(_names(name, destinations) for name in names)
+
+
+def _names(name: str, targets: tuple[str, ...] | set[str]) -> bool:
+    """``name`` is one of ``targets`` or inside one (``Contact.li_urn``, ``connections.X``)."""
+    return any(name == target or name.startswith(f"{target}.") for target in targets)
