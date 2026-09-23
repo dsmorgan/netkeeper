@@ -26,11 +26,15 @@ the gate refuses the next page.
 * a body the parser does not recognize is ``RouteChanged``: the run gives up on
   the endpoint for this run (spec 9.3).
 
-**The end of the list** is a *short* page: fewer connections than the page
-size asked for, an empty page included. ``paging.total`` never ends a run: a
-full page is followed by another request however small the reported total
-is, so a total that lies low cannot cut a sync short. (When the list length
-is an exact multiple of the page size, that costs one empty page.)
+**The end of the list** is an empty page, or a *short* page (fewer
+connections than asked for) that reaches the largest total any page has
+reported. A short page before that total is an under-filled page, not the
+end: it is logged and the run carries on from the next offset, so an endpoint
+that sometimes serves 39 of 40 does not end every full sync partway and leave
+the lifecycle never running. ``paging.total`` alone never ends a run: a full
+page is always followed by another request, so a total that lies low cannot
+cut a sync short, and a total of 0 means a short page is followed by one more
+request that comes back empty. The page budget bounds all of it.
 
 **Completion.** :attr:`SyncResult.complete` is true only for a full sync that
 ended on a short page with every page ``Ok``, whose pages reported a total
@@ -100,7 +104,7 @@ class StopReason(enum.StrEnum):
     """Why a run stopped. Only :attr:`END_OF_LIST` can make a full sync complete."""
 
     END_OF_LIST = "end_of_list"
-    """A page came back short (fewer connections than asked for, or none)."""
+    """An empty page, or a short page that reached the largest reported total."""
 
     CAUGHT_UP = "caught_up"
     """Incremental only: a page held nothing but already-known URNs."""
@@ -176,8 +180,9 @@ class ProgressEvent:
 class SyncResult:
     """How a run ended, and what it saw.
 
-    ``seen_urns`` is every URN on every page the run read; the core ages
-    contacts outside it, and only when :attr:`complete` is true. ``outcome`` and
+    ``seen_urns`` is every URN on every page the run read and ``seen_public_ids``
+    every slug; the core ages contacts outside both, and only when
+    :attr:`complete` is true. ``outcome`` and
     ``final_url`` describe the response that stopped the run when ``reason`` is
     :attr:`StopReason.RESPONSE` (the core raises heat or the session flag from
     them), and are ``None`` otherwise. ``total`` is the last page's reported
@@ -193,12 +198,13 @@ class SyncResult:
     final_url: str | None = None
     connections: int = 0
     max_total: int = 0
+    seen_public_ids: frozenset[str] = frozenset()
 
     @property
     def complete(self) -> bool:
         """A full sync that read the whole list: the only run that may age anyone (spec 9.8).
 
-        Ended on a short page, the list claimed to hold someone, and the run saw
+        Ended at the end of the list, the list claimed to hold someone, and the run saw
         at least as many people as the largest total any page claimed.
         """
         return (
@@ -321,6 +327,7 @@ async def run_connections_sync(
     can mistake it for complete.
     """
     seen: set[str] = set()
+    slugs: set[str] = set()
     pages = 0
     connections = 0
     total: int | None = None
@@ -340,6 +347,7 @@ async def run_connections_sync(
             final_url=final_url,
             connections=connections,
             max_total=max_total,
+            seen_public_ids=frozenset(slugs),
         )
 
     async def stopped(result: SyncResult) -> SyncResult:
@@ -402,15 +410,28 @@ async def run_connections_sync(
         max_total = max(max_total, result.total)
         urns = {connection.urn for connection in result.connections}
         seen.update(urns)
+        slugs.update(connection.public_id for connection in result.connections)
         await on_progress(
             ProgressEvent(mode=spec.mode, pages=pages, connections=connections, total=total)
         )
 
         start += len(result.connections)
-        # Only a short page ends the list. ``result.total`` is deliberately not
-        # consulted: a total that lies low would otherwise end a sync that has
-        # read a fraction of the list (see the module docstring).
-        if len(result.connections) < spec.page_size:
+        # See the module docstring: an empty page ends the list, a short page
+        # ends it only once it reaches the largest total any page reported, and
+        # a full page never does, whatever the total says.
+        if not result.connections:
             return await stopped(finish(StopReason.END_OF_LIST))
+        if len(result.connections) < spec.page_size:
+            if 0 < max_total <= start:
+                return await stopped(finish(StopReason.END_OF_LIST))
+            log.warning(
+                "connections: %s served %d of %d at offset %d, short of the reported"
+                " total %d; reading on",
+                source.endpoint,
+                len(result.connections),
+                spec.page_size,
+                result.start,
+                max_total,
+            )
         if spec.mode is SyncMode.INCREMENTAL and urns <= spec.known_urns:
             return await stopped(finish(StopReason.CAUGHT_UP))

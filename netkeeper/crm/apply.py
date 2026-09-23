@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, tzinfo
 from typing import Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -76,7 +76,9 @@ AGING_FLOOR: Final = 10
 #: stored contact. After the pages are applied every seen URN is on a contact unless
 #: identity resolution refused it (a candidate, a conflict), so many unmatched URNs
 #: mean the sync's URNs and the stored ones no longer name the same people -- which is
-#: exactly when the stored ones would all look missing.
+#: exactly when the stored ones would all look missing. The share is of the URNs
+#: *seen*, and :data:`AGING_FLOOR` applies to it only once more than that many were
+#: seen: with five seen, one stranger is already too many.
 UNMATCHED_MAX_SHARE: Final = 0.10
 
 
@@ -87,7 +89,9 @@ class PageCounts:
     ``seen`` is every connection on the pages; it splits into ``created``,
     ``updated``, ``needs_review`` (a candidate, left for a person) and
     ``conflicts`` (a URN or slug another contact holds). ``reconnected`` counts
-    contacts whose ``li_disconnected_at`` a sighting cleared.
+    contacts whose ``li_disconnected_at`` a sighting cleared. ``review_contact_ids``
+    is every contact a candidate row named: someone the sync may have seen under
+    another identity, which :func:`age_unseen` must not age while a person decides.
     """
 
     seen: int = 0
@@ -96,6 +100,7 @@ class PageCounts:
     needs_review: int = 0
     conflicts: int = 0
     reconnected: int = 0
+    review_contact_ids: set[int] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,8 +136,9 @@ def apply_page(
         incoming = _incoming(connection, page.observed_at, zone)
         resolution = resolve(session, user, incoming)
         match resolution:
-            case Candidate():
+            case Candidate(contact_ids=contact_ids):
                 counts.needs_review += 1
+                counts.review_contact_ids.update(contact_ids)
             case Matched() | New():
                 try:
                     apply(session, user, incoming, resolution)
@@ -162,10 +168,18 @@ def age_unseen(
     *,
     observed_at: datetime,
     disconnect_after_misses: int,
+    seen_public_ids: frozenset[str] = frozenset(),
+    held_for_review: frozenset[int] = frozenset(),
 ) -> AgingCounts:
-    """Give every contact with a URN outside ``seen_urns`` one more miss (spec 9.8).
+    """Give every contact the sync did not see one more miss (spec 9.8).
 
-    Call once, after a complete full sync, with every URN that sync saw. At
+    Call once, after a complete full sync, with every URN that sync saw, every
+    slug it saw (``seen_public_ids``), and every contact a candidate row named
+    (``held_for_review``, :attr:`PageCounts.review_contact_ids`). A contact
+    counts as seen when its URN, *or* its slug, appeared, or when it is waiting
+    for review: a profile that came back under a new URN with the same slug
+    resolves to a candidate and is never written, and aging it would disconnect
+    exactly the rows a person has been asked to look at. At
     ``disconnect_after_misses`` consecutive misses the contact's
     ``li_disconnected_at`` is set to ``observed_at``; one already disconnected
     keeps the time it was first set. Nothing is committed.
@@ -175,12 +189,17 @@ def age_unseen(
     than a week of disconnections:
 
     * ``seen_urns`` is empty -- a list that answered with nobody at all;
+    * every contact that can age would miss, or more than half of them would;
     * more contacts would miss than ``max(AGING_FLOOR, AGING_MAX_SHARE`` of the
       contacts that can age``)``;
-    * more seen URNs match no stored contact than ``max(AGING_FLOOR,
-      UNMATCHED_MAX_SHARE`` of the seen URNs``)`` -- the sync and the database no
-      longer agree on what a URN is (a scheme change turns every row into a
-      candidate, and every stored contact would then look missing).
+    * more seen URNs match no stored contact than ``UNMATCHED_MAX_SHARE`` of the
+      seen URNs, floored at ``AGING_FLOOR`` only once more than ``AGING_FLOOR``
+      URNs were seen -- the sync and the database no longer agree on what a URN
+      is (a scheme change turns every row into a candidate, and every stored
+      contact would then look missing).
+
+    The first rule is what protects a small network: the floor of ten would
+    otherwise let a sync wipe out a network of ten.
     """
     _require_writer(session)
     if disconnect_after_misses < 1:
@@ -193,12 +212,19 @@ def age_unseen(
     statement = scoped(user, Contact).where(
         Contact.li_urn.is_not(None), Contact.merged_into_id.is_(None)
     )
-    candidates = list(session.scalars(statement))
-    stored = {contact.li_urn for contact in candidates}
-    unseen = [contact for contact in candidates if contact.li_urn not in seen_urns]
+    ageable = list(session.scalars(statement))
+    stored = {contact.li_urn for contact in ageable}
+    slugs = {slug.lower() for slug in seen_public_ids}
+    unseen = [
+        contact
+        for contact in ageable
+        if contact.li_urn not in seen_urns
+        and contact.li_public_id not in slugs
+        and contact.id not in held_for_review
+    ]
     refusal = _implausible(
         missed=len(unseen),
-        can_age=len(candidates),
+        can_age=len(ageable),
         unmatched=len(seen_urns - stored),
         seen=len(seen_urns),
     )
@@ -209,7 +235,7 @@ def age_unseen(
             user.id,
             refusal,
             len(unseen),
-            len(candidates),
+            len(ageable),
             len(seen_urns - stored),
             len(seen_urns),
         )
@@ -240,12 +266,21 @@ def _limit(share: float, of: int) -> int:
 
 def _implausible(*, missed: int, can_age: int, unmatched: int, seen: int) -> str | None:
     """Why aging this sync would be trusting a misreading, or None when it looks real."""
+    if missed and missed == can_age:
+        return f"all {can_age} contacts that can age would miss this sync"
+    if missed * 2 > can_age:
+        return f"{missed} of {can_age} contacts would miss this sync, more than half"
     if missed > _limit(AGING_MAX_SHARE, can_age):
         return (
             f"{missed} of {can_age} contacts would miss this sync, more than the"
             f" {_limit(AGING_MAX_SHARE, can_age)} one sync may age"
         )
-    if unmatched > _limit(UNMATCHED_MAX_SHARE, seen):
+    unmatched_limit = (
+        _limit(UNMATCHED_MAX_SHARE, seen)
+        if seen > AGING_FLOOR
+        else math.floor(UNMATCHED_MAX_SHARE * seen)
+    )
+    if unmatched > unmatched_limit:
         return (
             f"{unmatched} of the {seen} URNs this sync saw match no contact; the"
             " stored URNs and LinkedIn's may no longer name the same people"

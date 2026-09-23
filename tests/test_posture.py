@@ -790,6 +790,13 @@ def _module_file(name: str) -> Path | None:
 def _live_modules() -> set[Path]:
     """Every module an entry point reaches through imports, module-level or in a function.
 
+    Liveness here is *import* reachability, not call reachability: an import
+    inside a function nobody calls still counts, and so does a module imported
+    only for a constant. It is a necessary condition for enforcement, not proof
+    of it. So treat any shrink of ``UNENFORCED_TODAY`` as a claim to verify by
+    reading the path from the entry point to the call, not as something this
+    scan has established.
+
     The rehearsal and report modules (:func:`_not_production`) are reached but not
     followed: ``netkeeper simulate`` importing the scheduler runs a *simulated*
     schedule, and ``netkeeper posture`` importing it reads constants. Neither makes
