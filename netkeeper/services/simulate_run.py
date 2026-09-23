@@ -7,26 +7,43 @@ actually do to my account?" -- answered without doing any of it. Two things
 of handlers that default to no-ops):
 
 1. **A real job handler for ``JobKind.ENRICH``**, the job kind spec 9.4 spends
-   a visit budget on. This module's handler is that job: on every fire the
-   scheduler does not heat-skip, it derives today's warm-up-ramped,
-   weekend-damped, heat-shrunk profile-visit allowance
+   a visit budget on. This module's handler is that job: before every unit it
+   spends, it re-derives today's warm-up-ramped, weekend-damped,
+   heat-shrunk profile-visit allowance
    (:func:`netkeeper.linkedin.pacing.warmup_budget`,
    :func:`netkeeper.linkedin.pacing.apply_weekend_multiplier`,
    :func:`netkeeper.linkedin.heat.shrink` -- the same three calls
    ``netkeeper.services.posture``'s report derives its numbers from, not a
-   second copy of that arithmetic) and then spends it one unit at a time
-   through :func:`netkeeper.services.budgets.consume`, the real enforcement
-   call, against a *scratch* database this module owns end to end.
+   second copy of that arithmetic), then spends the unit through
+   :func:`netkeeper.services.budgets.consume`, the real enforcement call,
+   against a *scratch* database this module owns end to end. **Re-derives
+   before every unit, not once per fire**: a throttle inside a fire raises
+   heat immediately, and the very next unit in that same fire has to see the
+   shrunk cap, or spec 9.7's "while warm... the per-run budget shrinks" is
+   true of the report and false of the run it claims to describe.
 
 2. **Injected throttles.** ``--throttles K`` (the CLI's, threaded through here
-   as ``throttles``) marks ``K`` ``Throttled`` outcomes at simulated-day
-   targets drawn from a seeded :class:`random.Random` (:func:`_pick_days`).
-   When a targeted unit comes up in the handler's spend loop, it calls
-   :func:`netkeeper.services.heat.raise_heat` -- the real call, not a
-   number this module invents -- instead of merely succeeding. Two
-   throttled units in a row abort that fire's spend loop early (spec 9.7's
-   classify table: "two consecutive throttled units abort the run";
-   :data:`CONSECUTIVE_THROTTLE_ABORT` pins the "two").
+   as ``throttles``) marks ``K`` distinct positions in the *global, run-wide
+   sequence of profile-visit units this scenario actually spends* -- not a
+   calendar day, which can have no spend to throttle at all (a day the weekly
+   ceiling has already exhausted, say, while an earlier day in the same run
+   had untouched budget). :func:`run_simulation` runs the scenario *twice*:
+   once with no throttles, purely to discover how many units it really
+   spends (the weekly ceiling and weekend damping both cut that well below
+   any per-day formula), and once for real, with :func:`_pick_spend_ordinals`
+   drawing ``K`` ordinals from a seeded :class:`random.Random` over that
+   genuine total. The handler keeps a running count of units actually
+   consumed and checks it against that set on every one. When a targeted
+   unit comes up, it calls :func:`netkeeper.services.heat.raise_heat` -- the
+   real call, not a number this module invents -- instead of merely
+   succeeding. Two throttled units in a row abort that fire's spend loop
+   early (spec 9.7's classify table: "two consecutive throttled units abort
+   the run"; :data:`CONSECUTIVE_THROTTLE_ABORT` pins the "two"). An ordinal
+   can still go unreached in the second pass if an earlier throttle's heat
+   suppresses spend the throttle-free baseline did not see --
+   :attr:`SimulationReport.throttles_landed` says how many actually landed,
+   and :func:`render` prints a warning line when it falls short of what was
+   requested, rather than only ever claiming the header count.
 
 That combination -- a handler that is a real caller of both ``consume`` and
 ``raise_heat`` -- is new: ``netkeeper.services.posture.UNENFORCED_TODAY``
@@ -38,7 +55,9 @@ account's budget is not production enforcement, and letting the scan count it
 would shrink ``UNENFORCED_TODAY`` over a gap that has not actually closed.
 
 **Never the user's real database.** :func:`run_simulation` creates a SQLite
-file under a throwaway temporary directory, builds the schema on it, runs
+file under a throwaway temporary directory, migrates it to the production
+schema (:func:`netkeeper.migrations.upgrade` -- the same schema `netkeeper db
+upgrade` builds, not a `Base.metadata.create_all` approximation of it), runs
 the whole scenario against it, and deletes the directory again before
 returning (:func:`_scratch_database`). It is seeded from the *config*
 ``settings`` passed in -- budgets, pacing, heat, active hours, timezone --
@@ -56,6 +75,23 @@ inputs that ever change the output are ``--days``, ``--throttles``, and
 ``--seed`` themselves, and a fortnight (or longer) always crosses at least
 one weekend for the damping to show.
 
+**What every column actually means, because a report that shows a number
+that never governed anything is worse than not showing it.** ``HEAT-CAP`` is
+not recomputed after the fact from an end-of-day heat reading -- that number
+can be *higher* than what really governed spending (heat decays back down
+before the day ends) or simply never have been in force for a single unit.
+It is the cap the handler itself last checked before it stopped spending
+that day, tracked live in :class:`_RunState` as the day happens.
+``MIN-CAP`` is the lowest that live-tracked cap ever reached that day, for a
+day where heat moved the cap more than once. ``SKIP?`` is not read off an
+end-of-day heat snapshot either (the score can fall back under the threshold
+by the time the day closes, well after a real fire was actually skipped
+mid-day) -- it is whether the scheduler's own ``SimResult`` recorded a
+heat-skipped fire that day, at all. A day the handler never touched (heat
+skipped every fire, or the day fell outside active hours) falls back to a
+one-shot end-of-day derivation for ``HEAT-CAP``/``MIN-CAP``, which is exactly
+right there: heat cannot have changed on a day nothing happened.
+
 **Nothing here imports a browser.** No ``AttachBrowserProvider``, no CDP, no
 network -- ``tests/test_browser_safety.py``'s allowlist is untouched by this
 module on purpose. ``simulate.simulate()`` already drives a virtual clock
@@ -65,6 +101,7 @@ a report on top of it, not a second clock.
 
 from __future__ import annotations
 
+import logging
 import shutil
 import tempfile
 from collections.abc import Iterator, Sequence
@@ -78,11 +115,12 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper import migrations
 from netkeeper.config import BudgetSettings, HeatSettings, Settings
 from netkeeper.db import make_engine, make_session_factory, session_scope
 from netkeeper.linkedin import heat as heat_math
 from netkeeper.linkedin import pacing
-from netkeeper.models import Base, User, UserKind
+from netkeeper.models import User, UserKind
 from netkeeper.scoping import install_scope_guard
 from netkeeper.services import heat as heat_rows
 from netkeeper.services import scheduler, simulate
@@ -130,16 +168,18 @@ class JobFires:
 
 @dataclass(frozen=True, slots=True)
 class DayReport:
-    """One simulated day: the budget chain and heat exactly as
-    ``netkeeper.services.posture`` would report them, plus what the scheduler did.
+    """One simulated day: the budget chain and heat, plus what the scheduler did.
 
-    ``week`` is spec 9.6's *other* profile-visit ceiling
-    (``PeriodBudget`` -- reused from ``netkeeper.services.budgets``, the same
-    dataclass ``consume`` and ``status`` already return): the daily warm-up
-    chain in ``budget`` can say a day is allowed 29 more visits while the ISO
-    week is already at its own limit and refuses every one of them. Both are
-    real; a report that only showed the day would make that day look broken
-    instead of governed by a second ceiling.
+    ``budget.after_heat`` is the cap that actually governed spending that
+    day, not an end-of-day recomputation (see the module docstring).
+    ``min_heat_cap`` is the lowest that cap fell to that day, which can be
+    lower still when more than one throttle landed. ``week`` is spec 9.6's
+    *other* profile-visit ceiling (``PeriodBudget``, reused from
+    ``netkeeper.services.budgets``): the daily chain can say a day is
+    allowed 29 more visits while the ISO week is already at its own limit
+    and refuses every one of them. ``heat_skipped_today`` is read directly
+    off that day's fires, not off an end-of-day heat reading that may have
+    already decayed back under the threshold.
     """
 
     index: int
@@ -147,8 +187,10 @@ class DayReport:
     weekday: str
     is_weekend: bool
     budget: TodaysBudget
+    min_heat_cap: int
     week: PeriodBudget | None
     heat: HeatPosture
+    heat_skipped_today: bool
     throttles_landed: int
     jobs: tuple[JobFires, ...]
 
@@ -194,6 +236,65 @@ async def run_simulation(
     if throttles < 0:
         raise InvalidSimulation(f"throttles must not be negative, got {throttles}")
 
+    if throttles == 0:
+        return await _replay(
+            days=days,
+            throttles=0,
+            target_ordinals=frozenset(),
+            seed=seed,
+            settings=settings,
+            heat_gate=heat_gate,
+        )
+
+    # Two passes. `_pick_spend_ordinals` needs an upper bound on how many
+    # profile-visit units this scenario can ever spend, and the honest one
+    # is not a formula -- it is "how many a throttle-free run of the exact
+    # same days, seed, and settings actually spends", because the weekly
+    # ceiling (spec 9.6) and weekend damping both cut real spend well below
+    # any per-day arithmetic that does not also account for a whole week's
+    # worth of days sharing one ceiling. A looser analytic estimate was
+    # tried first and routinely lost a throttle or two even on the exact
+    # invocation #30 names (`--days 14 --throttles 2`, no seed): most of its
+    # headroom was ordinals past the point the weekly ceiling had already
+    # cut spending off. The baseline run is thrown away -- its own database
+    # is a second, separate scratch database, deleted like any other -- and
+    # costs about as much wall time as the real run.
+    baseline = await _replay(
+        days=days,
+        throttles=0,
+        target_ordinals=frozenset(),
+        seed=seed,
+        settings=settings,
+        heat_gate=heat_gate,
+    )
+    total_spend = sum(day.budget.spent for day in baseline.days)
+    rng = Random(seed)  # noqa: S311 -- deterministic replay, not crypto
+    target_ordinals = _pick_spend_ordinals(rng, throttles, total_spend)
+    return await _replay(
+        days=days,
+        throttles=throttles,
+        target_ordinals=target_ordinals,
+        seed=seed,
+        settings=settings,
+        heat_gate=heat_gate,
+    )
+
+
+async def _replay(
+    *,
+    days: int,
+    throttles: int,
+    target_ordinals: frozenset[int],
+    seed: int,
+    settings: Settings,
+    heat_gate: HeatGate | None,
+) -> SimulationReport:
+    """One full scratch-database replay, with throttles injected at exactly
+    ``target_ordinals``. :func:`run_simulation` is the public entry point;
+    this is split out so it can be called once (the throttle-free case, or
+    the baseline pass that discovers a real ``target_ordinals`` for the
+    second call -- see its own comment).
+    """
     linkedin = settings.linkedin
     zone = ZoneInfo(linkedin.timezone)
     active_start, active_end = _active_window(linkedin.active_hours)
@@ -202,9 +303,6 @@ async def run_simulation(
 
     gate = linkedin.heat if heat_gate is None else heat_gate
     effective_heat = linkedin.heat if isinstance(gate, HeatSkip) else gate
-
-    rng = Random(seed)  # noqa: S311 -- deterministic replay, not crypto
-    throttle_targets = _pick_days(rng, throttles, days)
 
     with _scratch_database() as factory:
         with session_scope(factory, write=True) as session:
@@ -217,7 +315,7 @@ async def run_simulation(
             session.add(user)
             session.flush()
 
-        state = _RunState(throttle_targets=throttle_targets)
+        state = _RunState(target_ordinals=target_ordinals)
         registry = dict(scheduler.default_registry())
         registry[scheduler.JobKind.ENRICH] = _make_enrich_handler(
             factory,
@@ -272,7 +370,7 @@ async def run_simulation(
             )
             snapshot_now = day_end - timedelta(seconds=1)
             with session_scope(factory) as session:
-                budget, week = _todays_budget(
+                budget, min_heat_cap, week = _day_snapshot(
                     session,
                     user,
                     SINGLE_ACCOUNT_ID,
@@ -283,6 +381,7 @@ async def run_simulation(
                     weekend_multiplier=linkedin.weekend_multiplier,
                     cap=cap,
                     now=snapshot_now,
+                    state=state,
                 )
                 heat_posture = _heat_snapshot(
                     session, user, SINGLE_ACCOUNT_ID, now=snapshot_now, settings=effective_heat
@@ -294,8 +393,12 @@ async def run_simulation(
                     weekday=day_date.strftime("%A"),
                     is_weekend=pacing.is_weekend(day_date),
                     budget=budget,
+                    min_heat_cap=min_heat_cap,
                     week=week,
                     heat=heat_posture,
+                    heat_skipped_today=any(
+                        not f.fired and f.skipped_reason == "heat" for f in day_result.fires
+                    ),
                     throttles_landed=len(state.throttle_log) - landed_before,
                     jobs=_bucket_fires(day_result.fires),
                 )
@@ -312,24 +415,35 @@ async def run_simulation(
     )
 
 
-# --- throttle placement -------------------------------------------------------
+# --- throttle placement: a position in the run-wide spend sequence, not a day ---
 
 
-def _pick_days(rng: Random, count: int, days: int) -> dict[int, int]:
-    """Which simulated day (0-based) each of ``count`` injected throttles lands on.
+def _pick_spend_ordinals(rng: Random, count: int, total_spend: int) -> frozenset[int]:
+    """``count`` distinct 0-based positions in the global sequence of profile-visit
+    units this run spends, drawn from ``range(total_spend)``.
 
-    Drawn with replacement via ``rng.randrange(days)``: two throttles can
-    land on the same day -- the clustering a demo of the skip threshold needs
-    -- and a different seed picks a different set of days. ``days <= 0`` or
-    ``count <= 0`` returns ``{}``.
+    ``total_spend`` is meant to be the *real* number of units a throttle-free
+    run of this exact scenario spends (:func:`run_simulation`'s baseline
+    pass discovers it by actually running one) -- every ordinal drawn is then
+    guaranteed reachable, because it names a unit the scenario is already
+    known to spend. Placing throttles by ordinal rather than by calendar day
+    is what makes that guarantee possible at all: a day can have nothing left
+    to spend (the weekly ceiling already hit, say) while an earlier day in
+    the same run had plenty of untouched budget, so a day-based target can
+    miss even when the run as a whole had room for it.
+
+    Passed anything smaller than the real total -- an estimate, or a second
+    run whose own throttles suppressed some spend the baseline did not see --
+    an ordinal at or beyond it simply never comes up, which
+    :func:`run_simulation` reports honestly as fewer throttles landed than
+    were requested rather than silently drawing fewer to begin with.
+
+    A different seed draws a different set; the same seed repeats. ``count``
+    or ``total_spend`` non-positive returns ``frozenset()``.
     """
-    targets: dict[int, int] = {}
-    if days <= 0:
-        return targets
-    for _ in range(count):
-        day = rng.randrange(days)
-        targets[day] = targets.get(day, 0) + 1
-    return targets
+    if total_spend <= 0 or count <= 0:
+        return frozenset()
+    return frozenset(rng.sample(range(total_spend), k=min(count, total_spend)))
 
 
 def _local_date(at: datetime, zone: ZoneInfo) -> date:
@@ -343,9 +457,18 @@ def _local_date(at: datetime, zone: ZoneInfo) -> date:
 class _RunState:
     """Mutable, closed over by the handler across every fire of the whole replay."""
 
-    throttle_targets: dict[int, int]
-    thrown: dict[int, int] = field(default_factory=dict)
+    target_ordinals: frozenset[int]
+    #: How many profile-visit units this run has successfully spent so far,
+    #: across every day and every fire -- the counter :func:`_pick_spend_ordinals`'s
+    #: ordinals are positions into.
+    units_spent_total: int = 0
     throttle_log: list[datetime] = field(default_factory=list)
+    #: Per simulated day: the derived cap (:func:`_derive_allowance`'s
+    #: ``after_heat``) as it stood the last time the handler checked it that
+    #: day, and the lowest it ever stood that day. Absent for a day the
+    #: handler never ran on at all.
+    last_cap: dict[int, int] = field(default_factory=dict)
+    min_cap: dict[int, int] = field(default_factory=dict)
 
 
 def _make_enrich_handler(
@@ -362,13 +485,26 @@ def _make_enrich_handler(
     state: _RunState,
 ) -> scheduler.JobHandler:
     """A real ``JobKind.ENRICH`` handler: spends today's derived budget one unit at a
-    time, and turns targeted units into throttles.
+    time, re-deriving the cap before every single one, and turns targeted units
+    into throttles.
 
     This is what makes ``consume`` and ``raise_heat`` real callers instead of
     numbers this module invents (see the module docstring). Every other job
     kind still gets ``noop_handler`` -- spec 9.6 budgets only ``profile_visits``
     against a warm-up ramp; the other three job kinds have nothing here to
     enforce.
+
+    The cap is re-derived from a fresh ``cooldown_multiplier`` read *before
+    every unit*, not once per fire: a throttle raises heat mid-loop, and the
+    very next unit in that same fire has to spend against the shrunk cap for
+    spec 9.7's "the per-run budget shrinks" to be true of what this handler
+    actually does, not only of what a snapshot says afterward. ``today_count``
+    is tracked locally rather than re-read from the database on every
+    iteration -- it only has to be seeded once, from what earlier fires
+    already spent today, and re-reading it every time would make the loop's
+    own termination depend on ``consume`` actually persisting something,
+    which is one of the properties a test has to be free to break without
+    hanging the suite.
     """
 
     async def handler(ctx: scheduler.JobContext) -> None:
@@ -377,17 +513,6 @@ def _make_enrich_handler(
         local_date = _local_date(ctx.due, zone)
         day_index = (local_date - start_date).days
         with session_scope(factory, write=True) as session:
-            multiplier = heat_rows.cooldown_multiplier(
-                session, user, account_id, now=ctx.due, settings=heat_settings
-            )
-            _, _, after_heat = _derive_allowance(
-                day_index,
-                local_date,
-                budget_settings=budget_settings,
-                weekend_multiplier=weekend_multiplier,
-                cap=cap,
-                multiplier=multiplier,
-            )
             today_count = budget_status(
                 session,
                 user,
@@ -396,11 +521,23 @@ def _make_enrich_handler(
                 now=ctx.due,
                 settings=budget_settings,
             ).day.count
-            remaining_throttles = state.throttle_targets.get(day_index, 0) - state.thrown.get(
-                day_index, 0
-            )
             consecutive = 0
-            while consecutive < CONSECUTIVE_THROTTLE_ABORT and today_count <= after_heat:
+            while consecutive < CONSECUTIVE_THROTTLE_ABORT:
+                multiplier = heat_rows.cooldown_multiplier(
+                    session, user, account_id, now=ctx.due, settings=heat_settings
+                )
+                _, _, after_heat = _derive_allowance(
+                    day_index,
+                    local_date,
+                    budget_settings=budget_settings,
+                    weekend_multiplier=weekend_multiplier,
+                    cap=cap,
+                    multiplier=multiplier,
+                )
+                state.last_cap[day_index] = after_heat
+                state.min_cap[day_index] = min(state.min_cap.get(day_index, after_heat), after_heat)
+                if today_count >= after_heat:
+                    break
                 try:
                     consume(
                         session,
@@ -413,12 +550,12 @@ def _make_enrich_handler(
                 except BudgetExceeded:
                     break
                 today_count += 1
-                if remaining_throttles > 0:
+                ordinal = state.units_spent_total
+                state.units_spent_total += 1
+                if ordinal in state.target_ordinals:
                     heat_rows.raise_heat(
                         session, user, account_id, now=ctx.due, settings=heat_settings
                     )
-                    remaining_throttles -= 1
-                    state.thrown[day_index] = state.thrown.get(day_index, 0) + 1
                     state.throttle_log.append(ctx.due)
                     consecutive += 1
                 else:
@@ -439,10 +576,9 @@ def _derive_allowance(
     """``(ramp, after_weekend, after_heat)`` -- the same chain, in the same order,
     ``netkeeper.services.posture``'s ``_todays_budget`` derives its numbers in.
 
-    Shared by the handler (which needs it live, to know how much of today is
-    left to spend) and :func:`_todays_budget` (the retroactive per-day
-    snapshot the report reads), so the two can never say something different
-    about the same day.
+    Shared by the handler (which needs it live, before every unit) and
+    :func:`_day_snapshot` (the fallback for a day the handler never touched at
+    all), so the two can never say something different about the same day.
     """
     ramp = pacing.warmup_budget(
         day_index, cap, start=budget_settings.warmup_start, step=budget_settings.warmup_step
@@ -459,7 +595,7 @@ def _derive_allowance(
 # --- the per-day report: read-only, after the fact ---------------------------
 
 
-def _todays_budget(
+def _day_snapshot(
     session: Session,
     user: User,
     account_id: int,
@@ -471,30 +607,48 @@ def _todays_budget(
     weekend_multiplier: float,
     cap: int,
     now: datetime,
-) -> tuple[TodaysBudget, PeriodBudget | None]:
-    """``day_index``'s budget chain, and spec 9.6's separate weekly ceiling on the
-    same action class, read back right after that day's window closes -- see
-    :func:`run_simulation`'s comment on why the snapshot has to happen there
-    and not once at the very end.
+    state: _RunState,
+) -> tuple[TodaysBudget, int, PeriodBudget | None]:
+    """``(budget, min_heat_cap, week)`` for ``day_index``, read back right after
+    that day's window closes.
+
+    ``budget.after_heat`` and ``min_heat_cap`` come from ``state``'s live
+    tracking -- the cap as it actually governed the handler's spending that
+    day -- whenever the handler ran at all. A day it never touched (every
+    fire heat-skipped, or the day fell outside active hours) falls back to a
+    one-shot derivation at ``now``, which is exactly right there: heat
+    cannot have changed on a day nothing happened, so the live and the
+    snapshot values would agree anyway.
     """
-    multiplier = heat_rows.cooldown_multiplier(
-        session, user, account_id, now=now, settings=heat_settings
-    )
-    ramp, after_weekend, after_heat = _derive_allowance(
-        day_index,
-        local_date,
-        budget_settings=budget_settings,
-        weekend_multiplier=weekend_multiplier,
-        cap=cap,
-        multiplier=multiplier,
-    )
     snapshot = budget_status(
         session, user, account_id, ActionClass.PROFILE_VISITS, now=now, settings=budget_settings
     )
-    today = TodaysBudget(
+    if day_index in state.last_cap:
+        ramp = pacing.warmup_budget(
+            day_index, cap, start=budget_settings.warmup_start, step=budget_settings.warmup_step
+        )
+        after_weekend = pacing.apply_weekend_multiplier(
+            ramp, local_date, multiplier=weekend_multiplier
+        )
+        after_heat = state.last_cap[day_index]
+        min_heat_cap = state.min_cap[day_index]
+    else:
+        multiplier = heat_rows.cooldown_multiplier(
+            session, user, account_id, now=now, settings=heat_settings
+        )
+        ramp, after_weekend, after_heat = _derive_allowance(
+            day_index,
+            local_date,
+            budget_settings=budget_settings,
+            weekend_multiplier=weekend_multiplier,
+            cap=cap,
+            multiplier=multiplier,
+        )
+        min_heat_cap = after_heat
+    budget = TodaysBudget(
         ramp=ramp, after_weekend=after_weekend, after_heat=after_heat, spent=snapshot.day.count
     )
-    return today, snapshot.week
+    return budget, min_heat_cap, snapshot.week
 
 
 def _heat_snapshot(
@@ -530,8 +684,8 @@ def _heat_snapshot(
 def _bucket_fires(fires: Sequence[simulate.SimFire]) -> tuple[JobFires, ...]:
     """``fires`` from one day's own ``simulate()`` call, split by job kind.
 
-    No date filtering needed: :func:`run_simulation` now calls ``simulate()``
-    once per simulated day (see its own comment for why), so every fire here
+    No date filtering needed: :func:`run_simulation` calls ``simulate()`` once
+    per simulated day (see its own comment for why), so every fire here
     already belongs to the one day being reported.
     """
     return tuple(
@@ -556,20 +710,43 @@ def _active_window(active_hours: tuple[str, str]) -> tuple[time, time]:
 
 
 @contextmanager
+def _quiet_alembic() -> Iterator[None]:
+    """Alembic narrates every revision it applies at INFO. This command's own
+    output is the report, not migration chatter, so the ``alembic`` logger is
+    raised to WARNING for the migration and restored after -- not disabled
+    outright, so a caller who configured their own alembic logging, or wants
+    to debug a migration, is not overridden permanently."""
+    logger = logging.getLogger("alembic")
+    previous = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        yield
+    finally:
+        logger.setLevel(previous)
+
+
+@contextmanager
 def _scratch_database() -> Iterator[sessionmaker[Session]]:
-    """A throwaway, file-backed SQLite database under its own temporary directory.
+    """A throwaway, file-backed SQLite database under its own temporary directory,
+    migrated to the same schema ``netkeeper db upgrade`` builds.
 
     Never the path ``netkeeper.db.database_url()`` or ``netkeeper.paths.data_dir()``
     would resolve to -- this function builds its own URL from a directory
     ``tempfile.mkdtemp`` hands out and reads no environment variable to find it.
-    The whole directory (the database file, and SQLite's WAL/SHM companions) is
-    removed in the ``finally``, whether the replay raised or not.
+    The schema comes from :func:`netkeeper.migrations.upgrade`, not
+    ``Base.metadata.create_all``: the two can drift (a server default, a check
+    constraint, an index Alembic's own diff test polices against the migrated
+    schema but a model-only build never sees), and a scratch database whose
+    schema is not the production one is testing something else. The whole
+    directory (the database file, and SQLite's WAL/SHM companions) is removed
+    in the ``finally``, whether the replay raised or not.
     """
     tmp_dir = tempfile.mkdtemp(prefix="netkeeper-simulate-")
     try:
         engine = make_engine(f"sqlite:///{Path(tmp_dir) / 'scratch.sqlite3'}")
         try:
-            Base.metadata.create_all(engine)
+            with _quiet_alembic():
+                migrations.upgrade(engine)
             factory = make_session_factory(engine)
             install_scope_guard(factory)
             yield factory
@@ -590,10 +767,18 @@ def render(report: SimulationReport) -> str:
         f"netkeeper simulate: {report.days_requested} simulated days from"
         f" {report.start.date().isoformat()}, seed {report.seed}, timezone {report.timezone}",
         f"{report.throttles_requested} throttle(s) requested, {report.throttles_landed} landed",
-        "ran against a scratch database this command created and deleted; nothing here"
-        " touched your real data or linkedin.com",
-        "",
     ]
+    if report.throttles_landed < report.throttles_requested:
+        lines.append(
+            f"WARNING: only {report.throttles_landed} of {report.throttles_requested}"
+            " requested throttle(s) landed -- the run did not spend enough budget in this"
+            " window to reach the rest"
+        )
+    lines.append(
+        "ran against a scratch database this command created and deleted; nothing here"
+        " touched your real data or linkedin.com"
+    )
+    lines.append("")
     lines.extend(_table(_DAY_HEADERS, [_day_row(day) for day in report.days]).splitlines())
     lines.append("")
     lines.append("fires by day and job kind (fired/heat-skipped/catch-up):")
@@ -615,6 +800,7 @@ _DAY_HEADERS: Final = (
     "WARM-UP",
     "WEEKEND",
     "HEAT-CAP",
+    "MIN-CAP",
     "USED",
     "WEEK",
     "HEAT SCORE",
@@ -632,10 +818,11 @@ def _day_row(day: DayReport) -> tuple[str, ...]:
         str(day.budget.ramp),
         str(day.budget.after_weekend),
         str(day.budget.after_heat),
+        str(day.min_heat_cap),
         str(day.budget.spent),
         week,
         f"{day.heat.score:.2f}",
-        "yes" if day.heat.tripped else "no",
+        "yes" if day.heat_skipped_today else "no",
         str(day.throttles_landed),
     )
 

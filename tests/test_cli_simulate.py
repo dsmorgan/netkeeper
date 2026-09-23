@@ -30,6 +30,7 @@ def test_prints_the_day_table_and_the_fires_table() -> None:
 
     assert result.exit_code == 0, result.output
     assert "DAY" in result.output and "WARM-UP" in result.output and "HEAT SCORE" in result.output
+    assert "MIN-CAP" in result.output and "SKIP?" in result.output
     assert "fires by day and job kind" in result.output
     assert "enrich" in result.output and "inbox" in result.output
     assert "scratch database" in result.output
@@ -62,9 +63,13 @@ def test_refuses_negative_throttles() -> None:
 
 def test_matches_cp3s_demo_invocation() -> None:
     """The exact invocation #30's demo names: ``netkeeper simulate --days 14
-    --throttles 2``."""
+    --throttles 2``. Both requested throttles must actually land -- a review
+    of this command caught a version where placing throttles by calendar day
+    routinely lost one to a day the weekly budget had already exhausted,
+    on this exact invocation."""
     result = CliRunner().invoke(cli, ["simulate", "--days", "14", "--throttles", "2"])
 
     assert result.exit_code == 0, result.output
     assert "14 simulated days" in result.output
-    assert "2 throttle(s) requested" in result.output
+    assert "2 throttle(s) requested, 2 landed" in result.output
+    assert "WARNING" not in result.output
