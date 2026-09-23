@@ -1305,6 +1305,24 @@ class TriageContactOut(BaseModel):
     """
     tags: list[TriageTagOut]
     updated_at: datetime
+    archived_at: datetime | None
+    """When this contact was archived, or ``null`` while they are live (#91).
+
+    Liveness, said plainly, because a client had no other way to ask it. The
+    triage queue is ``met IN states AND archived_at IS NULL AND merged_into_id
+    IS NULL``, so these two fields are the whole difference between a card that
+    is in the queue and one that is not. Undo hands back the contact it
+    restored whatever state that left it in, and before this the only signal a
+    client had was ``TriageUndoOut.forced`` -- which does not mean that, because
+    the service appends to it for *any* overridden divergence, an ordinary field
+    edit included.
+    """
+    merged_into_id: int | None
+    """The contact this one was merged into, or ``null``. See ``archived_at``.
+
+    A merged-away contact is out of the queue exactly as an archived one is: the
+    survivor carries the decision now.
+    """
 
 
 class SharedCompanyOut(BaseModel):

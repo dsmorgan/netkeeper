@@ -100,8 +100,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any, Final
 
-from sqlalchemy import ColumnElement, Select, and_, case, func, or_, select
-from sqlalchemy.orm import Session, aliased, selectinload
+from sqlalchemy import ColumnElement, Select, case, func, select
+from sqlalchemy.orm import Session, selectinload
 
 from netkeeper.crm.interactions import (
     OUTBOUND_KINDS,
@@ -115,14 +115,12 @@ from netkeeper.db import is_writer
 from netkeeper.models import (
     Contact,
     ContactMet,
-    ContactPosition,
     ContactTag,
     Interaction,
     InteractionKind,
     MetSource,
     Tag,
     TagMetSignal,
-    TagSource,
     TriageDecision,
     TriageDecisionKind,
     User,
@@ -179,9 +177,6 @@ SUGGESTION_MET_WITH_MESSAGES: Final[str] = "met_with_messages"
 
 SUGGESTION_MET_INVITATION_NOTE: Final[str] = "met_invitation_note"
 """An invitation that carried a note either way, and no message thread since."""
-
-SUGGESTION_NOT_MET_NO_EVIDENCE: Final[str] = "not_met_no_evidence"
-"""Nothing on file at all: the large "not met" tail of an imported address book."""
 
 TAG_KEY_PREFIX: Final[str] = "tag:"
 """``tag:<id>``: the batch for one tag the user gave a meaning (``Tag.met_signal``)."""
@@ -862,6 +857,15 @@ def apply_suggestion(
 def _catalogue(session: Session, user: User) -> list[_Batch]:
     """Every batch that exists for this user, strongest evidence first.
 
+    **Every batch here argues from something on file.** Triage is an affirmative
+    pass: the workflow says "mark the people you have met", and *not met* is the
+    residue of that pass rather than a judgement anybody makes
+    (:doc:`networking-workflow`, stage 1). Having no message history is not
+    evidence of never having met someone -- it is the ordinary state of a
+    connection made at a conference in 2014 -- so no batch decides ``not_met``
+    from an absence. The only ``not_met`` offers left are the tag batches, which
+    are the user's own declared rule about their own label (#142).
+
     Why each one earns its place, and what it assumes:
 
     * **Message history.** You and this person wrote to each other. Nothing else
@@ -882,13 +886,8 @@ def _catalogue(session: Session, user: User) -> list[_Batch]:
       user says it means however it got there, and a tag they placed themselves
       is the stronger evidence of the two. A rule never decides ``met`` on its
       own — it tags, and a batch the person accepts turns tags into decisions.
-    * **No evidence at all.** No interaction of any kind on file, no tag the
-      user has given a meaning, and nothing on the card
-      (:func:`_card_carries_evidence`). This is the one batch that argues from
-      absence, so it is offered last, described plainly, and held to one rule:
-      nobody is decided in bulk while the card the batch could have shown has
-      something on it. What the panel counts is what the batch withholds on —
-      the same question, asked once in :func:`_shared_companies` and once here.
+      This is the only batch that can decide ``not_met``, and it does so because
+      the user said what the tag means, not because netkeeper found nothing.
     """
     return [
         _Batch(
@@ -911,22 +910,6 @@ def _catalogue(session: Session, user: User) -> list[_Batch]:
             where=(_invited_with_a_note(user), ~_messaged(user)),
         ),
         *_tag_batches(session, user),
-        _Batch(
-            key=SUGGESTION_NOT_MET_NO_EVIDENCE,
-            met=ContactMet.NOT_MET,
-            kind=TriageDecisionKind.BULK_NOT_MET,
-            title="Mark everyone there is no evidence about as not met",
-            template=(
-                "There is nothing on file for {count} untriaged {people}: no messages, "
-                "no invitation, no note, no tag of your own, and nobody else at their "
-                "company — their card would be empty."
-            ),
-            where=(
-                _has_no_interactions(user),
-                ~_carries_a_meaningful_tag(user),
-                ~_card_carries_evidence(user),
-            ),
-        ),
     ]
 
 
@@ -1530,24 +1513,6 @@ def _invited_with_a_note(user: User) -> ColumnElement[bool]:
     )
 
 
-def _has_no_interactions(user: User) -> ColumnElement[bool]:
-    """The contacts with no interaction of any kind: no message, no invitation, no note."""
-    return Contact.id.not_in(select(Interaction.contact_id).where(Interaction.user_id == user.id))
-
-
-def _carries_a_meaningful_tag(user: User) -> ColumnElement[bool]:
-    """The contacts carrying any tag the user has given a met signal."""
-    return Contact.id.in_(
-        select(ContactTag.contact_id)
-        .join(Tag, Tag.id == ContactTag.tag_id)
-        .where(
-            ContactTag.user_id == user.id,
-            Tag.user_id == user.id,
-            Tag.met_signal.is_not(None),
-        )
-    )
-
-
 def _carries_tag(tag: Tag) -> ColumnElement[bool]:
     """The contacts carrying one tag, however it was assigned.
 
@@ -1560,108 +1525,6 @@ def _carries_tag(tag: Tag) -> ColumnElement[bool]:
             ContactTag.user_id == tag.user_id, ContactTag.tag_id == tag.id
         )
     )
-
-
-def _card_carries_evidence(user: User) -> ColumnElement[bool]:
-    """The contacts whose card has something on it, whatever that something is.
-
-    The rule the "no evidence" batch is built on: nobody is decided in bulk
-    while the card that batch could have shown has something to say about them.
-    So this is the panel's own question, asked of the database — one clause per
-    thing :class:`Card` carries that a batch does not otherwise read:
-
-    * a company somebody else in the address book is at (:func:`_shared_companies`
-      is the panel, and :func:`_shares_a_company_the_panel_shows` asks exactly
-      what it counts, past positions and all);
-    * a note the person typed, which ``TriageContactOut`` carries and calls part
-      of the evidence panel;
-    * a tag the person put on by hand — a rule's tag is not evidence *they* know
-      this contact, but their own is;
-    * a preferred name they set with the ``p`` key, which is a thing only triage
-      writes;
-    * ``do_not_contact``, which is a decision about this person already.
-
-    The last four never fire on a freshly imported archive. They fire on the
-    second import, when somebody has been using netkeeper for a month, met
-    someone, written a note about them and not got round to triaging them — and
-    the review pass is exactly where they would find out netkeeper had ignored
-    their own note.
-    """
-    return or_(
-        _shares_a_company_the_panel_shows(user),
-        func.trim(func.coalesce(Contact.notes, "")) != "",
-        _carries_a_hand_placed_tag(user),
-        _has_a_chosen_preferred_name(),
-        Contact.do_not_contact.is_(True),
-    )
-
-
-def _shares_a_company_the_panel_shows(user: User) -> ColumnElement[bool]:
-    """The contacts whose card shows a company with somebody else in it.
-
-    Exactly what :func:`_shared_companies` counts, so the batch and the panel
-    cannot disagree: every company this contact is at *or has been at*
-    (``contact_positions``), against the current company of every other live
-    contact, without regard to case or surrounding space. ``other.id !=
-    Contact.id`` is the panel's "other contacts" and keeps a contact from
-    withholding itself.
-
-    Correlated, so it costs a lookup per candidate row rather than one scan;
-    ``ix_contacts_user_id_current_company`` is what that lookup uses.
-    """
-    other = aliased(Contact)
-    theirs = func.lower(func.trim(other.current_company))
-    live = (
-        other.user_id == user.id,
-        other.id != Contact.id,
-        other.archived_at.is_(None),
-        other.merged_into_id.is_(None),
-        func.trim(func.coalesce(other.current_company, "")) != "",
-    )
-    # Two ``EXISTS`` rather than one with a nested subquery: a subquery two
-    # levels down does not correlate back to the outer ``contacts`` row, and
-    # silently reads "any position of anybody" instead of "this contact's".
-    at_the_same_company = select(other.id).where(
-        *live, theirs == func.lower(func.trim(Contact.current_company))
-    )
-    where_they_used_to_be = (
-        select(other.id)
-        .join(
-            ContactPosition,
-            and_(
-                ContactPosition.user_id == user.id,
-                ContactPosition.contact_id == Contact.id,
-                func.trim(func.coalesce(ContactPosition.company, "")) != "",
-                theirs == func.lower(func.trim(ContactPosition.company)),
-            ),
-        )
-        .where(*live)
-    )
-    return or_(at_the_same_company.exists(), where_they_used_to_be.exists())
-
-
-def _carries_a_hand_placed_tag(user: User) -> ColumnElement[bool]:
-    """The contacts carrying a tag the person put on themselves.
-
-    ``manual`` only: a rule's tag says what a pattern matched, and nearly every
-    imported contact carries one, so it is no evidence that the person knows
-    this contact. Theirs is.
-    """
-    return Contact.id.in_(
-        select(ContactTag.contact_id).where(
-            ContactTag.user_id == user.id, ContactTag.source == TagSource.MANUAL
-        )
-    )
-
-
-def _has_a_chosen_preferred_name() -> ColumnElement[bool]:
-    """The contacts whose preferred name is not simply their first name.
-
-    The column defaults to ``first_name`` and the ``p`` key is what changes it,
-    so a difference is a thing the person typed about this contact.
-    """
-    chosen = func.trim(Contact.preferred_name)
-    return and_(chosen != "", chosen != func.trim(Contact.first_name))
 
 
 def _states(states: Sequence[ContactMet]) -> list[ContactMet]:
