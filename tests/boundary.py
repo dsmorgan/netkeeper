@@ -11,11 +11,11 @@ things, so the project keeps both and they read the same list from here:
   those imports *drag in*, which is how a forbidden module arrives through a
   harmless-looking helper.
 
-P2-03's classification work (#143/#144) carries its own copy of the subprocess check
-for a single module, with its own list. This list is the union of the two, and
-``netkeeper.crm`` came from theirs. Whichever branch lands second should delete that
-copy and read this one instead: the check here covers every module under
-``linkedin/``, theirs included.
+Until P2-01, three test modules carried a copy of the subprocess check each, one per
+module they had written, with a list each. This is the union of those lists, and the
+sweep in ``test_browser_safety.py`` imports every module under ``linkedin/`` in a
+subprocess of its own, so the per-module copies are gone: one list, one mechanism,
+nothing to drift.
 """
 
 from __future__ import annotations
@@ -28,8 +28,9 @@ from pathlib import Path
 PACKAGE = Path(__file__).resolve().parents[1] / "netkeeper"
 EXTRACTOR = PACKAGE / "linkedin"
 
-#: Import prefixes that put a database on the wrong side of the boundary. A module
-#: under ``linkedin/`` may not import these, or import anything that does.
+#: What ADR 0005 keeps out of the extractor. "sqlalchemy" is not in the ADR's words
+#: but follows from them: importing the ORM is how the models arrive. A module under
+#: ``linkedin/`` may not import these, or import anything that does.
 FORBIDDEN_IMPORTS = (
     "netkeeper.models",
     "netkeeper.crm",
@@ -37,6 +38,17 @@ FORBIDDEN_IMPORTS = (
     "netkeeper.scoping",
     "sqlalchemy",
 )
+
+
+def is_forbidden(name: str) -> bool:
+    """Whether a dotted name is one of the forbidden modules, or lives inside one.
+
+    Matched on dotted segments rather than characters, so a future ``netkeeper.dbg``
+    is not read as ``netkeeper.db``.
+    """
+    return any(
+        name == forbidden or name.startswith(f"{forbidden}.") for forbidden in FORBIDDEN_IMPORTS
+    )
 
 
 def extractor_modules() -> list[str]:
@@ -54,13 +66,13 @@ def imports_pulled_in_by(module: str) -> list[str]:
     """The forbidden modules that importing ``module`` loads, directly or through others.
 
     Runs in a subprocess because ``sys.modules`` in this one is already full of the
-    database: the test suite imported it long before this call.
+    database: the test suite imported it long before this call. One module per
+    subprocess, so a clean module cannot be vouched for by the company it keeps.
     """
     probe = (
         "import importlib, sys, json;"
         f"importlib.import_module({module!r});"
-        f"print(json.dumps(sorted(name for name in sys.modules"
-        f" if name.startswith({FORBIDDEN_IMPORTS!r}))))"
+        "print(json.dumps(sorted(sys.modules)))"
     )
     result = subprocess.run(
         [sys.executable, "-c", probe],
@@ -72,4 +84,4 @@ def imports_pulled_in_by(module: str) -> list[str]:
     if result.returncode != 0:
         raise AssertionError(f"importing {module} failed:\n{result.stderr}")
     loaded: list[str] = json.loads(result.stdout)
-    return loaded
+    return [name for name in loaded if is_forbidden(name)]

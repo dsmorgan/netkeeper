@@ -20,7 +20,6 @@ hand against every bound in this file while writing it) fails the test.
 
 from __future__ import annotations
 
-import json
 import random
 import statistics
 import subprocess
@@ -33,40 +32,15 @@ import pytest
 
 from netkeeper.linkedin import pacing
 
-# What ADR 0005 keeps out of the extractor (spec 9.10). Same list
-# tests/test_linkedin_archive.py uses for archive.py and conversations.py.
-FORBIDDEN_IMPORTS = ("netkeeper.models", "netkeeper.crm", "netkeeper.db", "sqlalchemy")
-
 # 2026 US transitions in America/New_York: spring forward 2026-03-08 02:00 EST -> 03:00 EDT,
 # fall back 2026-11-01 02:00 EDT -> 01:00 EST. Used only by the next_window_start DST tests.
 _NY = "America/New_York"
 
 
-def test_extractor_boundary_pacing_pulls_in_nothing_forbidden() -> None:
-    """ADR 0005: pacing.py never imports the ORM or opens a session.
-
-    Asserted in a subprocess for the same reason as the archive test: this
-    module has the whole package imported already and would see every one of
-    these in ``sys.modules`` regardless of what pacing.py itself did.
-    """
-    script = (
-        "import sys, json\nimport netkeeper.linkedin.pacing\nprint(json.dumps(sorted(sys.modules)))"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        check=True,
-        cwd=Path(__file__).parent.parent,
-    )
-    loaded = json.loads(result.stdout)
-    leaked = [
-        name
-        for name in loaded
-        for forbidden in FORBIDDEN_IMPORTS
-        if name == forbidden or name.startswith(f"{forbidden}.")
-    ]
-    assert leaked == [], f"netkeeper/linkedin/pacing.py pulled in {leaked}"
+# --- the boundary -----------------------------------------------------------
+# Checked for every module under linkedin/, each in its own subprocess, by
+# tests/test_browser_safety.py::test_no_extractor_module_drags_the_database_in.
+# The list it reads lives in tests/boundary.py; this module used to carry a copy.
 
 
 # --- Appendix C / config.example.toml: the defaults themselves --------------
