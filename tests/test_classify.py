@@ -10,17 +10,10 @@ a recognizable JSON shape -- wrapped in enough HTML or JSON to look real.
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 
 from netkeeper.linkedin.classify import Outcome, classify, is_retryable
-
-# What ADR 0005 keeps out of the extractor, same list test_linkedin_archive.py
-# uses: importing the ORM is how the models (and a session) would arrive.
-FORBIDDEN_IMPORTS = ("netkeeper.models", "netkeeper.crm", "netkeeper.db", "sqlalchemy")
 
 CONNECTIONS_URL = "https://www.linkedin.com/voyager/api/relationships/connections"
 PROFILE_URL = "https://www.linkedin.com/voyager/api/identity/profiles/nettie-keeperton/profileView"
@@ -348,35 +341,7 @@ def test_outcome_is_exactly_the_six_names_spec_9_7_lists() -> None:
     ]
 
 
-# --- the boundary -------------------------------------------------------
-
-
-def test_classify_loads_no_models_and_no_session() -> None:
-    """ADR 0005: nothing under ``linkedin/`` imports the ORM or opens a session.
-
-    Asserted in a subprocess for the same reason test_linkedin_archive.py's
-    equivalent test is: this test module already has the whole package
-    imported, so it would see every one of these in ``sys.modules`` regardless
-    of what classify.py itself did. A plain grep would miss a transitive
-    import, which is the way this invariant actually breaks.
-    """
-    script = (
-        "import sys, json\n"
-        "import netkeeper.linkedin.classify\n"
-        "print(json.dumps(sorted(sys.modules)))"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        check=True,
-        cwd=Path(__file__).parent.parent,
-    )
-    loaded = json.loads(result.stdout)
-    leaked = [
-        name
-        for name in loaded
-        for forbidden in FORBIDDEN_IMPORTS
-        if name == forbidden or name.startswith(f"{forbidden}.")
-    ]
-    assert leaked == [], f"netkeeper.linkedin.classify pulled in {leaked}"
+# --- the boundary -----------------------------------------------------------
+# Checked for every module under linkedin/, each in its own subprocess, by
+# tests/test_browser_safety.py::test_no_extractor_module_drags_the_database_in.
+# The list it reads lives in tests/boundary.py; this module used to carry a copy.

@@ -12,11 +12,8 @@ a URL at all, a group thread, and both directions of invitation.
 from __future__ import annotations
 
 import io
-import json
 import logging
 import struct
-import subprocess
-import sys
 import zipfile
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -42,9 +39,6 @@ from netkeeper.linkedin.conversations import Owner, detect_owner, group
 
 FIXTURES = Path(__file__).parent / "fixtures" / "archive"
 OWNER = "nettie-keeperton"
-# What ADR 0005 keeps out of the extractor. "sqlalchemy" is not in the ADR's
-# words but follows from them: importing the ORM is how the models arrive.
-FORBIDDEN_IMPORTS = ("netkeeper.models", "netkeeper.crm", "netkeeper.db", "sqlalchemy")
 
 
 def _member(archive: Archive, kind: ArchiveKind) -> ArchiveMember:
@@ -94,36 +88,9 @@ def _message(
 
 
 # --- the boundary -----------------------------------------------------------
-
-
-def test_the_extractor_loads_no_models_and_no_session() -> None:
-    """ADR 0005: nothing under ``linkedin/`` imports the ORM or opens a session.
-
-    Asserted in a subprocess, because this test module has the whole package
-    imported already and would see every one of these in ``sys.modules``
-    whatever the extractor did. A plain grep would miss a transitive import,
-    which is the way this invariant actually breaks.
-    """
-    script = (
-        "import sys, json\n"
-        "import netkeeper.linkedin.archive, netkeeper.linkedin.conversations\n"
-        "print(json.dumps(sorted(sys.modules)))"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        check=True,
-        cwd=Path(__file__).parent.parent,
-    )
-    loaded = json.loads(result.stdout)
-    leaked = [
-        name
-        for name in loaded
-        for forbidden in FORBIDDEN_IMPORTS
-        if name == forbidden or name.startswith(f"{forbidden}.")
-    ]
-    assert leaked == [], f"netkeeper/linkedin/ pulled in {leaked}"
+# Checked for every module under linkedin/, each in its own subprocess, by
+# tests/test_browser_safety.py::test_no_extractor_module_drags_the_database_in.
+# The list it reads lives in tests/boundary.py; this module used to carry a copy.
 
 
 # --- dates ------------------------------------------------------------------

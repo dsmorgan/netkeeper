@@ -28,7 +28,7 @@ from pathlib import Path
 
 import boundary
 import pytest
-from boundary import FORBIDDEN_IMPORTS
+from boundary import is_forbidden
 
 PACKAGE = Path(__file__).resolve().parents[1] / "netkeeper"
 REPO_ROOT = PACKAGE.parent
@@ -231,7 +231,7 @@ def context_mutations(source: str, path: Path = MEMORY) -> Iterator[Finding]:
 
 def database_imports(source: str, path: Path = MEMORY) -> Iterator[Finding]:
     for line, name in imported_names(source, path):
-        if name.startswith(FORBIDDEN_IMPORTS):
+        if is_forbidden(name):
             yield Finding(path, line, f"imports {name}: linkedin/ has no database (spec 9.10)")
 
 
@@ -296,6 +296,10 @@ def test_no_extractor_module_drags_the_database_in(module: str) -> None:
 
     A helper that looks harmless and imports the ORM two levels down puts a session in
     the extractor's process just as surely as ``from netkeeper.models import Contact``.
+
+    This is every module under ``linkedin/``, each in a subprocess of its own, and it
+    replaced the per-module copies that ``test_linkedin_archive.py``,
+    ``test_linkedin_pacing.py`` and ``test_classify.py`` used to carry.
     """
     loaded = boundary.imports_pulled_in_by(module)
     assert not loaded, f"importing {module} loads {', '.join(loaded)} (spec 9.10)"
@@ -372,6 +376,19 @@ def test_context_scanner_catches_a_raw_cdp_session() -> None:
     assert list(context_mutations("session = await browser.new_browser_cdp_session()\n"))
     assert list(context_mutations("await context.route_from_har('x.har')\n"))
     assert list(context_mutations("await context.expose_function('f', f)\n"))
+
+
+def test_the_forbidden_matcher_reads_dotted_segments() -> None:
+    """Shared by both mechanisms now, so it gets its own case.
+
+    Matching characters rather than segments would read a future ``netkeeper.dbg`` as
+    ``netkeeper.db`` and fail a rule nobody broke.
+    """
+    assert is_forbidden("netkeeper.db")
+    assert is_forbidden("netkeeper.models.contacts")
+    assert is_forbidden("sqlalchemy.orm")
+    assert not is_forbidden("netkeeper.dbg")
+    assert not is_forbidden("netkeeper.linkedin.browser")
 
 
 def test_database_scanner_catches_an_import() -> None:
