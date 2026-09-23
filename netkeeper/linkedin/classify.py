@@ -32,8 +32,20 @@ pointing at" the way it does for the checkpoint row. Both a followed
 redirect and a login page served in place of the JSON land a request on the
 same page; only one of the two ways LinkedIn has of saying so changes
 ``url``, and the other only shows up in ``body``. Treating the two rows the
-same way is this module's one interpretive call beyond the table -- see the
-PR that introduced it for the fuller argument.
+same way is this module's one interpretive call beyond the table -- spec 9.7
+is amended to say so; see the PR that introduced it for the fuller argument.
+
+The body is only ever scanned for those paths when it is *not* recognizable
+JSON. A real Voyager response is somebody's own data, and that data
+routinely contains a path-shaped substring with no bearing on the session at
+all -- a contact's personal website ending in ``/login``, a tracking url
+carrying ``/checkpoint/``, a headline that happens to mention
+``/challenge/``. A checkpoint interstitial and a login wall are always HTML,
+never a JSON object or array, so restricting the body scan to a body that
+already failed the JSON-shape check catches both real cases with no false
+positive from a JSON body's own content. The url is still always checked,
+JSON body or not, because a url is structure the response chose, not data a
+contact wrote.
 
 :func:`is_retryable` is the other half of "no retry on Checkpoint" (P2-03):
 the job loop that will eventually call :func:`classify` (P2-06 onward) asks
@@ -84,8 +96,14 @@ class Outcome(enum.StrEnum):
 
     ROUTE_CHANGED = "route_changed"
     """HTTP 200 with a body that is not recognizable JSON, or HTTP 400 on a
-    known endpoint. Action: give up on that endpoint for the run, log
-    loudly, fall back to DOM if one exists.
+    known endpoint -- and, as the conservative default, any other status
+    code spec 9.7's table does not name (403, 500, 502, 503, and anything
+    else unfamiliar). The table has no row for a server error or an
+    unrecognized status, and guessing one is retryable is not a call this
+    module is positioned to make, so it folds into the same "something is
+    off, do not trust this endpoint right now" outcome as an unrecognized
+    200 body. Action: give up on that endpoint for the run, log loudly,
+    fall back to DOM if one exists.
     """
 
 
@@ -120,9 +138,10 @@ def classify(response: int, url: str, body: str) -> Outcome:
     outranks the remaining status-based rows, and only once neither applies
     does the status code get to speak for itself.
     """
-    if _mentions(url, body, _CHECKPOINT_PATHS):
+    body_is_json = _is_recognizable_json(body)
+    if _mentions(url, body, _CHECKPOINT_PATHS, scan_body=not body_is_json):
         return Outcome.CHECKPOINT
-    if response == 401 or _mentions(url, body, _LOGGED_OUT_PATHS):
+    if response == 401 or _mentions(url, body, _LOGGED_OUT_PATHS, scan_body=not body_is_json):
         return Outcome.LOGGED_OUT
     if response == 429 or response == 999:
         return Outcome.THROTTLED
@@ -130,19 +149,22 @@ def classify(response: int, url: str, body: str) -> Outcome:
         return Outcome.NOT_FOUND
     if response == 400:
         return Outcome.ROUTE_CHANGED
-    if response == 200 and _is_recognizable_json(body):
+    if response == 200 and body_is_json:
         return Outcome.OK
     return Outcome.ROUTE_CHANGED
 
 
-def _mentions(url: str, body: str, paths: tuple[str, ...]) -> bool:
-    """True when the url or the body contains any of ``paths``.
+def _mentions(url: str, body: str, paths: tuple[str, ...], *, scan_body: bool) -> bool:
+    """True when the url, or (when ``scan_body``) the body, contains any of ``paths``.
 
-    Either can carry the signal: an actual redirect changes ``url``; LinkedIn
-    answering the original API url with the destination page's HTML in the
-    body instead does not (see the module docstring's second bullet).
+    The url is structure the response itself chose and is always checked: an
+    actual redirect changes it, and it never carries a contact's own data.
+    The body is only scanned when ``scan_body`` is true -- see the module
+    docstring for why a recognizable-JSON body is excluded.
     """
-    return any(path in url or path in body for path in paths)
+    if any(path in url for path in paths):
+        return True
+    return scan_body and any(path in body for path in paths)
 
 
 def _is_recognizable_json(body: str) -> bool:

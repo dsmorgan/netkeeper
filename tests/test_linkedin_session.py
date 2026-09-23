@@ -20,11 +20,21 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.db import mark_for_write
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import JsonValue
-from netkeeper.services.linkedin_session import SESSION_FLAG_KEY, flag_session, session_flag
+from netkeeper.services.linkedin_session import (
+    SESSION_FLAG_KEY,
+    clear_session_flag,
+    flag_session,
+    session_flag,
+)
 from netkeeper.services.settings_kv import get_setting, set_setting
 
+# The full url as a caller would pass it -- carrying a query-string token,
+# the way a real checkpoint or login-wall url does.
 CHECKPOINT_URL = "https://www.linkedin.com/checkpoint/challenge/?ctx=abc123"
 LOGIN_URL = "https://www.linkedin.com/uas/login?session_redirect=abc"
+# What flag_session() actually stores: the path only, query string dropped.
+CHECKPOINT_PATH = "/checkpoint/challenge/"
+LOGIN_PATH = "/uas/login"
 
 
 @pytest.fixture
@@ -58,8 +68,12 @@ def test_flag_session_records_the_two_outcomes_spec_9_7_says_to_flag(
     user = factories.make_user(writer)
     flagged = flag_session(writer, user, outcome, url=CHECKPOINT_URL)
     assert flagged.outcome is outcome
-    assert flagged.url == CHECKPOINT_URL
+    assert flagged.url == CHECKPOINT_PATH
     assert isinstance(flagged.flagged_at, datetime)
+    # utcnow() is timezone-aware; storing it naive would be exactly what
+    # CLAUDE.md says never to do, and an isoformat()/fromisoformat() round
+    # trip silently drops the offset if the value was naive to start with.
+    assert flagged.flagged_at.tzinfo is not None
     assert session_flag(writer, user) == flagged
 
 
@@ -98,7 +112,7 @@ def test_flag_session_overwrites_the_previous_flag(writer: Session) -> None:
     assert current == second
     assert current is not None
     assert current.outcome is Outcome.LOGGED_OUT
-    assert current.url == LOGIN_URL
+    assert current.url == LOGIN_PATH
 
 
 def test_session_flag_is_per_user(writer: Session) -> None:
@@ -147,5 +161,47 @@ def test_session_flag_round_trips_through_settings_kv_as_plain_json(writer: Sess
     raw = get_setting(writer, user, SESSION_FLAG_KEY)
     assert isinstance(raw, dict)
     assert raw["outcome"] == "checkpoint"
-    assert raw["url"] == CHECKPOINT_URL
+    assert raw["url"] == CHECKPOINT_PATH
     assert isinstance(raw["flagged_at"], str)
+
+
+def test_flag_session_drops_the_query_string(writer: Session) -> None:
+    """A checkpoint or login-wall url routinely carries a token (``ctx``,
+    ``sessionRedirect``); only the path is worth keeping in settings_kv,
+    backups, and exports."""
+    user = factories.make_user(writer)
+    flagged = flag_session(writer, user, Outcome.CHECKPOINT, url=CHECKPOINT_URL)
+    assert "ctx" not in flagged.url
+    assert "?" not in flagged.url
+    assert flagged.url == CHECKPOINT_PATH
+
+
+# --- clearing the flag ------------------------------------------------------
+
+
+def test_clear_session_flag_removes_it(writer: Session) -> None:
+    user = factories.make_user(writer)
+    flag_session(writer, user, Outcome.CHECKPOINT, url=CHECKPOINT_URL)
+    assert clear_session_flag(writer, user) is True
+    assert session_flag(writer, user) is None
+
+
+def test_clear_session_flag_is_false_when_nothing_was_flagged(writer: Session) -> None:
+    user = factories.make_user(writer)
+    assert clear_session_flag(writer, user) is False
+
+
+def test_clear_session_flag_is_per_user(writer: Session) -> None:
+    alice = factories.make_user(writer)
+    bob = factories.make_user(writer)
+    flag_session(writer, alice, Outcome.CHECKPOINT, url=CHECKPOINT_URL)
+    flag_session(writer, bob, Outcome.CHECKPOINT, url=CHECKPOINT_URL)
+    clear_session_flag(writer, alice)
+    assert session_flag(writer, alice) is None
+    assert session_flag(writer, bob) is not None
+
+
+def test_clear_session_flag_needs_a_writer_session(session: Session) -> None:
+    user = factories.make_user(session)
+    with pytest.raises(RuntimeError, match="writer session"):
+        clear_session_flag(session, user)

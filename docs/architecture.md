@@ -482,7 +482,7 @@ Enrichment order: contacts you are about to enroll in a campaign that lack the c
 | HTTP 200 JSON | `Ok` | |
 | HTTP 429, or HTTP 999 | `Throttled` | Escalating cooldown, raise heat, at most 3 attempts; two consecutive throttled units abort the run |
 | Redirect or body pointing at `/checkpoint/` or `/challenge/` | `Checkpoint` | Stop the run, set the session flag, banner in the UI. Never retry |
-| Redirect to `/login`, `/authwall`, `/uas/`, or 401 | `LoggedOut` | Stop, set the session flag, banner says log in to the netkeeper Chrome profile |
+| Redirect to `/login`, `/authwall`, `/uas/`, or a body pointing at one of them, or 401 | `LoggedOut` | Stop, set the session flag, banner says log in to the netkeeper Chrome profile |
 | HTTP 404 on a profile | `NotFound` | Terminal for the contact this run; increments a not-found streak used by 9.8 |
 | HTTP 200 with an unrecognized shape, or 400 on a known endpoint | `RouteChanged` | Give up on that endpoint for the run, log loudly, fall back to DOM if one exists |
 

@@ -81,6 +81,14 @@ def _bad_request_json() -> str:
     return json.dumps({"status": 400, "message": "Unrecognized field: legacyFoo"})
 
 
+def _server_error_json() -> str:
+    return json.dumps({"status": 503, "message": "upstream unavailable"})
+
+
+def _forbidden_json() -> str:
+    return json.dumps({"status": 403, "message": "forbidden"})
+
+
 @pytest.mark.parametrize(
     ("response", "url", "body", "expected"),
     [
@@ -130,6 +138,24 @@ def _bad_request_json() -> str:
             GENERIC_ERROR_BODY,
             Outcome.ROUTE_CHANGED,
             id="200_with_unrecognized_shape_is_route_changed",
+        ),
+        # --- statuses spec 9.7's table does not name: the conservative
+        # default, and proof the ``response == 200`` guard on the Ok branch
+        # actually matters (a valid JSON body at a non-200 status must not
+        # become Ok) -----------------------------------------------------
+        pytest.param(
+            503,
+            CONNECTIONS_URL,
+            _server_error_json(),
+            Outcome.ROUTE_CHANGED,
+            id="503_with_json_body_is_route_changed_not_ok",
+        ),
+        pytest.param(
+            403,
+            CONNECTIONS_URL,
+            _forbidden_json(),
+            Outcome.ROUTE_CHANGED,
+            id="403_is_route_changed",
         ),
         # --- the two rows where the HTTP status lies (the issue's "done
         # when"), each with a negative control right beside it so the outcome
@@ -182,6 +208,109 @@ def _bad_request_json() -> str:
 )
 def test_classify_table(response: int, url: str, body: str, expected: Outcome) -> None:
     assert classify(response, url, body) is expected
+
+
+# --- a contact's own data must never be misread as a session signal --------
+#
+# Review on #144 found that scanning the whole body for a bare path
+# substring, unconditionally, misclassified a perfectly healthy response
+# whenever *someone else's data* happened to contain one of the marker
+# strings: a contact's personal website, a tracking url LinkedIn attaches to
+# a result, a headline that happens to name a path. Each case below is a
+# recognizable JSON body, so `classify()` must not scan it at all -- only an
+# unrecognized (HTML) body is scanned. Every one of these used to come back
+# `checkpoint` or `logged_out` and halt a run over a stranger's headline.
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            json.dumps({"websites": [{"url": "https://acme.example/login"}]}),
+            id="contacts_own_website_ends_in_login",
+        ),
+        pytest.param(
+            json.dumps({"elements": [{"navigationUrl": "https://www.example.test/uas/login?x=1"}]}),
+            id="a_navigation_url_field_contains_uas_login",
+        ),
+        pytest.param(
+            json.dumps({"elements": [{"trackingUrl": "/checkpoint/lite/ping"}]}),
+            id="a_tracking_url_field_contains_checkpoint",
+        ),
+        pytest.param(
+            json.dumps({"elements": [{"headline": "I run the /challenge/ series"}]}),
+            id="a_headline_field_contains_challenge",
+        ),
+    ],
+)
+def test_a_path_substring_inside_recognizable_json_is_not_a_session_signal(body: str) -> None:
+    assert classify(200, CONNECTIONS_URL, body) is Outcome.OK
+
+
+# --- every path constant is individually load-bearing ----------------------
+#
+# Review on #144 found that four of the five path constants could be deleted
+# from classify.py with the suite still green, because the shared fixtures
+# above (CHECKPOINT_URL, CHECKPOINT_BODY, LOGIN_WALL_BODY) each happen to
+# carry more than one marker at once. Each case below carries exactly one.
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        pytest.param(
+            "https://www.linkedin.com/checkpoint/lite/ping", Outcome.CHECKPOINT, id="checkpoint"
+        ),
+        pytest.param(
+            "https://www.linkedin.com/challenge/verify", Outcome.CHECKPOINT, id="challenge"
+        ),
+        pytest.param("https://www.linkedin.com/login/identity", Outcome.LOGGED_OUT, id="login"),
+        pytest.param("https://www.linkedin.com/authwall", Outcome.LOGGED_OUT, id="authwall"),
+        pytest.param(
+            "https://www.linkedin.com/uas/request-password-reset",
+            Outcome.LOGGED_OUT,
+            id="uas",
+        ),
+    ],
+)
+def test_each_path_constant_is_checked_alone_in_the_url(url: str, expected: Outcome) -> None:
+    # A recognizable JSON body carrying none of the markers, so only the url
+    # branch of _mentions() can be responsible for the outcome.
+    assert classify(200, url, _connections_json()) is expected
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        pytest.param(
+            "<html><body>redirecting to /checkpoint/lite/ping</body></html>",
+            Outcome.CHECKPOINT,
+            id="checkpoint",
+        ),
+        pytest.param(
+            "<html><body>redirecting to /challenge/verify</body></html>",
+            Outcome.CHECKPOINT,
+            id="challenge",
+        ),
+        pytest.param(
+            "<html><body>please use /login to continue</body></html>",
+            Outcome.LOGGED_OUT,
+            id="login",
+        ),
+        pytest.param(
+            "<html><body>blocked by /authwall</body></html>", Outcome.LOGGED_OUT, id="authwall"
+        ),
+        pytest.param(
+            "<html><body>see /uas/request-password-reset</body></html>",
+            Outcome.LOGGED_OUT,
+            id="uas",
+        ),
+    ],
+)
+def test_each_path_constant_is_checked_alone_in_the_body(body: str, expected: Outcome) -> None:
+    # PROFILE_URL carries none of the markers, and the body is not JSON, so
+    # only the body branch of _mentions() can be responsible for the outcome.
+    assert classify(200, PROFILE_URL, body) is expected
 
 
 @pytest.mark.parametrize(
