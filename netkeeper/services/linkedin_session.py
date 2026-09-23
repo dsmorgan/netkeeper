@@ -8,6 +8,8 @@ or opens a session" (CLAUDE.md). :func:`netkeeper.linkedin.classify.classify`
 stays pure and returns an ``Outcome``; :func:`flag_session` is the other half,
 on the core side, that a future job (P2-06 onward) calls when that outcome is
 one of the two spec 9.7 says should stop the run and raise a banner.
+:func:`clear_session_flag` is the way back, for once the session is healthy
+again.
 
 Spec 8.4 describes the flag as a column on ``linkedin_account``
 (``session_status``, ``session_flag_at``), but that table does not exist yet --
@@ -24,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 
@@ -31,7 +34,7 @@ from netkeeper.db import is_writer
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import User
 from netkeeper.models.base import utcnow
-from netkeeper.services.settings_kv import get_setting, set_setting
+from netkeeper.services.settings_kv import delete_setting, get_setting, set_setting
 
 SESSION_FLAG_KEY: Final = "linkedin.session_flag"
 """The ``settings_kv`` key holding the current :class:`SessionFlag`, or nothing
@@ -44,7 +47,11 @@ _FLAGGABLE: Final[frozenset[Outcome]] = frozenset({Outcome.CHECKPOINT, Outcome.L
 @dataclass(frozen=True, slots=True)
 class SessionFlag:
     """What :data:`SESSION_FLAG_KEY` holds: why the session was flagged, from
-    where, and when."""
+    where, and when.
+
+    ``url`` is the *path* of the response that triggered the flag, not the
+    full url -- see :func:`flag_session`.
+    """
 
     outcome: Outcome
     url: str
@@ -62,6 +69,12 @@ def flag_session(session: Session, user: User, outcome: Outcome, *, url: str) ->
     :func:`netkeeper.linkedin.classify.is_retryable`, which a job checks
     *before* ever calling this -- this function stops a run that already
     decided not to retry, it does not itself decide that.
+
+    ``url`` is stored with its query string (and any fragment) dropped, kept
+    only as its path. A checkpoint or login-wall url routinely carries a
+    ``ctx`` or ``sessionRedirect`` token, and that token adds nothing a
+    banner or a support conversation needs while adding one more thing
+    ``settings_kv`` backups and exports would otherwise carry along.
     """
     if outcome not in _FLAGGABLE:
         raise ValueError(
@@ -70,7 +83,7 @@ def flag_session(session: Session, user: User, outcome: Outcome, *, url: str) ->
         )
     if not is_writer(session):
         raise RuntimeError("flag_session() needs a writer session; use session_scope(write=True)")
-    flag = SessionFlag(outcome=outcome, url=url, flagged_at=utcnow())
+    flag = SessionFlag(outcome=outcome, url=urlsplit(url).path, flagged_at=utcnow())
     set_setting(
         session,
         user,
@@ -82,6 +95,24 @@ def flag_session(session: Session, user: User, outcome: Outcome, *, url: str) ->
         },
     )
     return flag
+
+
+def clear_session_flag(session: Session, user: User) -> bool:
+    """Clear ``user``'s session flag, if one is set. True when a flag was cleared.
+
+    The other half of :func:`flag_session`: once set, nothing else in this
+    module removes the flag, so without this a checkpoint or logged-out
+    banner would persist even after the session is healthy again. Nothing
+    calls this yet -- wiring a successful preflight (P2-01) or a fresh
+    ``Ok`` classification to call it is separate follow-up work; this only
+    provides the function so a flagged session is not stuck banner-on
+    forever.
+    """
+    if not is_writer(session):
+        raise RuntimeError(
+            "clear_session_flag() needs a writer session; use session_scope(write=True)"
+        )
+    return delete_setting(session, user, SESSION_FLAG_KEY)
 
 
 def session_flag(session: Session, user: User) -> SessionFlag | None:
