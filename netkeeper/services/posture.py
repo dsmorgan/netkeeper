@@ -111,12 +111,12 @@ from netkeeper.services.scheduler import (
 #: provider that grew a second mode is caught by the comparison failing.
 ATTACH_ONLY: Final = "attach"
 
-#: The LinkedIn account v1 has. Budgets and heat are keyed by a
-#: ``linkedin_account`` row (ADR 0005) that P2-06 has not added yet, so
-#: ``services.budgets`` and ``services.heat`` take a plain ``account_id: int``
-#: and every caller in v1 passes this. It is the integer counterpart of
-#: ``linkedin.activity_lock.SINGLE_ACCOUNT_KEY``, which does the same job for the
-#: activity lock; when the row lands, both become ``linkedin_account.id``.
+#: The account id every caller used before ``linkedin_accounts`` existed (P2-06),
+#: and the id the first user's account row gets. ``netkeeper posture`` now reads
+#: the user's row (``services.linkedin_accounts.account_id_for``) and falls back
+#: to this only for a user with no row yet; ``netkeeper simulate`` keeps it for
+#: its scratch database. ``linkedin.activity_lock.SINGLE_ACCOUNT_KEY`` is still
+#: the lock's key until the browser side keys it by the row too.
 SINGLE_ACCOUNT_ID: Final = 1
 
 #: Hosts a CDP url may point at. Chrome's debug port is only ever on the

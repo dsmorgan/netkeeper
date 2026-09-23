@@ -38,6 +38,7 @@ from netkeeper.models.imports import (
     RowChanges,
     RowDecision,
 )
+from netkeeper.models.linkedin import DEFAULT_ACCOUNT_LABEL, LinkedInAccount
 from netkeeper.models.lists import (
     LIST_NAME_MAX_LENGTH,
     LIST_TABLES,
@@ -73,6 +74,7 @@ from netkeeper.models.user_positions import UserPosition
 __all__ = [
     "BATCH_ID_LENGTH",
     "CONTACT_CHILDREN",
+    "DEFAULT_ACCOUNT_LABEL",
     "IMPORT_TABLES",
     "LIST_NAME_MAX_LENGTH",
     "LIST_TABLES",
@@ -108,6 +110,7 @@ __all__ = [
     "InteractionKind",
     "JsonValue",
     "LinkKind",
+    "LinkedInAccount",
     "ListKind",
     "ListMember",
     "MetSource",

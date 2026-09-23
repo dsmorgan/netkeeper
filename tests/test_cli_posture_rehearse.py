@@ -35,7 +35,10 @@ from netkeeper.config import Settings
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserUnavailable
 from netkeeper.linkedin.preflight import Fingerprint, LoginState, PreflightReport
+from netkeeper.models import User, UserKind
 from netkeeper.scoping import install_scope_guard
+from netkeeper.services import heat as heat_rows
+from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.posture import SINGLE_ACCOUNT_ID
 from netkeeper.services.scheduler import sync_account_schedule
 from netkeeper.services.users import ensure_local_user
@@ -369,3 +372,31 @@ def test_a_rehearsal_started_now_records_when(fake_chrome: ReplayContext) -> Non
     result = CliRunner().invoke(cli, ["rehearse", "--visits", "1", "--scale", "5000"])
 
     assert f"started     {before:%Y-%m-%d %H:%M}" in result.output
+
+
+def test_posture_reads_the_local_users_own_account_by_default(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """Budgets and heat are keyed by the account row (P2-06), not by a hardcoded 1.
+
+    A hosted user's account takes id 1 here, so the local user's is 2; heat
+    raised on account 2 must show up in a plain ``netkeeper posture``, and
+    ``--account 1`` must still read the other one.
+    """
+    with session_scope(cli_db, write=True) as session:
+        hosted = User(kind=UserKind.HOSTED, timezone="UTC")
+        session.add(hosted)
+        session.flush()
+        assert ensure_account(session, hosted).id == 1
+        local = ensure_local_user(session, settings=Settings())
+        account = ensure_account(session, local).id
+        assert account == 2
+        heat_rows.raise_heat(
+            session, local, account, now=datetime.now(UTC), settings=Settings().linkedin.heat
+        )
+
+    by_default = CliRunner().invoke(cli, ["posture", "--no-probe"])
+    explicit_other = CliRunner().invoke(cli, ["posture", "--no-probe", "--account", "1"])
+
+    assert "last raised" in by_default.output
+    assert "last raised" not in explicit_other.output
