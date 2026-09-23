@@ -38,7 +38,7 @@ from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import StopReason, SyncMode, VoyagerConnections
 from netkeeper.linkedin.pacing import human_delay
-from netkeeper.models import Contact, LinkedInAccount, User
+from netkeeper.models import Contact, ContactAlias, LinkedInAccount, User
 from netkeeper.scoping import scoped
 from netkeeper.services import budgets
 from netkeeper.services import heat as heat_service
@@ -642,3 +642,40 @@ async def test_a_partial_urn_change_disconnects_nobody_it_holds_for_review(
     contacts = _contacts(session_factory, user_id)
     assert all((contacts[urn].li_missing_count, contacts[urn].li_disconnected_at) == (0, None)
                for urn in changed)  # fmt: skip
+
+
+async def test_a_candidate_matched_by_an_old_slug_is_held_not_aged(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """New URN, and a slug that is only one of the contact's old aliases.
+
+    Neither the URN nor the current slug was seen, so only the review hold
+    keeps this contact from aging while a person decides.
+    """
+    people = _many(100)
+    await _sync(session_factory, user_id, FakeVoyagerFetch(people))
+    target = people[50]
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        contact = session.scalars(scoped(user, Contact).where(Contact.li_urn == target.urn)).one()
+        contact.aliases.append(
+            ContactAlias(user_id=user.id, li_public_id="an-old-vanity-slug", observed_at=NOW)
+        )
+    served = list(people)
+    served[50] = replace(target, urn_prefix="ACoAANEW", public_id="an-old-vanity-slug")
+
+    reports = [
+        await _sync(
+            session_factory,
+            user_id,
+            FakeVoyagerFetch(served),
+            at=NOW + timedelta(days=7 * week),
+        )
+        for week in (1, 2)
+    ]
+
+    assert all(r.pages.needs_review == 1 for r in reports)
+    assert all(r.aging is not None and r.aging.missed == 0 for r in reports)
+    held = _contacts(session_factory, user_id)[target.urn]
+    assert (held.li_missing_count, held.li_disconnected_at) == (0, None)
