@@ -233,3 +233,16 @@ def test_one_throttle_goes_cold_after_about_forty_hours() -> None:
     at_40h = decayed_score(throttled, NOW + timedelta(hours=40), half_life_hours=HALF_LIFE_HOURS)
     assert at_39h > 0.0
     assert at_40h == 0.0
+
+
+def test_blocks_at_the_cutoff_never_accumulate() -> None:
+    """Why posture treats ``per_block == COLD_EPSILON`` as off: a minute later the
+    first block has decayed under the cutoff and reads 0.0, so the next block
+    starts from nothing again."""
+    state = raise_heat(clear(NOW), NOW, per_block=0.01, half_life_hours=HALF_LIFE_HOURS)
+    for minute in range(1, 11):
+        state = raise_heat(
+            state, NOW + timedelta(minutes=minute), per_block=0.01, half_life_hours=HALF_LIFE_HOURS
+        )
+    assert state.score == 0.01
+    assert decayed_score(state, NOW + timedelta(minutes=11), half_life_hours=HALF_LIFE_HOURS) == 0.0

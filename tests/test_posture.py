@@ -450,6 +450,12 @@ CASES = [
         off=("heat",),
     ),
     Case(
+        id="heat exactly at the cold cutoff, which never accumulates",
+        settings=_heat(per_block=0.01, skip_threshold=0.04),
+        warns=("heat",),
+        off=("heat",),
+    ),
+    Case(
         id="heat that decays before the next burst",
         settings=_heat(half_life_hours=0),
         warns=("heat",),

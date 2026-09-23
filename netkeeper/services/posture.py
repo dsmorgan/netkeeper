@@ -1075,14 +1075,19 @@ def _heat(posture_of_heat: HeatPosture, heat_settings: HeatSettings) -> Protecti
     """Heat's level, its skip threshold, and whether it is holding runs back (spec 9.7)."""
     warnings: list[str] = []
     status = Status.ON
-    if heat_settings.per_block < heat_math.COLD_EPSILON:
-        # Under the cold cutoff, one block reads back as 0.0 the moment it is
-        # written, so a positive-but-tiny `per_block` is as off as zero.
+    if heat_settings.per_block <= heat_math.COLD_EPSILON:
+        # At or under the cold cutoff, one block reads back as cold as soon as
+        # any time passes, and the residue is zeroed before the next block is
+        # added, so blocks never accumulate: as off as zero. `raise_heat` still
+        # stores the raise, so the row may say "last raised"; the score as read
+        # is what this warning is about.
         status = Status.OFF
         warnings.append(
-            f"linkedin.heat.per_block is {heat_settings.per_block:g}, so a throttle or a"
-            " checkpoint adds nothing to the score. Heat never rises, delays never"
-            " stretch, and the skip threshold can never be reached"
+            f"linkedin.heat.per_block is {heat_settings.per_block:g}, at or under the"
+            f" {heat_math.COLD_EPSILON:g} below which the score reads as cold, so a"
+            " throttle or a checkpoint never raises the score as read: it is back to"
+            " 0.00 as soon as any time passes, even when a raise is recorded. Delays"
+            " never stretch, and the skip threshold can never be reached"
         )
     if heat_settings.half_life_hours < MIN_HALF_LIFE_HOURS:
         status = Status.OFF
