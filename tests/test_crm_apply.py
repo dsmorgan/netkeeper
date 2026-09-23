@@ -350,7 +350,7 @@ def test_a_sync_that_saw_nobody_ages_nobody(writer: Session, user: User) -> None
         writer, user, frozenset(), observed_at=LATER, disconnect_after_misses=1
     )
 
-    assert aging.refused is not None
+    assert aging.refused == "the full sync saw no connections"
     assert all(_by_urn(writer, user, p).li_missing_count == 0 for p in PEOPLE[:3])
 
 
