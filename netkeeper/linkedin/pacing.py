@@ -188,10 +188,20 @@ def plan_burst_sizes(
     is whatever is left over, so it can be shorter than the range's floor
     but never longer than its ceiling. Sizes always sum to ``count``.
     ``count <= 0`` returns ``()``.
+
+    ``size_range`` must have a low end of at least 1 and a high end no lower
+    than the low one, or this raises :class:`ValueError`. A burst of zero
+    visits is not a burst, and a low end of 0 does not merely produce an odd
+    plan — it can draw 0 forever and never make progress, since
+    ``remaining`` never shrinks; ``burst_size`` is a user-facing config knob
+    (``config.example.toml``'s ``[linkedin.pacing] burst_size``), so a typo
+    there must fail loudly here rather than hang the caller.
     """
+    low, high = size_range
+    if low < 1 or high < low:
+        raise ValueError(f"size_range must have 1 <= low <= high, got {size_range!r}")
     if count <= 0:
         return ()
-    low, high = size_range
     sizes: list[int] = []
     remaining = count
     while remaining > 0:
@@ -297,6 +307,19 @@ def next_window_start(
     converting back to UTC; the local datetime along the way is aware
     throughout and is never returned or stored (CLAUDE.md: never store a
     naive local time) — only the UTC instant it corresponds to is.
+
+    DST is handled correctly because ``.replace()`` keeps ``local_now``'s
+    ``fold`` and ``.astimezone(UTC)`` resolves the result through it: adding
+    a day of wall time (rather than 24 hours of UTC) keeps the window
+    opening at the same local clock reading on a 23- or 25-hour day, and a
+    ``start`` that falls in the spring-forward gap resolves forward to the
+    first real instant at or after it. One deliberate consequence on a
+    fall-back day: called from inside a repeated hour's *first* pass, with a
+    ``start`` earlier in that hour than ``now``, this parks for tomorrow
+    rather than for the *second* pass of the same local hour later today —
+    ``candidate`` inherits ``now``'s fold, so it never considers the other
+    one. That is the safer reading (one window opening per calendar day,
+    not two 45 minutes apart), but it is a real choice, not an accident.
     """
     zone = tz if isinstance(tz, ZoneInfo) else ZoneInfo(tz)
     local_now = now_utc.astimezone(zone)
