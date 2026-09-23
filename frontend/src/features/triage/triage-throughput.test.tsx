@@ -161,17 +161,29 @@ describe('fifty contacts on the keyboard alone', () => {
       // document for accessible names, which costs several times what this test
       // is trying to measure; leaving it inside the loop made most of the
       // published mouse figure testing-library rather than the screen. The
-      // button row is never re-mounted between contacts, so both nodes stay
-      // valid for the whole run. The polling interval matches the keyboard
-      // loop's, so the two rows below are comparable.
-      const met = screen.getByRole('button', { name: 'Met' })
-      const notMet = screen.getByRole('button', { name: 'Not met' })
+      // polling interval matches the keyboard loop's, so the two rows below are
+      // comparable.
+      //
+      // The decision buttons are on the card now (#142), and driven flat out
+      // the two cards in hand do run out — which unmounts the card, and with it
+      // the node this cached. So the cached node is re-taken when, and only
+      // when, it has left the document: an `isConnected` check costs nothing
+      // and keeps the accessible-name scan out of the measured path, where it
+      // used to dominate the figure.
+      const buttons = new Map<string, HTMLElement>()
+      const button = (name: string) => {
+        const held = buttons.get(name)
+        if (held !== undefined && held.isConnected) return held
+        const found = screen.getByRole('button', { name })
+        buttons.set(name, found)
+        return found
+      }
 
       const started = performance.now()
       for (let index = 0; index < CONTACTS; index += 1) {
         await waitFor(() => expect(cardName()).not.toBe(''), { interval: 1, timeout: 5_000 })
         const showing = cardName()
-        fireEvent.click(index % 3 === 1 ? notMet : met)
+        fireEvent.click(button(index % 3 === 1 ? 'Not met' : 'Met'))
         await waitFor(() => expect(cardName()).not.toBe(showing), { interval: 1, timeout: 5_000 })
       }
       const elapsed = performance.now() - started

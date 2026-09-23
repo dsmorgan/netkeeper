@@ -13,6 +13,12 @@
  *   2. **Tags** — the tags already on them, with the picker opening in place.
  *   3. **Have you met them?** — the loudest thing on the card, and last.
  *
+ * Step 3 is the *only* place the three answers are offered. The action row
+ * sits above the card, so a copy of them there would put the met call above
+ * the name and the tags this order exists to put first; `action-bar.tsx` says
+ * the rest. The row is generated from `DECISION_BINDINGS` rather than from a
+ * list of its own, so a decision cannot gain a key without gaining a button.
+ *
  * **What did not change: the keys.** `m`, `n`, `s`, `t` and `p` still fire from
  * anywhere on the screen through the same handler, so a run by somebody who
  * knows the map costs exactly what it cost before. Only the reading order moved.
@@ -37,8 +43,8 @@ import { Button } from '@/components/ui/button'
 
 import { PreferredNameEditor } from './preferred-name-editor'
 import { TagPicker } from './tag-picker'
-import { DECISION_MEANINGS } from './method'
-import { bindingFor } from './keymap'
+import { meaningOf } from './method'
+import { DECISION_BINDINGS, bindingFor } from './keymap'
 import type { TriageAction } from './keymap'
 import type { TriageCard as Card, TriageTag } from './api'
 
@@ -203,19 +209,21 @@ export function CardSteps({
           data-testid="triage-decision"
           className="mt-2 flex flex-wrap gap-2"
         >
-          {DECISION_MEANINGS.map((meaning) => (
+          {/* Generated from the key map, not from a list of its own, so a
+              decision cannot gain a key without gaining the button for it. */}
+          {DECISION_BINDINGS.map((binding) => (
             <Button
-              key={meaning.action}
-              size="sm"
-              variant={meaning.action === 'skip' ? 'outline' : 'default'}
-              // The button row carries the same three actions, so this one says
-              // who it is about: "Met — Ada Example-1", not a second "Met".
-              aria-label={`${meaning.term} — ${name}`}
-              aria-keyshortcuts={bindingFor(meaning.action)?.aria}
-              onClick={() => onAction(meaning.action)}
+              key={binding.action}
+              // Full size and solid: this is the only place the three answers
+              // are offered (#142), and it is meant to be the loudest thing on
+              // the screen. Skip is the quiet one of the three because it is
+              // the one that decides nothing.
+              variant={binding.action === 'skip' ? 'outline' : 'default'}
+              aria-keyshortcuts={binding.aria}
+              onClick={() => onAction(binding.action)}
             >
-              {meaning.term}
-              <Key action={meaning.action} />
+              {binding.button}
+              <Key action={binding.action} />
             </Button>
           ))}
         </div>
@@ -223,10 +231,10 @@ export function CardSteps({
           data-testid="decision-meanings"
           className="mt-2 grid grid-cols-[max-content_1fr] gap-x-2 gap-y-0.5 text-xs text-muted-foreground"
         >
-          {DECISION_MEANINGS.map((meaning) => (
-            <div key={meaning.action} className="contents">
-              <dt className="font-medium">{meaning.term}</dt>
-              <dd className="min-w-0">{meaning.short}</dd>
+          {DECISION_BINDINGS.map((binding) => (
+            <div key={binding.action} className="contents">
+              <dt className="font-medium">{binding.button}</dt>
+              <dd className="min-w-0">{meaningOf(binding.action)?.short}</dd>
             </div>
           ))}
         </dl>

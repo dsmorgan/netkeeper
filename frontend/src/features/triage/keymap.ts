@@ -28,6 +28,11 @@
  * exception, and it is not an exception to the rule: it dismisses whatever is
  * open, and every overlay carries its own Close, which *is* that button. A
  * global Escape button with nothing open would do nothing at all.
+ *
+ * **`where` says which row draws that button, not whether one exists.** The
+ * three decisions are drawn on the card and nowhere else (#142); everything
+ * else is in the action row. The `?` overlay reads this array whole, so it
+ * still teaches all nine keys whichever row their button ended up in.
  */
 
 export type TriageAction =
@@ -56,6 +61,18 @@ export interface KeyBinding {
   readonly description: string
   /** The on-screen button's label, or `null` when the overlay's Close is it. */
   readonly button: string | null
+  /**
+   * Where that button is drawn.
+   *
+   * `bar` is the action row; `card` is the decision row under "have you met
+   * them?", which is the only place the three answers are offered (#142);
+   * `overlay` is Escape, whose button is whatever is open.
+   *
+   * Every binding still lives in this one array whatever its `where`, so the
+   * `?` overlay documents all of them and no key can be handled without being
+   * written down.
+   */
+  readonly where: 'bar' | 'card' | 'overlay'
 }
 
 export const KEY_BINDINGS: readonly KeyBinding[] = [
@@ -66,6 +83,7 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
     action: 'preferred-name',
     description: 'Edit the preferred name',
     button: 'Name',
+    where: 'bar',
   },
   {
     key: 't',
@@ -74,6 +92,7 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
     action: 'tag',
     description: 'Tag this contact',
     button: 'Tag',
+    where: 'bar',
   },
   {
     key: 'm',
@@ -82,6 +101,7 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
     action: 'met',
     description: 'Met this person',
     button: 'Met',
+    where: 'card',
   },
   {
     key: 'n',
@@ -90,6 +110,7 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
     action: 'not-met',
     description: 'Have not met them',
     button: 'Not met',
+    where: 'card',
   },
   {
     key: 's',
@@ -98,6 +119,7 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
     action: 'skip',
     description: 'Skip — revisit later with the Skipped filter',
     button: 'Skip',
+    where: 'card',
   },
   {
     key: 'arrowleft',
@@ -106,6 +128,7 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
     action: 'back',
     description: 'Back to a contact you already passed — writes nothing',
     button: 'Back',
+    where: 'bar',
   },
   {
     key: 'arrowright',
@@ -114,6 +137,7 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
     action: 'next',
     description: 'Next contact without deciding, and forward again while you are looking back',
     button: 'Next',
+    where: 'bar',
   },
   {
     key: 'u',
@@ -122,6 +146,7 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
     action: 'undo',
     description: 'Undo the last thing written — not the same as going back',
     button: 'Undo',
+    where: 'bar',
   },
   {
     key: '?',
@@ -130,6 +155,7 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
     action: 'help',
     description: 'Show or hide this help',
     button: 'Keyboard',
+    where: 'bar',
   },
   {
     key: 'escape',
@@ -138,6 +164,7 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
     action: 'dismiss',
     description: 'Close the help, an editor, or a prompt',
     button: null,
+    where: 'overlay',
   },
 ]
 
@@ -154,7 +181,30 @@ export function bindingFor(action: TriageAction): KeyBinding | undefined {
   return BY_ACTION.get(action)
 }
 
-/** Every action with an on-screen button, in the order the row draws them. */
+/**
+ * Every action with an on-screen button, wherever that button is drawn.
+ *
+ * The invariant `triage-controls.test.tsx` holds: an action cannot gain a key
+ * without gaining a button somebody can press. Which *row* it is on is
+ * `where`'s business, and the two subsets below are what each row draws.
+ */
 export const BUTTON_BINDINGS = KEY_BINDINGS.filter(
   (binding): binding is KeyBinding & { button: string } => binding.button !== null,
 )
+
+/**
+ * What the action row draws, in order: the edits, then movement, then undo.
+ *
+ * **The three decisions are deliberately not here (#142).** The row sits above
+ * the card, so a copy of Met/Not met/Skip in it would put the met call above
+ * the name and the tags a person is meant to fix first, which is the ordering
+ * this change exists to undo — and two rows of the same three buttons are two
+ * answers to "where do I decide?". They are drawn once, on the card, under the
+ * question they answer. The keys are unaffected: `m`, `n` and `s` fire from
+ * anywhere, and with no card on screen the handler says so rather than
+ * silently dropping the press.
+ */
+export const BAR_BINDINGS = BUTTON_BINDINGS.filter((binding) => binding.where === 'bar')
+
+/** What the card's decision row draws: the three answers, in the order asked. */
+export const DECISION_BINDINGS = BUTTON_BINDINGS.filter((binding) => binding.where === 'card')

@@ -9,6 +9,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
+import { KEY_BINDINGS } from './keymap'
 import { currentName, renderTriage } from './test-render'
 
 function press(key: string) {
@@ -233,9 +234,19 @@ describe('the triage keyboard map (spec 10.2)', () => {
 
     const help = await screen.findByRole('dialog', { name: 'Keyboard shortcuts' })
     expect(help).toHaveAttribute('aria-modal', 'false')
+    // Pinned from both ends. The literal list is the spec's own map, so a
+    // binding dropped from `KEY_BINDINGS` fails here; iterating the map and
+    // counting what is drawn fails if the overlay stops rendering one — which
+    // is the half that matters now that the buttons live in two different rows
+    // and the overlay is the only place all nine are written down (#142).
     for (const label of ['m', 'n', 's', 'u', 't', 'p', '←', '→', '?', 'Esc']) {
       expect(within(help).getByText(label, { selector: 'kbd' })).toBeInTheDocument()
     }
+    for (const binding of KEY_BINDINGS) {
+      expect(within(help).getByText(binding.label, { selector: 'kbd' })).toBeInTheDocument()
+      expect(help).toHaveTextContent(binding.description)
+    }
+    expect(help.querySelectorAll('kbd')).toHaveLength(KEY_BINDINGS.length)
 
     // The map still works while the overlay is open.
     press('m')
