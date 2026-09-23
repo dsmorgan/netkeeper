@@ -3520,6 +3520,8 @@ export interface components {
          * @description The contact under triage: the fields the screen shows (spec 10.2).
          */
         TriageContactOut: {
+            /** Archived At */
+            archived_at: string | null;
             /** Connected On */
             connected_on: string | null;
             /** Current Company */
@@ -3542,6 +3544,8 @@ export interface components {
             li_url: string | null;
             /** Location */
             location: string | null;
+            /** Merged Into Id */
+            merged_into_id: number | null;
             met: components["schemas"]["ContactMet"];
             met_source: components["schemas"]["MetSource"];
             /** Notes */

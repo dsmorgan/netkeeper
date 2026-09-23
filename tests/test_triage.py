@@ -33,7 +33,6 @@ from netkeeper.models import (
     RuleField,
     Tag,
     TagMetSignal,
-    TagSource,
     TriageDecision,
     TriageDecisionKind,
     User,
@@ -954,148 +953,133 @@ def test_a_note_from_someone_you_went_on_to_write_to_stays_in_the_stronger_batch
     assert offers[module.SUGGESTION_MET_WITH_MESSAGES].count == 1
 
 
-def test_the_no_evidence_batch_takes_only_the_contacts_nothing_is_known_about(
+def test_nothing_is_offered_about_a_contact_with_nothing_on_file(
     writer: Session, user: User
 ) -> None:
+    """Triage is an affirmative pass: an absence is not evidence of anything (#142).
+
+    The fixture is the exact shape the removed ``not_met_no_evidence`` batch was
+    built to sweep up — no interaction of any kind, no tag, no note, no
+    preferred name of their own, and nobody else at their company — and the
+    answer is now that there is nothing to offer. A contact with message
+    history is here to prove the catalogue is being built at all rather than
+    short-circuiting to an empty list.
+    """
     blank = factories.make_contact(writer, user, current_company="Northwind Pottery")
-    noted = factories.make_contact(writer, user, current_company="Blue Harbor Tools")
-    add_interaction(writer, user, noted.id, InteractionKind.NOTE, NOW, "spoke at a conference")
     wrote = factories.make_contact(writer, user, current_company="Somewhere Else")
     _message(writer, user, wrote)
-    offer = _offers(writer, user)[module.SUGGESTION_NOT_MET_NO_EVIDENCE]
-    assert (offer.count, offer.met) == (1, ContactMet.NOT_MET)
-    covered, total = module.suggestion_contacts(writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE)
-    assert ([contact.id for contact in covered], total) == ([blank.id], 1)
+
+    offers = _offers(writer, user)
+    assert [offer.key for offer in offers.values()] == [module.SUGGESTION_MET_WITH_MESSAGES]
+    covered, total = module.suggestion_contacts(writer, user, module.SUGGESTION_MET_WITH_MESSAGES)
+    assert ([contact.id for contact in covered], total) == ([wrote.id], 1)
+    assert blank.met is ContactMet.UNKNOWN
+    # And the key the batch used to answer to is gone from the catalogue for
+    # good, rather than answering with a different set.
+    for call in (module.suggestion_contacts, module.apply_suggestion):
+        with pytest.raises(InvalidDecision, match="no bulk suggestion named"):
+            call(writer, user, "not_met_no_evidence")
 
 
-def test_a_tag_you_gave_a_meaning_keeps_its_people_out_of_the_no_evidence_batch(
+def test_no_batch_in_the_catalogue_decides_not_met_without_a_tag_behind_it(
     writer: Session, user: User
 ) -> None:
-    """The two batches must not both cover one person, and the meaningful tag wins.
+    """The only ``not_met`` on offer is one the user declared themselves (#142).
 
-    Without this, a tag the user said means *met* would stop holding its people
-    back and accepting the "no evidence" batch first would mark them not met.
+    Every batch is asked what it decides, over a database holding one of each
+    kind of evidence, so a batch added later that infers ``not_met`` from
+    anything but a tag fails here.
+    """
+    signalled = _signalled_tag(writer, user, "recruiter", TagMetSignal.NOT_MET)
+    quiet, messaged, noted, recruiter = _contacts(writer, user, 4)
+    _message(writer, user, messaged)
+    _invitation(writer, user, noted, note="lovely to meet you")
+    tag_contact(writer, user, recruiter.id, signalled.id)
+    del quiet
+
+    offers = _offers(writer, user)
+    deciding_not_met = [key for key, offer in offers.items() if offer.met is ContactMet.NOT_MET]
+    assert deciding_not_met == [f"{module.TAG_KEY_PREFIX}{signalled.id}"]
+
+
+def test_a_tag_that_means_not_met_still_reaches_a_contact_with_nothing_else_on_file(
+    writer: Session, user: User
+) -> None:
+    """Removing the inference must not take the user's own declared rule with it.
+
+    The tagged contact carries nothing else at all — no interaction, no note, no
+    company anybody else is at — so the tag is the only thing that can put them
+    in a batch, and the tag came from a rule rather than a hand so that "you
+    tagged them yourself" cannot be what passes this.
     """
     recruiters = _signalled_tag(writer, user, "recruiter", TagMetSignal.NOT_MET)
-    friends = _signalled_tag(writer, user, "friend", TagMetSignal.MET)
-    recruiter, friend, stranger = _contacts(writer, user, 3)
-    # Both tags are a rule's, not a hand's. A tag the person placed themselves
-    # is evidence in its own right and would hold these two back through
-    # ``_card_carries_evidence`` whatever their meaning, which would leave the
-    # meaning itself untested: dropping the meaningful-tag clause stayed green
-    # when this used the default manual source.
-    tag_contact(writer, user, recruiter.id, recruiters.id, source=TagSource.RULE)
-    tag_contact(writer, user, friend.id, friends.id, source=TagSource.RULE)
-    covered, total = module.suggestion_contacts(writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE)
-    assert ([contact.id for contact in covered], total) == ([stranger.id], 1)
-    assert _offers(writer, user)[module.SUGGESTION_NOT_MET_NO_EVIDENCE].count == 1
+    create_rule(writer, user, recruiters.id, RuleField.TITLE, r"\brecruiter\b")
+    recruiter = factories.make_contact(
+        writer, user, current_title="Technical Recruiter", current_company="Northwind Pottery"
+    )
+    stranger = factories.make_contact(writer, user, current_company="Somewhere Else")
+    assert run_rules(writer, user).added == 1
+
+    key = f"{module.TAG_KEY_PREFIX}{recruiters.id}"
+    offer = _offers(writer, user)[key]
+    assert (offer.count, offer.met) == (1, ContactMet.NOT_MET)
+    applied = module.apply_suggestion(writer, user, key, expected_count=1, at=NOW)
+    assert applied.applied == 1
+    assert (_met(recruiter), _met(stranger)) == (ContactMet.NOT_MET, ContactMet.UNKNOWN)
+    assert recruiter.met_source is MetSource.AUTOMATIC
 
 
-def test_the_no_evidence_preview_counts_with_every_clause(writer: Session, user: User) -> None:
-    """``total`` is what the banner shows and what comes back as ``expected_count``.
+def test_n_still_marks_one_contact_not_met_by_hand(writer: Session, user: User) -> None:
+    """Only the *automatic* not-met went; the key did not (#142)."""
+    contact = factories.make_contact(writer, user)
+    module.decide(writer, user, contact.id, ContactMet.NOT_MET, at=NOW)
+    assert (_met(contact), contact.met_source) == (ContactMet.NOT_MET, MetSource.MANUAL)
 
-    Each contact here is held out by a different clause, so a ``total`` computed
-    from fewer clauses than the page counts somebody the page does not list.
+
+def test_undo_takes_back_a_no_evidence_batch_already_on_disk(writer: Session, user: User) -> None:
+    """A batch the catalogue no longer offers is still on somebody's undo stack (#142).
+
+    Rows written by the version that had the batch, reconstructed exactly as
+    ``apply_suggestion`` wrote them: ``bulk_not_met``, one ``batch_id``, and
+    ``reason`` naming a key no catalogue answers to any more. Undo walks
+    ``triage_decisions`` by ``batch_id`` and restores ``before_state``, so it
+    never asks the catalogue what ``reason`` means — and this fails if it ever
+    starts to.
     """
-    tag = _signalled_tag(writer, user, "recruiter", TagMetSignal.NOT_MET)
-    meaningful, messaged, noted, stranger = _contacts(writer, user, 4)
-    # A rule's tag, so this contact is held out by the meaning alone and each
-    # contact here is still held out by a different clause.
-    tag_contact(writer, user, meaningful.id, tag.id, source=TagSource.RULE)
-    _message(writer, user, messaged)
-    noted.notes = "met at the pottery fair"
+    first, second = _contacts(writer, user, 2)
+    batch_id = "9f2c4a1e6b8d4f0aa1c3e5d7b9f10246"
+    for contact in (first, second):
+        contact.met = ContactMet.NOT_MET
+        contact.met_source = MetSource.AUTOMATIC
+        contact.triaged_at = NOW
+        writer.add(
+            TriageDecision(
+                user_id=user.id,
+                contact_id=contact.id,
+                kind=TriageDecisionKind.BULK_NOT_MET,
+                before_state={"met": "unknown", "met_source": "manual", "triaged_at": None},
+                after_state={
+                    "met": "not_met",
+                    "met_source": "automatic",
+                    "triaged_at": NOW.isoformat(),
+                },
+                batch_id=batch_id,
+                reason="not_met_no_evidence",
+                decided_at=NOW,
+            )
+        )
     writer.flush()
-    covered, total = module.suggestion_contacts(writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE)
-    assert ([contact.id for contact in covered], total) == ([stranger.id], 1)
-    applied = module.apply_suggestion(
-        writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE, expected_count=total
+
+    undone = module.undo(writer, user)
+
+    assert (undone.kind, undone.decisions, undone.batch_id) == (
+        TriageDecisionKind.BULK_NOT_MET,
+        2,
+        batch_id,
     )
-    assert applied.applied == total, "the count the preview showed is the count that applied"
-
-
-@pytest.mark.parametrize(
-    "touch",
-    [
-        pytest.param(lambda c: setattr(c, "notes", "met her at PyCon"), id="a note"),
-        pytest.param(lambda c: setattr(c, "preferred_name", "Bobbie"), id="a preferred name"),
-        pytest.param(lambda c: setattr(c, "do_not_contact", True), id="do not contact"),
-    ],
-)
-def test_the_no_evidence_batch_leaves_anyone_you_have_touched_alone(
-    writer: Session, user: User, touch: Any
-) -> None:
-    """The batch never decides over something the card would show (spec 10.2)."""
-    touched, stranger = _contacts(writer, user, 2)
-    touch(touched)
-    writer.flush()
-    covered, total = module.suggestion_contacts(writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE)
-    assert ([contact.id for contact in covered], total) == ([stranger.id], 1)
-
-
-def test_a_tag_you_placed_yourself_holds_a_contact_back_and_a_rule_s_does_not(
-    writer: Session, user: User
-) -> None:
-    """Yours says you know them. A rule's says a pattern matched, and nearly all of them do."""
-    tag = create_tag(writer, user, "pottery")
-    create_rule(writer, user, tag.id, RuleField.TITLE, r"\bpotter\b")
-    by_hand, by_rule = _contacts(writer, user, 2, current_title="Potter")
-    tag_contact(writer, user, by_hand.id, tag.id)
-    assert run_rules(writer, user, [by_rule.id]).added == 1
-    covered, _total = module.suggestion_contacts(
-        writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE
-    )
-    assert [contact.id for contact in covered] == [by_rule.id]
-
-
-def test_the_no_evidence_batch_withholds_exactly_what_the_card_would_show(
-    writer: Session, user: User
-) -> None:
-    """The clause and the panel ask the same question, so neither can decide over the other.
-
-    ``_shared_companies`` counts *anybody else* at a company the contact is at
-    or has been at. Whoever it counts, the batch leaves alone.
-    """
-    colleague = factories.make_contact(writer, user, current_company="Northwind Pottery")
-    factories.make_contact(writer, user, current_company="northwind pottery")
-    alumnus = factories.make_contact(
-        writer,
-        user,
-        current_company="Quiet Consulting",
-        positions=[{"title": "Potter", "company": "Blue Harbor Tools", "is_current": False}],
-    )
-    # The panel's own asymmetry (spec 10.2): this contact's side counts their
-    # current company and every past position, while the others are matched on
-    # current company alone. So the alumnus's card shows the overlap and this
-    # one's does not, and the batch mirrors that rather than second-guessing it.
-    still_there = factories.make_contact(writer, user, current_company="Blue Harbor Tools")
-    alone = factories.make_contact(writer, user, current_company="Somewhere Else")
-
-    for contact in (colleague, alumnus):
-        shown = module.load_card(writer, user, contact).evidence.shared_companies
-        assert any(item.contact_count for item in shown), "their card has an overlap on it"
-    for contact in (still_there, alone):
-        assert all(
-            not item.contact_count
-            for item in module.load_card(writer, user, contact).evidence.shared_companies
-        ), "and theirs has nothing on it"
-    covered, total = module.suggestion_contacts(writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE)
-    assert ([contact.id for contact in covered], total) == ([still_there.id, alone.id], 2)
-
-
-def test_a_contact_alone_at_their_company_does_not_withhold_themselves(
-    writer: Session, user: User
-) -> None:
-    """The panel counts the *other* contacts there, and so does the clause."""
-    alone = factories.make_contact(writer, user, current_company="Northwind Pottery")
-    covered, _total = module.suggestion_contacts(
-        writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE, states=(ContactMet.SKIP,)
-    )
-    assert covered == [], "and nobody is in the skip queue yet"
-    module.decide(writer, user, alone.id, ContactMet.SKIP)
-    skipped, _total = module.suggestion_contacts(
-        writer, user, module.SUGGESTION_NOT_MET_NO_EVIDENCE, states=(ContactMet.SKIP,)
-    )
-    assert [contact.id for contact in skipped] == [alone.id]
+    assert (_met(first), _met(second)) == (ContactMet.UNKNOWN, ContactMet.UNKNOWN)
+    assert (first.met_source, first.triaged_at) == (MetSource.MANUAL, None)
+    assert _open_decisions(writer, user) == 0
 
 
 def test_a_tag_says_nothing_until_the_user_gives_it_a_meaning(writer: Session, user: User) -> None:

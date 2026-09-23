@@ -24,6 +24,8 @@ Decide who in your network you have actually met. This is the foundation for eve
 
 1. Export your connections. In LinkedIn, go to **Settings & Privacy > Data privacy > Get a copy of your data** and request your full data archive, not just Connections — the fuller export also carries your message and invitation history, which a tool automating this method can use as triage evidence later even though this stage only needs `Connections.csv`. The download link arrives within 24 hours, usually sooner.
 2. Mark the people you have met. Go down the list and flag anyone you have spoken with in person, on a video call, or in a real conversation. Do not judge whether they can help you, what their title is, or how long it has been. If you have met them once, they count.
+
+   This pass only ever goes one way. You are marking the people you have met, not sorting everyone into two piles: *not met* is a connection you have never actually spoken with, and it is what is left over rather than a call you make. If you are unsure about someone, leave them and come back — no decision is better than a guess, because everything downstream runs on this list. Nothing and nobody can work out from a quiet message history that you have not met someone; only you know that.
 3. Keep the flagged rows as your validated list. Keep the original export as a backup.
 
 Do not look up contact details or update anyone's information yet. That is stage 2.

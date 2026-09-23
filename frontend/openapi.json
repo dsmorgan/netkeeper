@@ -6283,6 +6283,18 @@
       "TriageContactOut": {
         "description": "The contact under triage: the fields the screen shows (spec 10.2).",
         "properties": {
+          "archived_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          },
           "connected_on": {
             "anyOf": [
               {
@@ -6377,6 +6389,17 @@
             ],
             "title": "Location"
           },
+          "merged_into_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merged Into Id"
+          },
           "met": {
             "$ref": "#/components/schemas/ContactMet"
           },
@@ -6441,7 +6464,9 @@
           "do_not_contact",
           "notes",
           "tags",
-          "updated_at"
+          "updated_at",
+          "archived_at",
+          "merged_into_id"
         ],
         "title": "TriageContactOut",
         "type": "object"

@@ -430,6 +430,53 @@ async def test_undo_refuses_a_contact_that_left_the_queue_and_says_so(
     assert before["card"]["contact"]["id"] == run_contacts[0]
 
 
+async def test_the_card_says_whether_the_contact_is_still_in_the_queue(
+    running_app: FastAPI, client: httpx.AsyncClient, run_contacts: list[int]
+) -> None:
+    """`archived_at` and `merged_into_id` on the card, so no client infers them (#91).
+
+    `TriageUndoOut.forced` was the only signal a client had, and it does not
+    mean this: the service appends to it for *any* divergence a force
+    overrode, an ordinary field edit included. So both halves are asserted
+    here — a live card carries `null` for each, and the card a forced undo
+    hands back for a contact that has left the queue says which way it left,
+    while `forced` alone cannot tell the two apart.
+    """
+    live = await _get(client, f"{TRIAGE}/next")
+    assert live["card"]["contact"]["archived_at"] is None
+    assert live["card"]["contact"]["merged_into_id"] is None
+
+    await _decide(client, run_contacts[0], "met")
+    with session_scope(_factory(running_app), write=True) as session:
+        contact = get_scoped(session, _local_user(session), Contact, run_contacts[0])
+        assert contact is not None
+        contact.archived_at = NOW
+    forced = await _undo(client, force=True)
+    assert forced.status_code == 200, forced.text
+    body = forced.json()
+    assert body["forced"] == [run_contacts[0]]
+    assert body["card"]["contact"]["id"] == run_contacts[0]
+    assert body["card"]["contact"]["archived_at"] is not None
+    assert body["card"]["contact"]["merged_into_id"] is None
+
+
+async def test_a_forced_undo_over_an_ordinary_edit_hands_back_a_card_still_in_the_queue(
+    running_app: FastAPI, client: httpx.AsyncClient, contact_id: int
+) -> None:
+    """The case `forced` cannot tell from the one above, and the fields can (#91)."""
+    await _decide(client, contact_id, "met")
+    with session_scope(_factory(running_app), write=True) as session:
+        contact = get_scoped(session, _local_user(session), Contact, contact_id)
+        assert contact is not None
+        contact.met = ContactMet.NOT_MET
+    forced = await _undo(client, force=True)
+    assert forced.status_code == 200, forced.text
+    body = forced.json()
+    assert body["forced"] == [contact_id], "forced says the same thing in both cases"
+    assert body["card"]["contact"]["archived_at"] is None
+    assert body["card"]["contact"]["merged_into_id"] is None
+
+
 # --- the preferred-name edit ------------------------------------------------
 
 
