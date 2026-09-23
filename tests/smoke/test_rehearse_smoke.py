@@ -24,7 +24,13 @@ from collections.abc import Iterator
 import pytest
 
 from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserUnavailable
-from netkeeper.linkedin.rehearse import NotANeutralSite, rehearse, render, serve_replica
+from netkeeper.linkedin.rehearse import (
+    REDACTED,
+    NotANeutralSite,
+    rehearse,
+    render,
+    serve_replica,
+)
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("NETKEEPER_BROWSER_TESTS") != "1",
@@ -97,6 +103,11 @@ async def test_the_rehearsals_requests_carry_the_browsers_own_headers(
     assert sent["user-agent"] == fingerprint_ua
     assert "Headless" not in sent["user-agent"], "run the smoke suite against a windowed Chrome"
     assert sent.get("sec-ch-ua"), "Chrome's client hints did not reach the request"
+    # This runs against the developer's own logged-in profile, and a failing
+    # assertion above prints `sent`. The replica reports a credential header's
+    # presence and never its value, so nothing here can put a real LinkedIn
+    # session cookie into test output (spec 9.1).
+    assert sent.get("cookie", REDACTED) == REDACTED
 
 
 async def test_a_rehearsal_adds_no_browser_context(

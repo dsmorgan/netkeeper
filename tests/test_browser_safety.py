@@ -107,7 +107,15 @@ CONNECTOR_MODULE = LINKEDIN / "browser.py"
 
 # Spec 5 and 9.9: a request handler that awaits browser work deadlocks on the tab
 # waiting for its own response, so routes enqueue work on the task runner instead.
-BROWSER_MODULES = ("netkeeper.linkedin.browser", "netkeeper.linkedin.preflight")
+BROWSER_MODULES = (
+    "netkeeper.linkedin.browser",
+    "netkeeper.linkedin.preflight",
+    # A rehearsal drives a real tab through a whole pacing plan -- minutes of
+    # it. Importing it from a route would await browser work inside a request
+    # handler exactly as importing the provider would, so it is a browser
+    # module here and not only a caller of one below.
+    "netkeeper.linkedin.rehearse",
+)
 
 # The modules that may reach the provider at all, as paths from the repository root.
 # A module that needs it adds itself here on purpose, in a diff someone reads. A
@@ -413,6 +421,24 @@ def test_the_scanners_resolve_a_relative_import() -> None:
 def test_browser_import_scanner_catches_an_import() -> None:
     assert list(browser_imports("from netkeeper.linkedin.browser import AttachBrowserProvider\n"))
     assert not list(browser_imports("from netkeeper.services.tasks import TaskRunner\n"))
+
+
+def test_every_browser_module_is_one_the_scanner_would_catch() -> None:
+    """Each entry in BROWSER_MODULES, shown an import of itself.
+
+    The rules above only bite when something actually imports one of these, so
+    an entry that is spelled wrong -- or missing -- passes every test in this
+    file while guarding nothing. A rehearsal is the case that made this worth
+    writing: it drives a real tab through a whole pacing plan, minutes of it,
+    so a future ``netkeeper/web/api/rehearse.py`` importing it would await
+    browser work inside a request handler exactly as importing the provider
+    would (spec 9.9).
+    """
+    for module in BROWSER_MODULES:
+        assert list(browser_imports(f"from {module} import thing\n")), module
+        assert list(browser_imports(f"import {module}\n")), module
+    assert "netkeeper.linkedin.rehearse" in BROWSER_MODULES
+    assert not list(browser_imports("from netkeeper.linkedin.pacing import human_delay\n"))
 
 
 def test_connect_scanner_catches_an_attach() -> None:

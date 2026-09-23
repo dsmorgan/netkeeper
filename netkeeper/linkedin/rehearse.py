@@ -50,7 +50,15 @@ from typing import Any, Final, Protocol, cast
 from urllib.parse import urlsplit
 
 from netkeeper.linkedin.browser import SINGLE_ACCOUNT_KEY, BrowserProvider, PageLike
-from netkeeper.linkedin.pacing import EnrichmentPlan, ScrollPlan, plan_enrichment
+from netkeeper.linkedin.pacing import (
+    DEFAULT_BURST_PROFILE,
+    DEFAULT_DELAY_PROFILE,
+    BurstProfile,
+    DelayProfile,
+    EnrichmentPlan,
+    ScrollPlan,
+    plan_enrichment,
+)
 
 log = logging.getLogger(__name__)
 
@@ -189,10 +197,25 @@ class Rehearsal:
     visits: tuple[RehearsalVisit, ...]
     elapsed_s: float
     notes: tuple[str, ...] = ()
+    #: Requests that landed after the last visit closed -- during the tab's
+    #: own teardown, which is exactly when an unload beacon fires. Nothing
+    #: groups them under a visit, so before this field existed they were
+    #: recorded and then silently discarded, and the neutrality check that
+    #: reads :attr:`requests` could not see them.
+    trailing: tuple[RequestRecord, ...] = ()
 
     @property
     def requests(self) -> tuple[RequestRecord, ...]:
-        return tuple(record for visit in self.visits for record in visit.requests)
+        """Every request the page made: the ones inside a visit, then any trailing ones.
+
+        :attr:`visits` partitions requests for reading. This is the complete
+        list, and it is what :func:`_assert_stayed_neutral` checks -- a
+        neutrality claim must not depend on how the log happens to be grouped.
+        """
+        return (
+            *(record for visit in self.visits for record in visit.requests),
+            *self.trailing,
+        )
 
     @property
     def hosts(self) -> tuple[str, ...]:
@@ -227,6 +250,8 @@ async def rehearse(
     seed: int,
     account: str = SINGLE_ACCOUNT_KEY,
     time_scale: float = 1.0,
+    delay: DelayProfile = DEFAULT_DELAY_PROFILE,
+    burst: BurstProfile = DEFAULT_BURST_PROFILE,
     sleep: Callable[[float], Awaitable[None]] = _real_sleep,
     clock: Callable[[], float] = time.monotonic,
     now: datetime | None = None,
@@ -246,6 +271,15 @@ async def rehearse(
     one. The *planned* waits are recorded unscaled either way, so the log
     always shows what the real thing would do.
 
+    ``delay`` and ``burst`` are the pacing the rehearsal actually follows. They
+    default to the pacing module's own constants, which today equal
+    ``[linkedin.pacing]``'s defaults field for field -- so a caller that leaves
+    them out looks right in every test and rehearses the wrong pacing the
+    moment somebody edits ``config.toml``. ``netkeeper rehearse`` passes the
+    loaded settings through :func:`netkeeper.services.pacing.profiles`, because
+    a rehearsal that shows 25-second medians while the config asks for 5 is
+    worse than no rehearsal: its entire value is fidelity.
+
     Raises whatever the browser raises: a rehearsal that cannot attach is a
     failure worth seeing, not something to paper over. Nothing here retries and
     nothing launches a browser (ADR 0002).
@@ -261,7 +295,12 @@ async def rehearse(
     # Not a cryptographic use: the seed is printed in the log precisely so a
     # rehearsal can be repeated line for line, which is the opposite of what a
     # secure generator is for.
-    plan: EnrichmentPlan = plan_enrichment(Random(seed), visits)  # noqa: S311
+    plan: EnrichmentPlan = plan_enrichment(
+        Random(seed),  # noqa: S311
+        visits,
+        delay=delay,
+        burst=burst,
+    )
     started_at = datetime.now(UTC) if now is None else now
     origin = clock()
     recorder = _Recorder(clock, origin)
@@ -294,6 +333,16 @@ async def rehearse(
                 )
             )
 
+    # Taken after the `async with` block, so it includes anything the tab asked
+    # for while it was being closed. That window is not hypothetical: an unload
+    # beacon is precisely a request fired on teardown.
+    trailing = recorder.close_visit()
+    if trailing:
+        notes.append(
+            f"{len(trailing)} request(s) arrived after the last profile visit, during the"
+            " tab's teardown; they are listed under AFTER THE LAST VISIT and are checked"
+            " for neutrality like every other request"
+        )
     rehearsal = Rehearsal(
         site=base,
         started_at=started_at,
@@ -303,6 +352,7 @@ async def rehearse(
         visits=tuple(made),
         elapsed_s=clock() - origin,
         notes=tuple(notes),
+        trailing=trailing,
     )
     _assert_stayed_neutral(rehearsal)
     return rehearsal
@@ -443,13 +493,24 @@ def _resource_type(request: RequestLike) -> str:
 
 
 def _require_neutral(site: str) -> str:
-    """``site`` with any trailing slash removed, if it is a loopback url; raise otherwise."""
-    split = urlsplit(site)
+    """``site`` with any trailing slash removed, if it is a loopback url; raise otherwise.
+
+    Every way this says no is a :class:`NotANeutralSite`, including a url too
+    malformed to parse (``http://[::1`` raises out of ``urlsplit``). A refusal
+    that arrives as some other exception type is a refusal a caller's
+    ``except`` clause does not catch, and the caller here is the CLI turning it
+    into a message rather than a traceback.
+    """
+    try:
+        split = urlsplit(site)
+        host = split.hostname
+        split.port  # noqa: B018 - parsed lazily, and a bad one only raises when touched
+    except ValueError as exc:
+        raise NotANeutralSite(f"{site!r} is not a url a rehearsal can be pointed at") from exc
     if split.scheme not in ("http", "https"):
         raise NotANeutralSite(
             f"a rehearsal site must be an http(s) url on this machine's loopback, got {site!r}"
         )
-    host = split.hostname
     if host is not None and _is_linkedin(host):
         raise NotANeutralSite(
             "a rehearsal never touches LinkedIn. It exists so the request pattern can be"
@@ -492,6 +553,13 @@ _AVATAR_SVG: Final = (
 )
 
 
+#: Request headers the replica reports the presence of but never the value of.
+REDACTED_HEADERS: Final[frozenset[str]] = frozenset(
+    {"cookie", "authorization", "proxy-authorization"}
+)
+REDACTED: Final = "<redacted>"
+
+
 class _ReplicaHandler(BaseHTTPRequestHandler):
     """A profile page, a stylesheet, and an image, so a visit makes more than one request."""
 
@@ -503,10 +571,25 @@ class _ReplicaHandler(BaseHTTPRequestHandler):
         elif self.path.startswith("/static/avatar.svg"):
             self._send(_AVATAR_SVG, "image/svg+xml")
         elif self.path.startswith("/headers"):
-            payload = {name.lower(): value for name, value in self.headers.items()}
-            self._send(json.dumps(payload).encode(), "text/plain; charset=utf-8")
+            self._send(json.dumps(self._echoed_headers()).encode(), "text/plain; charset=utf-8")
         else:
             self._send(_PROFILE_PAGE, "text/html; charset=utf-8")
+
+    def _echoed_headers(self) -> dict[str, str]:
+        """The request's headers, with anything bearing a credential redacted.
+
+        The smoke suite fetches this to prove the tab sends the browser's own
+        user agent and client hints, and a failing assertion prints the whole
+        payload. The replica is on loopback and the profile is the user's own,
+        so ``Cookie`` here would be their real session cookie landing in test
+        output -- the one thing preflight goes out of its way never to read
+        (spec 9.1, CLAUDE.md). Nothing in netkeeper needs their values to check
+        that a header arrived, so the name is kept and the value is not.
+        """
+        return {
+            name.lower(): (REDACTED if name.lower() in REDACTED_HEADERS else value)
+            for name, value in self.headers.items()
+        }
 
     def _send(self, body: bytes, content_type: str) -> None:
         self.send_response(200)
@@ -560,12 +643,16 @@ def render(rehearsal: Rehearsal) -> str:
     for visit in rehearsal.visits:
         lines.extend(_visit_lines(visit))
         lines.append("")
+    if rehearsal.trailing:
+        lines.append("AFTER THE LAST VISIT  (the tab's own teardown)")
+        lines.extend(f"  {line}" for line in _request_table(rehearsal.trailing).splitlines())
+        lines.append("")
     lines.extend(_summary_lines(rehearsal))
     return "".join(f"{line}\n" for line in lines)
 
 
-def _visit_lines(visit: RehearsalVisit) -> list[str]:
-    lines = [f"VISIT {visit.index}  {visit.url}"]
+def _request_table(records: Sequence[RequestRecord]) -> str:
+    """The request log's one table shape, so every block of it reads the same."""
     rows = [
         (
             f"+{record.started_s:.3f}s",
@@ -575,11 +662,15 @@ def _visit_lines(visit: RehearsalVisit) -> list[str]:
             "-" if record.duration_ms is None else f"{record.duration_ms:.0f} ms",
             record.path,
         )
-        for record in visit.requests
+        for record in records
     ]
-    if rows:
-        table = _table(("TIME", "METHOD", "STATUS", "KIND", "TOOK", "PATH"), rows)
-        lines.extend(f"  {line}" for line in table.splitlines())
+    return _table(("TIME", "METHOD", "STATUS", "KIND", "TOOK", "PATH"), rows)
+
+
+def _visit_lines(visit: RehearsalVisit) -> list[str]:
+    lines = [f"VISIT {visit.index}  {visit.url}"]
+    if visit.requests:
+        lines.extend(f"  {line}" for line in _request_table(visit.requests).splitlines())
     else:
         lines.append("  (the page made no requests)")
     failures = [record for record in visit.requests if record.failure is not None]
@@ -599,12 +690,29 @@ def _visit_lines(visit: RehearsalVisit) -> list[str]:
 
 
 def _summary_lines(rehearsal: Rehearsal) -> list[str]:
+    """The verdict, qualified exactly as far as the log can support it.
+
+    An unqualified "nothing reached linkedin.com" is a claim about the run. It
+    is only true of the *log* once something is known to be missing from the
+    log -- after a tab loss, the navigation on the reopened tab happens before
+    the listeners are reattached. Printing the absolute claim above a note
+    saying the log is incomplete is the shape of over-claiming this whole
+    module exists to avoid, so the claim shrinks when the note appears.
+    """
     hosts = ", ".join(rehearsal.hosts) or "none"
+    complete = not rehearsal.notes
+    verdict = (
+        "every request above went to the loopback replica. Nothing reached linkedin.com,"
+        " and a rehearsal that had would have raised instead of printing this."
+        if complete
+        else "nothing *in this log* reached linkedin.com, and a rehearsal whose log showed"
+        " otherwise would have raised instead of printing this -- but some requests are"
+        " missing from this log; see the notes below."
+    )
     lines = [
         f"{len(rehearsal.visits)} visits, {len(rehearsal.requests)} requests,"
         f" {len(rehearsal.hosts)} host(s): {hosts}",
-        "every request above went to the loopback replica. Nothing reached linkedin.com,"
-        " and a rehearsal that had would have raised instead of printing this.",
+        verdict,
         f"elapsed {rehearsal.elapsed_s:.1f}s; a run at this pacing would have waited"
         f" {rehearsal.planned_wait_s:.1f}s between profiles.",
     ]

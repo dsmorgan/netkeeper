@@ -41,7 +41,13 @@ import pytest
 from browser_fakes import FakeBrowser, FakeConnector, FakeContext, FakePage
 
 from netkeeper.linkedin.browser import AttachBrowserProvider, PageLike
-from netkeeper.linkedin.pacing import plan_enrichment
+from netkeeper.linkedin.pacing import (
+    DEFAULT_BURST_PROFILE,
+    DEFAULT_DELAY_PROFILE,
+    BurstProfile,
+    DelayProfile,
+    plan_enrichment,
+)
 from netkeeper.linkedin.rehearse import (
     LINKEDIN_HOST,
     LOOPBACK_HOSTS,
@@ -107,6 +113,7 @@ class ReplayPage(FakePage):
         self.fail_at = fail_at
         self.goto_count = 0
         self._extra: tuple[str, ...] = context.extra_requests
+        self._on_close: tuple[str, ...] = context.unload_requests
         self._fetch = context.fetch
 
     def on(self, event: str, handler: Callable[[Any], None]) -> None:
@@ -140,6 +147,20 @@ class ReplayPage(FakePage):
             return 200
         return httpx.get(url, timeout=5).status_code
 
+    async def close(self) -> None:
+        """Emit anything armed for the unload window, then close.
+
+        A beacon fires when the tab goes away, which is after the last visit
+        has been closed out -- the one moment nothing groups a request under a
+        visit.
+        """
+        for target in self._on_close:
+            request = FakeRequest(target, method="POST", resource_type="other")
+            self._emit("request", request)
+            self._emit("response", FakeResponse(request, status=204))
+        self.close_calls += 1
+        self._closed = True
+
     def _emit(self, event: str, payload: object) -> None:
         for handler in self.handlers.get(event, []):
             handler(payload)
@@ -153,11 +174,13 @@ class ReplayContext(FakeContext):
         *,
         fail_first_page_at: int | None = None,
         extra_requests: Sequence[str] = (),
+        unload_requests: Sequence[str] = (),
         fetch: bool = False,
     ) -> None:
         super().__init__()
         self.fail_first_page_at = fail_first_page_at
         self.extra_requests = tuple(extra_requests)
+        self.unload_requests = tuple(unload_requests)
         self.fetch = fetch
         self.replays: list[ReplayPage] = []
 
@@ -197,9 +220,16 @@ class Sleeper:
 
 
 def _setup(
-    *, fail_first_page_at: int | None = None, extra_requests: Sequence[str] = ()
+    *,
+    fail_first_page_at: int | None = None,
+    extra_requests: Sequence[str] = (),
+    unload_requests: Sequence[str] = (),
 ) -> tuple[AttachBrowserProvider, ReplayContext, FakeConnector]:
-    context = ReplayContext(fail_first_page_at=fail_first_page_at, extra_requests=extra_requests)
+    context = ReplayContext(
+        fail_first_page_at=fail_first_page_at,
+        extra_requests=extra_requests,
+        unload_requests=unload_requests,
+    )
     connector = FakeConnector([FakeBrowser([context])])
     return AttachBrowserProvider(CDP, connector=connector), context, connector
 
@@ -211,9 +241,14 @@ async def _rehearse(
     time_scale: float = 1.0,
     fail_first_page_at: int | None = None,
     extra_requests: Sequence[str] = (),
+    unload_requests: Sequence[str] = (),
+    delay: DelayProfile = DEFAULT_DELAY_PROFILE,
+    burst: BurstProfile = DEFAULT_BURST_PROFILE,
 ) -> tuple[Rehearsal, ReplayContext, FakeConnector, Sleeper]:
     provider, context, connector = _setup(
-        fail_first_page_at=fail_first_page_at, extra_requests=extra_requests
+        fail_first_page_at=fail_first_page_at,
+        extra_requests=extra_requests,
+        unload_requests=unload_requests,
     )
     sleeper = Sleeper()
     rehearsal = await rehearse(
@@ -222,6 +257,8 @@ async def _rehearse(
         visits=visits,
         seed=SEED,
         time_scale=time_scale,
+        delay=delay,
+        burst=burst,
         sleep=sleeper,
         clock=Ticker(),
     )
@@ -342,6 +379,67 @@ async def test_a_page_that_reached_linkedin_raises_instead_of_reporting() -> Non
         await _rehearse(visits=1, extra_requests=("https://www.linkedin.com/li/track",))
 
 
+async def test_a_beacon_fired_during_teardown_is_logged_and_checked() -> None:
+    """The one window nothing groups a request under a visit, which is when beacons fire.
+
+    Before ``Rehearsal.trailing`` existed, a request arriving after the last
+    ``close_visit()`` was recorded and then silently dropped: it never reached
+    ``requests``, so the neutrality check could not see it and the log printed
+    an unqualified "nothing reached linkedin.com" over the top of it.
+    """
+    rehearsal, _, _, _ = await _rehearse(
+        visits=2, unload_requests=("http://127.0.0.1:52341/beacon",)
+    )
+    text = render(rehearsal)
+
+    assert len(rehearsal.trailing) == 1
+    assert rehearsal.trailing[0].path == "/beacon"
+    assert rehearsal.trailing[0].method == "POST"
+    assert rehearsal.trailing[0] in rehearsal.requests, "trailing requests are not in the log"
+    assert "AFTER THE LAST VISIT" in text
+    assert "/beacon" in text
+
+
+async def test_a_beacon_to_linkedin_during_teardown_raises() -> None:
+    """The gap that mattered: a request outside every visit still has to be checked.
+
+    ``requests`` is what ``_assert_stayed_neutral`` reads, so this passes only
+    because trailing requests are part of it -- a neutrality claim must not
+    depend on how the log happens to be grouped. The fake emits; nothing is
+    fetched.
+    """
+    with pytest.raises(NotANeutralSite, match="not neutral"):
+        await _rehearse(visits=1, unload_requests=("https://www.linkedin.com/li/track",))
+
+
+async def test_a_run_with_no_beacon_has_nothing_trailing() -> None:
+    """Without this, a report that swept every request into `trailing` would pass above."""
+    rehearsal, _, _, _ = await _rehearse(visits=2)
+
+    assert rehearsal.trailing == ()
+    assert "AFTER THE LAST VISIT" not in render(rehearsal)
+
+
+async def test_the_summary_stops_claiming_the_whole_run_once_the_log_is_incomplete() -> None:
+    """After a tab loss the reopened tab navigates before the listeners reattach.
+
+    The note was already there; the sentence above it still said "every request
+    above" and "nothing reached linkedin.com" without qualification, which is
+    the over-claiming this module exists to avoid.
+    """
+    lost, _, _, _ = await _rehearse(visits=3, fail_first_page_at=2)
+    complete, _, _, _ = await _rehearse(visits=3)
+
+    lost_text, complete_text = render(lost), render(complete)
+
+    assert "nothing *in this log* reached linkedin.com" in lost_text
+    assert "some requests are missing from this log" in lost_text
+    assert "every request above went to the loopback replica" not in lost_text
+    # And the unqualified claim is still made when the log really is complete.
+    assert "every request above went to the loopback replica" in complete_text
+    assert "missing from this log" not in complete_text
+
+
 def test_the_three_spellings_of_this_machine_are_accepted() -> None:
     for host in ("127.0.0.1", "localhost", "::1"):
         url = f"http://{host}:8080" if host != "::1" else "http://[::1]:8080"
@@ -350,6 +448,48 @@ def test_the_three_spellings_of_this_machine_are_accepted() -> None:
 
 def test_a_trailing_slash_is_trimmed_so_paths_do_not_double_up() -> None:
     assert _require_neutral("http://127.0.0.1:8080/") == "http://127.0.0.1:8080"
+
+
+@pytest.mark.parametrize("site", ["http://[::1", "http://[", "https://[::1]:notaport"])
+async def test_a_url_too_malformed_to_parse_is_refused_not_raised_through(site: str) -> None:
+    """Every refusal is a NotANeutralSite, including one urlsplit itself chokes on.
+
+    A refusal arriving as some other exception type is one the caller's except
+    clause does not catch, and the caller is the CLI turning it into a message
+    rather than a traceback.
+    """
+    provider, _, connector = _setup()
+
+    with pytest.raises(NotANeutralSite):
+        await rehearse(provider, site=site, seed=SEED, sleep=Sleeper(), clock=Ticker())
+
+    assert connector.attaches == 0
+
+
+def test_the_replica_never_echoes_a_credential_header() -> None:
+    """The smoke suite fetches /headers, and a failing assertion prints the payload.
+
+    The replica is on loopback and the browser is the owner's own, so an echoed
+    `Cookie` is their real LinkedIn session landing in test output -- the one
+    thing preflight goes out of its way never to read (spec 9.1).
+    """
+    with serve_replica() as base:
+        echoed = httpx.get(
+            f"{base}/headers",
+            headers={
+                "Cookie": "li_at=SECRET-SESSION-VALUE",
+                "Authorization": "Bearer SECRET-TOKEN",
+                "User-Agent": "Chrome/140.0.7339.80",
+            },
+            timeout=5,
+        ).text
+
+    assert "SECRET-SESSION-VALUE" not in echoed
+    assert "SECRET-TOKEN" not in echoed
+    assert '"cookie": "<redacted>"' in echoed
+    assert '"authorization": "<redacted>"' in echoed
+    # The names still arrive, which is what the smoke suite actually checks for.
+    assert "Chrome/140.0.7339.80" in echoed
 
 
 @pytest.mark.parametrize(
@@ -387,6 +527,38 @@ async def test_the_rehearsal_replays_the_real_pacing_plan() -> None:
     ]
     wheels = context.replays[0].mouse.wheels
     assert wheels == [(0, step.delta_px) for plan in expected.steps for step in plan.scroll.steps]
+
+
+async def test_the_rehearsal_follows_the_pacing_it_is_given_not_the_library_default() -> None:
+    """The fidelity claim, made falsifiable.
+
+    ``PacingSettings``' defaults equal the pacing module's constants field for
+    field, so a rehearsal that ignored its arguments would agree with one that
+    honored them on every default config -- and diverge silently the moment
+    somebody edits ``config.toml``. This passes a median far from the default
+    and checks the waits actually moved.
+    """
+    brisk = DelayProfile(median=2.0, sigma=0.01, tail_p=0.0, tail_range=(0.0, 0.0))
+    expected = plan_enrichment(Random(SEED), 4, delay=brisk, burst=DEFAULT_BURST_PROFILE)
+
+    rehearsal, _, _, _ = await _rehearse(visits=4, delay=brisk)
+    default_rehearsal, _, _, _ = await _rehearse(visits=4)
+
+    assert [visit.planned_wait_s for visit in rehearsal.visits] == [
+        step.delay_after_s for step in expected.steps
+    ]
+    assert rehearsal.planned_wait_s < default_rehearsal.planned_wait_s / 5
+    assert rehearsal.planned_wait_s > 0
+
+
+async def test_the_rehearsal_follows_the_burst_profile_it_is_given() -> None:
+    tight = BurstProfile(size_range=(2, 2), break_range_s=(11.0, 11.0))
+
+    rehearsal, _, _, _ = await _rehearse(visits=6, burst=tight, time_scale=1000.0)
+
+    assert rehearsal.burst_sizes == (2, 2, 2)
+    breaks = [visit.planned_wait_s for visit in rehearsal.visits if visit.burst_break]
+    assert breaks == [11.0, 11.0]
 
 
 async def test_every_wait_is_one_the_plan_asked_for() -> None:
