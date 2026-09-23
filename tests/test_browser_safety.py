@@ -65,9 +65,13 @@ PROCESS_CALLS = frozenset(
         "execvp",
         "execvpe",
         "spawnl",
+        "spawnle",
+        "spawnlp",
+        "spawnlpe",
         "spawnv",
         "spawnve",
         "spawnvp",
+        "spawnvpe",
         "posix_spawn",
         "posix_spawnp",
         "startfile",
@@ -182,8 +186,15 @@ def reached_names(source: str, path: Path = MEMORY) -> Iterator[tuple[int, str]]
       ``from os import system as sh`` makes ``sh()`` a process start;
     - a string literal handed to ``getattr`` or ``operator.attrgetter``.
 
-    It cannot see a name built at run time, which is why every rule here is also a
-    review rule, not only a test.
+    It cannot see a name built at run time, or one read out of a namespace
+    (``vars(os)["system"]``), which is why every rule here is also a review rule,
+    not only a test.
+
+    Reading references rather than calls widens the net: an unrelated attribute
+    that happens to be *named* ``route`` or ``system`` now fails the build too.
+    That is the safe direction. There is deliberately no per-line escape hatch; a
+    false positive is settled in review by renaming the attribute or by narrowing
+    the list entry, in a diff someone reads.
     """
     yield from called_names(source)
     for node in ast.walk(ast.parse(source)):
@@ -192,23 +203,29 @@ def reached_names(source: str, path: Path = MEMORY) -> Iterator[tuple[int, str]]
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 yield node.lineno, alias.name
-        elif isinstance(node, ast.Call) and _names_an_attribute(node):
-            for arg in node.args[1:2] if _is_getattr(node) else node.args:
+        elif isinstance(node, ast.Call):
+            for arg in _attribute_name_arguments(node):
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    yield node.lineno, arg.value
+                    for part in arg.value.split("."):
+                        yield node.lineno, part
 
 
-def _is_getattr(node: ast.Call) -> bool:
-    return isinstance(node.func, ast.Name) and node.func.id == "getattr"
+def _attribute_name_arguments(node: ast.Call) -> list[ast.expr]:
+    """The arguments that name an attribute, for the calls that take one by string.
 
-
-def _names_an_attribute(node: ast.Call) -> bool:
-    """``getattr(obj, "name")`` and ``operator.attrgetter("name")``."""
-    if _is_getattr(node):
-        return True
+    ``getattr(obj, "name", default)`` names it second and only second;
+    ``operator.methodcaller("name", *args)`` names it first; ``attrgetter`` takes
+    any number, each possibly dotted (``attrgetter("chromium.launch")``).
+    """
     func = node.func
     name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-    return name == "attrgetter"
+    if name == "getattr" and isinstance(func, ast.Name):
+        return node.args[1:2]
+    if name == "methodcaller":
+        return node.args[:1]
+    if name == "attrgetter":
+        return list(node.args)
+    return []
 
 
 def imported_names(source: str, path: Path = MEMORY) -> Iterator[tuple[int, str]]:
@@ -441,7 +458,13 @@ def test_the_scanners_see_getattr_with_a_literal() -> None:
     assert list(launch_calls("await getattr(p.chromium, 'launch')()\n"))
     assert list(context_mutations("getattr(context, 'new_cdp_session')(page)\n"))
     assert list(process_starts("operator.attrgetter('system')(os)('open -a Chrome')\n"))
+    assert list(launch_calls("operator.methodcaller('launch')(p.chromium)\n"))
+    assert list(launch_calls("operator.attrgetter('chromium.launch')(p)()\n"))
+    assert list(process_starts("os.spawnlp(os.P_NOWAIT, 'open', 'open', '-a', 'Chrome')\n"))
     assert not list(launch_calls("getattr(page, 'url')\n"))
+    # getattr names its attribute second; a default that happens to spell a listed
+    # name is a value, not a reference.
+    assert not list(launch_calls("getattr(obj, 'x', 'launch')\n"))
 
 
 def test_context_scanner_catches_a_mutation() -> None:
