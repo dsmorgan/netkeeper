@@ -54,8 +54,9 @@ from netkeeper.services.backup import (
     list_backups,
     prune_backups,
 )
+from netkeeper.services.linkedin_accounts import account_id_for
 from netkeeper.services.pacing import profiles as pacing_profiles
-from netkeeper.services.posture import SINGLE_ACCOUNT_ID, SessionProbe, posture
+from netkeeper.services.posture import SessionProbe, posture
 from netkeeper.services.posture import render as render_posture
 from netkeeper.services.simulate_run import DEFAULT_DAYS as DEFAULT_SIMULATION_DAYS
 from netkeeper.services.simulate_run import DEFAULT_SEED as DEFAULT_SIMULATION_SEED
@@ -425,8 +426,12 @@ def posture_command(
         ),
     ] = True,
     account: Annotated[
-        int, typer.Option(help="LinkedIn account the budgets and heat belong to.")
-    ] = SINGLE_ACCOUNT_ID,
+        int | None,
+        typer.Option(
+            help="LinkedIn account id the budgets and heat belong to. Defaults to the"
+            " local user's account."
+        ),
+    ] = None,
 ) -> None:
     """Every protection the LinkedIn extractor has, and a warning for anything that is off.
 
@@ -456,7 +461,7 @@ def posture_command(
             report = posture(
                 session,
                 user,
-                account,
+                account if account is not None else account_id_for(session, user),
                 now=datetime.now(UTC),
                 settings=settings,
                 # The provider this command would actually run with, not the

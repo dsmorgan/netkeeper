@@ -1137,3 +1137,91 @@ def test_downgrading_drops_the_decisions_the_old_schema_cannot_hold(
     with migration_engine.begin() as connection:
         kept = connection.execute(text("SELECT id FROM triage_decisions ORDER BY id")).scalars()
         assert list(kept) == [1]
+
+
+# --- linkedin accounts, and the keys that already belonged to one (0011) --------------
+
+
+def _put_setting(connection: Connection, user_id: int, key: str, value: str = "1") -> None:
+    connection.execute(
+        text(
+            "INSERT INTO settings_kv (user_id, key, value, created_at, updated_at)"
+            " VALUES (:user_id, :key, :value, :t, :t)"
+        ),
+        {"user_id": user_id, "key": key, "value": value, "t": STAMP},
+    )
+
+
+def _keys(connection: Connection, user_id: int) -> set[str]:
+    rows = connection.execute(
+        text("SELECT key FROM settings_kv WHERE user_id = :user_id"), {"user_id": user_id}
+    ).scalars()
+    return set(rows)
+
+
+#: What CP3's code wrote for account 1, plus neighbors that only look like it.
+LEGACY_KEYS = {
+    "linkedin.budget.1.connection_pages.day.2026-09-22",
+    "linkedin.budget.1.profile_visits.week.2026-W39",
+    "linkedin.heat.1",
+    "scheduler.job.1.connections_full",
+    "linkedin.session_flag",  # keyed by user alone
+    "linkedin.budget.10.connection_pages.day.2026-09-22",  # account 10, not 1
+    "linkedin.heat.12",
+    "tags.defaults_seeded",
+}
+
+
+def test_every_user_gets_an_account_and_keeps_their_counters(migration_engine: Engine) -> None:
+    """The first user's account is 1 and nothing moves; the second's is 2 and its keys follow."""
+    migrations.upgrade(migration_engine, "0010")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        for key in LEGACY_KEYS:
+            _put_setting(connection, 1, key)
+            _put_setting(connection, 2, key)
+
+    migrations.upgrade(migration_engine, "0011")
+
+    with migration_engine.begin() as connection:
+        accounts = connection.execute(
+            text("SELECT user_id, id, label FROM linkedin_accounts ORDER BY user_id")
+        ).all()
+        assert [tuple(row) for row in accounts] == [(1, 1, "default"), (2, 2, "default")]
+        assert _keys(connection, 1) == LEGACY_KEYS
+        assert _keys(connection, 2) == {
+            "linkedin.budget.2.connection_pages.day.2026-09-22",
+            "linkedin.budget.2.profile_visits.week.2026-W39",
+            "linkedin.heat.2",
+            "scheduler.job.2.connections_full",
+            "linkedin.session_flag",
+            "linkedin.budget.10.connection_pages.day.2026-09-22",
+            "linkedin.heat.12",
+            "tags.defaults_seeded",
+        }
+
+    migrations.downgrade(migration_engine, "0010")
+
+    assert "linkedin_accounts" not in set(inspect(migration_engine).get_table_names())
+    with migration_engine.begin() as connection:
+        assert _keys(connection, 1) == LEGACY_KEYS
+        assert _keys(connection, 2) == LEGACY_KEYS
+
+
+def test_an_account_label_is_unique_per_user_and_goes_with_its_user(
+    migration_engine: Engine,
+) -> None:
+    migrations.upgrade(migration_engine)
+    insert = text(
+        "INSERT INTO linkedin_accounts (user_id, label, created_at, updated_at)"
+        " VALUES (:user_id, :label, :t, :t)"
+    )
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        connection.execute(insert, {"user_id": 1, "label": "default", "t": STAMP})
+        connection.execute(insert, {"user_id": 2, "label": "default", "t": STAMP})
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(insert, {"user_id": 1, "label": "default", "t": STAMP})
+    with migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM users WHERE id = 1"))
+        assert _count(connection, "linkedin_accounts") == 1
