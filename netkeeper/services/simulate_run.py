@@ -87,10 +87,16 @@ day where heat moved the cap more than once. ``SKIP?`` is not read off an
 end-of-day heat snapshot either (the score can fall back under the threshold
 by the time the day closes, well after a real fire was actually skipped
 mid-day) -- it is whether the scheduler's own ``SimResult`` recorded a
-heat-skipped fire that day, at all. A day the handler never touched (heat
-skipped every fire, or the day fell outside active hours) falls back to a
-one-shot end-of-day derivation for ``HEAT-CAP``/``MIN-CAP``, which is exactly
-right there: heat cannot have changed on a day nothing happened.
+heat-skipped fire that day, at all. A day the handler never touched at all
+(heat skipped every fire, or the day fell outside active hours) has no live
+reading to fall back on, so ``HEAT-CAP``/``MIN-CAP`` there come from a
+one-shot end-of-day derivation instead -- an approximation, not a recovered
+truth: heat decays continuously through a day whether or not anything spent
+against it, so that single end-of-day reading can itself be higher than the
+cap was earlier the same day (most visibly on a day the skip gate held for
+its whole span: the longer heat has had to decay by the time this reads it,
+the more permissive a cap it reports for a day nothing was ever allowed to
+spend against). No scenario the second review found reaches this path.
 
 **Nothing here imports a browser.** No ``AttachBrowserProvider``, no CDP, no
 network -- ``tests/test_browser_safety.py``'s allowlist is untouched by this
@@ -304,7 +310,7 @@ async def _replay(
     gate = linkedin.heat if heat_gate is None else heat_gate
     effective_heat = linkedin.heat if isinstance(gate, HeatSkip) else gate
 
-    with _scratch_database() as factory:
+    with _scratch_database() as factory, _quiet_scheduler_warnings():
         with session_scope(factory, write=True) as session:
             user = User(
                 kind=UserKind.LOCAL,
@@ -522,7 +528,7 @@ def _make_enrich_handler(
                 settings=budget_settings,
             ).day.count
             consecutive = 0
-            while consecutive < CONSECUTIVE_THROTTLE_ABORT:
+            while True:
                 multiplier = heat_rows.cooldown_multiplier(
                     session, user, account_id, now=ctx.due, settings=heat_settings
                 )
@@ -534,8 +540,17 @@ def _make_enrich_handler(
                     cap=cap,
                     multiplier=multiplier,
                 )
+                # Recorded before the abort check below, not after: the
+                # second consecutive throttle raises heat and then this loop
+                # exits without ever spending another unit, but the cap that
+                # raise just produced is real -- it is the day's true lowest
+                # point, even though no unit was spent against it. Recording
+                # it only when the loop goes on to spend another unit would
+                # leave MIN-CAP one throttle behind the day's actual low.
                 state.last_cap[day_index] = after_heat
                 state.min_cap[day_index] = min(state.min_cap.get(day_index, after_heat), after_heat)
+                if consecutive >= CONSECUTIVE_THROTTLE_ABORT:
+                    break
                 if today_count >= after_heat:
                     break
                 try:
@@ -615,10 +630,15 @@ def _day_snapshot(
     ``budget.after_heat`` and ``min_heat_cap`` come from ``state``'s live
     tracking -- the cap as it actually governed the handler's spending that
     day -- whenever the handler ran at all. A day it never touched (every
-    fire heat-skipped, or the day fell outside active hours) falls back to a
-    one-shot derivation at ``now``, which is exactly right there: heat
-    cannot have changed on a day nothing happened, so the live and the
-    snapshot values would agree anyway.
+    fire heat-skipped, or the day fell outside active hours) has no live
+    reading to use, so this falls back to a one-shot derivation at ``now``
+    instead -- an approximation, not a recovered truth. Heat decays
+    continuously through the day regardless of whether anything spent
+    against it, so this end-of-day reading can be *higher* (more permissive)
+    than the cap really was earlier the same day, most visibly on a day the
+    skip gate held throughout: the more of the day has passed by the time
+    this reads it, the more heat has already decayed away. See the module
+    docstring's "what every column actually means".
     """
     snapshot = budget_status(
         session, user, account_id, ActionClass.PROFILE_VISITS, now=now, settings=budget_settings
@@ -704,6 +724,29 @@ def _bucket_fires(fires: Sequence[simulate.SimFire]) -> tuple[JobFires, ...]:
 def _active_window(active_hours: tuple[str, str]) -> tuple[time, time]:
     start, end = active_hours
     return time.fromisoformat(start), time.fromisoformat(end)
+
+
+# --- quieting other modules' own logging for the duration of a replay --------
+
+
+@contextmanager
+def _quiet_scheduler_warnings() -> Iterator[None]:
+    """``netkeeper.services.scheduler`` logs at WARNING on its own: a heat-skipped
+    fire ("scheduler: skipping enrich for account 1 (heat)") and a catch-up
+    jitter, both naming the scratch account's id. The skip is already in the
+    day table this command prints (``heat_skipped_today``, and the fires
+    table's own column) -- a copy of the same fact on stderr, worded exactly
+    like a real skip on a real account, would be. Raised to ERROR for the
+    whole replay and restored after, on every path, the same pattern
+    :func:`_quiet_alembic` uses -- not disabled outright, so a caller who
+    configured their own scheduler logging is not overridden permanently."""
+    logger = logging.getLogger("netkeeper.services.scheduler")
+    previous = logger.level
+    logger.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        logger.setLevel(previous)
 
 
 # --- the scratch database: created and deleted by this call, never the user's ---

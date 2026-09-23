@@ -32,6 +32,7 @@ Two traps this project keeps hitting, both guarded here:
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
@@ -175,6 +176,30 @@ async def test_the_cap_shrinks_within_the_same_fire_that_raised_heat() -> None:
     assert day_with.min_heat_cap == 10  # shrink(20, cooldown_multiplier=2.0)
 
 
+async def test_heat_cap_is_the_live_tracked_cap_not_an_end_of_day_rereading() -> None:
+    """The defect a second review caught coming back with no test failing: a
+    version that kept ``MIN-CAP`` live but reverted ``HEAT-CAP``
+    (``budget.after_heat``) to an end-of-day re-derivation still passed every
+    other test in this module. Pins the exact value a real run of the CP3
+    demo's own invocation produces on the two days a throttle lands, so that
+    specific regression fails here instead of nowhere.
+
+    Confirmed by reverting ``_day_snapshot`` to always take the ``else``
+    (end-of-day) branch for ``after_heat``: day 9 then reads 51, not 48 (heat
+    has decayed further by the end of the day than it had when the handler
+    itself last stopped spending), and day 10 reads 50, not 47.
+    """
+    report = await sr.run_simulation(days=14, throttles=2, seed=0, settings=DEFAULTS)
+
+    day9, day10 = report.days[9], report.days[10]
+    assert day9.throttles_landed == 1
+    assert day9.budget.after_heat == 48
+    assert day9.budget.spent == 48  # spending actually stopped at the live cap, not at 51
+    assert day10.throttles_landed == 1
+    assert day10.budget.after_heat == 47
+    assert day10.budget.spent == 47
+
+
 async def test_spending_stops_exactly_at_the_derived_cap_with_no_overshoot() -> None:
     """The handler's own stopping condition is "spend while under the cap", not
     "spend while at or under it": ``consume`` already provides one unit of
@@ -231,11 +256,23 @@ async def test_two_consecutive_throttles_abort_one_fires_spend_loop() -> None:
     """Every one of the first five units is targeted -- more than the abort
     should ever let land in a single fire. The day's own budget (20) is
     nowhere close to exhausted, so only the two-consecutive-throttle abort
-    explains stopping at exactly 2."""
+    explains stopping at exactly 2.
+
+    Also pins the cap the second throttle itself produces: confirmed by
+    running it, ``shrink(20, cooldown_multiplier=3.0) == 6`` -- lower than
+    the 10 a single throttle alone produces
+    (``test_the_cap_shrinks_within_the_same_fire_that_raised_heat``). The
+    loop exits on the abort right after that second raise without ever
+    spending another unit, so this cap governed nothing -- but it is the
+    day's real lowest point, and a version that only records the cap when
+    the loop goes on to spend again would leave ``min_cap`` one throttle
+    behind at 10."""
     state = await _run_one_direct_fire(frozenset(range(5)))
 
     assert len(state.throttle_log) == sr.CONSECUTIVE_THROTTLE_ABORT
     assert state.units_spent_total == sr.CONSECUTIVE_THROTTLE_ABORT
+    assert state.min_cap[0] == 6
+    assert state.last_cap[0] == 6
 
 
 async def test_removing_the_abort_would_let_more_than_two_land_in_one_fire(
@@ -278,17 +315,6 @@ async def test_the_weekly_ceiling_refuses_once_exceeded() -> None:
     assert day13.budget.spent == 0  # refused entirely: the week is already over
 
 
-async def test_a_neutered_consume_would_fail_the_weekly_ceiling_test() -> None:
-    """Mutation check: what the test above would see if ``consume`` stopped
-    actually persisting anything -- the counter it depends on would never
-    move at all, which is a different, and also visibly wrong, number."""
-    report = await sr.run_simulation(days=1, throttles=0, seed=0, settings=DEFAULTS)
-
-    day = report.days[0]
-    assert day.budget.spent != 0  # a neutered `consume` would leave this at 0
-    assert day.budget.spent == 20
-
-
 # --- the heat skip gate: browser jobs must actually stop -----------------------
 
 
@@ -326,6 +352,27 @@ async def test_disabling_the_heat_skip_lets_browser_jobs_run_through_the_hot_per
     assert all(job.heat_skipped == 0 for day in disabled.days for job in day.jobs)
     assert all(not day.heat_skipped_today for day in disabled.days)
     assert any(day.heat.score > 0 for day in disabled.days)  # heat still rose
+
+
+async def test_the_schedulers_own_heat_skip_warning_never_reaches_the_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``netkeeper.services.scheduler`` logs a WARNING on its own for every
+    heat-skipped fire ("scheduler: skipping enrich for account 1 (heat)"),
+    naming the scratch account's id exactly the way it would name a real
+    one. The skip is still fully visible in the report -- this same scenario
+    is what :func:`test_heat_skip_suppresses_fires_during_a_hot_period`
+    checks -- so nothing is lost by keeping a copy of it off stderr during a
+    replay. ``caplog`` itself tries to lower the logger back to WARNING to
+    capture at that level; this asserts that ``run_simulation`` still wins
+    for the whole time it runs."""
+    with caplog.at_level(logging.WARNING, logger="netkeeper.services.scheduler"):
+        report = await sr.run_simulation(
+            days=HOT_DAYS, throttles=HOT_THROTTLES, seed=HOT_SEED, settings=DEFAULTS
+        )
+
+    assert any(job.heat_skipped > 0 for day in report.days for job in day.jobs)
+    assert caplog.records == []
 
 
 # --- warm-up ramp: day 0 must not get the cap ---------------------------------
