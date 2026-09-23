@@ -30,6 +30,25 @@ from typing import Final
 # value: cold (score 0) is exactly 1.0, and it only grows from there.
 COOLDOWN_FLOOR: Final = 1.0
 
+# Below this, a decayed score reads as exactly 0.0 (cold). Exponential decay
+# never reaches zero on its own, and ``shrink`` floors, so without a cutoff the
+# residue of one throttle -- a multiplier of ``1.000...1`` -- took one unit off
+# every budget for about 318 hours, until float64 rounded ``1.0 + score`` to
+# 1.0, while the score displayed as 0.00 (#160). Appendix C says "a clean day
+# resets".
+#
+# Why 0.01: it is the smallest score with an effect worth keeping. At 0.01 the
+# multiplier is 1.01 -- a 25 s delay median stretches by a quarter of a
+# second, inside the lognormal jitter (sigma 0.6) it rides on, and a
+# profile-visit budget (at most 100 by spec 9.6's hard max) loses at most the
+# one unit flooring always takes. Every score that should still stretch
+# delays is far above it: one ``per_block`` (1.0) is 100 times larger, and
+# the skip threshold (2.5) 250 times. With the Appendix C defaults (6-hour
+# half-life) one throttle goes cold after about 40 hours
+# (``6 * log2(1 / 0.01)``), and a score at the skip threshold after about 48
+# -- the throttle's own day, then a clean one.
+COLD_EPSILON: Final = 0.01
+
 
 @dataclass(frozen=True, slots=True)
 class HeatState:
@@ -53,6 +72,10 @@ def decayed_score(state: HeatState, now: datetime, *, half_life_hours: float) ->
     number. Elapsed time is real hours, not calendar days, so this needs no
     notion of a local day or timezone at all -- that belongs to the budget
     counters (spec 9.6), not to heat.
+
+    A result below :data:`COLD_EPSILON` is returned as exactly 0.0, so every
+    reader -- the skip gate, the multiplier, the budget, the display -- agrees
+    that the account is cold rather than carrying an invisible residue.
     """
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
@@ -60,9 +83,10 @@ def decayed_score(state: HeatState, now: datetime, *, half_life_hours: float) ->
         raise ValueError("half_life_hours must be positive")
     elapsed_hours = (now - state.updated_at).total_seconds() / 3600
     if elapsed_hours <= 0:
-        return state.score
-    decay = math.pow(0.5, elapsed_hours / half_life_hours)
-    return state.score * decay
+        score = state.score
+    else:
+        score = state.score * math.pow(0.5, elapsed_hours / half_life_hours)
+    return 0.0 if score < COLD_EPSILON else score
 
 
 def raise_heat(

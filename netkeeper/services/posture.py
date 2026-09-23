@@ -1075,7 +1075,9 @@ def _heat(posture_of_heat: HeatPosture, heat_settings: HeatSettings) -> Protecti
     """Heat's level, its skip threshold, and whether it is holding runs back (spec 9.7)."""
     warnings: list[str] = []
     status = Status.ON
-    if heat_settings.per_block <= 0:
+    if heat_settings.per_block < heat_math.COLD_EPSILON:
+        # Under the cold cutoff, one block reads back as 0.0 the moment it is
+        # written, so a positive-but-tiny `per_block` is as off as zero.
         status = Status.OFF
         warnings.append(
             f"linkedin.heat.per_block is {heat_settings.per_block:g}, so a throttle or a"
@@ -1165,8 +1167,9 @@ def _heat_posture(
     )
     # A stored score of exactly 0.0 is what `heat.clear()` writes and nothing
     # else does: `raise_heat` adds a positive `per_block` to a non-negative
-    # score, and a decayed score is never exactly zero. So the timestamp means
-    # "cleared", not "raised".
+    # score, so a raised row is never exactly zero even when the score it was
+    # raised from had decayed to a cold 0.0 (`COLD_EPSILON`). So the timestamp
+    # means "cleared", not "raised".
     raised = stored_state is not None and stored_state.score > 0
     return HeatPosture(
         score=score,
