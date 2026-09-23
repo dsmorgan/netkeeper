@@ -1,0 +1,22 @@
+{
+    "emailAddress": "jamie.fake.rivera@example-mail.test",
+    "phoneNumbers": [
+        {
+            "number": "+1-555-0101",
+            "type": "MOBILE"
+        }
+    ],
+    "websites": [
+        {
+            "url": "https://jamie-fake-rivera.example.test",
+            "category": {
+                "type": "PERSONAL"
+            }
+        }
+    ],
+    "twitterHandles": [
+        {
+            "name": "jamiefakerivera"
+        }
+    ]
+}

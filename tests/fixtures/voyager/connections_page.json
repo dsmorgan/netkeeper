@@ -1,0 +1,37 @@
+{
+    "data": {
+        "elements": [
+            {
+                "*connectedMemberResolutionResult": "urn:li:fsd_profile:ACoAAFAKE0000001",
+                "createdAt": 1690000000000
+            },
+            {
+                "*connectedMemberResolutionResult": "urn:li:fsd_profile:ACoAAFAKE0000002",
+                "createdAt": 1691000000000
+            }
+        ],
+        "paging": {
+            "start": 0,
+            "count": 40,
+            "total": 2
+        }
+    },
+    "included": [
+        {
+            "entityUrn": "urn:li:fsd_profile:ACoAAFAKE0000001",
+            "$type": "com.linkedin.voyager.dash.identity.profile.Profile",
+            "publicIdentifier": "jamie-fake-rivera-1a2b3c4d",
+            "firstName": "Jamie",
+            "lastName": "Rivera",
+            "headline": "Product designer at Fictional Robotics Co"
+        },
+        {
+            "entityUrn": "urn:li:fsd_profile:ACoAAFAKE0000002",
+            "$type": "com.linkedin.voyager.dash.identity.profile.Profile",
+            "publicIdentifier": "alex-fake-chen-5e6f7g8h",
+            "firstName": "Alex",
+            "lastName": "Chen",
+            "headline": "Staff engineer at Acme Testing Group"
+        }
+    ]
+}

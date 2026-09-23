@@ -1,0 +1,53 @@
+{
+    "data": {
+        "elements": [
+            {
+                "entityUrn": "urn:li:fsd_conversation:2-FAKECONVO0001",
+                "lastActivityAt": 1695000000000,
+                "unread": false,
+                "participants": [
+                    {
+                        "entityUrn": "urn:li:fsd_profile:ACoAAFAKE0000001",
+                        "publicIdentifier": "jamie-fake-rivera-1a2b3c4d",
+                        "firstName": "Jamie",
+                        "lastName": "Rivera"
+                    }
+                ],
+                "lastMessage": {
+                    "entityUrn": "urn:li:fsd_message:2-FAKEMSG0001",
+                    "body": {
+                        "text": "Great catching up last week!"
+                    },
+                    "sender": {
+                        "entityUrn": "urn:li:fsd_profile:ACoAAFAKE0000001"
+                    }
+                }
+            },
+            {
+                "entityUrn": "urn:li:fsd_conversation:2-FAKECONVO0002",
+                "lastActivityAt": 1695100000000,
+                "unread": true,
+                "participants": [
+                    {
+                        "entityUrn": "urn:li:fsd_profile:ACoAAFAKE0000002",
+                        "publicIdentifier": "alex-fake-chen-5e6f7g8h",
+                        "firstName": "Alex",
+                        "lastName": "Chen"
+                    },
+                    {
+                        "entityUrn": "urn:li:fsd_profile:ACoAAFAKE0000003",
+                        "publicIdentifier": "sam-fake-nguyen-9i8j7k6l",
+                        "firstName": "Sam",
+                        "lastName": "Nguyen"
+                    }
+                ],
+                "lastMessage": null
+            }
+        ],
+        "paging": {
+            "start": 0,
+            "count": 20,
+            "total": 2
+        }
+    }
+}
