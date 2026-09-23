@@ -12,6 +12,7 @@ restart differs by.
 from __future__ import annotations
 
 from datetime import UTC, datetime, time, timedelta
+from itertools import pairwise
 from random import Random
 
 import factories
@@ -37,6 +38,10 @@ DAILY = {
     )
 }
 HEAT_SETTINGS = HeatSettings(per_block=1.0, half_life_hours=6, skip_threshold=2.5)
+CATCHUP_BOUNDS = (scheduler.CATCHUP_MIN_MINUTES, scheduler.CATCHUP_MAX_MINUTES)
+# The seed whose first two catch-up draws land in the same whole minute; the
+# test that needs that collision pins it, and asserts it still holds.
+COLLIDING_SEED = 2
 
 
 def _make_factory(db_path: str) -> sessionmaker[Session]:
@@ -208,27 +213,6 @@ async def test_downtime_catches_up_once_not_once_per_missed_day(db_path: str, ow
     assert all(f.at < down_start or f.at >= down_end for f in result.fires)
 
 
-async def test_a_mutant_that_catches_up_per_missed_day_would_fail_the_above(
-    db_path: str, owner: User
-) -> None:
-    """Mutation check: reimplements the buggy alternative -- one fire per
-    interval missed -- directly against compute_due's inputs, and shows it
-    produces the pattern the real implementation must not."""
-    stale = START  # missed for 90 days
-    now = START + timedelta(days=90)
-    interval = timedelta(days=1)
-    # The real behaviour: exactly one fire, soon.
-    due, is_catchup, _ = scheduler.compute_due(stale, now=now, interval=interval, rng=Random(0))
-    assert is_catchup is True
-    assert due <= now + timedelta(minutes=scheduler.CATCHUP_MAX_MINUTES)
-
-    # The bug this guards against, spelled out: a naive "advance by one
-    # interval until caught up" loop schedules one fire per missed day.
-    naive_fire_count = (now - stale) // interval
-    assert naive_fire_count == 90  # exactly the pattern the real scheduler refuses to produce
-    assert naive_fire_count != 1
-
-
 # --- reschedule only on change, observed through simulate -------------------
 
 
@@ -341,7 +325,7 @@ async def test_removing_the_heat_check_would_fail_the_skip_test(db_path: str, ow
         schedules=SHORT,
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],
-        heat_settings=None,
+        heat_settings=scheduler.HEAT_SKIP_DISABLED,
     )
     assert len(result.fires) == 1
     assert result.fires[0].fired is True
@@ -377,6 +361,18 @@ async def test_two_job_kinds_never_fire_in_the_same_minute(db_path: str, owner: 
                 scheduler._JobState(due=START - timedelta(days=1), fingerprint=fp),
             )
 
+    # One `Random` draws two different values, so most seeds put the two kinds
+    # far enough apart that this test passes without the interleave gap ever
+    # being needed -- and 77 seconds apart is not enough either, because it can
+    # straddle a minute boundary. Seed 2 draws 19.341 and 19.217 minutes: the
+    # same whole minute. Pinned here so a future seed change cannot quietly
+    # turn this into a test of nothing.
+    probe = Random(COLLIDING_SEED)
+    raw = [START + timedelta(minutes=probe.uniform(*CATCHUP_BOUNDS)) for _ in schedules]
+    assert raw[0].replace(second=0, microsecond=0) == raw[1].replace(second=0, microsecond=0), (
+        "seed no longer puts the two catch-up draws in the same minute"
+    )
+
     result = await simulate.simulate(
         factory,
         owner,
@@ -384,11 +380,7 @@ async def test_two_job_kinds_never_fire_in_the_same_minute(db_path: str, owner: 
         start=START,
         end=START + timedelta(days=5),
         schedules=schedules,
-        # seed 42: verified in tests/test_scheduler.py
-        # (test_sync_account_schedule_staggers_a_shared_catchup_collision) to draw
-        # near-identical catch-up jitter for both kinds -- the actual collision
-        # case this test needs to exercise, not just a hoped-for one.
-        seed=42,
+        seed=COLLIDING_SEED,
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],
     )
@@ -401,3 +393,89 @@ async def test_two_job_kinds_never_fire_in_the_same_minute(db_path: str, owner: 
         minutes_seen.setdefault(bucket, []).append(f.kind)
     for kinds in minutes_seen.values():
         assert len(kinds) == 1, f"more than one job kind fired in the same minute: {kinds}"
+
+
+# --- the sleeping laptop: an outage that never restarts the process ----------
+
+
+async def test_a_sleeping_laptop_resumes_without_replaying_the_backlog(
+    db_path: str, owner: User
+) -> None:
+    """The motivating case for the hot path's catch-up branch, end to end. A
+    closed laptop keeps the process alive, so nothing re-establishes anything
+    on waking: the heartbeat simply finds a due time three days old. It must
+    produce one catch-up fire, not one fire per missed day -- that burst is
+    what budgets (9.6), pacing (9.5), and heat (9.7) exist to prevent."""
+    factory = _make_factory(db_path)
+    sleep_start = START + timedelta(days=2, hours=1)
+    sleep_end = sleep_start + timedelta(days=3)  # 3 missed daily fires
+    end = sleep_end + timedelta(days=3)
+
+    result = await simulate.simulate(
+        factory,
+        owner,
+        ACCOUNT,
+        start=START,
+        end=end,
+        schedules=DAILY,
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+        sleep=(sleep_start, sleep_end),
+    )
+
+    catchups = result.catchups(scheduler.JobKind.CONNECTIONS_INCREMENTAL)
+    assert len(catchups) == 1  # not 3
+    woke = catchups[0].at
+    assert sleep_end + timedelta(minutes=scheduler.CATCHUP_MIN_MINUTES) <= woke
+    assert woke <= sleep_end + timedelta(minutes=scheduler.CATCHUP_MAX_MINUTES)
+    assert all(f.at < sleep_start or f.at >= sleep_end for f in result.fires)
+
+    # No two fires closer together than the cadence, anywhere in the replay:
+    # a replayed backlog shows up as several fires at (or near) one instant.
+    fires = sorted(f.at for f in result.fires if f.fired)
+    assert len(fires) == len(set(fires))
+    for earlier, later in pairwise(fires):
+        assert later - earlier >= DAILY[scheduler.JobKind.CONNECTIONS_INCREMENTAL].interval
+
+    # and the cadence resumes counted from the catch-up fire
+    after_waking = [at for at in fires if at >= sleep_end]
+    assert after_waking == [woke, woke + timedelta(days=1), woke + timedelta(days=2)]
+
+
+# --- the stall guard: a broken schedule fails the test, never hangs it -------
+
+
+async def test_a_schedule_that_stops_advancing_raises_instead_of_looping(
+    db_path: str, owner: User
+) -> None:
+    """A mutation that leaves a due time where it was turns this event loop into
+    an infinite one. Reproduce that directly -- a handler that rewinds its own
+    due time after every fire -- and confirm the guard ends the run."""
+    factory = _make_factory(db_path)
+    stuck_at = START + timedelta(days=1)
+
+    async def rewinding_handler(ctx: scheduler.JobContext) -> None:
+        with session_scope(factory, write=True) as session:
+            state = scheduler._load_state(session, owner, ACCOUNT, ctx.kind)
+            assert state is not None
+            scheduler._store_state(
+                session,
+                owner,
+                ACCOUNT,
+                ctx.kind,
+                scheduler._JobState(due=stuck_at, fingerprint=state.fingerprint),
+            )
+
+    with pytest.raises(RuntimeError, match="stalled"):
+        await simulate.simulate(
+            factory,
+            owner,
+            ACCOUNT,
+            start=START,
+            end=START + timedelta(days=10),
+            schedules=DAILY,
+            registry={scheduler.JobKind.CONNECTIONS_INCREMENTAL: rewinding_handler},
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+            max_iterations=25,
+        )
