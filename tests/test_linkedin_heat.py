@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from netkeeper.linkedin.heat import (
+    COLD_EPSILON,
     COOLDOWN_FLOOR,
     HeatState,
     clear,
@@ -176,3 +177,59 @@ def test_shrink_refuses_a_multiplier_below_one() -> None:
 def test_shrink_refuses_a_non_positive_base_limit() -> None:
     with pytest.raises(ValueError, match="at least 1"):
         shrink(0, 2.0)
+
+
+# --- the cold cutoff (#160) ------------------------------------------------------
+
+
+def test_the_cold_epsilon_is_one_hundredth() -> None:
+    """Pinned by value (CLAUDE.md): a drift up would forget real heat, down would
+    bring back the days-long residue #160 removed."""
+    assert COLD_EPSILON == 0.01
+
+
+def test_one_throttle_is_forgotten_by_the_budget_two_days_later() -> None:
+    """#160: before the cutoff, the residue (score 0.0039, multiplier 1.0039) took
+    one unit off a 60 budget -- and kept taking it for about 13 days."""
+    throttled = raise_heat(clear(NOW), NOW, per_block=1.0, half_life_hours=HALF_LIFE_HOURS)
+    later = NOW + timedelta(hours=48)
+
+    assert decayed_score(throttled, later, half_life_hours=HALF_LIFE_HOURS) == 0.0
+    assert cooldown_multiplier(throttled, later, half_life_hours=HALF_LIFE_HOURS) == 1.0
+    assert shrink(60, cooldown_multiplier(throttled, later, half_life_hours=HALF_LIFE_HOURS)) == 60
+
+
+def test_a_throttle_still_shrinks_the_budget_while_heat_is_meaningful() -> None:
+    """One half-life after one block: score 0.5, multiplier 1.5, 60 -> 40."""
+    throttled = raise_heat(clear(NOW), NOW, per_block=1.0, half_life_hours=HALF_LIFE_HOURS)
+    later = NOW + timedelta(hours=HALF_LIFE_HOURS)
+
+    multiplier = cooldown_multiplier(throttled, later, half_life_hours=HALF_LIFE_HOURS)
+    assert multiplier == pytest.approx(1.5)
+    assert shrink(60, multiplier) == 40
+
+
+def test_heat_just_above_the_cutoff_still_counts() -> None:
+    state = _state(0.0101)
+
+    assert decayed_score(state, NOW, half_life_hours=HALF_LIFE_HOURS) == 0.0101
+    assert cooldown_multiplier(state, NOW, half_life_hours=HALF_LIFE_HOURS) > COOLDOWN_FLOOR
+    assert shrink(60, cooldown_multiplier(state, NOW, half_life_hours=HALF_LIFE_HOURS)) == 59
+
+
+def test_heat_just_below_the_cutoff_reads_cold() -> None:
+    """Including at zero elapsed: a stored score under the cutoff is cold on every read."""
+    state = _state(0.0099)
+
+    assert decayed_score(state, NOW, half_life_hours=HALF_LIFE_HOURS) == 0.0
+    assert cooldown_multiplier(state, NOW, half_life_hours=HALF_LIFE_HOURS) == 1.0
+
+
+def test_one_throttle_goes_cold_after_about_forty_hours() -> None:
+    """``6 * log2(1 / 0.01)`` = 39.9 hours with the Appendix C defaults."""
+    throttled = raise_heat(clear(NOW), NOW, per_block=1.0, half_life_hours=HALF_LIFE_HOURS)
+
+    at_39h = decayed_score(throttled, NOW + timedelta(hours=39), half_life_hours=HALF_LIFE_HOURS)
+    at_40h = decayed_score(throttled, NOW + timedelta(hours=40), half_life_hours=HALF_LIFE_HOURS)
+    assert at_39h > 0.0
+    assert at_40h == 0.0

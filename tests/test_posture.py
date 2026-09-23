@@ -444,6 +444,12 @@ CASES = [
         off=("heat",),
     ),
     Case(
+        id="heat that reads cold the moment it is raised",
+        settings=_heat(per_block=0.005, skip_threshold=0.02),
+        warns=("heat",),
+        off=("heat",),
+    ),
+    Case(
         id="heat that decays before the next burst",
         settings=_heat(half_life_hours=0),
         warns=("heat",),
@@ -1007,6 +1013,19 @@ def test_todays_budget_shows_each_protections_bite_in_order(writer: Session, use
     assert today.after_weekend == 30
     assert today.after_heat == 15
     assert today.after_heat >= 1  # spec 9.7: shrinks, never to zero
+
+
+def test_one_throttle_two_days_ago_leaves_todays_budget_whole(writer: Session, user: User) -> None:
+    """#160 through posture: the residue of a throttle 48 hours back (score 0.0039)
+    used to floor a 30 Saturday budget to 29 and keep doing so for about 13 days."""
+    heat_rows.raise_heat(
+        writer, user, ACCOUNT, now=SATURDAY - timedelta(hours=48), settings=DEFAULTS.linkedin.heat
+    )
+
+    today = _report(writer, user, now=SATURDAY).today
+
+    assert today.after_weekend == 30
+    assert today.after_heat == 30
 
 
 def test_spent_budget_shows_up_against_the_limit(writer: Session, user: User) -> None:
