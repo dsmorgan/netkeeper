@@ -31,6 +31,23 @@ The [implementation guide](docs/implementation-guide.md) is the backlog: every w
 
 Phase 0 in the spec adds the runnable scaffold. Until then there is nothing to build. When it lands, the commands in [section 16 of the spec](docs/architecture.md#16-packaging-running-and-deployment) are the setup, and this section will link to them.
 
+## The browser smoke suite
+
+The offline suite drives the attach path against fakes. The smoke suite drives it
+against a real Chrome, which is the only way to know that Playwright still behaves as
+the code assumes and that the tab netkeeper opens sends the browser's own headers and
+client hints. It is skipped unless you opt in, and it talks to a loopback HTTP server
+this repository serves: no test in this project, opt-in or not, contacts linkedin.com.
+
+```sh
+.venv/bin/netkeeper browser launch     # prints the command; run that command yourself
+NETKEEPER_BROWSER_TESTS=1 .venv/bin/python -m pytest tests/smoke -q
+```
+
+Run it against Chrome stable in a window, not a headless one, and say which Chrome
+version you used in the pull request. `NETKEEPER_CDP_URL` overrides the debug port if
+yours is not the default `http://127.0.0.1:9222`.
+
 ## AI-assisted contributions
 
 Contributions written with AI tools are welcome. You are the author: review what you submit, make sure it follows the spec and the ADRs, and be ready to explain it in review. A pull request the submitter cannot explain will be closed.

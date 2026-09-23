@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, NoReturn
+from urllib.parse import urlsplit
 
 import typer
 import uvicorn
@@ -30,6 +33,9 @@ from netkeeper.crm.lists import ListCount, list_lists, list_views, member_counts
 from netkeeper.crm.tags import ensure_default_rules, list_tags, run_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.linkedin.archive import ArchiveFormatError, open_archive
+from netkeeper.linkedin.browser import CHROME_PROFILE_DIRNAME, AttachBrowserProvider
+from netkeeper.linkedin.preflight import LoginState, PreflightReport
+from netkeeper.linkedin.preflight import preflight as run_preflight
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import ImportResolution, ImportRun, ImportStatus, User, UserKind
 from netkeeper.paths import CONFIG_ENV, data_dir
@@ -61,6 +67,9 @@ import_app = typer.Typer(
     help="Bring contacts in from a LinkedIn archive or a CSV.", no_args_is_help=True
 )
 contacts_app = typer.Typer(help="Inspect your contacts.", no_args_is_help=True)
+browser_app = typer.Typer(
+    help="The Chrome netkeeper attaches to (it never starts one).", no_args_is_help=True
+)
 app.add_typer(config_app, name="config")
 app.add_typer(db_app, name="db")
 app.add_typer(openapi_app, name="openapi")
@@ -69,6 +78,7 @@ app.add_typer(tags_app, name="tags")
 app.add_typer(lists_app, name="lists")
 app.add_typer(import_app, name="import")
 app.add_typer(contacts_app, name="contacts")
+app.add_typer(browser_app, name="browser")
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +238,133 @@ def openapi_export(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(openapi_json(create_app(settings)), encoding="utf-8")
     typer.echo(f"wrote {out}")
+
+
+DEFAULT_CDP_PORT = 9222
+
+
+@browser_app.command("launch")
+def browser_launch(ctx: typer.Context) -> None:
+    """Print the command that starts Chrome with a debug port. netkeeper never runs it.
+
+    netkeeper attaches to a browser you run; it does not own one. A browser netkeeper
+    started would be a second device on your LinkedIn account, and that is what gets
+    accounts restricted, so this command prints a command for you to run (ADR 0002).
+    """
+    state = ctx.ensure_object(CliState)
+    settings = _load_settings_or_exit(state)
+    cdp_url = settings.linkedin.cdp_url
+    profile = data_dir() / CHROME_PROFILE_DIRNAME
+    typer.echo("netkeeper attaches to a Chrome you start yourself. It never starts one.")
+    typer.echo("Run this in a terminal (again whenever that Chrome is not running):")
+    typer.echo()
+    for line in _chrome_command(_cdp_port(cdp_url), profile):
+        typer.echo(f"  {line}")
+    typer.echo()
+    typer.echo("Then, in that window:")
+    typer.echo("  - log in to LinkedIn once;")
+    typer.echo("  - use it for your own LinkedIn browsing too, so your activity and")
+    typer.echo("    netkeeper's share one session and one fingerprint.")
+    typer.echo()
+    typer.echo(
+        "Chrome 136 and later refuse --remote-debugging-port on the default profile\n"
+        "directory, so the separate --user-data-dir above is required."
+    )
+    host = urlsplit(cdp_url).hostname
+    if host not in (None, "localhost", "127.0.0.1", "::1"):
+        typer.echo()
+        typer.echo(
+            f"note: linkedin.cdp_url points at {host}, not this machine. Chrome's debug\n"
+            "port is only reachable on its own loopback address."
+        )
+    typer.echo()
+    typer.echo(f"Check it with: netkeeper preflight   (attaches to {cdp_url})")
+
+
+def _chrome_command(port: int, profile: Path) -> list[str]:
+    """The platform's Chrome command, as lines the user can paste."""
+    # Read through a plain str so mypy keeps both branches on either host, the same
+    # reason paths._is_macos() does it.
+    platform: str = sys.platform
+    opener = 'open -na "Google Chrome" --args \\' if platform == "darwin" else "google-chrome \\"
+    return [opener, f"  --remote-debugging-port={port} \\", f'  --user-data-dir="{profile}"']
+
+
+def _cdp_port(cdp_url: str) -> int:
+    """The debug port from ``linkedin.cdp_url``, falling back to Chrome's usual one."""
+    try:
+        port = urlsplit(cdp_url).port
+    except ValueError:
+        port = None
+    return DEFAULT_CDP_PORT if port is None else port
+
+
+@app.command()
+def preflight(ctx: typer.Context) -> None:
+    """Check the sidecar: the attach, the LinkedIn session, and the browser fingerprint.
+
+    Everything it reports comes from your own machine. It opens one blank tab on the
+    Chrome you started, reads a few navigator properties and the names of the LinkedIn
+    cookies already in that profile, and closes the tab again. It visits no website,
+    and it never reads or prints a cookie value. Exits non-zero when a job could not
+    run right now.
+    """
+    state = ctx.ensure_object(CliState)
+    settings = _load_settings_or_exit(state)
+    provider = AttachBrowserProvider(settings.linkedin.cdp_url)
+    report = asyncio.run(run_preflight(provider))
+    for line in _preflight_lines(report):
+        typer.echo(line)
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+def _preflight_lines(report: PreflightReport) -> list[str]:
+    """The report as lines: a field table, then anything wrong, then the verdict."""
+    rows: list[tuple[str, str]] = [
+        ("cdp url", report.cdp_url),
+        ("attached", "yes" if report.attached else "no"),
+    ]
+    if report.attached:
+        rows.append(("browser", report.browser_version or "unknown"))
+        rows.append(("contexts", str(report.context_count)))
+        rows.append(("session", _session_cell(report)))
+    fingerprint = report.fingerprint
+    if fingerprint is not None:
+        rows.extend(
+            [
+                ("user agent", fingerprint.user_agent or "-"),
+                ("platform", fingerprint.platform or "-"),
+                ("languages", ", ".join(fingerprint.languages) or "-"),
+                ("timezone", fingerprint.timezone or "-"),
+                ("cpu cores", str(fingerprint.hardware_concurrency)),
+                ("webdriver", "true" if fingerprint.webdriver else "false"),
+                ("plugins", str(fingerprint.plugin_count)),
+            ]
+        )
+    lines = _format_table(("FIELD", "VALUE"), rows).splitlines()
+    lines.extend(f"problem: {problem}" for problem in report.problems)
+    lines.extend(f"warning: {warning}" for warning in report.warnings)
+    lines.append("ready" if report.ok else "not ready")
+    return lines
+
+
+def _session_cell(report: PreflightReport) -> str:
+    """The session line: state, the cookie names found, and when the session expires.
+
+    Cookie names only. A value never reaches this function.
+    """
+    words = {
+        LoginState.LOGGED_IN: "logged in",
+        LoginState.LOGGED_OUT: "logged out",
+        LoginState.UNKNOWN: "unknown",
+    }
+    cell = words[report.login]
+    if report.session_cookies:
+        cell += f" ({', '.join(report.session_cookies)})"
+    if report.session_expires_at is not None:
+        cell += f", expires {report.session_expires_at:%Y-%m-%d %H:%M UTC}"
+    return cell
 
 
 @backup_app.callback()
