@@ -42,8 +42,10 @@ scheduling, persistence, catch-up, or the interleave gap changes.
 :func:`sync_account_schedule`, its per-account fan-out) is the *cold* path:
 call it once at process start, once when settings that affect timing change,
 and once when a downtime window ends. It is the only place that decides
-between "restored unchanged", "downtime -- catch up once", and "the timing
-parameters themselves changed -- reschedule fresh". :func:`poll_and_fire`
+between "restored unchanged", "downtime -- catch up once", "the timing
+parameters themselves changed -- reschedule fresh", and "never scheduled"
+(one interval out, except for a kind spec 9.4 runs "on first setup", which is
+due after the catch-up jitter). :func:`poll_and_fire`
 (and its per-account, per-poll fan-out :func:`poll_once`) is the *hot* path:
 call it every heartbeat. For a due time that has simply arrived it re-derives
 nothing -- it reads the due time the cold path settled on, fires, and advances
@@ -175,11 +177,20 @@ def default_registry() -> JobRegistry:
 
 @dataclass(frozen=True, slots=True)
 class JobSchedule:
-    """How often ``kind`` runs, and whether it waits for active hours (spec 9.5)."""
+    """How often ``kind`` runs, and whether it waits for active hours (spec 9.5).
+
+    ``run_on_first_setup`` makes a kind that has *never* been scheduled for
+    this account due right away (after the catch-up jitter) instead of one
+    interval out. Only a missing row counts as first setup: a restart, a
+    catch-up, and a timing-parameter change all leave it alone. Not part of
+    :class:`ScheduleFingerprint`, because it says nothing about when an
+    established schedule fires.
+    """
 
     kind: JobKind
     interval: timedelta
     respect_active_hours: bool = True
+    run_on_first_setup: bool = False
 
 
 # Spec 9.4: incremental sync "runs daily"; full sync runs "on first setup and
@@ -187,12 +198,16 @@ class JobSchedule:
 # runs every few hours while any LinkedIn step is active") -- these two are
 # reasonable defaults, not spec numbers, and are trivially overridable per call.
 # A future item can make them per-account settings without changing anything
-# else in this module.
+# else in this module. The full sync is the only kind spec 9.4 says runs "on
+# first setup", so it is the only one with ``run_on_first_setup``: every later
+# incremental sync compares against the baseline it builds (#161).
 DEFAULT_SCHEDULES: Final[dict[JobKind, JobSchedule]] = {
     JobKind.CONNECTIONS_INCREMENTAL: JobSchedule(
         JobKind.CONNECTIONS_INCREMENTAL, timedelta(days=1)
     ),
-    JobKind.CONNECTIONS_FULL: JobSchedule(JobKind.CONNECTIONS_FULL, timedelta(days=7)),
+    JobKind.CONNECTIONS_FULL: JobSchedule(
+        JobKind.CONNECTIONS_FULL, timedelta(days=7), run_on_first_setup=True
+    ),
     JobKind.ENRICH: JobSchedule(JobKind.ENRICH, timedelta(hours=3)),
     JobKind.INBOX: JobSchedule(JobKind.INBOX, timedelta(hours=3)),
 }
@@ -266,6 +281,7 @@ def compute_due(
     now: datetime,
     interval: timedelta,
     rng: random.Random,
+    first_setup: bool = False,
 ) -> tuple[datetime, bool, str]:
     """``(due, is_catchup, reason)`` for a job with no still-valid schedule.
 
@@ -275,6 +291,13 @@ def compute_due(
     parameters just changed -- both get a fresh ``now + interval``, never the
     catch-up jitter, because neither one is downtime.
 
+    ``first_setup`` (only meaningful with ``prior_due=None``) is the one
+    exception: a kind that runs "on first setup" (spec 9.4's full sync) and
+    has never been scheduled is due now, but through the same 5 to 20 minute
+    jitter as a catch-up, so a fresh install -- which is also a process start,
+    possibly mid-deploy -- never fires the moment it boots. It is not flagged
+    ``is_catchup``, because nothing was missed.
+
     Mirrors igtracker's proven ``_first_fire`` (``services/scheduler.py``,
     cited in ``docs/architecture.md`` section 6 as this project's reason for
     picking APScheduler): no stored due time is a fresh schedule; a stored due
@@ -283,11 +306,16 @@ def compute_due(
     catch-up fire, 5 to 20 minutes out.
     """
     if prior_due is None:
+        if first_setup:
+            return now + _catchup_jitter(rng), False, "first setup"
         return now + interval, False, "no stored schedule yet"
     if prior_due > now:
         return prior_due, False, "restored"
-    catchup = now + timedelta(minutes=rng.uniform(CATCHUP_MIN_MINUTES, CATCHUP_MAX_MINUTES))
-    return catchup, True, "catching up after downtime"
+    return now + _catchup_jitter(rng), True, "catching up after downtime"
+
+
+def _catchup_jitter(rng: random.Random) -> timedelta:
+    return timedelta(minutes=rng.uniform(CATCHUP_MIN_MINUTES, CATCHUP_MAX_MINUTES))
 
 
 # --- persistence (settings_kv; spec 8.4) ------------------------------------
@@ -451,6 +479,10 @@ def establish_schedule(
         schedule, tz=tz, active_start=active_start, active_end=active_end
     )
     existing = _load_state(session, user, account_id, kind)
+    # Only a missing row is first setup. A changed fingerprint also arrives
+    # with prior_due=None below, but it is an established schedule being
+    # retimed, not a new install, so it keeps the fresh ``now + interval``.
+    first_setup = existing is None and schedule.run_on_first_setup
     if existing is not None and existing.fingerprint == fingerprint:
         if existing.due > now:
             return ScheduleResult(
@@ -459,7 +491,9 @@ def establish_schedule(
         prior_due = existing.due  # same parameters, due already passed: downtime
     else:
         prior_due = None  # first time, or the timing parameters themselves changed
-    due, is_catchup, reason = compute_due(prior_due, now=now, interval=schedule.interval, rng=rng)
+    due, is_catchup, reason = compute_due(
+        prior_due, now=now, interval=schedule.interval, rng=rng, first_setup=first_setup
+    )
     due = _snap_to_active_hours(
         due,
         tz,
