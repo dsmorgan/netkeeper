@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 from collections.abc import Iterator, Sequence
@@ -55,6 +56,7 @@ from netkeeper.services.backup import (
     prune_backups,
 )
 from netkeeper.services.linkedin_accounts import account_id_for
+from netkeeper.services.linkedin_session import clear_session_flag
 from netkeeper.services.pacing import profiles as pacing_profiles
 from netkeeper.services.posture import SessionProbe, posture
 from netkeeper.services.posture import render as render_posture
@@ -65,6 +67,8 @@ from netkeeper.services.simulate_run import InvalidSimulation, run_simulation
 from netkeeper.services.simulate_run import render as render_simulation
 from netkeeper.services.users import ensure_local_user
 from netkeeper.web.app import create_app, openapi_json
+
+log = logging.getLogger(__name__)
 
 APP_FACTORY = "netkeeper.web.app:dev_app"
 
@@ -328,15 +332,56 @@ def preflight(ctx: typer.Context) -> None:
     It takes the same per-account activity lock every netkeeper process takes before
     attaching, so while `netkeeper serve` or another command holds the browser, this
     reports which process holds it and exits non-zero instead of attaching alongside.
+
+    A run that finds a live session clears `linkedin.session_flag` if a checkpoint or
+    a login wall had set it: logging back in to the netkeeper Chrome profile is the
+    actual fix for that condition, and this is where the fix gets noticed (#154).
     """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
     provider = AttachBrowserProvider(settings.linkedin.cdp_url)
     report = asyncio.run(run_preflight(provider))
+    _clear_session_flag_after_login(report)
     for line in _preflight_lines(report):
         typer.echo(line)
     if not report.ok:
         raise typer.Exit(code=1)
+
+
+def _clear_session_flag_after_login(report: PreflightReport) -> None:
+    """The other half of `linkedin.session_flag` (#144): a live session clears it.
+
+    Only `LoginState.LOGGED_IN` clears the flag. `LoginState.NO_SESSION` is not
+    treated as its opposite: preflight's cookie-jar read is weaker evidence than
+    LinkedIn actually answering with a login wall (`classify.Outcome.LOGGED_OUT`),
+    which is the whole reason #145 kept the two enums from comparing equal, so a
+    missing cookie must never *set* the flag here either -- only a job that gets an
+    answer from LinkedIn does that (spec 9.7, `services.linkedin_session.flag_session`).
+
+    `linkedin/preflight.py` may not open a database session (spec 9.10, ADR 0005),
+    so the clearing happens here, in the CLI -- the one place both the browser
+    report and the database are reachable. A database that has never been migrated
+    (no `netkeeper db upgrade` yet) is not an error this command should surface:
+    preflight answers from the browser alone and always has, so a missing schema or
+    a missing local user is silently nothing to clear rather than a failure.
+    """
+    if report.login is not LoginState.LOGGED_IN:
+        return
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = session.scalars(
+                select(User).where(User.kind == UserKind.LOCAL).order_by(User.id)
+            ).first()
+            if user is None:
+                return
+            clear_session_flag(session, user)
+    except OperationalError:
+        log.debug("no database to clear the session flag in yet; nothing to do")
+    finally:
+        engine.dispose()
 
 
 def _preflight_lines(report: PreflightReport) -> list[str]:
