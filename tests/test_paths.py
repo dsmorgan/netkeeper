@@ -30,6 +30,7 @@ def test_data_dir_empty_env_var_is_unset(monkeypatch: pytest.MonkeyPatch, tmp_pa
 def test_data_dir_macos_uses_application_support(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.delenv("NETKEEPER_DATA", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(sys, "platform", "darwin")
     assert data_dir() == tmp_path / "Library" / "Application Support" / "netkeeper"
@@ -39,6 +40,7 @@ def test_data_dir_macos_uses_application_support(
 def test_data_dir_other_platforms_use_cwd_data(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, platform: str
 ) -> None:
+    monkeypatch.delenv("NETKEEPER_DATA", raising=False)
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.chdir(tmp_path)
     assert data_dir() == tmp_path / "data"

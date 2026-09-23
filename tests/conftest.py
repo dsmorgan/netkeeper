@@ -22,16 +22,22 @@ def _reset_factory_counters() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _clean_netkeeper_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the developer's shell environment out of every test."""
+def _clean_netkeeper_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep the developer's shell environment, and their data directory, out of every test.
+
+    ``NETKEEPER_DATA`` points at a fresh directory rather than being unset: unset, the
+    data directory on macOS is the real one under Application Support, and the
+    activity lock writes its lock files there the moment a test opens a browser run.
+    A test about the default location deletes the variable itself.
+    """
     for name in (
-        "NETKEEPER_DATA",
         "NETKEEPER_CONFIG",
         "NETKEEPER_LOG_LEVEL",
         "NETKEEPER_DATABASE_URL",
         "NETKEEPER_FRONTEND_DIST",
     ):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NETKEEPER_DATA", str(tmp_path / "netkeeper-data"))
 
 
 @pytest.fixture

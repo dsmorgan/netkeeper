@@ -20,10 +20,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+from netkeeper.linkedin import activity_lock
+from netkeeper.linkedin.activity_lock import SINGLE_ACCOUNT_KEY as SINGLE_ACCOUNT_KEY
 
 log = logging.getLogger(__name__)
 
@@ -35,12 +40,6 @@ ATTACH = "attach"
 #: the sidecar's Chrome has its own (spec 9.1). netkeeper never creates or writes it:
 #: Chrome does, when the user runs the command `netkeeper browser launch` prints.
 CHROME_PROFILE_DIRNAME = "chrome-profile"
-
-#: Lock key for the single LinkedIn account v1 has. Budgets, heat, and this lock
-#: belong to a ``linkedin_account`` row (ADR 0005); until that table lands, every
-#: browser path shares this key, and the key is what a caller passes, never a
-#: process-wide global, so a second account is never blocked by the first.
-SINGLE_ACCOUNT_KEY = "local"
 
 
 class BrowserError(RuntimeError):
@@ -56,10 +55,11 @@ class BrowserUnavailable(BrowserError):
 
 
 class BrowserBusy(BrowserError):
-    """Another run holds this account's activity lock.
+    """Another run, in this process or another netkeeper process, holds the account's lock.
 
     Two CDP clients on one browser drop each other's connection, so the caller waits
     or reports ``busy`` (spec 9.9); it never opens a second browser to get around it.
+    The message names the holder (command, pid, since when) when the holder left a note.
     """
 
 
@@ -169,27 +169,49 @@ class PlaywrightCdpConnector:
 
 
 class ActivityLocks:
-    """One activity lock per LinkedIn account (spec 9.9, ADR 0005).
+    """One activity lock per LinkedIn account, across every netkeeper process (spec 9.9).
 
-    Every browser-touching path in a process goes through the lock for its account:
-    scheduled jobs, the CLI, and the Settings page's "check session" button alike. The
-    key is the ``linkedin_account`` the work belongs to rather than the process, so two
-    accounts on one machine do not block each other while two runs on one account
-    always do. Hold exactly one registry per process, on the provider.
+    Every browser-touching path goes through the lock for its account: scheduled jobs,
+    ``netkeeper preflight``, ``posture --probe``, ``rehearse``, and the Settings page's
+    "check session" button alike. The key is the ``linkedin_account`` the work belongs
+    to, so two accounts on one machine do not block each other while two runs on one
+    account always do.
 
-    **This guards one process, and that is not yet enough.** ``netkeeper preflight`` in
-    a terminal builds its own provider with its own registry, so running it while
-    ``netkeeper serve`` holds the lock does open a second CDP client — the thing this
-    lock exists to prevent. Before live runs, the claim has to outlive the process: a
-    lock file next to the database, or a ``settings_kv`` claim with a heartbeat, taken
-    here so every caller inherits it.
+    A hold takes two locks, in this order:
+
+    1. **This process's** ``asyncio.Lock`` for the account. It is what lets a run with
+       ``wait=True`` queue behind another coroutine in the same process, in order and
+       without polling, and it keeps a second coroutine off the file lock entirely.
+    2. **The account's OS file lock** (:mod:`netkeeper.linkedin.activity_lock`), shared
+       by every process using this data directory. This is the one that keeps
+       ``netkeeper preflight`` in a terminal from attaching while ``netkeeper serve``
+       holds the browser. The kernel drops it when its holder exits, ``SIGKILL``
+       included, so a crashed holder never parks it.
+
+    ``directory`` is where the lock files live; ``None`` means ``<data dir>/locks``,
+    resolved at each hold. Hold one registry per process, on the provider; a second
+    registry is still gated by the file lock, but its coroutines would not queue.
     """
 
-    def __init__(self) -> None:
+    #: How often a ``wait=True`` hold looks at a lock another process holds.
+    POLL_S = 0.25
+
+    #: A claim can lose to a peek (:func:`activity_lock.inspect`) holding a shared
+    #: lock for a few microseconds; a refused claim looks again this much later
+    #: before calling the account busy.
+    CONFIRM_S = 0.05
+
+    def __init__(self, directory: Path | None = None) -> None:
+        self._directory = directory
         self._locks: dict[str, asyncio.Lock] = {}
 
+    @property
+    def directory(self) -> Path:
+        """Where the lock files live."""
+        return activity_lock.locks_dir() if self._directory is None else self._directory
+
     def lock_for(self, account: str) -> asyncio.Lock:
-        """The account's lock, created on first use."""
+        """The account's in-process lock, created on first use."""
         lock = self._locks.get(account)
         if lock is None:
             lock = asyncio.Lock()
@@ -197,26 +219,61 @@ class ActivityLocks:
         return lock
 
     def is_busy(self, account: str) -> bool:
-        """Whether a run currently holds this account's lock."""
+        """Whether any run, in this process or another, holds this account's lock."""
         lock = self._locks.get(account)
-        return lock is not None and lock.locked()
+        if lock is not None and lock.locked():
+            return True
+        return activity_lock.inspect(account, self.directory).held
 
     @asynccontextmanager
     async def hold(self, account: str, *, wait: bool = False) -> AsyncIterator[None]:
         """Hold the account's lock for the block. Busy raises :class:`BrowserBusy`.
 
         ``wait=True`` queues behind the current holder instead, for a job that has
-        nothing better to do. There is no race between the check and the acquire:
-        acquiring a free ``asyncio.Lock`` does not yield to the loop.
+        nothing better to do: behind a coroutine in this process on the
+        ``asyncio.Lock``, behind another process by looking again every
+        :attr:`POLL_S`. There is no race between the in-process check and the
+        acquire: acquiring a free ``asyncio.Lock`` does not yield to the loop.
         """
         lock = self.lock_for(account)
         if not wait and lock.locked():
-            raise BrowserBusy(f"a netkeeper run already holds the browser for account {account!r}")
+            raise BrowserBusy(
+                f"another run in this process (pid {os.getpid()}) already holds the"
+                f" browser for LinkedIn account {account!r}; {_BUSY_ADVICE}"
+            )
         await lock.acquire()
         try:
-            yield
+            claim = await self._claim(account, wait=wait)
+            try:
+                yield
+            finally:
+                claim.release()
         finally:
             lock.release()
+
+    async def _claim(self, account: str, *, wait: bool) -> activity_lock.Claim:
+        """The account's file lock, or :class:`BrowserBusy` when another process has it."""
+        claim = activity_lock.try_claim(account, self.directory)
+        if claim is None:
+            await asyncio.sleep(self.CONFIRM_S)
+            claim = activity_lock.try_claim(account, self.directory)
+        while claim is None and wait:
+            await asyncio.sleep(self.POLL_S)
+            claim = activity_lock.try_claim(account, self.directory)
+        if claim is None:
+            holder = activity_lock.read_holder(account, self.directory)
+            who = holder.describe() if holder is not None else "another netkeeper process"
+            raise BrowserBusy(
+                f"the browser for LinkedIn account {account!r} is in use by {who}; {_BUSY_ADVICE}"
+            )
+        return claim
+
+
+#: The second half of every busy message: what happened, and what to do about it.
+_BUSY_ADVICE = (
+    "netkeeper keeps one browser client per account, so this did not attach."
+    " Wait for that run to finish, or stop that process, and try again"
+)
 
 
 class BrowserRun:
@@ -444,8 +501,9 @@ class AttachBrowserProvider:
     ) -> AsyncIterator[BrowserRun]:
         """Hold the account's activity lock, attach, and yield the run's tab handle.
 
-        The lock is taken before the connection is opened, so a busy account never
-        gets as far as a second CDP client. The tab closes and the connection detaches
+        The lock -- this process's and the cross-process file lock -- is taken before
+        the connection is opened, so a busy account never gets as far as a second CDP
+        client, whichever netkeeper process holds it. The tab closes and the connection detaches
         when the block ends, whether or not the body raised.
         """
         async with self.locks.hold(account, wait=wait):

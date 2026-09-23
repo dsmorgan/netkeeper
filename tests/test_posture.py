@@ -28,6 +28,7 @@ Two traps this project keeps hitting, both guarded here:
 from __future__ import annotations
 
 import math
+import os
 import random
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
@@ -45,6 +46,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.cli import _session_probe
 from netkeeper.config import Settings
 from netkeeper.db import session_scope
+from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin.browser import AttachBrowserProvider
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.preflight import preflight
@@ -172,6 +174,10 @@ def _report(
     )
 
 
+def _row(report: PostureReport, name: str) -> Protection:
+    return next(protection for protection in report.protections if protection.name == name)
+
+
 def _warned(report: PostureReport) -> set[str]:
     return {protection.name for protection in report.protections if protection.warnings}
 
@@ -201,6 +207,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
 
     assert names == [
         "attach-only browser",
+        "one browser client",
         "linkedin session",
         "session flag",
         "active hours",
@@ -864,8 +871,8 @@ def test_the_defaults_this_report_calls_clean_are_appendix_c_s() -> None:
 def test_now_is_a_parameter_not_a_clock_read(writer: Session, user: User) -> None:
     """Two instants, one database, two different answers. A ``datetime.now()`` inside
     would make these agree."""
-    inside = _report(writer, user, now=NOW).protections[3]
-    outside = _report(writer, user, now=NOW - timedelta(hours=10)).protections[3]
+    inside = _row(_report(writer, user, now=NOW), "active hours")
+    outside = _row(_report(writer, user, now=NOW - timedelta(hours=10)), "active hours")
 
     assert inside.name == outside.name == "active hours"
     assert "inside" in inside.value
@@ -1105,6 +1112,55 @@ def test_the_report_states_the_gaps_it_cannot_see(writer: Session, user: User) -
     """The scheduler is on another branch; saying so is better than a silent omission."""
     gaps = " ".join(_report(writer, user).gaps)
 
-    assert "activity lock guards one process" in gaps
     assert "scheduler" in gaps
+    assert "different NETKEEPER_DATA" in gaps, "the file lock's scope is stated"
     assert posture_module.GAPS  # a report with no gaps listed would pass the two above
+
+
+def test_the_closed_per_process_gap_is_no_longer_claimed(writer: Session, user: User) -> None:
+    """Issue #153 closed it; a report still confessing it would be wrong the other way."""
+    gaps = " ".join(_report(writer, user).gaps)
+
+    assert "guards one process" not in gaps
+    assert "second CDP client" not in gaps
+
+
+# --- the activity lock ------------------------------------------------------------
+
+
+def test_a_free_activity_lock_reads_as_free(writer: Session, user: User) -> None:
+    row = _row(_report(writer, user), "one browser client")
+
+    assert row.status is Status.ON
+    assert row.value.startswith("free")
+    assert not row.warnings
+
+
+def test_a_held_activity_lock_names_its_holder(writer: Session, user: User) -> None:
+    """While `netkeeper serve` runs a job, posture says so -- by pid, from the lock itself."""
+    claim = activity_lock.try_claim(activity_lock.SINGLE_ACCOUNT_KEY)
+    assert claim is not None
+    try:
+        row = _row(_report(writer, user), "one browser client")
+    finally:
+        claim.release()
+
+    assert row.status is Status.ON, "held is the lock working, not a protection off"
+    assert row.value.startswith("held by")
+    assert f"pid {os.getpid()}" in row.value
+    assert _row(_report(writer, user), "one browser client").value.startswith("free")
+
+
+def test_an_unreadable_activity_lock_warns(
+    writer: Session, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unreadable(account: str, directory: object = None) -> activity_lock.LockState:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(activity_lock, "inspect", unreadable)
+    report = _report(writer, user)
+    row = _row(report, "one browser client")
+
+    assert row.status is Status.UNKNOWN
+    assert row.warnings
+    assert not report.ok

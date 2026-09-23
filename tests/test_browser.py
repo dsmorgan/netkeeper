@@ -333,12 +333,7 @@ async def test_a_second_account_runs_while_the_first_is_busy() -> None:
 
 
 async def test_one_registry_gates_every_provider_that_shares_it() -> None:
-    """How a process keeps its promise: one registry, handed to everything that attaches.
-
-    The promise stops at the process. A second netkeeper process builds its own
-    registry and would attach alongside this one, which is why ``ActivityLocks`` says a
-    cross-process claim is still owed before live runs.
-    """
+    """One registry, handed to everything that attaches in a process, is one gate."""
     locks = ActivityLocks()
     scheduler = make_provider(FakeConnector(), locks)
     dashboard = make_provider(FakeConnector(), locks)
@@ -348,9 +343,28 @@ async def test_one_registry_gates_every_provider_that_shares_it() -> None:
             async with asyncio.timeout(BUSY_TIMEOUT_S), dashboard.run("account-7"):
                 pass
 
-    separate = make_provider()
+
+async def test_a_second_registry_is_gated_by_the_file_lock() -> None:
+    """Issue #153: a registry of its own is what `netkeeper preflight` in a terminal has.
+
+    Before the file lock, this second provider attached alongside the first. The file
+    lock is per open file description, so it refuses a second registry in the same
+    process exactly as it refuses another process (``test_activity_lock_processes``).
+    """
+    connector = FakeConnector()
+    held = make_provider(FakeConnector(), ActivityLocks())
+    separate = make_provider(connector, ActivityLocks())
+
+    async with held.run("account-7"):
+        with pytest.raises(BrowserBusy, match=r"account-7.*in use by .*pid \d+"):
+            async with asyncio.timeout(BUSY_TIMEOUT_S), separate.run("account-7"):
+                pass
+        assert separate.locks.is_busy("account-7"), "the other registry sees the holder"
+
+    assert connector.attaches == 0, "the refused provider never reached the browser"
     async with separate.run("account-7"):
-        assert not locks.is_busy("account-7"), "a second registry is a second gate"
+        pass
+    assert connector.attaches == 1, "released, the account is free for the next registry"
 
 
 async def test_a_failed_run_still_releases_the_lock() -> None:
