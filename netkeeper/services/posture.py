@@ -435,27 +435,41 @@ def posture(
 #: that, say, nothing yet calls ``budgets.consume`` is recorded here rather
 #: than left for a reader to discover after their first live run.
 #:
-#: The keys are the function names as a caller writes them at a call site,
-#: which is what ``tests/test_posture.py`` scans the package for. That test is
-#: what keeps :data:`UNENFORCED_TODAY` honest: when P2-06's enrichment job
-#: lands and calls ``consume``, the scan sees it and the test fails until this
-#: list is shortened. The list is therefore derived from the code, on a
-#: schedule of "every test run", rather than being prose that quietly rots.
+#: The keys are fully qualified function names, which is what
+#: ``tests/test_posture.py`` resolves every reference in the package to,
+#: through its imports: ``budgets.consume(...)``, ``consume(...)``,
+#: ``spend(...)`` after ``import consume as spend``, and ``consume`` handed
+#: over as a callback all count, and an unrelated ``queue.consume()`` does
+#: not (#162). That test is what keeps
+#: :data:`UNENFORCED_TODAY` honest: when P2-06's enrichment job lands and
+#: calls ``consume``, the scan sees it and the test fails until this list is
+#: shortened. The list is therefore derived from the code, on a schedule of
+#: "every test run", rather than being prose that quietly rots.
+#:
+#: Heat's key is the persisting ``services.heat.raise_heat``, not the pure
+#: ``linkedin.heat.raise_heat`` it delegates to: the pure one returns a new
+#: state and stores nothing, so a run that called only it would forget the
+#: throttle the moment it returned.
+#:
+#: Human-like pacing's key is ``pacing.plan_enrichment``, the entry point that
+#: produces the inter-visit plan (delays, bursts, breaks), not the helpers it
+#: calls. ``human_delay`` is also reached by ``scroll_like_a_person`` for the
+#: reading dwell alone, so a job that only scrolls pages would have read as
+#: paced while nothing spaced its visits apart.
 ENFORCED_BY: Final[dict[str, tuple[str, ...]]] = {
-    "consume": (
+    "netkeeper.services.budgets.consume": (
         "budget connection_pages",
         "budget profile_visits",
         "budget inbox_polls",
         "budget li_messages_auto",
     ),
-    "warmup_budget": ("warm-up ramp",),
-    "apply_weekend_multiplier": ("weekend damping",),
-    "human_delay": ("human-like pacing",),
-    "plan_burst_sizes": ("human-like pacing",),
-    "raise_heat": ("heat",),
-    "flag_session": ("session flag",),
-    "is_active_at": ("active hours",),
-    "should_skip": ("heat skip gate",),
+    "netkeeper.linkedin.pacing.warmup_budget": ("warm-up ramp",),
+    "netkeeper.linkedin.pacing.apply_weekend_multiplier": ("weekend damping",),
+    "netkeeper.linkedin.pacing.plan_enrichment": ("human-like pacing",),
+    "netkeeper.services.heat.raise_heat": ("heat",),
+    "netkeeper.services.linkedin_session.flag_session": ("session flag",),
+    "netkeeper.linkedin.pacing.is_active_at": ("active hours",),
+    "netkeeper.services.heat.should_skip": ("heat skip gate",),
 }
 
 #: The subset of :data:`ENFORCED_BY` whose function nothing in the package
@@ -464,13 +478,12 @@ ENFORCED_BY: Final[dict[str, tuple[str, ...]]] = {
 #: the whole point: a hand-maintained list of "not wired up yet" is wrong the
 #: week after it is written.
 UNENFORCED_TODAY: Final[tuple[str, ...]] = (
-    "consume",
-    "warmup_budget",
-    "apply_weekend_multiplier",
-    "human_delay",
-    "plan_burst_sizes",
-    "raise_heat",
-    "flag_session",
+    "netkeeper.services.budgets.consume",
+    "netkeeper.linkedin.pacing.warmup_budget",
+    "netkeeper.linkedin.pacing.apply_weekend_multiplier",
+    "netkeeper.linkedin.pacing.plan_enrichment",
+    "netkeeper.services.heat.raise_heat",
+    "netkeeper.services.linkedin_session.flag_session",
 )
 
 

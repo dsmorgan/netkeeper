@@ -27,6 +27,7 @@ Two traps this project keeps hitting, both guarded here:
 
 from __future__ import annotations
 
+import importlib
 import math
 import os
 import random
@@ -36,6 +37,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import call_targets
 import factories
 import pytest
 import test_browser_safety as browser_safety
@@ -712,10 +714,10 @@ def test_several_protections_off_at_once_all_warn(writer: Session, user: User) -
 
 
 def _callers_of(function: str) -> set[Path]:
-    """Every file under ``netkeeper/`` with a call written as ``function(...)``.
+    """Every file under ``netkeeper/`` with a call that resolves to ``function``.
 
-    Uses ``test_browser_safety``'s own syntax-tree scanner rather than a second
-    one, and reads the last dotted segment, so it sees the call however the
+    Resolves each call through the file's imports (``call_targets``, #162) and
+    matches ``function`` fully qualified, so it sees the call however the
     name was imported. ``posture.py`` is excluded because reading a counter is
     not enforcing a limit, and ``rehearse.py`` because a rehearsal is by
     definition not the live run whose budget has to be enforced.
@@ -741,16 +743,29 @@ def _callers_of(function: str) -> set[Path]:
     for path in browser_safety.python_files(package):
         if path in ignore:
             continue
-        source = path.read_text(encoding="utf-8")
-        if f"def {function}(" in source:
-            # The module that defines the name, or the core-side wrapper that
-            # delegates to the pure one under the same name. A definition site
-            # calling itself is the implementation, not a consumer enforcing a
-            # limit, and counting it would make every protection look wired.
-            continue
-        if any(name == function for _, name in browser_safety.called_names(source)):
+        if _calls(path.read_text(encoding="utf-8"), path, function):
             found.add(path)
     return found
+
+
+def _calls(source: str, path: Path, function: str) -> bool:
+    """Whether ``source``, as the file at ``path``, uses the fully qualified ``function``.
+
+    A use is any reference that resolves to ``function``, called or handed over.
+    A definition site calling itself is the implementation, not a consumer
+    enforcing a limit, so the defining module never counts. An unrelated
+    method of the same name (``queue.consume()``) does not count either, and a
+    file that defines its own ``consume`` still counts its real call. Nothing
+    is followed transitively: a helper that happens to reach a key is not the
+    key (see ``ENFORCED_BY`` on ``plan_enrichment``).
+    """
+    module = call_targets.module_name(path, browser_safety.REPO_ROOT)
+    if module == function.rpartition(".")[0]:
+        return False
+    references = call_targets.qualified_references(
+        source, module, is_package=path.name == "__init__.py"
+    )
+    return function in references
 
 
 def test_the_unenforced_list_is_what_the_package_actually_shows() -> None:
@@ -777,8 +792,134 @@ def test_the_unenforced_list_is_what_the_package_actually_shows() -> None:
 
 def test_the_scanner_can_actually_find_a_caller() -> None:
     """A scan that matched nothing would make the test above pass forever."""
-    assert _callers_of("is_active_at"), "is_active_at has a live caller in the scheduler"
-    assert not _callers_of("a_function_nobody_wrote")
+    assert _callers_of("netkeeper.linkedin.pacing.is_active_at") == {
+        Path(browser_safety.PACKAGE) / "services" / "scheduler.py"
+    }
+    assert not _callers_of("netkeeper.linkedin.pacing.a_function_nobody_wrote")
+
+
+# The scanner, shown snippets as if they were a file in the package (#162).
+_CALLER = Path(browser_safety.PACKAGE) / "services" / "some_job.py"
+_CONSUME = "netkeeper.services.budgets.consume"
+_PLAN = "netkeeper.linkedin.pacing.plan_enrichment"
+
+
+def test_an_unrelated_consume_method_is_not_enforcement() -> None:
+    """The dangerous direction: a queue's ``consume`` must not read as the budget wired."""
+    assert not _calls("queue.consume()\n", _CALLER, _CONSUME)
+    assert not _calls("import queue\nqueue.consume()\n", _CALLER, _CONSUME)
+    assert not _calls("def go(stream):\n    stream.consume()\n", _CALLER, _CONSUME)
+    assert not _calls("consume()\n", _CALLER, _CONSUME)  # unbound: not ours to claim
+
+
+def test_an_aliased_call_is_enforcement() -> None:
+    source = (
+        "from netkeeper.services.budgets import consume as spend\n"
+        "def run(session):\n"
+        "    spend(session)\n"
+    )
+    assert _calls(source, _CALLER, _CONSUME)
+
+
+def test_every_spelling_of_the_real_call_is_enforcement() -> None:
+    spellings = (
+        "from netkeeper.services.budgets import consume\nconsume()\n",
+        "from netkeeper.services import budgets\nbudgets.consume()\n",
+        "import netkeeper.services.budgets as b\nb.consume()\n",
+        "import netkeeper.services.budgets\nnetkeeper.services.budgets.consume()\n",
+        "from . import budgets\nbudgets.consume()\n",
+        "from .budgets import consume\nconsume()\n",
+        "def run():\n    from netkeeper.services import budgets\n    budgets.consume()\n",
+    )
+    for source in spellings:
+        assert _calls(source, _CALLER, _CONSUME), source
+
+
+def test_a_file_with_its_own_consume_still_counts_its_real_call() -> None:
+    """Used to be skipped outright on the text ``def consume(``."""
+    source = (
+        "from netkeeper.services import budgets\n"
+        "def consume(message):\n"
+        "    return message\n"
+        "def run(session):\n"
+        "    budgets.consume(session)\n"
+    )
+    assert _calls(source, _CALLER, _CONSUME)
+
+
+def test_a_local_consume_is_not_the_real_one() -> None:
+    """The bare name resolves to whatever it is bound to last, as Python would."""
+    shadowed = (
+        "from netkeeper.services.budgets import consume\n"
+        "def consume(message):\n"
+        "    return message\n"
+        "consume(1)\n"
+    )
+    local_variable = (
+        "from netkeeper.services.budgets import consume\ndef run(consume):\n    consume()\n"
+    )
+    assert not _calls(shadowed, _CALLER, _CONSUME)
+    assert not _calls(local_variable, _CALLER, _CONSUME)
+
+
+def test_the_defining_module_is_not_its_own_caller() -> None:
+    budgets = Path(browser_safety.PACKAGE) / "services" / "budgets.py"
+    assert not _calls("def consume():\n    consume()\n", budgets, _CONSUME)
+
+
+def test_a_passed_reference_is_enforcement() -> None:
+    """Handler injection: the function handed over, not called here."""
+    spellings = (
+        "import functools\nfrom netkeeper.services import budgets\n"
+        "spend = functools.partial(budgets.consume, action=1)\n",
+        "from netkeeper.services.budgets import consume\n"
+        "def build(runner):\n    runner.register(on_visit=consume)\n",
+        "from netkeeper.services import budgets\nclass Job:\n    charge = budgets.consume\n",
+    )
+    for source in spellings:
+        assert _calls(source, _CALLER, _CONSUME), source
+
+
+def test_an_import_alone_is_not_enforcement() -> None:
+    assert not _calls("from netkeeper.services.budgets import consume\n", _CALLER, _CONSUME)
+
+
+def test_pacing_is_enforced_by_the_plan_not_by_scrolling() -> None:
+    """A job that plans its visits paces them; one that only scrolls pages does
+    not, although ``scroll_like_a_person`` calls ``human_delay`` for its dwell."""
+    planned = (
+        "from netkeeper.linkedin import pacing\n"
+        "def run(rng):\n"
+        "    return pacing.plan_enrichment(rng, 10)\n"
+    )
+    scrolled = (
+        "from netkeeper.linkedin import pacing\n"
+        "async def sync(page, rng):\n"
+        "    await pacing.scroll_like_a_person(page, rng)\n"
+    )
+    assert _calls(planned, _CALLER, _PLAN)
+    assert not _calls(scrolled, _CALLER, _PLAN)
+
+
+def test_human_like_pacing_is_keyed_on_the_plan_alone() -> None:
+    """Keyed on a helper (``human_delay``), a scroll-only job would close the gap."""
+    keys = {function for function, names in ENFORCED_BY.items() if "human-like pacing" in names}
+    assert keys == {"netkeeper.linkedin.pacing.plan_enrichment"}
+
+
+def test_the_rehearsal_is_ignored_because_it_does_pace() -> None:
+    """The ``rehearse.py`` ignore entry is load-bearing: without it, the rehearsal's
+    ``plan_enrichment`` would mark human-like pacing as enforced by a live job."""
+    rehearse = Path(browser_safety.PACKAGE) / "linkedin" / "rehearse.py"
+    assert _calls(rehearse.read_text(encoding="utf-8"), rehearse, _PLAN)
+    assert rehearse not in _callers_of(_PLAN)
+
+
+def test_every_enforcement_target_is_a_function_that_exists() -> None:
+    """A misspelled key would read as "nothing calls it" forever."""
+    for function in ENFORCED_BY:
+        module, _, name = function.rpartition(".")
+        assert callable(getattr(importlib.import_module(module), name, None)), function
 
 
 def test_every_unenforced_name_maps_to_protections_the_report_has(
