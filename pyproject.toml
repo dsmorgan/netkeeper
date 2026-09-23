@@ -28,6 +28,7 @@ dependencies = [
   "keyring>=25",
   "regex>=2026.9.10",
   "python-multipart>=0.0.9",
+  "apscheduler>=3.10,<4",
 ]
 
 [project.optional-dependencies]
@@ -76,7 +77,7 @@ warn_unreachable = true
 files = ["netkeeper", "tests", "scripts"]
 
 [[tool.mypy.overrides]]
-module = ["keyring.*", "sse_starlette.*"]
+module = ["keyring.*", "sse_starlette.*", "apscheduler.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
