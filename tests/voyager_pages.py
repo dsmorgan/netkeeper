@@ -18,7 +18,7 @@ and never opens a socket.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,10 +37,12 @@ class Person:
     headline: str | None
     created_ms: int | None = 1_690_000_000_000
     public_id: str | None = None
+    #: The URN scheme; a test swaps it to fake LinkedIn renumbering every profile.
+    urn_prefix: str = "ACoAAFAKE"
 
     @property
     def urn(self) -> str:
-        return f"urn:li:fsd_profile:ACoAAFAKE{self.n:07d}"
+        return f"urn:li:fsd_profile:{self.urn_prefix}{self.n:07d}"
 
     @property
     def slug(self) -> str:
@@ -119,6 +121,9 @@ class FakeVoyagerFetch:
     script: dict[int, Scripted] = field(default_factory=dict)
     requests: list[VoyagerRequest] = field(default_factory=list)
     start_offset: int = 0  # added to the answered ``start``, to fake a page LinkedIn misnumbers
+    #: What ``paging.total`` says: None tells the truth; an int, or a function of the
+    #: requested ``start``, lies. Every page's ``elements`` stay honest either way.
+    total: int | Callable[[int], int] | None = None
 
     async def __call__(self, request: VoyagerRequest) -> VoyagerResponse:
         call = len(self.requests)
@@ -132,9 +137,16 @@ class FakeVoyagerFetch:
             self.people[start : start + count],
             start=start + self.start_offset,
             count=count,
-            total=len(self.people),
+            total=self._total(start),
         )
         return VoyagerResponse(200, body, CONNECTIONS_URL)
+
+    def _total(self, start: int) -> int:
+        if self.total is None:
+            return len(self.people)
+        if isinstance(self.total, int):
+            return self.total
+        return self.total(start)
 
     @property
     def starts(self) -> list[int]:

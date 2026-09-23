@@ -45,8 +45,10 @@ writes, so the session must be a writer (``session_scope(factory, write=True)``)
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date, datetime, tzinfo
+from typing import Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
@@ -59,6 +61,23 @@ from netkeeper.models import Contact, ContactSource, User
 from netkeeper.scoping import scoped
 
 log = logging.getLogger(__name__)
+
+#: The most contacts one full sync may age, as a share of the contacts that can age
+#: (URN-holding, not merged away), and the floor under that share. A week of real
+#: disconnections is a handful of people; a sync that would age a tenth of a network
+#: is far likelier to have misread it (a URN scheme change, a list the site served
+#: short) than to be right, and aging is the step that ends in ``li_disconnected_at``.
+#: The floor keeps a small network's ordinary week from tripping the share: 3 of 20
+#: is 15%, and still normal. :func:`age_unseen` refuses above ``max(floor, share)``.
+AGING_MAX_SHARE: Final = 0.10
+AGING_FLOOR: Final = 10
+
+#: The same limit on the other side: of the URNs a sync saw, how many may match no
+#: stored contact. After the pages are applied every seen URN is on a contact unless
+#: identity resolution refused it (a candidate, a conflict), so many unmatched URNs
+#: mean the sync's URNs and the stored ones no longer name the same people -- which is
+#: exactly when the stored ones would all look missing.
+UNMATCHED_MAX_SHARE: Final = 0.10
 
 
 @dataclass(slots=True)
@@ -149,10 +168,19 @@ def age_unseen(
     Call once, after a complete full sync, with every URN that sync saw. At
     ``disconnect_after_misses`` consecutive misses the contact's
     ``li_disconnected_at`` is set to ``observed_at``; one already disconnected
-    keeps the time it was first set. Refuses, and ages nobody, when
-    ``seen_urns`` is empty: a connections list that answered with nobody at
-    all, for an account whose contacts carry URNs, is far likelier a wrong
-    answer than a person who disconnected from everyone. Nothing is committed.
+    keeps the time it was first set. Nothing is committed.
+
+    Refuses, ages nobody, logs an error, and says why in
+    :attr:`AgingCounts.refused` when the answer looks like a misreading rather
+    than a week of disconnections:
+
+    * ``seen_urns`` is empty -- a list that answered with nobody at all;
+    * more contacts would miss than ``max(AGING_FLOOR, AGING_MAX_SHARE`` of the
+      contacts that can age``)``;
+    * more seen URNs match no stored contact than ``max(AGING_FLOOR,
+      UNMATCHED_MAX_SHARE`` of the seen URNs``)`` -- the sync and the database no
+      longer agree on what a URN is (a scheme change turns every row into a
+      candidate, and every stored contact would then look missing).
     """
     _require_writer(session)
     if disconnect_after_misses < 1:
@@ -165,10 +193,29 @@ def age_unseen(
     statement = scoped(user, Contact).where(
         Contact.li_urn.is_not(None), Contact.merged_into_id.is_(None)
     )
+    candidates = list(session.scalars(statement))
+    stored = {contact.li_urn for contact in candidates}
+    unseen = [contact for contact in candidates if contact.li_urn not in seen_urns]
+    refusal = _implausible(
+        missed=len(unseen),
+        can_age=len(candidates),
+        unmatched=len(seen_urns - stored),
+        seen=len(seen_urns),
+    )
+    if refusal is not None:
+        log.error(
+            "connections sync for user %d: aging nobody, %s (%d of %d would miss, %d of %d seen"
+            " URNs match no contact)",
+            user.id,
+            refusal,
+            len(unseen),
+            len(candidates),
+            len(seen_urns - stored),
+            len(seen_urns),
+        )
+        return AgingCounts(refused=refusal)
     missed = disconnected = 0
-    for contact in session.scalars(statement):
-        if contact.li_urn in seen_urns:
-            continue
+    for contact in unseen:
         missed += 1
         contact.li_missing_count += 1
         if (
@@ -185,6 +232,25 @@ def age_unseen(
         disconnected,
     )
     return AgingCounts(missed=missed, disconnected=disconnected)
+
+
+def _limit(share: float, of: int) -> int:
+    return max(AGING_FLOOR, math.floor(share * of))
+
+
+def _implausible(*, missed: int, can_age: int, unmatched: int, seen: int) -> str | None:
+    """Why aging this sync would be trusting a misreading, or None when it looks real."""
+    if missed > _limit(AGING_MAX_SHARE, can_age):
+        return (
+            f"{missed} of {can_age} contacts would miss this sync, more than the"
+            f" {_limit(AGING_MAX_SHARE, can_age)} one sync may age"
+        )
+    if unmatched > _limit(UNMATCHED_MAX_SHARE, seen):
+        return (
+            f"{unmatched} of the {seen} URNs this sync saw match no contact; the"
+            " stored URNs and LinkedIn's may no longer name the same people"
+        )
+    return None
 
 
 def _mark_seen(session: Session, user: User, urns: set[str]) -> int:

@@ -143,10 +143,11 @@ async def test_every_request_is_the_connections_endpoint_at_the_asked_size() -> 
     assert fetch.starts == [0, 4, 8]
 
 
-async def test_a_list_that_ends_on_a_page_boundary_needs_no_empty_page() -> None:
+async def test_a_list_that_ends_on_a_page_boundary_is_confirmed_by_an_empty_page() -> None:
+    """A full last page is not the end: only a short page is, so one empty page follows."""
     fetch = FakeVoyagerFetch(list(PEOPLE[:9]))
     result, _, _ = await _run(fetch)
-    assert fetch.starts == [0, 3, 6]
+    assert fetch.starts == [0, 3, 6, 9]
     assert result.complete
 
 
@@ -292,12 +293,8 @@ async def test_a_list_that_grew_during_the_run_is_not_complete() -> None:
     assert not result.complete
 
 
-async def test_a_removal_during_the_run_skips_a_row_the_count_cannot_see() -> None:
-    """The documented limit: the skipped person looks missing from a complete sync.
-
-    ``tests/test_crm_apply.py`` shows why that is survivable: one miss never
-    disconnects anyone.
-    """
+async def test_a_removal_during_the_run_is_caught_by_the_largest_total() -> None:
+    """A removal skips a row at a page boundary; the first page's total still counts it."""
     people = list(PEOPLE)
     fetch = FakeVoyagerFetch(people)
 
@@ -314,7 +311,9 @@ async def test_a_removal_during_the_run_skips_a_row_the_count_cannot_see() -> No
     )
 
     assert PEOPLE[3].urn not in result.seen_urns  # moved up to offset 2, already read
-    assert result.complete
+    assert result.reason is StopReason.END_OF_LIST
+    assert (len(result.seen_urns), result.total, result.max_total) == (9, 9, 10)
+    assert not result.complete
 
 
 # --- incremental sync ------------------------------------------------------------
@@ -426,3 +425,55 @@ async def test_an_ok_answer_with_no_page_is_a_changed_route_not_an_empty_list() 
     assert result.outcome is Outcome.ROUTE_CHANGED
     assert result.reason is StopReason.RESPONSE
     assert not result.complete
+
+
+# --- a total that lies ---------------------------------------------------------------
+# Every other fixture here reports ``total=len(people)``. These serve honest pages
+# under a dishonest ``paging.total``, which is the one number the run cannot check.
+
+
+def _hundred() -> list[Person]:
+    return [*PEOPLE, *(Person(300 + i, f"Given{i}", f"Family{i}", None) for i in range(90))]
+
+
+async def test_a_total_of_zero_neither_ends_the_run_nor_completes_it() -> None:
+    fetch = FakeVoyagerFetch(_hundred(), total=0)
+
+    result, sink, _ = await _run(fetch, page_size=40)
+
+    assert fetch.starts == [0, 40, 80]  # read to the short page regardless
+    assert len(sink.urns) == 100
+    assert result.reason is StopReason.END_OF_LIST
+    assert not result.complete
+
+
+async def test_a_total_that_lies_low_cannot_cut_the_run_short() -> None:
+    """Total 40 of 100: the run still reads all 100, so it is complete about what it saw."""
+    fetch = FakeVoyagerFetch(_hundred(), total=40)
+
+    result, _, _ = await _run(fetch, page_size=40)
+
+    assert fetch.starts == [0, 40, 80]
+    assert len(result.seen_urns) == 100
+    assert result.complete
+
+
+async def test_a_trailing_empty_page_cannot_lower_the_bar() -> None:
+    """Page 0 says 100; page 1 comes back empty and says 0. Forty seen is not the list."""
+    empty_says_zero = Scripted(200, page_body([], start=40, count=40, total=0))
+    fetch = FakeVoyagerFetch(_hundred(), script={1: empty_says_zero})
+
+    result, _, _ = await _run(fetch, page_size=40)
+
+    assert fetch.starts == [0, 40]
+    assert result.reason is StopReason.END_OF_LIST
+    assert (result.total, result.max_total) == (0, 100)
+    assert not result.complete
+
+
+async def test_an_honest_trailing_empty_page_reporting_zero_still_completes() -> None:
+    """80 people, total 80 until the empty page at 80 says 0: all 80 were seen."""
+    fetch = FakeVoyagerFetch(_hundred()[:80], total=lambda start: 0 if start >= 80 else 80)
+    result, _, _ = await _run(fetch, page_size=40)
+    assert fetch.starts == [0, 40, 80]
+    assert result.complete

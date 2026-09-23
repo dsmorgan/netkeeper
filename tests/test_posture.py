@@ -713,7 +713,7 @@ def test_several_protections_off_at_once_all_warn(writer: Session, user: User) -
 # --- the claim the report is entitled to make -----------------------------------
 
 
-def _callers_of(function: str) -> set[Path]:
+def _callers_of(function: str, *, live_only: bool = True) -> set[Path]:
     """Every file under ``netkeeper/`` with a call that resolves to ``function``.
 
     Resolves each call through the file's imports (``call_targets``, #162) and
@@ -732,20 +732,86 @@ def _callers_of(function: str) -> set[Path]:
     shrink ``UNENFORCED_TODAY`` over a gap that has not actually closed: no
     live job calls any of these four yet. #156's PR added this line rather
     than let the list shrink on its own.
+
+    With ``live_only`` (the default), a caller also has to be *live*: reached,
+    through imports, from something netkeeper actually runs (:func:`_live_modules`).
+    A job that exists but that no command, route, or server start ever reaches
+    enforces nothing yet -- the connections sync runner (P2-06) called
+    ``consume``, ``raise_heat``, and ``flag_session`` for real, and nothing
+    started it (#167's review).
     """
     package = Path(browser_safety.PACKAGE)
-    ignore = {
-        package / "services" / "posture.py",
-        package / "linkedin" / "rehearse.py",
-        package / "services" / "simulate_run.py",
-    }
+    live = _live_modules() if live_only else None
     found: set[Path] = set()
     for path in browser_safety.python_files(package):
-        if path in ignore:
+        if path in _not_production(package):
+            continue
+        if live is not None and path not in live:
             continue
         if _calls(path.read_text(encoding="utf-8"), path, function):
             found.add(path)
     return found
+
+
+def _not_production(package: Path) -> set[Path]:
+    """Modules that call enforcement for a rehearsal or a report, never for a live run."""
+    return {
+        package / "services" / "posture.py",
+        package / "linkedin" / "rehearse.py",
+        package / "services" / "simulate_run.py",
+    }
+
+
+def _entry_points() -> set[Path]:
+    """What netkeeper runs: the CLI (``[project.scripts]``), the app factory ``serve``
+    starts, and the API modules that factory discovers by package scan rather than
+    by import (so no import edge would reach them)."""
+    package = Path(browser_safety.PACKAGE)
+    api = package / "web" / "api"
+    return {package / "cli.py", package / "web" / "app.py", *api.glob("*.py")}
+
+
+def _module_file(name: str) -> Path | None:
+    """The file a dotted ``netkeeper.*`` name is, or lives in; None outside the package."""
+    parts = name.split(".")
+    if parts[0] != "netkeeper":
+        return None
+    root = Path(browser_safety.REPO_ROOT)
+    while parts:
+        candidate = root.joinpath(*parts)
+        if candidate.with_suffix(".py").is_file():
+            return candidate.with_suffix(".py")
+        if (candidate / "__init__.py").is_file():
+            return candidate / "__init__.py"
+        parts = parts[:-1]
+    return None
+
+
+def _live_modules() -> set[Path]:
+    """Every module an entry point reaches through imports, module-level or in a function.
+
+    The rehearsal and report modules (:func:`_not_production`) are reached but not
+    followed: ``netkeeper simulate`` importing the scheduler runs a *simulated*
+    schedule, and ``netkeeper posture`` importing it reads constants. Neither makes
+    the scheduler part of a live run.
+    """
+    package = Path(browser_safety.PACKAGE)
+    not_followed = _not_production(package)
+    reached: set[Path] = set()
+    queue = sorted(_entry_points())
+    while queue:
+        path = queue.pop()
+        if path in reached:
+            continue
+        reached.add(path)
+        if path in not_followed:
+            continue
+        source = path.read_text(encoding="utf-8")
+        for _, name in browser_safety.imported_names(source, path):
+            target = _module_file(name)
+            if target is not None and target not in reached:
+                queue.append(target)
+    return reached
 
 
 def _calls(source: str, path: Path, function: str) -> bool:
@@ -806,11 +872,35 @@ def test_the_unenforced_list_is_what_the_package_actually_shows() -> None:
 
 
 def test_the_scanner_can_actually_find_a_caller() -> None:
-    """A scan that matched nothing would make the test above pass forever."""
-    assert _callers_of("netkeeper.linkedin.pacing.is_active_at") == {
-        Path(browser_safety.PACKAGE) / "services" / "scheduler.py"
+    """A scan that matched nothing would make the test above pass forever.
+
+    Every protection is unenforced today, so the live scan is shown finding a
+    live caller of something else: the CLI calls ``ensure_local_user``.
+    """
+    package = Path(browser_safety.PACKAGE)
+    assert package / "cli.py" in _callers_of("netkeeper.services.users.ensure_local_user")
+    assert _callers_of("netkeeper.linkedin.pacing.is_active_at", live_only=False) == {
+        package / "services" / "scheduler.py"
     }
-    assert not _callers_of("netkeeper.linkedin.pacing.a_function_nobody_wrote")
+    assert not _callers_of("netkeeper.linkedin.pacing.a_function_nobody_wrote", live_only=False)
+
+
+def test_a_caller_nothing_starts_is_not_live() -> None:
+    """The runner and the scheduler call enforcement for real and are still not live.
+
+    Each is reachable only through a report or a rehearsal (``posture`` reads the
+    scheduler's constants, ``simulate`` runs a fake schedule), or not at all.
+    """
+    package = Path(browser_safety.PACKAGE)
+    live = _live_modules()
+    assert package / "services" / "connections_sync.py" not in live
+    assert package / "services" / "scheduler.py" not in live
+    assert package / "services" / "users.py" in live  # the CLI and the app both reach it
+    assert package / "web" / "api" / "contacts.py" in live  # discovered, not imported
+    assert _callers_of("netkeeper.services.heat.raise_heat", live_only=False) == {
+        package / "services" / "connections_sync.py"
+    }
+    assert not _callers_of("netkeeper.services.heat.raise_heat")
 
 
 # The scanner, shown snippets as if they were a file in the package (#162).
@@ -991,17 +1081,22 @@ def test_the_gap_lists_the_protections_nothing_enforces_yet(writer: Session, use
     # The sentence after the colon, up to its period. (This used to split on
     # "never callers", whose next character is the period ending that bold
     # phrase, so every "not in" below it compared against an empty string.)
-    unwired = gaps.split("no enforcing caller in the package yet:")[1].split(".")[0]
+    unwired = gaps.split("no enforcing caller that netkeeper runs yet:")[1].split(".")[0]
     assert unwired.strip()
 
-    assert "budget profile_visits" in unwired
-    assert "warm-up ramp" in unwired
-    assert "active hours" not in unwired
-    # The connections sync (P2-06) spends connection pages, raises heat, and sets
-    # the session flag; it spends no profile visit, so that budget stays listed.
-    assert "budget connection_pages" not in unwired
-    assert "session flag" not in unwired
-    assert "heat" not in unwired
+    # Nothing netkeeper runs reaches the scheduler or the connections sync runner
+    # yet, so every protection either of them would enforce is listed.
+    for name in (
+        "budget connection_pages",
+        "budget profile_visits",
+        "warm-up ramp",
+        "active hours",
+        "heat skip gate",
+        "session flag",
+        "heat",
+    ):
+        assert name in unwired, name
+    assert "connections sync runner" in gaps
 
 
 _CONNECTION_PAGES = f"{_CONSUME}[netkeeper.services.budgets.ActionClass.CONNECTION_PAGES]"

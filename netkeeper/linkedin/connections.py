@@ -26,19 +26,31 @@ the gate refuses the next page.
 * a body the parser does not recognize is ``RouteChanged``: the run gives up on
   the endpoint for this run (spec 9.3).
 
+**The end of the list** is a *short* page: fewer connections than the page
+size asked for, an empty page included. ``paging.total`` never ends a run: a
+full page is followed by another request however small the reported total
+is, so a total that lies low cannot cut a sync short. (When the list length
+is an exact multiple of the page size, that costs one empty page.)
+
 **Completion.** :attr:`SyncResult.complete` is true only for a full sync that
-reached the end of the list with every page ``Ok`` *and* saw at least as many
-distinct connections as the list's last reported total. Only a complete full
-sync may age contacts it did not see (spec 9.8); an aborted one saw part of
-the list, and treating the rest as gone is how a network gets deleted. The
-count check catches the other ways to end "at the end" having seen part of a
-list: an empty page served before the reported total (a list the site stops
-paging early), and a list that grew during the run (a connection added at the
-top pushes every row down one, so the run sees one person fewer than the new
-total). One shift it cannot see: a connection *removed* mid-run moves later
-rows up one, and the row at the next page boundary is never served, while the
-removed person, already seen, keeps the count level. That person gets one
-miss they did not earn; the two-miss rule in spec 9.8 is what absorbs it.
+ended on a short page with every page ``Ok``, whose pages reported a total
+above zero, and that saw at least as many distinct connections as the
+*largest* total any page reported. Only a complete full sync may age contacts
+it did not see (spec 9.8); an aborted one saw part of the list, and treating
+the rest as gone is how a network gets deleted. The total is the one number
+the run cannot check for itself, so it is read as the least it must have
+seen, never as permission to stop: a total of 0 (or none at all) proves
+nothing and completes nothing, and a trailing empty page reporting a smaller
+total cannot lower the bar an earlier page set. The count check catches the
+ways to end "at the end" having seen part of a list: a short or empty page
+served before the reported total (a list the site stops paging early), and a
+list that grew during the run (a connection added at the top pushes every row
+down one, so the run sees one person fewer than the new total). Because the
+bar is the *largest* total, a connection removed mid-run is caught too: later
+rows move up one and the row at the next page boundary is never served, but
+the total the first page reported still counts that person, so the run falls
+one short. The price is that a sync during which the list changed at all is
+incomplete and ages nobody that week; the next one catches up.
 
 **The source seam.** The job reads pages through a :class:`ConnectionsSource`.
 :class:`VoyagerConnections` is the in-page API implementation (spec 9.3);
@@ -88,7 +100,7 @@ class StopReason(enum.StrEnum):
     """Why a run stopped. Only :attr:`END_OF_LIST` can make a full sync complete."""
 
     END_OF_LIST = "end_of_list"
-    """Every page up to the list's reported total was read."""
+    """A page came back short (fewer connections than asked for, or none)."""
 
     CAUGHT_UP = "caught_up"
     """Incremental only: a page held nothing but already-known URNs."""
@@ -168,7 +180,8 @@ class SyncResult:
     contacts outside it, and only when :attr:`complete` is true. ``outcome`` and
     ``final_url`` describe the response that stopped the run when ``reason`` is
     :attr:`StopReason.RESPONSE` (the core raises heat or the session flag from
-    them), and are ``None`` otherwise.
+    them), and are ``None`` otherwise. ``total`` is the last page's reported
+    total and ``max_total`` the largest any page reported (0 before any page).
     """
 
     mode: SyncMode
@@ -179,15 +192,20 @@ class SyncResult:
     outcome: Outcome | None = None
     final_url: str | None = None
     connections: int = 0
+    max_total: int = 0
 
     @property
     def complete(self) -> bool:
-        """A full sync that read the whole list: the only run that may age anyone (spec 9.8)."""
+        """A full sync that read the whole list: the only run that may age anyone (spec 9.8).
+
+        Ended on a short page, the list claimed to hold someone, and the run saw
+        at least as many people as the largest total any page claimed.
+        """
         return (
             self.mode is SyncMode.FULL
             and self.reason is StopReason.END_OF_LIST
-            and self.total is not None
-            and len(self.seen_urns) >= self.total
+            and self.max_total > 0
+            and len(self.seen_urns) >= self.max_total
         )
 
 
@@ -306,6 +324,7 @@ async def run_connections_sync(
     pages = 0
     connections = 0
     total: int | None = None
+    max_total = 0
     start = 0
 
     def finish(
@@ -320,6 +339,7 @@ async def run_connections_sync(
             outcome=outcome,
             final_url=final_url,
             connections=connections,
+            max_total=max_total,
         )
 
     async def stopped(result: SyncResult) -> SyncResult:
@@ -379,6 +399,7 @@ async def run_connections_sync(
         pages += 1
         connections += len(result.connections)
         total = result.total
+        max_total = max(max_total, result.total)
         urns = {connection.urn for connection in result.connections}
         seen.update(urns)
         await on_progress(
@@ -386,7 +407,10 @@ async def run_connections_sync(
         )
 
         start += len(result.connections)
-        if not result.connections or start >= result.total:
+        # Only a short page ends the list. ``result.total`` is deliberately not
+        # consulted: a total that lies low would otherwise end a sync that has
+        # read a fraction of the list (see the module docstring).
+        if len(result.connections) < spec.page_size:
             return await stopped(finish(StopReason.END_OF_LIST))
         if spec.mode is SyncMode.INCREMENTAL and urns <= spec.known_urns:
             return await stopped(finish(StopReason.CAUGHT_UP))

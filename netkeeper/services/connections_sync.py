@@ -6,7 +6,13 @@ logic; it decides what the job may do and what happens after it stops:
 
 * **Heat skip.** A run does not start while heat is at or above the skip
   threshold (spec 9.7). The scheduler checks too; a run started any other way
-  must not be the hole in that.
+  must not be the hole in that. Heat is read once, at the start of the run, and
+  not again between pages: a run stops on the first non-``Ok`` response anyway,
+  so heat can only rise at the end of a run, never in the middle of one.
+* **Session flag.** A run does not start while the session flag is set (spec
+  9.7): after a checkpoint or a login wall, the next run fetching anyway would
+  be the retry ADR 0002 forbids, one run later. Clearing the flag is a person's
+  act (``services.linkedin_session.clear_session_flag``).
 * **Budget, between pages.** Before every page the gate spends one
   ``connection_pages`` unit (:func:`netkeeper.services.budgets.consume`, spec
   9.6) in its own short writer session, and a refusal stops the run before the
@@ -60,7 +66,7 @@ from netkeeper.services import budgets
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass, BudgetExceeded
 from netkeeper.services.linkedin_accounts import ensure_account
-from netkeeper.services.linkedin_session import flag_session
+from netkeeper.services.linkedin_session import flag_session, session_flag
 from netkeeper.services.pacing import profiles
 
 log = logging.getLogger(__name__)
@@ -74,6 +80,10 @@ _FLAG_OUTCOMES = frozenset({Outcome.CHECKPOINT, Outcome.LOGGED_OUT})
 
 class HeatSkipped(RuntimeError):
     """Heat is at or above the skip threshold; the run did not start (spec 9.7)."""
+
+
+class SessionFlagged(RuntimeError):
+    """The session flag is set (a checkpoint or a login wall); the run did not start."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,8 +171,9 @@ async def sync_connections(
 ) -> SyncRunReport:
     """Run one ``mode`` sync for ``user_id`` through ``source`` and apply what it read.
 
-    ``HeatSkipped`` when heat is at or above its skip threshold; nothing is
-    fetched and nothing is spent. Every other stop is a :class:`SyncRunReport`.
+    ``SessionFlagged`` while the session flag is set, and ``HeatSkipped`` when
+    heat is at or above its skip threshold; either way nothing is fetched and
+    nothing is spent. Every other stop is a :class:`SyncRunReport`.
     An exception from the mapping propagates after the pages before it were
     committed; it never ages anyone.
     """
@@ -170,6 +181,12 @@ async def sync_connections(
         user = _load_user(session, user_id)
         account_id = ensure_account(session, user).id
         now = clock()
+        flagged_by = session_flag(session, user)
+        if flagged_by is not None:
+            raise SessionFlagged(
+                f"the LinkedIn session is flagged ({flagged_by.outcome.value}); not syncing"
+                " until it is cleared"
+            )
         if heat_service.should_skip(session, user, account_id, now=now, settings=settings.heat):
             raise HeatSkipped(f"heat is at or above {settings.heat.skip_threshold}; not syncing")
         multiplier = heat_service.cooldown_multiplier(

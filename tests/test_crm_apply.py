@@ -203,7 +203,14 @@ def test_a_slug_another_contact_holds_is_counted_and_skipped_not_fatal(
 ) -> None:
     """A merged-away contact holds the incoming slug: that row is refused, the page goes on."""
     ravi, priya = PEOPLE[9], PEOPLE[0]
-    survivor = factories.make_contact(writer, user, li_urn=ravi.urn, li_public_id="ravi-old-slug")
+    survivor = factories.make_contact(
+        writer,
+        user,
+        li_urn=ravi.urn,
+        li_public_id="ravi-old-slug",
+        li_missing_count=1,
+        li_disconnected_at=NOW,
+    )
     factories.make_contact(
         writer, user, li_urn=None, li_public_id=ravi.slug, merged_into_id=survivor.id
     )
@@ -213,6 +220,9 @@ def test_a_slug_another_contact_holds_is_counted_and_skipped_not_fatal(
     assert counts.conflicts == 1
     assert counts.created == 1  # Priya, after the refused row
     assert survivor.li_public_id == "ravi-old-slug"
+    # The row was refused, but the URN was on the page: Ravi is still a connection.
+    assert (survivor.li_missing_count, survivor.li_disconnected_at) == (0, None)
+    assert counts.reconnected == 1
 
 
 def test_mapping_needs_a_writer(session_factory: sessionmaker[Session]) -> None:
@@ -354,3 +364,80 @@ def test_a_threshold_below_one_is_refused(writer: Session, user: User, threshold
             observed_at=LATER,
             disconnect_after_misses=threshold,
         )
+
+
+# --- a sync that would age too many is a misreading --------------------------------------
+
+
+def test_the_aging_limits_are_a_tenth_with_a_floor_of_ten() -> None:
+    assert mapping.AGING_MAX_SHARE == 0.10
+    assert mapping.AGING_FLOOR == 10
+    assert mapping.UNMATCHED_MAX_SHARE == 0.10
+
+
+def _crowd(count: int, prefix: str = "ACoAAFAKE") -> list[Person]:
+    return [
+        Person(500 + i, f"Given{i}", f"Family{i}", None, urn_prefix=prefix) for i in range(count)
+    ]
+
+
+def _missing(session: Session, user: User, people: Sequence[Person]) -> list[int]:
+    return [_by_urn(session, user, p).li_missing_count for p in people]
+
+
+def test_aging_up_to_the_share_goes_ahead_and_one_more_is_refused(
+    writer: Session, user: User
+) -> None:
+    """200 contacts: 20 may miss (a tenth); 21 is refused and ages nobody."""
+    crowd = _crowd(200)
+    mapping.apply_page(writer, user, _page(crowd))
+
+    ok = mapping.age_unseen(
+        writer, user, frozenset(p.urn for p in crowd[20:]), observed_at=LATER,
+        disconnect_after_misses=2,
+    )  # fmt: skip
+    assert (ok.missed, ok.refused) == (20, None)
+
+    refused = mapping.age_unseen(
+        writer, user, frozenset(p.urn for p in crowd[21:]), observed_at=LATER,
+        disconnect_after_misses=2,
+    )  # fmt: skip
+    assert refused.refused is not None and "21 of 200" in refused.refused
+    assert refused.missed == 0
+    assert _missing(writer, user, crowd[:21]) == [1] * 20 + [0]  # the second call touched none
+
+
+def test_a_small_network_may_lose_up_to_the_floor(writer: Session, user: User) -> None:
+    """20 contacts: a tenth would be 2, but the floor lets 10 go; 11 is refused."""
+    crowd = _crowd(20)
+    mapping.apply_page(writer, user, _page(crowd))
+    ten = mapping.age_unseen(
+        writer, user, frozenset(p.urn for p in crowd[10:]), observed_at=LATER,
+        disconnect_after_misses=2,
+    )  # fmt: skip
+    assert ten.refused is None and ten.missed == 10
+    eleven = mapping.age_unseen(
+        writer, user, frozenset(p.urn for p in crowd[11:]), observed_at=LATER,
+        disconnect_after_misses=2,
+    )  # fmt: skip
+    assert eleven.refused is not None
+
+
+def test_seen_urns_that_match_no_contact_refuse_aging_even_when_few_would_miss(
+    writer: Session, user: User
+) -> None:
+    """95 of 100 seen and 30 URNs nobody holds: only 5 would miss, but the URNs disagree."""
+    crowd = _crowd(100)
+    mapping.apply_page(writer, user, _page(crowd))
+    strangers = {p.urn for p in _crowd(30, prefix="ACoAANEW")}
+
+    aging = mapping.age_unseen(
+        writer,
+        user,
+        frozenset({p.urn for p in crowd[5:]} | strangers),
+        observed_at=LATER,
+        disconnect_after_misses=1,
+    )
+
+    assert aging.refused is not None and "match no contact" in aging.refused
+    assert _missing(writer, user, crowd[:5]) == [0] * 5

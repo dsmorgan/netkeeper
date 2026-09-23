@@ -444,10 +444,12 @@ _ACTION_CLASS: Final = "netkeeper.services.budgets.ActionClass"
 #: ``spend(...)`` after ``import consume as spend``, and ``consume`` handed
 #: over as a callback all count, and an unrelated ``queue.consume()`` does
 #: not (#162). That test is what keeps
-#: :data:`UNENFORCED_TODAY` honest: when P2-06's enrichment job lands and
-#: calls ``consume``, the scan sees it and the test fails until this list is
-#: shortened. The list is therefore derived from the code, on a schedule of
-#: "every test run", rather than being prose that quietly rots.
+#: :data:`UNENFORCED_TODAY` honest: when a job that calls ``consume`` becomes
+#: reachable from something netkeeper runs (the CLI, the app ``serve`` starts,
+#: an API module), the scan sees it and the test fails until this list is
+#: shortened. A caller nothing starts does not count. The list is therefore
+#: derived from the code, on a schedule of "every test run", rather than being
+#: prose that quietly rots.
 #:
 #: Heat's key is the persisting ``services.heat.raise_heat``, not the pure
 #: ``linkedin.heat.raise_heat`` it delegates to: the pure one returns a new
@@ -480,18 +482,29 @@ ENFORCED_BY: Final[dict[str, tuple[str, ...]]] = {
     "netkeeper.services.heat.should_skip": ("heat skip gate",),
 }
 
-#: The subset of :data:`ENFORCED_BY` whose function nothing in the package
-#: calls yet, outside this module and the rehearsal. Kept in sync by
-#: ``test_the_unenforced_list_is_what_the_package_actually_shows``, which is
-#: the whole point: a hand-maintained list of "not wired up yet" is wrong the
-#: week after it is written.
+#: The subset of :data:`ENFORCED_BY` that nothing netkeeper runs calls yet. A
+#: caller counts only when it is *live*: reached through imports from the CLI,
+#: the app ``netkeeper serve`` starts, or an API module, and not only through
+#: this report or a rehearsal. Code that exists but nothing starts enforces
+#: nothing. Today that is everything: the scheduler (P2-09) holds the active
+#: hours and heat skip gate and the connections sync runner (P2-06) spends
+#: connection pages, raises heat, and sets the session flag, but neither is
+#: started by any command or by ``serve`` yet. Kept in sync by
+#: ``test_the_unenforced_list_is_what_the_package_actually_shows``, which is the
+#: whole point: a hand-maintained list of "not wired up yet" is wrong the week
+#: after it is written.
 UNENFORCED_TODAY: Final[tuple[str, ...]] = (
+    f"{_CONSUME}[{_ACTION_CLASS}.CONNECTION_PAGES]",
     f"{_CONSUME}[{_ACTION_CLASS}.PROFILE_VISITS]",
     f"{_CONSUME}[{_ACTION_CLASS}.INBOX_POLLS]",
     f"{_CONSUME}[{_ACTION_CLASS}.LI_MESSAGES_AUTO]",
     "netkeeper.linkedin.pacing.warmup_budget",
     "netkeeper.linkedin.pacing.apply_weekend_multiplier",
     "netkeeper.linkedin.pacing.plan_enrichment",
+    "netkeeper.services.heat.raise_heat",
+    "netkeeper.services.linkedin_session.flag_session",
+    "netkeeper.linkedin.pacing.is_active_at",
+    "netkeeper.services.heat.should_skip",
 )
 
 
@@ -512,10 +525,12 @@ GAPS: Final[tuple[str, ...]] = (
     "**this report reads configuration and counters, never callers.** It can"
     " tell you a limit is set and how much of it is spent; it cannot tell you"
     " that the code which will do the work remembers to ask. The protections"
-    f" listed next have no enforcing caller in the package yet: {_UNENFORCED_TEXT}."
-    " Until the job that must call it exists, each of those is a setting rather"
-    " than a brake, and this report says the same thing on the day it is wired"
-    " as on the day it is not.",
+    f" listed next have no enforcing caller that netkeeper runs yet: {_UNENFORCED_TEXT}."
+    " Code that calls them can exist and still not count: the connections sync"
+    " runner and the scheduler are written, but no command and nothing `netkeeper"
+    " serve` starts reaches either one. Until something netkeeper runs calls it,"
+    " each of those is a setting rather than a brake, and this report says the"
+    " same thing on the day it is wired as on the day it is not.",
     "the activity lock binds netkeeper processes that share this data directory on"
     " this machine: it is a file lock under the data directory. A netkeeper started"
     " with a different NETKEEPER_DATA, a netkeeper on another machine, or any other"
