@@ -10,12 +10,18 @@
  * The other half is that the mouse path costs what the keyboard path costs. A
  * click goes through the same handler, synchronously, against the same two
  * cards in hand.
+ *
+ * Since #142 the buttons live in two rows — the action row above the card, and
+ * the decision row on it — and the invariant is unchanged by that: every
+ * action with a key has a button somewhere a person can press it. Which row is
+ * `KeyBinding.where`'s business, and the decisions being in exactly one of
+ * them is asserted here rather than left to the layout.
  */
 
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
-import { BUTTON_BINDINGS, KEY_BINDINGS } from './keymap'
+import { BAR_BINDINGS, BUTTON_BINDINGS, DECISION_BINDINGS, KEY_BINDINGS } from './keymap'
 import { currentName, renderTriage } from './test-render'
 
 function click(name: string) {
@@ -27,12 +33,45 @@ describe('the on-screen controls', () => {
     renderTriage({ contacts: 4 })
     await currentName()
 
-    const bar = screen.getByTestId('triage-actions')
+    // Two rows, one invariant: an action cannot gain a key without gaining a
+    // button somebody can press. `where` says which row draws it.
+    const rows: Record<string, HTMLElement> = {
+      bar: screen.getByTestId('triage-actions'),
+      card: screen.getByTestId('triage-decision'),
+    }
     for (const binding of BUTTON_BINDINGS) {
-      const button = within(bar).getByRole('button', { name: binding.button })
+      const row = rows[binding.where]
+      expect(row, `${binding.action} is drawn in an unknown row`).toBeDefined()
+      const button = within(row!).getByRole('button', { name: binding.button })
       expect(button).toHaveAttribute('aria-keyshortcuts', binding.aria)
       expect(within(button).getByText(binding.label, { selector: 'kbd' })).toBeInTheDocument()
     }
+    expect(BAR_BINDINGS.length + DECISION_BINDINGS.length).toBe(BUTTON_BINDINGS.length)
+  })
+
+  it('offers the three decisions once, on the card and not in the action row', async () => {
+    // The row sits above the card, so a second copy of Met/Not met/Skip there
+    // would put the met call above the name and the tags the person is meant
+    // to fix first — which is the ordering #142 exists to undo — and would be
+    // two answers to "where do I decide?". This is what stops it coming back.
+    renderTriage({ contacts: 4 })
+    await currentName()
+
+    const bar = screen.getByTestId('triage-actions')
+    for (const binding of DECISION_BINDINGS) {
+      expect(within(bar).queryByRole('button', { name: binding.button })).toBeNull()
+      // Once on the whole screen, so no test has to say which one it means.
+      expect(screen.getAllByRole('button', { name: binding.button })).toHaveLength(1)
+    }
+    expect(DECISION_BINDINGS.map((binding) => binding.button)).toEqual(['Met', 'Not met', 'Skip'])
+
+    // And the decision row comes after the card, which is the point of it.
+    const steps = screen.getByTestId('triage-steps')
+    expect(steps.contains(screen.getByTestId('triage-decision'))).toBe(true)
+    expect(
+      screen.getByTestId('triage-card').compareDocumentPosition(steps) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
   })
 
   it('leaves out only Escape, whose button is the Close on whatever is open', async () => {
@@ -117,8 +156,12 @@ describe('the on-screen controls', () => {
     await currentName()
 
     const bar = screen.getByTestId('triage-actions')
-    for (const binding of BUTTON_BINDINGS) {
+    for (const binding of BAR_BINDINGS) {
       expect(within(bar).getByRole('button', { name: binding.button })).not.toBeDisabled()
+    }
+    const decisions = screen.getByTestId('triage-decision')
+    for (const binding of DECISION_BINDINGS) {
+      expect(within(decisions).getByRole('button', { name: binding.button })).not.toBeDisabled()
     }
 
     click('Back')

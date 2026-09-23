@@ -12,12 +12,16 @@
  * order is about what is *drawn*; `triage-keys.test.tsx` and
  * `triage-throughput.test.tsx` hold the other half, that `m`, `n`, `s`, `t` and
  * `p` still fire from anywhere for the same one request each.
+ *
+ * The three answers are drawn once, on the card. `triage-controls.test.tsx`
+ * holds that they are not also in the action row above it; this file holds
+ * what the two rows do contain.
  */
 
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { BUTTON_BINDINGS } from './keymap'
+import { BAR_BINDINGS, DECISION_BINDINGS } from './keymap'
 import { DECISION_MEANINGS } from './method'
 import { createFakeBackend } from './test-backend'
 import { currentName, renderTriage } from './test-render'
@@ -97,7 +101,7 @@ describe('the card, in the order the work is done', () => {
     const { backend } = renderTriage({ contacts: 4 })
     expect(await currentName()).toContain('Ada')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Met — Ada Example-1' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Met' }))
 
     await waitFor(() => expect(backend.byId(1).met).toBe('met'))
     expect(await currentName()).toContain('Bo')
@@ -111,7 +115,7 @@ describe('the card, in the order the work is done', () => {
     const { backend } = renderTriage({ contacts: 4 })
     await currentName()
 
-    fireEvent.click(screen.getByRole('button', { name: `${term} — Ada Example-1` }))
+    fireEvent.click(screen.getByRole('button', { name: term }))
 
     await waitFor(() => expect(backend.byId(1).met).toBe(expected))
   })
@@ -139,7 +143,7 @@ describe('the card, in the order the work is done', () => {
 })
 
 describe('the button row', () => {
-  it('leads with Name and Tag, and puts the decisions after them', async () => {
+  it('leads with Name and Tag, and carries no decision at all', async () => {
     renderTriage({ contacts: 4 })
     await currentName()
 
@@ -147,9 +151,20 @@ describe('the button row', () => {
     const drawn = within(bar)
       .getAllByRole('button')
       .map((button) => button.textContent?.replace(/\s+$/, ''))
-    expect(drawn.slice(0, 5)).toEqual(['Namep', 'Tagt', 'Metm', 'Not metn', 'Skips'])
-    // And the row is still generated from the map, so nothing fell out of it.
-    expect(drawn).toHaveLength(BUTTON_BINDINGS.length)
+    expect(drawn).toEqual(['Namep', 'Tagt', 'Back←', 'Next→', 'Undou', 'Keyboard?'])
+    // Still generated from the map, so nothing fell out of it silently.
+    expect(drawn).toHaveLength(BAR_BINDINGS.length)
+  })
+
+  it('puts the decisions on the card, in the order they are asked', async () => {
+    renderTriage({ contacts: 4 })
+    await currentName()
+
+    const drawn = within(screen.getByTestId('triage-decision'))
+      .getAllByRole('button')
+      .map((button) => button.textContent?.replace(/\s+$/, ''))
+    expect(drawn).toEqual(['Metm', 'Not metn', 'Skips'])
+    expect(drawn).toHaveLength(DECISION_BINDINGS.length)
   })
 })
 
