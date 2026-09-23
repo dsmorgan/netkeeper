@@ -174,6 +174,13 @@ def strip_jsessionid(raw_cookie_value: str) -> str:
     A value with no surrounding quotes (a future LinkedIn that stops quoting
     it, or a caller that already stripped it) passes through unchanged, so
     this is always safe to call.
+
+    Only the outer pair of quotes comes off, deliberately: this undoes the
+    cookie's own quoting, once, and does not scan for or strip a quote
+    character anywhere else in the value. A value like ``'"ajax:12"34"'``
+    becomes ``'ajax:12"34'`` — the inner ``"`` stays, because nothing says
+    the token itself cannot contain one, and this function's job is "the
+    cookie is no longer quoted", not "the value has no quotes in it".
     """
     value = raw_cookie_value.strip()
     if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
