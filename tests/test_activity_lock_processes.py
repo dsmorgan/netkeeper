@@ -190,6 +190,42 @@ def test_a_killed_holder_does_not_park_the_lock(data: Path, holders: list[Holder
     assert contend(data, "try")["outcome"] == "attached", "and asking once works too"
 
 
+def test_a_waiting_process_queues_behind_a_live_holder(data: Path, holders: list[Holder]) -> None:
+    """``wait=True`` across processes: what a scheduled job does when preflight has the browser.
+
+    The waiter starts while the holder is live, so it cannot find the lock free on
+    its first look; it must still be waiting a second later -- not refused, not
+    attached -- and must attach once the holder lets go.
+    """
+    holder = Holder(data)
+    holders.append(holder)
+    waiter = subprocess.Popen(
+        [sys.executable, str(HELPER), "try", ACCOUNT, "--wait"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_env(data),
+        text=True,
+    )
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            waiter.wait(timeout=1.0)
+
+        assert holder.release()["state"] == "released"
+        try:
+            out, err = waiter.communicate(timeout=TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            pytest.fail(f"the waiter was still blocked {TIMEOUT_S}s after the release")
+    finally:
+        if waiter.poll() is None:
+            waiter.kill()
+            waiter.wait(timeout=TIMEOUT_S)
+
+    assert waiter.returncode == 0, err
+    result = json.loads(out.strip().splitlines()[-1])
+    assert result["outcome"] == "attached"
+    assert result["attaches"] == 1
+
+
 def test_netkeeper_preflight_tells_the_user_who_holds_the_browser(
     data: Path, holders: list[Holder], monkeypatch: pytest.MonkeyPatch
 ) -> None:

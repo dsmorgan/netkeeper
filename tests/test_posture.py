@@ -63,6 +63,7 @@ from netkeeper.services.posture import (
     LOOPBACK_HOSTS,
     MAX_ACTIVE_WINDOW_HOURS,
     MAX_BLOCKS_BEFORE_SKIP,
+    MAX_PLAUSIBLE_HOLD_HOURS,
     MIN_HALF_LIFE_HOURS,
     SINGLE_ACCOUNT_ID,
     UNENFORCED_TODAY,
@@ -161,6 +162,7 @@ def _report(
     browser_mode: str = ATTACH_ONLY,
     now: datetime = NOW,
     heat_gate: HeatGate | None = None,
+    lock: activity_lock.LockState | None = None,
 ) -> PostureReport:
     return posture(
         session,
@@ -171,6 +173,7 @@ def _report(
         browser_mode=browser_mode,
         probe=probe,
         heat_gate=heat_gate,
+        lock=lock,
     )
 
 
@@ -274,6 +277,34 @@ def _flag(session: Session, user: User) -> None:
     )
 
 
+#: A pid no process has: above every platform's pid_max, inside a 32-bit pid_t.
+NO_SUCH_PID = 2**31 - 1
+
+_UNSET: Any = object()
+
+
+def _held(
+    *,
+    holder: Any = _UNSET,
+    pid: int | None = None,
+    command: str = "netkeeper serve",
+    since: datetime | None = None,
+) -> activity_lock.LockState:
+    """The lock as posture would inspect it while a run holds it. Alive, ours, recent."""
+    if holder is _UNSET:
+        holder = activity_lock.Holder(
+            pid=os.getpid() if pid is None else pid,
+            command=command,
+            since=NOW - timedelta(minutes=10) if since is None else since,
+        )
+    return activity_lock.LockState(
+        account=activity_lock.SINGLE_ACCOUNT_KEY,
+        path=Path("/nonexistent/locks/browser-local.lock"),
+        held=True,
+        holder=holder,
+    )
+
+
 @dataclass(frozen=True)
 class Case:
     """One protection turned off, and what the report must then say."""
@@ -292,6 +323,8 @@ class Case:
     heat_gate: HeatGate | None = None
     #: False leaves the account with no schedule established.
     schedule: bool = True
+    #: The activity lock as inspected; ``None`` inspects the (free) real one.
+    lock: activity_lock.LockState | None = None
     #: True for a case that must leave the report *clean*: a state worth
     #: covering because getting it wrong would produce a spurious warning,
     #: rather than because it should produce one.
@@ -505,6 +538,32 @@ CASES = [
         warns=("scheduled jobs",),
         off=("scheduled jobs",),
     ),
+    Case(
+        id="an ordinary run holding the activity lock",
+        lock=_held(),
+        warns=(),
+        expect_ok=True,
+    ),
+    Case(
+        id="an activity lock held with no readable note",
+        lock=_held(holder=None),
+        warns=("one browser client",),
+    ),
+    Case(
+        id="an activity lock held by a pid that is not running",
+        lock=_held(pid=NO_SUCH_PID),
+        warns=("one browser client",),
+    ),
+    Case(
+        id="an activity lock held by something that is not netkeeper",
+        lock=_held(command="python3 some-other-tool.py"),
+        warns=("one browser client",),
+    ),
+    Case(
+        id="an activity lock held longer than any run takes",
+        lock=_held(since=NOW - timedelta(hours=4, minutes=30)),
+        warns=("one browser client",),
+    ),
 ]
 
 
@@ -529,6 +588,7 @@ def test_turning_one_protection_off_warns_about_exactly_that_one(
         browser_mode=case.browser_mode,
         now=case.now,
         heat_gate=case.heat_gate,
+        lock=case.lock,
     )
 
     assert _warned(report) == set(case.warns)
@@ -551,6 +611,7 @@ def test_no_protection_is_ever_off_and_silent(writer: Session, case: Case) -> No
         browser_mode=case.browser_mode,
         now=case.now,
         heat_gate=case.heat_gate,
+        lock=case.lock,
     )
 
     for protection in report.protections:
@@ -759,6 +820,7 @@ def test_the_half_life_floor_is_one_hour() -> None:
 
 def test_the_active_window_ceiling_is_sixteen_hours() -> None:
     assert MAX_ACTIVE_WINDOW_HOURS == 16.0
+    assert MAX_PLAUSIBLE_HOLD_HOURS == 4.0
 
 
 def test_weekend_damping_stops_damping_at_one() -> None:

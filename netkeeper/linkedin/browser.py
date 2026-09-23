@@ -418,7 +418,7 @@ class BrowserRun:
         self._reattached = True
         log.warning("lost the browser (%s); reattaching once", cause)
         await _detach_quietly(self._attachment.detach)
-        self._attachment = await self._provider.attach()
+        self._attachment = await self._provider._attach()
         try:
             return await self._attachment.context.new_page()
         except Exception as exc:
@@ -438,8 +438,6 @@ class BrowserProvider(Protocol):
 
     mode: str
     cdp_url: str
-
-    async def attach(self) -> Attachment: ...
 
     def run(
         self, account: str = SINGLE_ACCOUNT_KEY, *, wait: bool = False
@@ -466,8 +464,13 @@ class AttachBrowserProvider:
         self._connector = PlaywrightCdpConnector() if connector is None else connector
         self.locks = ActivityLocks() if locks is None else locks
 
-    async def attach(self) -> Attachment:
+    async def _attach(self) -> Attachment:
         """Connect to the user's Chrome and reuse the context that is already open.
+
+        Private on purpose: it opens a CDP client and takes no lock, so it may only
+        run under the one :meth:`run` holds -- from :meth:`run` itself, or from the
+        reattach inside :class:`BrowserRun`, which exists only inside :meth:`run`.
+        A public ``attach`` would be a route around the activity lock.
 
         Raises :class:`BrowserUnavailable` when Chrome is unreachable or has no
         context to reuse. It never answers the failure by starting a browser.
@@ -507,7 +510,7 @@ class AttachBrowserProvider:
         when the block ends, whether or not the body raised.
         """
         async with self.locks.hold(account, wait=wait):
-            attachment = await self.attach()
+            attachment = await self._attach()
             run = BrowserRun(self, account, attachment)
             try:
                 yield run
