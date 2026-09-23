@@ -9,6 +9,14 @@
  *   `m` met · `n` not met · `s` skip · `u` undo · `t` tag ·
  *   `p` edit preferred name · `→` next · `←` back · `?` the map itself
  *
+ * **The array's order is the order the screen draws them, and it is not the
+ * order they are listed in the spec.** `p` and `t` come first because that is
+ * the order the work is done in: you fix the name and put the tags on while you
+ * are looking at the person, and the met call is the last thing you do on a
+ * card (#142). The keys themselves did not move — `m`, `n`, `s`, `t` and `p`
+ * still fire from anywhere on the screen, so a run by somebody who knows the
+ * map costs exactly what it cost before and only the reading order changed.
+ *
  * `←` is the *navigation* half of the pair the screen used to collapse into `u`
  * alone (P1-23): `←` moves, `u` writes. It and `?` were not in the first
  * writing of spec 10.2; §10.2 lists them now, so this array and the spec agree
@@ -52,6 +60,22 @@ export interface KeyBinding {
 
 export const KEY_BINDINGS: readonly KeyBinding[] = [
   {
+    key: 'p',
+    label: 'p',
+    aria: 'p',
+    action: 'preferred-name',
+    description: 'Edit the preferred name',
+    button: 'Name',
+  },
+  {
+    key: 't',
+    label: 't',
+    aria: 't',
+    action: 'tag',
+    description: 'Tag this contact',
+    button: 'Tag',
+  },
+  {
     key: 'm',
     label: 'm',
     aria: 'm',
@@ -90,22 +114,6 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
     action: 'next',
     description: 'Next contact without deciding, and forward again while you are looking back',
     button: 'Next',
-  },
-  {
-    key: 't',
-    label: 't',
-    aria: 't',
-    action: 'tag',
-    description: 'Tag this contact',
-    button: 'Tag',
-  },
-  {
-    key: 'p',
-    label: 'p',
-    aria: 'p',
-    action: 'preferred-name',
-    description: 'Edit the preferred name',
-    button: 'Name',
   },
   {
     key: 'u',

@@ -42,10 +42,8 @@ import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
 
 import {
   AHEAD_PAGE,
-  LIVENESS_CONFLICTS,
   TriageError,
   applySuggestion,
-  conflictFieldOf,
   decide as decideRequest,
   fetchQueue,
   decidedByFor,
@@ -145,14 +143,6 @@ export interface TriageQueueState {
   /** A `409` from undo, as the backend worded it. The person chooses what happens. */
   undoConflict: string | null
   /**
-   * The contact field that `409` named, which says what kind of refusal it was.
-   *
-   * `archived_at` or `merged_into_id` mean the contact has left the queue, and
-   * forcing restores it without putting it back; anything else is an ordinary
-   * edit in between, and forcing leaves the contact exactly where it was.
-   */
-  undoConflictField: string | null
-  /**
    * What `u` would take back, newest first.
    *
    * The undo stack lives on the server; this is the part of it this session
@@ -192,7 +182,6 @@ const INITIAL: TriageQueueState = {
   loadError: null,
   actionErrors: [],
   undoConflict: null,
-  undoConflictField: null,
   undoable: [],
   taggedSinceUndoable: false,
   restored: null,
@@ -534,7 +523,6 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
           // `actionErrors` is deliberately untouched: a write that did not land
           // must not be erased by the next keystroke.
           undoConflict: null,
-          undoConflictField: null,
           restored: null,
           taggedSinceUndoable: false,
           undoable: [{ seq, kind: 'decision' as const, label: decisionLabel }, ...state.undoable],
@@ -744,12 +732,6 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
       const taking = stateRef.current.undoable[0]
       const meant = taking?.seq
       const force = options?.force ?? false
-      // A force answers a refusal the screen is still showing, and the field it
-      // named says whether the contact is merely edited or gone from the queue.
-      const overLiveness =
-        force &&
-        stateRef.current.undoConflictField !== null &&
-        LIVENESS_CONFLICTS.has(stateRef.current.undoConflictField)
       return enqueue(async () => {
         const retraction = meant === undefined ? undefined : retracted.current.get(meant)
         if (retraction !== undefined) {
@@ -781,17 +763,20 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
           }
           const restored = result.card
           // The card comes off the restored contact whatever state that left it
-          // in, so it is not always one this queue would serve — and the card
-          // shows neither way that happens. Undoing a preferred-name edit on
-          // somebody already marked met hands back a `met` contact; a contact
-          // archived or merged away is restored without returning to the queue.
+          // in, so it is not always one this queue would serve — and there are
+          // two different ways that happens. Undoing a preferred-name edit on
+          // somebody already marked met hands back a `met` contact, who is
+          // simply in another state; a contact archived or merged away is
+          // restored without returning to the queue at all, whatever `met` says.
           //
-          // `result.forced` alone does not tell them apart. The service appends
-          // to it for *any* divergence it overrode, an edited field included,
-          // and that is the common case: an archive or a merge needs another
-          // actor. So liveness is read from the refusal this force answered,
-          // and `forced` only narrows it to the contacts actually overridden.
-          const leftQueue = overLiveness && result.forced.includes(restored.contact.id)
+          // The card says which (#91). `result.forced` cannot: the service
+          // appends to it for *any* divergence a force overrode, an ordinary
+          // edited field included, which is the common case — an archive or a
+          // merge needs another actor. Reading liveness off the fields is the
+          // difference between "they are not in this queue" and a notice about
+          // an archive that never happened.
+          const leftQueue =
+            restored.contact.archived_at !== null || restored.contact.merged_into_id !== null
           const inQueue = !leftQueue && states.includes(restored.contact.met)
           commit((state) => {
             const head = state.cards[0]
@@ -838,7 +823,6 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
               reviewIndex: returning ? null : reviewIndex,
               progress: result.progress,
               undoConflict: null,
-              undoConflictField: null,
               undoable: state.undoable.slice(1),
               taggedSinceUndoable: false,
               notice: `Undo took back ${undone}.`,
@@ -857,7 +841,6 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
             commit((state) => ({
               ...state,
               undoConflict: error.detail,
-              undoConflictField: conflictFieldOf(error.detail),
             }))
             return
           }
@@ -1017,7 +1000,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
     notify,
     undo,
     dismissConflict: useCallback(
-      () => commit((previous) => ({ ...previous, undoConflict: null, undoConflictField: null })),
+      () => commit((previous) => ({ ...previous, undoConflict: null })),
       [commit],
     ),
     dismissError: useCallback(

@@ -82,18 +82,20 @@ export class TriageError extends Error {
  * decision left <expected>; <reason>` (`netkeeper/crm/triage.py`, `UndoConflict`),
  * and the field is the only part that says *which kind* of refusal this is:
  * `archived_at` and `merged_into_id` mean the contact has left the queue, and
- * anything else means a field was edited in between. The distinction changes
- * both what the screen says and what it does with the card a force hands back,
- * so it is parsed once, here, rather than in each place that needs it.
+ * anything else means a field was edited in between. That changes what the
+ * screen offers to do about it, so it is parsed once, here, rather than in each
+ * place that needs it.
+ *
+ * It is only ever used to *word* the refusal now. What the screen then does
+ * with the card a force hands back is read off that card's own `archived_at`
+ * and `merged_into_id` (#91), not recovered from this message: a fact the API
+ * knows should not have to be parsed back out of a sentence.
  *
  * A `null` return is the safe reading: treat it as an ordinary field conflict.
  */
 export function conflictFieldOf(detail: string): string | null {
   return /\bhas ([a-z_]+)=/.exec(detail)?.[1] ?? null
 }
-
-/** The refusals that mean the contact is gone from the queue, not merely edited. */
-export const LIVENESS_CONFLICTS: ReadonlySet<string> = new Set(['archived_at', 'merged_into_id'])
 
 /** FastAPI puts its wording in `detail`; anything else falls back to `whenUnknown`. */
 function detailOf(error: unknown, whenUnknown: string): string {

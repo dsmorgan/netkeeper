@@ -24,6 +24,15 @@
  *
  * Nothing in here is a link that steals a key, and nothing is focusable except
  * the profile link, which sits last.
+ *
+ * **What is not here: the name, the tags, and the decision.** They are
+ * `CardSteps`, drawn immediately under this, in the order the work is done in
+ * (#142). Keeping them out of this region is what lets them hold editors: an
+ * atomic live region re-reads all of itself whenever it changes, so a text
+ * field inside one would announce the whole card on every keystroke. The
+ * heading still carries the preferred name, because that is who the card is
+ * about; what you call them, and whether that differs from their given name, is
+ * step 1's to say.
  */
 
 import { ExternalLink } from 'lucide-react'
@@ -80,11 +89,6 @@ export function ContactCard({
       )}
       <div className="min-w-0">
         <h2 className="font-heading text-xl leading-tight font-medium break-words">{name}</h2>
-        {contact.preferred_name !== contact.first_name && (
-          <p className="text-xs text-muted-foreground">
-            Given name {contact.first_name}; you call them {contact.preferred_name}.
-          </p>
-        )}
         {contact.headline !== null && (
           <p className="mt-1 break-words text-muted-foreground">{contact.headline}</p>
         )}
@@ -101,18 +105,11 @@ export function ContactCard({
         <dd>{MET_LABELS[contact.met] ?? contact.met}</dd>
       </dl>
 
-      <div className="flex flex-wrap items-center gap-1.5">
-        {contact.do_not_contact && <Badge variant="destructive">Do not contact</Badge>}
-        {contact.tags.length === 0 ? (
-          <span className="text-sm text-muted-foreground">No tags</span>
-        ) : (
-          contact.tags.map((tag) => (
-            <Badge key={tag.id} variant={tag.kind === 'manual' ? 'secondary' : 'outline'}>
-              {tag.name}
-            </Badge>
-          ))
-        )}
-      </div>
+      {contact.do_not_contact && (
+        <div>
+          <Badge variant="destructive">Do not contact</Badge>
+        </div>
+      )}
 
       {contact.li_url !== null && (
         <a

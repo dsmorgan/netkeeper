@@ -339,6 +339,7 @@ Done when: CP2.5's import runs from the downloaded zip without a terminal, an ex
 Goal: auto-tag rules run on the contacts an import touched, inside the same writer transaction, with the counts in the run summary (#64). The suggestion catalogue grows past the single message-history batch — an invitation with a note, a tag a rule applied, no evidence at all — each with a preview of who it covers, a count checked before it applies, and one batch id undo takes back. A queue filter serves the contacts whose latest decision was automatic, so the manual pass reviews that work instead of starting cold.
 Depends on: P1-07, P1-09.
 Done when: importing the real archive tags contacts with no button press, every offered batch can be previewed before it applies, and the queue can serve exactly the contacts a batch decided.
+Since: the "no evidence at all" batch was removed by CP2.5's feedback (#142). Triage is an affirmative pass, so nothing decides `not_met` from an absence; the tag batches, which may decide either way, are the user's own declared rule and stayed.
 
 **P1-23 Frontend: triage controls, position, and going back** · lane frontend · M
 Goal: every action in the keymap gets an on-screen button labelled with its key; the card shows its position in the queue and what is left; the queue is visible and a contact in it can be opened; a person can walk back through cards they already passed, see the decision each carries, and change it — separate from undo, which stays "take back the last write". Carries the #92 fixes.

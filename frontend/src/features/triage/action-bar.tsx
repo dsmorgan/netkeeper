@@ -13,28 +13,44 @@
  * network. Nothing here is disabled: an action with nothing to act on answers
  * with a line saying so, which is more use than a button that cannot be pressed
  * and does not say why.
+ *
+ * This row is on screen whatever the queue is doing — an empty queue, a failed
+ * load, a contact still in flight — which is why the decisions are here as well
+ * as on the card. `ContactCard`'s copy of them is the one to press while a
+ * person is on screen: it asks about that person by name, and it carries the
+ * definition of each answer. Both go through `onAction`, so neither is a second
+ * path to the API.
  */
 
 import { Button } from '@/components/ui/button'
 
 import { BUTTON_BINDINGS, type TriageAction } from './keymap'
 
-/** How loud each button is. The three decisions are the work; the rest is around it. */
-const VARIANTS: Record<TriageAction, 'default' | 'outline' | 'ghost'> = {
-  met: 'default',
-  'not-met': 'default',
+/**
+ * How loud each button is, which follows the order the work is done in (#142).
+ *
+ * Name and Tag lead the row in solid styling: they are what you do to a card
+ * *before* you decide anything, and a row that opened with the met call taught
+ * the opposite. The decisions sit to their right in a quieter style because the
+ * loud copy of them is on the card itself, under the question, where the
+ * decision is actually made; this row is the key map, and its job is to teach
+ * the keys rather than to compete with the card for the same press.
+ */
+const VARIANTS: Record<TriageAction, 'default' | 'secondary' | 'outline' | 'ghost'> = {
+  'preferred-name': 'default',
+  tag: 'default',
+  met: 'secondary',
+  'not-met': 'secondary',
   skip: 'outline',
   back: 'outline',
   next: 'outline',
-  tag: 'ghost',
-  'preferred-name': 'ghost',
   undo: 'ghost',
   help: 'ghost',
   dismiss: 'ghost',
 }
 
-/** A hairline before these, so decisions, movement, and edits read as groups. */
-const BREAK_BEFORE: ReadonlySet<TriageAction> = new Set<TriageAction>(['back', 'tag', 'undo'])
+/** A hairline before these, so edits, decisions, movement, and undo read as groups. */
+const BREAK_BEFORE: ReadonlySet<TriageAction> = new Set<TriageAction>(['met', 'back', 'undo'])
 
 export function ActionBar({ onAction }: { onAction: (action: TriageAction) => void }) {
   return (

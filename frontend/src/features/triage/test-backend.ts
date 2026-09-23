@@ -37,10 +37,6 @@ export interface FakeContact extends TriageContact {
   invitations: number
   /** The body the newest message carries, verbatim, however unpleasant. */
   messageBody: string | null
-  /** Set by `archive`; undo then refuses the way the service does. */
-  archivedAt: string | null
-  /** Set by `mergeAway`; undo then refuses the way the service does. */
-  mergedIntoId: number | null
 }
 
 interface FakeDecision {
@@ -200,8 +196,8 @@ export function makeContact(index: number, options: { messages?: number } = {}):
     messages,
     invitations: 0,
     messageBody: messages > 0 ? 'Good to meet you at the Example Corp meetup.' : null,
-    archivedAt: null,
-    mergedIntoId: null,
+    archived_at: null,
+    merged_into_id: null,
   }
 }
 
@@ -245,56 +241,72 @@ function snapshot(contact: FakeContact, fields: Iterable<string>): Record<string
 /**
  * The batches this fake offers, in the order the service's catalogue runs.
  *
- * Two, because one of them decides `not_met` and the screen says so: a
- * catalogue with a single `met` batch cannot tell a button that reads the
- * batch from one that assumes the answer. `covers` stands in for the service's
- * clauses — message history for the first, and nothing on file at all for the
- * second, which is the batch that argues from absence.
+ * Message history first, then one batch per tag the user has given a meaning
+ * (`_tag_batches`), met before not met. Two kinds, because one of them decides
+ * `not_met` and the screen says so: a catalogue with only `met` batches cannot
+ * tell a button that reads the batch from one that assumes the answer.
+ *
+ * There is no batch here that argues from an *absence*, because there is none
+ * in the service any more (#142). `not_met_no_evidence` and the clauses that
+ * held people back from it are gone: triage is an affirmative pass, and a quiet
+ * message history is not evidence that two people have never met. The only
+ * `not_met` left is a tag whose meaning the user declared, which is why the
+ * shape of a tag batch is what this fake has to get right.
  */
 interface FakeBatch {
   key: string
   title: string
   met: ContactMet
+  /** The tag a tag batch is built on; `null` for the message batch. */
+  tagId: number | null
   describe: (count: number) => string
   /** ``others`` is every live contact, as the service's clauses read the table. */
   covers: (contact: FakeContact, others: readonly FakeContact[]) => boolean
 }
 
-const BATCHES: readonly FakeBatch[] = [
-  {
-    key: 'met_with_messages',
-    title: 'Mark everyone with message history as met',
-    met: 'met',
+const MESSAGE_BATCH: FakeBatch = {
+  key: 'met_with_messages',
+  title: 'Mark everyone with message history as met',
+  met: 'met',
+  tagId: null,
+  describe: (count) =>
+    `You have message threads with ${count} untriaged ${count === 1 ? 'person' : 'people'}.`,
+  covers: (contact) => contact.messages > 0,
+}
+
+/** `_tag_batch`: one offer per tag carrying a meaning, however the tag got on. */
+function tagBatch(tag: Tag): FakeBatch {
+  const decidesMet = tag.met_signal === 'met'
+  return {
+    key: `tag:${tag.id}`,
+    title: `Mark everyone tagged ${tag.name} as ${decidesMet ? 'met' : 'not met'}`,
+    met: decidesMet ? 'met' : 'not_met',
+    tagId: tag.id,
     describe: (count) =>
-      `You have message threads with ${count} untriaged ${count === 1 ? 'person' : 'people'}.`,
-    covers: (contact) => contact.messages > 0,
-  },
-  {
-    key: 'not_met_no_evidence',
-    title: 'Mark everyone there is no evidence about as not met',
-    met: 'not_met',
-    describe: (count) =>
-      `There is nothing on file for ${count} untriaged ${count === 1 ? 'person' : 'people'}: no messages, no invitation, no note, no tag of your own, and nobody else at their company — their card would be empty.`,
-    // `_card_carries_evidence`: the batch that argues from absence withholds
-    // anyone whose card has something on it, and a company somebody else in
-    // the address book is at counts. Leaving that clause out made this fake
-    // offer the batch for a fixture the service withholds every contact of —
-    // three companies over six contacts means everybody shares one.
-    covers: (contact, others) =>
-      contact.messages === 0 &&
-      contact.notes === null &&
-      contact.tags.length === 0 &&
-      !contact.do_not_contact &&
-      contact.preferred_name === contact.first_name &&
-      !others.some(
-        (other) =>
-          other.id !== contact.id &&
-          other.current_company !== null &&
-          other.current_company.trim().toLowerCase() ===
-            (contact.current_company ?? '').trim().toLowerCase(),
-      ),
-  },
-]
+      `${count} untriaged ${count === 1 ? 'person carries' : 'people carry'} the tag ${tag.name}, ` +
+      `which you have said means you ${decidesMet ? 'have met' : 'have not met'} them.`,
+    // `_carries_tag`: a rule's tag counts the same as one placed by hand.
+    covers: (contact) => contact.tags.some((applied) => applied.id === tag.id),
+  }
+}
+
+/**
+ * The catalogue as it stands, which moves when a tag gains a meaning.
+ *
+ * `_tag_batches` reads the tags on every call and orders them by signal then
+ * name, so `met` batches come before `not_met` ones; a fake that froze the list
+ * at startup would not notice a tag given a meaning mid-run.
+ */
+function batchesFor(tags: readonly Tag[]): FakeBatch[] {
+  const signalled = tags
+    .filter((tag) => tag.met_signal !== null)
+    .sort(
+      (a, b) =>
+        (a.met_signal ?? '').localeCompare(b.met_signal ?? '') ||
+        a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
+    )
+  return [MESSAGE_BATCH, ...signalled.map(tagBatch)]
+}
 
 export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend {
   const total = options.contacts ?? 6
@@ -358,8 +370,8 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
       (contact) =>
         states.includes(contact.met) &&
         (decidedBy === null || contact.met_source === decidedBy) &&
-        contact.archivedAt === null &&
-        contact.mergedIntoId === null,
+        contact.archived_at === null &&
+        contact.merged_into_id === null,
     )
   }
 
@@ -391,15 +403,10 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
               updated_at: '2024-03-04T10:11:00Z',
             },
           ]
-    const {
-      messages,
-      messageBody: _body,
-      archivedAt: _archived,
-      mergedIntoId: _merged,
-      ...out
-    } = contact
-    void _archived
-    void _merged
+    // `archived_at` and `merged_into_id` stay on the card: `TriageContactOut`
+    // carries them (#91), and a client reads liveness off them instead of
+    // inferring it from `TriageUndoOut.forced`, which never meant that.
+    const { messages, messageBody: _body, ...out } = contact
     void _body
     return {
       contact: out,
@@ -436,7 +443,7 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
    */
   function progress(states: ContactMet[], decidedBy: 'manual' | 'automatic' | null = null) {
     const live = contacts.filter(
-      (contact) => contact.archivedAt === null && contact.mergedIntoId === null,
+      (contact) => contact.archived_at === null && contact.merged_into_id === null,
     )
     const by_state: Record<string, number> = { unknown: 0, met: 0, not_met: 0, skip: 0 }
     for (const contact of live) by_state[contact.met] = (by_state[contact.met] ?? 0) + 1
@@ -514,7 +521,7 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
   /** The contacts one batch covers, against the queue as it stands. */
   function covered(batch: FakeBatch, states: ContactMet[]): FakeContact[] {
     const live = contacts.filter(
-      (contact) => contact.archivedAt === null && contact.mergedIntoId === null,
+      (contact) => contact.archived_at === null && contact.merged_into_id === null,
     )
     return queue(states).filter((contact) => batch.covers(contact, live))
   }
@@ -620,19 +627,19 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
           const contact = byId(decision.contact_id)
           // Liveness first, as the service checks it: neither archiving nor
           // merging moves a recorded field, so the fields alone never show it.
-          if (contact.mergedIntoId !== null) {
+          if (contact.merged_into_id !== null) {
             return conflict(
               contact.id,
               'merged_into_id',
-              String(contact.mergedIntoId),
+              String(contact.merged_into_id),
               'it was merged away after the decision, and the survivor carries that decision now',
             )
           }
-          if (contact.archivedAt !== null) {
+          if (contact.archived_at !== null) {
             return conflict(
               contact.id,
               'archived_at',
-              contact.archivedAt,
+              contact.archived_at,
               'it was archived after the decision, so undo cannot put it back in the queue',
             )
           }
@@ -726,8 +733,8 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
           (contact) =>
             wanted.includes(contact.met) &&
             (ahead.decidedBy === null || contact.met_source === ahead.decidedBy) &&
-            contact.archivedAt === null &&
-            contact.mergedIntoId === null,
+            contact.archived_at === null &&
+            contact.merged_into_id === null,
         )
         // `apply_sort` ends every ordering with `Contact.id.asc()`, and with no
         // sort keys that is the whole ordering.
@@ -756,7 +763,8 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
       // A batch matching nobody is not offered, and the counts are taken
       // against the queue as it stands, so accepting one shrinks the other.
       return jsonResponse(
-        BATCHES.map((batch) => ({ batch, count: covered(batch, states).length }))
+        batchesFor(tags)
+          .map((batch) => ({ batch, count: covered(batch, states).length }))
           .filter(({ count }) => count > 0)
           .map(({ batch, count }) => ({
             key: batch.key,
@@ -767,14 +775,20 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
             // decides, which is the word the button says, and `tag_id` names
             // the tag when the batch came from one.
             met: batch.met,
-            tag_id: null,
+            tag_id: batch.tagId,
           })),
       )
     }
 
     const contactsMatch = /^\/api\/v1\/triage\/suggestions\/([^/]+)\/contacts$/.exec(url.pathname)
     if (contactsMatch !== null) {
-      const batch = BATCHES.find((candidate) => candidate.key === contactsMatch[1])
+      // A tag batch's key carries a colon, which the client percent-encodes
+      // into the path; FastAPI decodes a path parameter before the handler
+      // sees it, so this does too. Matching the raw segment made every tag
+      // batch answer 404 here while the real API served it.
+      const batch = batchesFor(tags).find(
+        (candidate) => candidate.key === decodeURIComponent(contactsMatch[1] ?? ''),
+      )
       if (batch === undefined) {
         return jsonResponse({ detail: 'no suggestion by that key' }, 404)
       }
@@ -796,7 +810,9 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
 
     const applyMatch = /^\/api\/v1\/triage\/suggestions\/([^/]+)\/apply$/.exec(url.pathname)
     if (applyMatch !== null) {
-      const batch = BATCHES.find((candidate) => candidate.key === applyMatch[1])
+      const batch = batchesFor(tags).find(
+        (candidate) => candidate.key === decodeURIComponent(applyMatch[1] ?? ''),
+      )
       if (batch === undefined) {
         return jsonResponse({ detail: 'no suggestion by that key' }, 404)
       }
@@ -897,10 +913,10 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
       Object.assign(byId(id), patch)
     },
     archive(id) {
-      byId(id).archivedAt = '2026-09-21T10:00:00Z'
+      byId(id).archived_at = '2026-09-21T10:00:00Z'
     },
     mergeAway(id, into) {
-      byId(id).mergedIntoId = into
+      byId(id).merged_into_id = into
     },
     setMessageCount(id, messages) {
       byId(id).messages = messages
