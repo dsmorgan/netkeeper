@@ -234,7 +234,7 @@ netkeeper/
 │   │   ├── preflight.py      # attach, session state, and fingerprint, without a request
 │   │   ├── voyager.py        # endpoint constants, header builder, in-page fetch, response parsers
 │   │   ├── dom.py            # DOM fallbacks for connections list and contact-info overlay
-│   │   ├── connections.py    # full + incremental sync, edge lifecycle
+│   │   ├── connections.py    # full + incremental sync job (pure; crm/apply.py maps its pages)
 │   │   ├── enrich.py         # profile visit, harvest everything, snapshot diff
 │   │   ├── inbox.py          # conversation polling for reply detection
 │   │   ├── messaging.py      # prefill compose; opt-in auto send
@@ -245,6 +245,7 @@ netkeeper/
 │   │   └── archive.py        # LinkedIn data export (.zip / CSV) importer
 │   ├── crm/
 │   │   ├── contacts.py       # CRUD, identity resolution, merge
+│   │   ├── apply.py          # extractor results → contacts, edge lifecycle (9.8, 9.10)
 │   │   ├── triage.py
 │   │   ├── tags.py           # manual + rule-based auto-tags
 │   │   ├── lists.py          # static lists, smart-list filter DSL → SQL
@@ -381,6 +382,7 @@ Merging two contacts is a first-class operation that re-points every child row a
 - `sync_run` (`kind` connections_full/connections_incremental/enrich/inbox/message_send, `status` running/completed/aborted/failed, `started_at`, `completed_at`, `progress_json`, `counts_json`, `browser_mode`, `notes`, `resume_of_id`).
 - `import_run` (`source_kind` archive/csv, `filename`, `preset`, `mapping_json`, `status`, counts, including what the auto-tag rules did when it committed: `tagged_contacts`, `tags_added`, `tags_removed`) and `import_row` (`raw_json`, `resolution` matched/created/candidate/skipped, `contact_id`, `decision_json`).
 - `linkedin_account` (`user_id`, `label`, `cdp_url`, `timezone`, `active_hours_json`, `session_status` ok/checkpoint/logged_out, `session_flag_at`). One row in v1. Budget counters and heat state are keyed by this row's id in `settings_kv`, and the browser activity lock belongs to it.
+  *As built (P2-06):* the table is `linkedin_accounts` with `user_id` and `label` (`default`, unique per user) only. Each other column arrives with the change that moves its value off where it lives today (`[linkedin]` in the config, `users.timezone`, the `linkedin.session_flag` key), so there is never a column nobody reads beside the value that is actually used. Migration 0011 created one account per existing user and moved that user's `settings_kv` budget, heat, and scheduler keys from the id 1 every caller used before onto the new row's id. The activity lock is still keyed `local` until the browser side keys it by the row.
 - `settings_kv` (`user_id`, string key, JSON value) for runtime-adjustable settings, budget counters, heat state, next-fire times, session flags.
 
 ### 8.5 Campaigns
@@ -498,6 +500,8 @@ Unlike Instagram's follower lists, LinkedIn's connections list is complete, so r
 - A contact that reappears clears both. Nothing is deleted.
 - Position and headline changes write a `contact_snapshot`. The dashboard surfaces "changed jobs in the last 30 days" as an outreach prompt; that is the single best reason to reconnect.
 - A `NotFound` streak of 3 across at least 14 days marks the profile as gone (`li_disconnected_at` plus a note). Same two-threshold reasoning as igtracker: a deactivated profile looks exactly like a deleted one and often comes back.
+
+*As built (P2-06).* Only a *complete* full sync ages anyone: one that paged to the end of the list with every response `Ok` and saw at least as many distinct connections as the list's last reported total. A full sync stopped by the budget, a throttle, a checkpoint, a login wall, a changed route, or an error ages nobody, and a complete one that saw no connections at all is refused rather than trusted. Being seen in either mode clears the count and any disconnect, since a sighting is evidence whichever job made it; an incremental sync still never adds a miss. Only contacts with a URN, not merged away, can age: a CSV-only contact has nothing a sync could have missed. The threshold is `disconnect_after_misses` (Appendix B, default 2). One case the count cannot see: a connection removed mid-run shifts later rows up one on an offset-paginated list, so the row at the next page boundary is skipped while the count stays level; that person takes one unearned miss, which the two-miss rule absorbs.
 
 ### 9.9 Locking, cancel, resume, tab loss
 
