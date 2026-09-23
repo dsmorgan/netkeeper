@@ -455,6 +455,41 @@ async def test_a_fresh_install_after_hours_runs_the_full_sync_first_and_alone(
     assert len(minutes) == len(set(minutes))
 
 
+async def test_a_first_full_sync_skipped_for_heat_runs_once_heat_decays(
+    db_path: str, owner: User
+) -> None:
+    """Installed hot (3.0 against a 2.5 threshold, so skipping until about 1.6 h
+    in): the full sync is skipped, retried hourly, and runs the same day --
+    not a week later -- then settles into its weekly cadence."""
+    factory = _make_factory(db_path)
+    with session_scope(factory, write=True) as session:
+        for _ in range(3):
+            heat.raise_heat(session, owner, ACCOUNT, now=START, settings=HEAT_SETTINGS)
+
+    result = await simulate.simulate(
+        factory,
+        owner,
+        ACCOUNT,
+        start=START,
+        end=START + timedelta(days=8),
+        seed=0,
+        schedules={
+            scheduler.JobKind.CONNECTIONS_FULL: scheduler.DEFAULT_SCHEDULES[
+                scheduler.JobKind.CONNECTIONS_FULL
+            ]
+        },
+        heat_settings=HEAT_SETTINGS,
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+    )
+
+    skipped = [f for f in result.fires if f.skipped_reason == "heat"]
+    ran = _full_syncs(result)
+    assert skipped, "heat never skipped the first fire; the test is not exercising anything"
+    assert ran[0].at < START + timedelta(hours=4)
+    assert [f.at for f in ran] == [ran[0].at, ran[0].at + timedelta(days=7)]
+
+
 async def test_restarting_an_established_install_does_not_rerun_the_full_sync(
     db_path: str, owner: User
 ) -> None:

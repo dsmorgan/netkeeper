@@ -1130,6 +1130,88 @@ def test_a_row_from_before_the_fired_flag_counts_as_fired(writer: Session, user:
     assert retimed.due == later + timedelta(days=7)
 
 
+def test_the_first_setup_retry_is_one_hour() -> None:
+    assert timedelta(hours=1) == scheduler.FIRST_SETUP_RETRY
+
+
+@pytest.mark.parametrize("late", [timedelta(0), timedelta(hours=3)], ids=["on time", "3h late"])
+async def test_a_heat_skipped_first_full_sync_is_offered_again_soon(
+    session_factory: sessionmaker[Session], late: timedelta
+) -> None:
+    """Driven through ``poll_and_fire``'s real heat skip, not ``record_fired``
+    directly: the skip must leave the flag unset and retry an hour after the
+    poll that skipped it. Counted from the poll, not the stale due time, so a
+    late poll does not leave a retry that is already due again."""
+    calls: list[scheduler.JobContext] = []
+
+    async def recording_handler(ctx: scheduler.JobContext) -> None:
+        calls.append(ctx)
+
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+        first = scheduler.establish_schedule(
+            session,
+            owner,
+            ACCOUNT,
+            FULL.kind,
+            now=NOW,
+            schedule=FULL,
+            rng=Random(0),
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        )
+        for _ in range(3):  # 3.0 >= the 2.5 threshold, at the poll
+            heat.raise_heat(session, owner, ACCOUNT, now=first.due + late, settings=HEAT_SETTINGS)
+
+    result = await scheduler.poll_and_fire(
+        session_factory,
+        owner,
+        ACCOUNT,
+        FULL.kind,
+        now=first.due + late,
+        schedule=FULL,
+        registry={FULL.kind: recording_handler},
+        heat_settings=HEAT_SETTINGS,
+        tz="UTC",
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+    )
+
+    assert calls == []
+    assert result is not None
+    assert result.skipped_reason == "heat"
+    assert result.next_due == first.due + late + timedelta(hours=1)
+    with session_scope(session_factory) as session:
+        state = scheduler._load_state(session, owner, ACCOUNT, FULL.kind)
+    assert state is not None
+    assert state.fired_once is False
+
+
+def test_a_heat_skip_after_the_first_run_keeps_the_weekly_cadence(
+    writer: Session, user: User
+) -> None:
+    first = _establish(writer, user, schedule=FULL)
+    _fire(writer, user, first.due)
+    second = first.due + timedelta(days=7)
+
+    after_skip = scheduler.record_fired(
+        writer,
+        user,
+        ACCOUNT,
+        FULL.kind,
+        due=second,
+        schedule=FULL,
+        tz="UTC",
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+        handler_ran=False,
+        now=second,
+    )
+
+    assert after_skip == second + timedelta(days=7)
+
+
 def test_the_default_heat_gate_is_the_config_default_not_an_ad_hoc_one() -> None:
     """Spec 9.7's skip is unconditional, so the default is config's own
     ``[linkedin.heat]`` -- never off, and never numbers invented here."""
