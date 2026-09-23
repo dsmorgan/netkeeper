@@ -7,7 +7,7 @@ import json
 import os
 import sys
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,9 +33,16 @@ from netkeeper.crm.lists import ListCount, list_lists, list_views, member_counts
 from netkeeper.crm.tags import ensure_default_rules, list_tags, run_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.linkedin.archive import ArchiveFormatError, open_archive
-from netkeeper.linkedin.browser import CHROME_PROFILE_DIRNAME, AttachBrowserProvider
+from netkeeper.linkedin.browser import (
+    CHROME_PROFILE_DIRNAME,
+    AttachBrowserProvider,
+    BrowserError,
+)
 from netkeeper.linkedin.preflight import LoginState, PreflightReport
 from netkeeper.linkedin.preflight import preflight as run_preflight
+from netkeeper.linkedin.rehearse import NotANeutralSite, Rehearsal, serve_replica
+from netkeeper.linkedin.rehearse import rehearse as run_rehearsal
+from netkeeper.linkedin.rehearse import render as render_rehearsal
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import ImportResolution, ImportRun, ImportStatus, User, UserKind
 from netkeeper.paths import CONFIG_ENV, data_dir
@@ -47,6 +54,8 @@ from netkeeper.services.backup import (
     list_backups,
     prune_backups,
 )
+from netkeeper.services.posture import SINGLE_ACCOUNT_ID, SessionProbe, posture
+from netkeeper.services.posture import render as render_posture
 from netkeeper.services.users import ensure_local_user
 from netkeeper.web.app import create_app, openapi_json
 
@@ -369,6 +378,176 @@ def _session_cell(report: PreflightReport) -> str:
     if report.session_expires_at is not None:
         cell += f", expires {report.session_expires_at:%Y-%m-%d %H:%M UTC}"
     return cell
+
+
+def _session_probe(report: PreflightReport) -> SessionProbe:
+    """A preflight report reduced to what a posture report may say about it.
+
+    The adapter lives here rather than in ``services.posture`` because that
+    module may not import ``linkedin.preflight``: a module under ``services/``
+    that reaches the browser is how browser work ends up inside a request
+    handler, and ``tests/test_browser_safety.py`` fails the build for it.
+
+    Cookie *names* cross this line and cookie values do not -- they cannot,
+    because preflight never read one and :class:`SessionProbe` has no field to
+    put one in (spec 9.1, CLAUDE.md).
+    """
+    logged_in: dict[LoginState, bool | None] = {
+        LoginState.LOGGED_IN: True,
+        LoginState.NO_SESSION: False,
+        LoginState.UNKNOWN: None,
+    }
+    return SessionProbe(
+        attached=report.attached,
+        logged_in=logged_in[report.login],
+        browser_version=report.browser_version,
+        cookie_names=report.session_cookies,
+        problems=report.problems,
+    )
+
+
+@app.command("posture")
+def posture_command(
+    ctx: typer.Context,
+    probe: Annotated[
+        bool,
+        typer.Option(
+            "--probe/--no-probe",
+            help="Attach to Chrome and read the LinkedIn session, as `netkeeper preflight`"
+            " does. --no-probe answers from the database alone and reports the session as"
+            " unknown.",
+        ),
+    ] = True,
+    account: Annotated[
+        int, typer.Option(help="LinkedIn account the budgets and heat belong to.")
+    ] = SINGLE_ACCOUNT_ID,
+) -> None:
+    """Every protection the LinkedIn extractor has, and a warning for anything that is off.
+
+    This is the "is it safe to run?" answer in one place: attach-only browsing,
+    the active window and where now falls in it, the warm-up ramp and today's
+    budget, every per-day and per-week counter against its limit and against
+    spec 9.6's hard max, the heat score with when it was last raised and when
+    runs resume, the weekend multiplier, LinkedIn auto-send, and the session
+    flag a checkpoint or a login wall raises.
+
+    Reads only: it takes no write lock and changes nothing. Exits non-zero when
+    anything warned, so it can gate a script as well as inform a person. It
+    attaches to Chrome to check the LinkedIn session, the same way `netkeeper
+    preflight` does; --no-probe skips that and reports the session as unknown
+    rather than assuming it is fine.
+    """
+    state = ctx.ensure_object(CliState)
+    settings = _load_settings_or_exit(state)
+    session_probe = (
+        _session_probe(asyncio.run(run_preflight(_provider(settings)))) if probe else None
+    )
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            report = posture(
+                session,
+                user,
+                account,
+                now=datetime.now(UTC),
+                settings=settings,
+                browser_mode=AttachBrowserProvider.mode,
+                probe=session_probe,
+            )
+    finally:
+        engine.dispose()
+    typer.echo(render_posture(report), nl=False)
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+DEFAULT_REHEARSAL_VISITS = 3
+
+
+@app.command("rehearse")
+def rehearse_command(
+    ctx: typer.Context,
+    visits: Annotated[
+        int, typer.Option(help="How many profile visits to rehearse.")
+    ] = DEFAULT_REHEARSAL_VISITS,
+    seed: Annotated[
+        int | None,
+        typer.Option(
+            help="Seed the pacing plan, to repeat a rehearsal exactly.", show_default=False
+        ),
+    ] = None,
+    scale: Annotated[
+        float,
+        typer.Option(
+            help="Divide every wait by this. 1.0 waits exactly what a run would; anything"
+            " else is marked as scaled in the log.",
+        ),
+    ] = 1.0,
+    site: Annotated[
+        str | None,
+        typer.Option(
+            help="A loopback replica you started yourself. Without it, netkeeper starts"
+            " one and shuts it down afterwards.",
+            show_default=False,
+        ),
+    ] = None,
+    log: Annotated[
+        Path | None,
+        typer.Option(help="Also write the request log here.", show_default=False),
+    ] = None,
+) -> None:
+    """Run the real request pattern against a neutral loopback site, and print every request.
+
+    Watch what netkeeper would do before it does it anywhere real. It attaches
+    to your Chrome exactly as a job does, follows the genuine pacing plan --
+    the same scroll deltas, the same dwell, the same lognormal waits, the same
+    bursts -- against a profile-shaped page served on this machine's loopback,
+    and records every request the tab made: method, status, kind, timing, path.
+
+    It never touches LinkedIn. The site must be a loopback url, a linkedin.com
+    host is refused by name, and a rehearsal that somehow reached one raises
+    instead of reporting. Nothing here launches a browser (ADR 0002).
+    """
+    state = ctx.ensure_object(CliState)
+    settings = _load_settings_or_exit(state)
+    chosen_seed = int(datetime.now(UTC).timestamp()) if seed is None else seed
+    replica: AbstractContextManager[str] = (
+        nullcontext(site) if site is not None else serve_replica()
+    )
+    try:
+        with replica as base:
+            rehearsal = asyncio.run(
+                run_rehearsal(
+                    _provider(settings),
+                    site=base,
+                    visits=visits,
+                    seed=chosen_seed,
+                    time_scale=scale,
+                )
+            )
+    except (NotANeutralSite, ValueError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except BrowserError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    _report_rehearsal(rehearsal, log)
+
+
+def _report_rehearsal(rehearsal: Rehearsal, log: Path | None) -> None:
+    text = render_rehearsal(rehearsal)
+    typer.echo(text, nl=False)
+    if log is not None:
+        log.write_text(text, encoding="utf-8")
+        typer.echo(f"wrote the request log to {log}")
+
+
+def _provider(settings: Settings) -> AttachBrowserProvider:
+    """The one provider there is, pointed at the configured debug port (ADR 0002)."""
+    return AttachBrowserProvider(settings.linkedin.cdp_url)
 
 
 @backup_app.callback()

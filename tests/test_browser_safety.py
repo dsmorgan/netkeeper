@@ -115,8 +115,9 @@ BROWSER_MODULES = ("netkeeper.linkedin.browser", "netkeeper.linkedin.preflight")
 # which is how a shim under services/ would smuggle the browser into a handler.
 BROWSER_CALLERS = frozenset(
     {
-        Path("netkeeper/cli.py"),  # `netkeeper preflight`, on its own event loop
+        Path("netkeeper/cli.py"),  # `netkeeper preflight` and `rehearse`, on their own loops
         Path("netkeeper/linkedin/preflight.py"),  # the report, inside a run
+        Path("netkeeper/linkedin/rehearse.py"),  # the rehearsal, inside a run
     }
 )
 

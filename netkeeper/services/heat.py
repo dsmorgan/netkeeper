@@ -43,6 +43,22 @@ def read(
     return heat_math.decayed_score(state, now, half_life_hours=settings.half_life_hours)
 
 
+def state(session: Session, user: User, account_id: int) -> heat_math.HeatState | None:
+    """The stored state as it is, undecayed, or ``None`` when heat was never raised.
+
+    :func:`read` answers "how warm is it now", which is what a pacing decision
+    needs. This answers "when was it last raised", which is what a report needs
+    (spec 9.7: the Settings page "shows the level, when it was last raised, and
+    when runs resume") and which a decayed score alone cannot say -- a score of
+    0.02 is the same number whether it came from one throttle six hours ago or
+    five throttles two days ago. ``None`` rather than the cold placeholder
+    :data:`_COLD`, so a caller can tell "never raised" from "raised at the
+    epoch" instead of printing 1970 at someone. Read-only.
+    """
+    raw = get_setting(session, user, _key(account_id))
+    return None if raw is None else _load(session, user, account_id)
+
+
 def should_skip(
     session: Session, user: User, account_id: int, *, now: datetime, settings: HeatSettings
 ) -> bool:
