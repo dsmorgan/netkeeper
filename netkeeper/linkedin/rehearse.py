@@ -85,12 +85,13 @@ class NotANeutralSite(ValueError):
 
 
 # --- the slices of Playwright a rehearsal needs -------------------------------
-# `browser.PageLike` is deliberately tiny. A rehearsal needs two more things --
-# the wheel, to replay a scroll plan, and the event listener, to record what the
-# tab asked for -- so it declares them here rather than widening the protocol
-# every other caller shares. `on` is a listener; `route` (which would let
-# netkeeper change what the browser sends) is absent from both protocols and is
-# refused outright by tests/test_browser_safety.py.
+# `browser.PageLike` is deliberately tiny. A rehearsal needs one more thing -- the
+# event listener, to record what the tab asked for -- so it declares it here rather
+# than widening the protocol every other caller shares. `on` is a listener; `route`
+# (which would let netkeeper change what the browser sends) is absent from both
+# protocols and is refused outright by tests/test_browser_safety.py. Replaying the
+# scroll plan itself is `BrowserRun.scroll`'s job (#152): it borrows the mouse
+# locally, inside `browser.py`, so this module never needs to name it either.
 
 
 class RequestLike(Protocol):
@@ -116,17 +117,8 @@ class ResponseLike(Protocol):
     def request(self) -> RequestLike: ...
 
 
-class MouseLike(Protocol):
-    """The slice of a Playwright ``Mouse`` a scroll plan is replayed through."""
-
-    async def wheel(self, delta_x: float, delta_y: float) -> None: ...
-
-
 class RehearsalPage(PageLike, Protocol):
-    """A tab that can be scrolled and listened to."""
-
-    @property
-    def mouse(self) -> MouseLike: ...
+    """A tab that can be listened to."""
 
     def on(self, event: str, handler: Callable[[Any], None]) -> None: ...
 
@@ -319,7 +311,14 @@ async def rehearse(
                     f"the tab was reopened before visit {index + 1}; requests it made"
                     " before the listeners were reattached are not in this log"
                 )
-            await _replay_scroll(page, step.scroll, sleep=sleep, time_scale=time_scale)
+            page = _as_rehearsal_page(
+                await run.scroll(step.scroll, sleep=_scaled_sleep(sleep, time_scale))
+            )
+            if recorder.follow(page):
+                notes.append(
+                    f"the tab was reopened while scrolling visit {index + 1}; requests it"
+                    " made before the listeners were reattached are not in this log"
+                )
             waited = await _wait(step.delay_after_s, sleep=sleep, time_scale=time_scale)
             made.append(
                 RehearsalVisit(
@@ -375,18 +374,22 @@ def _assert_stayed_neutral(rehearsal: Rehearsal) -> None:
         )
 
 
-async def _replay_scroll(
-    page: RehearsalPage,
-    plan: ScrollPlan,
-    *,
-    sleep: Callable[[float], Awaitable[None]],
-    time_scale: float,
-) -> None:
-    """One ``mouse.wheel`` per step, the pause after each, then the dwell (spec 9.5)."""
-    for step in plan.steps:
-        await page.mouse.wheel(0, step.delta_px)
-        await sleep(step.pause_s / time_scale)
-    await sleep(plan.dwell_s / time_scale)
+def _scaled_sleep(
+    sleep: Callable[[float], Awaitable[None]], time_scale: float
+) -> Callable[[float], Awaitable[None]]:
+    """``sleep``, with every wait it is asked for divided by ``time_scale`` first.
+
+    What :meth:`~netkeeper.linkedin.browser.BrowserRun.scroll` is handed in place of
+    the plain ``sleep`` a real run would use: scaling the *wait*, not the *plan*, is
+    ``rehearse``'s whole point (a scaled rehearsal still records what a run at this
+    pacing would actually wait -- see :func:`_wait`, which does the same division for
+    the pause between profiles).
+    """
+
+    async def scaled(seconds: float) -> None:
+        await sleep(seconds / time_scale)
+
+    return scaled
 
 
 async def _wait(

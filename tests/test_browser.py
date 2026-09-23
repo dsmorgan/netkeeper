@@ -21,6 +21,7 @@ from netkeeper.linkedin.browser import (
     BrowserProvider,
     BrowserUnavailable,
 )
+from netkeeper.linkedin.pacing import ScrollPlan, ScrollStep
 
 CDP_URL = "http://127.0.0.1:9222"
 LOCAL_PAGE = "http://127.0.0.1:8123/replica/profile.html"
@@ -407,3 +408,134 @@ async def test_locks_are_made_once_per_account() -> None:
     assert locks.lock_for("a") is locks.lock_for("a")
     assert locks.lock_for("a") is not locks.lock_for("b")
     assert not locks.is_busy("never-used")
+
+
+# --- replaying a scroll plan (#152) -------------------------------------------
+
+
+class Sleeper:
+    """Records what it was asked to wait and waits none of it."""
+
+    def __init__(self) -> None:
+        self.waits: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.waits.append(seconds)
+
+
+def make_plan(*steps: tuple[int, float], dwell_s: float = 2.5) -> ScrollPlan:
+    return ScrollPlan(
+        steps=tuple(ScrollStep(delta_px=delta, pause_s=pause) for delta, pause in steps),
+        dwell_s=dwell_s,
+    )
+
+
+async def test_scroll_sends_one_wheel_per_step_then_sleeps_each_pause_and_the_dwell() -> None:
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+    plan = make_plan((120, 0.4), (-90, 0.2), (500, 0.9), dwell_s=3.0)
+    sleeper = Sleeper()
+
+    async with provider.run() as run:
+        returned = await run.scroll(plan, sleep=sleeper)
+
+    page = only_page(context)
+    assert returned is page
+    assert page.mouse.wheels == [(0, 120), (0, -90), (0, 500)]
+    # Order matters as much as the values: a plan replayed out of order, or with
+    # the dwell folded into a step's own pause, would still sum to the same total.
+    assert sleeper.waits == [0.4, 0.2, 0.9, 3.0]
+
+
+async def test_scroll_with_no_steps_still_sleeps_the_dwell() -> None:
+    provider = make_provider()
+    plan = make_plan(dwell_s=1.5)
+    sleeper = Sleeper()
+
+    async with provider.run() as run:
+        await run.scroll(plan, sleep=sleeper)
+
+    assert sleeper.waits == [1.5]
+
+
+async def test_scroll_defaults_to_a_real_sleep() -> None:
+    """No ``sleep`` given at all still works -- the default is ``asyncio.sleep``."""
+    provider = make_provider()
+    plan = make_plan((10, 0.0), dwell_s=0.0)
+
+    async with provider.run() as run:
+        await run.scroll(plan)
+
+
+async def test_scroll_reopens_a_lost_tab_and_scrolls_the_recovered_one() -> None:
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+    plan = make_plan((100, 0.1))
+
+    async with provider.run() as run:
+        await run.goto(LOCAL_PAGE)
+        lost = only_page(context)
+        lost.user_closed_it()
+
+        returned = await run.scroll(plan, sleep=Sleeper())
+
+        recovered = context.pages[-1]
+        assert returned is recovered
+        assert recovered is not lost
+        assert not recovered.is_closed()
+        assert recovered.mouse.wheels == [(0, 100)]
+        assert lost.mouse.wheels == [], "the closed tab's own mouse recorded nothing"
+        assert context.new_page_calls == 2
+
+
+async def test_a_cancelled_scroll_stops_before_its_next_wheel_event() -> None:
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+    plan = make_plan((1, 0.1), (2, 0.1), (3, 0.1), dwell_s=9.0)
+    sleeper = Sleeper()
+    calls = 0
+
+    def cancelled() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls > 1  # let the first wheel event through, then stop
+
+    async with provider.run() as run:
+        returned = await run.scroll(plan, sleep=sleeper, cancelled=cancelled)
+
+    page = only_page(context)
+    assert returned is page
+    assert page.mouse.wheels == [(0, 1)], "a cancelled replay must not send the rest of the plan"
+    assert sleeper.waits == [0.1], "nor wait out the steps or the dwell it never reached"
+
+
+async def test_a_scroll_cancelled_only_before_the_dwell_still_sends_every_wheel_event() -> None:
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+    plan = make_plan((1, 0.1), (2, 0.1), dwell_s=9.0)
+    sleeper = Sleeper()
+
+    def cancelled_after_steps() -> bool:
+        return len(sleeper.waits) >= 2  # both steps have paused; only the dwell is left
+
+    async with provider.run() as run:
+        await run.scroll(plan, sleep=sleeper, cancelled=cancelled_after_steps)
+
+    page = only_page(context)
+    assert page.mouse.wheels == [(0, 1), (0, 2)], "cancelling before the dwell must not skip a step"
+    assert sleeper.waits == [0.1, 0.1], "the dwell itself must not run once cancelled"
+
+
+async def test_an_uncancelled_scroll_ignores_a_cancelled_callback_that_says_no() -> None:
+    provider = make_provider()
+    plan = make_plan((10, 0.05), dwell_s=0.25)
+    sleeper = Sleeper()
+
+    async with provider.run() as run:
+        await run.scroll(plan, sleep=sleeper, cancelled=lambda: False)
+
+    assert sleeper.waits == [0.05, 0.25]
