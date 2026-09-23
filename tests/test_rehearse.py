@@ -86,18 +86,12 @@ class FakeResponse:
         self.status = status
 
 
-class FakeMouse:
-    """Records the wheel events a scroll plan is replayed through."""
-
-    def __init__(self) -> None:
-        self.wheels: list[tuple[float, float]] = []
-
-    async def wheel(self, delta_x: float, delta_y: float) -> None:
-        self.wheels.append((delta_x, delta_y))
-
-
 class ReplayPage(FakePage):
     """A tab that emits the requests a page load makes, and can lose itself on cue.
+
+    ``mouse`` comes from the shared :class:`FakePage` base now that
+    ``BrowserRun.scroll`` (#152) is what replays a scroll plan against it, rather
+    than this module's own (formerly separate) ``_replay_scroll``.
 
     With ``context.fetch`` it really fetches each url over loopback and reports
     the status it got, instead of fabricating one. That is what the CLI test
@@ -108,7 +102,6 @@ class ReplayPage(FakePage):
 
     def __init__(self, context: ReplayContext, *, fail_at: int | None = None) -> None:
         super().__init__(context)
-        self.mouse = FakeMouse()
         self.handlers: dict[str, list[Callable[[Any], None]]] = {}
         self.fail_at = fail_at
         self.goto_count = 0

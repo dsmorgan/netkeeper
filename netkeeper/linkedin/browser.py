@@ -25,10 +25,11 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin.activity_lock import SINGLE_ACCOUNT_KEY as SINGLE_ACCOUNT_KEY
+from netkeeper.linkedin.pacing import ScrollPlan
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +81,28 @@ class PageLike(Protocol):
     async def evaluate(self, expression: str) -> Any: ...
 
     async def close(self) -> None: ...
+
+
+class _MouseLike(Protocol):
+    """The slice of a Playwright ``Mouse`` a :class:`~netkeeper.linkedin.pacing.ScrollPlan`
+    is replayed through.
+
+    Not part of :class:`PageLike`: #152 kept that protocol to exactly what every
+    other caller needs, and :meth:`BrowserRun.scroll` is the only thing in this
+    package that reaches for a page's mouse. Declaring the wider slice here, local to
+    the one method that uses it, is the point -- widening the shared protocol would
+    hand every other caller the whole Playwright mouse API for a replay that has
+    exactly one shape.
+    """
+
+    async def wheel(self, delta_x: float, delta_y: float) -> None: ...
+
+
+class _ScrollablePage(PageLike, Protocol):
+    """A tab that can also be scrolled. See :class:`_MouseLike`."""
+
+    @property
+    def mouse(self) -> _MouseLike: ...
 
 
 class ContextLike(Protocol):
@@ -276,6 +299,13 @@ _BUSY_ADVICE = (
 )
 
 
+async def _real_sleep(seconds: float) -> None:
+    """The default sleeper for :meth:`BrowserRun.scroll`. A named wrapper so the
+    parameter's type stays one-argument (``asyncio.sleep`` also takes an optional
+    result to return)."""
+    await asyncio.sleep(seconds)
+
+
 class BrowserRun:
     """One unit of browser work: the activity lock, one tab, and at most one reattach.
 
@@ -328,6 +358,49 @@ class BrowserRun:
         :class:`BrowserUnavailable` and the run is over.
         """
         return await self._ensure_page(restore=True)
+
+    async def scroll(
+        self,
+        plan: ScrollPlan,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = _real_sleep,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> PageLike:
+        """Replay ``plan`` on this run's tab: one ``mouse.wheel`` per step, then the dwell.
+
+        #152's decision: :mod:`netkeeper.linkedin.pacing` builds the plan as plain
+        data, with no browser in sight, and this is where it is spent, on the one tab
+        this run owns. :class:`PageLike` gains nothing from it -- this method borrows
+        the wider :class:`_ScrollablePage` slice locally rather than widening the
+        protocol every other caller shares.
+
+        Calls :meth:`ensure_page` first, so a tab the user closed (or a browser that
+        went away) is reopened the same way a navigation would recover it, and returns
+        the page actually scrolled -- a caller tracking the previous one (a request
+        listener, say) should re-attach to what comes back if it differs.
+
+        ``sleep`` stands in for the wait after each step and the final dwell; inject a
+        fake in an offline test so it takes zero real time and records what it was
+        asked to wait, or a scaled one to divide every wait for a sped-up demo. Real
+        time (``asyncio.sleep``) is the default.
+
+        ``cancelled``, when given, is polled before every wheel event and again before
+        the final dwell, so a caller wired to spec 9.9's cooperative cancel ("checked
+        between profiles and inside sliced cooldowns") has somewhere to plug one in;
+        nothing here reads a database or a settings flag itself (spec 9.10 keeps that
+        off this side of the boundary), so the check is the caller's to supply. A
+        cancelled replay returns the page without sending its remaining wheel events
+        or waiting out the dwell.
+        """
+        page = cast(_ScrollablePage, await self.ensure_page())
+        for step in plan.steps:
+            if cancelled is not None and cancelled():
+                return page
+            await page.mouse.wheel(0, step.delta_px)
+            await sleep(step.pause_s)
+        if cancelled is None or not cancelled():
+            await sleep(plan.dwell_s)
+        return page
 
     async def goto(self, url: str) -> PageLike:
         """Navigate this run's tab, reopening it first, or again, if it was lost.

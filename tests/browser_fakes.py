@@ -19,11 +19,22 @@ from typing import Any
 from netkeeper.linkedin.browser import Connection, ContextLike, PageLike
 
 
+class FakeMouse:
+    """Records the wheel events a scroll plan (or an in-page fetch's caller) sends."""
+
+    def __init__(self) -> None:
+        self.wheels: list[tuple[float, float]] = []
+
+    async def wheel(self, delta_x: float, delta_y: float) -> None:
+        self.wheels.append((delta_x, delta_y))
+
+
 class FakePage:
     """One tab. Records what it was asked to do and can be closed behind the run's back."""
 
     def __init__(self, context: FakeContext) -> None:
         self.context = context
+        self.mouse = FakeMouse()
         self.goto_calls: list[str] = []
         self.evaluate_calls: list[str] = []
         self.close_calls = 0
@@ -31,6 +42,7 @@ class FakePage:
         self._url = "about:blank"
         self._goto_error: Exception | None = None
         self._goto_error_closes = True
+        self._evaluate_error: Exception | None = None
 
     @property
     def url(self) -> str:
@@ -62,7 +74,14 @@ class FakePage:
     async def evaluate(self, expression: str) -> Any:
         assert not self._closed, "evaluated on a closed tab"
         self.evaluate_calls.append(expression)
+        if self._evaluate_error is not None:
+            error, self._evaluate_error = self._evaluate_error, None
+            raise error
         return self.context.evaluate_result
+
+    def fail_next_evaluate(self, error: Exception) -> None:
+        """Arm one failed in-page evaluate, the way :meth:`fail_next_goto` arms a navigation."""
+        self._evaluate_error = error
 
     async def close(self) -> None:
         self.close_calls += 1
