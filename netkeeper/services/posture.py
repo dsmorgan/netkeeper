@@ -424,6 +424,9 @@ def posture(
     )
 
 
+_CONSUME: Final = "netkeeper.services.budgets.consume"
+_ACTION_CLASS: Final = "netkeeper.services.budgets.ActionClass"
+
 #: What this report cannot see yet. Each is a real limit of the tool as it
 #: stands, not a warning about the configuration, and each names what would
 #: close it. They are listed rather than silently omitted because a reader who
@@ -451,18 +454,23 @@ def posture(
 #: state and stores nothing, so a run that called only it would forget the
 #: throttle the moment it returned.
 #:
+#: The budget's four keys are one function and four action classes: a key
+#: written ``function[reference]`` is enforced by a file that uses both, so
+#: ``budgets.consume`` called with ``ActionClass.CONNECTION_PAGES`` (the
+#: connections sync, P2-06) wires the ``connection_pages`` budget and none of the
+#: other three. Keyed on ``consume`` alone, that one caller read as all four
+#: budgets enforced while nothing spent a profile visit.
+#:
 #: Human-like pacing's key is ``pacing.plan_enrichment``, the entry point that
 #: produces the inter-visit plan (delays, bursts, breaks), not the helpers it
 #: calls. ``human_delay`` is also reached by ``scroll_like_a_person`` for the
 #: reading dwell alone, so a job that only scrolls pages would have read as
 #: paced while nothing spaced its visits apart.
 ENFORCED_BY: Final[dict[str, tuple[str, ...]]] = {
-    "netkeeper.services.budgets.consume": (
-        "budget connection_pages",
-        "budget profile_visits",
-        "budget inbox_polls",
-        "budget li_messages_auto",
-    ),
+    f"{_CONSUME}[{_ACTION_CLASS}.CONNECTION_PAGES]": ("budget connection_pages",),
+    f"{_CONSUME}[{_ACTION_CLASS}.PROFILE_VISITS]": ("budget profile_visits",),
+    f"{_CONSUME}[{_ACTION_CLASS}.INBOX_POLLS]": ("budget inbox_polls",),
+    f"{_CONSUME}[{_ACTION_CLASS}.LI_MESSAGES_AUTO]": ("budget li_messages_auto",),
     "netkeeper.linkedin.pacing.warmup_budget": ("warm-up ramp",),
     "netkeeper.linkedin.pacing.apply_weekend_multiplier": ("weekend damping",),
     "netkeeper.linkedin.pacing.plan_enrichment": ("human-like pacing",),
@@ -478,12 +486,12 @@ ENFORCED_BY: Final[dict[str, tuple[str, ...]]] = {
 #: the whole point: a hand-maintained list of "not wired up yet" is wrong the
 #: week after it is written.
 UNENFORCED_TODAY: Final[tuple[str, ...]] = (
-    "netkeeper.services.budgets.consume",
+    f"{_CONSUME}[{_ACTION_CLASS}.PROFILE_VISITS]",
+    f"{_CONSUME}[{_ACTION_CLASS}.INBOX_POLLS]",
+    f"{_CONSUME}[{_ACTION_CLASS}.LI_MESSAGES_AUTO]",
     "netkeeper.linkedin.pacing.warmup_budget",
     "netkeeper.linkedin.pacing.apply_weekend_multiplier",
     "netkeeper.linkedin.pacing.plan_enrichment",
-    "netkeeper.services.heat.raise_heat",
-    "netkeeper.services.linkedin_session.flag_session",
 )
 
 
@@ -1396,8 +1404,8 @@ def _verdict(report: PostureReport) -> str:
     """What this report is entitled to claim, which is narrower than "you are safe".
 
     The report reads configuration and counters. It cannot see whether the code
-    that will do the work calls the enforcement -- and today, for five of the
-    protections, nothing does (:data:`UNENFORCED_TODAY`, stated in
+    that will do the work calls the enforcement -- and today, for several of
+    the protections, nothing does (:data:`UNENFORCED_TODAY`, stated in
     :data:`GAPS`). So a clean report says *nothing is misconfigured*, which is
     true and worth a great deal, rather than *every protection is in force*,
     which would be the same sentence on the day a protection works and the day

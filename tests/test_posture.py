@@ -751,6 +751,12 @@ def _callers_of(function: str) -> set[Path]:
 def _calls(source: str, path: Path, function: str) -> bool:
     """Whether ``source``, as the file at ``path``, uses the fully qualified ``function``.
 
+    A key written ``function[reference]`` needs both: a use of ``function`` and
+    a use of ``reference`` in the same file. That is how a budget is keyed per
+    action class (``consume[...ActionClass.CONNECTION_PAGES]``): one caller of
+    ``consume`` enforces the classes it names, not every class ``consume``
+    could be handed.
+
     A use is any reference that resolves to ``function``, called or handed over.
     A definition site calling itself is the implementation, not a consumer
     enforcing a limit, so the defining module never counts. An unrelated
@@ -759,13 +765,22 @@ def _calls(source: str, path: Path, function: str) -> bool:
     is followed transitively: a helper that happens to reach a key is not the
     key (see ``ENFORCED_BY`` on ``plan_enrichment``).
     """
+    function, reference = _split_key(function)
     module = call_targets.module_name(path, browser_safety.REPO_ROOT)
     if module == function.rpartition(".")[0]:
         return False
-    references = call_targets.qualified_references(
-        source, module, is_package=path.name == "__init__.py"
+    references = set(
+        call_targets.qualified_references(source, module, is_package=path.name == "__init__.py")
     )
-    return function in references
+    return function in references and (reference is None or reference in references)
+
+
+def _split_key(key: str) -> tuple[str, str | None]:
+    """``"f[r]"`` -> ``("f", "r")``; a plain ``"f"`` -> ``("f", None)``."""
+    if key.endswith("]") and "[" in key:
+        function, _, reference = key[:-1].partition("[")
+        return function, reference
+    return key, None
 
 
 def test_the_unenforced_list_is_what_the_package_actually_shows() -> None:
@@ -917,9 +932,28 @@ def test_the_rehearsal_is_ignored_because_it_does_pace() -> None:
 
 def test_every_enforcement_target_is_a_function_that_exists() -> None:
     """A misspelled key would read as "nothing calls it" forever."""
-    for function in ENFORCED_BY:
+    for key in ENFORCED_BY:
+        function, reference = _split_key(key)
         module, _, name = function.rpartition(".")
-        assert callable(getattr(importlib.import_module(module), name, None)), function
+        assert callable(getattr(importlib.import_module(module), name, None)), key
+        if reference is not None:
+            assert _resolves(reference), key
+
+
+def _resolves(dotted: str) -> bool:
+    """Whether ``a.b.C.D`` names something: the longest importable prefix, then attributes."""
+    parts = dotted.split(".")
+    for split in range(len(parts), 0, -1):
+        try:
+            target: object = importlib.import_module(".".join(parts[:split]))
+        except ImportError:
+            continue
+        for attribute in parts[split:]:
+            if not hasattr(target, attribute):
+                return False
+            target = getattr(target, attribute)
+        return True
+    return False
 
 
 def test_every_unenforced_name_maps_to_protections_the_report_has(
@@ -954,10 +988,50 @@ def test_a_clean_report_claims_configuration_and_not_enforcement(
 def test_the_gap_lists_the_protections_nothing_enforces_yet(writer: Session, user: User) -> None:
     gaps = " ".join(_report(writer, user).gaps)
 
-    assert "budget profile_visits" in gaps
-    assert "warm-up ramp" in gaps
-    assert "session flag" in gaps
-    assert "active hours" not in gaps.split("never callers")[1].split(".")[0]
+    # The sentence after the colon, up to its period. (This used to split on
+    # "never callers", whose next character is the period ending that bold
+    # phrase, so every "not in" below it compared against an empty string.)
+    unwired = gaps.split("no enforcing caller in the package yet:")[1].split(".")[0]
+    assert unwired.strip()
+
+    assert "budget profile_visits" in unwired
+    assert "warm-up ramp" in unwired
+    assert "active hours" not in unwired
+    # The connections sync (P2-06) spends connection pages, raises heat, and sets
+    # the session flag; it spends no profile visit, so that budget stays listed.
+    assert "budget connection_pages" not in unwired
+    assert "session flag" not in unwired
+    assert "heat" not in unwired
+
+
+_CONNECTION_PAGES = f"{_CONSUME}[netkeeper.services.budgets.ActionClass.CONNECTION_PAGES]"
+_PROFILE_VISITS = f"{_CONSUME}[netkeeper.services.budgets.ActionClass.PROFILE_VISITS]"
+
+
+def test_a_budget_is_enforced_per_action_class() -> None:
+    """One ``consume`` caller wires the classes it names and no others.
+
+    Keyed on ``consume`` alone, the connections sync spending connection pages
+    read as every budget enforced, profile visits included, while nothing
+    spent one.
+    """
+    source = (
+        "from netkeeper.services import budgets\n"
+        "from netkeeper.services.budgets import ActionClass\n"
+        "def page(session):\n"
+        "    budgets.consume(session, ActionClass.CONNECTION_PAGES)\n"
+    )
+    assert _calls(source, _CALLER, _CONNECTION_PAGES)
+    assert not _calls(source, _CALLER, _PROFILE_VISITS)
+
+
+def test_a_named_action_class_without_consume_is_not_enforcement() -> None:
+    source = (
+        "from netkeeper.services import budgets\n"
+        "def page(session):\n"
+        "    budgets.status(session, budgets.ActionClass.CONNECTION_PAGES)\n"
+    )
+    assert not _calls(source, _CALLER, _CONNECTION_PAGES)
 
 
 # --- the thresholds, pinned to literals ----------------------------------------
