@@ -42,6 +42,7 @@ from netkeeper.services import budgets
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass
 from netkeeper.services.connections_sync import HeatSkipped, SyncRunReport, sync_connections
+from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.linkedin_session import session_flag
 
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
@@ -449,3 +450,47 @@ async def test_the_budget_is_spent_before_the_fetch_not_after(
     fetch = FakeVoyagerFetch(_many(100), script={1: THROTTLED})
     report = await _sync(session_factory, user_id, fetch)
     assert _spent(session_factory, user_id, report.account_id, NOW) == 2
+
+
+async def test_budget_spent_elsewhere_mid_run_stops_the_next_page(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """The per-page gate, not only the up-front page budget, enforces the day's limit.
+
+    Another run spends the rest of the day's pages while this one pauses; the
+    next page is refused before it is fetched.
+    """
+    settings = replace(SETTINGS, budget=BudgetSettings(connection_pages_per_day=5))
+
+    class SpendingElsewhere(Sleeps):
+        async def __call__(self, seconds: float) -> None:
+            await super().__call__(seconds)
+            with session_scope(session_factory, write=True) as session:
+                user = session.get(User, user_id)
+                assert user is not None
+                for _ in range(5):
+                    try:
+                        budgets.consume(
+                            session,
+                            user,
+                            report_account,
+                            ActionClass.CONNECTION_PAGES,
+                            now=NOW,
+                            settings=settings.budget,
+                        )
+                    except budgets.BudgetExceeded:
+                        break
+
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        report_account = ensure_account(session, user).id
+    fetch = FakeVoyagerFetch(_many(400))
+
+    report = await _sync(
+        session_factory, user_id, fetch, settings=settings, sleeps=SpendingElsewhere()
+    )
+
+    assert len(fetch.requests) == 1
+    assert report.result.reason is StopReason.BUDGET
+    assert report.aging is None
