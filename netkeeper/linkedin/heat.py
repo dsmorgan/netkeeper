@@ -1,0 +1,118 @@
+"""Heat: an escalating back-off score for the LinkedIn extractor (spec 9.7).
+
+Pure and behind the extractor boundary (spec 9.10, ADR 0005): no import of
+``netkeeper.models``, no session, no clock read of its own. Every function
+takes ``now`` as a parameter rather than calling ``datetime.now()`` internally,
+which is what makes the decay testable without sleeping.
+
+A raised score decays exponentially with a configured half-life, computed
+fresh on every read from the stored score and the elapsed time
+(:func:`decayed_score`). Nothing here ticks the number down in the
+background -- reading it twice with no new event between the reads returns a
+smaller number the second time, as long as real time passed, and no scheduler
+job exists whose only purpose is to keep the score honest.
+
+Persisting a :class:`HeatState` -- reading and writing the row that survives
+between calls -- needs a session and a ``User`` (for the account it belongs
+to), so it lives on the core side, in ``netkeeper.services.heat``, which
+calls the pure functions here to do the math. See that module's docstring for
+why the seam falls here rather than inside ``linkedin/``.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Final
+
+# The multiplier never contracts a delay or a budget below its configured
+# value: cold (score 0) is exactly 1.0, and it only grows from there.
+COOLDOWN_FLOOR: Final = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class HeatState:
+    """A score of ``score`` as of ``updated_at``. ``score=0`` reads as cold at any time."""
+
+    score: float
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.updated_at.tzinfo is None or self.updated_at.utcoffset() is None:
+            raise ValueError("HeatState.updated_at must be timezone-aware")
+        if self.score < 0:
+            raise ValueError("HeatState.score must not be negative")
+
+
+def decayed_score(state: HeatState, now: datetime, *, half_life_hours: float) -> float:
+    """``state.score`` decayed exponentially from ``updated_at`` to ``now``.
+
+    ``now`` before ``updated_at`` (clock skew, or a stale read) returns the
+    stored score unchanged rather than projecting it backward into a larger
+    number. Elapsed time is real hours, not calendar days, so this needs no
+    notion of a local day or timezone at all -- that belongs to the budget
+    counters (spec 9.6), not to heat.
+    """
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    if half_life_hours <= 0:
+        raise ValueError("half_life_hours must be positive")
+    elapsed_hours = (now - state.updated_at).total_seconds() / 3600
+    if elapsed_hours <= 0:
+        return state.score
+    decay = math.pow(0.5, elapsed_hours / half_life_hours)
+    return state.score * decay
+
+
+def raise_heat(
+    state: HeatState, now: datetime, *, per_block: float, half_life_hours: float
+) -> HeatState:
+    """Add ``per_block`` to the score, decayed forward to ``now`` first.
+
+    Each ``Throttled`` or ``Checkpoint`` outcome (spec 9.7) calls this once.
+    """
+    if per_block < 0:
+        raise ValueError("per_block must not be negative")
+    current = decayed_score(state, now, half_life_hours=half_life_hours)
+    return HeatState(score=current + per_block, updated_at=now)
+
+
+def clear(now: datetime) -> HeatState:
+    """A fresh, cold state as of ``now``: the manual clear for "the block was something else"."""
+    return HeatState(score=0.0, updated_at=now)
+
+
+def is_skipping(
+    state: HeatState, now: datetime, *, half_life_hours: float, skip_threshold: float
+) -> bool:
+    """True once the score, decayed to ``now``, is at or above ``skip_threshold``.
+
+    The scheduler's cue to skip browser jobs entirely (spec 9.7) rather than
+    run them slower.
+    """
+    return decayed_score(state, now, half_life_hours=half_life_hours) >= skip_threshold
+
+
+def cooldown_multiplier(state: HeatState, now: datetime, *, half_life_hours: float) -> float:
+    """>= 1.0: how much warmer than baseline things are right now.
+
+    The caller multiplies ``human_delay`` medians by this and divides a
+    per-run budget by it (through :func:`shrink`) -- the same number drives
+    both, because both are "how cautious to be while warm" (spec 9.7).
+    """
+    score = decayed_score(state, now, half_life_hours=half_life_hours)
+    return COOLDOWN_FLOOR + score
+
+
+def shrink(base_limit: int, multiplier: float) -> int:
+    """``base_limit`` divided by ``multiplier``, floored at 1 unit.
+
+    Spec 9.7: "the per-run budget shrinks, never to zero." A multiplier below
+    1 would grow the budget instead of shrinking it, so it is refused.
+    """
+    if multiplier < COOLDOWN_FLOOR:
+        raise ValueError("multiplier must be at least 1.0")
+    if base_limit < 1:
+        raise ValueError("base_limit must be at least 1")
+    return max(1, math.floor(base_limit / multiplier))
