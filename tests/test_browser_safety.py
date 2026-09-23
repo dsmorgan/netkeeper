@@ -119,6 +119,9 @@ BROWSER_MODULES = (
     # handler exactly as importing the provider would, so it is a browser
     # module here and not only a caller of one below.
     "netkeeper.linkedin.rehearse",
+    # The in-page Voyager fetch (#150) awaits a real `page.evaluate` fetch --
+    # exactly the deadlock risk the other three exist to keep out of a handler.
+    "netkeeper.linkedin.fetch",
 )
 
 # The modules that may reach the provider at all, as paths from the repository root.
@@ -130,6 +133,7 @@ BROWSER_CALLERS = frozenset(
         Path("netkeeper/cli.py"),  # `netkeeper preflight` and `rehearse`, on their own loops
         Path("netkeeper/linkedin/preflight.py"),  # the report, inside a run
         Path("netkeeper/linkedin/rehearse.py"),  # the rehearsal, inside a run
+        Path("netkeeper/linkedin/fetch.py"),  # PageVoyagerFetch, inside a run (#150)
     }
 )
 
