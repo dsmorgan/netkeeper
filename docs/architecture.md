@@ -231,6 +231,7 @@ netkeeper/
 │   ├── models/               # ORM: contacts.py, campaigns.py, runs.py, settings.py
 │   ├── linkedin/
 │   │   ├── browser.py        # CDP attach, tab management, activity lock, reattach
+│   │   ├── preflight.py      # attach, session state, and fingerprint, without a request
 │   │   ├── voyager.py        # endpoint constants, header builder, in-page fetch, response parsers
 │   │   ├── dom.py            # DOM fallbacks for connections list and contact-info overlay
 │   │   ├── connections.py    # full + incremental sync, edge lifecycle
@@ -407,7 +408,7 @@ open -na "Google Chrome" --args \
 
 Chrome 136 and later refuse `--remote-debugging-port` on the default profile directory, so a dedicated profile is mandatory. You log in to LinkedIn in that profile once. LinkedIn sees one new device at setup and then a stable one. Use that profile for your own LinkedIn browsing too, so organic activity and sidecar activity share a session.
 
-Invariants inherited from igtracker: reuse `browser.contexts[0]`; open one tab per run and close only that tab; never `add_init_script` or `route` on the shared context; never write cookies; never override the UA or timezone. `netkeeper preflight` verifies the attach, that the tab is logged in, and that the profile's fingerprint looks like a normal Chrome.
+Invariants inherited from igtracker: reuse `browser.contexts[0]`; open one tab per run and close only that tab; never `add_init_script` or `route` on the shared context; never write cookies; never override the UA or timezone. `netkeeper preflight` verifies the attach, that the profile still holds a LinkedIn session, and that its fingerprint looks like a normal Chrome. It answers all three locally and navigates nowhere: the session state comes from the names and expiry of the profile's own cookies, read over CDP, and the fingerprint from `navigator` properties on the blank tab the run opens. Whether a session is not merely present but still accepted is something only a job can learn, from the classification in 9.7. Cookie values are never read, reported, or logged.
 
 ### 9.2 Data sources, layered
 

@@ -36,6 +36,22 @@ make install                # create .venv and install the package with dev extr
 .venv/bin/netkeeper serve   # http://127.0.0.1:8000
 ```
 
+### The browser sidecar
+
+The LinkedIn steps attach to a Chrome you start yourself, with its own profile and a
+debug port. netkeeper never launches a browser: a browser it started would be a
+second device on your LinkedIn account, which is the thing accounts get restricted
+for ([ADR 0002](docs/adr/0002-attach-only-browser-mode.md)).
+
+```sh
+.venv/bin/netkeeper browser launch   # prints the Chrome command to run yourself
+.venv/bin/netkeeper preflight        # attach, session state, browser fingerprint
+```
+
+Log in to LinkedIn once in that window and use it for your own LinkedIn browsing too,
+so your activity and netkeeper's share one session. `preflight` reads the profile's
+cookie names and a few `navigator` properties on a blank tab; it visits no website.
+
 ### Run at login (macOS)
 
 `scripts/install-launchd.sh` installs a user LaunchAgent, `fun.tnkr.netkeeper`, that starts `netkeeper serve` when you log in and restarts it if it crashes. It runs the copy in this repository's `.venv`, so run `make install` first. Re-running the script replaces the agent.

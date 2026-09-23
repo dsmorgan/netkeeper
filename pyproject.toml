@@ -21,6 +21,9 @@ dependencies = [
   "alembic>=1.13",
   "pydantic>=2.7",
   "typer>=0.12",
+  # Attach-only browser driver: connect_over_cdp needs no bundled browser, so
+  # `playwright install` is never part of the setup (ADR 0002, spec 6).
+  "playwright>=1.55",
   "sse-starlette>=2.1",
   "keyring>=25",
   "regex>=2026.9.10",
