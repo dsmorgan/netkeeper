@@ -20,8 +20,6 @@ from __future__ import annotations
 
 import copy
 import json
-import subprocess
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -58,55 +56,13 @@ from netkeeper.linkedin.voyager import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "voyager"
-# What ADR 0005 keeps out of the extractor (mirrors test_linkedin_archive.py).
-# #145 (branch p2-01-browser, not yet on main) consolidates this and its sibling
-# copies into a single sweep in tests/boundary.py. Once that lands, delete this
-# list and this module's boundary test and confirm the shared sweep covers
-# netkeeper/linkedin/voyager.py; until then, keep this list in sync by hand.
-FORBIDDEN_IMPORTS = (
-    "netkeeper.models",
-    "netkeeper.crm",
-    "netkeeper.db",
-    "netkeeper.scoping",
-    "sqlalchemy",
-)
+# ADR 0005's rule for this module is checked by the shared sweep in
+# tests/boundary.py, which walks every module under netkeeper/linkedin/ in its
+# own subprocess. The list it reads lives there; this module used to carry a copy.
 
 
 def _body(name: str) -> str:
     return (FIXTURES / name).read_text()
-
-
-# --- the boundary -------------------------------------------------------------
-
-
-def test_voyager_loads_no_models_and_no_session() -> None:
-    """ADR 0005: nothing under ``linkedin/`` imports the ORM or opens a session.
-
-    Run in a subprocess for the same reason test_linkedin_archive.py does:
-    this test module has the whole package imported already, so checking
-    ``sys.modules`` in-process would see every one of these regardless of
-    what the module under test did.
-    """
-    script = (
-        "import sys, json\n"
-        "import netkeeper.linkedin.voyager\n"
-        "print(json.dumps(sorted(sys.modules)))"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        check=True,
-        cwd=Path(__file__).parent.parent,
-    )
-    loaded = json.loads(result.stdout)
-    leaked = [
-        name
-        for name in loaded
-        for forbidden in FORBIDDEN_IMPORTS
-        if name == forbidden or name.startswith(f"{forbidden}.")
-    ]
-    assert leaked == [], f"netkeeper/linkedin/voyager.py pulled in {leaked}"
 
 
 # --- header builder -------------------------------------------------------------
