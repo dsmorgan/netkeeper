@@ -499,6 +499,12 @@ GAPS: Final[tuple[str, ...]] = (
     " this machine: it is a file lock under the data directory. A netkeeper started"
     " with a different NETKEEPER_DATA, a netkeeper on another machine, or any other"
     " tool attached to the same Chrome over CDP does not take it and is not seen.",
+    "the activity lock is a file, `locks/browser-<account>.lock` under the data"
+    " directory, and a file lock guards only the file that is still there. Deleting"
+    " `locks/` or the file while netkeeper holds the browser leaves the holder"
+    " locking a file nobody else can open, so the next process claims a fresh one"
+    " and attaches as a second CDP client. Nothing in netkeeper deletes it; only a"
+    " manual `rm` can cause this, so leave `locks/` alone while `netkeeper serve` runs.",
     "nothing wires the scheduler into `netkeeper serve` yet (that is P2-10), so"
     " on a normal install no schedule is established and no job fires on its"
     " own. The schedule in this report is whatever a caller has established;"

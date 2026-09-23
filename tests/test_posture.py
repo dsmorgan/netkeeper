@@ -1176,6 +1176,8 @@ def test_the_report_states_the_gaps_it_cannot_see(writer: Session, user: User) -
 
     assert "scheduler" in gaps
     assert "different NETKEEPER_DATA" in gaps, "the file lock's scope is stated"
+    assert "Deleting `locks/` or the file while netkeeper holds the browser" in gaps
+    assert "only a manual `rm` can cause this" in gaps
     assert posture_module.GAPS  # a report with no gaps listed would pass the two above
 
 
@@ -1184,7 +1186,7 @@ def test_the_closed_per_process_gap_is_no_longer_claimed(writer: Session, user: 
     gaps = " ".join(_report(writer, user).gaps)
 
     assert "guards one process" not in gaps
-    assert "second CDP client" not in gaps
+    assert "builds its own" not in gaps
 
 
 # --- the activity lock ------------------------------------------------------------
