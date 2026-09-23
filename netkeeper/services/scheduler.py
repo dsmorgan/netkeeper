@@ -11,7 +11,12 @@ reimplemented: :func:`netkeeper.linkedin.pacing.is_active_at` and
 :func:`next_window_start` are the only active-hours logic in this module.
 Likewise the heat skip threshold (spec 9.7: "above heat_skip_threshold the
 scheduler skips browser jobs entirely") is enforced here by calling
-:mod:`netkeeper.services.heat`, never reimplemented.
+:mod:`netkeeper.services.heat`, never reimplemented. Spec 9.7 makes that skip
+unconditional, so it is on by default: every entry point defaults
+``heat_settings`` to :data:`DEFAULT_HEAT_SETTINGS` (config's
+``[linkedin.heat]`` defaults), production passes its own loaded
+``settings.linkedin.heat``, and turning the skip off takes the explicit,
+named :data:`HEAT_SKIP_DISABLED` -- never a forgotten argument.
 
 **The account.** Spec 8.4's ``linkedin_account`` table -- one row per user in v1,
 carrying the account's timezone and active hours -- does not exist yet; it
@@ -36,22 +41,39 @@ scheduling, persistence, catch-up, or the interleave gap changes.
 **Two clocks, on purpose.** :func:`establish_schedule` (and
 :func:`sync_account_schedule`, its per-account fan-out) is the *cold* path:
 call it once at process start, once when settings that affect timing change,
-and once when a downtime window ends. It is the only place that compares a
-stored due time to "now" and decides whether that gap means "restored
-unchanged", "downtime -- catch up once, 5 to 20 minutes out", or "the timing
-parameters themselves changed -- reschedule fresh". :func:`poll_and_fire` (and
-its per-account, per-poll fan-out :func:`poll_once`) is the *hot* path: call it
-every heartbeat. It never re-derives anything -- it reads the due time
-:func:`establish_schedule` already settled on, fires if it has arrived, and
-advances it by exactly one interval. Collapsing these two into one function
-that runs on every heartbeat was the first draft of this module and it does
-not work: a due time that simply arrives during continuous, uninterrupted
-operation is indistinguishable, from the stored state alone, from a due time
-that lapsed during three days of downtime. A poller that re-derives on every
-tick reads the ordinary case as the downtime case and jitters every single
-fire 5 to 20 minutes into the future, which quietly breaks the cadence this
-item exists to get right. Keeping catch-up detection exclusive to the cold
-path is what keeps the hot path honest.
+and once when a downtime window ends. It is the only place that decides
+between "restored unchanged", "downtime -- catch up once", and "the timing
+parameters themselves changed -- reschedule fresh". :func:`poll_and_fire`
+(and its per-account, per-poll fan-out :func:`poll_once`) is the *hot* path:
+call it every heartbeat. For a due time that has simply arrived it re-derives
+nothing -- it reads the due time the cold path settled on, fires, and advances
+it by exactly one interval. Collapsing these two into one function that
+re-derives on every tick was the first draft of this module and it does not
+work: it reads the ordinary case as the downtime case and jitters every
+single fire 5 to 20 minutes into the future, which quietly breaks the cadence
+this item exists to get right.
+
+**The lapse the cold path cannot see.** Downtime does not always restart the
+process. A sleeping laptop keeps it alive, so :func:`build_scheduler` and
+:func:`sync_account_schedule` never run again -- the heartbeat just resumes
+into a backlog. Advancing by one interval per poll replays one fire per
+missed interval: 24 runs after a three-day sleep at the default three-hour
+cadence, one per heartbeat minute, which is precisely the request burst
+budgets (9.6), pacing (9.5), and heat (9.7) all exist to prevent. It is
+reachable with no sleep at all, too: :func:`build_scheduler` arms one job
+with ``max_instances=1`` and :func:`poll_and_fire` awaits the handler
+*inside* the heartbeat, so a real enrichment run -- spec 9.5's bursts of 8 to
+15 profiles plus 5 to 20 minute breaks -- that outlasts its own interval
+comes back to the same backlog. So the hot path applies exactly one rule of
+its own, and it is the cold path's rule at the cold path's threshold: a due
+time lapsed by a *whole interval or more* is downtime, whoever noticed it,
+and goes back through :func:`compute_due`'s catch-up branch -- one fire, 5 to
+20 minutes out, flagged ``is_catchup``, with the independent jitter that also
+keeps several kinds waking together from landing on the same minute. A due
+time lapsed by less than one interval is ordinary polling latency and fires
+straight away, as before. The distinction the two clocks exist to protect is
+untouched: "it is simply time" and "we were asleep" are still told apart by
+how far the due time lapsed, never by re-deriving a due time that has not.
 
 **Writer sessions.** Every function that persists (:func:`establish_schedule`,
 :func:`record_fired`, and the ``_store_*`` helpers) needs
@@ -64,16 +86,23 @@ transaction open for that long would starve every other writer in the process.
 
 **The interleave gap.** Spec 9.5's last bullet: "never run enrichment and a
 message send in the same minute; the scheduler interleaves job kinds with a
-gap." :func:`stagger_due_times` is the general mechanism -- it takes any set of
-computed due times for one account and nudges apart any that land within
-:data:`MIN_JOB_KIND_GAP` of each other. It is applied at both places a
-collision can arise: :func:`sync_account_schedule` (multiple kinds catching up
-after a shared downtime, each drawing an independent 5-20 minute jitter, can
-land in the same minute by chance) and :func:`poll_once` (two kinds with
-different cadences can drift into alignment over a long uptime). Because it is
-keyed by :class:`JobKind`, not by name, message-send (P2-08) gets the same
-protection automatically the day it is added to that enum -- nothing here
-changes.
+gap." Two mechanisms, one constant (:data:`MIN_JOB_KIND_GAP`).
+:func:`stagger_due_times` is the pure one: it nudges apart *computed* due
+times that land within the gap, and :func:`sync_account_schedule` applies it
+to the times it has just established (several kinds catching up after a
+shared outage each draw an independent 5-20 minute jitter and can land in the
+same minute by chance). :func:`poll_once` cannot use it, because by the time
+it looks, colliding due times are in the *past*: nudging a past time two
+minutes forward leaves it in the past, and it fires in the same poll anyway.
+So the hot path enforces the gap against the fire it just performed instead
+-- at most one kind fires per poll per account, and every other kind that was
+due has its stored due time pushed a full gap past that fire, so it runs on a
+later poll rather than in the same minute. Fires only ever happen at poll
+instants, so a heartbeat of :data:`DEFAULT_HEARTBEAT_INTERVAL` (one minute)
+or coarser makes "two kinds in one minute" structurally impossible for one
+account. Because both mechanisms are keyed by :class:`JobKind`, not by name,
+message-send (P2-08) gets the same protection the day it is added to that
+enum -- nothing here changes.
 """
 
 from __future__ import annotations
@@ -90,7 +119,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.config import HeatSettings
+from netkeeper.config import HeatSettings, LinkedInSettings
 from netkeeper.db import is_writer, session_scope
 from netkeeper.linkedin import pacing
 from netkeeper.models import JsonValue, User
@@ -181,12 +210,28 @@ CATCHUP_MAX_MINUTES: Final = 20.0
 MIN_JOB_KIND_GAP: Final = timedelta(minutes=2)
 
 
+# --- the heat gate: on unless explicitly, namedly disabled (spec 9.7) --------
+
+
+class HeatSkip(enum.Enum):
+    """The one value that turns spec 9.7's heat skip off. A separate type, not
+    ``None``, so disabling it is a deliberate, greppable argument rather than a
+    default nobody noticed."""
+
+    DISABLED = "disabled"
+
+
+HEAT_SKIP_DISABLED: Final = HeatSkip.DISABLED
+
+# Config's own ``[linkedin.heat]`` defaults. Production passes the loaded
+# ``settings.linkedin.heat`` instead; this keeps a caller that passes nothing
+# protected rather than unprotected, which is what spec 9.7 requires.
+DEFAULT_HEAT_SETTINGS: Final = LinkedInSettings().heat
+
+HeatGate = HeatSettings | HeatSkip
+
+
 # --- active hours: delegates to netkeeper.linkedin.pacing, never reimplements it ---
-
-
-def _parse_hhmm(value: str) -> time:
-    hour, _, minute = value.partition(":")
-    return time(int(hour), int(minute))
 
 
 def _snap_to_active_hours(
@@ -556,6 +601,38 @@ def record_fired(
     return next_due
 
 
+def _defer_as_catchup(
+    session: Session,
+    user: User,
+    account_id: int,
+    kind: JobKind,
+    *,
+    state: _JobState,
+    now: datetime,
+    schedule: JobSchedule,
+    rng: random.Random,
+    tz: str,
+    active_start: time,
+    active_end: time,
+) -> datetime:
+    """Reschedule a due time that lapsed by a whole interval as a single catch-up
+    fire, 5 to 20 minutes out, and persist it. The hot path's half of the rule
+    :func:`compute_due` already implements for the cold path -- same function,
+    same bounds, same ``is_catchup`` flag -- so a lapse means one fire whether
+    the process restarted or simply stopped being polled."""
+    _require_writer(session, "scheduler._defer_as_catchup")
+    due, _, _ = compute_due(state.due, now=now, interval=schedule.interval, rng=rng)
+    due = _snap_to_active_hours(
+        due,
+        tz,
+        start=active_start,
+        end=active_end,
+        respect_active_hours=schedule.respect_active_hours,
+    )
+    _store_state(session, user, account_id, kind, replace(state, due=due, is_catchup=True))
+    return due
+
+
 async def poll_and_fire(
     session_factory: sessionmaker[Session],
     user: User,
@@ -565,20 +642,29 @@ async def poll_and_fire(
     now: datetime,
     schedule: JobSchedule,
     registry: JobRegistry,
-    heat_settings: HeatSettings | None = None,
+    heat_settings: HeatGate = DEFAULT_HEAT_SETTINGS,
     tz: str,
     active_start: time = pacing.DEFAULT_ACTIVE_START,
     active_end: time = pacing.DEFAULT_ACTIVE_END,
+    rng: random.Random | None = None,
 ) -> FireResult | None:
     """One heartbeat's check for ``(account_id, kind)``: fire if due, else no-op.
 
-    Returns ``None`` when the job is not due yet, or when it has never been
+    Returns ``None`` when the job is not due yet, when it has never been
     established (:func:`establish_schedule`/:func:`sync_account_schedule` must
-    run first -- this function only ever reads the schedule, never derives
-    it). Above the configured heat threshold (spec 9.7) the browser job is
-    skipped -- the injected handler is not called -- but the cadence still
-    advances, so the scheduler does not spin retrying the same fire on every
-    subsequent heartbeat while heat is elevated.
+    run first -- this function never derives a schedule from nothing), and
+    when the due time lapsed by a whole interval or more: that is downtime the
+    cold path never got to see (see the module docstring, "the lapse the cold
+    path cannot see"), so it is rescheduled once through :func:`compute_due`'s
+    catch-up branch -- 5 to 20 minutes out, exactly one fire -- instead of
+    replaying one fire per missed interval. ``rng`` supplies that jitter and
+    defaults to a fresh :class:`random.Random`; pass a seeded one to replay it.
+
+    Above the configured heat threshold (spec 9.7) the browser job is skipped
+    -- the injected handler is not called -- but the cadence still advances, so
+    the scheduler does not spin retrying the same fire on every subsequent
+    heartbeat while heat is elevated. The skip is on unless ``heat_settings``
+    is :data:`HEAT_SKIP_DISABLED`.
 
     The writer session that reads and advances the due time is closed *before*
     the (possibly long-running) handler is awaited, so a real job never holds
@@ -588,10 +674,33 @@ async def poll_and_fire(
         state = _load_state(session, user, account_id, kind)
         if state is None or state.due > now:
             return None
+        if now - state.due >= schedule.interval:
+            deferred = _defer_as_catchup(
+                session,
+                user,
+                account_id,
+                kind,
+                state=state,
+                now=now,
+                schedule=schedule,
+                rng=rng if rng is not None else random.Random(),  # noqa: S311 -- jitter
+                tz=tz,
+                active_start=active_start,
+                active_end=active_end,
+            )
+            log.warning(
+                "scheduler: %s for account %d lapsed %s past its due time; "
+                "catching up once at %s instead of replaying every interval",
+                kind.value,
+                account_id,
+                now - state.due,
+                deferred.isoformat(),
+            )
+            return None
         due = state.due
         is_catchup = state.is_catchup
         skipped_reason: str | None = None
-        if heat_settings is not None and heat_service.should_skip(
+        if isinstance(heat_settings, HeatSettings) and heat_service.should_skip(
             session, user, account_id, now=now, settings=heat_settings
         ):
             skipped_reason = "heat"
@@ -634,20 +743,23 @@ async def poll_once(
     now: datetime,
     registry: JobRegistry,
     schedules: Mapping[JobKind, JobSchedule] = DEFAULT_SCHEDULES,
-    heat_settings: HeatSettings | None = None,
+    heat_settings: HeatGate = DEFAULT_HEAT_SETTINGS,
     active_start: time = pacing.DEFAULT_ACTIVE_START,
     active_end: time = pacing.DEFAULT_ACTIVE_END,
+    rng: random.Random | None = None,
 ) -> list[FireResult]:
     """:func:`poll_and_fire` every ``(user, account_id)`` in ``accounts`` across
     every kind in ``schedules``. The body of the heartbeat job in
     :func:`build_scheduler`.
 
-    Before firing, re-applies :func:`stagger_due_times` across whichever kinds
-    are due in *this same poll* -- schedules with different cadences can drift
-    into alignment over a long uptime even though nothing collided when they
-    were established. A kind nudged clear of a collision this way fires on a
-    later poll instead of this one; it is not skipped, only delayed by the
-    gap.
+    Enforces spec 9.5's interleave gap against the fire it just performed, not
+    against ``now``: once a kind has fired in this poll, every other kind that
+    was also due has its stored due time pushed :data:`MIN_JOB_KIND_GAP` past
+    that fire and runs on a later poll. Staggering the *due times* against each
+    other cannot do this job here -- two times that are both already in the
+    past stay in the past when nudged two minutes, and both fire in the same
+    call (see the module docstring, "the interleave gap"). Nothing is skipped;
+    at most one kind per account is delayed by the gap.
     """
     fired: list[FireResult] = []
     for user, account_id in accounts:
@@ -659,17 +771,11 @@ async def poll_once(
                 if (state := _load_state(session, user, account_id, kind)) is not None
                 and state.due <= now
             }
-        if len(due_now) > 1:
-            staggered = stagger_due_times(due_now)
-            changed = {kind: when for kind, when in staggered.items() if when != due_now[kind]}
-            if changed:
-                with session_scope(session_factory, write=True) as session:
-                    for kind, when in changed.items():
-                        state = _load_state(session, user, account_id, kind)
-                        assert state is not None  # read moments ago, above
-                        _store_state(session, user, account_id, kind, replace(state, due=when))
-            due_now = {kind: when for kind, when in staggered.items() if when <= now}
-        for kind in due_now:
+        last_fired_at: datetime | None = None
+        for kind in sorted(due_now, key=lambda k: (due_now[k], k.value)):
+            if last_fired_at is not None and now - last_fired_at < MIN_JOB_KIND_GAP:
+                _defer_past_the_gap(session_factory, user, account_id, kind, after=last_fired_at)
+                continue
             result = await poll_and_fire(
                 session_factory,
                 user,
@@ -682,10 +788,34 @@ async def poll_once(
                 tz=tz,
                 active_start=active_start,
                 active_end=active_end,
+                rng=rng,
             )
-            if result is not None:
-                fired.append(result)
+            if result is None:
+                continue
+            fired.append(result)
+            if result.fired:
+                last_fired_at = now
     return fired
+
+
+def _defer_past_the_gap(
+    session_factory: sessionmaker[Session],
+    user: User,
+    account_id: int,
+    kind: JobKind,
+    *,
+    after: datetime,
+) -> None:
+    """Push ``kind``'s stored due time to a full :data:`MIN_JOB_KIND_GAP` past the
+    fire at ``after``, so the next poll runs it instead of this one running it in
+    the same minute. Leaves a due time that is already clear of the gap alone,
+    and never moves one earlier."""
+    target = after + MIN_JOB_KIND_GAP
+    with session_scope(session_factory, write=True) as session:
+        state = _load_state(session, user, account_id, kind)
+        if state is None or state.due >= target:
+            return
+        _store_state(session, user, account_id, kind, replace(state, due=target))
 
 
 # --- production wiring: build, never start -----------------------------------
@@ -705,7 +835,7 @@ def build_scheduler(
     heartbeat_interval: timedelta = DEFAULT_HEARTBEAT_INTERVAL,
     active_start: time = pacing.DEFAULT_ACTIVE_START,
     active_end: time = pacing.DEFAULT_ACTIVE_END,
-    heat_settings: HeatSettings | None = None,
+    heat_settings: HeatGate = DEFAULT_HEAT_SETTINGS,
     rng: random.Random | None = None,
 ) -> AsyncIOScheduler:
     """Build (never start) an :class:`AsyncIOScheduler` with one heartbeat job.
@@ -725,10 +855,15 @@ def build_scheduler(
     returning (the "process start" case in the module docstring). The caller
     starts the scheduler (``.start()``); this function never does, and no test
     in this module does either -- no job is armed by building one.
+
+    ``heat_settings`` defaults to :data:`DEFAULT_HEAT_SETTINGS`, so a caller
+    that wires up the scheduler and passes nothing still gets spec 9.7's skip;
+    production passes its loaded ``settings.linkedin.heat``, and only
+    :data:`HEAT_SKIP_DISABLED` turns it off.
     """
     registry = dict(registry) if registry is not None else default_registry()
     schedules = dict(schedules) if schedules is not None else dict(DEFAULT_SCHEDULES)
-    rng = rng if rng is not None else random.Random()  # noqa: S311 -- pacing jitter, not crypto
+    jitter = rng if rng is not None else random.Random()  # noqa: S311 -- pacing jitter, not crypto
     scheduler = AsyncIOScheduler()
 
     for user, account_id in accounts():
@@ -739,7 +874,7 @@ def build_scheduler(
                 account_id,
                 now=utcnow(),
                 schedules=schedules,
-                rng=rng,
+                rng=jitter,
                 tz=user.timezone,
                 active_start=active_start,
                 active_end=active_end,
@@ -755,6 +890,7 @@ def build_scheduler(
             heat_settings=heat_settings,
             active_start=active_start,
             active_end=active_end,
+            rng=jitter,
         )
 
     scheduler.add_job(

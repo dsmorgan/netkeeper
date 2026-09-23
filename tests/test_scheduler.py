@@ -10,6 +10,7 @@ not to a coincidence of two code paths landing on the same number (the
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime, time, timedelta
 from itertools import pairwise
@@ -22,13 +23,19 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.config import HeatSettings
 from netkeeper.db import session_scope
 from netkeeper.models import User
+from netkeeper.models.base import utcnow
 from netkeeper.services import heat, scheduler
+from netkeeper.services.scheduler import DEFAULT_SCHEDULES
 
 NOW = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 ACCOUNT = 1
 ALL_DAY = (time(0, 0), time(0, 0))  # start == end: active all 24 hours (pacing.is_active_hour)
 SCHEDULE = scheduler.JobSchedule(scheduler.JobKind.CONNECTIONS_INCREMENTAL, timedelta(days=1))
 HEAT_SETTINGS = HeatSettings(per_block=1.0, half_life_hours=6, skip_threshold=2.5)
+CATCHUP_BOUNDS = (scheduler.CATCHUP_MIN_MINUTES, scheduler.CATCHUP_MAX_MINUTES)
+# The seed whose first two catch-up draws land inside MIN_JOB_KIND_GAP of each
+# other; every test that needs a real collision pins it, and asserts it.
+COLLIDING_SEED = 0
 
 
 @pytest.fixture
@@ -187,22 +194,18 @@ def test_a_noop_settings_write_does_not_rebuild_the_job(writer: Session, user: U
     identical parameters, at a later `now`, is what a save-without-changes
     handler actually does."""
     first = _establish(writer, user, now=NOW)
-    again = _establish(writer, user, now=NOW + timedelta(hours=6))  # same schedule/tz/hours
-    assert again.changed is False
-    assert again.due == first.due
-
-
-def test_mutating_reschedule_always_would_fail_the_noop_test(writer: Session, user: User) -> None:
-    """Mutation check: if establish_schedule always rebuilt (ignored the stored
-    fingerprint), the second call above -- at a later `now` -- would compute a
-    new `now + interval` and diverge from the first due time. Confirmed here so
-    the no-op guarantee doesn't happen to pass by the two `now` values landing
-    on the same due time."""
-    first = _establish(writer, user, now=NOW)
+    # Anti-coincidence: an establish_schedule that ignored the stored
+    # fingerprint and always rebuilt would land here instead, so the two
+    # outcomes are provably different numbers before the real call is made.
     always_rebuilt = scheduler.compute_due(
         None, now=NOW + timedelta(hours=6), interval=SCHEDULE.interval, rng=Random(0)
     )[0]
     assert always_rebuilt != first.due
+
+    again = _establish(writer, user, now=NOW + timedelta(hours=6))  # same schedule/tz/hours
+    assert again.changed is False
+    assert again.due == first.due
+    assert again.due != always_rebuilt
 
 
 def test_a_due_time_that_has_passed_under_the_same_settings_is_downtime_not_a_change(
@@ -226,7 +229,11 @@ def test_establish_schedule_requires_a_writer_session(
         owner = factories.make_user(setup, timezone="UTC")
     owner_again = session.get(User, owner.id)
     assert owner_again is not None
-    with pytest.raises(RuntimeError, match="writer session"):
+    # Matched on the guard's own name, not just "writer session": every
+    # persisting function reaches _store_state, whose guard would otherwise
+    # cover for a missing one anywhere upstream of it.
+    guard = re.escape("scheduler.establish_schedule needs a writer")
+    with pytest.raises(RuntimeError, match=guard):
         scheduler.establish_schedule(
             session,
             owner_again,
@@ -366,6 +373,11 @@ def test_stagger_pushes_a_collision_apart_by_the_gap() -> None:
         scheduler.JobKind.ENRICH: NOW,
         scheduler.JobKind.INBOX: NOW + timedelta(seconds=10),  # same minute
     }
+    # The input really does collide, so an identity "stagger" -- what removing
+    # the gap enforcement looks like -- could not pass the assertions below.
+    collision = dues[scheduler.JobKind.INBOX] - dues[scheduler.JobKind.ENRICH]
+    assert collision < scheduler.MIN_JOB_KIND_GAP
+
     staggered = scheduler.stagger_due_times(dues)
     assert staggered[scheduler.JobKind.ENRICH] == NOW
     gap = staggered[scheduler.JobKind.INBOX] - staggered[scheduler.JobKind.ENRICH]
@@ -373,20 +385,6 @@ def test_stagger_pushes_a_collision_apart_by_the_gap() -> None:
     assert staggered[scheduler.JobKind.ENRICH].replace(second=0, microsecond=0) != staggered[
         scheduler.JobKind.INBOX
     ].replace(second=0, microsecond=0)
-
-
-def test_removing_the_stagger_step_would_fail_the_gap_test() -> None:
-    """Mutation check: an identity 'stagger' (returns its input unchanged) is
-    exactly what a removed gap-enforcement would look like -- confirm it
-    produces a same-minute collision, so the assertion above is provably
-    checking the real mechanism."""
-    dues = {
-        scheduler.JobKind.ENRICH: NOW,
-        scheduler.JobKind.INBOX: NOW + timedelta(seconds=10),
-    }
-    identity = dict(dues)
-    gap = identity[scheduler.JobKind.INBOX] - identity[scheduler.JobKind.ENRICH]
-    assert gap < scheduler.MIN_JOB_KIND_GAP
 
 
 def test_stagger_three_way_collision_keeps_every_pair_apart() -> None:
@@ -427,15 +425,25 @@ def test_sync_account_schedule_staggers_a_shared_catchup_collision(
             kind,
             scheduler._JobState(due=NOW - timedelta(days=1), fingerprint=fingerprint[kind]),
         )
-    # A single rng draws identical jitter for both, since interval is identical
-    # and both start from the same stale due time -- the worst case for collision.
+    # One `Random` yields two *different* draws, so most seeds put the two
+    # kinds harmlessly far apart and the test passes without the stagger ever
+    # running. Seed 0 draws 17.666 and 16.369 minutes -- 77.8 seconds apart,
+    # inside MIN_JOB_KIND_GAP -- so the collision this test is named for
+    # actually happens. Pinned below, so a future seed change cannot silently
+    # drift back into harmlessness.
+    probe = Random(COLLIDING_SEED)
+    raw = [
+        NOW + timedelta(minutes=probe.uniform(*CATCHUP_BOUNDS)) for _ in schedules
+    ]  # the two draws sync_account_schedule is about to make, in the same order
+    assert abs(raw[0] - raw[1]) < scheduler.MIN_JOB_KIND_GAP, "seed no longer collides"
+
     scheduler.sync_account_schedule(
         writer,
         user,
         ACCOUNT,
         now=NOW,
         schedules=schedules,
-        rng=Random(42),
+        rng=Random(COLLIDING_SEED),
         tz="UTC",
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],
@@ -536,7 +544,7 @@ async def test_removing_the_heat_check_would_fail_the_skip_test(
         now=NOW + SCHEDULE.interval,
         schedule=SCHEDULE,
         registry={SCHEDULE.kind: recording_handler},
-        heat_settings=None,  # gate disabled
+        heat_settings=scheduler.HEAT_SKIP_DISABLED,  # the only way to turn 9.7's skip off
         tz="UTC",
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],
@@ -703,3 +711,451 @@ def test_build_scheduler_restart_keeps_the_same_due_times(
         }
 
     assert after == before
+
+
+# --- the hot path never replays a backlog (finding 1) ------------------------
+
+THREE_HOURLY = scheduler.JobSchedule(scheduler.JobKind.ENRICH, timedelta(hours=3))
+
+
+async def test_waking_from_a_long_sleep_fires_once_not_once_per_missed_interval(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A sleeping laptop keeps the process alive, so the cold path never runs
+    again -- the heartbeat just resumes into a backlog. One fire per missed
+    interval is the request burst budgets, pacing, and heat all exist to
+    prevent (spec 9.5, 9.6, 9.7): at the default three-hour cadence a three-day
+    sleep would replay 24 runs, one per heartbeat minute."""
+    calls: list[scheduler.JobContext] = []
+
+    async def recording_handler(ctx: scheduler.JobContext) -> None:
+        calls.append(ctx)
+
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+        established = scheduler.establish_schedule(
+            session,
+            owner,
+            ACCOUNT,
+            THREE_HOURLY.kind,
+            now=NOW,
+            schedule=THREE_HOURLY,
+            rng=Random(0),
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        )
+
+    woke = established.due + timedelta(days=3)  # 24 missed three-hour intervals
+    results: list[scheduler.FireResult] = []
+    for minute in range(60):  # an hour of one-minute heartbeats after waking
+        result = await scheduler.poll_and_fire(
+            session_factory,
+            owner,
+            ACCOUNT,
+            THREE_HOURLY.kind,
+            now=woke + timedelta(minutes=minute),
+            schedule=THREE_HOURLY,
+            registry={THREE_HOURLY.kind: recording_handler},
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        )
+        if result is not None:
+            results.append(result)
+
+    assert len(calls) == 1  # not 24
+    assert len(results) == 1
+    fire = results[0]
+    assert fire.fired is True
+    assert fire.is_catchup is True  # the lapse was routed through the catch-up branch
+    assert woke + timedelta(minutes=scheduler.CATCHUP_MIN_MINUTES) <= fire.due
+    assert fire.due <= woke + timedelta(minutes=scheduler.CATCHUP_MAX_MINUTES)
+    # and the cadence resumes counted from the catch-up fire, not from the backlog
+    assert fire.next_due == fire.due + THREE_HOURLY.interval
+
+
+# --- poll_once: one kind per poll (finding 2) --------------------------------
+
+
+async def test_poll_once_never_fires_two_kinds_in_the_same_poll(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Spec 9.5's last bullet. Two kinds due 30 seconds apart, polled well after
+    both of them: staggering times that are already in the past leaves them in
+    the past, so filtering on `when <= now` lets both through.
+
+    The two kinds are deliberately declared in the opposite order to their due
+    times, so "whichever the schedules mapping happens to list first" and "the
+    one that has been waiting longest" are different answers."""
+    schedules = {
+        scheduler.JobKind.INBOX: scheduler.JobSchedule(scheduler.JobKind.INBOX, timedelta(hours=3)),
+        scheduler.JobKind.ENRICH: scheduler.JobSchedule(
+            scheduler.JobKind.ENRICH, timedelta(hours=3)
+        ),
+    }
+    calls: list[scheduler.JobKind] = []
+
+    async def recording_handler(ctx: scheduler.JobContext) -> None:
+        calls.append(ctx.kind)
+
+    registry = dict.fromkeys(schedules, recording_handler)
+    dues = {
+        scheduler.JobKind.ENRICH: NOW,
+        scheduler.JobKind.INBOX: NOW + timedelta(seconds=30),  # same minute
+    }
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+        for kind, schedule in schedules.items():
+            scheduler._store_state(
+                session,
+                owner,
+                ACCOUNT,
+                kind,
+                scheduler._JobState(
+                    due=dues[kind],
+                    fingerprint=scheduler.ScheduleFingerprint.of(
+                        schedule, tz="UTC", active_start=ALL_DAY[0], active_end=ALL_DAY[1]
+                    ),
+                ),
+            )
+
+    polled_at = NOW + timedelta(minutes=30)  # both well past due, neither a full interval late
+    fired = await scheduler.poll_once(
+        session_factory,
+        [(owner, ACCOUNT)],
+        now=polled_at,
+        registry=registry,
+        schedules=schedules,
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+    )
+
+    assert len(calls) == 1, f"both kinds ran in one poll: {calls}"
+    assert len(fired) == 1
+    # the one that had been waiting longest goes first, whatever order the
+    # schedules mapping lists them in
+    assert calls == [scheduler.JobKind.ENRICH]
+    # the kind that did not run is pushed a full gap past the one that did,
+    # so it runs on a later poll rather than in the same minute
+    deferred = next(kind for kind in schedules if kind != calls[0])
+    with session_scope(session_factory) as session:
+        due = scheduler.stored_due(session, owner, ACCOUNT, deferred)
+    assert due is not None
+    assert due >= polled_at + scheduler.MIN_JOB_KIND_GAP
+
+    later = await scheduler.poll_once(
+        session_factory,
+        [(owner, ACCOUNT)],
+        now=due,
+        registry=registry,
+        schedules=schedules,
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+    )
+    assert len(later) == 1
+    assert calls == [calls[0], deferred]
+
+
+# --- the safety-relevant constants, pinned to the spec they come from --------
+
+
+def test_catchup_window_is_the_five_to_twenty_minutes_the_item_specifies() -> None:
+    """Issue #105: "catch-up after downtime (once, 5 to 20 minutes after start)".
+    Asserted as literals: every other test in this file refers to the constants,
+    so without this one they could be changed to any numbers at all and the
+    suite would stay green."""
+    assert scheduler.CATCHUP_MIN_MINUTES == 5.0
+    assert scheduler.CATCHUP_MAX_MINUTES == 20.0
+
+
+def test_the_interleave_gap_is_two_minutes_and_clears_a_whole_minute() -> None:
+    """Spec 9.5: "never run enrichment and a message send in the same minute."
+    One minute is the floor that guarantees a different minute; two is the
+    chosen value, with room for polling jitter around the boundary."""
+    assert timedelta(minutes=2) == scheduler.MIN_JOB_KIND_GAP
+    assert timedelta(minutes=1) <= scheduler.MIN_JOB_KIND_GAP
+
+
+def test_the_heartbeat_is_a_minute_which_is_what_makes_the_gap_structural() -> None:
+    """At most one kind fires per poll per account, so a heartbeat of a minute
+    or coarser makes two kinds in one minute impossible for an account. A
+    finer heartbeat would quietly give that guarantee up."""
+    assert timedelta(minutes=1) == scheduler.DEFAULT_HEARTBEAT_INTERVAL
+    assert timedelta(minutes=1) <= scheduler.DEFAULT_HEARTBEAT_INTERVAL
+
+
+def test_the_default_cadences_are_the_ones_spec_9_4_names() -> None:
+    """Spec 9.4: incremental sync "runs daily", full sync "on first setup and
+    weekly". The other two carry no spec number and are not pinned here."""
+    assert DEFAULT_SCHEDULES[scheduler.JobKind.CONNECTIONS_INCREMENTAL].interval == timedelta(
+        days=1
+    )
+    assert DEFAULT_SCHEDULES[scheduler.JobKind.CONNECTIONS_FULL].interval == timedelta(days=7)
+
+
+def test_the_default_heat_gate_is_the_config_default_not_an_ad_hoc_one() -> None:
+    """Spec 9.7's skip is unconditional, so the default is config's own
+    ``[linkedin.heat]`` -- never off, and never numbers invented here."""
+    assert HeatSettings() == scheduler.DEFAULT_HEAT_SETTINGS
+    assert isinstance(scheduler.DEFAULT_HEAT_SETTINGS, HeatSettings)
+
+
+# --- writer-session guards ----------------------------------------------------
+
+
+def test_record_fired_requires_a_writer_session(
+    session: Session, session_factory: sessionmaker[Session]
+) -> None:
+    with session_scope(session_factory, write=True) as setup:
+        owner = factories.make_user(setup, timezone="UTC")
+        _establish(setup, owner)
+    owner_again = session.get(User, owner.id)
+    assert owner_again is not None
+    with pytest.raises(RuntimeError, match=re.escape("scheduler.record_fired needs a writer")):
+        scheduler.record_fired(
+            session,
+            owner_again,
+            ACCOUNT,
+            SCHEDULE.kind,
+            due=NOW,
+            schedule=SCHEDULE,
+            tz="UTC",
+        )
+
+
+def test_defer_as_catchup_requires_a_writer_session(
+    session: Session, session_factory: sessionmaker[Session]
+) -> None:
+    with session_scope(session_factory, write=True) as setup:
+        owner = factories.make_user(setup, timezone="UTC")
+        _establish(setup, owner)
+    owner_again = session.get(User, owner.id)
+    assert owner_again is not None
+    state = scheduler._load_state(session, owner_again, ACCOUNT, SCHEDULE.kind)
+    assert state is not None
+    with pytest.raises(RuntimeError, match=re.escape("scheduler._defer_as_catchup needs a writer")):
+        scheduler._defer_as_catchup(
+            session,
+            owner_again,
+            ACCOUNT,
+            SCHEDULE.kind,
+            state=state,
+            now=state.due + SCHEDULE.interval * 2,
+            schedule=SCHEDULE,
+            rng=Random(0),
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        )
+
+
+def test_store_state_requires_a_writer_session(
+    session: Session, session_factory: sessionmaker[Session]
+) -> None:
+    with session_scope(session_factory, write=True) as setup:
+        owner = factories.make_user(setup, timezone="UTC")
+    owner_again = session.get(User, owner.id)
+    assert owner_again is not None
+    state = scheduler._JobState(
+        due=NOW,
+        fingerprint=scheduler.ScheduleFingerprint.of(
+            SCHEDULE, tz="UTC", active_start=ALL_DAY[0], active_end=ALL_DAY[1]
+        ),
+    )
+    with pytest.raises(RuntimeError, match=re.escape("scheduler._store_state needs a writer")):
+        scheduler._store_state(session, owner_again, ACCOUNT, SCHEDULE.kind, state)
+
+
+# --- build_scheduler wires the heat skip, without being asked to -------------
+
+
+def _make_due_and_hot(
+    session_factory: sessionmaker[Session], owner: User, kind: scheduler.JobKind
+) -> None:
+    """Rewind ``kind``'s established due time by a minute (due, but nowhere near
+    a whole interval late) and raise heat past the *config default* threshold."""
+    with session_scope(session_factory, write=True) as session:
+        state = scheduler._load_state(session, owner, ACCOUNT, kind)
+        assert state is not None
+        scheduler._store_state(
+            session,
+            owner,
+            ACCOUNT,
+            kind,
+            scheduler._JobState(due=utcnow() - timedelta(minutes=1), fingerprint=state.fingerprint),
+        )
+        settings = scheduler.DEFAULT_HEAT_SETTINGS
+        while not heat.should_skip(session, owner, ACCOUNT, now=utcnow(), settings=settings):
+            heat.raise_heat(session, owner, ACCOUNT, now=utcnow(), settings=settings)
+
+
+async def test_build_scheduler_skips_a_hot_account_without_being_handed_heat_settings(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """P2-06 will wire this scheduler up. If the heat gate were opt-in, that
+    would silently produce a scheduler with no heat protection at all (spec
+    9.7 makes the skip unconditional), and nothing in the suite would notice."""
+    calls: list[scheduler.JobContext] = []
+
+    async def recording_handler(ctx: scheduler.JobContext) -> None:
+        calls.append(ctx)
+
+    schedules = {scheduler.JobKind.ENRICH: THREE_HOURLY}
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    built = scheduler.build_scheduler(
+        session_factory,
+        lambda: [(owner, ACCOUNT)],
+        registry={scheduler.JobKind.ENRICH: recording_handler},
+        schedules=schedules,
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+        rng=Random(0),
+    )  # no heat_settings argument at all -- the case P2-06 will hit
+    _make_due_and_hot(session_factory, owner, scheduler.JobKind.ENRICH)
+
+    job = built.get_job(scheduler.HEARTBEAT_JOB_ID)
+    assert job is not None
+    await job.func()  # run the heartbeat body once; the scheduler is never started
+
+    assert calls == []  # the browser job did not run
+    with session_scope(session_factory) as session:
+        due = scheduler.stored_due(session, owner, ACCOUNT, scheduler.JobKind.ENRICH)
+    assert due is not None
+    assert due > utcnow()  # the poll did happen: a skip advances the cadence
+
+
+async def test_build_scheduler_with_the_skip_explicitly_disabled_still_fires(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Anti-coincidence for the test above: the same hot account, the same
+    heartbeat, with the gate explicitly named off -- it fires, so the skip
+    above is caused by the default gate and not by the scenario."""
+    calls: list[scheduler.JobContext] = []
+
+    async def recording_handler(ctx: scheduler.JobContext) -> None:
+        calls.append(ctx)
+
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    built = scheduler.build_scheduler(
+        session_factory,
+        lambda: [(owner, ACCOUNT)],
+        registry={scheduler.JobKind.ENRICH: recording_handler},
+        schedules={scheduler.JobKind.ENRICH: THREE_HOURLY},
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+        heat_settings=scheduler.HEAT_SKIP_DISABLED,
+        rng=Random(0),
+    )
+    _make_due_and_hot(session_factory, owner, scheduler.JobKind.ENRICH)
+
+    job = built.get_job(scheduler.HEARTBEAT_JOB_ID)
+    assert job is not None
+    await job.func()
+
+    assert len(calls) == 1
+
+
+# --- poll_once's interleave gap, covered directly ----------------------------
+
+
+def _establish_two(
+    session_factory: sessionmaker[Session],
+    schedules: dict[scheduler.JobKind, scheduler.JobSchedule],
+    dues: dict[scheduler.JobKind, datetime],
+) -> User:
+    """A user with both kinds persisted at the given due times."""
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+        for kind, schedule in schedules.items():
+            scheduler._store_state(
+                session,
+                owner,
+                ACCOUNT,
+                kind,
+                scheduler._JobState(
+                    due=dues[kind],
+                    fingerprint=scheduler.ScheduleFingerprint.of(
+                        schedule, tz="UTC", active_start=ALL_DAY[0], active_end=ALL_DAY[1]
+                    ),
+                ),
+            )
+    return owner
+
+
+TWO_KINDS = {
+    scheduler.JobKind.ENRICH: scheduler.JobSchedule(scheduler.JobKind.ENRICH, timedelta(hours=3)),
+    scheduler.JobKind.INBOX: scheduler.JobSchedule(scheduler.JobKind.INBOX, timedelta(hours=3)),
+}
+
+
+async def test_poll_once_defers_the_second_of_two_kinds_due_at_the_same_instant(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Two cadences drifting into alignment over a long uptime. Staggering the
+    due times against each other cannot fix this at poll time -- both are
+    already at `now` -- so the gap is enforced against the fire instead."""
+    calls: list[scheduler.JobKind] = []
+
+    async def recording_handler(ctx: scheduler.JobContext) -> None:
+        calls.append(ctx.kind)
+
+    owner = _establish_two(session_factory, TWO_KINDS, dict.fromkeys(TWO_KINDS, NOW))
+
+    fired = await scheduler.poll_once(
+        session_factory,
+        [(owner, ACCOUNT)],
+        now=NOW,
+        registry=dict.fromkeys(TWO_KINDS, recording_handler),
+        schedules=TWO_KINDS,
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+    )
+    assert len(fired) == 1
+    assert len(calls) == 1
+
+    deferred = next(kind for kind in TWO_KINDS if kind != calls[0])
+    with session_scope(session_factory) as session:
+        due = scheduler.stored_due(session, owner, ACCOUNT, deferred)
+        fired_next = scheduler.stored_due(session, owner, ACCOUNT, calls[0])
+    assert due == NOW + scheduler.MIN_JOB_KIND_GAP  # a full gap past the fire
+    assert fired_next == NOW + TWO_KINDS[calls[0]].interval  # the fired kind advanced normally
+
+
+async def test_a_heat_skipped_kind_does_not_consume_the_interleave_slot(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The gap exists to keep two *browser runs* out of one minute. A heat skip
+    runs no browser work, so it must not push the other kind out of the poll --
+    both cadences advance together while the account is hot (spec 9.7)."""
+    calls: list[scheduler.JobKind] = []
+
+    async def recording_handler(ctx: scheduler.JobContext) -> None:
+        calls.append(ctx.kind)
+
+    owner = _establish_two(session_factory, TWO_KINDS, dict.fromkeys(TWO_KINDS, NOW))
+    with session_scope(session_factory, write=True) as session:
+        while not heat.should_skip(session, owner, ACCOUNT, now=NOW, settings=HEAT_SETTINGS):
+            heat.raise_heat(session, owner, ACCOUNT, now=NOW, settings=HEAT_SETTINGS)
+
+    fired = await scheduler.poll_once(
+        session_factory,
+        [(owner, ACCOUNT)],
+        now=NOW,
+        registry=dict.fromkeys(TWO_KINDS, recording_handler),
+        schedules=TWO_KINDS,
+        heat_settings=HEAT_SETTINGS,
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+    )
+    assert calls == []
+    assert len(fired) == 2
+    assert all(result.skipped_reason == "heat" for result in fired)
+    with session_scope(session_factory) as session:
+        for kind in TWO_KINDS:
+            assert (
+                scheduler.stored_due(session, owner, ACCOUNT, kind)
+                == NOW + TWO_KINDS[kind].interval
+            )

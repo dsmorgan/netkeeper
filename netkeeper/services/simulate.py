@@ -14,12 +14,19 @@ in the fires it records, not a vibe.
 **Event-driven, not polled every minute.** Each iteration reads every job
 kind's currently persisted due time, jumps the virtual clock straight to the
 earliest one, and fires whatever has become due at that instant -- it never
-steps minute by minute through however many days ``end - start`` spans. This
-also means it terminates: every persisted due time, whether fresh, restored,
-caught up, or just advanced by a fire, is always strictly later than the
-``now`` it was computed against (see ``scheduler.compute_due`` and
-``record_fired``), so the virtual clock is monotonically increasing and the
-loop cannot stall.
+steps minute by minute through however many days ``end - start`` spans. It
+terminates because every persisted due time, whether fresh, restored, caught
+up, or just advanced by a fire, is strictly later than the ``now`` it was
+computed against (see ``scheduler.compute_due``, ``record_fired``, and the
+hot path's catch-up branch), so the virtual clock only moves forward.
+
+That argument is about the code being correct, which is exactly what a test
+using this harness is trying to find out, so it is not left as an argument:
+``max_iterations`` bounds the loop and a schedule that stops advancing raises
+``RuntimeError``. A mutation that stalls a due time therefore turns a test
+red in milliseconds instead of hanging the suite. The bound is far above what
+any honest replay needs -- a 90-day outage on a daily job costs under a
+hundred iterations.
 
 **A restart is not a special code path.** All of the scheduler's state lives
 in ``settings_kv``, keyed by ``(account_id, kind)`` -- nothing about *this*
@@ -34,11 +41,18 @@ call across ``[start, end)``. ``tests/test_simulate.py`` does exactly this.
 **Downtime** is the ``downtime=(down_start, down_end)`` window: when a jump
 would land inside it, the clock is fanned straight to ``down_end`` without
 firing anything, and :func:`scheduler.sync_account_schedule` is re-run there
--- the "process restarts after an outage" moment, and the only place catch-up
-detection can fire (see ``scheduler``'s module docstring, "two clocks"). A due
-time that already passed by then gets exactly one catch-up fire, 5 to 20
-minutes later; the interval then resumes counted from *that* fire, not from
-whatever the original due time was.
+-- the "process restarts after an outage" moment. A due time that already
+passed by then gets exactly one catch-up fire, 5 to 20 minutes later; the
+interval then resumes counted from *that* fire, not from whatever the
+original due time was.
+
+**Sleep** is ``sleep=(sleep_start, sleep_end)``, the outage that never
+restarts anything: the clock fans to ``sleep_end`` the same way, but nothing
+is re-established, because a laptop waking up does not restart the process.
+The backlog then lands on the *hot* path, which is the only thing left that
+can notice it (see ``scheduler``'s module docstring, "the lapse the cold path
+cannot see"). The guarantee is the same one: once, 5 to 20 minutes after the
+first poll that sees it -- never one fire per missed interval.
 """
 
 from __future__ import annotations
@@ -46,14 +60,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from random import Random
+from typing import Final
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.config import HeatSettings
 from netkeeper.db import session_scope
 from netkeeper.linkedin import pacing
 from netkeeper.models import User
 from netkeeper.services import scheduler as sched
+
+# The stall guard. Every real replay in the suite runs in the low hundreds of
+# iterations (the longest, a 90-day outage on a daily schedule, is under 100),
+# so this only ever trips on a schedule that has stopped moving forward.
+MAX_ITERATIONS: Final = 10_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,8 +118,10 @@ async def simulate(
     schedules: dict[sched.JobKind, sched.JobSchedule] | None = None,
     active_start: time = pacing.DEFAULT_ACTIVE_START,
     active_end: time = pacing.DEFAULT_ACTIVE_END,
-    heat_settings: HeatSettings | None = None,
+    heat_settings: sched.HeatGate = sched.DEFAULT_HEAT_SETTINGS,
     downtime: tuple[datetime, datetime] | None = None,
+    sleep: tuple[datetime, datetime] | None = None,
+    max_iterations: int = MAX_ITERATIONS,
 ) -> SimResult:
     """Replay the schedule for ``(user, account_id)`` from ``start`` to ``end``.
 
@@ -109,6 +130,17 @@ async def simulate(
     it, and the schedule is re-established (see the module docstring) the
     moment it ends -- the same "restart" moment a real process going through
     :func:`scheduler.build_scheduler` again would hit.
+
+    ``sleep`` is the *other* kind of outage, and the more dangerous one: the
+    process stays alive across ``[sleep_start, sleep_end)`` -- a closed laptop
+    -- so nothing is polled and nothing is re-established either. The clock
+    simply reappears on the far side with a backlog, and the very next poll is
+    the only thing that can notice. Everything catch-up related here goes
+    through the hot path rather than through ``sync_account_schedule``.
+
+    ``max_iterations`` is the stall guard (see the module docstring): a
+    schedule that stops moving forward raises :class:`RuntimeError` instead of
+    spinning, so a test that breaks the clock goes red rather than hanging CI.
     """
     rng = Random(seed)  # noqa: S311 -- deterministic replay, not crypto
     registry = registry if registry is not None else sched.default_registry()
@@ -133,7 +165,14 @@ async def simulate(
 
     _boot(now)  # "process start"
 
+    iterations = 0
     while now < end:
+        iterations += 1
+        if iterations > max_iterations:
+            raise RuntimeError(
+                f"simulate: stalled at {now.isoformat()} after {max_iterations} iterations "
+                f"(schedule not advancing); giving up instead of looping forever"
+            )
         with session_scope(session_factory) as session:
             dues = {
                 kind: due
@@ -152,6 +191,9 @@ async def simulate(
             _boot(now)  # "process restart" after the outage
             continue
 
+        if sleep is not None and sleep[0] <= now < sleep[1]:
+            now = sleep[1]  # the process never stopped, so nothing re-establishes
+
         fired = await sched.poll_once(
             session_factory,
             [(user, account_id)],
@@ -161,6 +203,7 @@ async def simulate(
             heat_settings=heat_settings,
             active_start=active_start,
             active_end=active_end,
+            rng=rng,
         )
         result.fires.extend(
             SimFire(
