@@ -61,10 +61,18 @@ _FINGERPRINT_JS = """() => ({
 
 
 class LoginState(StrEnum):
-    """What the cookie jar says about the LinkedIn session in this profile."""
+    """What the cookie jar says about the LinkedIn session in this profile.
+
+    ``NO_SESSION`` is deliberately not spelled ``LOGGED_OUT``. P2-03's
+    ``classify.Outcome`` has a ``LOGGED_OUT`` of its own, and two ``StrEnum`` members
+    that share a value compare and hash equal, so a preflight answer would pass for a
+    classified response and could be written as a session flag. The two say different
+    things: this one means "no cookie in the jar", that one means "LinkedIn answered
+    with a login wall". A test keeps the values of the two enums disjoint.
+    """
 
     LOGGED_IN = "logged_in"
-    LOGGED_OUT = "logged_out"
+    NO_SESSION = "no_session"
     UNKNOWN = "unknown"
 
 
@@ -207,7 +215,7 @@ def _build_report(
     problems: list[str] = []
     warnings: list[str] = []
     login, expires_at = _login_state(cookies)
-    if login is LoginState.LOGGED_OUT:
+    if login is LoginState.NO_SESSION:
         problems.append(
             "no live LinkedIn session in this Chrome profile: log in to LinkedIn in "
             "the window `netkeeper browser launch` describes"
@@ -240,9 +248,9 @@ def _login_state(
         return LoginState.UNKNOWN, None
     session = next((cookie for cookie in cookies if cookie.name == SESSION_COOKIE), None)
     if session is None:
-        return LoginState.LOGGED_OUT, None
+        return LoginState.NO_SESSION, None
     if session.expires_at is not None and session.expires_at <= datetime.now(UTC):
-        return LoginState.LOGGED_OUT, session.expires_at
+        return LoginState.NO_SESSION, session.expires_at
     return LoginState.LOGGED_IN, session.expires_at
 
 

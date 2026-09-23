@@ -31,7 +31,7 @@ Frontend: `cd frontend && pnpm install && pnpm dev | build | lint | test`.
 - **API modules** live in `netkeeper/web/api/<name>.py` and expose `router`; the app factory discovers them, so adding an endpoint never edits `app.py`.
 - **Config** is TOML (`config.py` dataclasses); runtime-adjustable values live in `settings_kv`, seeded from config on first start.
 - **Secrets** go to Keychain via `keyring` under `netkeeper/<user_id>/<name>`, never into the database or logs. Message bodies, cookies, and tokens never appear in logs.
-- **Tests are offline.** No network, no linkedin.com, no Gmail, no Anthropic. Browser-touching code has an opt-in smoke suite (`NETKEEPER_BROWSER_TESTS=1`). Fixtures captured from LinkedIn are sanitized: fake names, fake URNs, no real emails or phones.
+- **Tests are offline.** No network, no linkedin.com, no Gmail, no Anthropic. The rule is that no test makes a request: a linkedin.com URL in a fixture, a constant, or an assertion is fine, and `netkeeper/models/contacts.py` has had one since P1. Fetching one is not. Browser-touching code has an opt-in smoke suite (`NETKEEPER_BROWSER_TESTS=1`) that drives a loopback server, never the site. Fixtures captured from LinkedIn are sanitized: fake names, fake URNs, no real emails or phones.
 - **Naming.** The reference workflow's mailing tool is never named in code, docs, or tests. Export preset is `nine-column`.
 - **Style.** ruff and mypy `--strict` are the arbiters. Type everything. Prefer plain dataclasses and Pydantic models over dicts across module boundaries. Log with the module logger.
 

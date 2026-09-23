@@ -13,6 +13,8 @@ terminal.
 
 from __future__ import annotations
 
+import asyncio
+import importlib.util
 import logging
 import os
 import subprocess
@@ -29,6 +31,7 @@ from netkeeper.linkedin.browser import ActivityLocks, AttachBrowserProvider
 from netkeeper.linkedin.preflight import Fingerprint, LoginState, preflight
 
 CDP_URL = "http://127.0.0.1:9222"
+BUSY_TIMEOUT_S = 1.0
 
 # Invented, and never a value any code path reads: the tests below assert that this
 # string never leaves the fake jar.
@@ -120,20 +123,20 @@ async def test_a_live_session_reads_as_logged_in() -> None:
     assert report.problems == ()
 
 
-async def test_a_profile_without_the_session_cookie_reads_as_logged_out() -> None:
+async def test_a_profile_without_the_session_cookie_has_no_session() -> None:
     jar = [cookie("JSESSIONID", FAKE_CSRF_VALUE), cookie("bcookie", "x")]
     report = await preflight(make_provider(cookies=jar))
 
-    assert report.login is LoginState.LOGGED_OUT
+    assert report.login is LoginState.NO_SESSION
     assert not report.ok
     assert "log in to LinkedIn" in " ".join(report.problems)
 
 
-async def test_an_expired_session_cookie_reads_as_logged_out() -> None:
+async def test_an_expired_session_cookie_has_no_session() -> None:
     yesterday = (datetime.now(UTC) - timedelta(days=1)).timestamp()
     report = await preflight(make_provider(cookies=logged_in_jar(expires=yesterday)))
 
-    assert report.login is LoginState.LOGGED_OUT
+    assert report.login is LoginState.NO_SESSION
     assert report.session_expires_at is not None
     assert not report.ok
 
@@ -143,7 +146,7 @@ async def test_a_session_cookie_for_another_site_does_not_count() -> None:
     jar = [cookie("li_at", FAKE_SESSION_VALUE, domain=".linkedin.com.example.invalid")]
     report = await preflight(make_provider(cookies=jar))
 
-    assert report.login is LoginState.LOGGED_OUT
+    assert report.login is LoginState.NO_SESSION
     assert report.session_cookies == ()
 
 
@@ -233,11 +236,17 @@ async def test_a_browser_that_is_not_running_is_a_problem_not_an_exception() -> 
 
 
 async def test_preflight_waits_for_nobody_and_reports_busy() -> None:
-    """Spec 9.9: the "check session" path takes the same lock as a run."""
+    """Spec 9.9: the "check session" path takes the same lock as a run.
+
+    The timeout is the same guard its twin in ``tests/test_browser.py`` carries: with
+    the busy check gone this would wait forever, and a hung CI job is worse than a red
+    one.
+    """
     provider = make_provider()
 
     async with provider.run():
-        report = await preflight(provider)
+        async with asyncio.timeout(BUSY_TIMEOUT_S):
+            report = await preflight(provider)
 
     assert not report.ok
     assert "already holds the browser" in " ".join(report.problems)
@@ -257,6 +266,24 @@ async def test_no_cookie_value_reaches_the_report_or_the_log(
     assert FAKE_CSRF_VALUE not in caplog.text
     assert FAKE_SESSION_VALUE not in repr(report)
     assert FAKE_CSRF_VALUE not in repr(report)
+
+
+async def test_the_session_state_is_not_a_classification_outcome() -> None:
+    """``LoginState`` and P2-03's ``classify.Outcome`` must never compare equal.
+
+    Both are ``StrEnum``, so two members that share a value are equal, hash alike, and
+    pass each other's membership tests. A preflight answer that reads as a classified
+    response could be written as a session flag, which is a flag nobody's response
+    caused. Keeping the values disjoint is what stops it; ``NO_SESSION`` is this
+    module's word for "no cookie in the jar".
+    """
+    assert "logged_out" not in {state.value for state in LoginState}
+
+    if importlib.util.find_spec("netkeeper.linkedin.classify") is None:
+        pytest.skip("classify lands with P2-03 (#143/#144); the rule above holds either way")
+    outcome = importlib.import_module("netkeeper.linkedin.classify").Outcome
+    overlap = {state.value for state in LoginState} & {member.value for member in outcome}
+    assert not overlap, f"LoginState and Outcome share {sorted(overlap)}"
 
 
 # --- the commands ------------------------------------------------------------

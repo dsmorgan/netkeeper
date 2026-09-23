@@ -308,6 +308,10 @@ def preflight(ctx: typer.Context) -> None:
     cookies already in that profile, and closes the tab again. It visits no website,
     and it never reads or prints a cookie value. Exits non-zero when a job could not
     run right now.
+
+    Run it when nothing else is driving the browser. The activity lock lives inside
+    one process, so this command cannot see a run that `netkeeper serve` is holding,
+    and attaching alongside one drops both connections.
     """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
@@ -356,7 +360,7 @@ def _session_cell(report: PreflightReport) -> str:
     """
     words = {
         LoginState.LOGGED_IN: "logged in",
-        LoginState.LOGGED_OUT: "logged out",
+        LoginState.NO_SESSION: "no LinkedIn session",
         LoginState.UNKNOWN: "unknown",
     }
     cell = words[report.login]

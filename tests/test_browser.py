@@ -216,6 +216,90 @@ async def test_a_reattach_that_cannot_attach_ends_the_run() -> None:
             await run.ensure_page()
 
 
+async def test_a_tab_that_dies_mid_navigation_is_reopened_and_the_visit_finishes() -> None:
+    """The loss can arrive during the navigation, not only before it (spec 9.9).
+
+    Without this, the run hands the caller a raw driver error, the reattach is never
+    spent, and the scheduler sees an unclassified crash instead of a parked retry.
+    """
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        first = await run.ensure_page()
+        only_page(context).fail_next_goto(
+            RuntimeError("Target page, context or browser has been closed")
+        )
+
+        page = await run.goto(LOCAL_PAGE)
+
+        assert not page.is_closed()
+        assert page is not first
+        assert context.new_page_calls == 2
+        assert context.pages[1].goto_calls == [LOCAL_PAGE]
+        assert run.last_url == LOCAL_PAGE
+        assert not run.reattached, "a lost tab is not a lost browser"
+        assert connector.attaches == 1
+
+
+async def test_a_browser_that_disconnects_mid_navigation_spends_the_reattach() -> None:
+    """The tab stays open and the socket is gone: ``is_connected()`` is the tell."""
+    first = FakeContext()
+    healthy = FakeContext()
+    dying = FakeBrowser([first])
+    connector = FakeConnector([dying, FakeBrowser([healthy])])
+    provider = make_provider(connector)
+
+    async with provider.run() as run:
+        await run.ensure_page()
+        first.pages[0].fail_next_goto(RuntimeError("Connection closed"), closes=False)
+        dying.connected = False
+        first.new_page_error = RuntimeError("browser has been closed")
+
+        recovered = await run.goto(LOCAL_PAGE)
+
+        assert run.reattached
+        assert connector.attaches == 2
+        assert recovered in healthy.pages
+        assert healthy.pages[0].goto_calls == [LOCAL_PAGE]
+
+
+async def test_a_navigation_that_loses_the_tab_twice_ends_the_run() -> None:
+    lost = RuntimeError("Target page, context or browser has been closed")
+    context = FakeContext(page_goto_error=lost)
+    connector = FakeConnector([FakeBrowser([context])])
+    provider = make_provider(connector)
+
+    async with provider.run() as run:
+        with pytest.raises(BrowserUnavailable, match="went away again"):
+            await run.goto(LOCAL_PAGE)
+
+    assert context.new_page_calls == 2, "the run reopened the tab once, not forever"
+
+
+async def test_a_navigation_that_merely_fails_belongs_to_the_caller() -> None:
+    """A tab that is still there means the site answered. That is spec 9.7's business.
+
+    Recovering here would hide a throttle or a checkpoint behind a page reload, and
+    reloading it would spend the budget twice.
+    """
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        await run.ensure_page()
+        only_page(context).fail_next_goto(TimeoutError("Timeout 30000ms exceeded"), closes=False)
+
+        with pytest.raises(TimeoutError, match="Timeout"):
+            await run.goto(LOCAL_PAGE)
+
+        assert context.new_page_calls == 1, "nothing was reopened"
+        assert not run.reattached
+        assert run.last_url is None, "a failed navigation is not where the run is"
+
+
 # --- the activity lock -------------------------------------------------------
 
 
@@ -236,12 +320,37 @@ async def test_one_run_at_a_time_for_an_account() -> None:
     assert not provider.locks.is_busy("account-7")
 
 
-async def test_the_lock_belongs_to_the_account_not_the_process() -> None:
-    """ADR 0005: budgets, heat, and this lock are keyed by ``linkedin_account``."""
+async def test_a_second_account_runs_while_the_first_is_busy() -> None:
+    """ADR 0005: the lock is keyed by ``linkedin_account``, so accounts do not queue."""
     provider = make_provider()
 
-    async with provider.run("account-1"), provider.run("account-2") as other:
-        assert other.account == "account-2"
+    async with provider.run("account-1") as first, provider.run("account-2") as second:
+        assert first.account == "account-1"
+        assert second.account == "account-2"
+        assert provider.locks.is_busy("account-1")
+        assert provider.locks.is_busy("account-2")
+        assert provider.locks.lock_for("account-1") is not provider.locks.lock_for("account-2")
+
+
+async def test_one_registry_gates_every_provider_that_shares_it() -> None:
+    """How a process keeps its promise: one registry, handed to everything that attaches.
+
+    The promise stops at the process. A second netkeeper process builds its own
+    registry and would attach alongside this one, which is why ``ActivityLocks`` says a
+    cross-process claim is still owed before live runs.
+    """
+    locks = ActivityLocks()
+    scheduler = make_provider(FakeConnector(), locks)
+    dashboard = make_provider(FakeConnector(), locks)
+
+    async with scheduler.run("account-7"):
+        with pytest.raises(BrowserBusy, match="account-7"):
+            async with asyncio.timeout(BUSY_TIMEOUT_S), dashboard.run("account-7"):
+                pass
+
+    separate = make_provider()
+    async with separate.run("account-7"):
+        assert not locks.is_busy("account-7"), "a second registry is a second gate"
 
 
 async def test_a_failed_run_still_releases_the_lock() -> None:
