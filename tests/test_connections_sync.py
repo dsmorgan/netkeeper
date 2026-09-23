@@ -14,6 +14,7 @@ boundary has to fall inside it (``_many``).
 
 from __future__ import annotations
 
+import random
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -36,14 +37,21 @@ from netkeeper.crm import apply as mapping
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import StopReason, SyncMode, VoyagerConnections
+from netkeeper.linkedin.pacing import human_delay
 from netkeeper.models import Contact, LinkedInAccount, User
 from netkeeper.scoping import scoped
 from netkeeper.services import budgets
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass
-from netkeeper.services.connections_sync import HeatSkipped, SyncRunReport, sync_connections
+from netkeeper.services.connections_sync import (
+    HeatSkipped,
+    SessionFlagged,
+    SyncRunReport,
+    sync_connections,
+)
 from netkeeper.services.linkedin_accounts import ensure_account
-from netkeeper.services.linkedin_session import session_flag
+from netkeeper.services.linkedin_session import clear_session_flag, session_flag
+from netkeeper.services.pacing import profiles
 
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
 SETTINGS = LinkedInSettings()
@@ -94,6 +102,7 @@ async def _sync(
     settings: LinkedInSettings = SETTINGS,
     at: datetime = NOW,
     sleeps: Sleeps | None = None,
+    rng: random.Random | None = None,
 ) -> SyncRunReport:
     return await sync_connections(
         factory,
@@ -103,6 +112,7 @@ async def _sync(
         settings=settings,
         clock=Clock(at),
         sleep=sleeps or Sleeps(),
+        rng=rng,
     )
 
 
@@ -379,7 +389,12 @@ async def test_the_stopping_response_raises_heat_and_the_flag_as_spec_9_7_says(
     assert (score > 0) is heat
     assert (stored.outcome if stored is not None else None) is flag
     if stored is not None:
-        assert "?" not in stored.url and "secret-token" not in stored.url
+        # The path only: the ctx token in the checkpoint url is never stored.
+        expected = {
+            Outcome.CHECKPOINT: "/checkpoint/challenge/AgFAKE",
+            Outcome.LOGGED_OUT: "/authwall",
+        }
+        assert stored.url == expected[stored.outcome]
 
 
 async def test_heat_over_the_skip_threshold_stops_the_run_before_anything_is_fetched(
@@ -410,22 +425,51 @@ async def test_warm_heat_shrinks_the_run_and_stretches_the_pauses(
     other = _new_user(session_factory)
 
     warm_fetch = FakeVoyagerFetch(_many(400))
-    await _sync(session_factory, user_id, warm_fetch, settings=settings, sleeps=warm)
+    await _sync(
+        session_factory,
+        user_id,
+        warm_fetch,
+        settings=settings,
+        sleeps=warm,
+        rng=random.Random(7),
+    )
     cold_fetch = FakeVoyagerFetch(_many(400))
-    await _sync(session_factory, other, cold_fetch, settings=settings, sleeps=cold)
+    await _sync(
+        session_factory,
+        other,
+        cold_fetch,
+        settings=settings,
+        sleeps=cold,
+        rng=random.Random(7),
+    )
 
     # Cold: 5 left, 5 pages. Warm: 4 left (one spent on the throttle) at 2.0: 2 pages.
     assert len(cold_fetch.requests) == 5
     assert len(warm_fetch.requests) == 2
     assert len(cold.waits) == 4 and len(warm.waits) == 1
+    # Same seed, same first draw: the warm wait is that draw at twice the median.
+    delay = profiles(settings.pacing).delay
+
+    def first_wait(median: float) -> float:
+        return human_delay(
+            random.Random(7),
+            median=median,
+            sigma=delay.sigma,
+            tail_p=delay.tail_p,
+            tail_range=delay.tail_range,
+        )
+
+    assert cold.waits[0] == pytest.approx(first_wait(delay.median))
+    assert warm.waits[0] == pytest.approx(first_wait(delay.median * 2.0))
+    assert warm.waits[0] > cold.waits[0]
 
 
 async def test_pages_are_paced_with_human_like_waits(
     session_factory: sessionmaker[Session], user_id: int
 ) -> None:
     sleeps = Sleeps()
-    await _sync(session_factory, user_id, FakeVoyagerFetch(_many(160)), sleeps=sleeps)
-    assert len(sleeps.waits) == 3  # four pages, a wait between each pair
+    await _sync(session_factory, user_id, FakeVoyagerFetch(_many(150)), sleeps=sleeps)
+    assert len(sleeps.waits) == 3  # four pages (40, 40, 40, 30), a wait between each pair
     assert all(wait > 0 for wait in sleeps.waits)
     assert len(set(sleeps.waits)) == 3  # drawn, not a fixed interval
 
@@ -494,3 +538,76 @@ async def test_budget_spent_elsewhere_mid_run_stops_the_next_page(
     assert len(fetch.requests) == 1
     assert report.result.reason is StopReason.BUDGET
     assert report.aging is None
+
+
+# --- a lying paging.total ages nobody it did not see -----------------------------------
+
+
+@pytest.mark.parametrize("lie", [0, 40], ids=["total-0", "total-40"])
+async def test_a_lying_total_never_disconnects_people_who_are_still_there(
+    session_factory: sessionmaker[Session], user_id: int, lie: int
+) -> None:
+    """The review's attack: 100 people served honestly under a false total, twice."""
+    people = _many(100)
+    await _sync(session_factory, user_id, FakeVoyagerFetch(people))
+
+    for week in (1, 2):
+        await _sync(
+            session_factory,
+            user_id,
+            FakeVoyagerFetch(people, total=lie),
+            at=NOW + timedelta(days=7 * week),
+        )
+
+    contacts = _contacts(session_factory, user_id)
+    assert all(c.li_disconnected_at is None for c in contacts.values())
+    assert all(c.li_missing_count == 0 for c in contacts.values())
+
+
+async def test_a_urn_scheme_change_disconnects_nobody(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """The review's attack: every profile comes back under a new URN, same slug.
+
+    Each row resolves to a candidate (the slug's contact carries another URN),
+    nothing is written, and every stored contact looks missing. Aging refuses.
+    """
+    people = _many(100)
+    await _sync(session_factory, user_id, FakeVoyagerFetch(people))
+    renumbered = [replace(p, urn_prefix="ACoAANEW") for p in people]
+
+    reports = [
+        await _sync(
+            session_factory,
+            user_id,
+            FakeVoyagerFetch(renumbered),
+            at=NOW + timedelta(days=7 * week),
+        )
+        for week in (1, 2)
+    ]
+
+    assert all(r.pages.needs_review == 100 for r in reports)
+    assert all(r.aging is not None and r.aging.refused is not None for r in reports)
+    contacts = _contacts(session_factory, user_id)
+    assert len(contacts) == 100
+    assert all((c.li_missing_count, c.li_disconnected_at) == (0, None) for c in contacts.values())
+
+
+@pytest.mark.parametrize("scripted", [CHECKPOINT, LOGGED_OUT], ids=["checkpoint", "logged-out"])
+async def test_no_run_starts_while_the_session_is_flagged(
+    session_factory: sessionmaker[Session], user_id: int, scripted: Scripted
+) -> None:
+    """The review's attack: a run after a checkpoint fetched anyway, a retry one run later."""
+    await _sync(session_factory, user_id, FakeVoyagerFetch(list(PEOPLE), script={0: scripted}))
+    later = FakeVoyagerFetch(list(PEOPLE))
+
+    with pytest.raises(SessionFlagged):
+        await _sync(session_factory, user_id, later, at=NOW + timedelta(days=1))
+    assert later.requests == []
+
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        assert clear_session_flag(session, user)
+    await _sync(session_factory, user_id, later, at=NOW + timedelta(days=2))
+    assert later.requests != []
