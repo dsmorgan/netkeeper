@@ -32,10 +32,12 @@ import random
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import factories
 import pytest
+import test_browser_safety as browser_safety
 from browser_fakes import FakeBrowser, FakeConnector, FakeContext
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -55,11 +57,13 @@ from netkeeper.services.budgets import ActionClass, consume
 from netkeeper.services.linkedin_session import flag_session
 from netkeeper.services.posture import (
     ATTACH_ONLY,
+    ENFORCED_BY,
     LOOPBACK_HOSTS,
     MAX_ACTIVE_WINDOW_HOURS,
     MAX_BLOCKS_BEFORE_SKIP,
     MIN_HALF_LIFE_HOURS,
     SINGLE_ACCOUNT_ID,
+    UNENFORCED_TODAY,
     WEEKEND_DAMPING_CEILING,
     PostureReport,
     Protection,
@@ -138,6 +142,10 @@ def _heat(**overrides: Any) -> Settings:
     return _linkedin(heat=replace(DEFAULTS.linkedin.heat, **overrides))
 
 
+def _pacing(**overrides: Any) -> Settings:
+    return _linkedin(pacing=replace(DEFAULTS.linkedin.pacing, **overrides))
+
+
 def _campaigns(**overrides: Any) -> Settings:
     return replace(DEFAULTS, campaigns=replace(DEFAULTS.campaigns, **overrides))
 
@@ -198,6 +206,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "active hours",
         "one local midnight",
         "weekend damping",
+        "human-like pacing",
         "warm-up ramp",
         "manual linkedin sends",
         "budget connection_pages",
@@ -243,6 +252,14 @@ def _drop_one_job(kind: JobKind) -> Callable[[Session, User], None]:
     return prepare
 
 
+def _clear_heat(session: Session, user: User) -> None:
+    """Raise heat, then clear it by hand -- spec 9.7's "the block was something else"."""
+    heat_rows.raise_heat(
+        session, user, ACCOUNT, now=NOW - timedelta(hours=30), settings=DEFAULTS.linkedin.heat
+    )
+    heat_rows.clear(session, user, ACCOUNT, now=NOW - timedelta(minutes=5))
+
+
 def _flag(session: Session, user: User) -> None:
     # A linkedin.com string in a fixture is fine; nothing fetches it (CLAUDE.md).
     flag_session(
@@ -268,6 +285,10 @@ class Case:
     heat_gate: HeatGate | None = None
     #: False leaves the account with no schedule established.
     schedule: bool = True
+    #: True for a case that must leave the report *clean*: a state worth
+    #: covering because getting it wrong would produce a spurious warning,
+    #: rather than because it should produce one.
+    expect_ok: bool = False
 
 
 CASES = [
@@ -401,6 +422,65 @@ CASES = [
     ),
     Case(id="heat over its skip threshold", prepare=_raise_heat(3), warns=("heat",)),
     Case(
+        id="no wait at all between profile views",
+        settings=_pacing(profile_delay_median_s=0),
+        warns=("human-like pacing",),
+        off=("human-like pacing",),
+    ),
+    Case(
+        id="a wait too short to be a person reading",
+        settings=_pacing(profile_delay_median_s=2),
+        warns=("human-like pacing",),
+        off=("human-like pacing",),
+    ),
+    Case(
+        id="the same wait every time",
+        settings=_pacing(profile_delay_sigma=0.0),
+        warns=("human-like pacing",),
+        off=("human-like pacing",),
+    ),
+    Case(
+        id="a session that is never interrupted",
+        settings=_pacing(distraction_p=0.0),
+        warns=("human-like pacing",),
+        off=("human-like pacing",),
+    ),
+    Case(
+        id="a distraction pause of zero seconds",
+        settings=_pacing(distraction_range_s=(0, 0)),
+        warns=("human-like pacing",),
+        off=("human-like pacing",),
+    ),
+    Case(
+        id="a burst bigger than the whole day's budget",
+        settings=_pacing(burst_size=(10_000, 10_000)),
+        warns=("human-like pacing",),
+        off=("human-like pacing",),
+    ),
+    Case(
+        id="a burst size pacing would refuse",
+        settings=_pacing(burst_size=(0, 15)),
+        warns=("human-like pacing",),
+        off=("human-like pacing",),
+    ),
+    Case(
+        id="no break between bursts",
+        settings=_pacing(burst_break_s=(0, 0)),
+        warns=("human-like pacing",),
+        off=("human-like pacing",),
+    ),
+    Case(
+        id="an active window that runs overnight",
+        settings=_linkedin(active_hours=("21:30", "08:30")),
+        warns=("active hours",),
+    ),
+    Case(
+        id="heat cleared by hand rather than never raised",
+        prepare=_clear_heat,
+        warns=(),
+        expect_ok=True,
+    ),
+    Case(
         id="the scheduler's heat skip gate disabled",
         heat_gate=HEAT_SKIP_DISABLED,
         warns=("heat skip gate",),
@@ -446,7 +526,7 @@ def test_turning_one_protection_off_warns_about_exactly_that_one(
 
     assert _warned(report) == set(case.warns)
     assert _not_in_force(report) == set(case.off)
-    assert not report.ok
+    assert report.ok is case.expect_ok
 
 
 @pytest.mark.parametrize("case", CASES, ids=[case.id for case in CASES])
@@ -494,6 +574,22 @@ def test_each_warning_says_which_thing_is_wrong_not_merely_that_something_is(
     assert "enrich" in _warning_for(partial, "scheduled jobs")
     assert "no job kind has a due time" in _warning_for(bare, "scheduled jobs")
 
+    # The pacing row has six ways to be off and they send you to six different
+    # config keys, so "something about pacing is wrong" is not good enough.
+    for overrides, expected in (
+        ({"profile_delay_median_s": 0}, "raises part-way through a run"),
+        ({"profile_delay_median_s": 2}, "under the 5s this report treats as human"),
+        ({"profile_delay_sigma": 0.0}, "every wait is exactly the median"),
+        ({"distraction_p": 0.0}, "never pauses for a distraction"),
+        ({"burst_size": (10_000, 10_000)}, "a burst never reaches its own end"),
+        ({"burst_break_s": (0, 0)}, "sessions, not streams"),
+    ):
+        report = _report(writer, user, settings=_pacing(**overrides))
+        assert expected in _warning_for(report, "human-like pacing"), overrides
+
+    overnight = _report(writer, user, settings=_linkedin(active_hours=("21:30", "08:30")))
+    assert "runs overnight" in _warning_for(overnight, "active hours")
+
 
 def _warning_for(report: PostureReport, name: str) -> str:
     protection = next(p for p in report.protections if p.name == name)
@@ -530,6 +626,102 @@ def test_several_protections_off_at_once_all_warn(writer: Session, user: User) -
         "heat",
     }
     assert len(report.warnings) >= 5
+
+
+# --- the claim the report is entitled to make -----------------------------------
+
+
+def _callers_of(function: str) -> set[Path]:
+    """Every file under ``netkeeper/`` with a call written as ``function(...)``.
+
+    Uses ``test_browser_safety``'s own syntax-tree scanner rather than a second
+    one, and reads the last dotted segment, so it sees the call however the
+    name was imported. ``posture.py`` is excluded because reading a counter is
+    not enforcing a limit, and ``rehearse.py`` because a rehearsal is by
+    definition not the live run whose budget has to be enforced.
+    """
+    package = Path(browser_safety.PACKAGE)
+    ignore = {package / "services" / "posture.py", package / "linkedin" / "rehearse.py"}
+    found: set[Path] = set()
+    for path in browser_safety.python_files(package):
+        if path in ignore:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if f"def {function}(" in source:
+            # The module that defines the name, or the core-side wrapper that
+            # delegates to the pure one under the same name. A definition site
+            # calling itself is the implementation, not a consumer enforcing a
+            # limit, and counting it would make every protection look wired.
+            continue
+        if any(name == function for _, name in browser_safety.called_names(source)):
+            found.add(path)
+    return found
+
+
+def test_the_unenforced_list_is_what_the_package_actually_shows() -> None:
+    """The gap about unwired protections is derived, not a hand-written claim.
+
+    A posture report reads configuration and counters; it cannot see whether
+    the code that does the work calls the enforcement. Saying so is only
+    honest if the list stays true, and a hand-maintained "not wired up yet"
+    list is wrong the week after it is written. So this scans the package: when
+    P2-06's enrichment job lands and calls ``budgets.consume``, this fails and
+    the gap has to be shortened before the suite is green again.
+    """
+    unenforced = {name for name in ENFORCED_BY if not _callers_of(name)}
+
+    assert unenforced == set(UNENFORCED_TODAY), (
+        "the set of protections with no enforcing caller changed.\n"
+        f"  the package shows: {sorted(unenforced)}\n"
+        f"  UNENFORCED_TODAY:  {sorted(UNENFORCED_TODAY)}\n"
+        "Shorten UNENFORCED_TODAY when an enforcement gains its caller, and"
+        " lengthen it if one lost its caller -- which would be a regression"
+        " worth stopping for."
+    )
+
+
+def test_the_scanner_can_actually_find_a_caller() -> None:
+    """A scan that matched nothing would make the test above pass forever."""
+    assert _callers_of("is_active_at"), "is_active_at has a live caller in the scheduler"
+    assert not _callers_of("a_function_nobody_wrote")
+
+
+def test_every_unenforced_name_maps_to_protections_the_report_has(
+    writer: Session, user: User
+) -> None:
+    """The gap names rows a reader can find in the table above it."""
+    names = {protection.name for protection in _report(writer, user).protections}
+
+    for function, protections in ENFORCED_BY.items():
+        assert set(protections) <= names, f"{function} names a protection the report lacks"
+
+
+def test_a_clean_report_claims_configuration_and_not_enforcement(
+    writer: Session, user: User
+) -> None:
+    """The verdict is the one sentence most likely to be read on its own.
+
+    "every protection is in force" would be the same sentence on the day a
+    protection works and the day nothing calls it, which for five of them is
+    today. "nothing is misconfigured" is what this module actually checks.
+    """
+    text = render(_report(writer, user))
+
+    assert "nothing is misconfigured" in text
+    assert "in force" not in text.split("nothing is misconfigured")[1]
+    assert "never callers" in text
+    for name in _report(writer, user).protections:
+        if name.name in ("budget profile_visits", "warm-up ramp", "weekend damping"):
+            assert name.name in text.split("not covered by this report:")[1]
+
+
+def test_the_gap_lists_the_protections_nothing_enforces_yet(writer: Session, user: User) -> None:
+    gaps = " ".join(_report(writer, user).gaps)
+
+    assert "budget profile_visits" in gaps
+    assert "warm-up ramp" in gaps
+    assert "session flag" in gaps
+    assert "active hours" not in gaps.split("never callers")[1].split(".")[0]
 
 
 # --- the thresholds, pinned to literals ----------------------------------------
@@ -637,7 +829,7 @@ def test_the_rendered_report_shows_when_each_job_next_fires(writer: Session, use
     assert "kept 2 minutes apart" in text
 
 
-def test_the_defaults_this_report_calls_clean_are_appendix_c_s(writer: Session, user: User) -> None:
+def test_the_defaults_this_report_calls_clean_are_appendix_c_s() -> None:
     """Appendix C's numbers are what an all-clear report is all-clear *about*.
 
     CP3 asks "are the defaults in Appendix C what the code does". If a default
@@ -650,9 +842,20 @@ def test_the_defaults_this_report_calls_clean_are_appendix_c_s(writer: Session, 
     assert DEFAULTS.linkedin.budget.profile_visits_per_week == 300
     assert DEFAULTS.linkedin.budget.warmup_start == 20
     assert DEFAULTS.linkedin.budget.warmup_step == 10
+    assert DEFAULTS.linkedin.budget.connection_pages_per_day == 150
+    assert DEFAULTS.linkedin.budget.inbox_polls_per_day == 8
+    assert DEFAULTS.linkedin.budget.li_messages_auto_per_day == 15
+    assert DEFAULTS.linkedin.heat.per_block == 1.0
     assert DEFAULTS.linkedin.heat.half_life_hours == 6
     assert DEFAULTS.linkedin.heat.skip_threshold == 2.5
     assert DEFAULTS.campaigns.linkedin_auto_send is False
+    # Appendix C's pacing rows, which `_pacing` is the report's row for.
+    assert DEFAULTS.linkedin.pacing.profile_delay_median_s == 25
+    assert DEFAULTS.linkedin.pacing.profile_delay_sigma == 0.6
+    assert DEFAULTS.linkedin.pacing.distraction_p == 0.08
+    assert DEFAULTS.linkedin.pacing.distraction_range_s == (120, 480)
+    assert DEFAULTS.linkedin.pacing.burst_size == (8, 15)
+    assert DEFAULTS.linkedin.pacing.burst_break_s == (300, 1200)
 
 
 # --- the numbers the report carries ---------------------------------------------
@@ -750,6 +953,39 @@ def test_heat_reports_when_runs_resume(writer: Session, user: User) -> None:
     assert math.isclose(settled, DEFAULTS.linkedin.heat.skip_threshold, rel_tol=1e-9)
 
 
+def test_heat_cleared_by_hand_is_not_reported_as_last_raised(writer: Session, user: User) -> None:
+    """A manual clear writes a state exactly as a raise does (spec 9.7's manual clear).
+
+    Reading the stored timestamp without looking at the score reports the
+    clear as the last raise: "0.00 of 2.5, last raised five minutes ago",
+    which is self-contradictory and sends someone hunting a throttle that did
+    not happen. The fixture raises 30 hours ago and clears 5 minutes ago, so
+    the two timestamps are far enough apart that the wrong one is unmistakable.
+    """
+    _clear_heat(writer, user)
+
+    report = _report(writer, user)
+    row = next(p for p in report.protections if p.name == "heat")
+
+    assert report.heat.last_raised_at is None
+    assert report.heat.cleared_at == NOW - timedelta(minutes=5)
+    assert report.heat.score == 0.0
+    assert "cleared 2026-09-23 17:55 UTC" in row.value
+    assert "last raised" not in row.value
+    assert report.ok, "a cleared account is a clean one, not a warning"
+
+
+def test_a_raised_score_is_still_reported_as_raised(writer: Session, user: User) -> None:
+    """Without this, reporting every state as "cleared" would pass the test above."""
+    _raise_heat(1)(writer, user)
+
+    report = _report(writer, user)
+
+    assert report.heat.last_raised_at == NOW
+    assert report.heat.cleared_at is None
+    assert "last raised" in next(p for p in report.protections if p.name == "heat").value
+
+
 def test_heat_that_was_never_raised_says_so(writer: Session, user: User) -> None:
     report = _report(writer, user)
 
@@ -821,13 +1057,38 @@ async def test_a_cookie_value_never_reaches_the_report(writer: Session, user: Us
 # --- the rendered table ----------------------------------------------------------
 
 
+def test_the_pacing_row_shows_the_numbers_a_reviewer_would_check(
+    writer: Session, user: User
+) -> None:
+    """CP3 asks "are the defaults in Appendix C what the code does". This is where
+    four of its six rows are visible without reading the config file."""
+    row = next(p for p in _report(writer, user).protections if p.name == "human-like pacing")
+
+    assert row.value == "25s median (sigma 0.6), 8% distraction, bursts of 8-15 then 300-1200s"
+    assert row.status is Status.ON
+
+
+def test_an_overnight_window_is_allowed_but_not_silent(writer: Session, user: User) -> None:
+    """Somebody really may keep those hours, so this warns rather than refusing.
+
+    But spec 9.1 leans on the owner's own browsing as cover traffic, and a
+    sidecar busiest while the account is otherwise asleep has none.
+    """
+    report = _report(writer, user, settings=_linkedin(active_hours=("21:30", "08:30")))
+    row = next(p for p in report.protections if p.name == "active hours")
+
+    assert row.status is Status.ON, "an overnight window is a choice, not a disabled protection"
+    assert row.warnings
+    assert not report.ok
+
+
 def test_the_rendered_report_names_every_protection(writer: Session, user: User) -> None:
     report = _report(writer, user)
     text = render(report)
 
     for protection in report.protections:
         assert protection.name in text
-    assert "all clear" in text
+    assert "nothing is misconfigured" in text
     assert "not covered by this report:" in text
 
 
@@ -836,7 +1097,7 @@ def test_the_rendered_report_never_reads_as_all_clear_with_something_off(
 ) -> None:
     text = render(_report(writer, user, browser_mode="launch"))
 
-    assert "NOT all clear" in text
+    assert "NOT clear" in text
     assert "second device" in text
 
 

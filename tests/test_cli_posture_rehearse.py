@@ -108,7 +108,7 @@ def test_posture_exits_non_zero_when_anything_warned(cli_db: sessionmaker[Sessio
     result = CliRunner().invoke(cli, ["posture", "--no-probe"])
 
     assert result.exit_code == 1
-    assert "NOT all clear" in result.output
+    assert "NOT clear" in result.output
     assert "no browser probe was run" in result.output
 
 
@@ -156,9 +156,9 @@ def test_posture_is_all_clear_when_the_probe_finds_a_session(
     result = CliRunner().invoke(cli, ["posture"])
 
     assert result.exit_code == 0, result.output
-    assert "all clear" in result.output
+    assert "nothing is misconfigured" in result.output
     assert "logged in (li_at)" in result.output
-    assert "NOT all clear" not in result.output
+    assert "NOT clear" not in result.output
 
 
 @pytest.mark.parametrize(
@@ -292,6 +292,68 @@ def test_rehearse_reports_a_browser_it_cannot_attach_to(
 
     assert result.exit_code == 1
     assert "Chrome is not running" in result.output
+
+
+def test_rehearse_uses_the_pacing_in_the_config_file(
+    fake_chrome: ReplayContext, tmp_path: Path
+) -> None:
+    """The fidelity claim, at the command line.
+
+    A config asking for a 1-second median must produce 1-second waits in the
+    log. Before the settings were threaded through, the rehearsal used the
+    pacing module's 25-second default and the log said 25 while the live run
+    would have used 1 -- the exact inversion of what rehearsing is for.
+    """
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[linkedin.pacing]\n"
+        "profile_delay_median_s = 1\n"
+        "profile_delay_sigma = 0.01\n"
+        "distraction_p = 0.0\n",
+        encoding="utf-8",
+    )
+
+    brisk = CliRunner().invoke(
+        cli,
+        ["--config", str(config), "rehearse", "--visits", "3", "--seed", "5", "--scale", "5000"],
+    )
+    default = CliRunner().invoke(
+        cli, ["rehearse", "--visits", "3", "--seed", "5", "--scale", "5000"]
+    )
+
+    assert brisk.exit_code == 0, brisk.output
+    assert _planned_waits(brisk.output), brisk.output
+    assert max(_planned_waits(brisk.output)) < 3.0
+    assert max(_planned_waits(default.output)) > 5.0
+
+
+def _planned_waits(output: str) -> list[float]:
+    """The "Ns planned" figures the log prints between profile visits."""
+    return [float(value) for value in re.findall(r"([\d.]+)s planned", output)]
+
+
+def test_posture_reads_the_mode_off_the_provider_it_would_run_with(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not off the class, which would make the attach-only row tautological.
+
+    ``AttachBrowserProvider.mode`` is a class attribute that is always
+    ``"attach"``, so reading it compares a constant with itself. The instance
+    below shadows it, which is the shape a future second provider would have.
+    """
+
+    def odd(_settings: Settings) -> AttachBrowserProvider:
+        provider = AttachBrowserProvider("http://127.0.0.1:9222", connector=FakeConnector())
+        provider.mode = "launch"
+        return provider
+
+    monkeypatch.setattr("netkeeper.cli._provider", odd)
+
+    result = CliRunner().invoke(cli, ["posture", "--no-probe"])
+
+    assert result.exit_code == 1
+    assert "second device" in result.output
+    assert AttachBrowserProvider.mode == "attach", "the class attribute is untouched"
 
 
 def test_the_default_rehearsal_is_short_enough_to_watch() -> None:

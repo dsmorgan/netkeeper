@@ -44,9 +44,36 @@ def test_ensure_local_user_takes_timezone_from_settings(session: Session) -> Non
     settings = replace(Settings(), linkedin=LinkedInSettings(timezone="Europe/Berlin"))
     user = ensure_local_user(session, settings=settings)
     assert user.timezone == "Europe/Berlin"
-    # Settings seed a new row only; an existing user keeps its timezone.
-    other = replace(Settings(), linkedin=LinkedInSettings(timezone="Asia/Tokyo"))
-    assert ensure_local_user(session, settings=other).timezone == "Europe/Berlin"
+
+
+def test_ensure_local_user_resyncs_the_timezone_from_settings(session: Session) -> None:
+    """``linkedin.timezone`` is the single source of truth, after the first start too.
+
+    This used to seed a new row only, which left ``User.timezone`` and
+    ``linkedin.timezone`` permanently disagreeing the moment anyone edited the
+    config after `netkeeper db upgrade`. They are read by different things --
+    budget counters key off the user row, the active window and the scheduler's
+    deferral read the config -- so disagreeing means a day's budget resets at
+    an hour the window is open. See ``ensure_local_user``'s docstring.
+    """
+    berlin = replace(Settings(), linkedin=LinkedInSettings(timezone="Europe/Berlin"))
+    user = ensure_local_user(session, settings=berlin)
+    tokyo = replace(Settings(), linkedin=LinkedInSettings(timezone="Asia/Tokyo"))
+
+    resynced = ensure_local_user(session, settings=tokyo)
+
+    assert resynced.id == user.id, "the row was replaced rather than updated"
+    assert resynced.timezone == "Asia/Tokyo"
+    assert session.get(User, user.id) is not None
+
+
+def test_ensure_local_user_without_settings_leaves_the_timezone_alone(session: Session) -> None:
+    """No config in hand is not a reason to overwrite the zone with a default."""
+    berlin = replace(Settings(), linkedin=LinkedInSettings(timezone="Europe/Berlin"))
+    user = ensure_local_user(session, settings=berlin)
+
+    assert ensure_local_user(session).timezone == "Europe/Berlin"
+    assert user.timezone == "Europe/Berlin"
 
 
 # --- netkeeper db -----------------------------------------------------------

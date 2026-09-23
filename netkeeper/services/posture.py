@@ -64,7 +64,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
-from netkeeper.config import HeatSettings, LinkedInSettings, Settings
+from netkeeper.config import HeatSettings, LinkedInSettings, PacingSettings, Settings
 from netkeeper.linkedin import heat as heat_math
 from netkeeper.linkedin.pacing import (
     apply_weekend_multiplier,
@@ -145,6 +145,19 @@ MAX_ACTIVE_WINDOW_HOURS: Final = 16.0
 #: nothing; above it, the "damping" raises weekend budgets above weekday ones.
 WEEKEND_DAMPING_CEILING: Final = 1.0
 
+#: The shortest median gap between profile views this report will call
+#: human-like. Appendix C picks 25 seconds because that is how long a person
+#: takes to read a profile; five is already a skim nobody performs sixty times
+#: in a row, and below it the lognormal's own spread puts a large share of
+#: waits under a second.
+MIN_DELAY_MEDIAN_S: Final = 5.0
+
+#: The shortest between-burst break that is still a break. Appendix C's range
+#: is 5 to 20 minutes ("sessions, not streams"); a break measured in seconds
+#: leaves one unbroken stream of requests, which is the shape bursts exist to
+#: avoid.
+MIN_BURST_BREAK_S: Final = 60.0
+
 
 class Status(enum.StrEnum):
     """Whether one protection is in force.
@@ -218,6 +231,13 @@ class HeatPosture:
     last_raised_at: datetime | None
     resumes_at: datetime | None
     readable: bool = True
+    #: When the score was last manually cleared (spec 9.7's "a manual clear
+    #: exists for the case where the block was something else"). A clear writes
+    #: a state like a raise does, so reading the stored timestamp without
+    #: looking at the score reports a clear as the last raise -- which reads as
+    #: "0.00, last raised five minutes ago" and sends someone hunting a
+    #: throttle that did not happen.
+    cleared_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,6 +389,7 @@ def posture(
         _active_hours(linkedin, zone, zone_warning, now=now, local_now=local_now),
         _account_timezone(user, linkedin.timezone),
         _weekend_damping(linkedin.weekend_multiplier, local_now),
+        _pacing(linkedin.pacing, _profile_visit_cap(settings)),
         _warmup_ramp(settings, today),
         _auto_send(settings),
         *(_budget(action, budgets[action], settings) for action in ActionClass),
@@ -393,16 +414,83 @@ def posture(
 #: close it. They are listed rather than silently omitted because a reader who
 #: is deciding whether to trust this tool is entitled to know where the report
 #: stops.
+#: Which function has to be *called* for each protection to actually bite, and
+#: which protections depend on it. A posture report reads configuration and
+#: counters; it cannot see whether anything calls the enforcement. So the fact
+#: that, say, nothing yet calls ``budgets.consume`` is recorded here rather
+#: than left for a reader to discover after their first live run.
+#:
+#: The keys are the function names as a caller writes them at a call site,
+#: which is what ``tests/test_posture.py`` scans the package for. That test is
+#: what keeps :data:`UNENFORCED_TODAY` honest: when P2-06's enrichment job
+#: lands and calls ``consume``, the scan sees it and the test fails until this
+#: list is shortened. The list is therefore derived from the code, on a
+#: schedule of "every test run", rather than being prose that quietly rots.
+ENFORCED_BY: Final[dict[str, tuple[str, ...]]] = {
+    "consume": (
+        "budget connection_pages",
+        "budget profile_visits",
+        "budget inbox_polls",
+        "budget li_messages_auto",
+    ),
+    "warmup_budget": ("warm-up ramp",),
+    "apply_weekend_multiplier": ("weekend damping",),
+    "human_delay": ("human-like pacing",),
+    "plan_burst_sizes": ("human-like pacing",),
+    "raise_heat": ("heat",),
+    "flag_session": ("session flag",),
+    "is_active_at": ("active hours",),
+    "should_skip": ("heat skip gate",),
+}
+
+#: The subset of :data:`ENFORCED_BY` whose function nothing in the package
+#: calls yet, outside this module and the rehearsal. Kept in sync by
+#: ``test_the_unenforced_list_is_what_the_package_actually_shows``, which is
+#: the whole point: a hand-maintained list of "not wired up yet" is wrong the
+#: week after it is written.
+UNENFORCED_TODAY: Final[tuple[str, ...]] = (
+    "consume",
+    "warmup_budget",
+    "apply_weekend_multiplier",
+    "human_delay",
+    "plan_burst_sizes",
+    "raise_heat",
+    "flag_session",
+)
+
+
+def _unenforced_protections() -> tuple[str, ...]:
+    """The protection names that no caller enforces yet, deduplicated, in report order."""
+    names: list[str] = []
+    for function in UNENFORCED_TODAY:
+        for name in ENFORCED_BY[function]:
+            if name not in names:
+                names.append(name)
+    return tuple(names)
+
+
+_UNENFORCED_TEXT: Final = ", ".join(_unenforced_protections())
+
+
 GAPS: Final[tuple[str, ...]] = (
+    "**this report reads configuration and counters, never callers.** It can"
+    " tell you a limit is set and how much of it is spent; it cannot tell you"
+    " that the code which will do the work remembers to ask. The protections"
+    f" listed next have no enforcing caller in the package yet: {_UNENFORCED_TEXT}."
+    " Until the job that must call it exists, each of those is a setting rather"
+    " than a brake, and this report says the same thing on the day it is wired"
+    " as on the day it is not.",
     "the activity lock guards one process. `netkeeper preflight` or `netkeeper"
     " rehearse` in a terminal builds its own, so running one while `netkeeper"
-    " serve` holds the browser still opens a second CDP client. A claim that"
-    " outlives the process (a lock file, or a settings_kv claim with a"
+    " serve` holds the browser still opens a second CDP client -- including"
+    " this command, which with --probe attaches too: an all-clear can print in"
+    " the same breath as running it broke the one-client invariant. A claim"
+    " that outlives the process (a lock file, or a settings_kv claim with a"
     " heartbeat) is owed before the first live run.",
     "nothing wires the scheduler into `netkeeper serve` yet (that is P2-10), so"
     " on a normal install no schedule is established and no job fires on its"
-    " own. The schedule below is whatever a caller has established; until serve"
-    " starts one, runs are the ones you start by hand.",
+    " own. The schedule in this report is whatever a caller has established;"
+    " until serve starts one, runs are the ones you start by hand.",
     "this reports the *stored* due time for each job kind, not whether the"
     " process that would fire it is running. A schedule established by a"
     " `netkeeper serve` that has since exited still reads as scheduled.",
@@ -560,6 +648,13 @@ def _active_hours(
             " this report treats as still being a window. Appendix B's default is 08:30"
             " to 21:30, 13 hours"
         )
+    elif start > end:
+        warnings.append(
+            f"the window runs overnight ({start:%H:%M} to {end:%H:%M}), so netkeeper is"
+            " active at hours your own browsing is not. Spec 9.1 leans on your organic"
+            " activity as cover traffic, and a sidecar that is busiest while the account"
+            " is otherwise asleep has none. If those really are your hours, this is fine"
+        )
     inside = is_active_at(now, zone, start=start, end=end)
     where = "inside" if inside else "outside"
     opens = next_window_start(now, zone, start=start).astimezone(zone)
@@ -649,6 +744,101 @@ def _warmup_ramp(settings: Settings, today: TodaysBudget) -> Protection:
         name="warm-up ramp",
         status=Status.ON,
         value=f"{value}; today {today.ramp}",
+    )
+
+
+def _pacing(pacing: PacingSettings, cap: int) -> Protection:
+    """Spec 9.5's human-like behavior: the wait between profiles, and the bursts.
+
+    Four of Appendix C's six rows live in ``[linkedin.pacing]`` -- the delay
+    between profiles, the distraction pause, the burst size, and the break
+    between bursts -- and every one of them is a real, loadable config key.
+    Reporting the weekend multiplier while saying nothing about the gap between
+    two profile views has the coverage backwards: the gap *is* what spec 9.5 is
+    about, and a config that zeroes it turns the sidecar into exactly the
+    request pattern the whole design exists to avoid.
+
+    ``cap`` is the per-day profile-visit limit in force, which is what makes
+    the burst-size check a derived fact rather than an invented ceiling: a
+    burst larger than a day's whole budget can never reach its own end, so the
+    break between bursts never happens.
+    """
+    warnings: list[str] = []
+    status = Status.ON
+    if pacing.profile_delay_median_s <= 0:
+        status = Status.OFF
+        warnings.append(
+            f"linkedin.pacing.profile_delay_median_s is {pacing.profile_delay_median_s:g}:"
+            " there is no wait between profile views at all. Worse than the pacing being"
+            " off, pacing.human_delay refuses a median of zero or less, so this does not"
+            " run fast -- it raises part-way through a run, after this report has been"
+            " read. Appendix C's default is 25"
+        )
+    elif pacing.profile_delay_median_s < MIN_DELAY_MEDIAN_S:
+        status = Status.OFF
+        warnings.append(
+            f"linkedin.pacing.profile_delay_median_s is {pacing.profile_delay_median_s:g}s,"
+            f" under the {MIN_DELAY_MEDIAN_S:g}s this report treats as human. Appendix C"
+            " picks 25 because that is how long a person takes to read a profile"
+        )
+    if pacing.profile_delay_sigma <= 0:
+        status = Status.OFF
+        warnings.append(
+            f"linkedin.pacing.profile_delay_sigma is {pacing.profile_delay_sigma:g}, so"
+            " every wait is exactly the median. A constant interval between requests is"
+            " the most machine-like signature there is; the spread is what makes the"
+            " timing look human at all"
+        )
+    if pacing.distraction_p <= 0:
+        status = Status.OFF
+        warnings.append(
+            f"linkedin.pacing.distraction_p is {pacing.distraction_p:g}, so the run never"
+            " pauses for a distraction. Appendix C gives it an 8% chance because people"
+            " get interrupted, and a session that never is looks unattended"
+        )
+    elif pacing.distraction_range_s[1] <= 0:
+        status = Status.OFF
+        warnings.append(
+            f"linkedin.pacing.distraction_range_s is {list(pacing.distraction_range_s)}, so"
+            " a distraction pause adds nothing however often it is drawn"
+        )
+    low, high = pacing.burst_size
+    if low < 1 or high < low:
+        status = Status.OFF
+        warnings.append(
+            f"linkedin.pacing.burst_size is {list(pacing.burst_size)}, which is not a"
+            " range pacing.plan_burst_sizes accepts: it raises rather than planning a"
+            " run, so this fails part-way through rather than pacing badly"
+        )
+    elif low > cap:
+        status = Status.OFF
+        warnings.append(
+            f"linkedin.pacing.burst_size starts at {low}, more than the {cap} profile"
+            " visits a day allows, so a burst never reaches its own end and the break"
+            " between bursts never happens. Spec 9.5's bursts are 8 to 15"
+        )
+    break_low, break_high = pacing.burst_break_s
+    if break_high < break_low or break_low < 0:
+        status = Status.OFF
+        warnings.append(
+            f"linkedin.pacing.burst_break_s is {list(pacing.burst_break_s)}, which is not a range"
+        )
+    elif break_high < MIN_BURST_BREAK_S:
+        status = Status.OFF
+        warnings.append(
+            f"linkedin.pacing.burst_break_s tops out at {break_high:g}s, under the"
+            f" {MIN_BURST_BREAK_S:g}s this report treats as a break. Appendix C's range is"
+            " 5 to 20 minutes -- sessions, not streams"
+        )
+    return Protection(
+        name="human-like pacing",
+        status=status,
+        value=(
+            f"{pacing.profile_delay_median_s:g}s median (sigma {pacing.profile_delay_sigma:g}),"
+            f" {pacing.distraction_p:.0%} distraction, bursts of {low}-{high}"
+            f" then {break_low:g}-{break_high:g}s"
+        ),
+        warnings=tuple(warnings),
     )
 
 
@@ -825,11 +1015,12 @@ def _heat(posture_of_heat: HeatPosture, heat_settings: HeatSettings) -> Protecti
             f"the score is {posture_of_heat.score:.2f}, at or above the skip threshold of"
             f" {posture_of_heat.threshold:g}: browser jobs are skipped{resumes}"
         )
-    raised = (
-        "never raised"
-        if posture_of_heat.last_raised_at is None
-        else f"last raised {posture_of_heat.last_raised_at:%Y-%m-%d %H:%M UTC}"
-    )
+    if posture_of_heat.last_raised_at is not None:
+        raised = f"last raised {posture_of_heat.last_raised_at:%Y-%m-%d %H:%M UTC}"
+    elif posture_of_heat.cleared_at is not None:
+        raised = f"cleared {posture_of_heat.cleared_at:%Y-%m-%d %H:%M UTC}"
+    else:
+        raised = "never raised"
     level = (
         "score unreadable"
         if not posture_of_heat.readable
@@ -873,13 +1064,19 @@ def _heat_posture(
     multiplier = heat_rows.cooldown_multiplier(
         session, user, account_id, now=now, settings=heat_settings
     )
+    # A stored score of exactly 0.0 is what `heat.clear()` writes and nothing
+    # else does: `raise_heat` adds a positive `per_block` to a non-negative
+    # score, and a decayed score is never exactly zero. So the timestamp means
+    # "cleared", not "raised".
+    raised = stored_state is not None and stored_state.score > 0
     return HeatPosture(
         score=score,
         threshold=heat_settings.skip_threshold,
         multiplier=multiplier,
         tripped=tripped,
-        last_raised_at=None if stored_state is None else stored_state.updated_at,
+        last_raised_at=stored_state.updated_at if raised and stored_state else None,
         resumes_at=_resumes_at(score, now, settings=heat_settings) if tripped else None,
+        cleared_at=None if stored_state is None or raised else stored_state.updated_at,
     )
 
 
@@ -1076,15 +1273,26 @@ def _hours(interval: float) -> str:
 
 
 def _verdict(report: PostureReport) -> str:
+    """What this report is entitled to claim, which is narrower than "you are safe".
+
+    The report reads configuration and counters. It cannot see whether the code
+    that will do the work calls the enforcement -- and today, for five of the
+    protections, nothing does (:data:`UNENFORCED_TODAY`, stated in
+    :data:`GAPS`). So a clean report says *nothing is misconfigured*, which is
+    true and worth a great deal, rather than *every protection is in force*,
+    which would be the same sentence on the day a protection works and the day
+    it was never wired.
+    """
     total = len(report.protections)
     if report.ok:
-        return f"all clear: {total} protections, every one of them in force"
+        return f"nothing is misconfigured: {total} protections, none of them disabled"
     off = len(report.disabled)
     warned = _plural(len(report.warnings), "warning")
     if off:
         verb = "is" if off == 1 else "are"
-        return f"NOT all clear: {off} of {total} protections {verb} not in force, {warned} in all"
-    return f"NOT all clear: all {total} protections are in force, but {warned} need reading"
+        return f"NOT clear: {off} of {total} protections {verb} not in force, {warned} in all"
+    verb = "needs" if len(report.warnings) == 1 else "need"
+    return f"NOT clear: no protection is disabled, but {warned} {verb} reading"
 
 
 def _plural(count: int, noun: str) -> str:

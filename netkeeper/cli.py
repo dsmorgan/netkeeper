@@ -54,6 +54,7 @@ from netkeeper.services.backup import (
     list_backups,
     prune_backups,
 )
+from netkeeper.services.pacing import profiles as pacing_profiles
 from netkeeper.services.posture import SINGLE_ACCOUNT_ID, SessionProbe, posture
 from netkeeper.services.posture import render as render_posture
 from netkeeper.services.users import ensure_local_user
@@ -439,9 +440,8 @@ def posture_command(
     """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
-    session_probe = (
-        _session_probe(asyncio.run(run_preflight(_provider(settings)))) if probe else None
-    )
+    provider = _provider(settings)
+    session_probe = _session_probe(asyncio.run(run_preflight(provider))) if probe else None
     engine = make_engine(database_url())
     try:
         factory = make_session_factory(engine)
@@ -454,7 +454,11 @@ def posture_command(
                 account,
                 now=datetime.now(UTC),
                 settings=settings,
-                browser_mode=AttachBrowserProvider.mode,
+                # The provider this command would actually run with, not the
+                # class attribute: an instance that reported a different mode
+                # is exactly what this row exists to catch, and reading the
+                # class makes the check tautological.
+                browser_mode=provider.mode,
                 probe=session_probe,
             )
     finally:
@@ -506,6 +510,8 @@ def rehearse_command(
     the same scroll deltas, the same dwell, the same lognormal waits, the same
     bursts -- against a profile-shaped page served on this machine's loopback,
     and records every request the tab made: method, status, kind, timing, path.
+    The pacing is the one in your config file, not a demo default, so what you
+    watch is what a live run would do.
 
     It never touches LinkedIn. The site must be a loopback url, a linkedin.com
     host is refused by name, and a rehearsal that somehow reached one raises
@@ -517,6 +523,12 @@ def rehearse_command(
     replica: AbstractContextManager[str] = (
         nullcontext(site) if site is not None else serve_replica()
     )
+    # The pacing the owner configured, not the pacing module's defaults. The
+    # two are equal out of the box, which is exactly why passing them is worth
+    # doing: a rehearsal showing 25-second medians against a config asking for
+    # 5 would be a fidelity claim that is false, and fidelity is the whole
+    # point of rehearsing.
+    pacing = pacing_profiles(settings.linkedin.pacing)
     try:
         with replica as base:
             rehearsal = asyncio.run(
@@ -526,6 +538,8 @@ def rehearse_command(
                     visits=visits,
                     seed=chosen_seed,
                     time_scale=scale,
+                    delay=pacing.delay,
+                    burst=pacing.burst,
                 )
             )
     except (NotANeutralSite, ValueError) as exc:
