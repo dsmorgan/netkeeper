@@ -112,7 +112,7 @@ export function CardSteps({
     <section
       aria-label="What to do with this contact"
       data-testid="triage-steps"
-      className="flex min-w-0 flex-col gap-3 rounded-xl bg-card p-4 ring-1 ring-foreground/10"
+      className="flex min-w-0 flex-col gap-3 border-t border-foreground/10 pt-3"
     >
       <div className="flex flex-col gap-2">
         <Step number={1} label="Name">
@@ -147,35 +147,56 @@ export function CardSteps({
           )}
         </Step>
 
-        <Step number={2} label="Tags">
-          {contact.tags.length === 0 ? (
-            <span className="text-sm text-muted-foreground">None yet</span>
-          ) : (
-            <ul className="flex min-w-0 flex-wrap items-center gap-1">
-              {contact.tags.map((tag) => (
-                <li key={tag.id}>
-                  <span className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-xs ring-1 ring-foreground/10">
-                    {tag.name}
-                    <button
-                      type="button"
-                      // Named for the tag, so a screen reader hears which one
-                      // this takes off rather than a row of bare crosses.
-                      aria-label={`Take the tag ${tag.name} off ${name}`}
-                      className="rounded-sm px-0.5 leading-none opacity-60 hover:opacity-100 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-                      onClick={() => onRemoveTag(contact.id, tag.id)}
-                    >
-                      <span aria-hidden="true">×</span>
-                    </button>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
+        {/* Step 2 is written out rather than using `Step`, because the label
+            and the tags have to sit inside one live region together and the
+            Add tag button has to sit outside it. The tags used to live in the
+            card's atomic region, which announced them when the card advanced;
+            moving them here is right — an editor inside an atomic region is
+            worse — but it took that announcement with it, and left adding or
+            removing a tag saying nothing at all. So this row is its own polite,
+            atomic region: it re-reads "Tags founder, vp" when the card moves,
+            when a tag goes on, and when one comes off. The button is outside it
+            so that merely opening the picker, which hides the button, is not a
+            change worth announcing. */}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span aria-hidden="true" className="text-xs tabular-nums text-muted-foreground">
+            2
+          </span>
+          <div
+            aria-live="polite"
+            aria-atomic="true"
+            data-testid="triage-tags"
+            className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1"
+          >
+            <span className="w-11 shrink-0 text-sm text-muted-foreground">Tags</span>
+            {contact.tags.length === 0 ? (
+              <span className="text-sm text-muted-foreground">None yet</span>
+            ) : (
+              <ul className="flex min-w-0 flex-wrap items-center gap-1">
+                {contact.tags.map((tag) => (
+                  <li key={tag.id}>
+                    <span className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-xs ring-1 ring-foreground/10">
+                      {tag.name}
+                      <button
+                        type="button"
+                        // Named for the tag, so a screen reader hears which one
+                        // this takes off rather than a row of bare crosses.
+                        aria-label={`Take the tag ${tag.name} off ${name}`}
+                        className="rounded-sm px-0.5 leading-none opacity-60 hover:opacity-100 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+                        onClick={() => onRemoveTag(contact.id, tag.id)}
+                      >
+                        <span aria-hidden="true">×</span>
+                      </button>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           {open !== 'tags' && (
             <Button
               size="xs"
               variant="outline"
-              className="ml-auto"
               aria-keyshortcuts={bindingFor('tag')?.aria}
               onClick={() => onOpen('tags')}
             >
@@ -183,7 +204,7 @@ export function CardSteps({
               <Key action="tag" />
             </Button>
           )}
-        </Step>
+        </div>
 
         {open === 'tags' && (
           <TagPicker

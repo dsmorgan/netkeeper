@@ -126,7 +126,11 @@ export function QueueList({
       tabIndex={-1}
       aria-label="Queue"
       data-testid="triage-queue-list"
-      className="flex min-w-0 flex-col gap-2 rounded-xl bg-card p-3 ring-1 ring-foreground/10 focus-visible:outline-none"
+      // Focusable only as the last resort in the effect above, when the whole
+      // trail went and there is no row left to hand focus to — so it needs a
+      // visible ring of its own, or a sighted keyboard user is told nothing
+      // about where they just landed.
+      className="flex min-w-0 flex-col gap-2 rounded-xl bg-card p-3 ring-1 ring-foreground/10 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
     >
       <div>
         <h3 className="font-medium">Queue · {filterLabel}</h3>

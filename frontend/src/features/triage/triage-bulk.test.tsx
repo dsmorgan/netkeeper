@@ -289,13 +289,30 @@ describe('what netkeeper decided (P1-28)', () => {
     await waitFor(() => expect(backend.byId(4).met).toBe('not_met'))
     expect(backend.byId(1).met).toBe('unknown')
     expect(await screen.findByRole('status')).toHaveTextContent(/Marked 3 contacts as not met/)
+    // `apply_suggestion` writes `batch.kind`, which is `bulk_not_met` here —
+    // pinned against the service's own assertion in
+    // `tests/test_triage.py::test_a_tag_with_a_meaning_is_offered_as_its_own_batch`.
+    // The fake recorded `bulk_met` for every batch, which nothing read yet and
+    // which would have been wrong the first time anything did.
+    expect(new Set(backend.decisions.map((decision) => decision.kind))).toEqual(
+      new Set(['bulk_not_met']),
+    )
   })
 
   it('offers no batch at all about a contact nothing is known of (#142)', async () => {
     // The shape the removed `not_met_no_evidence` batch existed to sweep up:
     // six contacts, three of them with nothing on file at all. The screen has
     // one offer, and it is about the three it has evidence for.
-    renderTriage({ contacts: 6, withMessages: 3 })
+    //
+    // Contact 6 is given a company of their own on purpose. The fixture's six
+    // contacts share three companies round-robin, and the removed batch
+    // withheld anyone who shared a company with another contact — so against
+    // the plain fixture it would have covered nobody, and this test would have
+    // passed with the batch restored. It is the difference between asserting
+    // that nothing is offered and asserting that nothing *could* be.
+    const backend = createFakeBackend({ contacts: 6, withMessages: 3 })
+    backend.byId(6).current_company = 'Solo Works'
+    renderTriage({ backend })
     await currentName()
     await findBannerFor('met_with_messages')
 

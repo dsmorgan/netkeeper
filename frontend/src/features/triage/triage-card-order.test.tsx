@@ -178,23 +178,57 @@ describe('the explainer above the card', () => {
     }
   })
 
-  it('is open the first time, in the method’s own words', async () => {
+  it('always shows the goal, and folds the definitions until they are asked for', async () => {
+    // The definitions used to open by default and pushed the decision row off
+    // the bottom of a 1280x800 laptop — the one control the screen exists for.
+    // The goal line stays, because it is one sentence and it is what somebody
+    // glancing at the screen needs.
     renderTriage({ contacts: 4 })
     await currentName()
 
     const explainer = screen.getByTestId('triage-explainer')
     expect(explainer).toHaveTextContent('Decide who in your network you have actually met')
+    expect(explainer).not.toHaveTextContent('If you have met them once, they count')
+    expect(within(explainer).getByRole('button')).toHaveAttribute('aria-expanded', 'false')
+    expect(within(explainer).getByRole('button')).toHaveTextContent('What counts as met?')
+  })
+
+  it('still lets a first-time reader learn what Met means without opening anything', async () => {
+    // What makes folding the long version safe: the card answers the same
+    // question beside the button that asks it, in both states. If this ever
+    // stops being true, folding the explainer has to stop too.
+    renderTriage({ contacts: 4 })
+    await currentName()
+
+    expect(within(screen.getByTestId('triage-explainer')).getByRole('button')).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
+    const meanings = screen.getByTestId('decision-meanings')
+    for (const meaning of DECISION_MEANINGS) {
+      expect(meanings).toHaveTextContent(meaning.term)
+      expect(meanings).toHaveTextContent(meaning.short)
+    }
+  })
+
+  it('gives the method\u2019s own words when it is opened', async () => {
+    renderTriage({ contacts: 4 })
+    await currentName()
+
+    fireEvent.click(within(screen.getByTestId('triage-explainer')).getByRole('button'))
+
+    const explainer = screen.getByTestId('triage-explainer')
     expect(explainer).toHaveTextContent('in person, on a video call, or in a real conversation')
     expect(explainer).toHaveTextContent('If you have met them once, they count')
     expect(explainer).toHaveTextContent('never actually spoken with')
     expect(within(explainer).getByRole('button')).toHaveAttribute('aria-expanded', 'true')
   })
 
-  it('stays collapsed for the next visit once it is collapsed', async () => {
+  it('stays open for the next visit once it is opened', async () => {
     const first = renderTriage({ contacts: 4 })
     await currentName()
     fireEvent.click(within(screen.getByTestId('triage-explainer')).getByRole('button'))
-    expect(screen.getByTestId('triage-explainer')).not.toHaveTextContent(
+    expect(screen.getByTestId('triage-explainer')).toHaveTextContent(
       'If you have met them once, they count',
     )
     first.unmount()
@@ -202,14 +236,13 @@ describe('the explainer above the card', () => {
     renderTriage({ contacts: 4 })
     await currentName()
 
-    const explainer = screen.getByTestId('triage-explainer')
-    expect(within(explainer).getByRole('button')).toHaveAttribute('aria-expanded', 'false')
-    // The goal line is not part of what collapses: it is one sentence, and it
-    // is the thing somebody glancing at the screen needs.
-    expect(explainer).toHaveTextContent('Decide who in your network you have actually met')
+    expect(within(screen.getByTestId('triage-explainer')).getByRole('button')).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    )
   })
 
-  it('opens again when it is expanded, and stays open', async () => {
+  it('folds again for the next visit once it is folded back', async () => {
     const first = renderTriage({ contacts: 4 })
     await currentName()
     const toggle = () =>
@@ -223,14 +256,14 @@ describe('the explainer above the card', () => {
 
     expect(within(screen.getByTestId('triage-explainer')).getByRole('button')).toHaveAttribute(
       'aria-expanded',
-      'true',
+      'false',
     )
   })
 
-  it('renders, open, when storage throws the way a private window does', async () => {
+  it('renders when storage throws the way a private window does', async () => {
     // Not "comes back empty": `localStorage` can throw on the getter itself
     // with site data blocked, and an unguarded read would take the whole
-    // screen down with it rather than one collapsed section.
+    // screen down with it rather than one folded section.
     const denied = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
       throw new Error('access to storage is not allowed from this context')
     })
@@ -242,13 +275,100 @@ describe('the explainer above the card', () => {
     await currentName()
 
     expect(screen.getByTestId('triage-explainer')).toHaveTextContent(
-      'If you have met them once, they count',
+      'Decide who in your network you have actually met',
     )
     expect(denied).toHaveBeenCalled()
-    // And collapsing it still works for as long as the page is open.
+    // And opening it still works for as long as the page is open.
     fireEvent.click(within(screen.getByTestId('triage-explainer')).getByRole('button'))
-    expect(screen.getByTestId('triage-explainer')).not.toHaveTextContent(
+    expect(screen.getByTestId('triage-explainer')).toHaveTextContent(
       'If you have met them once, they count',
     )
+  })
+})
+
+/**
+ * The parts of the fold fix that jsdom can see.
+ *
+ * jsdom has no layout, so the number that matters — where the decision row
+ * lands in a real browser at a real viewport — is measured by hand and recorded
+ * in the PR. What can be held here is the structure that produced it, so the
+ * three changes cannot be undone without something going red.
+ */
+describe('the shape that keeps the decision row on screen', () => {
+  it('draws the card and its steps inside one box, not two', async () => {
+    renderTriage({ contacts: 4 })
+    await currentName()
+
+    const card = screen.getByTestId('triage-card')
+    const steps = screen.getByTestId('triage-steps')
+    expect(card.parentElement).toBe(steps.parentElement)
+    // A second bordered box is a second box's worth of padding between the
+    // person and the thing they came here to press.
+    for (const node of [card, steps]) {
+      expect(node.className).not.toMatch(/\bring-1\b/)
+    }
+    expect(card.parentElement?.className).toMatch(/\bring-1\b/)
+  })
+
+  it('keeps the notice line below the card rather than above it', async () => {
+    renderTriage({ contacts: 4 })
+    await currentName()
+
+    const notice = screen.getByTestId('triage-notice')
+    const steps = screen.getByTestId('triage-steps')
+    expect(steps.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // Still a live region, and still in the DOM before it has anything to say,
+    // which is what makes a later change announce at all.
+    expect(notice).toHaveAttribute('aria-live', 'polite')
+    expect(notice.textContent).toBe('')
+  })
+
+  it('reserves the headline two lines whatever the contact says', async () => {
+    // The one part of the card whose height follows the contact, with the
+    // decision row underneath it: a wrapped headline moved the buttons 40px
+    // down on that card alone.
+    const backend = createFakeBackend({ contacts: 4 })
+    backend.byId(1).headline = 'A headline long enough to wrap onto a second line and then some'
+    renderTriage({ backend })
+    await currentName()
+
+    const headline = screen.getByTestId('triage-card').querySelector('p.line-clamp-2')
+    expect(headline).not.toBeNull()
+    expect(headline?.className).toMatch(/min-h-\[2lh\]/)
+    // Clamping is visual: the whole headline is still read out.
+    expect(headline?.textContent).toContain('and then some')
+  })
+})
+
+describe('the tags on the card', () => {
+  it('are a live region, so a screen reader hears them change', async () => {
+    // They used to be inside the card's own atomic live region, which
+    // announced them whenever the card advanced. Moving them to the steps was
+    // right, but it took that with it and left adding one saying nothing.
+    renderTriage({ backend: withATagOnAda() })
+    await currentName()
+
+    const tags = screen.getByTestId('triage-tags')
+    expect(tags).toHaveAttribute('aria-live', 'polite')
+    expect(tags).toHaveAttribute('aria-atomic', 'true')
+    expect(tags).toHaveTextContent('Tags')
+    expect(tags).toHaveTextContent('founder')
+    // The Add tag button is outside it: opening the picker hides that button,
+    // and that is not a change worth announcing.
+    expect(within(tags).queryByRole('button', { name: /^Add tag/ })).toBeNull()
+  })
+
+  it('announces the next contact\u2019s tags when the card advances', async () => {
+    const backend = withATagOnAda()
+    renderTriage({ backend })
+    await currentName()
+    expect(screen.getByTestId('triage-tags')).toHaveTextContent('founder')
+
+    press('m')
+
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+    // Same region, new contents, so the region announces. Bo has none.
+    expect(screen.getByTestId('triage-tags')).toHaveTextContent('None yet')
+    expect(screen.getByTestId('triage-tags')).not.toHaveTextContent('founder')
   })
 })

@@ -42,7 +42,7 @@ export interface FakeContact extends TriageContact {
 interface FakeDecision {
   id: number
   contact_id: number
-  kind: 'decide' | 'preferred_name' | 'bulk_met'
+  kind: 'decide' | 'preferred_name' | 'bulk_met' | 'bulk_not_met'
   before_state: Record<string, string | null>
   after_state: Record<string, string | null>
   batch_id: string | null
@@ -220,6 +220,7 @@ type RecordedField = 'met' | 'met_source' | 'triaged_at' | 'preferred_name'
 const RECORDED_FIELDS: Record<FakeDecision['kind'], readonly RecordedField[]> = {
   decide: ['met', 'met_source', 'triaged_at'],
   bulk_met: ['met', 'met_source', 'triaged_at'],
+  bulk_not_met: ['met', 'met_source', 'triaged_at'],
   preferred_name: ['preferred_name'],
 }
 
@@ -282,8 +283,12 @@ function tagBatch(tag: Tag): FakeBatch {
     title: `Mark everyone tagged ${tag.name} as ${decidesMet ? 'met' : 'not met'}`,
     met: decidesMet ? 'met' : 'not_met',
     tagId: tag.id,
+    // Word for word what `_tag_batch` renders, including the construction that
+    // keeps the verb out of the count's way. The fake used to write "person
+    // carries", which quietly repaired a sentence the service got wrong — so
+    // no test here could ever have shown it.
     describe: (count) =>
-      `${count} untriaged ${count === 1 ? 'person carries' : 'people carry'} the tag ${tag.name}, ` +
+      `The tag ${tag.name} is on ${count} untriaged ${count === 1 ? 'person' : 'people'}, ` +
       `which you have said means you ${decidesMet ? 'have met' : 'have not met'} them.`,
     // `_carries_tag`: a rule's tag counts the same as one placed by hand.
     covers: (contact) => contact.tags.some((applied) => applied.id === tag.id),
@@ -838,14 +843,20 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
         )
       }
       const batchId = `batch-${nextDecisionId}`
+      // `apply_suggestion` writes `batch.kind`, which is `BULK_NOT_MET` for a
+      // batch that decides `not_met`. Recording `bulk_met` for all of them was
+      // inert while nothing read `kind` back — and tag batches are the only
+      // `not_met` batches there are now, so the first test worded off `kind`
+      // would have passed here and been wrong in production.
+      const kind = batch.met === 'met' ? ('bulk_met' as const) : ('bulk_not_met' as const)
       for (const contact of matching) {
-        const before = snapshot(contact, RECORDED_FIELDS.bulk_met)
+        const before = snapshot(contact, RECORDED_FIELDS[kind])
         contact.met = batch.met
         // What the review pass serves, and what keeps a batch's decision from
         // passing as one the person made.
         contact.met_source = 'automatic'
         contact.triaged_at = new Date().toISOString()
-        record(contact, 'bulk_met', before, batchId)
+        record(contact, kind, before, batchId)
       }
       return jsonResponse({
         key: batch.key,

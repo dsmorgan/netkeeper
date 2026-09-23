@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import quote
 
 import factories
 import httpx
@@ -771,12 +772,28 @@ async def test_a_tag_the_user_gave_a_meaning_becomes_a_batch(
     key = f"tag:{tag_id}"
     assert offers[key]["count"] == 1 and offers[key]["met"] == "not_met"
     assert offers[key]["tag_id"] == tag_id
-    preview = await _get(client, f"{TRIAGE}/suggestions/{key}/contacts")
+    # One contact, and the sentence about it is English. The count and the noun
+    # agree through ``{people}``; the verb cannot, so the sentence is built not
+    # to need it to. A tag batch with exactly one untriaged contact is the
+    # ordinary case now that these are the only ``not_met`` batches there are.
+    assert offers[key]["description"] == (
+        "The tag recruiter is on 1 untriaged person, "
+        "which you have said means you have not met them."
+    )
+    # The path the browser actually sends. `openapi-fetch` percent-encodes a
+    # path parameter, so a tag batch's colon goes over the wire as `%3A`, and
+    # every committed test until now used the unencoded form — which the router
+    # also accepts, so neither the client nor the server was pinned to the same
+    # string.
+    encoded = f"tag%3A{tag_id}"
+    assert quote(key, safe="") == encoded
+    preview = await _get(client, f"{TRIAGE}/suggestions/{encoded}/contacts")
     assert [item["id"] for item in preview["items"]] == [contact_id]
     applied = await client.post(
-        f"{TRIAGE}/suggestions/{key}/apply", json={"expected_count": 1}, headers=CSRF
+        f"{TRIAGE}/suggestions/{encoded}/apply", json={"expected_count": 1}, headers=CSRF
     )
     assert applied.status_code == 200, applied.text
+    assert applied.json()["key"] == key, "the service answers with the key, not the encoding"
     assert _contact_row(running_app, LOCAL_USER_ID, contact_id).met is ContactMet.NOT_MET
 
 
