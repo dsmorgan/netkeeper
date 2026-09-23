@@ -100,6 +100,14 @@ def cooldown_multiplier(state: HeatState, now: datetime, *, half_life_hours: flo
     The caller multiplies ``human_delay`` medians by this and divides a
     per-run budget by it (through :func:`shrink`) -- the same number drives
     both, because both are "how cautious to be while warm" (spec 9.7).
+
+    ``1.0 + score`` is this module's own choice, not spec 9.7's: the spec says
+    only that delays stretch and the budget shrinks while warm, not by how
+    much. The score itself is not capped here, but in practice the caller
+    stops browser work once :func:`is_skipping` trips well before the
+    multiplier grows large -- with the defaults in Appendix C
+    (``skip_threshold=2.5``), the worst multiplier a run ever operates under
+    is 3.5.
     """
     score = decayed_score(state, now, half_life_hours=half_life_hours)
     return COOLDOWN_FLOOR + score
@@ -108,8 +116,10 @@ def cooldown_multiplier(state: HeatState, now: datetime, *, half_life_hours: flo
 def shrink(base_limit: int, multiplier: float) -> int:
     """``base_limit`` divided by ``multiplier``, floored at 1 unit.
 
-    Spec 9.7: "the per-run budget shrinks, never to zero." A multiplier below
-    1 would grow the budget instead of shrinking it, so it is refused.
+    Spec 9.7 requires only the property this has: "the per-run budget
+    shrinks, never to zero." Division-with-a-floor is this module's own way
+    of getting there, not a curve the spec specifies. A multiplier below 1
+    would grow the budget instead of shrinking it, so it is refused.
     """
     if multiplier < COOLDOWN_FLOOR:
         raise ValueError("multiplier must be at least 1.0")
