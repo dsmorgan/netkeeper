@@ -404,7 +404,7 @@ Depends on: P0-03.
 Done when: budget math is tested across the local-day boundary; heat decays as configured; overshoot by one unit is the maximum.
 
 **P2-06 Connections sync** · lane extractor · L
-Goal: `SyncJobSpec` in, `ConnectionsPage` out; full and incremental modes; `linkedin/apply.py` applying the edge lifecycle from spec 9.8 inside a session; `linkedin_account` model.
+Goal: `SyncJobSpec` in, `ConnectionsPage` out; full and incremental modes; `crm/apply.py` applying the edge lifecycle from spec 9.8 inside a session (under `crm/`, not `linkedin/`: a module under `linkedin/` that opens a session would break spec 9.10's boundary); `linkedin_account` model.
 Depends on: P2-01, P2-02, P2-05, P1-02.
 Done when: fixture-driven full sync creates and updates contacts; incremental stops at the first known page; two misses set `li_disconnected_at`; a reappearance clears it.
 
@@ -446,7 +446,7 @@ Done when: it passes on Chrome stable on macOS and is documented in CONTRIBUTING
 **P2-14 Extractor boundary enforcement** · lane extractor · S · `safety`
 Goal: an import-linter test that fails if anything under `linkedin/` imports `models` or `db`; the job spec and result dataclasses from spec 9.10 as the only interface.
 Depends on: P2-06.
-Done when: the test exists and passes; `linkedin/apply.py` is the only module that touches a session.
+Done when: the test exists and passes; `crm/apply.py` is the only module that maps extractor results onto rows.
 
 **P2-15 Prior campaign history import** · lane core · M · `safety`
 Goal: import the outreach history from the previous mailing tool so netkeeper knows who was already contacted before it sends anything. The export is one `.xlsx` workbook, one tab per campaign, laid out as a report rather than a table: a campaign summary row, then side-by-side blocks of openers, clickers, and bounced addresses at column offsets that differ between tabs. Match recipients through `crm/identity.py` on email address, write one `email_out` interaction per recipient per campaign dated from the campaign start so `last_contacted_at` becomes correct, mark bounced addresses so the phase 3 enrollment guard in F18 has something to read, and decide where opens and clicks live alongside the phase 3 campaign tables rather than ahead of them. The source records delivery only: replies, positive responses, and unsubscribes are not in it and come from the phase 3 Gmail reply detection run backwards over the historical threads. Do not infer a decline from a non-open.
