@@ -169,6 +169,48 @@ def called_names(source: str) -> Iterator[tuple[int, str]]:
             yield node.lineno, node.func.id
 
 
+def reached_names(source: str, path: Path = MEMORY) -> Iterator[tuple[int, str]]:
+    """Every way ``source`` can reach a name, called or not.
+
+    A deny-list that only reads call sites is answered by one line of indirection,
+    so this reads four:
+
+    - a call, as :func:`called_names` sees it;
+    - an attribute *reference*, called or not: ``start = p.chromium.launch`` holds
+      the method to call later, and ``start()`` alone names nothing on the list;
+    - the member of a ``from`` import, whatever it is renamed to:
+      ``from os import system as sh`` makes ``sh()`` a process start;
+    - a string literal handed to ``getattr`` or ``operator.attrgetter``.
+
+    It cannot see a name built at run time, which is why every rule here is also a
+    review rule, not only a test.
+    """
+    yield from called_names(source)
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute):
+            yield node.lineno, node.attr
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                yield node.lineno, alias.name
+        elif isinstance(node, ast.Call) and _names_an_attribute(node):
+            for arg in node.args[1:2] if _is_getattr(node) else node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    yield node.lineno, arg.value
+
+
+def _is_getattr(node: ast.Call) -> bool:
+    return isinstance(node.func, ast.Name) and node.func.id == "getattr"
+
+
+def _names_an_attribute(node: ast.Call) -> bool:
+    """``getattr(obj, "name")`` and ``operator.attrgetter("name")``."""
+    if _is_getattr(node):
+        return True
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+    return name == "attrgetter"
+
+
 def imported_names(source: str, path: Path = MEMORY) -> Iterator[tuple[int, str]]:
     """Every imported dotted name: the module, and ``module.member`` for ``from`` imports.
 
@@ -218,7 +260,7 @@ def scan(
 
 
 def launch_calls(source: str, path: Path = MEMORY) -> Iterator[Finding]:
-    for line, name in called_names(source):
+    for line, name in reached_names(source, path):
         if name in LAUNCH_CALLS:
             yield Finding(path, line, f"{name}() starts a browser (ADR 0002: attach only)")
 
@@ -227,13 +269,13 @@ def process_starts(source: str, path: Path = MEMORY) -> Iterator[Finding]:
     for line, name in imported_names(source, path):
         if name.split(".")[0] in PROCESS_MODULES:
             yield Finding(path, line, f"imports {name}, which can start a process")
-    for line, name in called_names(source):
+    for line, name in reached_names(source, path):
         if name in PROCESS_CALLS:
             yield Finding(path, line, f"{name}() starts a process")
 
 
 def context_mutations(source: str, path: Path = MEMORY) -> Iterator[Finding]:
-    for line, name in called_names(source):
+    for line, name in reached_names(source, path):
         if name in CONTEXT_MUTATORS:
             yield Finding(path, line, f"{name}() changes the user's browser context (spec 9.1)")
 
@@ -371,6 +413,35 @@ def test_process_scanner_catches_the_asyncio_spelling() -> None:
     assert list(process_starts("await asyncio.create_subprocess_shell('open -a Chrome')\n"))
     assert list(process_starts("await loop.subprocess_exec(protocol, 'chrome')\n"))
     assert not list(process_starts("import asyncio\nasyncio.sleep(0)\n"))
+
+
+def test_the_scanners_see_a_renamed_import() -> None:
+    """``as`` is not a way around the list: the import line itself is the finding."""
+    spawn = (
+        "from asyncio import create_subprocess_exec as spawn\n"
+        "async def go():\n"
+        "    await spawn('open', '-na', 'Google Chrome')\n"
+    )
+    assert list(process_starts(spawn))
+    assert list(process_starts("from os import system as sh\nsh('open -a Chrome')\n"))
+    assert list(launch_calls("from playwright.async_api import launch as go\n"))
+    assert not list(process_starts("from asyncio import sleep as nap\n"))
+
+
+def test_the_scanners_see_a_method_held_before_it_is_called() -> None:
+    """Holding the bound method and calling it later names nothing at the call."""
+    assert list(launch_calls("start = p.chromium.launch\nawait start()\n"))
+    assert list(context_mutations("add = context.add_cookies\nawait add([])\n"))
+    assert list(process_starts("run = os.posix_spawn\n"))
+    assert not list(launch_calls("start = p.chromium.connect_over_cdp\n"))
+
+
+def test_the_scanners_see_getattr_with_a_literal() -> None:
+    """A literal handed to ``getattr`` or ``attrgetter`` is a reference by another name."""
+    assert list(launch_calls("await getattr(p.chromium, 'launch')()\n"))
+    assert list(context_mutations("getattr(context, 'new_cdp_session')(page)\n"))
+    assert list(process_starts("operator.attrgetter('system')(os)('open -a Chrome')\n"))
+    assert not list(launch_calls("getattr(page, 'url')\n"))
 
 
 def test_context_scanner_catches_a_mutation() -> None:
