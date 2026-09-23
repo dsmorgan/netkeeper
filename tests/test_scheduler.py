@@ -894,6 +894,140 @@ def test_the_default_cadences_are_the_ones_spec_9_4_names() -> None:
     assert DEFAULT_SCHEDULES[scheduler.JobKind.CONNECTIONS_FULL].interval == timedelta(days=7)
 
 
+def test_only_the_full_sync_runs_on_first_setup() -> None:
+    """Spec 9.4 says "runs on first setup" of the full sync and of nothing else."""
+    assert {kind for kind, sch in DEFAULT_SCHEDULES.items() if sch.run_on_first_setup} == {
+        scheduler.JobKind.CONNECTIONS_FULL
+    }
+
+
+# --- first setup: the full sync does not wait a week (#161) --------------------
+
+FULL = DEFAULT_SCHEDULES[scheduler.JobKind.CONNECTIONS_FULL]
+
+
+def _assert_in_catchup_window(due: datetime, now: datetime) -> None:
+    assert now + timedelta(minutes=scheduler.CATCHUP_MIN_MINUTES) <= due
+    assert due <= now + timedelta(minutes=scheduler.CATCHUP_MAX_MINUTES)
+
+
+def test_first_setup_is_due_after_the_catchup_jitter_not_an_interval_out() -> None:
+    due, is_catchup, reason = scheduler.compute_due(
+        None, now=NOW, interval=timedelta(days=7), rng=Random(0), first_setup=True
+    )
+    _assert_in_catchup_window(due, NOW)
+    assert is_catchup is False  # nothing was missed
+    assert reason == "first setup"
+
+
+def test_first_setup_does_not_change_a_restored_or_stale_due_time() -> None:
+    """``first_setup`` only answers the ``prior_due is None`` question."""
+    future = NOW + timedelta(days=3)
+    assert scheduler.compute_due(
+        future, now=NOW, interval=timedelta(days=7), rng=Random(0), first_setup=True
+    ) == (future, False, "restored")
+    _, is_catchup, _ = scheduler.compute_due(
+        NOW - timedelta(days=1),
+        now=NOW,
+        interval=timedelta(days=7),
+        rng=Random(0),
+        first_setup=True,
+    )
+    assert is_catchup is True
+
+
+def test_a_fresh_full_sync_is_due_within_the_catchup_window(writer: Session, user: User) -> None:
+    result = _establish(writer, user, schedule=FULL)
+
+    _assert_in_catchup_window(result.due, NOW)
+    assert result.is_catchup is False
+    assert scheduler.stored_due(writer, user, ACCOUNT, FULL.kind) == result.due
+
+
+def test_a_fresh_full_sync_outside_active_hours_waits_for_the_window(
+    writer: Session, user: User
+) -> None:
+    late = datetime(2026, 9, 20, 22, 0, tzinfo=UTC)  # outside 08:30-21:30
+
+    result = _establish(
+        writer, user, now=late, schedule=FULL, active_start=time(8, 30), active_end=time(21, 30)
+    )
+
+    assert result.due == datetime(2026, 9, 21, 8, 30, tzinfo=UTC)
+
+
+def test_a_fresh_install_keeps_the_other_kinds_first_due_and_the_gap(
+    writer: Session, user: User
+) -> None:
+    """Every default kind at once, outside active hours: the full sync snaps to
+    08:30 and so do enrich and inbox (22:00 + 3 h), so the interleave gap has
+    real work to do. The other three keep their one-interval first fire."""
+    late = datetime(2026, 9, 20, 22, 0, tzinfo=UTC)
+    window = datetime(2026, 9, 21, 8, 30, tzinfo=UTC)
+
+    results = scheduler.sync_account_schedule(
+        writer,
+        user,
+        ACCOUNT,
+        now=late,
+        rng=Random(0),
+        tz="UTC",
+        active_start=time(8, 30),
+        active_end=time(21, 30),
+    )
+
+    dues = sorted(r.due for r in results.values())
+    assert results[scheduler.JobKind.CONNECTIONS_FULL].due >= window
+    assert results[scheduler.JobKind.CONNECTIONS_FULL].due < window + timedelta(hours=1)
+    # One interval out (22:00 the next day), then snapped to the window after it.
+    assert results[scheduler.JobKind.CONNECTIONS_INCREMENTAL].due == window + timedelta(days=1)
+    for kind in (
+        scheduler.JobKind.CONNECTIONS_INCREMENTAL,
+        scheduler.JobKind.ENRICH,
+        scheduler.JobKind.INBOX,
+    ):
+        assert results[kind].reason == "no stored schedule yet"
+    assert all(b - a >= scheduler.MIN_JOB_KIND_GAP for a, b in pairwise(dues))
+
+
+def test_restarting_an_established_full_sync_does_not_run_it_again(
+    writer: Session, user: User
+) -> None:
+    """The cold path's "restored unchanged": a restart is not first setup."""
+    first = _establish(writer, user, schedule=FULL)
+    fired_at = first.due
+    scheduler.record_fired(
+        writer,
+        user,
+        ACCOUNT,
+        FULL.kind,
+        due=fired_at,
+        schedule=FULL,
+        tz="UTC",
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+    )
+
+    restart = _establish(writer, user, now=fired_at + timedelta(hours=1), schedule=FULL)
+
+    assert restart.changed is False
+    assert restart.due == fired_at + timedelta(days=7)
+
+
+def test_retiming_an_established_full_sync_is_not_first_setup(writer: Session, user: User) -> None:
+    """A changed fingerprint also reaches ``compute_due`` with no prior due time,
+    but it is an established schedule being retimed: one interval out, as before."""
+    _establish(writer, user, schedule=FULL)
+    later = NOW + timedelta(hours=1)
+
+    retimed = _establish(
+        writer, user, now=later, schedule=FULL, active_start=time(0, 0), active_end=time(23, 59)
+    )
+
+    assert retimed.reason == "no stored schedule yet"
+    assert retimed.due == later + timedelta(days=7)
+
+
 def test_the_default_heat_gate_is_the_config_default_not_an_ad_hoc_one() -> None:
     """Spec 9.7's skip is unconditional, so the default is config's own
     ``[linkedin.heat]`` -- never off, and never numbers invented here."""

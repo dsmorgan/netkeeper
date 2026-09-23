@@ -395,6 +395,67 @@ async def test_two_job_kinds_never_fire_in_the_same_minute(db_path: str, owner: 
         assert len(kinds) == 1, f"more than one job kind fired in the same minute: {kinds}"
 
 
+# --- first setup: the full sync runs on day 0 (#161) --------------------------
+
+
+def _full_syncs(result: simulate.SimResult) -> list[simulate.SimFire]:
+    return [f for f in result.fires if f.kind == scheduler.JobKind.CONNECTIONS_FULL and f.fired]
+
+
+async def test_a_fresh_install_runs_the_full_sync_on_day_zero(db_path: str, owner: User) -> None:
+    """Spec 9.4: the full sync "runs on first setup and weekly". Every default kind,
+    so the day-0 fire also has to clear the interleave gap against the others."""
+    result = await simulate.simulate(
+        _make_factory(db_path),
+        owner,
+        ACCOUNT,
+        start=START,
+        end=START + timedelta(days=1),
+        seed=0,
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+    )
+
+    full = _full_syncs(result)
+    assert len(full) == 1
+    assert START + timedelta(minutes=CATCHUP_BOUNDS[0]) <= full[0].at
+    assert full[0].at <= START + timedelta(minutes=CATCHUP_BOUNDS[1])
+    assert full[0].is_catchup is False
+    fired_minutes = [int(f.at.timestamp() // 60) for f in result.fires if f.fired]
+    assert len(fired_minutes) == len(set(fired_minutes))
+
+
+async def test_restarting_an_established_install_does_not_rerun_the_full_sync(
+    db_path: str, owner: User
+) -> None:
+    """The hot path / cold path line: a restart two days in restores the weekly
+    due time, so the next full sync is a week after the day-0 one, not now."""
+    first = await simulate.simulate(
+        _make_factory(db_path),
+        owner,
+        ACCOUNT,
+        start=START,
+        end=START + timedelta(days=2),
+        seed=0,
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+    )
+    (day_zero,) = _full_syncs(first)
+
+    restarted = await simulate.simulate(
+        _make_factory(db_path),  # a new process against the same file
+        owner,
+        ACCOUNT,
+        start=START + timedelta(days=2),
+        end=START + timedelta(days=10),
+        seed=1,
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+    )
+
+    assert [f.at for f in _full_syncs(restarted)] == [day_zero.at + timedelta(days=7)]
+
+
 # --- the sleeping laptop: an outage that never restarts the process ----------
 
 
