@@ -220,6 +220,13 @@ DEFAULT_SCHEDULES: Final[dict[JobKind, JobSchedule]] = {
 CATCHUP_MIN_MINUTES: Final = 5.0
 CATCHUP_MAX_MINUTES: Final = 20.0
 
+# A ``run_on_first_setup`` kind whose first fire is heat-skipped has not run,
+# so it must not wait a whole interval (a week, for the full sync) for its next
+# chance. It is offered again this long after the skip instead: long enough
+# that a warm account is not polled into a skip every few minutes, short enough
+# that the first full sync still lands the day heat clears (#161).
+FIRST_SETUP_RETRY: Final = timedelta(hours=1)
+
 # Spec 9.5: "never run enrichment and a message send in the same minute; the
 # scheduler interleaves job kinds with a gap." Two minutes is comfortably more
 # than the one full minute a collision needs to be resolved (see
@@ -622,6 +629,7 @@ def record_fired(
     active_start: time = pacing.DEFAULT_ACTIVE_START,
     active_end: time = pacing.DEFAULT_ACTIVE_END,
     handler_ran: bool = True,
+    now: datetime | None = None,
 ) -> datetime:
     """Advance ``kind``'s due time to the next cycle after a fire (executed or
     heat-skipped -- either way, this fire happened and the cadence moves on).
@@ -632,7 +640,9 @@ def record_fired(
 
     ``handler_ran`` is False for a heat-skipped fire: the cadence moves on,
     but the kind has not yet *run*, so a ``run_on_first_setup`` kind keeps its
-    first-setup standing (see :class:`JobSchedule`).
+    first-setup standing (see :class:`JobSchedule`) -- and, since it still has
+    not run, it is offered again :data:`FIRST_SETUP_RETRY` after the later of
+    ``due`` and ``now`` rather than a whole interval out.
     """
     _require_writer(session, "scheduler.record_fired")
     state = _load_state(session, user, account_id, kind)
@@ -640,7 +650,10 @@ def record_fired(
         raise RuntimeError(
             f"record_fired: no established schedule for account {account_id}/{kind.value}"
         )
-    next_due = due + schedule.interval
+    if not handler_ran and not state.fired_once and schedule.run_on_first_setup:
+        next_due = max(due, now or due) + FIRST_SETUP_RETRY
+    else:
+        next_due = due + schedule.interval
     next_due = _snap_to_active_hours(
         next_due,
         tz,
@@ -772,6 +785,7 @@ async def poll_and_fire(
             active_start=active_start,
             active_end=active_end,
             handler_ran=skipped_reason is None,
+            now=now,
         )
     fired = skipped_reason is None
     if fired:
