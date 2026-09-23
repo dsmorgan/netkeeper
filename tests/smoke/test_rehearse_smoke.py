@@ -122,7 +122,10 @@ async def test_a_rehearsal_adds_no_browser_context(
 
     async with provider.run() as run:
         assert len(run.browser.contexts) == contexts_before
-        assert len(run.context.pages) == pages_before + 1  # only this run's own tab
+        # A run opens its tab lazily, so count after asking for it. One more than
+        # before is this run's own tab; two more would be the rehearsal's, left open.
+        await run.ensure_page()
+        assert len(run.context.pages) == pages_before + 1
 
 
 async def test_a_real_rehearsal_still_refuses_linkedin(provider: AttachBrowserProvider) -> None:
