@@ -242,6 +242,30 @@ def consume(
     return BudgetSnapshot(action=action, day=day, week=week)
 
 
+def configured_default(
+    action: ActionClass, settings: BudgetSettings, period: Period = "day"
+) -> int | None:
+    """What ``settings`` *asks* for, before spec 9.6's hard max clamps it.
+
+    :func:`status` and :func:`consume` only ever report the clamped limit,
+    which is the right number to enforce and the wrong number to answer "has
+    anything been configured past its ceiling" with -- a ``config.toml``
+    asking for 10,000 profile visits a day and one asking for exactly 100 are
+    indistinguishable once the clamp has run. ``netkeeper.services.posture``
+    compares the two to warn about the first; a settings UI wants the same
+    pair. ``None`` means this action has no limit for ``period`` (only
+    ``profile_visits`` has a weekly one).
+
+    Reads the same ``_DAY_DEFAULT``/``_WEEK_DEFAULT`` tables :func:`_limits_for`
+    does, so a caller cannot drift from enforcement by keeping its own copy of
+    which config field backs which action class.
+    """
+    if period == "day":
+        return _DAY_DEFAULT[action](settings)
+    week_default = _WEEK_DEFAULT.get(action)
+    return None if week_default is None else week_default(settings)
+
+
 @dataclass(frozen=True, slots=True)
 class _Limits:
     day: int
