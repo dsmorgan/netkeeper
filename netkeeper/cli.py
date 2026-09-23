@@ -319,9 +319,9 @@ def preflight(ctx: typer.Context) -> None:
     and it never reads or prints a cookie value. Exits non-zero when a job could not
     run right now.
 
-    Run it when nothing else is driving the browser. The activity lock lives inside
-    one process, so this command cannot see a run that `netkeeper serve` is holding,
-    and attaching alongside one drops both connections.
+    It takes the same per-account activity lock every netkeeper process takes before
+    attaching, so while `netkeeper serve` or another command holds the browser, this
+    reports which process holds it and exits non-zero instead of attaching alongside.
     """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)

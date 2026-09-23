@@ -65,6 +65,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy.orm import Session
 
 from netkeeper.config import HeatSettings, LinkedInSettings, PacingSettings, Settings
+from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin import heat as heat_math
 from netkeeper.linkedin.pacing import (
     apply_weekend_multiplier,
@@ -113,7 +114,7 @@ ATTACH_ONLY: Final = "attach"
 #: ``linkedin_account`` row (ADR 0005) that P2-06 has not added yet, so
 #: ``services.budgets`` and ``services.heat`` take a plain ``account_id: int``
 #: and every caller in v1 passes this. It is the integer counterpart of
-#: ``linkedin.browser.SINGLE_ACCOUNT_KEY``, which does the same job for the
+#: ``linkedin.activity_lock.SINGLE_ACCOUNT_KEY``, which does the same job for the
 #: activity lock; when the row lands, both become ``linkedin_account.id``.
 SINGLE_ACCOUNT_ID: Final = 1
 
@@ -340,6 +341,7 @@ def posture(
     browser_mode: str = ATTACH_ONLY,
     probe: SessionProbe | None = None,
     heat_gate: HeatGate | None = None,
+    lock: activity_lock.LockState | None = None,
 ) -> PostureReport:
     """Summarize every protection the extractor has, as of ``now``.
 
@@ -356,6 +358,10 @@ def posture(
     parameter exists rather than the report reading the config and assuming.
     ``None`` means "whatever ``settings`` says", which is what a scheduler
     started from this config would use.
+
+    ``lock`` is the account's activity lock as the caller inspected it; ``None``
+    inspects :data:`~netkeeper.linkedin.activity_lock.SINGLE_ACCOUNT_KEY` here. The
+    inspection peeks with a shared file lock it drops at once, and creates nothing.
 
     Read-only: a plain ``session_scope(factory)`` is enough and a writer is not
     needed.
@@ -384,6 +390,7 @@ def posture(
 
     protections: list[Protection] = [
         _browser_mode(browser_mode, linkedin.cdp_url),
+        _activity_lock(lock),
         _linkedin_session(probe),
         _session_flag(session, user),
         _active_hours(linkedin, zone, zone_warning, now=now, local_now=local_now),
@@ -480,13 +487,10 @@ GAPS: Final[tuple[str, ...]] = (
     " Until the job that must call it exists, each of those is a setting rather"
     " than a brake, and this report says the same thing on the day it is wired"
     " as on the day it is not.",
-    "the activity lock guards one process. `netkeeper preflight` or `netkeeper"
-    " rehearse` in a terminal builds its own, so running one while `netkeeper"
-    " serve` holds the browser still opens a second CDP client -- including"
-    " this command, which with --probe attaches too: an all-clear can print in"
-    " the same breath as running it broke the one-client invariant. A claim"
-    " that outlives the process (a lock file, or a settings_kv claim with a"
-    " heartbeat) is owed before the first live run.",
+    "the activity lock binds netkeeper processes that share this data directory on"
+    " this machine: it is a file lock under the data directory. A netkeeper started"
+    " with a different NETKEEPER_DATA, a netkeeper on another machine, or any other"
+    " tool attached to the same Chrome over CDP does not take it and is not seen.",
     "nothing wires the scheduler into `netkeeper serve` yet (that is P2-10), so"
     " on a normal install no schedule is established and no job fires on its"
     " own. The schedule in this report is whatever a caller has established;"
@@ -531,6 +535,42 @@ def _browser_mode(mode: str, cdp_url: str) -> Protection:
         status=status,
         value=f"{mode} over CDP to {cdp_url}",
         warnings=tuple(warnings),
+    )
+
+
+def _activity_lock(state: activity_lock.LockState | None) -> Protection:
+    """One browser client per account, across processes (spec 9.9): free, or held by whom.
+
+    Held is the lock doing its job -- a run is in progress and anything else that
+    tries to attach is answering ``busy`` -- so it is reported, not warned about. The
+    row warns when the lock cannot be inspected, because then nobody can say whether
+    attaching now would open a second client.
+    """
+    name = "one browser client"
+    if state is None:
+        try:
+            state = activity_lock.inspect(activity_lock.SINGLE_ACCOUNT_KEY)
+        except OSError as exc:
+            return Protection(
+                name=name,
+                status=Status.UNKNOWN,
+                value="lock unreadable",
+                warnings=(
+                    f"could not inspect the activity lock ({exc}), so whether another"
+                    " netkeeper process holds the browser is unknown",
+                ),
+            )
+    if not state.held:
+        return Protection(
+            name=name,
+            status=Status.ON,
+            value=f"free: no netkeeper process holds the browser for {state.account!r}",
+        )
+    who = state.holder.describe() if state.holder is not None else "another netkeeper process"
+    return Protection(
+        name=name,
+        status=Status.ON,
+        value=f"held by {who}; anything else that tries to attach answers busy",
     )
 
 

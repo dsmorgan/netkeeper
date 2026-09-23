@@ -111,6 +111,7 @@ def test_default_log_dir_matches_the_apps_macos_data_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The installer hardcodes the macOS default; this fails if paths.py moves it."""
+    monkeypatch.delenv("NETKEEPER_DATA", raising=False)
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setenv("HOME", str(tmp_path))
     expected = data_dir()

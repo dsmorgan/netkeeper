@@ -1,0 +1,217 @@
+"""The activity lock's cross-process half: one OS file lock per LinkedIn account (spec 9.9).
+
+Two CDP clients on one browser drop each other's connection, and once jobs are armed
+they are also two request streams no budget counter knows about. So every browser path
+in every netkeeper process claims its account here *before* it attaches: ``netkeeper
+serve``'s jobs, ``netkeeper preflight``, ``netkeeper posture --probe``, and ``netkeeper
+rehearse`` all meet at the same file, and whichever arrives second is refused.
+
+**The mechanism is ``flock(2)``** on ``<data dir>/locks/browser-<account>.lock``, taken
+with ``LOCK_EX | LOCK_NB``. The kernel owns the lock and drops it when the descriptor
+closes, and the descriptor closes when the process exits *however* it exits, ``SIGKILL``
+included. A crashed holder therefore cannot park the lock: there is no heartbeat, no
+staleness rule, and no clock involved, because nothing stale can exist. The file's
+contents (pid, command, since) are a note for the busy message and are never what
+decides whether the lock is held; a note left behind by a crash is overwritten by the
+next holder and ignored until then.
+
+The price is scope. The lock binds processes that share this data directory on this
+machine. That is exactly netkeeper's deployment today (one machine, one Chrome, one data
+directory); a ``settings_kv`` claim would reach across machines sharing a database, at
+the cost of a heartbeat, a staleness window during which a crashed holder still blocks,
+and a database write on the browser path. ``services/posture.py`` states the scope as
+a gap.
+
+Nothing here imports the ORM, opens a session, or starts a process (spec 9.10).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import errno
+import fcntl
+import json
+import os
+import re
+import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+from netkeeper.paths import data_dir
+
+#: Directory under the data directory that holds one lock file per LinkedIn account.
+LOCKS_DIRNAME = "locks"
+
+#: Lock key for the single LinkedIn account v1 has. Budgets, heat, and this lock
+#: belong to a ``linkedin_account`` row (ADR 0005); until that table lands, every
+#: browser path shares this key, and the key is what a caller passes, never a
+#: process-wide global, so a second account is never blocked by the first.
+SINGLE_ACCOUNT_KEY = "local"
+
+_SAFE_KEY = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def locks_dir() -> Path:
+    """Where the lock files live: ``<data dir>/locks``. Resolved per call, never cached."""
+    return data_dir() / LOCKS_DIRNAME
+
+
+def lock_path(account: str, directory: Path | None = None) -> Path:
+    """The lock file for ``account``. A key that is not a plain name is hex-encoded."""
+    name = account if _SAFE_KEY.fullmatch(account) else "x" + account.encode().hex()
+    return (locks_dir() if directory is None else directory) / f"browser-{name}.lock"
+
+
+@dataclass(frozen=True, slots=True)
+class Holder:
+    """Who holds an account's lock, from the note the holder wrote into the lock file."""
+
+    pid: int
+    command: str
+    since: datetime | None
+
+    def describe(self) -> str:
+        """``netkeeper serve (pid 4242, since 2026-09-23 14:02 UTC)``."""
+        when = f", since {self.since:%Y-%m-%d %H:%M UTC}" if self.since is not None else ""
+        return f"{self.command or 'a netkeeper process'} (pid {self.pid}{when})"
+
+
+@dataclass(frozen=True, slots=True)
+class LockState:
+    """Whether an account's lock is held right now, and by whom when the note says."""
+
+    account: str
+    path: Path
+    held: bool
+    holder: Holder | None = None
+
+
+class Claim:
+    """A held lock. :meth:`release` lets go; so does the process ending, however it ends."""
+
+    def __init__(self, account: str, path: Path, fd: int) -> None:
+        self.account = account
+        self.path = path
+        self._fd: int | None = fd
+
+    @property
+    def held(self) -> bool:
+        return self._fd is not None
+
+    def release(self) -> None:
+        """Erase the note, unlock, close. Idempotent.
+
+        The file itself stays. Unlinking a lock file lets a process that opened the
+        old inode lock it while a newcomer locks a fresh one, which is two holders.
+        """
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        with contextlib.suppress(OSError):  # the note is advisory; the lock is what matters
+            os.ftruncate(fd, 0)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def try_claim(account: str, directory: Path | None = None) -> Claim | None:
+    """Take ``account``'s lock without waiting. ``None`` when another descriptor holds it.
+
+    The lock is per open file description, so a second claim from this same process is
+    refused as well: the caller need not trust its own bookkeeping.
+    """
+    path = lock_path(account, directory)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+            return None
+        raise
+    _write_note(fd)
+    return Claim(account, path, fd)
+
+
+def inspect(account: str, directory: Path | None = None) -> LockState:
+    """Whether ``account``'s lock is held, without taking it and without creating anything.
+
+    Peeks with a shared lock, which conflicts only with an exclusive holder and is
+    dropped at once. A claim that lands in that instant is refused, and
+    :class:`~netkeeper.linkedin.browser.ActivityLocks` tries such a claim once more
+    before calling the account busy.
+    """
+    path = lock_path(account, directory)
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return LockState(account=account, path=path, held=False)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                return LockState(account=account, path=path, held=True, holder=_read_note(fd))
+            raise
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return LockState(account=account, path=path, held=False)
+    finally:
+        os.close(fd)
+
+
+def read_holder(account: str, directory: Path | None = None) -> Holder | None:
+    """The note in ``account``'s lock file, for a busy message. Advisory only."""
+    try:
+        fd = os.open(lock_path(account, directory), os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        return _read_note(fd)
+    finally:
+        os.close(fd)
+
+
+def process_label() -> str:
+    """What this process is, as a person typed it: ``netkeeper serve``, ``netkeeper preflight``."""
+    argv = sys.argv
+    if not argv:
+        return ""
+    words = [Path(argv[0]).name]
+    command = next((arg for arg in argv[1:] if not arg.startswith("-")), None)
+    if command is not None:
+        words.append(command)
+    return " ".join(words)
+
+
+def _write_note(fd: int) -> None:
+    note = {
+        "pid": os.getpid(),
+        "command": process_label(),
+        "since": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+    try:
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, json.dumps(note).encode(), 0)
+    except OSError:
+        pass  # a missing note costs the busy message a name, never the lock
+
+
+def _read_note(fd: int) -> Holder | None:
+    try:
+        raw = os.pread(fd, 4096, 0)
+        note = json.loads(raw.decode()) if raw else None
+    except (OSError, ValueError):
+        return None
+    if not isinstance(note, dict) or not isinstance(note.get("pid"), int):
+        return None
+    since: datetime | None = None
+    if isinstance(note.get("since"), str):
+        try:
+            since = datetime.fromisoformat(note["since"])
+        except ValueError:
+            since = None
+    command = note.get("command")
+    return Holder(pid=note["pid"], command=command if isinstance(command, str) else "", since=since)
