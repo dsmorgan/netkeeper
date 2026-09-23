@@ -27,9 +27,11 @@ from netkeeper.db import session_scope
 from netkeeper.models import User
 from netkeeper.services.budgets import (
     HARD_MAX_PER_DAY,
+    HARD_MAX_PER_WEEK,
     ActionClass,
     BudgetExceeded,
     LocalPeriod,
+    PeriodBudget,
     consume,
     status,
 )
@@ -52,6 +54,22 @@ def user(writer: Session) -> User:
 
 def _settings(**overrides: int) -> BudgetSettings:
     return replace(DEFAULT_SETTINGS, **overrides)
+
+
+# --- PeriodBudget (pure, no database) -----------------------------------------
+
+
+def test_period_budget_remaining_under_the_limit() -> None:
+    assert PeriodBudget(count=3, limit=10).remaining == 7
+
+
+def test_period_budget_remaining_at_the_limit_is_zero() -> None:
+    assert PeriodBudget(count=10, limit=10).remaining == 0
+
+
+def test_period_budget_remaining_never_goes_negative_once_over() -> None:
+    assert PeriodBudget(count=11, limit=10).remaining == 0
+    assert PeriodBudget(count=11, limit=10).over
 
 
 # --- the local-day and local-week boundary ------------------------------------
@@ -279,10 +297,28 @@ def test_week_budget_is_also_capped_at_one_unit_over_and_checked_independently_o
 # --- hard max clamps the configured default -----------------------------------
 
 
+def test_hard_max_per_day_matches_spec_9_6() -> None:
+    """Pinned against the literal numbers in spec 9.6's table, not against the
+    module's own constant: a self-referential ``== HARD_MAX_PER_DAY[...]``
+    assertion would pass no matter what the dict said, including a bad merge
+    that raised ``profile_visits`` to 999 (ten times the reference workflow's
+    own stated guidance of 100)."""
+    assert HARD_MAX_PER_DAY == {
+        ActionClass.CONNECTION_PAGES: 400,
+        ActionClass.PROFILE_VISITS: 100,
+        ActionClass.INBOX_POLLS: 24,
+        ActionClass.LI_MESSAGES_AUTO: 30,
+    }
+
+
+def test_hard_max_per_week_matches_spec_9_6() -> None:
+    assert HARD_MAX_PER_WEEK == {ActionClass.PROFILE_VISITS: 500}
+
+
 def test_a_configured_default_above_the_hard_max_is_clamped(writer: Session, user: User) -> None:
     settings = _settings(connection_pages_per_day=10_000)
     result = status(writer, user, ACCOUNT, ActionClass.CONNECTION_PAGES, now=NOW, settings=settings)
-    assert result.day.limit == HARD_MAX_PER_DAY[ActionClass.CONNECTION_PAGES]
+    assert result.day.limit == 400
     assert result.day.limit < 10_000
 
 
@@ -290,6 +326,20 @@ def test_a_configured_default_under_the_hard_max_is_left_alone(writer: Session, 
     settings = _settings(connection_pages_per_day=7)
     result = status(writer, user, ACCOUNT, ActionClass.CONNECTION_PAGES, now=NOW, settings=settings)
     assert result.day.limit == 7
+
+
+def test_a_configured_weekly_default_above_the_hard_max_is_clamped(
+    writer: Session, user: User
+) -> None:
+    """The week limit's own clamp, mirroring the day one above: dropping
+    ``min(..., week_hard)`` from ``_limits_for`` leaves every other test green
+    (nothing else pushes a configured weekly default past 500), so it needs
+    its own case."""
+    settings = _settings(profile_visits_per_week=10_000)
+    result = status(writer, user, ACCOUNT, ActionClass.PROFILE_VISITS, now=NOW, settings=settings)
+    assert result.week is not None
+    assert result.week.limit == 500
+    assert result.week.limit < 10_000
 
 
 # --- week only applies where spec 9.6 says it does ----------------------------
@@ -325,6 +375,56 @@ def test_week_counter_is_keyed_by_iso_week_not_by_calendar_month(
     fresh_week = consume(writer, user, ACCOUNT, action, now=next_week, settings=settings)
     assert fresh_week.week is not None
     assert fresh_week.week.count == 1
+
+
+def test_week_counter_is_keyed_by_iso_year_not_by_calendar_year(
+    writer: Session, user: User
+) -> None:
+    """2026-12-31 and 2027-01-01 are both ISO week 2026-W53: the year the ISO
+    week belongs to, not the calendar year of the date, has to be part of the
+    key. Using ``local.year`` in place of the ``iso_year`` that
+    ``isocalendar()`` returns would key these as ``2026-W53`` and
+    ``2027-W53`` -- two different weeks -- and silently double the weekly
+    limit across every New Year's Eve."""
+    settings = _settings(profile_visits_per_week=10)
+    action = ActionClass.PROFILE_VISITS
+    new_years_eve = datetime(2026, 12, 31, 12, 0, tzinfo=UTC)
+    new_years_day = datetime(2027, 1, 1, 12, 0, tzinfo=UTC)
+
+    consume(writer, user, ACCOUNT, action, now=new_years_eve, settings=settings)
+    after = consume(writer, user, ACCOUNT, action, now=new_years_day, settings=settings)
+
+    assert after.week is not None
+    assert after.week.count == 2
+
+
+def test_week_counter_uses_the_local_iso_week_not_the_stored_utc_one(
+    writer: Session, user: User
+) -> None:
+    """The day key and the week key must both cross the local/UTC seam through
+    the same conversion. A ``Pacific/Kiritimati`` (UTC+14) account's Monday
+    01:00 is UTC Sunday 11:00 the day before -- still the *previous* ISO week
+    if ``isocalendar()`` is read off the stored UTC instant instead of the
+    local one. The default fixture user's timezone is UTC (factories.py),
+    where local and UTC never disagree, so this needs its own non-UTC user."""
+    ahead = factories.make_user(writer, timezone="Pacific/Kiritimati")
+    settings = _settings(profile_visits_per_week=10)
+    action = ActionClass.PROFILE_VISITS
+    # UTC 2026-09-20 11:00 is local 2026-09-21 01:00 (Monday, ISO week 39).
+    monday_local = datetime(2026, 9, 20, 11, 0, tzinfo=UTC)
+    # UTC 2026-09-22 11:00 is local 2026-09-23 01:00 (Wednesday, still week 39).
+    wednesday_local = datetime(2026, 9, 22, 11, 0, tzinfo=UTC)
+
+    first = consume(writer, ahead, ACCOUNT, action, now=monday_local, settings=settings)
+    assert first.week is not None
+    assert first.week.count == 1
+
+    second = consume(writer, ahead, ACCOUNT, action, now=wednesday_local, settings=settings)
+    assert second.week is not None
+    # Both calls land in the account's local ISO week 39: one counter, count 2.
+    # Keying off the raw UTC instant's own isocalendar() would put the first
+    # call in week 38 instead, leaving this at 1.
+    assert second.week.count == 2
 
 
 # --- isolation -----------------------------------------------------------

@@ -97,6 +97,16 @@ _DAY_DEFAULT: Final[dict[ActionClass, Callable[[BudgetSettings], int]]] = {
     ActionClass.LI_MESSAGES_AUTO: lambda s: s.li_messages_auto_per_day,
 }
 
+# One entry per key in HARD_MAX_PER_WEEK, not one entry per ActionClass: only
+# `PROFILE_VISITS` has a weekly limit today. Keying `_limits_for`'s week clamp
+# off this dict, rather than reading `settings.profile_visits_per_week`
+# unconditionally, means a second action class added to HARD_MAX_PER_WEEK
+# without a matching default here fails loudly (KeyError) instead of silently
+# inheriting profile-visits' weekly setting.
+_WEEK_DEFAULT: Final[dict[ActionClass, Callable[[BudgetSettings], int]]] = {
+    ActionClass.PROFILE_VISITS: lambda s: s.profile_visits_per_week,
+}
+
 
 class BudgetExceeded(RuntimeError):
     """:func:`consume` refused: ``period`` already has ``count`` recorded against ``limit``."""
@@ -241,7 +251,7 @@ class _Limits:
 def _limits_for(action: ActionClass, settings: BudgetSettings) -> _Limits:
     day = min(_DAY_DEFAULT[action](settings), HARD_MAX_PER_DAY[action])
     week_hard = HARD_MAX_PER_WEEK.get(action)
-    week = None if week_hard is None else min(settings.profile_visits_per_week, week_hard)
+    week = None if week_hard is None else min(_WEEK_DEFAULT[action](settings), week_hard)
     return _Limits(day=day, week=week)
 
 
