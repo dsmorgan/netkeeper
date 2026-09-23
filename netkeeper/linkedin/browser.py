@@ -171,14 +171,18 @@ class PlaywrightCdpConnector:
 class ActivityLocks:
     """One activity lock per LinkedIn account (spec 9.9, ADR 0005).
 
-    Every browser-touching path goes through the lock for its account: scheduled
-    jobs, CLI commands, and the Settings page's "check session" button alike. The key
-    is the ``linkedin_account`` the work belongs to rather than the process, so two
+    Every browser-touching path in a process goes through the lock for its account:
+    scheduled jobs, the CLI, and the Settings page's "check session" button alike. The
+    key is the ``linkedin_account`` the work belongs to rather than the process, so two
     accounts on one machine do not block each other while two runs on one account
-    always do.
+    always do. Hold exactly one registry per process, on the provider.
 
-    Hold exactly one of these per process, on the provider, so that "every path" is
-    true by construction.
+    **This guards one process, and that is not yet enough.** ``netkeeper preflight`` in
+    a terminal builds its own provider with its own registry, so running it while
+    ``netkeeper serve`` holds the lock does open a second CDP client — the thing this
+    lock exists to prevent. Before live runs, the claim has to outlive the process: a
+    lock file next to the database, or a ``settings_kv`` claim with a heartbeat, taken
+    here so every caller inherits it.
     """
 
     def __init__(self) -> None:
@@ -269,16 +273,48 @@ class BrowserRun:
         return await self._ensure_page(restore=True)
 
     async def goto(self, url: str) -> PageLike:
-        """Navigate this run's tab, reopening it first if it was lost.
+        """Navigate this run's tab, reopening it first, or again, if it was lost.
 
-        Recovery skips restoring the previous URL here: this call is about to
-        navigate anyway, and a restore would spend a page view (and, on a profile,
-        a budgeted visit) on a page nobody asked for twice.
+        Recovery skips restoring the previous URL: this call is about to navigate
+        anyway, and a restore would spend a page view (and, on a profile, a budgeted
+        visit) on a page nobody asked for twice.
+
+        A browser that dies *during* the navigation is the same loss arriving a
+        moment later, so it is handled the same way: reopen the tab, spending the
+        run's one reattach if the context went with it, and navigate once more. A
+        navigation that fails while the tab and the browser are both still there is
+        not a loss — that is the site answering, and it belongs to the caller and to
+        the response classification in spec 9.7, so it is raised unchanged.
         """
         page = await self._ensure_page(restore=False)
-        await page.goto(url)
+        try:
+            await page.goto(url)
+        except Exception as exc:
+            if not self._lost(page):
+                raise
+            log.warning("lost the tab while navigating: %s", _reason(exc))
+            page = await self._reopen_for(url)
         self._last_url = url
         return page
+
+    async def _reopen_for(self, url: str) -> PageLike:
+        """Open a tab again after a navigation lost one, and navigate it once."""
+        self._page = None
+        page = await self._ensure_page(restore=False)
+        try:
+            await page.goto(url)
+        except Exception as exc:
+            if not self._lost(page):
+                raise
+            raise BrowserUnavailable(
+                "the browser went away again while navigating; aborting the run"
+            ) from exc
+        log.info("the run carried on after reopening its tab")
+        return page
+
+    def _lost(self, page: PageLike) -> bool:
+        """Whether a failure means the tab or the browser went away, not the page."""
+        return page.is_closed() or not self._attachment.browser.is_connected()
 
     async def close(self) -> None:
         """Close this run's tab and let go of the connection. Idempotent.

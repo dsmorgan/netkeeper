@@ -9,7 +9,14 @@ Those rules are about code that does not exist rather than behavior that does, s
 they are checked by walking the package's syntax tree: the tests below fail on the
 line that breaks a rule, whoever writes it and whichever item it lands in. Each
 scanner is itself exercised against a snippet that must be caught, because a scanner
-that quietly matches nothing would pass forever.
+that quietly matches nothing would pass forever — and each rule that names one file
+also asserts that the file still matches, so renaming it cannot make the rule vacuous.
+
+Two limits are deliberate. The scan covers ``netkeeper/`` and not ``tests/``: test
+code starts processes (the boundary probe below runs one) and drives fakes that
+imitate the calls the rules forbid. And it reads names, not meanings, so it catches
+the spellings a person would actually write, not every way Python can reach a symbol.
+The offline behavior tests and the opt-in smoke suite are the other two layers.
 """
 
 from __future__ import annotations
@@ -19,18 +26,33 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+import boundary
+import pytest
+from boundary import FORBIDDEN_IMPORTS
+
 PACKAGE = Path(__file__).resolve().parents[1] / "netkeeper"
+REPO_ROOT = PACKAGE.parent
 LINKEDIN = PACKAGE / "linkedin"
 WEB = PACKAGE / "web"
+
+#: Stands in for a file when a scanner is being shown a snippet.
+MEMORY = Path("<memory>")
 
 # Playwright's ways to start a browser process. None of them may appear anywhere.
 LAUNCH_CALLS = frozenset({"launch", "launch_persistent_context", "launch_server"})
 
 # Ways to start any process, which is how a browser would be started without
-# Playwright. `netkeeper browser launch` prints a command; it never runs one.
+# Playwright. `netkeeper browser launch` prints a command; it never runs one. The
+# asyncio spellings matter most: this package is async throughout and already imports
+# asyncio, so `create_subprocess_exec` is the shortest path from here to a launch.
 PROCESS_MODULES = frozenset({"subprocess", "pty", "webbrowser"})
 PROCESS_CALLS = frozenset(
     {
+        "create_subprocess_exec",
+        "create_subprocess_shell",
+        "subprocess_exec",
+        "subprocess_shell",
+        "Popen",
         "system",
         "popen",
         "fork",
@@ -54,25 +76,30 @@ PROCESS_CALLS = frozenset(
 
 # Spec 9.1: reuse the context that is there, and change nothing about it. A second
 # context is a second identity; the rest would make the profile stop looking like the
-# profile the user browses with.
+# profile the user browses with. `new_cdp_session` is the one that matters most: a raw
+# CDP session reaches Network.setUserAgentOverride, Emulation.setTimezoneOverride and
+# Network.setCookie in one step, past every named method here.
 CONTEXT_MUTATORS = frozenset(
     {
         "new_context",
+        "new_cdp_session",
+        "new_browser_cdp_session",
         "add_init_script",
+        "add_script_tag",
         "add_cookies",
         "clear_cookies",
+        "expose_function",
+        "expose_binding",
+        "grant_permissions",
         "route",
+        "route_from_har",
         "unroute",
         "set_extra_http_headers",
-        "set_user_agent",
         "set_geolocation",
+        "set_offline",
         "emulate_media",
     }
 )
-
-# Spec 9.10 / ADR 0005: job specs in, dataclasses out. P2-14 generalizes this to the
-# whole contract; until then these are the imports that would break it first.
-DATABASE_IMPORTS = ("netkeeper.models", "netkeeper.db", "netkeeper.scoping", "sqlalchemy")
 
 # The attach point. Everything else goes through AttachBrowserProvider.
 CONNECT_CALL = "connect_over_cdp"
@@ -81,6 +108,22 @@ CONNECTOR_MODULE = LINKEDIN / "browser.py"
 # Spec 5 and 9.9: a request handler that awaits browser work deadlocks on the tab
 # waiting for its own response, so routes enqueue work on the task runner instead.
 BROWSER_MODULES = ("netkeeper.linkedin.browser", "netkeeper.linkedin.preflight")
+
+# The modules that may reach the provider at all, as paths from the repository root.
+# A module that needs it adds itself here on purpose, in a diff someone reads. A
+# module under web/ never belongs here; neither does a helper a web module imports,
+# which is how a shim under services/ would smuggle the browser into a handler.
+BROWSER_CALLERS = frozenset(
+    {
+        Path("netkeeper/cli.py"),  # `netkeeper preflight`, on its own event loop
+        Path("netkeeper/linkedin/preflight.py"),  # the report, inside a run
+    }
+)
+
+# Roots that must never import the browser directly. services/ is here because a
+# helper is the obvious place to put a shim, and #144 is establishing
+# services/linkedin_session.py as the core-side extractor helper.
+CORE_ROOTS = [WEB, PACKAGE / "crm", PACKAGE / "services"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +140,15 @@ def python_files(root: Path) -> list[Path]:
     return sorted(root.rglob("*.py"))
 
 
+def package_of(path: Path) -> str:
+    """The package a file's relative imports resolve against."""
+    try:
+        parts = path.resolve().parent.relative_to(REPO_ROOT).parts
+    except (OSError, ValueError):
+        parts = ()
+    return ".".join(parts) if parts else PACKAGE.name
+
+
 def called_names(source: str) -> Iterator[tuple[int, str]]:
     """Every called name in ``source``: ``a.b.c()`` yields ``c``, ``f()`` yields ``f``."""
     for node in ast.walk(ast.parse(source)):
@@ -108,16 +160,36 @@ def called_names(source: str) -> Iterator[tuple[int, str]]:
             yield node.lineno, node.func.id
 
 
-def imported_names(source: str) -> Iterator[tuple[int, str]]:
-    """Every imported dotted name: the module, and ``module.member`` for ``from`` imports."""
+def imported_names(source: str, path: Path = MEMORY) -> Iterator[tuple[int, str]]:
+    """Every imported dotted name: the module, and ``module.member`` for ``from`` imports.
+
+    Relative imports are resolved against the file's own package, so
+    ``from ..models import User`` reads as ``netkeeper.models``. Skipping that step
+    would leave every rule here answerable with a dot.
+    """
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield node.lineno, alias.name
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            yield node.lineno, node.module
+        elif isinstance(node, ast.ImportFrom):
+            base = _absolute_module(node, package_of(path))
+            if base is None:
+                continue
+            yield node.lineno, base
             for alias in node.names:
-                yield node.lineno, f"{node.module}.{alias.name}"
+                yield node.lineno, f"{base}.{alias.name}"
+
+
+def _absolute_module(node: ast.ImportFrom, package: str) -> str | None:
+    """``from .. import x`` in ``netkeeper.linkedin`` is ``netkeeper``."""
+    if node.level == 0:
+        return node.module
+    parts = package.split(".")
+    climbed = parts[: len(parts) - (node.level - 1)] if node.level > 1 else parts
+    prefix = ".".join(climbed)
+    if node.module is None:
+        return prefix or None
+    return f"{prefix}.{node.module}" if prefix else node.module
 
 
 def scan(
@@ -136,14 +208,14 @@ def scan(
     return findings
 
 
-def launch_calls(source: str, path: Path = Path("<memory>")) -> Iterator[Finding]:
+def launch_calls(source: str, path: Path = MEMORY) -> Iterator[Finding]:
     for line, name in called_names(source):
         if name in LAUNCH_CALLS:
             yield Finding(path, line, f"{name}() starts a browser (ADR 0002: attach only)")
 
 
-def process_starts(source: str, path: Path = Path("<memory>")) -> Iterator[Finding]:
-    for line, name in imported_names(source):
+def process_starts(source: str, path: Path = MEMORY) -> Iterator[Finding]:
+    for line, name in imported_names(source, path):
         if name.split(".")[0] in PROCESS_MODULES:
             yield Finding(path, line, f"imports {name}, which can start a process")
     for line, name in called_names(source):
@@ -151,28 +223,28 @@ def process_starts(source: str, path: Path = Path("<memory>")) -> Iterator[Findi
             yield Finding(path, line, f"{name}() starts a process")
 
 
-def context_mutations(source: str, path: Path = Path("<memory>")) -> Iterator[Finding]:
+def context_mutations(source: str, path: Path = MEMORY) -> Iterator[Finding]:
     for line, name in called_names(source):
         if name in CONTEXT_MUTATORS:
             yield Finding(path, line, f"{name}() changes the user's browser context (spec 9.1)")
 
 
-def database_imports(source: str, path: Path = Path("<memory>")) -> Iterator[Finding]:
-    for line, name in imported_names(source):
-        if name.startswith(DATABASE_IMPORTS):
+def database_imports(source: str, path: Path = MEMORY) -> Iterator[Finding]:
+    for line, name in imported_names(source, path):
+        if name.startswith(FORBIDDEN_IMPORTS):
             yield Finding(path, line, f"imports {name}: linkedin/ has no database (spec 9.10)")
 
 
-def browser_imports(source: str, path: Path = Path("<memory>")) -> Iterator[Finding]:
-    for line, name in imported_names(source):
+def browser_imports(source: str, path: Path = MEMORY) -> Iterator[Finding]:
+    for line, name in imported_names(source, path):
         if name.startswith(BROWSER_MODULES):
             yield Finding(path, line, f"imports {name}; enqueue the work on the task runner")
 
 
-def connect_calls(source: str, path: Path = Path("<memory>")) -> Iterator[Finding]:
+def connect_calls(source: str, path: Path = MEMORY) -> Iterator[Finding]:
     for line, name in called_names(source):
         if name == CONNECT_CALL:
-            yield Finding(path, line, f"{name}() outside the one connector")
+            yield Finding(path, line, f"{name}() attaches to a browser")
 
 
 def complain(findings: list[Finding], rule: str) -> str:
@@ -202,10 +274,14 @@ def test_the_users_browser_context_is_never_mutated() -> None:
 
 def test_only_the_connector_opens_a_cdp_connection() -> None:
     """One attach point, so the activity lock cannot be sidestepped."""
-    findings = [
-        finding for finding in scan([PACKAGE], connect_calls) if finding.path != CONNECTOR_MODULE
-    ]
-    assert not findings, complain(findings, f"attach through {CONNECTOR_MODULE.name}:")
+    findings = scan([PACKAGE], connect_calls)
+    inside = [finding for finding in findings if finding.path == CONNECTOR_MODULE]
+    outside = [finding for finding in findings if finding.path != CONNECTOR_MODULE]
+    assert inside, (
+        f"nothing in {CONNECTOR_MODULE.name} attaches any more. If the connector moved,"
+        " point CONNECTOR_MODULE at its new home; the rule is vacuous until you do."
+    )
+    assert not outside, complain(outside, f"attach through {CONNECTOR_MODULE.name}:")
 
 
 def test_nothing_under_linkedin_touches_the_database() -> None:
@@ -214,10 +290,42 @@ def test_nothing_under_linkedin_touches_the_database() -> None:
     assert not findings, complain(findings, "the extractor boundary is one-way:")
 
 
+@pytest.mark.parametrize("module", boundary.extractor_modules())
+def test_no_extractor_module_drags_the_database_in(module: str) -> None:
+    """The other half of the boundary: what the imports pull in, not what they say.
+
+    A helper that looks harmless and imports the ORM two levels down puts a session in
+    the extractor's process just as surely as ``from netkeeper.models import Contact``.
+    """
+    loaded = boundary.imports_pulled_in_by(module)
+    assert not loaded, f"importing {module} loads {', '.join(loaded)} (spec 9.10)"
+
+
 def test_no_request_handler_can_await_browser_work() -> None:
     """Spec 9.9: a handler that awaits the browser deadlocks on its own response."""
-    findings = scan([WEB, PACKAGE / "crm"], browser_imports, at_least=15)
+    findings = scan(CORE_ROOTS, browser_imports, at_least=15)
     assert not findings, complain(findings, "routes enqueue browser work, never await it:")
+
+
+def test_the_browser_modules_have_exactly_these_callers() -> None:
+    """Who may reach the provider is a list someone edits, not a thing that drifts.
+
+    A shim under ``services/`` that a route imports would satisfy every other rule
+    here and still put browser work inside a request. It cannot satisfy this one.
+    """
+    callers = {
+        finding.path.resolve().relative_to(REPO_ROOT)
+        for finding in scan([PACKAGE], browser_imports)
+    }
+    assert callers == set(BROWSER_CALLERS), (
+        "the browser's callers changed.\n"
+        f"  now:      {sorted(str(path) for path in callers)}\n"
+        f"  expected: {sorted(str(path) for path in BROWSER_CALLERS)}\n"
+        "A module that must reach the provider adds itself to BROWSER_CALLERS on"
+        " purpose. A request handler never does: it enqueues the work on the task"
+        " runner, because awaiting browser work inside a handler deadlocks on the tab"
+        " that is waiting for the response (spec 9.9)."
+    )
 
 
 # --- the scanners themselves --------------------------------------------------
@@ -238,18 +346,57 @@ def test_process_scanner_catches_a_spawn() -> None:
     assert not list(process_starts("import os\nos.environ.get('X')\n"))
 
 
+def test_process_scanner_catches_the_asyncio_spelling() -> None:
+    """The one a module that already imports asyncio would reach for."""
+    assert list(
+        process_starts(
+            "import asyncio\n"
+            "async def go():\n"
+            "    await asyncio.create_subprocess_exec('open', '-na', 'Google Chrome')\n"
+        )
+    )
+    assert list(process_starts("await asyncio.create_subprocess_shell('open -a Chrome')\n"))
+    assert list(process_starts("await loop.subprocess_exec(protocol, 'chrome')\n"))
+    assert not list(process_starts("import asyncio\nasyncio.sleep(0)\n"))
+
+
 def test_context_scanner_catches_a_mutation() -> None:
     assert list(context_mutations("await browser.new_context()\n"))
     assert list(context_mutations("await context.add_init_script('x')\n"))
     assert not list(context_mutations("await context.new_page()\n"))
 
 
+def test_context_scanner_catches_a_raw_cdp_session() -> None:
+    """The escape hatch that reaches every override at once."""
+    assert list(context_mutations("session = await context.new_cdp_session(page)\n"))
+    assert list(context_mutations("session = await browser.new_browser_cdp_session()\n"))
+    assert list(context_mutations("await context.route_from_har('x.har')\n"))
+    assert list(context_mutations("await context.expose_function('f', f)\n"))
+
+
 def test_database_scanner_catches_an_import() -> None:
     assert list(database_imports("from netkeeper.models import Contact\n"))
     assert list(database_imports("import sqlalchemy\n"))
+    assert list(database_imports("from netkeeper.crm.tags import list_tags\n"))
     assert not list(database_imports("from netkeeper.linkedin.browser import BrowserRun\n"))
+
+
+def test_the_scanners_resolve_a_relative_import() -> None:
+    """A dot is not a way out of the rules."""
+    assert list(database_imports("from ..models import User\n", LINKEDIN / "browser.py"))
+    assert list(database_imports("from ..crm.tags import list_tags\n", LINKEDIN / "dom.py"))
+    assert list(
+        browser_imports("from ...linkedin.browser import Attach\n", WEB / "api" / "__init__.py")
+    )
+    assert not list(database_imports("from .browser import BrowserRun\n", LINKEDIN / "dom.py"))
+    assert not list(database_imports("from . import archive\n", LINKEDIN / "conversations.py"))
 
 
 def test_browser_import_scanner_catches_an_import() -> None:
     assert list(browser_imports("from netkeeper.linkedin.browser import AttachBrowserProvider\n"))
     assert not list(browser_imports("from netkeeper.services.tasks import TaskRunner\n"))
+
+
+def test_connect_scanner_catches_an_attach() -> None:
+    assert list(connect_calls("browser = await pw.chromium.connect_over_cdp(url)\n"))
+    assert not list(connect_calls("browser = await pw.chromium.connect(url)\n"))

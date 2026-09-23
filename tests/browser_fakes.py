@@ -29,6 +29,8 @@ class FakePage:
         self.close_calls = 0
         self._closed = False
         self._url = "about:blank"
+        self._goto_error: Exception | None = None
+        self._goto_error_closes = True
 
     @property
     def url(self) -> str:
@@ -40,8 +42,22 @@ class FakePage:
     async def goto(self, url: str) -> object:
         assert not self._closed, "navigated a closed tab"
         self.goto_calls.append(url)
+        if self._goto_error is not None:
+            error, self._goto_error = self._goto_error, None
+            if self._goto_error_closes:
+                self._closed = True
+            raise error
         self._url = url
         return None
+
+    def fail_next_goto(self, error: Exception, *, closes: bool = True) -> None:
+        """Arm one failed navigation.
+
+        ``closes`` is the difference the run has to tell apart: a tab that died with
+        the navigation, or a page that simply did not load while the tab is fine.
+        """
+        self._goto_error = error
+        self._goto_error_closes = closes
 
     async def evaluate(self, expression: str) -> Any:
         assert not self._closed, "evaluated on a closed tab"
@@ -66,7 +82,11 @@ class FakeContext:
         cookies: Sequence[Mapping[str, Any]] = (),
         evaluate_result: Any = None,
         new_page_error: Exception | None = None,
+        page_goto_error: Exception | None = None,
     ) -> None:
+        #: Armed on every tab this context opens, for the run that loses the tab it
+        #: just reopened.
+        self.page_goto_error = page_goto_error
         self.pages: list[FakePage] = []
         self.cookie_jar: list[Mapping[str, Any]] = list(cookies)
         self.cookie_error: Exception | None = None
@@ -80,6 +100,8 @@ class FakeContext:
         if self.new_page_error is not None:
             raise self.new_page_error
         page = FakePage(self)
+        if self.page_goto_error is not None:
+            page.fail_next_goto(self.page_goto_error)
         self.pages.append(page)
         return page
 

@@ -170,7 +170,7 @@ async def test_preflight_reads_the_real_profile(provider: AttachBrowserProvider)
     assert report.fingerprint.user_agent
     assert report.fingerprint.timezone
     assert not report.fingerprint.webdriver, "start Chrome without automation flags"
-    assert report.login in (LoginState.LOGGED_IN, LoginState.LOGGED_OUT)
+    assert report.login in (LoginState.LOGGED_IN, LoginState.NO_SESSION)
     if report.login is LoginState.LOGGED_IN:
         assert "li_at" in report.session_cookies
     # Names, never values: the report carries nothing a log could leak.
