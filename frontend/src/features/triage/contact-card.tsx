@@ -25,6 +25,10 @@
  * Nothing in here is a link that steals a key, and nothing is focusable except
  * the profile link, which sits last.
  *
+ * The bordered box around this is `triage-page.tsx`'s, shared with `CardSteps`
+ * so the two read as one card — and so the decision row is not a second box's
+ * worth of padding further down the page.
+ *
  * **What is not here: the name, the tags, and the decision.** They are
  * `CardSteps`, drawn immediately under this, in the order the work is done in
  * (#142). Keeping them out of this region is what lets them hold editors: an
@@ -70,7 +74,7 @@ export function ContactCard({
       aria-live="polite"
       aria-atomic="true"
       data-testid="triage-card"
-      className="flex min-w-0 flex-col gap-3 rounded-xl bg-card p-4 ring-1 ring-foreground/10"
+      className="flex min-w-0 flex-col gap-3"
     >
       <p data-testid="card-position" className="text-xs text-muted-foreground">
         {position}
@@ -89,9 +93,16 @@ export function ContactCard({
       )}
       <div className="min-w-0">
         <h2 className="font-heading text-xl leading-tight font-medium break-words">{name}</h2>
-        {contact.headline !== null && (
-          <p className="mt-1 break-words text-muted-foreground">{contact.headline}</p>
-        )}
+        {/* Two lines, always, however long the headline is. This is the one
+            thing on the card whose height varies with the contact, and the
+            decision row sits under it: without a reserved height a wrapped
+            headline pushed the buttons 40px down on that card alone, so the
+            mouse had to re-aim on every contact and a long one could put them
+            below the fold. Clamping is visual only — the whole headline is
+            still in the DOM, so a screen reader reads all of it. */}
+        <p className="mt-1 line-clamp-2 min-h-[2lh] break-words text-muted-foreground">
+          {contact.headline}
+        </p>
       </div>
 
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">

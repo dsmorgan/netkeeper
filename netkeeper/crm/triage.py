@@ -933,8 +933,13 @@ def _tag_batch(tag: Tag) -> _Batch:
         met=met,
         kind=TriageDecisionKind.BULK_MET if decides_met else TriageDecisionKind.BULK_NOT_MET,
         title=f"Mark everyone tagged {tag.name} as {'met' if decides_met else 'not met'}",
+        # Phrased so the sentence's verb does not have to agree with a count
+        # only ``{people}`` knows about: "carry" over "{count} untriaged
+        # person" read as broken English, and a tag with exactly one untriaged
+        # contact is not rare now that tag batches are the only ``not_met``
+        # ones there are.
         template=(
-            f"{{count}} untriaged {{people}} carry the tag {tag.name}, "
+            f"The tag {tag.name} is on {{count}} untriaged {{people}}, "
             f"which you have said means you {reading} them."
         ),
         where=(_carries_tag(tag),),

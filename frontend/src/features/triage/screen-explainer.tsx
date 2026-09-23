@@ -7,17 +7,23 @@
  * `docs/networking-workflow.md` and it is short, so it is on the screen in the
  * method's own words (`method.ts`) rather than paraphrased here.
  *
- * Open by default, because the person who needs it has not read it yet. Once
- * collapsed it stays collapsed, because the person who closed it has. That
- * preference is the one thing on this screen worth a `localStorage` entry: it
- * is per-viewer, it is a convenience, and losing it costs one click.
+ * **The goal line is always on screen; the definitions start folded.** An
+ * earlier draft opened the whole thing by default and pushed the decision row
+ * off the bottom of a 1280x800 laptop — which made the one control the screen
+ * exists for the one thing a first-time user could not see. Nothing is lost by
+ * folding it: the card carries a one-line definition of each answer next to the
+ * button that gives it, in both states, so "what does Met mean?" is answerable
+ * without opening anything and this is the longer version for somebody who
+ * wants it. Once opened it stays open, because the person who opened it means
+ * it. That preference is the one thing on this screen worth a `localStorage`
+ * entry: per-viewer, a convenience, and losing it costs one click.
  *
  * **Every read and write of it is wrapped.** `localStorage` throws outright in
  * a private window with site data blocked, and comes back empty in a fresh
  * profile, in a test, and after somebody clears their browser. Neither may stop
  * the screen from rendering, and neither may change what it renders beyond
- * whether this section starts open: an empty read means "never collapsed", which
- * is the default anyway.
+ * whether the definitions start folded out: an empty read means "never opened
+ * it", which is the default anyway.
  *
  * Not a `<details>`: the toggle is a button with `aria-expanded`, so the label
  * says what pressing it does in both states, and nothing here takes a key the
@@ -32,34 +38,34 @@ import { DECISION_MEANINGS, TRIAGE_GOAL } from './method'
 
 /** Per-viewer, per-browser. Nothing about it reaches the server or another tab. */
 const STORAGE_KEY = 'netkeeper.triage.explainer'
-const COLLAPSED = 'collapsed'
+const OPEN = 'open'
 
-/** Whether this viewer has closed it before. `false` whenever the answer is unknown. */
-function wasCollapsed(): boolean {
+/** Whether this viewer has opened it before. `false` whenever the answer is unknown. */
+function wasOpened(): boolean {
   try {
-    return window.localStorage.getItem(STORAGE_KEY) === COLLAPSED
+    return window.localStorage.getItem(STORAGE_KEY) === OPEN
   } catch {
     // A private window can throw on the read itself, not only on the write.
     return false
   }
 }
 
-function remember(collapsed: boolean): void {
+function remember(open: boolean): void {
   try {
-    if (collapsed) window.localStorage.setItem(STORAGE_KEY, COLLAPSED)
+    if (open) window.localStorage.setItem(STORAGE_KEY, OPEN)
     else window.localStorage.removeItem(STORAGE_KEY)
   } catch {
     // Nothing to do and nothing to report: the section still works, it just
-    // opens again next time.
+    // folds again next time.
   }
 }
 
 export function ScreenExplainer() {
-  const [collapsed, setCollapsed] = useState(wasCollapsed)
+  const [open, setOpen] = useState(wasOpened)
 
   function toggle() {
-    const next = !collapsed
-    setCollapsed(next)
+    const next = !open
+    setOpen(next)
     remember(next)
   }
 
@@ -76,15 +82,15 @@ export function ScreenExplainer() {
         <Button
           size="xs"
           variant="ghost"
-          aria-expanded={!collapsed}
+          aria-expanded={open}
           aria-controls="triage-explainer-body"
           onClick={toggle}
         >
-          {collapsed ? 'What counts as met?' : 'Hide this'}
+          {open ? 'Hide this' : 'What counts as met?'}
         </Button>
       </div>
 
-      {!collapsed && (
+      {open && (
         <dl
           id="triage-explainer-body"
           className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm"

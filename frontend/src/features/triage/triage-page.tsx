@@ -307,14 +307,6 @@ export function TriagePage() {
 
       <ActionBar onAction={onAction} />
 
-      <p
-        data-testid="triage-notice"
-        aria-live="polite"
-        className="min-h-5 text-sm text-muted-foreground"
-      >
-        {queue.notice}
-      </p>
-
       {/* A batch only ever reaches contacts nobody has answered for, so the
           review pass has none to offer: asking for them there is a 422. */}
       {filter !== 'automatic' && (
@@ -390,7 +382,7 @@ export function TriagePage() {
                     it are what to do about them, and they are a separate
                     element because the card is an atomic live region and a text
                     field inside one is re-read on every keystroke. */}
-                <div className="flex min-w-0 flex-col gap-2">
+                <div className="flex min-w-0 flex-col gap-3 rounded-xl bg-card p-4 ring-1 ring-foreground/10">
                   <ContactCard card={card} position={position} review={queue.reviewing} />
                   <CardSteps
                     card={card}
@@ -406,6 +398,21 @@ export function TriagePage() {
                 <EvidencePanel card={card} />
               </div>
             )}
+
+            {/* Under the card, not above it. It is in the DOM from first paint
+                whatever it holds, so `aria-live` announces every change to it;
+                what moved is only where the reserved band sits, and above the
+                card it was 36px of nothing between the queue's top and the
+                thing a person came here to press. Below, a notice arriving
+                cannot push the decision row down mid-run, and `min-h-5` keeps
+                it from pushing anything else either. */}
+            <p
+              data-testid="triage-notice"
+              aria-live="polite"
+              className="min-h-5 text-sm text-muted-foreground"
+            >
+              {queue.notice}
+            </p>
           </div>
 
           {(queue.seen > 0 || queue.liveCard !== null) && (
