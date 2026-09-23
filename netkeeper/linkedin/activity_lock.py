@@ -121,19 +121,45 @@ def try_claim(account: str, directory: Path | None = None) -> Claim | None:
 
     The lock is per open file description, so a second claim from this same process is
     refused as well: the caller need not trust its own bookkeeping.
+
+    A lock on a file that is no longer at ``path`` locks nothing anyone else will
+    open: if the file was deleted or replaced between this claim's ``open`` and its
+    ``flock``, the next claimant opens the new file and locks that alongside it. So
+    after locking, the claim checks that its descriptor is still the file at
+    ``path``, and starts over on the file that is there now when it is not.
     """
     path = lock_path(account, directory)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    for _ in range(_REOPEN_ATTEMPTS):
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(fd)
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                return None
+            raise
+        if _is_file_at(fd, path):
+            _write_note(fd)
+            return Claim(account, path, fd)
+        os.close(fd)  # locked an unlinked inode; that lock guards nothing
+    raise OSError(f"the lock file at {path} kept changing under this claim")
+
+
+#: How many times a claim starts over after finding its lock file replaced. One
+#: retry covers a single delete; more than a handful means something is deleting
+#: the file in a loop, and that is an error rather than something to wait out.
+_REOPEN_ATTEMPTS = 5
+
+
+def _is_file_at(fd: int, path: Path) -> bool:
+    """Whether the open descriptor is still the file ``path`` names."""
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as exc:
-        os.close(fd)
-        if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
-            return None
-        raise
-    _write_note(fd)
-    return Claim(account, path, fd)
+        there = path.stat()
+    except FileNotFoundError:
+        return False
+    held = os.fstat(fd)
+    return (held.st_dev, held.st_ino) == (there.st_dev, there.st_ino)
 
 
 def inspect(account: str, directory: Path | None = None) -> LockState:
@@ -172,6 +198,23 @@ def read_holder(account: str, directory: Path | None = None) -> Holder | None:
         return _read_note(fd)
     finally:
         os.close(fd)
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether a process with this pid exists. Signal 0 checks and delivers nothing.
+
+    ``EPERM`` means it exists and belongs to someone else, which still counts. A pid
+    of zero or below names a process group, never one process, so it is not alive.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def process_label() -> str:

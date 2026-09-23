@@ -44,6 +44,11 @@ this repository serves: no test in this project, opt-in or not, contacts linkedi
 NETKEEPER_BROWSER_TESTS=1 .venv/bin/python -m pytest tests/smoke -q
 ```
 
+**Stop `netkeeper serve` before you run the smoke suite.** The test suite points
+`NETKEEPER_DATA` at a temporary directory for every test, so the smoke tests take
+their activity lock there, not in your real data directory. They cannot see a run that
+`serve` holds, and running them alongside one opens a second CDP client on your Chrome.
+
 Run it against Chrome stable in a window, not a headless one, and say which Chrome
 version you used in the pull request. `NETKEEPER_CDP_URL` overrides the debug port if
 yours is not the default `http://127.0.0.1:9222`.

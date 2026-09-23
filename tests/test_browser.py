@@ -50,11 +50,9 @@ async def test_attach_reuses_the_context_that_is_already_open() -> None:
     connector = FakeConnector([FakeBrowser([first, second])])
     provider = make_provider(connector)
 
-    attachment = await provider.attach()
-
-    assert attachment.context is first
+    async with provider.run() as run:
+        assert run.context is first
     assert connector.connect_calls == [CDP_URL]
-    await attachment.detach()
 
 
 async def test_attach_without_a_context_gives_up_rather_than_making_one() -> None:
@@ -62,7 +60,8 @@ async def test_attach_without_a_context_gives_up_rather_than_making_one() -> Non
     provider = make_provider(connector)
 
     with pytest.raises(BrowserUnavailable, match="no open browser context"):
-        await provider.attach()
+        async with provider.run():
+            pass
     assert connector.detaches == 1, "a failed attach still lets go of the connection"
 
 
@@ -72,7 +71,8 @@ async def test_a_browser_that_is_not_there_is_browser_unavailable() -> None:
     provider = make_provider(connector)
 
     with pytest.raises(BrowserUnavailable, match="cannot attach to Chrome"):
-        await provider.attach()
+        async with provider.run():
+            pass
 
 
 async def test_the_provider_can_only_attach() -> None:
@@ -82,6 +82,9 @@ async def test_the_provider_can_only_attach() -> None:
     assert provider.mode == ATTACH
     for verb in ("launch", "launch_persistent_context", "start", "spawn"):
         assert not hasattr(provider, verb), f"a provider with {verb}() is a second identity"
+    # Connecting without the activity lock is not something a caller can ask for:
+    # run() is the only public way to a browser (#158 review).
+    assert not hasattr(provider, "attach"), "a public attach() is a route around the lock"
 
 
 # --- the run's tab -----------------------------------------------------------

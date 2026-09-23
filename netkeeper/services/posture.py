@@ -58,6 +58,7 @@ import textwrap
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
+from pathlib import Path
 from typing import Final
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -152,6 +153,13 @@ WEEKEND_DAMPING_CEILING: Final = 1.0
 #: in a row, and below it the lognormal's own spread puts a large share of
 #: waits under a second.
 MIN_DELAY_MEDIAN_S: Final = 5.0
+
+#: The longest a netkeeper run can plausibly hold the browser. Spec 9.6's hard
+#: maximum of profile visits at Appendix C's pacing -- 25-second medians, bursts
+#: of 8-15 with 5-20 minute breaks -- is about two hours of wall clock; four
+#: leaves room for a slow day. A lock held longer is a stuck run, and a stuck run
+#: silently answers ``busy`` to every job and every preflight.
+MAX_PLAUSIBLE_HOLD_HOURS: Final = 4.0
 
 #: The shortest between-burst break that is still a break. Appendix C's range
 #: is 5 to 20 minutes ("sessions, not streams"); a break measured in seconds
@@ -390,7 +398,7 @@ def posture(
 
     protections: list[Protection] = [
         _browser_mode(browser_mode, linkedin.cdp_url),
-        _activity_lock(lock),
+        _activity_lock(lock, now=now),
         _linkedin_session(probe),
         _session_flag(session, user),
         _active_hours(linkedin, zone, zone_warning, now=now, local_now=local_now),
@@ -538,13 +546,16 @@ def _browser_mode(mode: str, cdp_url: str) -> Protection:
     )
 
 
-def _activity_lock(state: activity_lock.LockState | None) -> Protection:
+def _activity_lock(state: activity_lock.LockState | None, *, now: datetime) -> Protection:
     """One browser client per account, across processes (spec 9.9): free, or held by whom.
 
-    Held is the lock doing its job -- a run is in progress and anything else that
-    tries to attach is answering ``busy`` -- so it is reported, not warned about. The
-    row warns when the lock cannot be inspected, because then nobody can say whether
-    attaching now would open a second client.
+    Held is normally the lock doing its job -- a run is in progress and anything
+    else that tries to attach answers ``busy`` -- so it stays ``on``. It warns when
+    the holder looks wrong, because a stuck or unknown holder blocks every job and
+    every preflight without saying so: no readable note, a pid that is not running,
+    a holder that is not a netkeeper command, or a hold longer than
+    :data:`MAX_PLAUSIBLE_HOLD_HOURS`. It is ``unknown`` when the lock cannot be
+    inspected at all.
     """
     name = "one browser client"
     if state is None:
@@ -566,12 +577,54 @@ def _activity_lock(state: activity_lock.LockState | None) -> Protection:
             status=Status.ON,
             value=f"free: no netkeeper process holds the browser for {state.account!r}",
         )
-    who = state.holder.describe() if state.holder is not None else "another netkeeper process"
+    holder = state.holder
+    who = holder.describe() if holder is not None else "a holder that left no note"
     return Protection(
         name=name,
         status=Status.ON,
         value=f"held by {who}; anything else that tries to attach answers busy",
+        warnings=_suspicious_holder(holder, state.path, now=now),
     )
+
+
+def _suspicious_holder(
+    holder: activity_lock.Holder | None, path: Path, *, now: datetime
+) -> tuple[str, ...]:
+    """Why a held lock looks stuck or foreign, if it does. Empty for an ordinary run."""
+    until_released = (
+        " Until it is released, every job and every preflight answers busy; stop the"
+        " holding process to release it"
+    )
+    if holder is None:
+        return (
+            f"the activity lock ({path}) is held, but its holder left no readable note,"
+            f" so nothing can say what holds it.{until_released}",
+        )
+    warnings: list[str] = []
+    if not activity_lock.pid_alive(holder.pid):
+        warnings.append(
+            f"the activity lock is held, but pid {holder.pid} from its note is not"
+            " running: something netkeeper cannot name holds it (a child process that"
+            f" inherited it, or a process in another pid namespace).{until_released}"
+        )
+    if not holder.command.startswith("netkeeper"):
+        warnings.append(
+            f"the activity lock is held by {holder.command or 'an unnamed command'!r},"
+            f" which is not a netkeeper command.{until_released}"
+        )
+    if holder.since is not None:
+        since = holder.since
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=UTC)
+        held_for = now - since
+        if held_for > timedelta(hours=MAX_PLAUSIBLE_HOLD_HOURS):
+            hours = held_for.total_seconds() / 3600
+            warnings.append(
+                f"the activity lock has been held for {hours:.1f} hours, longer than the"
+                f" {MAX_PLAUSIBLE_HOLD_HOURS:g} any run should take: the run holding it"
+                f" is probably stuck.{until_released}"
+            )
+    return tuple(warnings)
 
 
 def _linkedin_session(probe: SessionProbe | None) -> Protection:
