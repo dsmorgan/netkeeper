@@ -117,11 +117,14 @@ def apply_page(
             case Matched() | New():
                 try:
                     apply(session, user, incoming, resolution)
-                except ValueError as exc:
+                except ValueError:
                     # apply() checks before its first write, so the row is untouched.
+                    # The error names the slug; the log does not need it.
                     counts.conflicts += 1
                     log.warning(
-                        "connections sync: skipped one connection for user %d: %s", user.id, exc
+                        "connections sync: skipped a connection for user %d whose URN or slug"
+                        " another contact holds; merge the two to let it through",
+                        user.id,
                     )
                 else:
                     if isinstance(resolution, New):
