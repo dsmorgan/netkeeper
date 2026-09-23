@@ -7,7 +7,7 @@
  * put that to the person as a choice, not swallow it and not force it.
  */
 
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import { jsonResponse } from '@/test/fetch'
@@ -214,6 +214,36 @@ describe('undo', () => {
     expect(screen.queryByText(/archived or merged away/i)).not.toBeInTheDocument()
   })
 
+  it('reads liveness off the card, not out of the refusal it forced past (#91)', async () => {
+    // The case the old inference got wrong, and the reason `TriageContactOut`
+    // carries `archived_at` and `merged_into_id` now.
+    //
+    // The `409` names an edited field, so the screen used to conclude "an
+    // ordinary edit" and put the restored contact back at the front of the
+    // queue. But a force skips every check, and the contact was archived while
+    // the prompt was on screen: what came back is a contact the queue will
+    // never serve again, presented as the next card. `forced` cannot tell the
+    // two apart — it lists this contact in both cases — and the card can.
+    const { backend } = renderTriage({ contacts: 4 })
+    await currentName()
+
+    press('m')
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+    backend.diverge(1, { met: 'not_met' })
+    press('u')
+    const prompt = await screen.findByRole('alertdialog')
+    expect(prompt).toHaveTextContent(/changed since you decided/i)
+
+    // Somebody archives them between the refusal and the force.
+    backend.archive(1)
+    fireEvent.click(await screen.findByTestId('undo-force'))
+
+    await waitFor(() => expect(backend.byId(1).met).toBe('unknown'))
+    expect(await screen.findByText(/archived or merged away since/i)).toBeInTheDocument()
+    // And they are not the card: the queue does not serve an archived contact.
+    expect(await currentName()).toContain('Bo')
+  })
+
   it('does not reach past a decision whose write never landed', async () => {
     // `u` pressed underneath a decision that is still in flight means "take
     // back that decision". If it never reached the server's stack, sending the
@@ -334,5 +364,60 @@ describe('undo against the service’s own conflict rule', () => {
     const prompt = await screen.findByRole('alertdialog')
     expect(prompt).toHaveTextContent(/changed since you decided/i)
     expect(backend.byId(1).met).toBe('met')
+  })
+})
+
+/**
+ * Issue #137: undo removes the row focus was standing on.
+ *
+ * The queue list draws every contact this run has passed as a button. Undoing
+ * a decision puts that contact back at the front of the queue, so their row
+ * leaves the trail — and if focus was on it, the browser drops focus to
+ * `document.body` and a keyboard or screen-reader user loses their place
+ * entirely (WCAG 2.4.3).
+ *
+ * Where focus goes is the judgement the issue asked for: it goes to the row
+ * that took the same place in the list, which keeps the person where they were
+ * reading rather than moving them to a control they were not using.
+ */
+describe('focus when undo takes a row out of the list', () => {
+  it('hands it to the row that took its place, never to the document', async () => {
+    const { backend } = renderTriage({ contacts: 4 })
+    await currentName()
+    press('m')
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+    press('m')
+    await waitFor(() => expect(backend.byId(2).met).toBe('met'))
+
+    const list = await screen.findByTestId('triage-queue-list')
+    const row = within(list).getByRole('button', { name: /Bo Sample-2 — Met/ })
+    row.focus()
+    expect(document.activeElement).toBe(row)
+
+    press('u')
+
+    await waitFor(() => expect(backend.byId(2).met).toBe('unknown'))
+    // The row is gone: Bo is back at the front of the queue, not behind you.
+    await waitFor(() =>
+      expect(within(list).queryByRole('button', { name: /Bo Sample-2 — Met/ })).toBeNull(),
+    )
+    expect(document.activeElement).not.toBe(document.body)
+    expect(list.contains(document.activeElement)).toBe(true)
+    // The same index, which is the row that took its place.
+    expect(document.activeElement).toHaveAccessibleName(/Bo Sample-2 — On screen/)
+  })
+
+  it('leaves focus alone when it was never on the row that went', async () => {
+    const { backend } = renderTriage({ contacts: 4 })
+    await currentName()
+    press('m')
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+
+    const filter = screen.getByRole('button', { name: 'Untriaged' })
+    filter.focus()
+    press('u')
+
+    await waitFor(() => expect(backend.byId(1).met).toBe('unknown'))
+    expect(document.activeElement).toBe(filter)
   })
 })

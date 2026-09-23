@@ -18,7 +18,28 @@
  * they are never focused to begin with: a contact further down the queue cannot
  * be opened, because reaching them means passing everybody in between, and that
  * is a decision about thirty people rather than a navigation.
+ *
+ * That leaves the one case the rows cannot hold on their own, which is issue
+ * #137: `u` takes back the newest decision, the contact goes back to the front
+ * of the queue, and their row leaves the trail — under the cursor, if that is
+ * where it was. The browser then drops focus to `document.body` and a keyboard
+ * or screen-reader user has lost their place entirely (WCAG 2.4.3).
+ *
+ * So focus is handed to **the row that took the same place in the list**, of
+ * the three candidates the issue weighed. It keeps the person where they were
+ * reading: the list has not gone anywhere, and one row out of it is not a
+ * reason to move them to the card or to a control they were not using. Where
+ * the row that went was the last one, the same index is the live card's row,
+ * which is the nearest thing to "where you were" the list can offer.
+ *
+ * The handover is deliberately narrow. It fires only when the remembered
+ * element has actually left the document *and* nothing else has taken focus,
+ * so a person who moved focus away themselves is never pulled back: moving to
+ * another element clears the memory through `focusout`, and clicking the page
+ * background leaves the row connected, which fails the other half.
  */
+
+import { useLayoutEffect, useRef } from 'react'
 
 import { Badge } from '@/components/ui/badge'
 
@@ -74,12 +95,38 @@ export function QueueList({
   onResume: () => void
 }) {
   const reviewing = reviewIndex !== null
+  const rows = useRef<HTMLOListElement>(null)
+  const section = useRef<HTMLElement>(null)
+  /** The row focus is on, so a row removed under it can hand focus on (#137). */
+  const standingOn = useRef<{ node: HTMLElement; index: number } | null>(null)
+
+  function pressables(): HTMLButtonElement[] {
+    return [...(rows.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
+  }
+
+  useLayoutEffect(() => {
+    const was = standingOn.current
+    // Still there, or focus was never in here: nothing to hand on.
+    if (was === null || was.node.isConnected) return
+    standingOn.current = null
+    // Something else took focus in the meantime, and it is not this component's
+    // to take back.
+    if (document.activeElement !== document.body) return
+    const now = pressables()
+    const heir = now[Math.min(was.index, now.length - 1)]
+    // No row left at all — the whole trail went. The section itself is the
+    // nearest place that still says where the person is.
+    if (heir === undefined) section.current?.focus()
+    else heir.focus()
+  })
 
   return (
     <section
+      ref={section}
+      tabIndex={-1}
       aria-label="Queue"
       data-testid="triage-queue-list"
-      className="flex min-w-0 flex-col gap-2 rounded-xl bg-card p-3 ring-1 ring-foreground/10"
+      className="flex min-w-0 flex-col gap-2 rounded-xl bg-card p-3 ring-1 ring-foreground/10 focus-visible:outline-none"
     >
       <div>
         <h3 className="font-medium">Queue · {filterLabel}</h3>
@@ -90,7 +137,21 @@ export function QueueList({
         </p>
       </div>
 
-      <ol className="flex max-h-96 flex-col gap-0.5 overflow-y-auto text-sm">
+      <ol
+        ref={rows}
+        className="flex max-h-96 flex-col gap-0.5 overflow-y-auto text-sm"
+        onFocus={(event) => {
+          const node = event.target as HTMLElement
+          const index = pressables().indexOf(node as HTMLButtonElement)
+          standingOn.current = index === -1 ? null : { node, index }
+        }}
+        onBlur={(event) => {
+          // A `relatedTarget` means the person moved focus themselves, so there
+          // is nothing to restore. A removed element leaves it null, which is
+          // the case worth remembering.
+          if (event.relatedTarget !== null) standingOn.current = null
+        }}
+      >
         {passed.map((entry, index) => (
           <li key={`${entry.card.contact.id}-${trailOffset + index}`}>
             <button

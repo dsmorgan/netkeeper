@@ -5,6 +5,16 @@
  * that teaches it, the position counters, the visible queue, the progress
  * counters, the queue filter, and the bulk suggestion banner.
  *
+ * **The screen says what it is for, and the card is three steps (#142).**
+ * `ScreenExplainer` sits above everything and answers "what am I deciding
+ * here?" in the method's own words; it opens by default and stays collapsed
+ * once somebody collapses it. Under it, a card is `ContactCard` (who they are)
+ * and `CardSteps` (what to do about them), in that order: name, then tags, then
+ * the met call, which is the loudest thing on the card and the last. The button
+ * row leads with Name and Tag for the same reason. None of that moved a key —
+ * `m`, `n`, `s`, `t` and `p` still fire from anywhere through this one handler,
+ * so the budget below is unchanged and only the reading order is new.
+ *
  * The screen is built to a budget: fifty contacts in ten minutes with the
  * keyboard alone, which is twelve seconds each. That rules out a few designs
  * that would otherwise be reasonable — nothing here traps focus, nothing is
@@ -30,41 +40,48 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 
 import { ActionBar } from './action-bar'
+import { CardSteps } from './card-steps'
 import { ContactCard } from './contact-card'
 import { EvidencePanel } from './evidence-panel'
 import { KeyboardHelp } from './keyboard-help'
-import { PreferredNameEditor } from './preferred-name-editor'
 import { QueueList } from './queue-list'
+import { ScreenExplainer } from './screen-explainer'
 import { SuggestionBanner } from './suggestion-banner'
-import { TagPicker } from './tag-picker'
 import { bindingFor } from './keymap'
 import { useTriageKeys } from './use-triage-keys'
 import { useTriageQueue } from './use-triage-queue'
-import { SUGGESTIONS_KEY, type QueueFilter } from './api'
+import { SUGGESTIONS_KEY, conflictFieldOf, type QueueFilter } from './api'
 import type { TriageAction } from './keymap'
 
-type Overlay = 'none' | 'help' | 'name' | 'tags'
+type Editor = 'none' | 'help' | 'name' | 'tags'
 
 /**
- * Which overlay is open, and for whom.
+ * Which editor is open, and for whom.
  *
- * `contactId` is the whole point. The `p` editor and the `t` picker are about
- * one person: they hold that person's name in their own state and send it to
- * that person's id. Leaving one open across a card change — which is easy,
+ * `contactId` is the whole point, and it survived the editors moving out of the
+ * overlay stack and onto the card (#142). The `p` editor and the `t` picker are
+ * about one person: they hold that person's name in their own state and send it
+ * to that person's id. Leaving one open across a card change — which is easy,
  * because they do not hold focus and `m` still works while they are up — would
  * let a name typed for one contact be submitted against the next. Tying the
- * overlay to the contact it was opened for closes it by derivation when the
- * card moves, with no effect and nothing to forget. That covers stepping back
- * as well as moving on, because both change which contact is on screen. The
- * help overlay is about the screen rather than a contact, so it carries `null`
- * and stays up.
+ * editor to the contact it was opened for closes it by derivation when the card
+ * moves, with no effect and nothing to forget. That covers stepping back as
+ * well as moving on, because both change which contact is on screen.
+ *
+ * `CardSteps` then keys each editor on the contact id, so React builds a fresh
+ * one for the next person rather than handing them the last person's state.
+ * Both halves are needed: the derivation is what closes it, and the key is what
+ * stops a reopened editor remembering somebody else's name.
+ *
+ * The help panel is about the screen rather than a contact, so it carries
+ * `null` and stays up.
  */
-interface OpenOverlay {
-  kind: Overlay
+interface OpenEditorFor {
+  kind: Editor
   contactId: number | null
 }
 
-const CLOSED: OpenOverlay = { kind: 'none', contactId: null }
+const CLOSED: OpenEditorFor = { kind: 'none', contactId: null }
 
 /** What an empty queue is called, in the words of the queue that emptied. */
 const EMPTY_QUEUE: Record<QueueFilter, string> = {
@@ -140,7 +157,7 @@ function AutomaticPass({
 
 export function TriagePage() {
   const [filter, setFilter] = useState<QueueFilter>('unknown')
-  const [overlay, setOverlay] = useState<OpenOverlay>(CLOSED)
+  const [overlay, setOverlay] = useState<OpenEditorFor>(CLOSED)
   const queue = useTriageQueue(filter)
   const client = useQueryClient()
   /** Anything that may have moved the suggestion's count re-runs its preview. */
@@ -216,10 +233,10 @@ export function TriagePage() {
   useTriageKeys({ enabled: true, onAction })
 
   const card = queue.current
-  // Derived rather than stored: an overlay opened for a contact closes itself
+  // Derived rather than stored: an editor opened for a contact closes itself
   // the moment the card moves on, so a name typed for one person can never be
   // submitted against the next.
-  const open: Overlay =
+  const open: Editor =
     overlay.contactId === null || overlay.contactId === card?.contact.id ? overlay.kind : 'none'
   const progress = queue.progress
   const triaged = (progress?.triaged ?? 0) + queue.pending.triaged
@@ -279,6 +296,8 @@ export function TriagePage() {
           </span>
         </p>
       </div>
+
+      <ScreenExplainer />
 
       <AutomaticPass
         waiting={automatic}
@@ -365,31 +384,27 @@ export function TriagePage() {
             )}
 
             {card !== null && (
-              <div className="grid gap-4 lg:grid-cols-[minmax(0,22rem)_minmax(0,1fr)]">
-                <ContactCard card={card} position={position} review={queue.reviewing} />
+              <div className="grid gap-4 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
+                {/* Name, then tags, then the decision — the order the work is
+                    done in (#142). The card is who they are; the steps beside
+                    it are what to do about them, and they are a separate
+                    element because the card is an atomic live region and a text
+                    field inside one is re-read on every keystroke. */}
+                <div className="flex min-w-0 flex-col gap-2">
+                  <ContactCard card={card} position={position} review={queue.reviewing} />
+                  <CardSteps
+                    card={card}
+                    open={open === 'name' || open === 'tags' ? open : 'none'}
+                    onOpen={(editor) => setOverlay({ kind: editor, contactId: card.contact.id })}
+                    onClose={() => setOverlay(CLOSED)}
+                    onRename={queue.rename}
+                    onAddTag={(contactId, tag) => void queue.addTag(contactId, tag)}
+                    onRemoveTag={(contactId, tagId) => void queue.removeTag(contactId, tagId)}
+                    onAction={onAction}
+                  />
+                </div>
                 <EvidencePanel card={card} />
               </div>
-            )}
-
-            {card !== null && open === 'name' && (
-              <PreferredNameEditor
-                key={card.contact.id}
-                contactId={card.contact.id}
-                initial={card.contact.preferred_name}
-                firstName={card.contact.first_name}
-                onSave={queue.rename}
-                onClose={() => setOverlay(CLOSED)}
-              />
-            )}
-
-            {card !== null && open === 'tags' && (
-              <TagPicker
-                key={card.contact.id}
-                applied={card.contact.tags}
-                onAdd={(tag) => void queue.addTag(card.contact.id, tag)}
-                onRemove={(tagId) => void queue.removeTag(card.contact.id, tagId)}
-                onClose={() => setOverlay(CLOSED)}
-              />
             )}
           </div>
 
@@ -460,10 +475,16 @@ const CHANGED_FIELD = {
     'Undoing anyway puts back what the decision recorded and overwrites whatever arrived since.',
 }
 
-/** The backend names the field in its detail: "contact 4 has archived_at='…'". */
+/**
+ * The backend names the field in its detail: "contact 4 has archived_at='…'".
+ *
+ * Parsed by `conflictFieldOf`, which is the one place that wording is read, so
+ * a change to the service's refusal breaks one regex rather than two that had
+ * drifted apart without anybody noticing.
+ */
 function wordingFor(detail: string) {
-  const field = /\bhas ([a-z_]+)=/.exec(detail)?.[1]
-  return (field === undefined ? undefined : CONFLICT_WORDING[field]) ?? CHANGED_FIELD
+  const field = conflictFieldOf(detail)
+  return (field === null ? undefined : CONFLICT_WORDING[field]) ?? CHANGED_FIELD
 }
 
 function UndoConflict({

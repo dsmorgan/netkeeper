@@ -9,8 +9,47 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
-import { createFakeBackend } from './test-backend'
+import { createFakeBackend, type FakeBackend } from './test-backend'
 import { currentName, renderTriage } from './test-render'
+import type { Tag } from './api'
+
+/**
+ * A tag the user has said means "I have not met these people".
+ *
+ * The only `not_met` batch there is, now that nothing decides `not_met` from an
+ * absence (#142): a tag's meaning is the user's own declared rule rather than
+ * something netkeeper worked out from a quiet message history.
+ */
+const RECRUITER: Tag = {
+  id: 9,
+  name: 'recruiter',
+  color: null,
+  kind: 'auto',
+  met_signal: 'not_met',
+  contact_count: 3,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+}
+
+const RECRUITER_BATCH = `tag:${RECRUITER.id}`
+
+/**
+ * Six contacts: three with message history, three carrying the recruiter tag.
+ *
+ * The tag is `auto` — a rule put it there, not a hand — so what puts those
+ * three in the batch can only be the meaning the user gave the tag. A `manual`
+ * tag would have tripped "you tagged them yourself" as well, and a test that
+ * two things can pass proves neither.
+ */
+function withARecruiterTag(): FakeBackend {
+  const backend = createFakeBackend({ contacts: 6, withMessages: 3, tags: [RECRUITER] })
+  for (const id of [4, 5, 6]) {
+    backend
+      .byId(id)
+      .tags.push({ id: RECRUITER.id, name: RECRUITER.name, color: null, kind: 'auto' })
+  }
+  return backend
+}
 
 /** The banner row for one batch, which is how a test says which it means. */
 function bannerFor(key: string): HTMLElement {
@@ -229,31 +268,40 @@ describe('what netkeeper decided (P1-28)', () => {
   it('says what each batch decides, not what the first one does', async () => {
     // Two batches are offered at once and they decide opposite things. A
     // button that assumed "met" read right for one of them and lied about the
-    // other, which is the batch that argues from absence — the one somebody
-    // most wants to read carefully before taking.
-    const backend = createFakeBackend({ contacts: 6, withMessages: 3 })
-    // The batch that argues from absence withholds anyone whose card shows a
-    // company somebody else is at, and the fixture's three companies over six
-    // contacts means everybody shares one. Give the three without messages a
-    // company of their own, which is what leaves their cards empty.
-    for (const id of [4, 5, 6]) backend.byId(id).current_company = `Solo Works ${id}`
+    // other — and the one it lied about is the one somebody most wants to read
+    // carefully before taking.
+    const backend = withARecruiterTag()
     renderTriage({ backend })
     await currentName()
 
     const messaged = await findBannerFor('met_with_messages')
-    const nothing = bannerFor('not_met_no_evidence')
+    const tagged = bannerFor(RECRUITER_BATCH)
     expect(within(messaged).getByRole('button', { name: /^Mark/ })).toHaveTextContent(
       'Mark 3 as met',
     )
-    expect(within(nothing).getByRole('button', { name: /^Mark/ })).toHaveTextContent(
+    expect(within(tagged).getByRole('button', { name: /^Mark/ })).toHaveTextContent(
       'Mark 3 as not met',
     )
+    expect(tagged).toHaveTextContent('which you have said means you have not met them')
 
-    fireEvent.click(within(nothing).getByRole('button', { name: 'Mark 3 as not met' }))
+    fireEvent.click(within(tagged).getByRole('button', { name: 'Mark 3 as not met' }))
 
     await waitFor(() => expect(backend.byId(4).met).toBe('not_met'))
     expect(backend.byId(1).met).toBe('unknown')
     expect(await screen.findByRole('status')).toHaveTextContent(/Marked 3 contacts as not met/)
+  })
+
+  it('offers no batch at all about a contact nothing is known of (#142)', async () => {
+    // The shape the removed `not_met_no_evidence` batch existed to sweep up:
+    // six contacts, three of them with nothing on file at all. The screen has
+    // one offer, and it is about the three it has evidence for.
+    renderTriage({ contacts: 6, withMessages: 3 })
+    await currentName()
+    await findBannerFor('met_with_messages')
+
+    const banners = screen.getAllByTestId('bulk-suggestion')
+    expect(banners.map((banner) => banner.dataset.key)).toEqual(['met_with_messages'])
+    expect(document.body).not.toHaveTextContent(/nothing on file/i)
   })
 
   it('reviews what a not-met batch decided, not only a met one', async () => {
@@ -261,13 +309,12 @@ describe('what netkeeper decided (P1-28)', () => {
     // test here reviews a `met` batch, so dropping `not_met` from the queue's
     // states would have left the suite green and the people netkeeper decided
     // *not met* unreviewable — the half of the pass most worth checking.
-    const backend = createFakeBackend({ contacts: 6, withMessages: 3 })
-    for (const id of [4, 5, 6]) backend.byId(id).current_company = `Solo Works ${id}`
+    const backend = withARecruiterTag()
     renderTriage({ backend })
     await currentName()
 
     fireEvent.click(
-      within(await findBannerFor('not_met_no_evidence')).getByRole('button', {
+      within(await findBannerFor(RECRUITER_BATCH)).getByRole('button', {
         name: 'Mark 3 as not met',
       }),
     )
