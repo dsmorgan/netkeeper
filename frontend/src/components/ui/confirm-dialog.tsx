@@ -1,28 +1,34 @@
 import { AlertDialog } from '@base-ui/react/alert-dialog'
+import type { VariantProps } from 'class-variance-authority'
+import { AlertTriangle } from 'lucide-react'
 import type { ReactNode } from 'react'
 
-import { Button } from '@/components/ui/button'
-
-import { ErrorNote } from './notes'
+import { Button, type buttonVariants } from '@/components/ui/button'
 
 interface ConfirmDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   title: string
-  /** What the action does, in full. A destructive action earns the whole sentence. */
+  /** What the action does, in full. A consequential action earns the whole sentence. */
   children: ReactNode
   confirmLabel: string
   onConfirm: () => void
   pending?: boolean
   /** A failure from the action itself, shown here because the dialog stays open. */
   error?: string | null
+  /**
+   * The confirm button's style. Defaults to `destructive` (undo, delete, roll
+   * back); a consequential-but-not-destructive action (arm scheduled runs,
+   * start a run) can pass `default` so the button does not read as "this
+   * deletes something".
+   */
+  confirmVariant?: VariantProps<typeof buttonVariants>['variant']
 }
 
 /**
- * A modal that states a destructive action's consequences and waits.
- *
- * It lives beside the import pages because nothing else needs it yet; move it
- * to `components/ui/` when a second feature does.
+ * A modal that states a consequential action's effects and waits for an
+ * explicit confirmation. Base UI's `AlertDialog` traps focus inside it and
+ * returns it to the trigger on close, so this needs nothing extra for that.
  */
 export function ConfirmDialog({
   open,
@@ -33,6 +39,7 @@ export function ConfirmDialog({
   onConfirm,
   pending = false,
   error = null,
+  confirmVariant = 'destructive',
 }: ConfirmDialogProps) {
   return (
     <AlertDialog.Root open={open} onOpenChange={onOpenChange}>
@@ -48,15 +55,19 @@ export function ConfirmDialog({
             {children}
           </AlertDialog.Description>
           {error !== null && (
-            <div className="mt-3">
-              <ErrorNote>{error}</ErrorNote>
-            </div>
+            <p
+              role="alert"
+              className="mt-3 flex items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-destructive"
+            >
+              <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+              <span>{error}</span>
+            </p>
           )}
           <div className="mt-5 flex justify-end gap-2">
             <AlertDialog.Close render={<Button variant="outline" />} disabled={pending}>
               Cancel
             </AlertDialog.Close>
-            <Button variant="destructive" onClick={onConfirm} disabled={pending}>
+            <Button variant={confirmVariant} onClick={onConfirm} disabled={pending}>
               {pending ? 'Working…' : confirmLabel}
             </Button>
           </div>
