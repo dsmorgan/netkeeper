@@ -765,3 +765,32 @@ async def test_the_gate_checks_the_cancel_flag_before_a_visit_as_well(
 
     assert await gate.before_visit(0) is StopReason.CANCELLED
     assert _spent(session_factory, user_id) == 0
+
+
+async def test_a_broken_fetch_aborts_the_plan_and_says_nothing_about_the_session(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """``VoyagerFetchError`` carries no response: no heat, no flag, the plan resumable."""
+    from netkeeper.linkedin.fetch import VoyagerFetchError
+
+    people = _people(4)
+    user_id, _ = _setup(session_factory, people)
+    browser = FakeBrowser.of(people)
+
+    def plumbing_breaks(kind: str, value: object) -> None:
+        if kind == "details" and browser.kinds().count("details") == 3:
+            raise VoyagerFetchError("the in-page fetch failed")
+
+    browser.on_event = plumbing_breaks
+    with pytest.raises(VoyagerFetchError):
+        await _enrich(session_factory, user_id, browser)
+
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        account = ensure_account(session, user).id
+        (key,) = [k for k in _plan_keys(session, user) if ".plan." in k]
+        plan = enrich_plan.load_plan(session, user, account, key.rsplit(".", 1)[1])
+        assert session_flag(session, user) is None
+        assert heat_service.state(session, user, account) is None
+    assert (plan.status, plan.stopped, len(plan.completed)) == ("aborted", "error", 2)

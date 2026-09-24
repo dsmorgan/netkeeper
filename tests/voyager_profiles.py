@@ -217,6 +217,13 @@ NOT_FOUND = Scripted(404, "{}")
 BAD_REQUEST = Scripted(400, "{}")
 
 
+@dataclass(frozen=True, slots=True)
+class Landed:
+    """The tab after a navigation, as far as the job reads it: where it landed."""
+
+    url: str
+
+
 @dataclass(slots=True)
 class FakeBrowser:
     """One tab over an in-memory set of profiles. See the module docstring.
@@ -250,10 +257,10 @@ class FakeBrowser:
         if self.on_event is not None:
             self.on_event(kind, value)
 
-    async def navigate(self, url: str) -> str:
+    async def navigate(self, url: str) -> Landed:
         self._record("goto", url)
         slug = unquote(urlsplit(url).path.split("/")[2])
-        return self.redirect.get(slug, url)
+        return Landed(self.redirect.get(slug, url))
 
     async def scroll(self, plan: ScrollPlan) -> None:
         self._record("scroll", plan)

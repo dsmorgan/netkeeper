@@ -2,11 +2,12 @@
 
 Two things are being proved here, and the second matters more than the first:
 
-1. a rehearsal drives the *genuine* pacing plan and records every request the
-   tab made, so the log is evidence rather than decoration
+1. a rehearsal drives the *genuine* enrichment job and pacing plan and records
+   every request the tab made, so the log is evidence rather than decoration
    (``test_the_rehearsal_replays_the_real_pacing_plan`` compares what the tab
    was asked to do against ``plan_enrichment`` called with the same seed, step
-   for step);
+   for step, and ``test_each_visit_is_the_enrichment_jobs_request_pattern``
+   checks each visit's page view and its two in-page API fetches);
 2. **a rehearsal cannot reach LinkedIn.** Three independent tests cover the
    three ways it could: the url it is pointed at
    (``test_a_rehearsal_refuses_linkedin_by_name``), any other off-machine host
@@ -31,10 +32,13 @@ leaves this machine.
 
 from __future__ import annotations
 
+import json
 import math
+import re
 from collections.abc import Callable, Sequence
 from random import Random
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -58,6 +62,7 @@ from netkeeper.linkedin.rehearse import (
     _require_neutral,
     rehearse,
     render,
+    replica_voyager,
     serve_replica,
 )
 
@@ -139,6 +144,34 @@ class ReplayPage(FakePage):
         if not self._fetch:
             return 200
         return httpx.get(url, timeout=5).status_code
+
+    async def evaluate(self, expression: str) -> Any:
+        """The in-page ``fetch()`` of ``PageVoyagerFetch``, answered as the replica would.
+
+        The url is read out of the script, where ``PageVoyagerFetch`` embeds it as
+        a JSON literal. The request and its response are emitted to the listeners
+        the way Playwright reports a page's own ``fetch``, so the log shows it. With
+        ``context.fetch`` it really fetches over loopback (the CLI test's "the
+        command's replica really serves"); otherwise it answers from
+        :func:`replica_voyager`, the served replica's own answer.
+        """
+        match = re.search(r'fetch\(("(?:[^"\\]|\\.)*")', expression)
+        if match is None:
+            return await super().evaluate(expression)
+        self.evaluate_calls.append(expression)
+        url = json.loads(match.group(1))
+        request = FakeRequest(url, resource_type="fetch")
+        self._emit("request", request)
+        if self._fetch:
+            async with httpx.AsyncClient() as client:
+                answer = await client.get(url, timeout=5)
+            status, body = answer.status_code, answer.text
+        else:
+            split = urlsplit(url)
+            served = replica_voyager(f"{split.path}?{split.query}" if split.query else split.path)
+            status, body = (200, served.decode()) if served is not None else (404, "{}")
+        self._emit("response", FakeResponse(request, status=status))
+        return {"status": status, "body": body, "url": url}
 
     async def close(self) -> None:
         """Emit anything armed for the unload window, then close.
@@ -266,9 +299,12 @@ async def test_a_rehearsal_logs_every_request_the_page_made() -> None:
 
     assert len(rehearsal.visits) == 3
     assert [visit.index for visit in rehearsal.visits] == [1, 2, 3]
-    assert len(rehearsal.requests) == 9  # document, stylesheet, image, per visit
+    # Per visit: the page and its two sub-resources, then the enrichment job's two
+    # in-page API fetches (P2-07).
+    assert len(rehearsal.requests) == 15
     kinds = [record.resource_type for record in rehearsal.visits[0].requests]
-    assert kinds == ["document", "stylesheet", "image"]
+    assert kinds == ["document", "stylesheet", "image", "fetch", "fetch"]
+    assert rehearsal.harvested == 3 and rehearsal.stopped is None
     for record in rehearsal.requests:
         assert record.method == "GET"
         assert record.status == 200
@@ -289,7 +325,7 @@ async def test_the_requests_of_one_visit_stay_with_that_visit() -> None:
     rehearsal, _, _, _ = await _rehearse(visits=3)
 
     for visit in rehearsal.visits:
-        assert len(visit.requests) == 3
+        assert len(visit.requests) == 5
         assert visit.requests[0].url == visit.url
 
 
@@ -633,6 +669,10 @@ async def test_time_scale_divides_the_waits_and_not_the_plan() -> None:
 
     assert math.isclose(scaled.total, real.total / 100, rel_tol=1e-9)
     assert math.isclose(scaled_rehearsal.planned_wait_s, unscaled.planned_wait_s, rel_tol=1e-9)
+    for visit in scaled_rehearsal.visits:  # each visit reports the wait it really did
+        planned = visit.planned_wait_s or 0.0
+        assert math.isclose(visit.waited_s, planned / 100, rel_tol=1e-9)
+    assert scaled_rehearsal.visits[0].waited_s > 0
     assert "SCALED" in render(scaled_rehearsal)
     assert "SCALED" not in render(unscaled)
 
@@ -754,7 +794,8 @@ async def test_the_rendered_log_shows_every_request_with_its_timing() -> None:
     for record in rehearsal.requests:
         assert record.path in text
     assert f"seed        {SEED}" in text
-    assert "2 visits, 6 requests, 1 host(s): 127.0.0.1" in text
+    assert "2 visits, 10 requests, 1 host(s): 127.0.0.1" in text
+    assert "2 of 2 visits harvested" in text
     assert "Nothing reached linkedin.com" in text
 
 
@@ -814,3 +855,74 @@ def test_the_rehearsal_slugs_are_invented() -> None:
     """No real profile is named anywhere, and every slug says so on its face."""
     assert all(slug.startswith("rehearsal-") for slug in REHEARSAL_SLUGS)
     assert len(set(REHEARSAL_SLUGS)) == len(REHEARSAL_SLUGS)
+
+
+async def test_each_visit_is_the_enrichment_jobs_request_pattern() -> None:
+    """P2-07's done-when: the page view, then the profile's details, then its contact info.
+
+    The two fetches are the job's own (``run_enrichment`` through
+    ``PageVoyagerFetch``), in the order spec 9.4 gives, after the page loaded and
+    was scrolled, and only once per visit.
+    """
+    rehearsal, context, _, _ = await _rehearse(visits=2)
+
+    for visit in rehearsal.visits:
+        slug = visit.url.rstrip("/").rsplit("/", 1)[1]
+        paths = [record.path for record in visit.requests]
+        assert paths[0] == f"/in/{slug}/"
+        assert paths[3].startswith("/voyager/api/identity/dash/profiles?")
+        assert f"memberIdentity={slug}" in paths[3]
+        assert paths[4] == f"/voyager/api/identity/profiles/{slug}/profileContactInfo"
+    (page,) = context.replays
+    assert len(page.evaluate_calls) == 4
+    assert all("document.cookie" in call for call in page.evaluate_calls)  # csrf stays in-page
+
+
+async def test_a_replica_that_stops_answering_is_named_in_the_log() -> None:
+    """A rehearsal whose job stopped early says so rather than pretending it visited them all."""
+    provider, _, _ = _setup()
+    original = ReplayPage.evaluate
+
+    async def throttled(self: ReplayPage, expression: str) -> Any:
+        answer = await original(self, expression)
+        if isinstance(answer, dict) and len(self.evaluate_calls) == 3:
+            return {**answer, "status": 429, "body": "slow down"}
+        return answer
+
+    ReplayPage.evaluate = throttled  # type: ignore[method-assign]
+    try:
+        rehearsal = await rehearse(
+            provider, site=SITE, visits=3, seed=SEED, sleep=Sleeper(), clock=Ticker()
+        )
+    finally:
+        ReplayPage.evaluate = original  # type: ignore[method-assign]
+
+    assert rehearsal.stopped == "response (throttled)"
+    assert rehearsal.harvested == 1 and len(rehearsal.visits) == 2
+    assert "stopped early: response (throttled)" in render(rehearsal)
+
+
+def test_the_replica_answers_the_two_profile_endpoints_in_voyagers_shapes() -> None:
+    """The served JSON parses: a rehearsal that fetched garbage would stop at visit one."""
+    from netkeeper.linkedin.voyager import (
+        contact_info_path,
+        parse_contact_info,
+        parse_profile_details,
+        profile_query,
+    )
+
+    slug = REHEARSAL_SLUGS[0]
+    with serve_replica() as base:
+        details = httpx.get(
+            f"{base}/voyager/api/identity/dash/profiles", params=profile_query(slug), timeout=5
+        )
+        info = httpx.get(f"{base}{contact_info_path(slug)}", timeout=5)
+        page = httpx.get(f"{base}/in/{slug}/", timeout=5)
+
+    parsed = parse_profile_details(details.text)
+    assert (parsed.public_id, parsed.first_name, parsed.last_name) == (slug, "Alex", "Doe")
+    assert parsed.urn.startswith("urn:li:fsd_profile:ACoAAREHEARSAL")
+    assert parse_contact_info(info.text).email == f"{slug}@example.test"
+    cookie = page.headers["set-cookie"]
+    assert cookie.startswith("JSESSIONID=") and "Max-Age=120" in cookie
+    assert "set-cookie" not in details.headers

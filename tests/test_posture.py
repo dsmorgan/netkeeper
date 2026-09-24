@@ -1025,11 +1025,23 @@ def test_human_like_pacing_is_keyed_on_the_plan_alone() -> None:
 
 
 def test_the_rehearsal_is_ignored_because_it_does_pace() -> None:
-    """The ``rehearse.py`` ignore entry is load-bearing: without it, the rehearsal's
-    ``plan_enrichment`` would mark human-like pacing as enforced by a live job."""
-    rehearse = Path(browser_safety.PACKAGE) / "linkedin" / "rehearse.py"
-    assert _calls(rehearse.read_text(encoding="utf-8"), rehearse, _PLAN)
-    assert rehearse not in _callers_of(_PLAN)
+    """The ``rehearse.py`` ignore entry is load-bearing: the rehearsal runs the
+    enrichment job itself (P2-07), and the job's ``plan_enrichment`` would mark
+    human-like pacing as enforced by a live job the moment the CLI imported it.
+
+    ``rehearse.py`` is reached (``netkeeper rehearse``) but not followed, so the job
+    it imports is not live on its account.
+    """
+    package = Path(browser_safety.PACKAGE)
+    rehearse = package / "linkedin" / "rehearse.py"
+    job = package / "linkedin" / "enrich.py"
+    imported = {name for _, name in browser_safety.imported_names(rehearse.read_text(), rehearse)}
+    assert any(name.startswith("netkeeper.linkedin.enrich") for name in imported)
+    assert _calls(job.read_text(encoding="utf-8"), job, _PLAN)
+    live = _live_modules()
+    assert rehearse in live
+    assert job not in live
+    assert job not in _callers_of(_PLAN)
 
 
 def test_every_enforcement_target_is_a_function_that_exists() -> None:
