@@ -2,7 +2,7 @@
 PY := .venv/bin/python
 UV := uv
 
-.PHONY: install lint fmt typecheck test check serve dev build-ui gen-client changelog-draft backup clean help
+.PHONY: install lint fmt typecheck test check serve dev build-ui gen-client changelog-draft backup reset chrome clean help
 
 install:            ## Create .venv and install the package with dev extras (from uv.lock)
 	$(UV) sync --all-extras
@@ -41,6 +41,12 @@ changelog-draft:    ## Preview the unreleased changelog assembled from changelog
 
 backup:             ## Snapshot the database into the data directory's backups/
 	$(PY) -m netkeeper.cli backup
+
+reset:              ## Archive the database, then delete it so `make serve` starts clean
+	scripts/reset-data.sh
+
+chrome:             ## Start the netkeeper Chrome profile with its debugging port (by hand)
+	scripts/chrome.sh
 
 clean:
 	rm -rf .venv .pytest_cache .mypy_cache .ruff_cache frontend/dist
