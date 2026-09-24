@@ -57,6 +57,7 @@ from typing import Final
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from netkeeper.crm.identity import (
@@ -195,7 +196,12 @@ def apply_page(
                         counts.created_contact_ids.add(written.id)
                     else:
                         counts.updated += 1
-    counts.reconnected += _mark_seen(session, user, {c.urn for c in page.connections})
+    counts.reconnected += _mark_seen(
+        session,
+        user,
+        urns={c.urn for c in page.connections if c.urn is not None},
+        public_ids={c.public_id for c in page.connections},
+    )
     session.flush()
     return counts
 
@@ -640,19 +646,37 @@ def _month(year: int | None, month: int | None) -> date | None:
     return date(year, month if month is not None and 1 <= month <= 12 else 1, 1)
 
 
-def _mark_seen(session: Session, user: User, urns: set[str]) -> int:
+def _mark_seen(session: Session, user: User, *, urns: set[str], public_ids: set[str]) -> int:
     """Clear the miss count, any disconnect, and any NotFound streak on every contact
-    holding one of ``urns``.
+    holding one of ``urns`` or, when a page carried no URN, one of ``public_ids``.
 
     A sighting is evidence the profile is there, so an enrichment NotFound streak
     (spec 9.8) starts over too: without that, a contact marked gone and then seen
     again would be marked gone by its next single NotFound. Returns how many had
     been disconnected. Runs after the page's rows are written, so a contact the
-    page just matched by slug has its URN by now.
+    page just matched by slug has its URN by now -- which is also why
+    ``public_ids`` changes nothing for a Voyager page: every connection there
+    already has a real URN (spec 9.3), and a slug match on such a page already
+    learned it during resolution (spec 8.2 step 2), so the URN branch alone
+    would have found the same contact.
+
+    ``public_ids`` exists for P2-08's DOM fallback, whose pages carry no URN at
+    all (:class:`~netkeeper.linkedin.voyager.ConnectionSummary`'s docstring).
+    Without it, a contact seen only through a DOM page would never have its
+    miss count, disconnect, or NotFound streak cleared here, even though spec
+    9.8 says "being seen is evidence whichever job made it" -- and
+    ``li_public_id`` is exactly as reliable an identity as ``li_urn`` (both
+    unique per user), so matching on it is not a weaker check, only a
+    different key.
     """
-    if not urns:
+    if not urns and not public_ids:
         return 0
-    statement = scoped(user, Contact).where(Contact.li_urn.in_(sorted(urns)))
+    conditions = []
+    if urns:
+        conditions.append(Contact.li_urn.in_(sorted(urns)))
+    if public_ids:
+        conditions.append(Contact.li_public_id.in_(sorted(public_ids)))
+    statement = scoped(user, Contact).where(or_(*conditions))
     reconnected = 0
     for contact in session.scalars(statement):
         if contact.li_disconnected_at is not None:

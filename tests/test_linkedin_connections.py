@@ -10,6 +10,7 @@ incremental-stop and completeness tests need to mean anything.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from pathlib import Path
 import pytest
 from voyager_pages import (
     CHECKPOINT,
+    CONNECTIONS_URL,
     LOGGED_OUT,
     PEOPLE,
     THROTTLED,
@@ -31,6 +33,7 @@ from netkeeper.linkedin import connections as job
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import (
     ConnectionsPage,
+    FallbackConnectionsSource,
     ProgressEvent,
     SourcePage,
     StopReason,
@@ -39,7 +42,12 @@ from netkeeper.linkedin.connections import (
     VoyagerConnections,
     run_connections_sync,
 )
-from netkeeper.linkedin.voyager import CONNECTIONS_PATH, parse_connections_page
+from netkeeper.linkedin.voyager import (
+    CONNECTIONS_PATH,
+    ConnectionsPageResult,
+    ConnectionSummary,
+    parse_connections_page,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "voyager"
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
@@ -74,7 +82,7 @@ class Sink:
 
     @property
     def urns(self) -> list[str]:
-        return [c.urn for page in self.pages for c in page.connections]
+        return [c.urn for page in self.pages for c in page.connections if c.urn is not None]
 
 
 async def _run(
@@ -521,3 +529,211 @@ async def test_every_slug_on_every_page_is_reported() -> None:
     fetch = FakeVoyagerFetch(list(PEOPLE))
     result, _, _ = await _run(fetch)
     assert result.seen_public_ids == {person.slug for person in PEOPLE}
+
+
+# --- FallbackConnectionsSource (P2-08): automatic selection -------------------------
+# A minimal, protocol-only fake stands in for both VoyagerConnections and P2-08's
+# DomConnectionsSource here: FallbackConnectionsSource only ever calls fetch_page
+# through the ConnectionsSource protocol, so these tests do not need a real DOM
+# reader (that is tests/test_linkedin_dom.py's job) to prove the switching itself.
+
+
+@dataclass(slots=True)
+class ScriptedSource:
+    """A ``ConnectionsSource`` that answers ``answers[i]`` on its ``i``-th call."""
+
+    name: str
+    answers: list[SourcePage]
+    calls: list[tuple[int, int]] = field(default_factory=list)
+
+    @property
+    def endpoint(self) -> str:
+        return self.name
+
+    async def fetch_page(self, *, start: int, count: int) -> SourcePage:
+        index = len(self.calls)
+        self.calls.append((start, count))
+        return self.answers[index]
+
+
+def _summary(n: int, urn: str | None) -> ConnectionSummary:
+    return ConnectionSummary(
+        urn=urn,
+        public_id=f"person-{n:04d}",
+        first_name=f"Given{n}",
+        last_name=f"Family{n}",
+        headline=None,
+        connected_at=None,
+    )
+
+
+def _ok(connections: Sequence[ConnectionSummary], *, start: int, total: int) -> SourcePage:
+    return SourcePage(
+        outcome=Outcome.OK,
+        final_url=CONNECTIONS_URL,
+        page=ConnectionsPageResult(
+            connections=tuple(connections), start=start, count=len(connections), total=total
+        ),
+    )
+
+
+ROUTE_CHANGED = SourcePage(outcome=Outcome.ROUTE_CHANGED, final_url=CONNECTIONS_URL)
+
+
+async def test_fallback_reads_only_the_primary_until_a_route_change() -> None:
+    primary = ScriptedSource(
+        "primary", [_ok([_summary(0, "urn:0")], start=0, total=1), SourcePage(Outcome.OK, "x")]
+    )
+    fallback = ScriptedSource("fallback", [])
+    source = FallbackConnectionsSource(primary, fallback)
+
+    assert source.endpoint == "primary"
+    first = await source.fetch_page(start=0, count=1)
+    assert first.page is not None and first.page.connections[0].urn == "urn:0"
+    assert source.endpoint == "primary"
+    assert fallback.calls == []
+
+
+async def test_fallback_switches_once_on_route_changed_and_never_switches_back() -> None:
+    primary = ScriptedSource(
+        "primary",
+        [
+            _ok([_summary(0, "urn:0")], start=0, total=10),
+            ROUTE_CHANGED,
+            SourcePage(Outcome.OK, "unused: primary must never be called a third time"),
+        ],
+    )
+    fallback = ScriptedSource(
+        "fallback",
+        [
+            _ok([_summary(1, None)], start=1, total=0),
+            _ok([_summary(2, None)], start=2, total=0),
+        ],
+    )
+    source = FallbackConnectionsSource(primary, fallback)
+
+    first = await source.fetch_page(start=0, count=1)
+    assert first.outcome is Outcome.OK
+    assert source.endpoint == "primary"
+
+    second = await source.fetch_page(start=1, count=1)  # primary's RouteChanged page
+    assert second.page is not None and second.page.connections[0].urn is None
+    assert source.endpoint == "fallback"
+
+    third = await source.fetch_page(start=2, count=1)
+    assert third.page is not None and third.page.connections[0].public_id == "person-0002"
+    assert source.endpoint == "fallback"
+
+    # Exactly two primary calls ever: the switch is one-way, so a third page never
+    # goes back to try primary again, even though primary has a scripted answer
+    # waiting that would prove the bug if it were ever read.
+    assert len(primary.calls) == 2
+    assert len(fallback.calls) == 2
+
+
+async def test_fallback_does_not_double_spend_the_gate_on_the_page_that_switches() -> None:
+    """The gate is asked once per page of run_connections_sync's own loop, whether that
+    page needed one source or two -- FallbackConnectionsSource hides the second
+    attempt entirely inside the one fetch_page call the loop already made."""
+    primary = ScriptedSource(
+        "primary", [_ok([_summary(0, "urn:0")], start=0, total=2), ROUTE_CHANGED]
+    )
+    fallback = ScriptedSource(
+        "fallback", [_ok([_summary(1, None)], start=1, total=0), _ok([], start=2, total=0)]
+    )
+    source = FallbackConnectionsSource(primary, fallback)
+    gate = Gate()
+    sink = Sink()
+
+    result = await run_connections_sync(
+        SyncJobSpec(mode=SyncMode.FULL, page_budget=50, page_size=1),
+        source,
+        gate,
+        on_page=sink.page,
+        clock=lambda: NOW,
+    )
+
+    # Three pages total (urn:0, one DOM page with a connection, one confirming empty
+    # DOM page) cost exactly three gate.before_page calls -- one per page, never one
+    # extra for the middle page, which needed both sources before it answered.
+    assert gate.asked == [0, 1, 2]
+    assert result.reason is StopReason.END_OF_LIST
+    assert result.pages == 3
+
+
+async def test_a_fallback_run_that_only_ever_used_dom_is_never_complete() -> None:
+    """No Voyager page ever ran: max_total stays 0 for the whole run (DOM's own pages
+    report total=0), so SyncResult.complete is false however cleanly the DOM source
+    reaches an honest empty page -- aging safety over completeness (P2-08)."""
+    primary = ScriptedSource("primary", [ROUTE_CHANGED])
+    fallback = ScriptedSource(
+        "fallback",
+        [
+            _ok([_summary(0, None), _summary(1, None)], start=0, total=0),
+            _ok([], start=2, total=0),
+        ],
+    )
+    source = FallbackConnectionsSource(primary, fallback)
+
+    result = await run_connections_sync(
+        SyncJobSpec(mode=SyncMode.FULL, page_budget=50, page_size=2),
+        source,
+        Gate(),
+        on_page=Sink().page,
+        clock=lambda: NOW,
+    )
+
+    assert result.reason is StopReason.END_OF_LIST
+    assert result.max_total == 0
+    assert not result.complete
+    assert result.seen_urns == frozenset()  # DOM contributed nothing urn-based
+    assert result.seen_public_ids == {"person-0000", "person-0001"}
+
+
+async def test_a_fallback_run_can_complete_only_when_voyager_alone_already_saw_the_total() -> None:
+    """The one case a mixed run can complete: Voyager's own page already reached
+    max_total by URN before DOM ever answered -- DOM's contribution here is fully
+    redundant with what Voyager already proved, not new evidence."""
+    primary = ScriptedSource(
+        "primary",
+        [_ok([_summary(0, "urn:0"), _summary(1, "urn:1")], start=0, total=2), ROUTE_CHANGED],
+    )
+    fallback = ScriptedSource("fallback", [_ok([], start=2, total=0)])
+    source = FallbackConnectionsSource(primary, fallback)
+
+    result = await run_connections_sync(
+        SyncJobSpec(mode=SyncMode.FULL, page_budget=50, page_size=2),
+        source,
+        Gate(),
+        on_page=Sink().page,
+        clock=lambda: NOW,
+    )
+
+    assert result.reason is StopReason.END_OF_LIST
+    assert result.complete
+    assert len(fallback.calls) == 1  # the switch happened, DOM just found nothing new
+
+
+async def test_a_fallback_run_partway_through_a_larger_total_is_not_complete() -> None:
+    """Voyager saw 2 of a claimed 10 before switching; DOM's urn=None pages can never
+    make up the difference, so this never completes even though the run reaches an
+    honest end of the (DOM-visible) list."""
+    primary = ScriptedSource(
+        "primary",
+        [_ok([_summary(0, "urn:0"), _summary(1, "urn:1")], start=0, total=10), ROUTE_CHANGED],
+    )
+    fallback = ScriptedSource("fallback", [_ok([], start=2, total=0)])
+    source = FallbackConnectionsSource(primary, fallback)
+
+    result = await run_connections_sync(
+        SyncJobSpec(mode=SyncMode.FULL, page_budget=50, page_size=2),
+        source,
+        Gate(),
+        on_page=Sink().page,
+        clock=lambda: NOW,
+    )
+
+    assert result.reason is StopReason.END_OF_LIST
+    assert not result.complete
+    assert result.max_total == 10
+    assert len(result.seen_urns) == 2
