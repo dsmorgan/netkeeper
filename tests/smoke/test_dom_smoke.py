@@ -265,6 +265,23 @@ _CONTACT_INFO_OVERLAY = b"""<!doctype html>
   <a href="https://x.com/Compose/tweet">Compose link</a>
   <a href="https://x.com/TOS">Tos link</a>
   <a href="https://x.com/Privacy">Privacy link</a>
+  <a href="https://x.com/Account">Account link</a>
+  <a href="https://x.com/About">About link</a>
+  <a href="https://x.com/Bookmarks">Bookmarks link</a>
+  <a href="https://x.com/Lists">Lists link</a>
+  <a href="https://x.com/Logout">Logout link</a>
+  <a href="https://x.com/Jobs">Jobs link</a>
+  <a href="https://x.com/Communities">Communities link</a>
+  <a href="https://x.com/Download">Download link</a>
+  <a href="https://x.com/OAuth">OAuth link</a>
+  <a href="https://x.com/En">Locale-prefix link</a>
+  <a href="https://x.com/Premium">Premium link</a>
+  <a href="https://x.com/Help">Help link</a>
+  <a href="https://x.com/Terms">Terms link</a>
+  <!-- #176 review L7: not on any denylist, but too long (16 chars) to be a
+       real X handle (X's own limit is 15) -- the shape check must reject
+       this even though the word check alone would not. -->
+  <a href="https://x.com/waytoolongtoeverbeahandle">Shape-invalid link</a>
   <a href="https://www.linkedin.com/in/jamie-fake-rivera-1a2b/">Back to profile</a>
 </div>
 </body></html>
@@ -308,6 +325,87 @@ _AMBIGUOUS_CONTACT_INFO_OVERLAY = b"""<!doctype html>
 </body></html>
 """
 
+#: #176 review, H1's own reproduction (probe case A): a docked chat with the
+#: *same* person is open, and nothing else -- no contact-info overlay at
+#: all. The chat's own heading is a link to the person's profile, not the
+#: text "Contact info", so before H1's fix the link-back alone was enough to
+#: qualify this dialog, and the reader returned the chat's own email and
+#: links. Also stands in for M2's "link only" case: a link-back with no
+#: matching heading must refuse under the new AND rule.
+_CHAT_ONLY_OVERLAY = b"""<!doctype html>
+<html><head><title>netkeeper dom smoke replica: contact info</title></head>
+<body>
+<aside role="dialog" aria-label="Messaging">
+  <h2><a href="/in/jamie-fake-rivera-1a2b/">Jamie Rivera</a></h2>
+  <p>hey check <a href="https://sketchy.example/deal">this</a>, mail me
+  <a href="mailto:someone-else@chat.example">here</a>,
+  <a href="https://x.com/randomperson">this</a> is my X.</p>
+</aside>
+</body></html>
+"""
+
+#: #176 review M2's "heading only" case: a dialog with the exact "Contact
+#: info" heading but no link back to any profile at all. Must refuse under
+#: the new AND rule -- the heading alone used to be sufficient too.
+_HEADING_ONLY_OVERLAY = b"""<!doctype html>
+<html><head><title>netkeeper dom smoke replica: contact info</title></head>
+<body>
+<div role="dialog">
+  <h2>Contact info</h2>
+  <a href="mailto:heading-only@example.test">heading-only@example.test</a>
+</div>
+</body></html>
+"""
+
+#: #176 review L1's own reproduction (probe case F): a heading that starts
+#: with "Contact info" but is not exactly that -- a real, differently-scoped
+#: LinkedIn dialog ("Contact info shared with advertisers"), not the overlay
+#: this module means to read. A prefix match let this through; an exact
+#: match (after trim/whitespace-normalize) must not. Carries a *matching*
+#: link-back too (unlike the "heading only" fixture above) so this isolates
+#: L1's own exact-match requirement: a prefix-matching mutation must be
+#: caught here even though H1's AND rule is otherwise satisfied.
+_LOOKALIKE_HEADING_OVERLAY = b"""<!doctype html>
+<html><head><title>netkeeper dom smoke replica: contact info</title></head>
+<body>
+<div role="dialog">
+  <h3>Contact info shared with advertisers</h3>
+  <a href="mailto:ads@example.test">ads@example.test</a>
+  <a href="/in/jamie-fake-rivera-1a2b/">Back to profile</a>
+</div>
+</body></html>
+"""
+
+#: #176 review M2's own reproduction (probe case E): the heading matches
+#: exactly, but the link-back's own host is unrelated to this page's origin
+#: or linkedin.com -- ``https://medium.example/in/<id>`` must not qualify a
+#: dialog just because its *path* happens to contain ``/in/<id>``.
+_FOREIGN_HOST_LINK_OVERLAY = b"""<!doctype html>
+<html><head><title>netkeeper dom smoke replica: contact info</title></head>
+<body>
+<div role="dialog">
+  <h2>Contact info</h2>
+  <a href="https://medium.example/in/foreignhost-fake/">Not linkedin</a>
+  <a href="mailto:leak@example.test">leak@example.test</a>
+</div>
+</body></html>
+"""
+
+#: #176 review, probe case D: a percent-encoded, upper-cased public id in the
+#: link-back's href -- proves the match decodes and case-folds both sides
+#: (#174 item 1's own wantId is lower-cased on the Python side; M13 pins
+#: that this actually matters).
+_ENCODED_UPPER_CASE_OVERLAY = b"""<!doctype html>
+<html><head><title>netkeeper dom smoke replica: contact info</title></head>
+<body>
+<div role="dialog">
+  <h2>Contact info</h2>
+  <a href="https://www.linkedin.com/in/J%C3%96RG-fake-x/">Back to profile</a>
+  <a href="mailto:jorg@example.test">jorg@example.test</a>
+</div>
+</body></html>
+"""
+
 
 #: A page with two good cards and one whose href carries a malformed
 #: percent-encoding (L2 of the #173 review): a real browser's
@@ -347,6 +445,11 @@ class _Replica(BaseHTTPRequestHandler):
     force_stalled_list = False
     force_only_messaging_overlay = False
     force_ambiguous_overlay = False
+    force_chat_only_overlay = False
+    force_heading_only_overlay = False
+    force_lookalike_heading_overlay = False
+    force_foreign_host_link_overlay = False
+    force_encoded_upper_case_overlay = False
 
     def do_GET(self) -> None:
         cls = type(self)
@@ -368,6 +471,16 @@ class _Replica(BaseHTTPRequestHandler):
             self._send(_ONLY_MESSAGING_OVERLAY, "text/html; charset=utf-8")
         elif cls.force_ambiguous_overlay and "/overlay/contact-info/" in self.path:
             self._send(_AMBIGUOUS_CONTACT_INFO_OVERLAY, "text/html; charset=utf-8")
+        elif cls.force_chat_only_overlay and "/overlay/contact-info/" in self.path:
+            self._send(_CHAT_ONLY_OVERLAY, "text/html; charset=utf-8")
+        elif cls.force_heading_only_overlay and "/overlay/contact-info/" in self.path:
+            self._send(_HEADING_ONLY_OVERLAY, "text/html; charset=utf-8")
+        elif cls.force_lookalike_heading_overlay and "/overlay/contact-info/" in self.path:
+            self._send(_LOOKALIKE_HEADING_OVERLAY, "text/html; charset=utf-8")
+        elif cls.force_foreign_host_link_overlay and "/overlay/contact-info/" in self.path:
+            self._send(_FOREIGN_HOST_LINK_OVERLAY, "text/html; charset=utf-8")
+        elif cls.force_encoded_upper_case_overlay and "/overlay/contact-info/" in self.path:
+            self._send(_ENCODED_UPPER_CASE_OVERLAY, "text/html; charset=utf-8")
         elif self.path.startswith("/in/") and "/overlay/contact-info/" in self.path:
             self._send(_CONTACT_INFO_OVERLAY, "text/html; charset=utf-8")
         else:
@@ -398,6 +511,11 @@ def _reset_replica_flags() -> None:
     _Replica.force_stalled_list = False
     _Replica.force_only_messaging_overlay = False
     _Replica.force_ambiguous_overlay = False
+    _Replica.force_chat_only_overlay = False
+    _Replica.force_heading_only_overlay = False
+    _Replica.force_lookalike_heading_overlay = False
+    _Replica.force_foreign_host_link_overlay = False
+    _Replica.force_encoded_upper_case_overlay = False
 
 
 @pytest.fixture
@@ -544,10 +662,13 @@ async def test_the_contact_info_overlay_is_read_from_mailto_and_tel_links(
     # Item 1: the messaging dialog's own links never leak in.
     assert info.email != "should-not-be-read@example.test"
     assert not any("unrelated.example.test" in w for w in info.websites)
-    # Items 2/3: every reserved X path (status, intent, share, home, search,
-    # hashtag, explore, settings, messages, notifications, login, signup,
-    # compose, tos, privacy), in a non-canonical case, is excluded -- only the
-    # one real handle survives.
+    # Items 2/3, extended by #176 review L7: every reserved X path (status,
+    # intent, share, home, search, hashtag, explore, settings, messages,
+    # notifications, login, signup, compose, tos, privacy, account, about,
+    # bookmarks, lists, logout, jobs, communities, download, oauth, en,
+    # premium, help, terms), in a non-canonical case, is excluded, and so is
+    # a segment that is not on any list but does not look like a real handle
+    # by shape (too long) -- only the one real handle survives.
     assert info.twitter_handles == ("jamiefake",)
 
 
@@ -632,6 +753,125 @@ async def test_a_real_page_with_two_qualifying_dialogs_refuses_as_ambiguous(
 
     assert result.outcome is Outcome.ROUTE_CHANGED
     assert result.info is None
+
+
+async def test_a_chat_with_the_same_person_never_qualifies_as_the_contact_info_dialog(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """#176 review H1 (HIGH), the reviewer's own probe case A: a docked chat
+    with the same person is open, and no contact-info overlay at all. The
+    chat's own header links back to that person's profile -- before H1's
+    fix, the link-back check alone was enough to qualify this dialog, and
+    the read returned the chat's own email and links instead of refusing.
+    Also stands in for M2's "link only" smoke case."""
+    _Replica.force_chat_only_overlay = True
+    try:
+        async with provider.run() as run:
+            source = DomContactInfoSource(run, origin=site)
+            result = await source.fetch_contact_info("jamie-fake-rivera-1a2b")
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert result.outcome is Outcome.ROUTE_CHANGED
+    assert result.info is None
+
+
+async def test_a_heading_with_no_link_back_never_qualifies(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """#176 review M2's "heading only" smoke case: the exact "Contact info"
+    heading is present, but there is no link back to any profile at all --
+    must refuse under the new AND rule, the same as "link only" above."""
+    _Replica.force_heading_only_overlay = True
+    try:
+        async with provider.run() as run:
+            source = DomContactInfoSource(run, origin=site)
+            result = await source.fetch_contact_info("jamie-fake-rivera-1a2b")
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert result.outcome is Outcome.ROUTE_CHANGED
+    assert result.info is None
+
+
+async def test_a_lookalike_heading_never_qualifies(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """#176 review L1, probe case F: "Contact info shared with advertisers"
+    is a real, differently-scoped LinkedIn dialog, not the contact-info
+    overlay this module means to read. A prefix match let it through; an
+    exact match (trimmed, whitespace-normalized, case-insensitive) must
+    refuse it."""
+    _Replica.force_lookalike_heading_overlay = True
+    try:
+        async with provider.run() as run:
+            source = DomContactInfoSource(run, origin=site)
+            result = await source.fetch_contact_info("jamie-fake-rivera-1a2b")
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert result.outcome is Outcome.ROUTE_CHANGED
+    assert result.info is None
+
+
+async def test_a_link_back_to_a_foreign_host_never_qualifies(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """#176 review M2, probe case E: the heading matches exactly, but the
+    link-back's own host (medium.example) is neither this page's origin nor
+    linkedin.com -- its path merely *contains* ``/in/<id>``. Must refuse:
+    a link-back is only trusted when its own origin is trusted too."""
+    _Replica.force_foreign_host_link_overlay = True
+    try:
+        async with provider.run() as run:
+            source = DomContactInfoSource(run, origin=site)
+            result = await source.fetch_contact_info("foreignhost-fake")
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert result.outcome is Outcome.ROUTE_CHANGED
+    assert result.info is None
+
+
+async def test_an_upper_case_public_id_still_matches_the_lower_case_link(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """#176 review M13: wantId must be lower-cased on the Python side before
+    it is embedded in the script -- without that, a caller holding the
+    public_id in a different case than the rendered link (both sides are
+    supposed to compare case-insensitively) would wrongly refuse a real
+    overlay. Reuses the default overlay fixture, whose own link-back is
+    lower-case, and asks for it upper-case instead."""
+    try:
+        async with provider.run() as run:
+            source = DomContactInfoSource(run, origin=site)
+            result = await source.fetch_contact_info("JAMIE-FAKE-RIVERA-1A2B")
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert result.outcome is Outcome.OK
+    assert result.info is not None
+    assert result.info.email == "jamie.fake@example.test"
+
+
+async def test_a_percent_encoded_upper_case_public_id_in_the_link_still_matches(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """#176 review, probe case D: the link-back's href carries a
+    percent-encoded, upper-cased public id (a real diacritic, the way a
+    browser would actually render one) -- the match must decode and
+    case-fold both sides, not just one."""
+    _Replica.force_encoded_upper_case_overlay = True
+    try:
+        async with provider.run() as run:
+            source = DomContactInfoSource(run, origin=site)
+            result = await source.fetch_contact_info("jörg-fake-x")
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert result.outcome is Outcome.OK
+    assert result.info is not None
+    assert result.info.email == "jorg@example.test"
 
 
 async def test_a_real_malformed_percent_encoded_card_is_skipped_not_fatal(
