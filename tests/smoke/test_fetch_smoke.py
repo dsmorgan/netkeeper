@@ -165,7 +165,19 @@ async def site(provider: AttachBrowserProvider) -> AsyncIterator[str]:
     gone (#173 review's jar check) -- names only, the same discipline
     ``preflight.py`` holds to: this reaches the developer's real Chrome profile,
     so the assertion below never prints a cookie's value, only whether a name
-    it must not still hold is present.
+    it must not still hold is present. The read itself is scoped with
+    ``urls=[base]`` (#174 item 7): an unfiltered ``context.cookies()`` call
+    returns *every* cookie in the developer's real profile -- every site they
+    are logged into, not just this fixture's loopback port -- which this smoke
+    suite has no business pulling into process memory at all, jar-check or not.
+
+    ``server.shutdown()``/``server.server_close()``/``thread.join()`` run in
+    their own ``finally`` (#174 item 7), not merely after the jar-check
+    ``try``/``except`` above: the previous ordering meant an ``AssertionError``
+    from the jar check itself (as opposed to the ``BrowserUnavailable`` it
+    already caught) would propagate straight out of this fixture and skip
+    shutting the fixture server down, leaking its thread and port for the rest
+    of the test run.
     """
     _FixtureServer.seen_headers = {}
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FixtureServer)
@@ -176,23 +188,25 @@ async def site(provider: AttachBrowserProvider) -> AsyncIterator[str]:
         yield base
     finally:
         try:
-            async with provider.run() as run:
-                await run.goto(f"{base}/expire-cookie")
-                jar = await run.context.cookies()
-                survived = [
-                    str(cookie.get("name"))
-                    for cookie in jar
-                    if str(cookie.get("domain", "")).lstrip(".") == "127.0.0.1"
-                    and cookie.get("name") == "JSESSIONID"
-                ]
-                assert not survived, (
-                    f"{len(survived)} JSESSIONID cookie(s) survived teardown on 127.0.0.1"
-                )
-        except BrowserUnavailable as exc:
-            log.warning("could not navigate to expire the fetch smoke suite's cookie: %s", exc)
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+            try:
+                async with provider.run() as run:
+                    await run.goto(f"{base}/expire-cookie")
+                    jar = await run.context.cookies(urls=[base])
+                    survived = [
+                        str(cookie.get("name"))
+                        for cookie in jar
+                        if str(cookie.get("domain", "")).lstrip(".") == "127.0.0.1"
+                        and cookie.get("name") == "JSESSIONID"
+                    ]
+                    assert not survived, (
+                        f"{len(survived)} JSESSIONID cookie(s) survived teardown on 127.0.0.1"
+                    )
+            except BrowserUnavailable as exc:
+                log.warning("could not navigate to expire the fetch smoke suite's cookie: %s", exc)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 async def test_the_fetch_carries_the_built_headers_and_the_body_round_trips(
