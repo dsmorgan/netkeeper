@@ -37,6 +37,7 @@ from netkeeper.cli import app as cli
 from netkeeper.config import Settings
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.linkedin.classify import Outcome
+from netkeeper.models import User
 from netkeeper.scoping import install_scope_guard
 from netkeeper.services.linkedin_session import SessionFlag, flag_session, session_flag
 from netkeeper.services.users import ensure_local_user
@@ -467,6 +468,30 @@ def test_clear_flag_prompt_does_not_hold_the_write_lock(
     assert _current_flag(cli_db) is None
 
 
+def test_clear_flag_re_checks_the_flag_after_the_prompt(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#173 review, R1 (mutation survived: the re-check neutered to ``if False``).
+    A flag that changed *while the prompt was on screen* must not be cleared by an
+    answer given about the flag that used to be there -- a job raising a fresh
+    flag during the wait is real evidence, and a stale "yes" must not erase it."""
+    _flag_a_checkpoint(cli_db)
+
+    def confirm_after_a_concurrent_change(*_args: object, **_kwargs: object) -> bool:
+        # Stands in for a job raising a *different* flag while the person was
+        # answering the prompt about the original one.
+        _flag_logged_out(cli_db)
+        return True
+
+    monkeypatch.setattr("typer.confirm", confirm_after_a_concurrent_change)
+
+    result = CliRunner().invoke(cli, ["linkedin", "clear-flag"])
+
+    assert result.exit_code == 1
+    assert "changed while waiting for an answer" in result.output
+    assert _current_flag(cli_db) is Outcome.LOGGED_OUT  # untouched by the stale "yes"
+
+
 # --- #170 item 6: preflight takes no write lock to report a CHECKPOINT flag ------
 
 
@@ -491,3 +516,38 @@ def test_preflight_with_a_checkpoint_flag_never_opens_a_writer(
     assert result.exit_code == 0, result.output
     assert "leaving the checkpoint session flag in place" in result.output
     assert writes == [False], f"a checkpoint report must only ever read, got write={writes}"
+
+
+def test_preflight_re_checks_the_flag_before_clearing_it(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#173 review, R2 (mutation survived: the re-check neutered to skip the
+    ``!= flag`` half). A flag that changed between preflight's read and its write
+    must not be cleared on stale evidence -- a job raising a fresh flag in that
+    gap is real evidence a `LoggedOut` clear must not erase."""
+    _flag_logged_out(cli_db)
+    _logged_in(monkeypatch)
+    real_session_flag = session_flag
+    calls = 0
+
+    def session_flag_that_changes_after_the_first_read(
+        session: Session, user: User
+    ) -> SessionFlag | None:
+        nonlocal calls
+        calls += 1
+        result = real_session_flag(session, user)
+        if calls == 1:
+            # Stands in for a job raising a *different* flag in the gap between
+            # preflight's read and its write.
+            _flag_a_checkpoint(cli_db)
+        return result
+
+    monkeypatch.setattr(
+        "netkeeper.cli.session_flag", session_flag_that_changes_after_the_first_read
+    )
+
+    result = CliRunner().invoke(cli, ["preflight"])
+
+    assert result.exit_code == 0, result.output
+    assert "cleared" not in result.output  # the write refused: no longer LoggedOut
+    assert _current_flag(cli_db) is Outcome.CHECKPOINT  # untouched by the stale clear attempt
