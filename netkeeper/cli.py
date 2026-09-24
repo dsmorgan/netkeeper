@@ -6,14 +6,12 @@ import asyncio
 import json
 import logging
 import os
-import sys
 from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, NoReturn
-from urllib.parse import urlsplit
 
 import typer
 import uvicorn
@@ -69,6 +67,7 @@ from netkeeper.services.backup import (
     list_backups,
     prune_backups,
 )
+from netkeeper.services.browser_launch import cdp_port, chrome_launch_command, remote_host_note
 from netkeeper.services.events import EventBus
 from netkeeper.services.linkedin_accounts import (
     account_id_for,
@@ -287,9 +286,6 @@ def openapi_export(
     typer.echo(f"wrote {out}")
 
 
-DEFAULT_CDP_PORT = 9222
-
-
 @browser_app.command("launch")
 def browser_launch(ctx: typer.Context) -> None:
     """Print the command that starts Chrome with a debug port. netkeeper never runs it.
@@ -297,6 +293,10 @@ def browser_launch(ctx: typer.Context) -> None:
     netkeeper attaches to a browser you run; it does not own one. A browser netkeeper
     started would be a second device on your LinkedIn account, and that is what gets
     accounts restricted, so this command prints a command for you to run (ADR 0002).
+
+    The command itself comes from :mod:`netkeeper.services.browser_launch` --
+    the same module ``GET /api/v1/linkedin/browser`` uses (P2-12) -- so there is
+    exactly one place that knows how to build it; nothing here restates the logic.
     """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
@@ -305,7 +305,7 @@ def browser_launch(ctx: typer.Context) -> None:
     typer.echo("netkeeper attaches to a Chrome you start yourself. It never starts one.")
     typer.echo("Run this in a terminal (again whenever that Chrome is not running):")
     typer.echo()
-    for line in _chrome_command(_cdp_port(cdp_url), profile):
+    for line in chrome_launch_command(cdp_port(cdp_url), profile):
         typer.echo(f"  {line}")
     typer.echo()
     typer.echo("Then, in that window:")
@@ -317,33 +317,12 @@ def browser_launch(ctx: typer.Context) -> None:
         "Chrome 136 and later refuse --remote-debugging-port on the default profile\n"
         "directory, so the separate --user-data-dir above is required."
     )
-    host = urlsplit(cdp_url).hostname
-    if host not in (None, "localhost", "127.0.0.1", "::1"):
+    note = remote_host_note(cdp_url)
+    if note is not None:
         typer.echo()
-        typer.echo(
-            f"note: linkedin.cdp_url points at {host}, not this machine. Chrome's debug\n"
-            "port is only reachable on its own loopback address."
-        )
+        typer.echo(f"note: {note}")
     typer.echo()
     typer.echo(f"Check it with: netkeeper preflight   (attaches to {cdp_url})")
-
-
-def _chrome_command(port: int, profile: Path) -> list[str]:
-    """The platform's Chrome command, as lines the user can paste."""
-    # Read through a plain str so mypy keeps both branches on either host, the same
-    # reason paths._is_macos() does it.
-    platform: str = sys.platform
-    opener = 'open -na "Google Chrome" --args \\' if platform == "darwin" else "google-chrome \\"
-    return [opener, f"  --remote-debugging-port={port} \\", f'  --user-data-dir="{profile}"']
-
-
-def _cdp_port(cdp_url: str) -> int:
-    """The debug port from ``linkedin.cdp_url``, falling back to Chrome's usual one."""
-    try:
-        port = urlsplit(cdp_url).port
-    except ValueError:
-        port = None
-    return DEFAULT_CDP_PORT if port is None else port
 
 
 @app.command()
