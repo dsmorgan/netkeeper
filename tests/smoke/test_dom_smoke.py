@@ -37,6 +37,7 @@ from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserUnavailable
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import (
     ConnectionsPage,
+    StopReason,
     SyncJobSpec,
     SyncMode,
     run_connections_sync,
@@ -127,8 +128,62 @@ _CONNECTIONS_PAGE = (
       list.appendChild(li);
     }
     loaded += BATCH;
+    if (loaded >= PEOPLE.length) {
+      // #174 item 5: LinkedIn's own end-of-list marker, rendered once the
+      // list has genuinely reached its end -- distinct from the list simply
+      // not having grown yet.
+      const end = document.createElement('div');
+      end.setAttribute('data-view-name', 'connections-list-end');
+      end.textContent = "You're all caught up";
+      document.querySelector('main').appendChild(end);
+    }
   }
   loadMore();  // the first batch renders on load, the way a real page would
+  window.addEventListener('scroll', () => {
+    const scrolledFraction = (window.scrollY + window.innerHeight) / document.body.scrollHeight;
+    if (scrolledFraction > 0.3) { loadMore(); }
+  });
+</script>
+</body></html>
+"""
+)
+
+#: #174 item 5's stall counterpart to `_CONNECTIONS_PAGE` above: the list
+#: never grows past `STALL_AFTER` people, however much scrolling happens, and
+#: -- unlike a genuine end of list -- never renders the end-of-list marker
+#: either. A real DOM fallback cannot tell this apart from a slow render
+#: that just needs more time; both must read as a stall (ROUTE_CHANGED), not
+#: a confirmed short page.
+_STALLED_CONNECTIONS_PAGE = (
+    """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>netkeeper dom smoke replica: stalled connections</title></head>
+<body>
+<main>
+  <ul id="connections-list" data-view-name="connections-list"></ul>
+  <div style="height:6000px">tall enough to scroll like a person would</div>
+</main>
+<script>
+  const PEOPLE = """
+    + repr(_PEOPLE).replace("'", '"').replace("None", "null")
+    + """;
+  const STALL_AFTER = 2;
+  let loaded = 0;
+  const list = document.getElementById('connections-list');
+  function loadMore() {
+    if (loaded >= STALL_AFTER) { return; }  // stuck here forever -- no marker, ever
+    for (const p of PEOPLE.slice(0, STALL_AFTER)) {
+      const li = document.createElement('li');
+      li.setAttribute('data-view-name', 'connections-list-item');
+      const a = document.createElement('a');
+      a.href = '/in/' + p.publicId + '/';
+      a.setAttribute('aria-label', p.name);
+      li.appendChild(a);
+      list.appendChild(li);
+    }
+    loaded = STALL_AFTER;
+  }
+  loadMore();
   window.addEventListener('scroll', () => {
     const scrolledFraction = (window.scrollY + window.innerHeight) / document.body.scrollHeight;
     if (scrolledFraction > 0.3) { loadMore(); }
@@ -149,11 +204,27 @@ _LOGIN_WALL_PAGE = b"""<!doctype html>
 <html><head><title>smoke: sign in</title></head><body><h1>Sign in</h1></body></html>
 """
 
-#: F7 of the #173 review: the actual contact info lives inside role="dialog",
-#: and the surrounding profile page carries its own, unrelated links -- a bio's
-#: mailto:, a LinkedIn short link, and an x.com status permalink (not a handle)
-#: -- that must never be read as if the overlay had shared them. Modeled on the
-#: review's own reproduction script.
+#: F7 of the #173 review, extended by #174 items 1-3: the actual contact info
+#: lives inside role="dialog", and the surrounding profile page carries its
+#: own, unrelated links -- a bio's mailto:, a LinkedIn short link, and an
+#: x.com status permalink (not a handle) -- that must never be read as if the
+#: overlay had shared them. Modeled on the review's own reproduction script.
+#:
+#: #174 item 1: a messaging overlay (also role="dialog") renders *before* the
+#: real contact-info dialog in document order, with neither the "Contact
+#: info" heading nor a link back to jamie-fake-rivera-1a2b's profile -- so it
+#: must never be the one this module reads from, whatever DOM order it
+#: happens to render in.
+#:
+#: #174 item 3: the lnkd.in short link and the x.com/.../status/... permalink
+#: are duplicated *inside* the real dialog (the originals outside it stay, to
+#: keep exercising dialog scoping on its own) -- if the shortener filter or
+#: the reserved-path check were ever weakened, these inside copies are what
+#: would leak into the parsed result, not just the outside ones scoping alone
+#: already excludes. #174 item 2: every other reserved X/Twitter path segment
+#: is exercised too, each in a different case than its canonical lowercase
+#: spelling, proving the denylist check is case-insensitive and covers more
+#: than just "i".
 _CONTACT_INFO_OVERLAY = b"""<!doctype html>
 <html><head><title>netkeeper dom smoke replica: contact info</title></head>
 <body>
@@ -167,12 +238,33 @@ _CONTACT_INFO_OVERLAY = b"""<!doctype html>
     <a href="https://x.com/i/status/12345">this post</a>.
   </section>
 </main>
+<div role="dialog" aria-label="Messaging">
+  <h2>Messaging</h2>
+  <a href="mailto:should-not-be-read@example.test">Reply</a>
+  <a href="https://unrelated.example.test/">Unrelated link</a>
+</div>
 <div role="dialog">
   <h2>Contact info</h2>
   <a href="mailto:jamie.fake@example.test">jamie.fake@example.test</a>
   <a href="tel:+15550100000">+1 555 010 0000</a>
   <a href="https://jamie-fake.example.test/">Website</a>
   <a href="https://x.com/jamiefake">X profile</a>
+  <a href="https://lnkd.in/xyz789">Shortened link (inside the dialog too)</a>
+  <a href="https://x.com/I/status/67890">Another liked post (inside the dialog too)</a>
+  <a href="https://x.com/Intent/tweet?text=hi">Intent link</a>
+  <a href="https://x.com/SHARE?url=x">Share link</a>
+  <a href="https://x.com/Home">Home link</a>
+  <a href="https://x.com/search?q=x">Search link</a>
+  <a href="https://x.com/HashTag/example">Hashtag link</a>
+  <a href="https://x.com/Explore">Explore link</a>
+  <a href="https://x.com/Settings">Settings link</a>
+  <a href="https://x.com/Messages">Messages link</a>
+  <a href="https://x.com/Notifications">Notifications link</a>
+  <a href="https://x.com/Login">Login link</a>
+  <a href="https://x.com/SignUp">Signup link</a>
+  <a href="https://x.com/Compose/tweet">Compose link</a>
+  <a href="https://x.com/TOS">Tos link</a>
+  <a href="https://x.com/Privacy">Privacy link</a>
   <a href="https://www.linkedin.com/in/jamie-fake-rivera-1a2b/">Back to profile</a>
 </div>
 </body></html>
@@ -182,6 +274,38 @@ _CONTACT_INFO_OVERLAY = b"""<!doctype html>
 _OVERLAY_ERROR_PAGE = b"""<!doctype html>
 <html><head><title>smoke: error</title></head>
 <body><main>Something went wrong</main></body></html>
+"""
+
+#: #174 item 1's "zero qualify" case, distinct from F5(d) above: a dialog
+#: genuinely renders (``role="dialog"`` is present), but it is the messaging
+#: one, not contact info -- no "Contact info" heading, no link back to the
+#: public id visited. Must refuse the same way an absent dialog does, not
+#: fall through to whatever this one dialog happens to contain.
+_ONLY_MESSAGING_OVERLAY = b"""<!doctype html>
+<html><head><title>netkeeper dom smoke replica: contact info</title></head>
+<body>
+<div role="dialog" aria-label="Messaging">
+  <h2>Messaging</h2>
+  <a href="mailto:should-not-be-read@example.test">Reply</a>
+</div>
+</body></html>
+"""
+
+#: #174 item 1's "more than one qualify" case: two dialogs both carry the
+#: "Contact info" heading marker. Ambiguous, so this must refuse rather than
+#: guess which one a caller meant -- the DOM read has no way to know.
+_AMBIGUOUS_CONTACT_INFO_OVERLAY = b"""<!doctype html>
+<html><head><title>netkeeper dom smoke replica: contact info</title></head>
+<body>
+<div role="dialog">
+  <h2>Contact info</h2>
+  <a href="mailto:one@example.test">one@example.test</a>
+</div>
+<div role="dialog">
+  <h2>Contact info</h2>
+  <a href="mailto:two@example.test">two@example.test</a>
+</div>
+</body></html>
 """
 
 
@@ -220,6 +344,9 @@ class _Replica(BaseHTTPRequestHandler):
     force_error_page = False
     force_malformed_card = False
     force_overlay_error = False
+    force_stalled_list = False
+    force_only_messaging_overlay = False
+    force_ambiguous_overlay = False
 
     def do_GET(self) -> None:
         cls = type(self)
@@ -231,10 +358,16 @@ class _Replica(BaseHTTPRequestHandler):
             self._send(_ERROR_PAGE, "text/html; charset=utf-8")
         elif cls.force_malformed_card and self.path.startswith(CONNECTIONS_LIST_PATH):
             self._send(_MALFORMED_CARD_PAGE, "text/html; charset=utf-8")
+        elif cls.force_stalled_list and self.path.startswith(CONNECTIONS_LIST_PATH):
+            self._send(_STALLED_CONNECTIONS_PAGE.encode(), "text/html; charset=utf-8")
         elif self.path.startswith(CONNECTIONS_LIST_PATH):
             self._send(_CONNECTIONS_PAGE.encode(), "text/html; charset=utf-8")
         elif cls.force_overlay_error and "/overlay/contact-info/" in self.path:
             self._send(_OVERLAY_ERROR_PAGE, "text/html; charset=utf-8")
+        elif cls.force_only_messaging_overlay and "/overlay/contact-info/" in self.path:
+            self._send(_ONLY_MESSAGING_OVERLAY, "text/html; charset=utf-8")
+        elif cls.force_ambiguous_overlay and "/overlay/contact-info/" in self.path:
+            self._send(_AMBIGUOUS_CONTACT_INFO_OVERLAY, "text/html; charset=utf-8")
         elif self.path.startswith("/in/") and "/overlay/contact-info/" in self.path:
             self._send(_CONTACT_INFO_OVERLAY, "text/html; charset=utf-8")
         else:
@@ -262,6 +395,9 @@ def _reset_replica_flags() -> None:
     _Replica.force_error_page = False
     _Replica.force_malformed_card = False
     _Replica.force_overlay_error = False
+    _Replica.force_stalled_list = False
+    _Replica.force_only_messaging_overlay = False
+    _Replica.force_ambiguous_overlay = False
 
 
 @pytest.fixture
@@ -289,7 +425,12 @@ async def test_scrolling_a_real_page_loads_more_cards_and_the_run_completes_them
 ) -> None:
     """Cards appear only as the page genuinely scrolls (the replica's own script
     gates them on window.scrollY), so a full sync reaching every one of them proves
-    BrowserRun.scroll's real mouse.wheel replay is what drove it."""
+    BrowserRun.scroll's real mouse.wheel replay is what drove it. Also #174 item 5:
+    the replica renders LinkedIn's own end-of-list marker once every person has
+    loaded, so the *second* page -- asking for 7 more that will never come --
+    is read as a clean end of list, not a stall, which is what the assertions
+    below now pin (see test_a_stalled_page_without_the_marker_is_still_route_changed
+    for the case this is deliberately not)."""
     pages: list[ConnectionsPage] = []
 
     class Gate:
@@ -309,8 +450,9 @@ async def test_scrolling_a_real_page_loads_more_cards_and_the_run_completes_them
                 # page_size matching len(_PEOPLE) exactly: the whole list loads in
                 # one settled page. The *next* page, asking for 7 more that will
                 # never come, exhausts every settle attempt -- #173 review, F5(c)
-                # -- and ends the run with ROUTE_CHANGED rather than a confirmed
-                # END_OF_LIST, which is what the assertions below now pin.
+                # -- but the replica's end-of-list marker is up by then (#174
+                # item 5), so this reads as a clean, empty end of list rather
+                # than a refusal, which is what the assertions below now pin.
                 SyncJobSpec(mode=SyncMode.FULL, page_budget=20, page_size=len(_PEOPLE)),
                 source,
                 Gate(),
@@ -324,12 +466,38 @@ async def test_scrolling_a_real_page_loads_more_cards_and_the_run_completes_them
     assert all(c.urn is None for page in pages for c in page.connections)
     assert result.max_total == 0
     assert not result.complete  # spec 9.3/P2-08: DOM alone never proves a total
-    assert result.outcome is Outcome.ROUTE_CHANGED  # F5(c): exhaustion is a refusal
+    # #174 item 5: a clean end of list, distinguished from a stall by the
+    # replica's own end-of-list marker -- not the across-the-board
+    # ROUTE_CHANGED every DOM run used to end with before this item.
+    assert result.reason is StopReason.END_OF_LIST
+    assert result.outcome is None
 
     all_connections = [c for page in pages for c in page.connections]
     jamie = next(c for c in all_connections if c.public_id == "jamie-fake-rivera-1a2b")
     assert (jamie.first_name, jamie.last_name) == ("Jamie", "Rivera")
     assert jamie.headline == "Product designer at Fictional Robotics Co"
+
+
+async def test_a_stalled_page_without_the_marker_is_still_route_changed(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """#174 item 5's stall half: the replica's list genuinely stalls at 2 people
+    and never renders the end-of-list marker, however much real scrolling
+    happens. Exhausting the settle attempts here must still refuse
+    (ROUTE_CHANGED) -- this module has no way to tell this apart from a list
+    that truly ended at 2, and the marker is what makes that distinction, not
+    a guess. See the sibling test above for the case this deliberately is
+    not: the same exhaustion, but the marker present."""
+    _Replica.force_stalled_list = True
+    try:
+        async with provider.run() as run:
+            source = DomConnectionsSource(run, origin=site, scroll_profile=_FAST_SCROLL)
+            answer = await source.fetch_page(start=0, count=len(_PEOPLE))
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert answer.outcome is Outcome.ROUTE_CHANGED
+    assert answer.page is None
 
 
 async def test_a_real_login_wall_redirect_is_classified_not_read_as_an_empty_list(
@@ -350,6 +518,14 @@ async def test_a_real_login_wall_redirect_is_classified_not_read_as_an_empty_lis
 async def test_the_contact_info_overlay_is_read_from_mailto_and_tel_links(
     provider: AttachBrowserProvider, site: str
 ) -> None:
+    """Also exercises #174 items 1-3 against a real browser: the fixture
+    renders an unrelated messaging dialog *before* the real one (item 1's
+    dialog-qualification check must still pick the right dialog), duplicates
+    the lnkd.in and x.com/.../status/... links *inside* the dialog alongside
+    the ones already outside it (item 3's scoping-vs-filtering split), and
+    exercises every other reserved X/Twitter path in a non-canonical case
+    (item 2's denylist, case-insensitively) -- none of that should change
+    what a correct read returns."""
     try:
         async with provider.run() as run:
             source = DomContactInfoSource(run, origin=site)
@@ -362,7 +538,16 @@ async def test_the_contact_info_overlay_is_read_from_mailto_and_tel_links(
     assert info is not None
     assert info.email == "jamie.fake@example.test"
     assert info.phones == ("+15550100000",)
+    # Item 3: shorteners are excluded even from inside the dialog, not merely
+    # scoped out by being outside it.
     assert info.websites == ("https://jamie-fake.example.test/",)
+    # Item 1: the messaging dialog's own links never leak in.
+    assert info.email != "should-not-be-read@example.test"
+    assert not any("unrelated.example.test" in w for w in info.websites)
+    # Items 2/3: every reserved X path (status, intent, share, home, search,
+    # hashtag, explore, settings, messages, notifications, login, signup,
+    # compose, tos, privacy), in a non-canonical case, is excluded -- only the
+    # one real handle survives.
     assert info.twitter_handles == ("jamiefake",)
 
 
@@ -401,6 +586,43 @@ async def test_a_real_overlay_error_page_is_unreadable_not_an_empty_ok(
     """#173 review, F5(d): an overlay whose dialog never rendered must not read as
     "Ok, nobody shared anything"."""
     _Replica.force_overlay_error = True
+    try:
+        async with provider.run() as run:
+            source = DomContactInfoSource(run, origin=site)
+            result = await source.fetch_contact_info("jamie-fake-rivera-1a2b")
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert result.outcome is Outcome.ROUTE_CHANGED
+    assert result.info is None
+
+
+async def test_a_real_page_with_only_a_messaging_dialog_refuses_as_unreadable(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """#174 item 1's "zero qualify" case: a dialog genuinely renders, but it is
+    the messaging one, not contact info -- distinct from F5(d) above, where no
+    dialog renders at all. Must still refuse rather than read the one dialog
+    that happens to be there."""
+    _Replica.force_only_messaging_overlay = True
+    try:
+        async with provider.run() as run:
+            source = DomContactInfoSource(run, origin=site)
+            result = await source.fetch_contact_info("jamie-fake-rivera-1a2b")
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert result.outcome is Outcome.ROUTE_CHANGED
+    assert result.info is None
+
+
+async def test_a_real_page_with_two_qualifying_dialogs_refuses_as_ambiguous(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """#174 item 1's "more than one qualify" case: two dialogs both carry the
+    "Contact info" heading. Ambiguous, so this refuses rather than guessing
+    which one a caller meant."""
+    _Replica.force_ambiguous_overlay = True
     try:
         async with provider.run() as run:
             source = DomContactInfoSource(run, origin=site)
