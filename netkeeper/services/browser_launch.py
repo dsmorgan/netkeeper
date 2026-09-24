@@ -1,17 +1,24 @@
 """The Chrome launch command, as data, for ``GET /linkedin/browser`` (P2-12).
 
 ``netkeeper browser launch`` (``netkeeper/cli.py``) prints this same command from a
-terminal. This module exists so the LinkedIn page can show it too, without the route
-that serves it importing anything that touches a browser: ``netkeeper.linkedin.browser``
+terminal -- literally: it calls :func:`chrome_launch_command` and :func:`cdp_port`
+too, rather than keeping its own copy, so there is exactly one place that knows how
+to build the command and the two can never drift apart. This module exists
+separately so the LinkedIn page can show the same thing, without the route that
+serves it importing anything that touches a browser: ``netkeeper.linkedin.browser``
 is one of ``BROWSER_MODULES`` in ``tests/test_browser_safety.py``, so nothing under
-``netkeeper/web/`` may import it, even for a constant. Everything here is a pure string
-computation from config -- no CDP, no Playwright, nothing awaited -- so a request
-handler may call it directly (CLAUDE.md: "never `await` browser work inside a request
-handler").
+``netkeeper/web/`` may import it, even for a constant, and ``netkeeper/cli.py`` is
+one of the few modules the safety rules do allow to. Everything here is a pure
+string computation from config -- no CDP, no Playwright, nothing awaited -- so a
+request handler may call it directly (CLAUDE.md: "never `await` browser work inside
+a request handler").
 
-``CHROME_PROFILE_DIRNAME`` is duplicated from ``netkeeper.linkedin.browser`` rather than
-imported, for the same reason; ``tests/test_browser_launch.py`` pins both this module's
-output and its constant against the CLI's own, so the two cannot silently drift apart.
+``CHROME_PROFILE_DIRNAME`` is the one thing still duplicated from
+``netkeeper.linkedin.browser`` rather than imported, for the same reason an import
+of the whole module is forbidden; ``tests/test_browser_launch.py`` pins the two
+constants together so they cannot silently drift apart, and separately asserts that
+``netkeeper browser launch``'s own printed lines are exactly this module's output,
+so an import forgetting to happen would fail loudly rather than pass by coincidence.
 """
 
 from __future__ import annotations
