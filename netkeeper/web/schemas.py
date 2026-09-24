@@ -1718,3 +1718,19 @@ class LinkedInStatusOut(BaseModel):
     armed: bool
     running_run_id: int | None
     can_start_runs: bool
+
+
+class BrowserLaunchOut(BaseModel):
+    """``netkeeper browser launch``'s instructions, for the page (spec 9.1, ADR 0002).
+
+    Read-only and built from config alone -- no attach, no CDP connection, nothing
+    awaited. Whether Chrome is actually reachable, and whether the session it holds
+    is healthy, is what ``netkeeper preflight`` checks; that attaches, so it cannot
+    run inside a request handler and has no API endpoint yet (a follow-up).
+    """
+
+    cdp_url: str
+    profile_dir: str
+    launch_command: list[str]
+    remote_host_note: str | None
+    check_command: str

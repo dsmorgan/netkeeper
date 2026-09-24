@@ -920,6 +920,32 @@ export interface paths {
         patch: operations["update_interaction"];
         trace?: never;
     };
+    "/api/v1/linkedin/browser": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Browser
+         * @description ``netkeeper browser launch``'s instructions, as data (spec 9.1, ADR 0002).
+         *
+         *     netkeeper never starts Chrome; it only ever prints (here, shows) the command
+         *     for a person to run themselves. Everything below comes from config -- no
+         *     attach, so this never awaits browser work (CLAUDE.md). ``user`` is unused --
+         *     the instructions are the same for everyone -- but every route here resolves
+         *     the current user (spec 14.1), local mode's single user included.
+         */
+        get: operations["get_linkedin_browser"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/linkedin/budget": {
         parameters: {
             query?: never;
@@ -1888,6 +1914,27 @@ export interface components {
              * @description The LinkedIn export zip, exactly as downloaded.
              */
             file: string;
+        };
+        /**
+         * BrowserLaunchOut
+         * @description ``netkeeper browser launch``'s instructions, for the page (spec 9.1, ADR 0002).
+         *
+         *     Read-only and built from config alone -- no attach, no CDP connection, nothing
+         *     awaited. Whether Chrome is actually reachable, and whether the session it holds
+         *     is healthy, is what ``netkeeper preflight`` checks; that attaches, so it cannot
+         *     run inside a request handler and has no API endpoint yet (a follow-up).
+         */
+        BrowserLaunchOut: {
+            /** Cdp Url */
+            cdp_url: string;
+            /** Check Command */
+            check_command: string;
+            /** Launch Command */
+            launch_command: string[];
+            /** Profile Dir */
+            profile_dir: string;
+            /** Remote Host Note */
+            remote_host_note: string | null;
         };
         /**
          * BudgetOut
@@ -6437,6 +6484,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_linkedin_browser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrowserLaunchOut"];
                 };
             };
         };

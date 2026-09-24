@@ -131,6 +131,20 @@ async def test_budget_heat_and_status_read_what_posture_reads(
     }
 
 
+async def test_browser_instructions_come_from_config_and_touch_no_browser(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """GET /linkedin/browser: read-only, built from config, matches `browser launch` (P2-12)."""
+    settings: Settings = running_app.state.settings
+    browser = (await client.get("/api/v1/linkedin/browser")).json()
+
+    assert browser["cdp_url"] == settings.linkedin.cdp_url
+    assert browser["profile_dir"].endswith("chrome-profile")
+    assert browser["launch_command"][1] == "  --remote-debugging-port=9222 \\"
+    assert browser["remote_host_note"] is None  # the default cdp_url is loopback
+    assert browser["check_command"] == "netkeeper preflight"
+
+
 async def test_a_resume_takes_the_rest_of_the_plan_and_runs_it(
     bare_engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
