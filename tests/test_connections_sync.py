@@ -593,6 +593,74 @@ async def test_a_urn_scheme_change_disconnects_nobody(
     assert all((c.li_missing_count, c.li_disconnected_at) == (0, None) for c in contacts.values())
 
 
+@pytest.mark.parametrize("size", [1, 2, 3, 5, 10])
+async def test_a_sync_that_replaces_a_small_network_outright_disconnects_nobody(
+    session_factory: sessionmaker[Session], user_id: int, size: int
+) -> None:
+    """#169 A, through the runner: every URN *and* slug changes at once.
+
+    Unlike a URN scheme change, nothing resolves to a candidate: every row is
+    new. The runner has to hand ``age_unseen`` the rows its own pages created,
+    or a doubled network lets exactly half of it age. The second week is the
+    regression persisting: the replacement rows now exist, so it is the half
+    rule, not the created rows, that refuses it.
+    """
+    people = _many(size)
+    await _sync(session_factory, user_id, FakeVoyagerFetch(people))
+    replaced = [
+        Person(900 + i, f"Other{i}", f"Stranger{i}", None, urn_prefix="ACoAANEW")
+        for i in range(size)
+    ]
+
+    reports = [
+        await _sync(
+            session_factory,
+            user_id,
+            FakeVoyagerFetch(replaced),
+            at=NOW + timedelta(days=7 * week),
+        )
+        for week in (1, 2)
+    ]
+
+    assert reports[0].pages.created == size
+    assert all(r.result.complete for r in reports)
+    assert all(r.aging is not None and r.aging.refused is not None for r in reports)
+    contacts = _contacts(session_factory, user_id)
+    assert all(
+        (contacts[p.urn].li_missing_count, contacts[p.urn].li_disconnected_at) == (0, None)
+        for p in people
+    )
+
+
+async def test_the_runner_measures_aging_against_the_contacts_it_found(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """Ten stored; a sync sees five of them and six new people.
+
+    Five of the ten stored would miss: half, refused. Counted over the sixteen
+    rows that exist once the pages are written, five would be under half and
+    go ahead, which is what a runner that forgot the rows it created would do.
+    """
+    people = _many(10)
+    await _sync(session_factory, user_id, FakeVoyagerFetch(people))
+    newcomers = [
+        Person(900 + i, f"Other{i}", f"Stranger{i}", None, urn_prefix="ACoAANEW") for i in range(6)
+    ]
+
+    report = await _sync(
+        session_factory,
+        user_id,
+        FakeVoyagerFetch([*newcomers, *people[5:]]),
+        at=NOW + timedelta(days=7),
+    )
+
+    assert report.result.complete and report.pages.created == 6
+    assert report.aging is not None and report.aging.refused is not None
+    assert "5 of 10" in report.aging.refused
+    contacts = _contacts(session_factory, user_id)
+    assert all(contacts[p.urn].li_missing_count == 0 for p in people[:5])
+
+
 @pytest.mark.parametrize("scripted", [CHECKPOINT, LOGGED_OUT], ids=["checkpoint", "logged-out"])
 async def test_no_run_starts_while_the_session_is_flagged(
     session_factory: sessionmaker[Session], user_id: int, scripted: Scripted

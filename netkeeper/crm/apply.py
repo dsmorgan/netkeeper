@@ -49,6 +49,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, tzinfo
 from typing import Final
+from urllib.parse import unquote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
@@ -57,7 +58,7 @@ from netkeeper.crm.identity import Candidate, IncomingContact, Matched, New, app
 from netkeeper.db import is_writer
 from netkeeper.linkedin.connections import ConnectionsPage
 from netkeeper.linkedin.voyager import ConnectionSummary
-from netkeeper.models import Contact, ContactSource, User
+from netkeeper.models import Contact, ContactSource, User, normalize_public_id
 from netkeeper.scoping import scoped
 
 log = logging.getLogger(__name__)
@@ -92,6 +93,9 @@ class PageCounts:
     contacts whose ``li_disconnected_at`` a sighting cleared. ``review_contact_ids``
     is every contact a candidate row named: someone the sync may have seen under
     another identity, which :func:`age_unseen` must not age while a person decides.
+    ``created_contact_ids`` is every contact these pages created: :func:`age_unseen`
+    measures its limits against the contacts that existed *before* the sync, and
+    these did not (#169).
     """
 
     seen: int = 0
@@ -101,6 +105,7 @@ class PageCounts:
     conflicts: int = 0
     reconnected: int = 0
     review_contact_ids: set[int] = field(default_factory=set)
+    created_contact_ids: set[int] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +146,7 @@ def apply_page(
                 counts.review_contact_ids.update(contact_ids)
             case Matched() | New():
                 try:
-                    apply(session, user, incoming, resolution)
+                    written = apply(session, user, incoming, resolution)
                 except ValueError:
                     # apply() checks before its first write, so the row is untouched.
                     # The error names the slug; the log does not need it.
@@ -154,6 +159,7 @@ def apply_page(
                 else:
                     if isinstance(resolution, New):
                         counts.created += 1
+                        counts.created_contact_ids.add(written.id)
                     else:
                         counts.updated += 1
     counts.reconnected += _mark_seen(session, user, {c.urn for c in page.connections})
@@ -168,6 +174,7 @@ def age_unseen(
     *,
     observed_at: datetime,
     disconnect_after_misses: int,
+    created_by_sync: frozenset[int],
     seen_public_ids: frozenset[str] = frozenset(),
     held_for_review: frozenset[int] = frozenset(),
 ) -> AgingCounts:
@@ -179,8 +186,9 @@ def age_unseen(
     counts as seen when its URN, *or* its slug, appeared, or when it is waiting
     for review: a profile that came back under a new URN with the same slug
     resolves to a candidate and is never written, and aging it would disconnect
-    exactly the rows a person has been asked to look at. At
-    ``disconnect_after_misses`` consecutive misses the contact's
+    exactly the rows a person has been asked to look at. Slugs are compared the
+    way they are stored: URL-decoded and lowercased (:func:`normalize_public_id`).
+    At ``disconnect_after_misses`` consecutive misses the contact's
     ``li_disconnected_at`` is set to ``observed_at``; one already disconnected
     keeps the time it was first set. Nothing is committed.
 
@@ -189,7 +197,7 @@ def age_unseen(
     than a week of disconnections:
 
     * ``seen_urns`` is empty -- a list that answered with nobody at all;
-    * every contact that can age would miss, or more than half of them would;
+    * every contact that can age would miss, or half of them or more would;
     * more contacts would miss than ``max(AGING_FLOOR, AGING_MAX_SHARE`` of the
       contacts that can age``)``;
     * more seen URNs match no stored contact than ``UNMATCHED_MAX_SHARE`` of the
@@ -200,6 +208,18 @@ def age_unseen(
 
     The first rule is what protects a small network: the floor of ten would
     otherwise let a sync wipe out a network of ten.
+
+    ``created_by_sync`` is every contact this sync's own pages created
+    (:attr:`PageCounts.created_contact_ids`), and it is required rather than
+    defaulted because leaving it out is the bug it fixes (#169 A). The shares
+    above are of the contacts that could age *before* this sync ran: a sync that
+    replaced a small network outright (every URN and slug changed, as after a
+    parser regression) creates as many rows as it misses, and counting those
+    rows as ones that "can age" diluted the denominator by exactly the number
+    that missed. A row the sync created was seen by it, so it never misses
+    either way. The half rule is "half or more", not "more than half", for the
+    week *after* such a sync: by then the replacement rows exist, and a
+    regression that persists misses exactly half of the doubled network again.
     """
     _require_writer(session)
     if disconnect_after_misses < 1:
@@ -214,17 +234,22 @@ def age_unseen(
     )
     ageable = list(session.scalars(statement))
     stored = {contact.li_urn for contact in ageable}
-    slugs = {slug.lower() for slug in seen_public_ids}
+    before = [contact for contact in ageable if contact.id not in created_by_sync]
+    slugs = {
+        slug
+        for slug in (normalize_public_id(unquote(raw)) for raw in seen_public_ids)
+        if slug is not None
+    }
     unseen = [
         contact
-        for contact in ageable
+        for contact in before
         if contact.li_urn not in seen_urns
         and contact.li_public_id not in slugs
         and contact.id not in held_for_review
     ]
     refusal = _implausible(
         missed=len(unseen),
-        can_age=len(ageable),
+        can_age=len(before),
         unmatched=len(seen_urns - stored),
         seen=len(seen_urns),
     )
@@ -235,7 +260,7 @@ def age_unseen(
             user.id,
             refusal,
             len(unseen),
-            len(ageable),
+            len(before),
             len(seen_urns - stored),
             len(seen_urns),
         )
@@ -268,8 +293,8 @@ def _implausible(*, missed: int, can_age: int, unmatched: int, seen: int) -> str
     """Why aging this sync would be trusting a misreading, or None when it looks real."""
     if missed and missed == can_age:
         return f"all {can_age} contacts that can age would miss this sync"
-    if missed * 2 > can_age:
-        return f"{missed} of {can_age} contacts would miss this sync, more than half"
+    if missed and missed * 2 >= can_age:
+        return f"{missed} of {can_age} contacts would miss this sync, half or more"
     if missed > _limit(AGING_MAX_SHARE, can_age):
         return (
             f"{missed} of {can_age} contacts would miss this sync, more than the"
