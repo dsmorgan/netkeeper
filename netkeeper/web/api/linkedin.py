@@ -116,6 +116,7 @@ def _run_out(run: SyncRun) -> RunOut:
         planned=derived.planned,
         completed=derived.completed,
         aging_refused=derived.aging_refused,
+        resumed_by=derived.resumed_by,
     )
 
 

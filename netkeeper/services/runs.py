@@ -550,6 +550,10 @@ class RunView:
     planned: int | None
     completed: int | None
     aging_refused: str | None
+    #: The run that took over this one's remaining plan, once one has (spec 9.9):
+    #: a plan is resumed at most once, so a client can tell "already resumed" apart
+    #: from "still resumable" without a second call to load the plan itself.
+    resumed_by: int | None
 
 
 def view(run: SyncRun) -> RunView:
@@ -557,6 +561,7 @@ def view(run: SyncRun) -> RunView:
     plan = run.plan_json or {}
     contact_ids = plan.get("contact_ids")
     done = plan.get("completed")
+    resumed_by = plan.get("resumed_by")
     counts: dict[str, Any] = run.counts_json or {}
     aging = counts.get("aging")
     refused = aging.get("refused") if isinstance(aging, dict) else None
@@ -565,6 +570,7 @@ def view(run: SyncRun) -> RunView:
         planned=len(contact_ids) if isinstance(contact_ids, list) else None,
         completed=len(done) if isinstance(done, list) else None,
         aging_refused=refused if isinstance(refused, str) else None,
+        resumed_by=resumed_by if isinstance(resumed_by, int) else None,
     )
 
 

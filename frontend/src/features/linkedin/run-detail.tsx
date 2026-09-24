@@ -55,9 +55,17 @@ export function RunDetail({
   if (run.isError) return <p role="alert">{message(run.error)}</p>
 
   const data = run.data
+  // A run that could not run at all (browser unavailable, a refusal before it
+  // ever started) is `failed`, not `aborted`, but its stored plan is exactly
+  // as resumable — the backend already allows it (`enrich_plan.start_resume`
+  // only refuses running, completed, or already-resumed, not the status name).
+  // `resumed_by` is the one case a resume must never be offered for even when
+  // the arithmetic still says "incomplete": a plan is resumed at most once
+  // (spec 9.9), and RunOut carries who already has it (L3, #179 review).
   const resumable =
     data.kind === 'enrich' &&
-    data.status === 'aborted' &&
+    (data.status === 'aborted' || data.status === 'failed') &&
+    data.resumed_by === null &&
     data.planned !== null &&
     data.completed !== null &&
     data.completed < data.planned
@@ -127,7 +135,7 @@ export function RunDetail({
         onOpenChange={setResuming}
         title="Resume this enrichment?"
         confirmVariant="default"
-        confirmLabel={resume.isPending ? 'Resuming…' : 'Resume'}
+        confirmLabel="Resume"
         pending={resume.isPending}
         error={resume.isError ? message(resume.error) : null}
         onConfirm={() => resume.mutate()}
@@ -144,14 +152,21 @@ function FieldList({ title, fields }: { title: string; fields: Field[] }) {
   return (
     <div>
       <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-0.5 sm:grid-cols-3">
+      {/* One column below sm: at a narrow width, two-up (each cell already a
+          label-above-value flex-col there) left a long value with nowhere to
+          go but into its neighbor's column, since a grid cell has no min-content
+          protection of its own — only a real browser lays that out; jsdom does
+          not. min-w-0 + break-words on the value is the same fix as the run and
+          budget tables' overflow wrapper: give the cell somewhere to shrink to
+          and something wide to wrap inside it, rather than push past it. */}
+      <dl className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
         {fields.map((field) => (
           <div
             key={field.label}
-            className="flex justify-between gap-2 sm:flex-col sm:justify-start"
+            className="flex min-w-0 justify-between gap-2 sm:flex-col sm:justify-start"
           >
             <dt className="text-xs text-muted-foreground">{field.label}</dt>
-            <dd className="tabular-nums">{field.value}</dd>
+            <dd className="min-w-0 tabular-nums break-words">{field.value}</dd>
           </div>
         ))}
       </dl>

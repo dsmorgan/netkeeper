@@ -131,6 +131,7 @@ export function run(overrides: Partial<Run> = {}): Run {
     planned: null,
     completed: null,
     aging_refused: null,
+    resumed_by: null,
     ...overrides,
   }
 }

@@ -172,11 +172,55 @@ async def test_a_resume_takes_the_rest_of_the_plan_and_runs_it(
             )
             await app.state.tasks.join()
             new = (await client.get(f"/api/v1/linkedin/runs/{resumed.json()['run_id']}")).json()
+            old_after = (await client.get(f"/api/v1/linkedin/runs/{old_id}")).json()
 
     assert resumed.status_code == 202, resumed.text
     assert again.status_code == 409 and "already resumed" in again.json()["detail"]
     assert (new["resume_of_id"], new["max_visits"], new["planned"]) == (old_id, 1, 2)
     assert new["status"] != "running"  # the fake Chrome answered; the run ended
+    assert connector.attaches == 1
+    # L3 (#179 review): the old run's RunOut now says who took over its plan,
+    # so a client can tell "already resumed" from "still resumable" on its own.
+    assert new["resumed_by"] is None
+    assert old_after["resumed_by"] == new["id"]
+
+
+async def test_a_failed_enrichment_with_a_remaining_plan_can_be_resumed(
+    bare_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L3 (#179 review): resume is not only for `aborted` — a run that could not
+    run at all (browser unavailable, a pre-attach refusal) is `failed`, and its
+    stored plan is exactly as resumable. `enrich_plan.start_resume` already
+    allowed this (it checks running/completed/resumed_by, never the status
+    name); the LinkedIn page only needed to stop hiding the button for it."""
+    monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", "/nonexistent-dist")
+    settings = Settings()
+    provider, connector = fake_provider()
+    async with served(bare_engine, settings, provider, Clock(NOW)) as app:
+        with session_scope(_factory(app), write=True) as session:
+            user = _local(session)
+            ids = [factories.make_contact(session, user).id for _ in range(3)]
+            old = runs.create_run(
+                session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW
+            )
+            enrich_plan.store_plan(session, user, old.id, ids)
+            runs.finish_run(
+                session,
+                user,
+                old.id,
+                status=SyncRunStatus.FAILED,
+                now=NOW,
+                stop_reason="browser_unavailable",
+                error="BrowserUnavailable: tab lost",
+            )
+            old_id = old.id
+        async with client_for(app) as client:
+            resumed = await client.post(
+                f"/api/v1/linkedin/runs/{old_id}/resume", json={}, headers=HEADERS
+            )
+            await app.state.tasks.join()
+
+    assert resumed.status_code == 202, resumed.text
     assert connector.attaches == 1
 
 
