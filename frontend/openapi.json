@@ -607,6 +607,50 @@
         "title": "Body_import_archive",
         "type": "object"
       },
+      "BrowserLaunchOut": {
+        "description": "``netkeeper browser launch``'s instructions, for the page (spec 9.1, ADR 0002).\n\nRead-only and built from config alone -- no attach, no CDP connection, nothing\nawaited. Whether Chrome is actually reachable, and whether the session it holds\nis healthy, is what ``netkeeper preflight`` checks; that attaches, so it cannot\nrun inside a request handler and has no API endpoint yet (a follow-up).",
+        "properties": {
+          "cdp_url": {
+            "title": "Cdp Url",
+            "type": "string"
+          },
+          "check_command": {
+            "title": "Check Command",
+            "type": "string"
+          },
+          "launch_command": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Launch Command",
+            "type": "array"
+          },
+          "profile_dir": {
+            "title": "Profile Dir",
+            "type": "string"
+          },
+          "remote_host_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote Host Note"
+          }
+        },
+        "required": [
+          "cdp_url",
+          "profile_dir",
+          "launch_command",
+          "remote_host_note",
+          "check_command"
+        ],
+        "title": "BrowserLaunchOut",
+        "type": "object"
+      },
       "BudgetOut": {
         "description": "One action class's counters against its limits (spec 9.6).",
         "properties": {
@@ -10765,6 +10809,28 @@
         "summary": "Update Interaction",
         "tags": [
           "interactions"
+        ]
+      }
+    },
+    "/api/v1/linkedin/browser": {
+      "get": {
+        "description": "``netkeeper browser launch``'s instructions, as data (spec 9.1, ADR 0002).\n\nnetkeeper never starts Chrome; it only ever prints (here, shows) the command\nfor a person to run themselves. Everything below comes from config -- no\nattach, so this never awaits browser work (CLAUDE.md). ``user`` is unused --\nthe instructions are the same for everyone -- but every route here resolves\nthe current user (spec 14.1), local mode's single user included.",
+        "operationId": "get_linkedin_browser",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserLaunchOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Browser",
+        "tags": [
+          "linkedin"
         ]
       }
     },

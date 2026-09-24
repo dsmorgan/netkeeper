@@ -24,6 +24,8 @@ built on:
   ``confirm: true``), ``POST /linkedin/schedule/disarm``: whether scheduled
   runs may fire. Every install starts disarmed.
 * ``GET /linkedin/status``: the page's banner in one read.
+* ``GET /linkedin/browser``: ``netkeeper browser launch``'s instructions, as data.
+  Read-only and built from config alone; it never attaches (spec 9.9, CLAUDE.md).
 
 Every ``GET`` here only reads: none starts, resumes, or arms anything. Every
 ``POST`` and ``DELETE`` goes through the CSRF guard (``X-Netkeeper-Client: 1``
@@ -39,9 +41,16 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from netkeeper.config import LinkedInSettings
 from netkeeper.models import Contact, SyncRun, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.models.base import utcnow
+from netkeeper.paths import data_dir
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import budgets, enrich_plan, runs
 from netkeeper.services import posture as posture_service
+from netkeeper.services.browser_launch import (
+    CHROME_PROFILE_DIRNAME,
+    cdp_port,
+    chrome_launch_command,
+    remote_host_note,
+)
 from netkeeper.services.heat import cooldown_multiplier
 from netkeeper.services.linkedin_accounts import (
     account_id_for,
@@ -57,6 +66,7 @@ from netkeeper.services.scheduler import SERVED_SCHEDULES, stored_due
 from netkeeper.services.visit_budget import todays_visits
 from netkeeper.web.deps import CurrentUser, SessionDep, Tasks
 from netkeeper.web.schemas import (
+    BrowserLaunchOut,
     BudgetOut,
     BudgetStatusOut,
     HeatOut,
@@ -435,4 +445,28 @@ def get_status(request: Request, user: CurrentUser, session: SessionDep) -> Link
         armed=account is not None and scheduled_runs_armed(session, user, account.id),
         running_run_id=None if running is None else running.id,
         can_start_runs=request.app.state.executor is not None,
+    )
+
+
+# --- launch instructions ---------------------------------------------------------------
+
+
+@router.get("/browser", operation_id="get_linkedin_browser")
+def get_browser(request: Request, user: CurrentUser) -> BrowserLaunchOut:
+    """``netkeeper browser launch``'s instructions, as data (spec 9.1, ADR 0002).
+
+    netkeeper never starts Chrome; it only ever prints (here, shows) the command
+    for a person to run themselves. Everything below comes from config -- no
+    attach, so this never awaits browser work (CLAUDE.md). ``user`` is unused --
+    the instructions are the same for everyone -- but every route here resolves
+    the current user (spec 14.1), local mode's single user included.
+    """
+    cdp_url = _settings(request).cdp_url
+    profile = data_dir() / CHROME_PROFILE_DIRNAME
+    return BrowserLaunchOut(
+        cdp_url=cdp_url,
+        profile_dir=str(profile),
+        launch_command=chrome_launch_command(cdp_port(cdp_url), profile),
+        remote_host_note=remote_host_note(cdp_url),
+        check_command="netkeeper preflight",
     )
