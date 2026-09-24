@@ -40,6 +40,7 @@ from netkeeper.linkedin.connections import (
     ConnectionsPage,
     StopReason,
     SyncMode,
+    SyncResult,
     VoyagerConnections,
 )
 from netkeeper.linkedin.pacing import human_delay
@@ -977,6 +978,7 @@ async def test_card_contacts_a_sync_confirms_do_not_dilute_its_aging_limits(
     assert report.result.complete
     assert report.pages.confirmed_by_urn == 10
     assert report.counts()["confirmed_by_urn"] == 10
+    assert report.counts()["cards_created"] == 0
     assert report.aging is not None and report.aging.refused is not None
     contacts = _contacts(session_factory, user_id)
     assert (contacts[real[1].urn].li_missing_count, contacts[real[1].urn].li_disconnected_at) == (
@@ -984,3 +986,23 @@ async def test_card_contacts_a_sync_confirms_do_not_dilute_its_aging_limits(
         None,
     )
     assert all(contacts[p.urn].needs_review_at is None for p in cards)
+
+
+def test_a_runs_counts_carry_the_cards_it_created() -> None:
+    """#184: a fallback run's ``counts_json`` says how many card contacts it made."""
+    pages = mapping.PageCounts(cards_created=3, confirmed_by_urn=1)
+    report = SyncRunReport(
+        account_id=1,
+        result=SyncResult(
+            mode=SyncMode.FULL,
+            reason=StopReason.END_OF_LIST,
+            pages=1,
+            seen_urns=frozenset(),
+            total=0,
+            source_switched=True,
+        ),
+        pages=pages,
+    )
+    counts = report.counts()
+    assert (counts["cards_created"], counts["confirmed_by_urn"]) == (3, 1)
+    assert counts["complete"] is False
