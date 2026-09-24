@@ -449,17 +449,19 @@ Depends on: P2-06.
 Done when: the test exists and passes; `crm/apply.py` is the only module that maps extractor results onto rows.
 
 **P2-15 Prior campaign history import** · lane core · M · `safety`
+Deferred to phase 3 (maintainer, 2026-09-23): the opens and clicks shape is decided with the campaign schema (P3-05) rather than ahead of it. It no longer gates CP4. Issue #65.
 Goal: import the outreach history from the previous mailing tool so netkeeper knows who was already contacted before it sends anything. The export is one `.xlsx` workbook, one tab per campaign, laid out as a report rather than a table: a campaign summary row, then side-by-side blocks of openers, clickers, and bounced addresses at column offsets that differ between tabs. Match recipients through `crm/identity.py` on email address, write one `email_out` interaction per recipient per campaign dated from the campaign start so `last_contacted_at` becomes correct, mark bounced addresses so the phase 3 enrollment guard in F18 has something to read, and decide where opens and clicks live alongside the phase 3 campaign tables rather than ahead of them. The source records delivery only: replies, positive responses, and unsubscribes are not in it and come from the phase 3 Gmail reply detection run backwards over the historical threads. Do not infer a decline from a non-open.
 Depends on: P1-03, P1-04, P1-10. Decide the opens and clicks shape with P3-05.
 Done when: the import is idempotent, unmatched addresses are reported rather than dropped, bounces show on the contact, and the fixtures are hand-built and sanitized. Real exports stay in `~/code/netkeeper-private`, never in the repo.
 
 **P2-16 Request the archive for the user** · lane extractor · M · `safety`
+Deferred (maintainer, 2026-09-23): manual archive import already works, and automating a LinkedIn settings flow waits until scheduled runs have a clean record. It no longer gates CP4 and has no milestone. Issue #120.
 Goal: netkeeper asks LinkedIn for the data export in the attached session, then waits — the export takes 1 to 24 hours and arrives as a notification. The run records which step it is on, the dashboard shows it, and when the file is ready netkeeper downloads and imports it. Manual mode stays first-class — request it yourself, download it yourself, drop the zip in — and one status list covers both.
 Depends on: P2-01, P1-20.
 Done when: both modes reach an imported archive from the same screen, the automated one survives a restart mid-wait, and a changed LinkedIn page stops the run with `RouteChanged` rather than a guess.
 
 **CP3** · checkpoint · after P2-01 to P2-05, P2-11.
-**CP4** · checkpoint · closes phase 2, after one week of scheduled runs.
+**CP4** · checkpoint · closes phase 2, after one week of scheduled runs. P2-15 and P2-16 are deferred and are not part of it.
 
 ### Phase 3: email campaigns
 
