@@ -241,9 +241,16 @@ class ActivityLocks:
     #: before calling the account busy.
     CONFIRM_S = 0.05
 
-    def __init__(self, directory: Path | None = None) -> None:
+    def __init__(
+        self, directory: Path | None = None, *, legacy_partner: str | None = SINGLE_ACCOUNT_KEY
+    ) -> None:
         self._directory = directory
         self._locks: dict[str, asyncio.Lock] = {}
+        #: The account whose holds also claim the legacy ``browser-local.lock``
+        #: (#169 F): the local user's account, which is what pre-P2-10 code acted
+        #: for. Account 1 unless whoever builds the registry knows better; a
+        #: caller with a database passes the local account's key (#175 review, F10).
+        self.legacy_partner = legacy_partner
 
     @property
     def directory(self) -> Path:
@@ -266,7 +273,7 @@ class ActivityLocks:
         if activity_lock.inspect(account, self.directory).held:
             return True
         return (
-            account == SINGLE_ACCOUNT_KEY
+            account == self.legacy_partner
             and activity_lock.inspect(LEGACY_SHARED_KEY, self.directory).held
         )
 
@@ -298,13 +305,14 @@ class ActivityLocks:
             lock.release()
 
     async def _claims(self, account: str, *, wait: bool) -> list[activity_lock.Claim]:
-        """The account's file lock; for account 1, the legacy one first (#169 F).
+        """The account's file lock; for :attr:`legacy_partner`, the legacy one first (#169 F).
 
         See :data:`~netkeeper.linkedin.activity_lock.LEGACY_SHARED_KEY`: a process
-        running older code holds only the legacy file, and only ever for account 1.
+        running older code holds only the legacy file, and only ever for the local
+        user's account.
         Either one busy releases whatever was taken and raises.
         """
-        keys = [LEGACY_SHARED_KEY, account] if account == SINGLE_ACCOUNT_KEY else [account]
+        keys = [LEGACY_SHARED_KEY, account] if account == self.legacy_partner else [account]
         held: list[activity_lock.Claim] = []
         try:
             for key in keys:

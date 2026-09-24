@@ -142,6 +142,7 @@ from netkeeper.models import JsonValue, User
 from netkeeper.models.base import utcnow
 from netkeeper.services import heat as heat_service
 from netkeeper.services.linkedin_accounts import scheduled_runs_armed
+from netkeeper.services.linkedin_session import session_flag
 from netkeeper.services.settings_kv import get_setting, set_setting
 
 log = logging.getLogger(__name__)
@@ -796,8 +797,10 @@ async def poll_and_fire(
 
     While the account's scheduled runs are disarmed (``armed``, P2-10; every
     account starts disarmed) the handler is not called either, and the fire
-    is skipped as ``"disarmed"``. Above the configured heat threshold (spec
-    9.7) the browser job is skipped as ``"heat"``. Either way the cadence still
+    is skipped as ``"disarmed"``; while the session flag is set (a checkpoint
+    or a login wall, spec 9.7) it is skipped as ``"session_flagged"``. Above
+    the configured heat threshold (spec 9.7) the browser job is skipped as
+    ``"heat"``. Either way the cadence still
     advances, so the scheduler does not spin retrying the same fire on every
     heartbeat, and a skipped fire has not *run*: a ``run_on_first_setup`` kind
     keeps its first-setup standing and is offered again
@@ -846,6 +849,10 @@ async def poll_and_fire(
         skipped_reason: str | None = None
         if not isinstance(armed, Arming) and not armed(session, user, account_id):
             skipped_reason = "disarmed"
+        elif session_flag(session, user) is not None:
+            # A checkpoint or a login wall: the run would refuse anyway (spec 9.7),
+            # so no run is recorded and nothing is attached (#175 review, F3).
+            skipped_reason = "session_flagged"
         elif isinstance(heat_settings, HeatSettings) and heat_service.should_skip(
             session, user, account_id, now=now, settings=heat_settings
         ):

@@ -188,7 +188,7 @@ async def _request_as(
 ) -> httpx.Response:
     with acting_as(app, user_id):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
             if endpoint.method.upper() == "GET":
                 return await client.get(url)
             return await client.request(

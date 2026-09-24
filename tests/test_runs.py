@@ -21,7 +21,7 @@ from netkeeper.config import Settings
 from netkeeper.db import session_scope
 from netkeeper.linkedin import enrich
 from netkeeper.linkedin.classify import Outcome
-from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
+from netkeeper.models import SyncRun, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.services import connections_sync, runs, scheduler
 from netkeeper.services.linkedin_accounts import (
     arm_scheduled_runs,
@@ -216,11 +216,25 @@ def test_the_startup_sweep_fails_what_nobody_holds(writer: Session, user: User) 
     live = runs.create_run(writer, held, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW)
     held_account = live.linkedin_account_id
 
+    young = factories.make_user(writer)
+    just_asked = runs.create_run(
+        writer,
+        young,
+        SyncRunKind.ENRICH,
+        trigger=SyncRunTrigger.MANUAL,
+        now=NOW + runs.STALE_AFTER - timedelta(seconds=1),
+    )
+
     count = runs.fail_interrupted_runs(
-        writer, now=NOW, browser_held=lambda account_id: account_id == held_account
+        writer,
+        now=NOW + runs.STALE_AFTER,
+        browser_held=lambda account_id: account_id == held_account,
     )
 
     assert count == 1
+    # #175 F7: a run asked for a moment ago may belong to a terminal about to take
+    # its lock; the sweep leaves it for create_run or cancel to judge later.
+    assert just_asked.status is SyncRunStatus.RUNNING
     assert (stale.status, stale.error) == (SyncRunStatus.FAILED, runs.INTERRUPTED)
     assert live.status is SyncRunStatus.RUNNING
 
@@ -364,7 +378,9 @@ async def test_a_retry_later_answer_parks_one_retry_twenty_to_fifty_minutes_out(
     async def unreachable(ctx: scheduler.JobContext) -> scheduler.JobOutcome:
         return scheduler.JobOutcome.RETRY_LATER
 
-    finished = due + timedelta(minutes=3)  # the attach attempt took a moment
+    # The attach attempt took a while: the retry counts from when it gave up, not
+    # from when the heartbeat started (#175 review, X26).
+    finished = due + timedelta(minutes=40)
     result = await scheduler.poll_and_fire(
         session_factory,
         owner,
@@ -458,3 +474,172 @@ def test_only_the_busy_heartbeat_warning_is_dropped() -> None:
     )
     assert not _BusyHeartbeat().filter(busy)
     assert _BusyHeartbeat().filter(record("Run time of job was missed by 0:05:00"))
+
+
+# --- #175 review ---------------------------------------------------------------------------
+
+
+async def test_an_armed_but_flagged_account_is_skipped_before_any_run(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """F3: the scheduler checks the session flag too, so a flagged session gets no run row."""
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+        account = ensure_account(session, owner).id
+        arm_scheduled_runs(session, owner, now=NOW)
+        flag_session(session, owner, Outcome.CHECKPOINT, url="/checkpoint/x")
+    due = _establish(session_factory, owner, account, SCHEDULE)
+    calls: list[scheduler.JobContext] = []
+
+    result = await _poll(session_factory, owner, account, SCHEDULE, due, calls)
+
+    assert calls == []
+    assert result is not None and result.skipped_reason == "session_flagged"
+
+
+def _stale_setup(writer: Session, user: User) -> SyncRun:
+    return runs.create_run(writer, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW)
+
+
+def test_a_run_left_behind_does_not_block_the_next_one(writer: Session, user: User) -> None:
+    """F6: a SIGKILLed CLI run leaves its row running and its lock free. Past the grace,
+    the next create_run marks it failed instead of refusing forever."""
+    left = _stale_setup(writer, user)
+    later = NOW + runs.STALE_AFTER
+    with pytest.raises(runs.RunAlreadyRunning):  # someone holds the lock: it is live
+        runs.create_run(
+            writer,
+            user,
+            SyncRunKind.CONNECTIONS_FULL,
+            trigger=SyncRunTrigger.MANUAL,
+            now=later,
+            browser_held=lambda account_id: True,
+        )
+    with pytest.raises(runs.RunAlreadyRunning):  # too young to judge
+        runs.create_run(
+            writer,
+            user,
+            SyncRunKind.CONNECTIONS_FULL,
+            trigger=SyncRunTrigger.MANUAL,
+            now=later - timedelta(seconds=1),
+            browser_held=lambda account_id: False,
+        )
+
+    fresh = runs.create_run(
+        writer,
+        user,
+        SyncRunKind.CONNECTIONS_FULL,
+        trigger=SyncRunTrigger.MANUAL,
+        now=later,
+        browser_held=lambda account_id: False,
+    )
+
+    assert (left.status, left.stop_reason, left.error) == (
+        SyncRunStatus.FAILED,
+        "interrupted",
+        runs.INTERRUPTED,
+    )
+    assert fresh.status is SyncRunStatus.RUNNING
+
+
+def test_cancelling_a_run_left_behind_fails_it(writer: Session, user: User) -> None:
+    left = _stale_setup(writer, user)
+    returned = runs.request_cancel(
+        writer, user, left.id, now=NOW + runs.STALE_AFTER, browser_held=lambda account_id: False
+    )
+    assert returned.status is SyncRunStatus.FAILED and returned.cancel_requested_at is None
+
+
+def test_cancelling_a_live_run_only_flags_it(writer: Session, user: User) -> None:
+    live = _stale_setup(writer, user)
+    runs.request_cancel(
+        writer, user, live.id, now=NOW + runs.STALE_AFTER, browser_held=lambda account_id: True
+    )
+    assert live.status is SyncRunStatus.RUNNING and live.cancel_requested_at is not None
+
+
+def test_a_lock_that_cannot_be_read_counts_as_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    """X8: a run nobody can prove is over is left alone, never failed under its process."""
+    from netkeeper.linkedin import activity_lock
+
+    def unreadable(*args: object, **kwargs: object) -> None:
+        raise PermissionError("locks/ is not readable")
+
+    monkeypatch.setattr(activity_lock, "inspect", unreadable)
+    assert runs.lock_held(1, legacy=False)
+    assert runs.lock_held(1, legacy=True)
+
+
+def test_the_legacy_lock_counts_for_the_local_account_only(writer: Session) -> None:
+    """X7, F10: an older process holding ``browser-local.lock`` is running the local
+    user's account, whatever its id; another account is not held by it."""
+    from netkeeper.linkedin import activity_lock
+    from netkeeper.models import UserKind
+
+    hosted = factories.make_user(writer, kind=UserKind.HOSTED)
+    other_account = ensure_account(writer, hosted).id  # id 1
+    local = factories.make_user(writer)
+    local_account = ensure_account(writer, local).id
+    old = activity_lock.try_claim(activity_lock.LEGACY_SHARED_KEY)
+    assert old is not None
+    try:
+        held = runs.browser_held_for(writer)
+        assert held(local_account)
+        assert not held(other_account)
+        left = runs.create_run(
+            writer, local, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW
+        )
+        assert runs.fail_interrupted_runs(writer, now=NOW + runs.STALE_AFTER) == 0
+        assert left.status is SyncRunStatus.RUNNING
+    finally:
+        old.release()
+    assert runs.fail_interrupted_runs(writer, now=NOW + runs.STALE_AFTER) == 1
+
+
+async def test_a_scheduled_fire_behind_a_manual_run_parks_a_retry(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """X12: the account's manual run is still going, so the scheduled one is retried
+    later rather than dropped until its next interval."""
+    from netkeeper.services.events import EventBus
+    from netkeeper.services.scheduled_runs import serve_registry
+    from netkeeper.services.tasks import TaskRunner
+
+    class NeverCalled:
+        async def execute(self, run_id: int, user_id: int) -> runs.RunOutcome:
+            raise AssertionError("no run may start behind a running one")
+
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session)
+        account = ensure_account(session, owner).id
+        arm_scheduled_runs(session, owner, now=NOW)
+        runs.create_run(session, owner, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW)
+    registry = serve_registry(
+        session_factory, NeverCalled(), TaskRunner(EventBus()), clock=lambda: NOW
+    )
+    context = scheduler.JobContext(
+        user_id=owner.id,
+        account_id=account,
+        kind=scheduler.JobKind.CONNECTIONS_INCREMENTAL,
+        due=NOW,
+        catch_up=False,
+    )
+    assert await registry[context.kind](context) is scheduler.JobOutcome.RETRY_LATER
+
+
+def test_posture_reports_armed_and_disarmed(writer: Session, user: User) -> None:
+    """X17: the scheduled-runs row says which, and says it the whole way."""
+    from netkeeper.services.posture import posture
+
+    account = ensure_account(writer, user).id
+
+    def row() -> str:
+        report = posture(writer, user, account, now=NOW, settings=Settings())
+        (found,) = [p for p in report.protections if p.name == "scheduled runs"]
+        return found.value
+
+    assert row().startswith("disarmed")
+    arm_scheduled_runs(writer, user, now=NOW)
+    assert row().startswith("armed since 2026-09-23 15:00 UTC")
+    disarm_scheduled_runs(writer, user)
+    assert row().startswith("disarmed")

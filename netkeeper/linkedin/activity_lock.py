@@ -8,7 +8,7 @@ rehearse`` all meet at the same file, and whichever arrives second is refused.
 
 **The mechanism is ``flock(2)``** on ``<data dir>/locks/browser-<account>.lock``
 (``browser-account-<id>.lock``, :func:`account_key`, plus the legacy
-``browser-local.lock`` a hold of account 1 also claims, :data:`LEGACY_SHARED_KEY`), taken
+``browser-local.lock`` a hold of the local account also claims, :data:`LEGACY_SHARED_KEY`), taken
 with ``LOCK_EX | LOCK_NB``. The kernel owns the lock and drops it when the descriptor
 closes, and the descriptor closes when the process exits *however* it exits, ``SIGKILL``
 included. A crashed holder therefore cannot park the lock: there is no heartbeat, no
@@ -65,11 +65,13 @@ SINGLE_ACCOUNT_KEY = account_key(1)
 #: The key every browser path used before the lock was keyed by account (#169 F).
 #: A netkeeper process started from older code and still running (a ``serve``,
 #: a ``preflight``) holds ``browser-local.lock`` and knows nothing of
-#: ``browser-account-1.lock``. Older code only ever acted for the first user's
-#: account, account 1, so :class:`~netkeeper.linkedin.browser.ActivityLocks`
-#: claims this file *as well as* :data:`SINGLE_ACCOUNT_KEY`, first, whenever it
-#: holds account 1: an old holder and a new one can never both attach. Any other
-#: account is not affected and never waits on it. Dropping this co-claim, once no
+#: ``browser-account-<id>.lock``. Older code only ever acted for the local user's
+#: account, so :class:`~netkeeper.linkedin.browser.ActivityLocks` claims this file
+#: *as well as* that account's own, first, whenever it holds that account (its
+#: ``legacy_partner``: the local user's account, whatever its id, when the caller
+#: can read the database; :data:`SINGLE_ACCOUNT_KEY` when it cannot). An old
+#: holder and a new one can never both attach. Any other account is not affected
+#: and never waits on it. Dropping this co-claim, once no
 #: pre-P2-10 process can still be running, is a follow-up.
 LEGACY_SHARED_KEY = "local"
 

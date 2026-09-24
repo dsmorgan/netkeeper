@@ -94,5 +94,5 @@ async def running_app(app: FastAPI) -> AsyncIterator[FastAPI]:
 async def client(running_app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     """An in-process HTTP client. State-changing requests need the CSRF header."""
     transport = httpx.ASGITransport(app=running_app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
         yield client

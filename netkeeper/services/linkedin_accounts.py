@@ -11,10 +11,11 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from netkeeper.db import is_writer
-from netkeeper.models import DEFAULT_ACCOUNT_LABEL, LinkedInAccount, User
+from netkeeper.models import DEFAULT_ACCOUNT_LABEL, LinkedInAccount, User, UserKind
 from netkeeper.scoping import scoped
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,22 @@ def ensure_account(session: Session, user: User) -> LinkedInAccount:
     session.flush()
     log.info("created linkedin account %d for user %d", account.id, user.id)
     return account
+
+
+def local_account_id(session: Session) -> int | None:
+    """The account of the first local user, or ``None`` before there is one. Read-only.
+
+    The account that code older than P2-10 acted for whenever it took the
+    browser lock, whatever its id: the one whose hold also claims the legacy
+    ``browser-local.lock`` (``linkedin.activity_lock.LEGACY_SHARED_KEY``).
+    """
+    user = session.scalars(
+        select(User).where(User.kind == UserKind.LOCAL).order_by(User.id)
+    ).first()
+    if user is None:
+        return None
+    account = find_account(session, user)
+    return None if account is None else account.id
 
 
 def account_id_for(session: Session, user: User) -> int:

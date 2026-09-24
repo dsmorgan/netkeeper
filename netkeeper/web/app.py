@@ -31,7 +31,6 @@ from netkeeper.crm.confirmation import Signer
 from netkeeper.crm.lists import ensure_validated_list
 from netkeeper.crm.tags import ensure_default_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
-from netkeeper.linkedin import activity_lock
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import install_scope_guard
 from netkeeper.services.events import EventBus
@@ -44,7 +43,7 @@ from netkeeper.web import api as api_package
 from netkeeper.web.deps import LocalSingleUser
 from netkeeper.web.errors import install_error_handlers
 from netkeeper.web.frontend import frontend_dist, mount_frontend
-from netkeeper.web.security import CSRFMiddleware
+from netkeeper.web.security import LOOPBACK_HOSTNAMES, CSRFMiddleware
 
 log = logging.getLogger(__name__)
 
@@ -103,7 +102,10 @@ def create_app(
         description="Keep your professional network warm.",
         lifespan=lifespan,
     )
-    app.add_middleware(CSRFMiddleware)
+    app.add_middleware(
+        CSRFMiddleware,
+        allowed_hosts=LOOPBACK_HOSTNAMES | {resolved.web.host.strip("[]").lower()},
+    )
     install_error_handlers(app)
     for name, router in discover_routers():
         app.include_router(router, prefix=API_PREFIX)
@@ -125,7 +127,7 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
         # Runs a stopped process left "running" are over; none is resumed on its own.
         # One whose account's browser lock is held right now belongs to a live
         # process (a `netkeeper linkedin sync` in a terminal) and is left alone.
-        fail_interrupted_runs(session, now=utcnow(), browser_held=_browser_held)
+        fail_interrupted_runs(session, now=utcnow())
         log.info(
             "database at revision %s, local user %d", migrations.current_revision(engine), user.id
         )
@@ -143,23 +145,6 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     # confirmation does not survive a restart, and nothing has to be cleaned up.
     app.state.confirmations = Signer.generated()
     return tasks
-
-
-def _browser_held(account_id: int) -> bool:
-    """Whether any process holds ``account_id``'s browser lock (or the legacy one).
-
-    Reads the lock files only (a shared peek, dropped at once); never attaches.
-    """
-    try:
-        key = activity_lock.account_key(account_id)
-        if activity_lock.inspect(key).held:
-            return True
-        return (
-            key == activity_lock.SINGLE_ACCOUNT_KEY
-            and activity_lock.inspect(activity_lock.LEGACY_SHARED_KEY).held
-        )
-    except OSError:
-        return True  # cannot tell: leave the run alone rather than fail a live one
 
 
 def discover_routers(package: ModuleType = api_package) -> list[tuple[str, APIRouter]]:

@@ -55,7 +55,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.config import LinkedInSettings, Settings, load_settings
 from netkeeper.db import session_scope
 from netkeeper.linkedin import activity_lock
+from netkeeper.linkedin.activity_lock import account_key
 from netkeeper.linkedin.browser import (
+    ActivityLocks,
     AttachBrowserProvider,
     BrowserBusy,
     BrowserProvider,
@@ -80,7 +82,7 @@ from netkeeper.services import runs
 from netkeeper.services.connections_sync import sync_connections
 from netkeeper.services.enrichment import enrich_contacts
 from netkeeper.services.events import Event, EventBus
-from netkeeper.services.linkedin_accounts import scheduled_runs_armed
+from netkeeper.services.linkedin_accounts import local_account_id, scheduled_runs_armed
 from netkeeper.services.scheduled_runs import ServeExtractor
 from netkeeper.web.app import create_app
 
@@ -350,12 +352,21 @@ def serve_extractor(
     """The extractor ``netkeeper serve`` hands the app: a worker on the one attach provider.
 
     ``provider`` defaults to :class:`~netkeeper.linkedin.browser.AttachBrowserProvider`
-    on ``linkedin.cdp_url``. Building it attaches to nothing; the provider only
+    on ``linkedin.cdp_url``, built once the app has its database, so the
+    legacy-lock co-claim (#169 F) goes with the local user's account whatever its
+    id (#175 review, F10). Building it attaches to nothing; the provider only
     connects inside a run, and a run on a disarmed account is never scheduled.
     """
-    chosen = AttachBrowserProvider(settings.linkedin.cdp_url) if provider is None else provider
 
     def executor(factory: sessionmaker[Session], bus: EventBus) -> runs.RunExecutor:
+        chosen = provider
+        if chosen is None:
+            with session_scope(factory) as session:
+                local = local_account_id(session)
+            partner = activity_lock.SINGLE_ACCOUNT_KEY if local is None else account_key(local)
+            chosen = AttachBrowserProvider(
+                settings.linkedin.cdp_url, locks=ActivityLocks(legacy_partner=partner)
+            )
         return BrowserWorker(chosen, factory, settings.linkedin, bus=bus)
 
     return ServeExtractor(executor=executor)

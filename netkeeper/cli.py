@@ -19,7 +19,7 @@ import typer
 import uvicorn
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from netkeeper import __version__, migrations
@@ -37,6 +37,7 @@ from netkeeper.linkedin.activity_lock import SINGLE_ACCOUNT_KEY, account_key
 from netkeeper.linkedin.archive import ArchiveFormatError, open_archive
 from netkeeper.linkedin.browser import (
     CHROME_PROFILE_DIRNAME,
+    ActivityLocks,
     AttachBrowserProvider,
     BrowserError,
 )
@@ -803,7 +804,9 @@ def _browser_lock_key() -> str:
             if user is None:
                 return SINGLE_ACCOUNT_KEY
             return account_key(account_id_for(session, user))
-    except OperationalError as exc:
+    except (OperationalError, ProgrammingError) as exc:
+        # SQLite says a missing table or column is operational; PostgreSQL says it
+        # is a programming error. Either means a schema this cannot read yet.
         log.debug("no account row to key the browser lock by (%s); using account 1", exc)
         return SINGLE_ACCOUNT_KEY
     finally:
@@ -811,8 +814,14 @@ def _browser_lock_key() -> str:
 
 
 def _provider(settings: Settings) -> AttachBrowserProvider:
-    """The one provider there is, pointed at the configured debug port (ADR 0002)."""
-    return AttachBrowserProvider(settings.linkedin.cdp_url)
+    """The one provider there is, pointed at the configured debug port (ADR 0002).
+
+    Its lock registry co-claims the legacy lock with the local user's account
+    (#169 F, #175 review F10), the same account `_browser_lock_key` names.
+    """
+    return AttachBrowserProvider(
+        settings.linkedin.cdp_url, locks=ActivityLocks(legacy_partner=_browser_lock_key())
+    )
 
 
 @app.command("simulate")
@@ -1115,12 +1124,19 @@ def linkedin_cancel(run_id: Annotated[int, typer.Argument(help="The run to stop.
         with session_scope(factory, write=True) as session:
             user = _local_user_or_exit(session)
             try:
-                runs.request_cancel(session, user, run_id, now=datetime.now(UTC))
+                run = runs.request_cancel(session, user, run_id, now=datetime.now(UTC))
             except (runs.RunNotFound, runs.RunFinished) as exc:
                 typer.echo(f"error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
+            left_behind = run.status is SyncRunStatus.FAILED
     finally:
         engine.dispose()
+    if left_behind:
+        typer.echo(
+            f"run {run_id} was left running by a process that is gone (nothing holds its"
+            " browser lock); marked it failed"
+        )
+        return
     typer.echo(f"asked run {run_id} to stop; it stops at its next check")
 
 
@@ -1161,15 +1177,24 @@ def linkedin_schedule_arm(
     try:
         factory = make_session_factory(engine)
         install_scope_guard(factory)
-        with session_scope(factory, write=True) as session:
+        # Read, then ask, then write: the prompt waits on a person, and a writer
+        # session held across it would lock out `serve` for as long (#175 review, F4).
+        with session_scope(factory) as session:
             user = _local_user_or_exit(session)
-            if not yes and not typer.confirm(
-                "arm scheduled LinkedIn runs? netkeeper serve will then visit LinkedIn on its"
-                " own schedule, without you starting each run"
-            ):
-                typer.echo("cancelled: scheduled runs stay disarmed")
-                raise typer.Exit(code=1)
-            arm_scheduled_runs(session, user, now=datetime.now(UTC))
+            account = find_account(session, user)
+            already = account is not None and account.scheduled_runs_armed_at is not None
+        if already:
+            typer.echo("scheduled LinkedIn runs are already armed")
+            return
+        if not yes and not typer.confirm(
+            "arm scheduled LinkedIn runs? netkeeper serve will then visit LinkedIn on its"
+            " own schedule, without you starting each run"
+        ):
+            typer.echo("cancelled: scheduled runs stay disarmed")
+            raise typer.Exit(code=1)
+        with session_scope(factory, write=True) as session:
+            # Arming is idempotent, so a change between the read and here is harmless.
+            arm_scheduled_runs(session, _local_user_or_exit(session), now=datetime.now(UTC))
     finally:
         engine.dispose()
     typer.echo("scheduled LinkedIn runs armed; `netkeeper linkedin schedule disarm` undoes it")

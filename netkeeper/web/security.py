@@ -5,7 +5,18 @@ site making your browser send a state-changing request to it. Two rules, checked
 by :func:`csrf_violation`, stop that: the request must carry
 ``X-Netkeeper-Client: 1`` (a custom header a cross-site form cannot set), and when
 the browser says where the request came from (``Origin``, ``Sec-Fetch-Site``) it
-must be this origin. Reads are never blocked.
+must be this origin. Reads are never blocked by those two.
+
+**DNS rebinding** (#175 review, F8). A page on ``evil.example`` whose name the
+attacker re-points at ``127.0.0.1`` reaches this server with ``Host:
+evil.example:8000`` and ``Origin: http://evil.example:8000`` -- the same origin
+as itself, so the origin rule alone waves it through, header or not (a
+same-origin script may set any header). So every request, reads included, must
+name this machine in ``Host``: ``127.0.0.1``, ``localhost``, or ``::1``, plus
+the configured ``web.host``. Anything else answers ``421 Misdirected Request``.
+The port is not checked: the attacker's hostname is what gives a rebinding
+away, and the Vite dev server proxies ``/api`` with ``changeOrigin: false``, so
+a dev request arrives naming the dev server's own port (``localhost:5173``).
 """
 
 from __future__ import annotations
@@ -24,11 +35,19 @@ STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 RULE_CLIENT_HEADER = "client-header"
 RULE_ORIGIN = "origin"
 RULE_SEC_FETCH_SITE = "sec-fetch-site"
+RULE_HOST = "host"
+
+#: The names this server answers to (see the module docstring). Pinned by a test.
+LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 
 _MESSAGES = {
     RULE_CLIENT_HEADER: "state-changing requests to the API need the header X-Netkeeper-Client: 1",
     RULE_ORIGIN: "the Origin header does not match this server's origin",
     RULE_SEC_FETCH_SITE: "Sec-Fetch-Site says the request is not same-origin",
+    RULE_HOST: (
+        "the Host header does not name this machine (127.0.0.1, localhost, or ::1);"
+        " netkeeper only answers requests addressed to its loopback address"
+    ),
 }
 _SAME_ORIGIN_SITES = frozenset({"same-origin", "none"})
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -55,6 +74,16 @@ def csrf_violation(
     if site is not None and site not in _SAME_ORIGIN_SITES:
         return RULE_SEC_FETCH_SITE
     return None
+
+
+def host_violation(headers: Mapping[str, str], allowed: frozenset[str]) -> bool:
+    """Whether ``Host`` fails to name one of ``allowed`` (lower-cased hostnames, no port)."""
+    host = headers.get("host", "")
+    try:
+        hostname = urlsplit(f"//{host}").hostname
+    except ValueError:
+        return True
+    return not host or hostname is None or hostname.lower() not in allowed
 
 
 def rejection_message(rule: str) -> str:
@@ -87,8 +116,9 @@ class CSRFMiddleware:
     stream) pass through untouched.
     """
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, *, allowed_hosts: frozenset[str] = LOOPBACK_HOSTNAMES) -> None:
         self.app = app
+        self.allowed_hosts = frozenset(host.lower() for host in allowed_hosts)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -98,6 +128,12 @@ class CSRFMiddleware:
             name.decode("latin-1").lower(): value.decode("latin-1")
             for name, value in scope["headers"]
         }
+        if host_violation(headers, self.allowed_hosts):
+            response = JSONResponse(
+                {"detail": rejection_message(RULE_HOST), "rule": RULE_HOST}, status_code=421
+            )
+            await response(scope, receive, send)
+            return
         rule = csrf_violation(
             scope["method"], scope["path"], headers, scheme=scope.get("scheme", "http")
         )

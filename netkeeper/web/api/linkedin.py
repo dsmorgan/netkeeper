@@ -221,6 +221,7 @@ async def resume_run(
     executor = _executor(request)
     account = ensure_account(session, user)
     try:
+        enrich_plan.load_plan(session, user, run_id)  # 404 before any 409: is there a plan?
         runs.refuse_if_flagged_or_hot(
             session, user, account.id, now=utcnow(), settings=_settings(request)
         )

@@ -1301,7 +1301,7 @@ async def test_get_contact_stats_agrees_with_the_cli_and_triage_progress(
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver"
+                transport=transport, base_url="http://127.0.0.1"
             ) as client:
                 response = await client.get("/api/v1/contacts/stats")
     finally:

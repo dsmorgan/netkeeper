@@ -51,7 +51,7 @@ async def test_request_session_is_a_writer_unless_the_method_is_safe(
 ) -> None:
     app = _probe_app(engine)
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
         response = await client.request(method, f"{API_PREFIX}/probe/mode")
     assert response.status_code == 200
     assert app.state.seen == [method not in SAFE_METHODS]
@@ -82,7 +82,7 @@ async def test_the_real_app_begins_immediate_for_a_post(
 async def test_a_read_only_handler_never_gets_a_writer_session(engine: Engine, method: str) -> None:
     app = _probe_app(engine)
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
         response = await client.request(method, f"{API_PREFIX}/probe/reader")
     assert response.status_code == 200
     assert app.state.seen == [False]

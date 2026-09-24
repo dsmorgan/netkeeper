@@ -44,7 +44,7 @@ class SSEClient:
             "raw_path": b"/api/v1/events",
             "query_string": b"",
             "root_path": "",
-            "headers": [(b"host", b"testserver"), (b"accept", b"text/event-stream")],
+            "headers": [(b"host", b"127.0.0.1"), (b"accept", b"text/event-stream")],
             "client": ("127.0.0.1", 12345),
             "server": ("testserver", 80),
         }
