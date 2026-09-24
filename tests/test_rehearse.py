@@ -127,7 +127,15 @@ class ReplayPage(FakePage):
         return result
 
     def _load(self, url: str) -> None:
-        """The requests a real profile page makes: the document, its css, its image."""
+        """The requests a real profile page makes: the document, its css, its image.
+
+        Any other page (the cookie-expiry route) is a bare document.
+        """
+        if "/in/" not in url:
+            request = FakeRequest(url, resource_type="document")
+            self._emit("request", request)
+            self._emit("response", FakeResponse(request, status=self._status(url)))
+            return
         base = url.split("/in/")[0]
         for target, kind in (
             (url, "document"),
@@ -300,8 +308,9 @@ async def test_a_rehearsal_logs_every_request_the_page_made() -> None:
     assert len(rehearsal.visits) == 3
     assert [visit.index for visit in rehearsal.visits] == [1, 2, 3]
     # Per visit: the page and its two sub-resources, then the enrichment job's two
-    # in-page API fetches (P2-07).
-    assert len(rehearsal.requests) == 15
+    # in-page API fetches (P2-07); then one navigation to expire the csrf cookie.
+    assert len(rehearsal.requests) == 16
+    assert [record.path for record in rehearsal.cleanup] == ["/expire-cookie"]
     kinds = [record.resource_type for record in rehearsal.visits[0].requests]
     assert kinds == ["document", "stylesheet", "image", "fetch", "fetch"]
     assert rehearsal.harvested == 3 and rehearsal.stopped is None
@@ -650,14 +659,15 @@ async def test_the_rehearsal_follows_the_burst_profile_it_is_given() -> None:
 
 async def test_every_wait_is_one_the_plan_asked_for() -> None:
     expected = plan_enrichment(Random(SEED), 4)
-    _, _, _, sleeper = await _rehearse(visits=4)
+    rehearsal, _, _, sleeper = await _rehearse(visits=4)
 
     planned = sum(
         sum(step.pause_s for step in visit.scroll.steps)
         + visit.scroll.dwell_s
         + (visit.delay_after_s or 0.0)
         for visit in expected.steps
-    )
+    ) + sum(visit.fetch_gap_s or 0.0 for visit in rehearsal.visits)
+    assert all(visit.fetch_gap_s is not None for visit in rehearsal.visits)
     assert math.isclose(sleeper.total, planned, rel_tol=1e-9)
 
 
@@ -794,7 +804,8 @@ async def test_the_rendered_log_shows_every_request_with_its_timing() -> None:
     for record in rehearsal.requests:
         assert record.path in text
     assert f"seed        {SEED}" in text
-    assert "2 visits, 10 requests, 1 host(s): 127.0.0.1" in text
+    assert "2 visits, 11 requests, 1 host(s): 127.0.0.1" in text
+    assert "CLEANUP" in text and "/expire-cookie" in text
     assert "2 of 2 visits harvested" in text
     assert "Nothing reached linkedin.com" in text
 
@@ -926,3 +937,19 @@ def test_the_replica_answers_the_two_profile_endpoints_in_voyagers_shapes() -> N
     cookie = page.headers["set-cookie"]
     assert cookie.startswith("JSESSIONID=") and "Max-Age=120" in cookie
     assert "set-cookie" not in details.headers
+
+
+async def test_the_rehearsal_expires_the_replicas_cookie_before_the_tab_closes() -> None:
+    """F8: a loopback cookie ignores the port, so it is not left for its two minutes."""
+    rehearsal, context, _, _ = await _rehearse(visits=2)
+
+    (page,) = context.replays
+    assert page.goto_calls[-1] == f"{SITE}/expire-cookie"
+    assert page.close_calls == 1
+    assert rehearsal.cleanup and not rehearsal.trailing
+
+
+def test_the_replicas_expiry_route_expires_the_cookie() -> None:
+    with serve_replica() as base:
+        answer = httpx.get(f"{base}/expire-cookie", timeout=5)
+    assert answer.headers["set-cookie"] == "JSESSIONID=; Path=/; Max-Age=0"

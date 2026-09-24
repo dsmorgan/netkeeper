@@ -27,11 +27,12 @@ pin takes a place *within* the budget, never one on top of it (spec 9.6).
 archived, not disconnected, and not marked do-not-contact, with a URN and a
 slug. The URN is the point: it is how :func:`netkeeper.crm.apply.apply_harvest`
 knows the profile a slug led to is the contact's, and every connection a sync
-has seen has one. A contact whose last visit found no profile waits
-:data:`NOT_FOUND_RETRY_AFTER` before the next, so spec 9.8's NotFound streak
-("3 across at least 14 days") is spread across two weeks rather than spent on
-three consecutive days. A pin overrides the tiers and the wait, never the
-eligibility.
+has seen has one. A contact whose last visit wrote nothing (no profile, a
+profile under another URN, a slug another contact holds, an unreadable shape)
+waits :data:`ENRICH_RETRY_AFTER` before the next, so it cannot head every run,
+and spec 9.8's NotFound streak ("3 across at least 14 days") is spread across
+two weeks rather than spent on three consecutive days. A pin overrides the
+tiers and the wait, never the eligibility.
 
 **Pins (spec 9.6).** At most :data:`MAX_PINS`, stored in ``settings_kv`` per
 account. A pin is removed when a run finishes with that contact (harvested or
@@ -72,10 +73,13 @@ log = logging.getLogger(__name__)
 #: Spec 9.6: "You can pin up to 5 contacts to the front of the next run."
 MAX_PINS: Final = 5
 
-#: How long a contact whose profile was not found waits before the next visit.
-#: Spec 9.8 marks a profile gone after 3 NotFound across at least 14 days; a week
-#: apart, the third lands on day 14.
-NOT_FOUND_RETRY_AFTER: Final = timedelta(days=7)
+#: How long a contact waits after an enrichment visit that wrote nothing before
+#: the next one: no profile, a profile under another URN, a slug another contact
+#: holds, or a shape the parser could not read (``li_enrich_attempted_at``). Without
+#: it one such contact heads every run's queue and costs a profile visit every day.
+#: For NotFound it is also the spacing spec 9.8 wants: three NotFound a week apart
+#: land across 14 days.
+ENRICH_RETRY_AFTER: Final = timedelta(days=7)
 
 PlanStatus = Literal["running", "aborted", "completed"]
 
@@ -153,8 +157,8 @@ def prioritize(
         .where(
             tier < 5,
             or_(
-                Contact.li_not_found_at.is_(None),
-                Contact.li_not_found_at <= now - NOT_FOUND_RETRY_AFTER,
+                Contact.li_enrich_attempted_at.is_(None),
+                Contact.li_enrich_attempted_at <= now - ENRICH_RETRY_AFTER,
             ),
         )
         .order_by(

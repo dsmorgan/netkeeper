@@ -3,6 +3,8 @@
 ``li_not_found_count`` is how many enrichment visits in a row found no profile,
 ``li_not_found_since`` when that streak began, and ``li_not_found_at`` the
 latest. Three across at least 14 days marks the profile gone.
+``li_enrich_attempted_at`` is the last enrichment visit that finished with the
+contact, whatever it found, so a visit that wrote nothing waits before the next.
 
 Revision ID: 0012
 Revises: 0011
@@ -31,9 +33,11 @@ def upgrade() -> None:
     )
     op.add_column("contacts", sa.Column("li_not_found_since", sa.DateTime(), nullable=True))
     op.add_column("contacts", sa.Column("li_not_found_at", sa.DateTime(), nullable=True))
+    op.add_column("contacts", sa.Column("li_enrich_attempted_at", sa.DateTime(), nullable=True))
 
 
 def downgrade() -> None:
+    op.drop_column("contacts", "li_enrich_attempted_at")
     op.drop_column("contacts", "li_not_found_at")
     op.drop_column("contacts", "li_not_found_since")
     op.drop_column("contacts", "li_not_found_count")

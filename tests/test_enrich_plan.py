@@ -19,8 +19,8 @@ from netkeeper.db import session_scope
 from netkeeper.models import Contact, ContactMet, User
 from netkeeper.services import enrich_plan
 from netkeeper.services.enrich_plan import (
+    ENRICH_RETRY_AFTER,
     MAX_PINS,
-    NOT_FOUND_RETRY_AFTER,
     PinError,
     PlanFinished,
     PlanNotFound,
@@ -57,7 +57,7 @@ def _order(session: Session, user: User, limit: int = 100) -> list[int]:
 
 def test_the_planning_constants_are_the_specs() -> None:
     assert MAX_PINS == 5
-    assert timedelta(days=7) == NOT_FOUND_RETRY_AFTER
+    assert timedelta(days=7) == ENRICH_RETRY_AFTER
 
 
 # --- spec 9.6's order ---------------------------------------------------------------
@@ -109,13 +109,15 @@ def test_who_is_never_visited(writer: Session, user: User) -> None:
     _contact(writer, user, do_not_contact=True)
     _contact(writer, user, merged_into_id=survivor.id, li_urn=None)
     _contact(writer, user, last_enriched_at=NOW - timedelta(days=STALE_DAYS - 1))
-    _contact(writer, user, li_not_found_at=NOW - NOT_FOUND_RETRY_AFTER + timedelta(hours=1))
+    _contact(writer, user, li_enrich_attempted_at=NOW - ENRICH_RETRY_AFTER + timedelta(hours=1))
 
     assert _order(writer, user) == [visitable.id, survivor.id]
 
 
-def test_a_not_found_contact_is_visited_again_after_a_week(writer: Session, user: User) -> None:
-    waited = _contact(writer, user, li_not_found_at=NOW - NOT_FOUND_RETRY_AFTER)
+def test_a_contact_whose_visit_wrote_nothing_is_visited_again_after_a_week(
+    writer: Session, user: User
+) -> None:
+    waited = _contact(writer, user, li_enrich_attempted_at=NOW - ENRICH_RETRY_AFTER)
     assert _order(writer, user) == [waited.id]
 
 

@@ -24,6 +24,7 @@ import factories
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 from voyager_profiles import (
+    BAD_REQUEST,
     CHECKPOINT,
     LOGGED_OUT,
     NOT_FOUND,
@@ -288,7 +289,8 @@ async def test_warm_heat_shrinks_the_run_and_stretches_the_waits(
     warm = replace(configured.delay, median=configured.delay.median * 2.0)
     expected = plan_enrichment(random.Random(SEED), 5, delay=warm, burst=configured.burst)
     assert report.result.plan == expected
-    assert sum(sleeps.waits) == pytest.approx(expected.total_delay_s)
+    gaps = sum(g or 0.0 for g in report.result.fetch_gaps_s)  # between each visit's fetches
+    assert sum(sleeps.waits) == pytest.approx(expected.total_delay_s + gaps)
 
 
 async def test_visits_already_spent_today_come_off_the_run(
@@ -458,7 +460,7 @@ async def test_a_run_that_outlasts_the_window_stops_at_its_edge(
         pytest.param(THROTTLED, True, False, id="throttled"),
         pytest.param(CHECKPOINT, True, True, id="checkpoint"),
         pytest.param(LOGGED_OUT, False, True, id="logged-out"),
-        pytest.param(UNRECOGNIZED, False, False, id="route-changed"),
+        pytest.param(BAD_REQUEST, False, False, id="route-changed"),
     ],
 )
 async def test_the_stopping_response_raises_heat_and_the_flag_as_spec_9_7_says(
@@ -549,7 +551,8 @@ async def test_cancel_stops_between_profiles_and_keeps_what_completed(
     assert browser.visited() == [p.slug for p in people[:2]]
     # The whole wait after the first profile, then one slice of the next and the check.
     steps = report.result.plan.steps
-    assert sum(sleeps.waits[:-1]) == pytest.approx(steps[0].delay_after_s)
+    gaps = sum(g or 0.0 for g in report.result.fetch_gaps_s)
+    assert sum(sleeps.waits[:-1]) == pytest.approx((steps[0].delay_after_s or 0.0) + gaps)
     assert sleeps.waits[-1] == min(CANCEL_SLICE_S, steps[1].delay_after_s or 0.0)
     plan = _plan(session_factory, user_id, report)
     assert (plan.status, plan.stopped) == ("aborted", "cancelled")
@@ -716,8 +719,12 @@ async def test_the_waits_between_profiles_are_sliced_for_cancel(
 
     report = await _enrich(session_factory, user_id, FakeBrowser.of(people), sleeps=sleeps)
 
-    assert all(0 < wait <= CANCEL_SLICE_S for wait in sleeps.waits)
-    assert sum(sleeps.waits) == pytest.approx(report.result.plan.total_delay_s)
+    gaps = [g for g in report.result.fetch_gaps_s if g is not None]
+    pauses = list(sleeps.waits)
+    for gap in gaps:  # the pause between two fetches is not a cancel slice
+        pauses.remove(gap)
+    assert all(0 < wait <= CANCEL_SLICE_S for wait in pauses)
+    assert sum(pauses) == pytest.approx(report.result.plan.total_delay_s)
     assert CANCEL_SLICE_S == 5.0
 
 
@@ -794,3 +801,121 @@ async def test_a_broken_fetch_aborts_the_plan_and_says_nothing_about_the_session
         assert session_flag(session, user) is None
         assert heat_service.state(session, user, account) is None
     assert (plan.status, plan.stopped, len(plan.completed)) == ("aborted", "error", 2)
+
+
+# --- #171 review --------------------------------------------------------------------------------
+
+
+async def test_a_contact_whose_visit_wrote_nothing_is_not_first_again_the_next_day(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """F1: Priya's slug now leads to someone else. Without an attempt time she would head
+    every day's queue and cost a profile visit each time; she waits a week instead."""
+    people = _people(3)
+    user_id, ids = _setup(session_factory, people)
+    somebody_else = replace(people[0], urn_prefix="ACoAANEW")
+    day_one = FakeBrowser.of([somebody_else, *people[1:]])
+    first = await _enrich(session_factory, user_id, day_one, settings=_one_a_day())
+    assert first.harvests.mismatch == 1 and day_one.visited() == [people[0].slug]
+
+    day_two = FakeBrowser.of(people)
+    await _enrich(
+        session_factory,
+        user_id,
+        day_two,
+        settings=_one_a_day(),
+        clock=Clock(NOW + timedelta(days=1)),
+    )
+    assert day_two.visited() == [people[1].slug]
+
+    week_later = FakeBrowser.of(people)
+    await _enrich(
+        session_factory,
+        user_id,
+        week_later,
+        settings=_one_a_day(),
+        clock=Clock(NOW + timedelta(days=7)),
+    )
+    assert week_later.visited() == [people[0].slug]
+    assert _contact(session_factory, user_id, ids[101]).li_enrich_attempted_at == NOW + timedelta(
+        days=7
+    )
+
+
+def _one_a_day() -> LinkedInSettings:
+    return replace(SMALL, budget=replace(SMALL.budget, profile_visits_per_day=1, warmup_start=1))
+
+
+async def test_an_unreadable_profile_is_recorded_and_the_run_goes_on(
+    session_factory: sessionmaker[Session],
+) -> None:
+    people = _people(3)
+    user_id, ids = _setup(session_factory, people)
+    browser = FakeBrowser.of(people, script={2: UNRECOGNIZED})
+
+    report = await _enrich(session_factory, user_id, browser)
+
+    assert report.result.reason is StopReason.END_OF_PLAN
+    assert (report.harvests.applied, report.harvests.unreadable) == (2, 1)
+    mateo = _contact(session_factory, user_id, ids[102])
+    assert (mateo.last_enriched_at, mateo.li_enrich_attempted_at) == (None, NOW)
+    assert _plan(session_factory, user_id, report).status == "completed"
+
+
+async def test_two_unreadable_profiles_in_a_row_abort_without_heat_or_flag(
+    session_factory: sessionmaker[Session],
+) -> None:
+    people = _people(4)
+    user_id, _ = _setup(session_factory, people)
+    browser = FakeBrowser.of(people, script={2: UNRECOGNIZED, 3: UNRECOGNIZED})
+
+    report = await _enrich(session_factory, user_id, browser)
+
+    assert report.result.reason is StopReason.RESPONSE
+    assert report.result.outcome is Outcome.ROUTE_CHANGED
+    assert (report.heat_raised, report.session_flagged) == (False, False)
+    plan = _plan(session_factory, user_id, report)
+    assert plan.status == "aborted" and len(plan.completed) == 3
+
+
+async def test_a_harvest_and_its_completion_mark_commit_together(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M19: if marking the contact done fails, the harvest it was written with rolls back."""
+    people = _people(2)
+    user_id, ids = _setup(session_factory, people)
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("the plan record could not be written")
+
+    monkeypatch.setattr(enrich_plan, "mark_completed", refuse)
+    with pytest.raises(RuntimeError, match="plan record"):
+        await _enrich(session_factory, user_id, FakeBrowser.of(people))
+
+    priya = _contact(session_factory, user_id, ids[101])
+    assert priya.headline is None and priya.last_enriched_at is None
+
+
+async def test_a_harvest_that_fails_to_write_is_not_marked_done(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M19, the other way round: no harvest written, no completion recorded."""
+    from netkeeper.crm import apply as mapping
+
+    people = _people(2)
+    user_id, _ = _setup(session_factory, people)
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("the harvest could not be written")
+
+    monkeypatch.setattr(mapping, "apply_harvest", broken)
+    with pytest.raises(RuntimeError, match="harvest could not"):
+        await _enrich(session_factory, user_id, FakeBrowser.of(people))
+
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        account = ensure_account(session, user).id
+        (key,) = [k for k in _plan_keys(session, user) if ".plan." in k]
+        plan = enrich_plan.load_plan(session, user, account, key.rsplit(".", 1)[1])
+    assert (plan.completed, plan.status) == ((), "aborted")

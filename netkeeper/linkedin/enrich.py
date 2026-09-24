@@ -14,8 +14,10 @@ around this loop in ``netkeeper.services.enrichment``.
    site sees a person do, and what loads the page's own requests;
 2. scroll it like a person, then dwell (spec 9.5; the plan comes from
    :func:`netkeeper.linkedin.pacing.plan_enrichment`);
-3. fetch profile details, then contact info, through the in-page API
-   (spec 9.3), each classified before anything parses it (spec 9.7);
+3. fetch profile details, then, after a short pause of the kind a person
+   takes before opening the contact-info overlay (:data:`FETCH_GAP_MEDIAN_S`),
+   contact info, through the in-page API (spec 9.3), each classified before
+   anything parses it (spec 9.7);
 4. hand the harvest to the core before the next visit starts, so what the
    core has written is never more than one profile behind what the run saw;
 5. wait the plan's gap -- a :func:`~netkeeper.linkedin.pacing.human_delay`, or
@@ -25,24 +27,36 @@ around this loop in ``netkeeper.services.enrichment``.
 through one (spec 9.4, 9.9): a budget refusal, a cancel, or the end of the
 active window stops the run *between* profiles, and a cancel noticed during
 the wait between two profiles stops it there. The first navigation or fetch
-that is not ``Ok`` stops the run, with one exception: ``NotFound`` on a
-profile is terminal for that contact only (spec 9.7), handed to the core as a
-not-found harvest (spec 9.8's streak) and the run goes on. Nothing is retried,
-a checkpoint least of all; like the connections job, a throttle stops the run
+that is not ``Ok`` stops the run, with two exceptions that are the contact's
+problem rather than the run's. ``NotFound`` on a profile is terminal for that
+contact only (spec 9.7), handed to the core as a not-found harvest (spec 9.8's
+streak). A body that classified ``Ok`` but that the parser cannot read is an
+*unreadable* harvest: one person's profile can hold a shape nobody has seen
+yet, and stopping on it would leave that person at the head of every run's
+queue for ever. :data:`MAX_UNREADABLE_IN_A_ROW` unreadable profiles in a row,
+on different contacts, is the signal that the route itself changed, and stops
+the run as ``RouteChanged``. A ``400`` or a body that is not JSON at all
+(classify's own ``RouteChanged``) stops the run at once. Nothing is retried, a
+checkpoint least of all; like the connections job, a throttle stops the run
 at once rather than taking spec 9.7's "at most 3 attempts", and the next
-scheduled run is the retry, with heat raised. A route either endpoint no
-longer answers in a shape the parser knows (``RouteChanged``) stops the run
-too: the DOM fallback (P2-08) is not here yet, and visiting profiles for half
-a harvest spends the one budget that matters on data that is then marked
-enriched.
+scheduled run is the retry, with heat raised.
 
 **A slug is not a signal.** Spec 9.7 classifies by the url a response came
 from, and a profile's url carries its slug. A person whose vanity url is
 ``checkpoint`` or starts with ``login`` would read as a checkpoint or a login
 wall, stop every run at their name, and flag the session each time. So the
-slug this job asked for is masked out of a url before it is classified
-(:func:`_masked`): a redirect to ``/checkpoint/`` still reads as one, and a
-profile named like one does not.
+path segment that names a profile -- the one after ``/in/``, and the one after
+``/identity/profiles/`` -- is masked out of a url before it is classified
+(:func:`_masked`), whatever it says: the slug asked for, a renamed one the site
+redirected to, in any case or encoding. A redirect to ``/checkpoint/`` still
+reads as one, and a profile named like one does not.
+
+**What navigation cannot see.** A page view is classified by where it landed,
+not by what it shows: a login wall served *in place* at the profile's own url
+reads as a page that loaded. The next step catches it, because the in-page
+API fetch that follows answers a signed-out session with a ``401`` or a login
+page, which classify reads as ``LoggedOut``. Reading the page itself for a
+wall marker is left until the first live run shows what one looks like (#149).
 
 **The source seam.** The job reads profiles through a :class:`ProfileSource`.
 :class:`BrowserProfiles` is the real one, built from one browser run's own
@@ -71,6 +85,7 @@ it for the next, and every skip would have spent a profile visit first.
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import logging
 import random
@@ -91,6 +106,7 @@ from netkeeper.linkedin.pacing import (
     EnrichmentPlan,
     ScrollPlan,
     ScrollProfile,
+    human_delay,
     plan_enrichment,
 )
 from netkeeper.linkedin.voyager import (
@@ -137,6 +153,16 @@ class StopReason(enum.StrEnum):
     """A navigation or fetch classified as something other than ``Ok`` or a
     per-contact ``NotFound``; see ``EnrichResult.outcome``."""
 
+
+#: Spec 9.5 has no figure for the pause between opening a profile's details and
+#: its contact-info overlay; this is a person's click, a second or two, with no
+#: distraction tail. Drawn with :func:`~netkeeper.linkedin.pacing.human_delay`.
+FETCH_GAP_MEDIAN_S: Final = 1.5
+FETCH_GAP_SIGMA: Final = 0.5
+
+#: Unreadable profiles in a row (on different contacts) that mean the route
+#: changed rather than one person's profile being unusual. The run stops there.
+MAX_UNREADABLE_IN_A_ROW: Final = 2
 
 #: The reasons a gate may give for refusing a visit.
 GATE_REASONS: Final = frozenset({StopReason.BUDGET, StopReason.CANCELLED, StopReason.INACTIVE})
@@ -194,8 +220,11 @@ class EnrichJobSpec:
 class ProfileHarvest:
     """What one visit found (spec 9.10's ``ProfileHarvest``), for ``crm/apply.py`` to map.
 
-    ``outcome`` is ``Ok`` (``details`` and ``contact_info`` both present) or
-    ``NotFound`` (both ``None``: the profile is not there, spec 9.8's streak).
+    ``outcome`` is ``Ok`` (``details`` and ``contact_info`` both present),
+    ``NotFound`` (both ``None``: the profile is not there, spec 9.8's streak),
+    or ``RouteChanged`` (both ``None``: the profile answered in a shape the
+    parser could not read; the core records the attempt and waits before
+    visiting again).
     ``requested_public_id`` is the slug the core asked the job to visit, which
     may differ from ``details.public_id`` after a vanity-url change; deciding
     whether the profile found is the contact asked for is the core's, against
@@ -213,11 +242,13 @@ class ProfileHarvest:
         if self.outcome is Outcome.OK:
             if self.details is None or self.contact_info is None:
                 raise ValueError("an Ok harvest carries both the details and the contact info")
-        elif self.outcome is Outcome.NOT_FOUND:
+        elif self.outcome in (Outcome.NOT_FOUND, Outcome.ROUTE_CHANGED):
             if self.details is not None or self.contact_info is not None:
-                raise ValueError("a NotFound harvest carries nothing")
+                raise ValueError(f"a {self.outcome.value} harvest carries nothing")
         else:
-            raise ValueError(f"a harvest is Ok or NotFound, not {self.outcome.value}")
+            raise ValueError(
+                f"a harvest is Ok, NotFound, or RouteChanged, not {self.outcome.value}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +264,7 @@ class ProgressEvent:
     harvested: int
     not_found: int
     stopped: StopReason | None = None
+    unreadable: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,7 +277,9 @@ class EnrichResult:
     stopped the run. ``outcome`` and ``final_url`` describe that response when
     ``reason`` is :attr:`StopReason.RESPONSE` (the core raises heat or the
     session flag from them); ``final_url`` has the visited slug masked out.
-    ``plan`` is the pacing plan the run followed, for a report to show.
+    ``plan`` is the pacing plan the run followed, for a report to show, and
+    ``fetch_gaps_s`` the pause taken between each visit's two fetches, one entry
+    per visit in order, ``None`` for a visit whose second fetch was never made.
     """
 
     reason: StopReason
@@ -256,6 +290,8 @@ class EnrichResult:
     outcome: Outcome | None = None
     final_url: str | None = None
     plan: EnrichmentPlan = field(default_factory=lambda: EnrichmentPlan(steps=(), burst_sizes=()))
+    unreadable: int = 0
+    fetch_gaps_s: tuple[float | None, ...] = ()
 
 
 # --- the source seam ---------------------------------------------------------
@@ -266,14 +302,16 @@ class Answer[T]:
     """What a source answered for one request: the classification, and the value when ``Ok``.
 
     ``value`` is ``None`` for every outcome but ``Ok``, and for an ``Ok``
-    response whose body did not parse (then ``outcome`` is ``RouteChanged``).
-    ``final_url`` is where the response came from, with the requested slug
-    masked out.
+    response whose body did not parse: then ``outcome`` is ``RouteChanged`` and
+    ``unparsed`` is true, which is what tells one unreadable profile from an
+    endpoint that answered ``400`` or not JSON at all. ``final_url`` is where
+    the response came from, with the profile's own path segment masked out.
     """
 
     outcome: Outcome
     final_url: str
     value: T | None = None
+    unparsed: bool = False
 
 
 class ProfileSource(Protocol):
@@ -332,7 +370,7 @@ class BrowserProfiles:
 
     async def open_profile(self, public_id: str) -> Answer[None]:
         page = await self.navigate(self.profile_url(public_id))
-        masked = _masked(page.url, public_id)
+        masked = _masked(page.url)
         return Answer(outcome=_navigation_outcome(masked), final_url=masked)
 
     async def scroll(self, plan: ScrollPlan) -> None:
@@ -356,7 +394,7 @@ class BrowserProfiles:
         endpoint: str,
     ) -> Answer[T]:
         response = await self.fetch(request)
-        masked = _masked(response.final_url, public_id)
+        masked = _masked(response.final_url)
         outcome = classify(response.status, masked, response.body)
         if outcome is not Outcome.OK:
             # Never parsed: a checkpoint page is not a profile (#150's gate).
@@ -365,7 +403,7 @@ class BrowserProfiles:
             value = parser(response.body)
         except RouteChanged:
             log.warning("enrichment: %s answered a shape its parser does not know", endpoint)
-            return Answer(outcome=Outcome.ROUTE_CHANGED, final_url=masked)
+            return Answer(outcome=Outcome.ROUTE_CHANGED, final_url=masked, unparsed=True)
         return Answer(outcome=Outcome.OK, final_url=masked, value=value)
 
 
@@ -380,23 +418,29 @@ def _navigation_outcome(url: str) -> Outcome:
     return classify(200, url, "{}")
 
 
-def _masked(url: str, public_id: str) -> str:
-    """``url`` with the slug a visit asked for replaced by ``_`` where it is the profile's.
+#: A path segment that names a profile: the one after ``/in/`` (the profile page)
+#: or after ``/identity/profiles/`` (the contact-info path). Case-insensitive, and
+#: up to the next ``/``, ``?`` or ``#``, so it takes a raw, percent-encoded, or
+#: renamed slug whole and never anything past it.
+_PROFILE_SEGMENT: Final = re.compile(r"(/(?:in|identity/profiles)/)[^/?#]+", re.IGNORECASE)
+
+
+def _masked(url: str) -> str:
+    """``url`` with every path segment that names a profile replaced by ``_``.
 
     See the module docstring: a slug is somebody's name, never a signal about
-    the session, and a slug that happens to read ``checkpoint`` or ``login...``
-    must not classify as one. Only the path segment that *is* the slug is
-    masked -- the one after ``/in/`` (the profile page) or ``/profiles/`` (the
-    contact-info path), raw or percent-encoded, in any case -- and nothing
-    else: masking the word wherever it appears would turn a real redirect to
-    ``/checkpoint/lg/login`` into a login wall, or a real ``/checkpoint/...``
-    into no wall at all, which is the one misreading that must never happen.
+    the session, and one that happens to read ``checkpoint`` or ``login...``
+    must not classify as one -- the slug asked for, or a renamed one the site
+    redirected to. Only the segment itself is masked, never the word wherever
+    it appears: masking ``checkpoint`` everywhere would turn a real redirect to
+    ``/checkpoint/lg/login`` into a login wall, or ``/checkpoint/...`` into no
+    wall at all, the one misreading that must never happen. Only the path is
+    touched; a query or fragment is left exactly as it came.
     """
-    for form in {public_id, quote(public_id, safe="")}:
-        if form:
-            pattern = rf"(/(?:in|profiles)/){re.escape(form)}(?=[/?#]|$)"
-            url = re.sub(pattern, r"\1_", url, flags=re.IGNORECASE)
-    return url
+    head, sep, tail = url.partition("?")
+    if not sep:
+        head, sep, tail = url.partition("#")
+    return _PROFILE_SEGMENT.sub(r"\1_", head) + sep + tail
 
 
 # --- the gate ----------------------------------------------------------------
@@ -423,6 +467,10 @@ ProgressSink = Callable[[ProgressEvent], Awaitable[None]]
 
 async def _no_progress(event: ProgressEvent) -> None:
     return None
+
+
+async def _real_sleep(seconds: float) -> None:
+    await asyncio.sleep(seconds)
 
 
 def _utcnow() -> datetime:
@@ -456,6 +504,7 @@ async def run_enrichment(
     rng: random.Random,
     on_progress: ProgressSink = _no_progress,
     clock: Callable[[], datetime] = _utcnow,
+    sleep: Callable[[float], Awaitable[None]] = _real_sleep,
 ) -> EnrichResult:
     """Visit the spec's targets in order, to its stopping point, and say why it stopped.
 
@@ -463,8 +512,9 @@ async def run_enrichment(
     the gate is asked about the next one. An exception from it propagates and
     ends the run: a run that ends by exception has no :class:`EnrichResult`,
     and the target it was handing over is not in anybody's completed list.
-    ``rng`` draws the pacing plan (:func:`~netkeeper.linkedin.pacing.plan_enrichment`);
-    a seeded one replays the same plan.
+    ``rng`` draws the pacing plan (:func:`~netkeeper.linkedin.pacing.plan_enrichment`),
+    then each pause between a visit's two fetches; a seeded one replays both.
+    ``sleep`` waits out that pause (the waits *between* profiles are the gate's).
     """
     planned = min(len(spec.targets), spec.visit_budget)
     pacing = stretched(spec.pacing, spec.heat_multiplier)
@@ -472,7 +522,8 @@ async def run_enrichment(
         rng, planned, delay=pacing.delay, burst=pacing.burst, scroll=pacing.scroll
     )
     completed: list[int] = []
-    visits = harvested = not_found = 0
+    gaps: list[float | None] = []
+    visits = harvested = not_found = unreadable = unreadable_in_a_row = 0
 
     def progress(stopped: StopReason | None = None) -> ProgressEvent:
         return ProgressEvent(
@@ -481,6 +532,7 @@ async def run_enrichment(
             harvested=harvested,
             not_found=not_found,
             stopped=stopped,
+            unreadable=unreadable,
         )
 
     async def stop(
@@ -505,6 +557,8 @@ async def run_enrichment(
             outcome=outcome,
             final_url=final_url,
             plan=plan,
+            unreadable=unreadable,
+            fetch_gaps_s=tuple(gaps),
         )
 
     for index, step in enumerate(plan.steps):
@@ -528,21 +582,31 @@ async def run_enrichment(
 
         details = await source.fetch_details(slug)
         info: Answer[ContactInfo] | None = None
+        gaps.append(None)
         if details.outcome is Outcome.OK:
+            gap = human_delay(
+                rng, median=FETCH_GAP_MEDIAN_S, sigma=FETCH_GAP_SIGMA, tail_p=0.0, tail_range=(0, 0)
+            )
+            gaps[-1] = gap
+            await sleep(gap)
             info = await source.fetch_contact_info(slug)
         answers = [answer for answer in (details, info) if answer is not None]
-        if any(answer.outcome is Outcome.NOT_FOUND for answer in answers):
-            harvest = ProfileHarvest(
-                contact_ref=target.contact_ref,
-                requested_public_id=slug,
-                outcome=Outcome.NOT_FOUND,
-                observed_at=clock(),
-            )
+        failed = next((a for a in answers if a.outcome is not Outcome.OK), None)
+        if failed is not None and failed.outcome is Outcome.NOT_FOUND:
+            outcome = Outcome.NOT_FOUND
             not_found += 1
+            unreadable_in_a_row = 0
+        elif failed is not None and failed.unparsed:
+            outcome = Outcome.ROUTE_CHANGED
+            unreadable += 1
+            unreadable_in_a_row += 1
+        elif failed is not None:
+            return await stop(StopReason.RESPONSE, failed.outcome, failed.final_url)
         else:
-            failed = next((a for a in answers if a.outcome is not Outcome.OK), None)
-            if failed is not None:
-                return await stop(StopReason.RESPONSE, failed.outcome, failed.final_url)
+            outcome = Outcome.OK
+            harvested += 1
+            unreadable_in_a_row = 0
+        if outcome is Outcome.OK:
             assert info is not None and details.value is not None and info.value is not None
             harvest = ProfileHarvest(
                 contact_ref=target.contact_ref,
@@ -552,10 +616,19 @@ async def run_enrichment(
                 details=details.value,
                 contact_info=info.value,
             )
-            harvested += 1
+        else:
+            harvest = ProfileHarvest(
+                contact_ref=target.contact_ref,
+                requested_public_id=slug,
+                outcome=outcome,
+                observed_at=clock(),
+            )
         await on_harvest(harvest)
         completed.append(target.contact_ref)
         await on_progress(progress())
+        if unreadable_in_a_row >= MAX_UNREADABLE_IN_A_ROW:
+            assert failed is not None
+            return await stop(StopReason.RESPONSE, Outcome.ROUTE_CHANGED, failed.final_url)
 
     if planned < len(spec.targets):
         return await stop(StopReason.VISIT_BUDGET)

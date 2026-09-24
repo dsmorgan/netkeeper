@@ -593,7 +593,49 @@ class TestParseProfileDetails:
                 )
             )
 
-    def test_position_missing_date_range(self) -> None:
+    def test_undated_entries_and_a_missing_company_are_none_not_route_changed(self) -> None:
+        """#171 review: a school listed without years is common; it must not make the
+        whole profile unreadable."""
+        details = parse_profile_details(
+            json.dumps(
+                {
+                    "data": {
+                        "entityUrn": "urn:li:fsd_profile:X",
+                        "publicIdentifier": "x",
+                        "firstName": "X",
+                        "lastName": "Y",
+                    },
+                    "included": [
+                        {
+                            "$type": "com.linkedin.voyager.dash.identity.profile.Position",
+                            "title": "Engineer",
+                        },
+                        {
+                            "$type": "com.linkedin.voyager.dash.identity.profile.Position",
+                            "title": "Founder",
+                            "companyName": None,
+                            "dateRange": None,
+                        },
+                        {
+                            "$type": "com.linkedin.voyager.dash.identity.profile.Education",
+                            "schoolName": "Fictional State University",
+                        },
+                    ],
+                }
+            )
+        )
+        assert [(p.title, p.company, p.start_year, p.end_year) for p in details.positions] == [
+            ("Engineer", None, None, None),
+            ("Founder", None, None, None),
+        ]
+        (school,) = details.education
+        assert (school.school, school.start_year, school.end_year) == (
+            "Fictional State University",
+            None,
+            None,
+        )
+
+    def test_a_date_range_that_is_not_an_object_is_still_route_changed(self) -> None:
         with pytest.raises(RouteChanged, match="dateRange"):
             parse_profile_details(
                 json.dumps(
@@ -606,9 +648,9 @@ class TestParseProfileDetails:
                         },
                         "included": [
                             {
-                                "$type": "com.linkedin.voyager.dash.identity.profile.Position",
-                                "title": "Engineer",
-                                "companyName": "Acme",
+                                "$type": "com.linkedin.voyager.dash.identity.profile.Education",
+                                "schoolName": "Fictional State University",
+                                "dateRange": "2015-2019",
                             }
                         ],
                     }
@@ -982,6 +1024,11 @@ _PROFILE_DETAILS_SWEEP = _Sweep(
         {
             ("data", "headline"),
             ("data", "geoLocationName"),
+            ("included", 0, "companyName"),
+            ("included", 1, "companyName"),
+            ("included", 0, "dateRange"),
+            ("included", 1, "dateRange"),
+            ("included", 2, "dateRange"),
             ("included", 0, "dateRange", "start"),
             ("included", 0, "dateRange", "start", "year"),
             ("included", 0, "dateRange", "start", "month"),

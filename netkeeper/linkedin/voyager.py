@@ -625,10 +625,16 @@ def profile_query(public_id: str) -> dict[str, str]:
 
 @dataclass(frozen=True, slots=True)
 class PositionEntry:
-    """One entry from a profile's experience section."""
+    """One entry from a profile's experience section.
+
+    ``company`` and every date are optional: a person can list a role with no
+    company name or no dates, and one such entry must not make a whole profile
+    unreadable (#171 review). Which of these LinkedIn really omits is for the
+    first live capture to confirm (#149).
+    """
 
     title: str
-    company: str
+    company: str | None
     start_year: int | None
     start_month: int | None
     end_year: int | None
@@ -680,14 +686,28 @@ def _optional_month_year(
     return year, month
 
 
-def _position_from_entity(endpoint: str, index: int, entity: Mapping[str, object]) -> PositionEntry:
-    where = f"included[{index}].dateRange"
-    date_range = _field(endpoint, entity, "dateRange", dict)
+def _optional_date_range(
+    endpoint: str, where: str, entity: Mapping[str, object]
+) -> tuple[int | None, int | None, int | None, int | None]:
+    """``(start_year, start_month, end_year, end_month)`` from an optional ``dateRange``.
+
+    Absent or ``null`` is a stint with no dates, which people do list (a school
+    with no years, most often); present, it must be an object.
+    """
+    date_range = _optional_field(endpoint, entity, "dateRange", dict)
+    if date_range is None:
+        return None, None, None, None
     start_year, start_month = _optional_month_year(endpoint, where, date_range, "start")
     end_year, end_month = _optional_month_year(endpoint, where, date_range, "end")
+    return start_year, start_month, end_year, end_month
+
+
+def _position_from_entity(endpoint: str, index: int, entity: Mapping[str, object]) -> PositionEntry:
+    where = f"included[{index}].dateRange"
+    start_year, start_month, end_year, end_month = _optional_date_range(endpoint, where, entity)
     return PositionEntry(
         title=_field(endpoint, entity, "title", str),
-        company=_field(endpoint, entity, "companyName", str),
+        company=_optional_field(endpoint, entity, "companyName", str),
         start_year=start_year,
         start_month=start_month,
         end_year=end_year,
@@ -698,10 +718,8 @@ def _position_from_entity(endpoint: str, index: int, entity: Mapping[str, object
 def _education_from_entity(
     endpoint: str, index: int, entity: Mapping[str, object]
 ) -> EducationEntry:
-    where = f"included[{index}]"
-    date_range = _field(endpoint, entity, "dateRange", dict)
-    start_year, _ = _optional_month_year(endpoint, f"{where}.dateRange", date_range, "start")
-    end_year, _ = _optional_month_year(endpoint, f"{where}.dateRange", date_range, "end")
+    where = f"included[{index}].dateRange"
+    start_year, _, end_year, _ = _optional_date_range(endpoint, where, entity)
     return EducationEntry(
         school=_field(endpoint, entity, "schoolName", str),
         degree=_optional_field(endpoint, entity, "degreeName", str),
