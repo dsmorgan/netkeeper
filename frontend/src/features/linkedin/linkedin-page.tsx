@@ -39,17 +39,17 @@ export function LinkedInPage() {
       {status.isError && <p role="alert">{message(status.error)}</p>}
       {status.isSuccess && <SessionBanner status={status.data} />}
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <ScheduleCard />
         <BrowserCard />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <BudgetPanel />
         <HeatPanel />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <div className="flex flex-col gap-4">
           <RunsPanel selectedRunId={selectedRunId} onSelect={setSelectedRunId} />
           {selectedRunId !== null && (
