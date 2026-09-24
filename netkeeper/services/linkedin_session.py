@@ -102,11 +102,14 @@ def clear_session_flag(session: Session, user: User) -> bool:
 
     The other half of :func:`flag_session`: once set, nothing else in this
     module removes the flag, so without this a checkpoint or logged-out
-    banner would persist even after the session is healthy again. Nothing
-    calls this yet -- wiring a successful preflight (P2-01) or a fresh
-    ``Ok`` classification to call it is separate follow-up work; this only
-    provides the function so a flagged session is not stuck banner-on
-    forever.
+    banner would persist even after the session is healthy again.
+    ``netkeeper preflight`` calls this now (P2-01, #154), but only after a
+    :attr:`~netkeeper.linkedin.classify.Outcome.LOGGED_OUT` flag -- never a
+    :attr:`~netkeeper.linkedin.classify.Outcome.CHECKPOINT` one, since a live
+    session cookie is not proof a checkpoint is resolved (#168 review, F1). A
+    ``Checkpoint`` flag is cleared only by hand, with ``netkeeper linkedin
+    clear-flag``; wiring a fresh ``Ok`` classification to also clear one is
+    separate follow-up work, deliberately deferred.
     """
     if not is_writer(session):
         raise RuntimeError(
