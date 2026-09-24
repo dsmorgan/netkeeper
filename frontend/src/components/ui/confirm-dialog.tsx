@@ -49,10 +49,24 @@ export function ConfirmDialog({
   // same tick both fire before React ever disables the button. This ref is
   // checked and set synchronously in the handler itself, so the second of two
   // same-tick clicks is dropped regardless of render timing (L2).
+  //
+  // `pending` alone is not enough to *reset* it either: a mutation that
+  // settles (succeeds or fails) fast enough that React never commits a render
+  // with `pending` true — an instant 409, a fast test, a fast backend — means
+  // `pending` reads `false` before the click and `false` after, so an effect
+  // that only reacts to `pending` changing never runs again, and the ref
+  // stays set forever: every click after the first is silently dropped, even
+  // once the caller is plainly ready for another one. `open` (closes on
+  // success) and `error` (appears on failure) are the two props that *do*
+  // change whenever the action actually concludes, whatever `pending` did
+  // along the way, so this resets on either of them too — reset the moment
+  // `pending` turns true is harmless, since `disabled={pending}` on the
+  // button below is what guards every click from then on; this ref only has
+  // to survive the gap before `pending`'s first true render.
   const submitting = useRef(false)
   useEffect(() => {
-    if (!pending) submitting.current = false
-  }, [pending])
+    submitting.current = false
+  }, [pending, open, error])
 
   const handleConfirm = (): void => {
     if (submitting.current) return
