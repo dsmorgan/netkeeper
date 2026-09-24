@@ -40,7 +40,7 @@ import httpx
 import pytest
 from browser_fakes import FakeBrowser, FakeConnector, FakeContext, FakePage
 
-from netkeeper.linkedin.browser import AttachBrowserProvider, PageLike
+from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserRun, PageLike, ScrollOutcome
 from netkeeper.linkedin.pacing import (
     DEFAULT_BURST_PROFILE,
     DEFAULT_DELAY_PROFILE,
@@ -325,10 +325,9 @@ async def test_a_second_host_is_named_rather_than_folded_into_the_first() -> Non
     "site",
     [
         "https://www.linkedin.com",
-        "https://www.linkedin.com/in/someone",
         "http://linkedin.com:8080",
-        "https://LINKEDIN.COM/feed",
-        "https://sub.domain.linkedin.com/x",
+        "https://LINKEDIN.COM",
+        "https://sub.domain.linkedin.com",
     ],
 )
 async def test_a_rehearsal_refuses_linkedin_by_name(site: str) -> None:
@@ -337,6 +336,65 @@ async def test_a_rehearsal_refuses_linkedin_by_name(site: str) -> None:
 
     with pytest.raises(NotANeutralSite, match="never touches LinkedIn"):
         await rehearse(provider, site=site, seed=SEED, sleep=Sleeper(), clock=Ticker())
+
+    assert connector.attaches == 0
+
+
+@pytest.mark.parametrize(
+    "site",
+    [
+        # #168's F3: --site is a bare origin now, full stop. A url that carries a
+        # path is refused before the linkedin-by-name check ever runs (a url this
+        # strict cannot be fooled into approving by a differently-parsed path), so
+        # these read as "not a bare origin", not specifically "is LinkedIn" -- both
+        # of these still ultimately keep the rehearsal off LinkedIn either way.
+        "https://www.linkedin.com/in/someone",
+        "https://LINKEDIN.COM/feed",
+        "https://sub.domain.linkedin.com/x",
+    ],
+)
+async def test_a_linkedin_url_with_a_path_is_refused_as_not_a_bare_origin(site: str) -> None:
+    provider, _, connector = _setup()
+
+    with pytest.raises(NotANeutralSite, match="not a bare origin"):
+        await rehearse(provider, site=site, seed=SEED, sleep=Sleeper(), clock=Ticker())
+
+    assert connector.attaches == 0
+
+
+async def test_a_rehearsal_refuses_the_whatwg_backslash_userinfo_trick() -> None:
+    """F3 (#168 review): the exact url that reads as loopback to ``urlsplit`` and as
+    LinkedIn to a real browser -- see ``strict_origin``'s docstring. Before this fix,
+    ``_require_neutral`` read ``urlsplit(...).hostname`` alone and approved this,
+    which would have let ``netkeeper rehearse --site`` navigate a real Chrome to
+    ``www.linkedin.com``.
+    """
+    provider, _, connector = _setup()
+
+    with pytest.raises(NotANeutralSite):
+        await rehearse(
+            provider,
+            site="http://www.linkedin.com\\@127.0.0.1:8080",
+            seed=SEED,
+            sleep=Sleeper(),
+            clock=Ticker(),
+        )
+
+    assert connector.attaches == 0
+
+
+async def test_a_rehearsal_refuses_a_loopback_lookalike_host() -> None:
+    """F3/N3: 'localhost' must match exactly, never as a substring of a longer host."""
+    provider, _, connector = _setup()
+
+    with pytest.raises(NotANeutralSite, match="loopback"):
+        await rehearse(
+            provider,
+            site="http://localhost.evil.example:8080",
+            seed=SEED,
+            sleep=Sleeper(),
+            clock=Ticker(),
+        )
 
     assert connector.attaches == 0
 
@@ -632,6 +690,45 @@ async def test_a_tab_lost_mid_rehearsal_is_recovered_and_said_so() -> None:
     assert len(rehearsal.visits) == 3
     assert any("the tab was reopened" in note for note in rehearsal.notes)
     assert "note: the tab was reopened" in render(rehearsal)
+
+
+async def test_a_page_scroll_silently_recovers_is_re_followed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N17: rehearse must re-`follow()` whatever page ``BrowserRun.scroll`` hands back.
+
+    ``BrowserRun.scroll`` can recover a tab that was already lost before its own
+    replay started (its docstring says so), the same way ``goto`` can -- and
+    unlike a loss ``goto`` recovers, nothing about that specific recovery raises
+    or fails a navigation, so there is no other signal for `rehearse` to notice it
+    by except re-``follow``ing whatever page the call actually returns. This forces
+    that by monkeypatching `BrowserRun.scroll` itself to simulate exactly that: a
+    successful scroll that quietly came back on a page nothing has followed yet.
+    """
+    provider, context, _ = _setup()
+    real_scroll = BrowserRun.scroll
+    swapped = False
+
+    async def scroll_onto_an_unfollowed_page(
+        self: BrowserRun, plan: object, **kwargs: object
+    ) -> ScrollOutcome:
+        nonlocal swapped
+        outcome = await real_scroll(self, plan, **kwargs)  # type: ignore[arg-type]
+        if not swapped:
+            swapped = True
+            fresh = await context.new_page()
+            return ScrollOutcome(page=fresh, cancelled=False)
+        return outcome
+
+    monkeypatch.setattr(BrowserRun, "scroll", scroll_onto_an_unfollowed_page)
+
+    rehearsal = await rehearse(
+        provider, site=SITE, visits=2, seed=SEED, sleep=Sleeper(), clock=Ticker()
+    )
+
+    assert any(
+        "already been lost before visit 1 could be scrolled" in note for note in rehearsal.notes
+    ), rehearsal.notes
 
 
 async def test_a_rehearsal_refuses_a_run_with_nothing_in_it() -> None:

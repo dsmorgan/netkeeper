@@ -59,6 +59,7 @@ from netkeeper.linkedin.pacing import (
     ScrollPlan,
     plan_enrichment,
 )
+from netkeeper.linkedin.strict_origin import NotAStrictOrigin, parse_strict_origin
 
 log = logging.getLogger(__name__)
 
@@ -311,13 +312,13 @@ async def rehearse(
                     f"the tab was reopened before visit {index + 1}; requests it made"
                     " before the listeners were reattached are not in this log"
                 )
-            page = _as_rehearsal_page(
-                await run.scroll(step.scroll, sleep=_scaled_sleep(sleep, time_scale))
-            )
+            scrolled = await run.scroll(step.scroll, sleep=_scaled_sleep(sleep, time_scale))
+            page = _as_rehearsal_page(scrolled.page)
             if recorder.follow(page):
                 notes.append(
-                    f"the tab was reopened while scrolling visit {index + 1}; requests it"
-                    " made before the listeners were reattached are not in this log"
+                    f"the tab had already been lost before visit {index + 1} could be"
+                    " scrolled and was reopened first; requests it made before the"
+                    " listeners were reattached are not in this log"
                 )
             waited = await _wait(step.delay_after_s, sleep=sleep, time_scale=time_scale)
             made.append(
@@ -496,36 +497,43 @@ def _resource_type(request: RequestLike) -> str:
 
 
 def _require_neutral(site: str) -> str:
-    """``site`` with any trailing slash removed, if it is a loopback url; raise otherwise.
+    """``site``, rebuilt and canonical, if it is a loopback url; raise otherwise.
 
     Every way this says no is a :class:`NotANeutralSite`, including a url too
-    malformed to parse (``http://[::1`` raises out of ``urlsplit``). A refusal
-    that arrives as some other exception type is a refusal a caller's
-    ``except`` clause does not catch, and the caller here is the CLI turning it
-    into a message rather than a traceback.
+    malformed to parse, or one shaped so that Python's ``urlsplit`` and a real
+    browser's URL parser would read it two different ways -- ``site`` first goes
+    through :func:`~netkeeper.linkedin.strict_origin.parse_strict_origin`, which
+    refuses a backslash, userinfo, or anything past the authority before that
+    differential can matter (see that module's docstring; a #168 review found this
+    function could be fooled into approving a url a real Chrome would resolve
+    straight to ``www.linkedin.com``). The linkedin-block and the loopback-require
+    below both read the *rebuilt* origin, never the original string. A refusal that
+    arrives as some other exception type is a refusal a caller's ``except`` clause
+    does not catch, and the caller here is the CLI turning it into a message rather
+    than a traceback.
     """
     try:
-        split = urlsplit(site)
-        host = split.hostname
-        split.port  # noqa: B018 - parsed lazily, and a bad one only raises when touched
-    except ValueError as exc:
-        raise NotANeutralSite(f"{site!r} is not a url a rehearsal can be pointed at") from exc
-    if split.scheme not in ("http", "https"):
+        origin = parse_strict_origin(site)
+    except NotAStrictOrigin as exc:
+        raise NotANeutralSite(
+            f"{site!r} is not a url a rehearsal can be pointed at: {exc}"
+        ) from exc
+    if origin.scheme not in ("http", "https"):
         raise NotANeutralSite(
             f"a rehearsal site must be an http(s) url on this machine's loopback, got {site!r}"
         )
-    if host is not None and _is_linkedin(host):
+    if _is_linkedin(origin.host):
         raise NotANeutralSite(
             "a rehearsal never touches LinkedIn. It exists so the request pattern can be"
-            f" seen before anything real is, so it refuses {host!r} and runs against the"
-            " loopback replica instead (`netkeeper rehearse` starts one for you)"
+            f" seen before anything real is, so it refuses {origin.host!r} and runs against"
+            " the loopback replica instead (`netkeeper rehearse` starts one for you)"
         )
-    if host not in LOOPBACK_HOSTS:
+    if origin.host not in LOOPBACK_HOSTS:
         allowed = ", ".join(sorted(LOOPBACK_HOSTS))
         raise NotANeutralSite(
-            f"a rehearsal site must be on this machine's loopback ({allowed}), got {host!r}"
+            f"a rehearsal site must be on this machine's loopback ({allowed}), got {origin.host!r}"
         )
-    return site.rstrip("/")
+    return str(origin)
 
 
 def _is_linkedin(host: str) -> bool:
