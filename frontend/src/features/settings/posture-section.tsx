@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 
 import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card'
+import { renderInlineMarkdown } from '@/lib/inline-markdown'
 import { cn } from '@/lib/utils'
 
 import { postureQuery, type Protection } from './api'
@@ -40,17 +41,26 @@ export function PostureSection() {
         {posture.isError && <p role="alert">{message(posture.error)}</p>}
         {posture.isSuccess && (
           <>
-            {/* Not min-w-max like the Runs/Budget tables: those hold short numeric
-                cells that read badly wrapped, so they scroll horizontally within
-                their own card instead. Detail here holds full sentences (a
-                protection's warning), which want to wrap, not scroll — a
-                paragraph of prose you have to scroll sideways to read is worse
-                than one that just wraps. table-fixed + a Detail column width
-                keeps the name/state columns from being squeezed by a long one. */}
-            <table className="w-full table-fixed text-left">
+            {/* Below `sm` a table has no room for a Detail column at all: a fixed
+                width just wraps prose one character per line rather than making
+                it any narrower (review179r2 measured a 31,093px-tall page from
+                exactly that). Below `sm` every protection is its own stacked
+                block instead, each with the full page width to wrap in; from
+                `sm` up there is room for a table, so this renders one markup
+                and hides half of it with `sm:` rather than measuring width in
+                script — the same approach `run-detail.tsx`'s FieldList uses. */}
+            <ul className="space-y-2 sm:hidden" data-testid="posture-blocks">
+              {posture.data.protections.map((row) => (
+                <ProtectionBlock key={row.name} row={row} />
+              ))}
+            </ul>
+            <table
+              className="hidden w-full table-fixed text-left sm:table"
+              data-testid="posture-table"
+            >
               <colgroup>
-                <col className="w-20 sm:w-40" />
-                <col className="w-16 sm:w-20" />
+                <col className="w-40" />
+                <col className="w-20" />
                 <col />
               </colgroup>
               <thead className="text-muted-foreground">
@@ -80,7 +90,7 @@ export function PostureSection() {
                 </h3>
                 <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
                   {posture.data.gaps.map((gap) => (
-                    <li key={gap}>{gap}</li>
+                    <li key={gap}>{renderInlineMarkdown(gap)}</li>
                   ))}
                 </ul>
               </div>
@@ -96,6 +106,34 @@ export function PostureSection() {
   )
 }
 
+function StatusBadge({ status }: { status: string }) {
+  return (
+    <span
+      className={cn(
+        'inline-flex h-5 shrink-0 items-center rounded-4xl px-2 text-xs font-medium',
+        STATUS_CLASSES[status] ?? 'bg-muted text-muted-foreground',
+      )}
+    >
+      {status}
+    </span>
+  )
+}
+
+function ProtectionDetail({ row }: { row: Protection }) {
+  return (
+    <>
+      <p>{renderInlineMarkdown(row.value)}</p>
+      {row.warnings.length > 0 && (
+        <ul className="mt-1 space-y-1 text-destructive">
+          {row.warnings.map((warning) => (
+            <li key={warning}>{renderInlineMarkdown(warning)}</li>
+          ))}
+        </ul>
+      )}
+    </>
+  )
+}
+
 function ProtectionRow({ row }: { row: Protection }) {
   return (
     <tr className="border-t border-border/60 align-top">
@@ -103,25 +141,36 @@ function ProtectionRow({ row }: { row: Protection }) {
         {row.name}
       </th>
       <td className="py-2 pr-3">
-        <span
-          className={cn(
-            'inline-flex h-5 shrink-0 items-center rounded-4xl px-2 text-xs font-medium',
-            STATUS_CLASSES[row.status] ?? 'bg-muted text-muted-foreground',
-          )}
-        >
-          {row.status}
-        </span>
+        <StatusBadge status={row.status} />
       </td>
       <td className="py-2 break-words">
-        <p>{row.value}</p>
-        {row.warnings.length > 0 && (
-          <ul className="mt-1 space-y-1 text-destructive">
-            {row.warnings.map((warning) => (
-              <li key={warning}>{warning}</li>
-            ))}
-          </ul>
-        )}
+        <ProtectionDetail row={row} />
       </td>
     </tr>
+  )
+}
+
+function ProtectionBlock({ row }: { row: Protection }) {
+  // `p-2`, not the card's usual `p-3`: this app's sidebar nav does not
+  // collapse below `sm` (out of scope here), so the content column left for
+  // a card at 390px is already only ~166px — every point of padding this
+  // block keeps for itself is a point the prose below cannot wrap in.
+  return (
+    <li className="rounded-lg border border-border/60 p-2">
+      <div className="flex items-center justify-between gap-2">
+        {/* `min-w-0`: a flex item's default `min-width: auto` refuses to
+            shrink below its content's own min-content width (the longest
+            unbreakable word), so without it a long name pushes the badge
+            past the card's own right edge instead of wrapping — measured in
+            a real browser at 390px (review179r2), where the effective
+            content column is much narrower than the viewport (the sidebar
+            nav does not collapse below `sm`). */}
+        <span className="min-w-0 break-words font-medium">{row.name}</span>
+        <StatusBadge status={row.status} />
+      </div>
+      <div className="mt-2 break-words text-muted-foreground">
+        <ProtectionDetail row={row} />
+      </div>
+    </li>
   )
 }
