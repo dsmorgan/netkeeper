@@ -4,9 +4,9 @@ import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 
 import { ApiError, importKeys, rollbackRun, rowsQuery, runQuery } from './api'
-import { ConfirmDialog } from './confirm-dialog'
 import { RESOLUTION_LABELS, fieldLabel, formatWhen, rowLabel } from './fields'
 import { ErrorNote, Note, OutcomeBadge, RunStatusBadge } from './notes'
 import { RunCounts } from './run-counts'

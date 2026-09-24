@@ -37,7 +37,8 @@ describe('backoffDelay', () => {
 describe('useEventStream', () => {
   it('stays disconnected when EventSource does not exist', () => {
     const { result } = renderHook(() => useEventStream('/api/v1/events'))
-    expect(result.current).toBe('disconnected')
+    expect(result.current.status).toBe('disconnected')
+    expect(result.current.source).toBeNull()
   })
 
   it('reports open and error, and reconnects with growing delays', () => {
@@ -47,19 +48,24 @@ describe('useEventStream', () => {
     const { result, unmount } = renderHook(() => useEventStream('/api/v1/events'))
     expect(FakeEventSource.instances).toHaveLength(1)
     expect(FakeEventSource.instances[0]?.url).toBe('/api/v1/events')
-    expect(result.current).toBe('disconnected')
+    expect(result.current.status).toBe('disconnected')
+    // The instance is exposed as soon as it is created, before `open` fires,
+    // so a listener attached early still catches whatever arrives first.
+    expect(result.current.source).toBe(FakeEventSource.instances[0])
 
     act(() => FakeEventSource.instances[0]?.onopen?.())
-    expect(result.current).toBe('connected')
+    expect(result.current.status).toBe('connected')
 
     // First failure: the hook closes the source itself and waits 1s.
     act(() => FakeEventSource.instances[0]?.onerror?.())
-    expect(result.current).toBe('disconnected')
+    expect(result.current.status).toBe('disconnected')
+    expect(result.current.source).toBeNull()
     expect(FakeEventSource.instances[0]?.closed).toBe(true)
     act(() => vi.advanceTimersByTime(999))
     expect(FakeEventSource.instances).toHaveLength(1)
     act(() => vi.advanceTimersByTime(1))
     expect(FakeEventSource.instances).toHaveLength(2)
+    expect(result.current.source).toBe(FakeEventSource.instances[1])
 
     // Second failure in a row: 2s.
     act(() => FakeEventSource.instances[1]?.onerror?.())
@@ -70,7 +76,7 @@ describe('useEventStream', () => {
 
     // A successful open resets the delay to 1s.
     act(() => FakeEventSource.instances[2]?.onopen?.())
-    expect(result.current).toBe('connected')
+    expect(result.current.status).toBe('connected')
     act(() => FakeEventSource.instances[2]?.onerror?.())
     act(() => vi.advanceTimersByTime(1_000))
     expect(FakeEventSource.instances).toHaveLength(4)
