@@ -2,6 +2,7 @@ import { AlertDialog } from '@base-ui/react/alert-dialog'
 import type { VariantProps } from 'class-variance-authority'
 import { AlertTriangle } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { useEffect, useRef } from 'react'
 
 import { Button, type buttonVariants } from '@/components/ui/button'
 
@@ -11,6 +12,8 @@ interface ConfirmDialogProps {
   title: string
   /** What the action does, in full. A consequential action earns the whole sentence. */
   children: ReactNode
+  /** The button's label at rest. While `pending` is true it always reads "Working…"
+   *  instead — a caller does not need (and should not build) a pending variant of it. */
   confirmLabel: string
   onConfirm: () => void
   pending?: boolean
@@ -41,6 +44,22 @@ export function ConfirmDialog({
   error = null,
   confirmVariant = 'destructive',
 }: ConfirmDialogProps) {
+  // `disabled={pending}` alone is not enough: `pending` only flips after the
+  // caller's mutation reports back, one render later, so two clicks inside the
+  // same tick both fire before React ever disables the button. This ref is
+  // checked and set synchronously in the handler itself, so the second of two
+  // same-tick clicks is dropped regardless of render timing (L2).
+  const submitting = useRef(false)
+  useEffect(() => {
+    if (!pending) submitting.current = false
+  }, [pending])
+
+  const handleConfirm = (): void => {
+    if (submitting.current) return
+    submitting.current = true
+    onConfirm()
+  }
+
   return (
     <AlertDialog.Root open={open} onOpenChange={onOpenChange}>
       <AlertDialog.Portal>
@@ -67,7 +86,7 @@ export function ConfirmDialog({
             <AlertDialog.Close render={<Button variant="outline" />} disabled={pending}>
               Cancel
             </AlertDialog.Close>
-            <Button variant={confirmVariant} onClick={onConfirm} disabled={pending}>
+            <Button variant={confirmVariant} onClick={handleConfirm} disabled={pending}>
               {pending ? 'Working…' : confirmLabel}
             </Button>
           </div>

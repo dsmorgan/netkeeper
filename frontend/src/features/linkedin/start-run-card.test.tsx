@@ -18,7 +18,7 @@ function renderCard(handlers: Record<string, Handler> = {}, calls: Call[] = []) 
       <StartRunCard onStarted={onStarted} />
     </QueryClientProvider>,
   )
-  return { calls, onStarted }
+  return { calls, onStarted, queryClient }
 }
 
 describe('StartRunCard', () => {
@@ -97,5 +97,79 @@ describe('StartRunCard', () => {
       kind: 'enrich',
       max_visits: 5,
     })
+  })
+
+  it('sends max_visits: null for a sync kind, even with a leftover value from enrich (R-16)', async () => {
+    const { calls } = renderCard({
+      'POST /api/v1/linkedin/runs': (call) => {
+        expect(call.body).toEqual({ kind: 'connections_full', max_visits: null })
+        return jsonResponse({ run_id: 8, task_id: 'task-3' }, 202)
+      },
+    })
+    const select = await screen.findByLabelText('Kind')
+    // Type a max-visits value under enrich, then switch back to a sync kind
+    // without clearing it — the field itself disappears, but the state
+    // behind it does not, so the guard has to be in what gets sent, not in
+    // what is visible.
+    fireEvent.change(select, { target: { value: 'enrich' } })
+    fireEvent.change(await screen.findByLabelText(/max visits/i), { target: { value: '5' } })
+    fireEvent.change(select, { target: { value: 'connections_full' } })
+    expect(screen.queryByLabelText(/max visits/i)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start run' }))
+    const dialog = await screen.findByRole('alertdialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Start run' }))
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.path === '/api/v1/linkedin/runs')).toBe(true),
+    )
+    expect(calls.find((call) => call.path === '/api/v1/linkedin/runs')?.body).toEqual({
+      kind: 'connections_full',
+      max_visits: null,
+    })
+  })
+
+  it('disables the input and Start, and says why, when today’s budget is spent (L1)', async () => {
+    renderCard({
+      'GET /api/v1/linkedin/budget': () =>
+        jsonResponse({ ...BUDGET, profile_visits_today: { ...BUDGET.profile_visits_today, remaining: 0 } }),
+    })
+    fireEvent.change(await screen.findByLabelText('Kind'), { target: { value: 'enrich' } })
+
+    const maxVisits = await screen.findByLabelText(/max visits/i)
+    expect(maxVisits).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled()
+    expect(screen.getByText(/budget is spent/i)).toBeInTheDocument()
+  })
+
+  it('does not disable a sync start when the enrichment budget is spent', async () => {
+    renderCard({
+      'GET /api/v1/linkedin/budget': () =>
+        jsonResponse({ ...BUDGET, profile_visits_today: { ...BUDGET.profile_visits_today, remaining: 0 } }),
+    })
+    // Default kind is a sync, not enrich: the profile-visit budget does not gate it.
+    expect(await screen.findByRole('button', { name: 'Start run' })).not.toBeDisabled()
+  })
+
+  it('re-clamps an already-typed value the moment remaining drops, not only on the next keystroke (L1)', async () => {
+    let remaining = 45
+    const { queryClient } = renderCard({
+      'GET /api/v1/linkedin/budget': () =>
+        jsonResponse({
+          ...BUDGET,
+          profile_visits_today: { ...BUDGET.profile_visits_today, remaining },
+        }),
+    })
+    fireEvent.change(await screen.findByLabelText('Kind'), { target: { value: 'enrich' } })
+    const maxVisits = await screen.findByLabelText(/max visits/i)
+    fireEvent.change(maxVisits, { target: { value: '40' } })
+    expect(maxVisits).toHaveValue(40)
+
+    // Budget shrinks elsewhere (another run, or a background refetch) — no
+    // keystroke on this field at all, only a new number from the query.
+    remaining = 10
+    await queryClient.invalidateQueries({ queryKey: ['linkedin', 'budget'] })
+
+    await waitFor(() => expect(maxVisits).toHaveValue(10))
   })
 })

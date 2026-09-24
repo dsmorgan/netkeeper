@@ -74,6 +74,42 @@ describe('ScheduleCard', () => {
     expect(calls.some((call) => call.path === '/api/v1/linkedin/schedule/arm')).toBe(false)
   })
 
+  it('never shows "Armed" while the schedule is still loading (R-09)', async () => {
+    let resolvePending: (() => void) | undefined
+    const pending = new Promise<Response>((resolve) => {
+      resolvePending = () => resolve(jsonResponse(SCHEDULE_ARMED))
+    })
+    renderCard({ 'GET /api/v1/linkedin/schedule': () => pending })
+
+    // Rendering is gated on isSuccess, never on the `armed` value alone (whose
+    // `?? false` fallback only matters while data is undefined, i.e. exactly
+    // here) — so nothing "Armed" may appear before the fetch resolves.
+    expect(screen.queryByText(/Armed/)).not.toBeInTheDocument()
+
+    resolvePending?.()
+    expect(await screen.findByText(/^Armed/)).toBeInTheDocument()
+  })
+
+  it('never shows "Armed" when the schedule fails to load (R-09)', async () => {
+    renderCard({
+      'GET /api/v1/linkedin/schedule': () => jsonResponse({ detail: 'boom' }, 500),
+    })
+
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(screen.queryByText(/Armed/)).not.toBeInTheDocument()
+  })
+
+  it('offers no Stop-equivalent control and no arm/disarm confirmation is needed to read the state', async () => {
+    // Sanity guard alongside R-09/R-10: the loading and error states render
+    // no action buttons for arming or disarming at all.
+    renderCard({
+      'GET /api/v1/linkedin/schedule': () => jsonResponse({ detail: 'boom' }, 500),
+    })
+    await screen.findByRole('alert')
+    expect(screen.queryByRole('button', { name: 'Arm scheduled runs' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Disarm' })).not.toBeInTheDocument()
+  })
+
   it('disarms in one click, with no confirmation dialog', async () => {
     const { calls } = renderCard({
       'GET /api/v1/linkedin/schedule': () => jsonResponse(SCHEDULE_ARMED),

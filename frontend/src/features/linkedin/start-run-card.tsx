@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { INPUT_CLASS, SELECT_CLASS } from '@/features/imports/styles'
+import { cn } from '@/lib/utils'
 
 import { budgetQuery, linkedinKeys, startRun } from './api'
 import { SectionTitle } from './section-title'
@@ -14,9 +15,15 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** A value the max-visits field will accept: whole, at least 1, never above `remaining`. */
+/**
+ * A value the max-visits field will accept: whole, at least 1, never above
+ * `remaining`. `remaining <= 0` means there is truly nothing left to spend
+ * today, so there is no positive number to clamp down to — the field goes
+ * empty (and the caller disables it) rather than floor to a false "1".
+ */
 function clamp(raw: string, remaining: number | null): string {
   if (raw === '') return ''
+  if (remaining !== null && remaining <= 0) return ''
   const parsed = Math.floor(Number(raw))
   if (!Number.isFinite(parsed)) return ''
   const ceiling = remaining === null ? parsed : Math.min(parsed, remaining)
@@ -29,9 +36,13 @@ function clamp(raw: string, remaining: number | null): string {
  *
  * `max_visits` can only ever lower today's remaining profile-visit budget
  * (CLAUDE.md, `RunStartIn.max_visits`) — never raise it — so the field's
- * value is clamped to `budget.profile_visits_today.remaining` on every
+ * *state* is clamped to `budget.profile_visits_today.remaining` on every
  * keystroke, not just marked invalid: typing a larger number is not a
- * momentarily-wrong state to flag, it is a number this field cannot hold.
+ * momentarily-wrong state to flag, it is a number the state behind this
+ * field can never hold, even for the one render between the keystroke and
+ * the clamp. `remaining` can also change out from under an open card — a
+ * run elsewhere spends today's budget — so it is re-clamped in an effect
+ * whenever `remaining` itself changes, not only on the next keystroke (L1).
  * Starting goes behind a confirmation dialog naming what is about to happen,
  * because this is the one button on the page that reaches out to LinkedIn
  * the moment it is pressed.
@@ -43,6 +54,21 @@ export function StartRunCard({ onStarted }: { onStarted: (runId: number) => void
   const [maxVisits, setMaxVisits] = useState('')
   const [asking, setAsking] = useState(false)
   const queryClient = useQueryClient()
+
+  // `remaining` can change out from under an open card — a run elsewhere spends
+  // today's budget — so it is re-clamped whenever `remaining` itself changes,
+  // not only on the next keystroke (L1). Adjusted during render against a
+  // tracked previous value, React's own pattern for this rather than an
+  // effect (https://react.dev/learn/you-might-not-need-an-effect): a
+  // same-tick setState() in an effect body is a cascading-render smell the
+  // lint rule (react-hooks/set-state-in-effect) catches.
+  const [previousRemaining, setPreviousRemaining] = useState(remaining)
+  if (remaining !== previousRemaining) {
+    setPreviousRemaining(remaining)
+    setMaxVisits((current) => clamp(current, remaining))
+  }
+
+  const budgetExhausted = kind === 'enrich' && remaining === 0
 
   const start = useMutation({
     mutationFn: () =>
@@ -68,7 +94,7 @@ export function StartRunCard({ onStarted }: { onStarted: (runId: number) => void
           </label>
           <select
             id="run-kind"
-            className={SELECT_CLASS}
+            className={cn(SELECT_CLASS, 'w-full max-w-full')}
             value={kind}
             onChange={(event) => setKind(event.target.value as RunKind)}
           >
@@ -93,22 +119,31 @@ export function StartRunCard({ onStarted }: { onStarted: (runId: number) => void
               max={remaining ?? undefined}
               className={INPUT_CLASS}
               value={maxVisits}
+              disabled={budgetExhausted}
               onChange={(event) => setMaxVisits(clamp(event.target.value, remaining))}
               placeholder={remaining === null ? 'today’s budget' : String(remaining)}
             />
+            {budgetExhausted && (
+              <p className="text-xs text-muted-foreground">
+                Today's profile-visit budget is spent; nothing is left to enrich with until it
+                resets.
+              </p>
+            )}
           </div>
         )}
 
         {start.isError && <p role="alert">{message(start.error)}</p>}
 
-        <Button onClick={() => setAsking(true)}>Start run</Button>
+        <Button onClick={() => setAsking(true)} disabled={budgetExhausted}>
+          Start run
+        </Button>
       </CardContent>
 
       <ConfirmDialog
         open={asking}
         onOpenChange={setAsking}
         title={`Start ${RUN_KIND_LABELS[kind].toLowerCase()}?`}
-        confirmLabel={start.isPending ? 'Starting…' : 'Start run'}
+        confirmLabel="Start run"
         confirmVariant="default"
         pending={start.isPending}
         error={start.isError ? message(start.error) : null}
