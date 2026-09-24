@@ -5,12 +5,17 @@ import type { LinkedInStatus } from './types'
 
 /**
  * The session flag, as a banner nothing else on the page can outshine (spec
- * 9.7). `netkeeper` never clears a `checkpoint` flag itself — a live session
- * cookie is not proof a checkpoint is resolved — and the API this page is
- * built on (#175) has no clear-flag route yet, so there is no clear button
- * here either: only `netkeeper linkedin clear-flag` can end this banner. A UI
- * clear button is a follow-up for once that route exists, and it should stay
- * a confirmed act, never automatic, even then.
+ * 9.7). The two flags clear differently (`netkeeper/services/posture.py`'s
+ * `_session_flag`, #168 review F1): a `logged_out` flag clears itself the
+ * moment `netkeeper preflight` finds a live session again, so its advice is
+ * just "log in, then run preflight" — no button needed, the CLI already does
+ * it. `netkeeper` never clears a `checkpoint` flag itself — a live session
+ * cookie is not proof a checkpoint is resolved — so that advice names the one
+ * thing that does, `netkeeper linkedin clear-flag`, run by hand once the
+ * account is confirmed healthy. The API this page is built on (#175) has no
+ * clear-flag route yet either way, so there is no clear button here: a UI
+ * button for the checkpoint case is a follow-up for once that route exists,
+ * and it should stay a confirmed act, never automatic, even then.
  */
 export function SessionBanner({ status }: { status: LinkedInStatus }) {
   if (status.session_flag === null) return null
@@ -38,7 +43,11 @@ export function SessionBanner({ status }: { status: LinkedInStatus }) {
               <code className="font-mono text-xs">netkeeper linkedin clear-flag</code>.{when}
             </>
           ) : (
-            <>Log back in to LinkedIn in the netkeeper Chrome profile.{when}</>
+            <>
+              Log in to LinkedIn in the netkeeper Chrome profile, then run{' '}
+              <code className="font-mono text-xs">netkeeper preflight</code>, which clears this
+              automatically.{when}
+            </>
           )}
         </p>
         <p className="text-xs text-destructive/80">
