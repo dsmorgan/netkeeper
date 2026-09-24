@@ -390,10 +390,15 @@ def test_a_reappearance_clears_both(writer: Session, user: User) -> None:
     assert counts.reconnected == 1
 
 
-def test_a_dom_sourced_reappearance_clears_both_too(writer: Session, user: User) -> None:
-    """P2-08: a DOM page carries no URN, so the reconnect signal has to travel by
-    slug instead -- 'being seen is evidence whichever job made it' (spec 9.8) must
-    not stop being true just because the job that saw them was the DOM fallback."""
+def test_a_dom_sourced_reappearance_resets_the_miss_count_but_never_reconnects(
+    writer: Session, user: User
+) -> None:
+    """#174 item 4: a DOM page carries no URN, only a slug, and a slug is weaker
+    evidence than a URN (spec 9.6) -- being seen by DOM alone resets the miss
+    count (it is still evidence the sync should not keep counting misses), but
+    it never clears an *existing* disconnect. Only a URN sighting does that;
+    see test_a_reappearance_clears_both for the Voyager-sourced case this one
+    is deliberately narrower than."""
     mapping.apply_page(writer, user, _page(PEOPLE[:4]))
     _age(writer, user, PEOPLE[:3])
     _age(writer, user, PEOPLE[:3])
@@ -402,9 +407,10 @@ def test_a_dom_sourced_reappearance_clears_both_too(writer: Session, user: User)
     counts = mapping.apply_page(writer, user, _dom_page(PEOPLE[3:4], at=LATER))
 
     tomasz = _by_urn(writer, user, PEOPLE[3])
-    assert (tomasz.li_missing_count, tomasz.li_disconnected_at) == (0, None)
+    assert tomasz.li_missing_count == 0
+    assert tomasz.li_disconnected_at is not None, "a DOM sighting alone must never reconnect"
     assert tomasz.li_urn == PEOPLE[3].urn  # still the real one; the DOM page never touched it
-    assert counts.reconnected == 1
+    assert counts.reconnected == 0
 
 
 # --- #173 review scenarios: a released slug, reused by someone else --------------
@@ -444,23 +450,81 @@ def test_S1_a_voyager_sighting_of_a_released_slug_never_reconnects_its_old_holde
     assert b_after.li_disconnected_at is not None, "B (removed) was wrongly reconnected by A's slug"
 
 
+def test_a_dom_sighting_of_a_reused_slug_during_a_voyager_outage_never_reconnects_the_old_holder(
+    writer: Session, user: User
+) -> None:
+    """#174 item 4, the reviewer's own scenario: unlike S1 above (a Voyager
+    row's own slug, fixed by keeping it out of _mark_seen's public_ids match
+    at all), this is the DOM path *after* that restriction already applies.
+    B is genuinely removed. LinkedIn later hands B's old slug to a different
+    person, A. Voyager is down for this run -- ``FallbackConnectionsSource``
+    has switched, so every page is DOM-sourced (``urn=None``), and every
+    sighting can only ever travel by slug. The DOM fallback reads A's card
+    under B's old slug and marks it seen. Before #174 item 4, a DOM sighting
+    alone was enough to clear B's disconnect -- the same wrong reconnection
+    S1 fixed for a Voyager row's slug, but reachable here purely through DOM,
+    since DOM never carries a URN to prefer instead."""
+    b = dataclasses.replace(PEOPLE[3], public_id="shared-slug")
+    mapping.apply_page(writer, user, _page([*PEOPLE[:3], b]))
+    _age(writer, user, PEOPLE[:3])
+    _age(writer, user, PEOPLE[:3], at=LATER + timedelta(days=7))
+    assert _by_urn(writer, user, b).li_disconnected_at is not None
+
+    # A (a different person) now renders under "shared-slug" -- the only kind
+    # of page a fallback run produces once it has switched to DOM.
+    a_card = ConnectionSummary(
+        urn=None,
+        public_id="shared-slug",
+        first_name="Someone",
+        last_name="Else",
+        headline="Not B at all",
+        connected_at=None,
+    )
+    outage_page = ConnectionsPage(
+        mode=SyncMode.FULL,
+        number=0,
+        start=0,
+        total=0,
+        connections=(a_card,),
+        observed_at=LATER + timedelta(days=14),
+    )
+    counts = mapping.apply_page(writer, user, outage_page)
+    assert counts.sightings == 1
+
+    b_after = _by_urn(writer, user, b)
+    assert b_after.li_disconnected_at is not None, (
+        "B (removed) was wrongly reconnected by A's DOM sighting"
+    )
+    assert b_after.li_missing_count == 0, (
+        "the miss count still resets -- only the disconnect is protected"
+    )
+
+
 def test_S2_a_dom_sighting_matches_the_stored_slug_case_insensitively(
     writer: Session, user: User
 ) -> None:
     """F1's normalization half: a DOM-read slug in a different case than the one
     stored (LinkedIn resolves slugs case-insensitively, and so does identity
     resolution's own normalize_public_id -- crm.models.contacts) must still
-    reconnect the contact it names."""
+    match the contact it names and reset its miss count -- #174 item 4 means
+    it stops short of reconnecting (see the "resets the miss count but never
+    reconnects" test above), but the case-insensitive match itself must still
+    happen."""
     mapping.apply_page(writer, user, _page(PEOPLE[:4]))
     _age(writer, user, PEOPLE[:3])
     _age(writer, user, PEOPLE[:3])
-    assert _by_urn(writer, user, PEOPLE[3]).li_disconnected_at is not None
+    tomasz_before = _by_urn(writer, user, PEOPLE[3])
+    assert tomasz_before.li_disconnected_at is not None
+    assert tomasz_before.li_missing_count == 2
 
     upper = dataclasses.replace(PEOPLE[3], public_id=PEOPLE[3].slug.upper())
     mapping.apply_page(writer, user, _dom_page([upper], at=LATER))
 
     tomasz = _by_urn(writer, user, PEOPLE[3])
-    assert tomasz.li_disconnected_at is None, "a case-different DOM slug should still reconnect"
+    assert tomasz.li_missing_count == 0, (
+        "a case-different DOM slug should still match and reset misses"
+    )
+    assert tomasz.li_disconnected_at is not None, "but never reconnect on its own (#174 item 4)"
 
 
 def test_S3_a_dom_sighting_under_a_renamed_slug_creates_no_duplicate(
