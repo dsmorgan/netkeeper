@@ -251,6 +251,7 @@ def _age(session: Session, user: User, seen: Sequence[Person], at: datetime = LA
         frozenset(p.urn for p in seen),
         observed_at=at,
         disconnect_after_misses=2,
+        created_by_sync=frozenset(),
     )
 
 
@@ -276,12 +277,12 @@ def test_two_consecutive_misses_set_li_disconnected_at(writer: Session, user: Us
 
 
 def test_a_third_miss_keeps_the_first_disconnect_time(writer: Session, user: User) -> None:
-    mapping.apply_page(writer, user, _page(PEOPLE[:2]))
+    mapping.apply_page(writer, user, _page(PEOPLE[:3]))
     for week in (1, 2, 3):
-        _age(writer, user, PEOPLE[:1], at=NOW + timedelta(days=7 * week))
-    mateo = _by_urn(writer, user, PEOPLE[1])
-    assert mateo.li_missing_count == 3
-    assert mateo.li_disconnected_at == NOW + timedelta(days=14)
+        _age(writer, user, PEOPLE[:2], at=NOW + timedelta(days=7 * week))
+    hana = _by_urn(writer, user, PEOPLE[2])
+    assert hana.li_missing_count == 3
+    assert hana.li_disconnected_at == NOW + timedelta(days=14)
 
 
 def test_a_reappearance_clears_both(writer: Session, user: User) -> None:
@@ -299,25 +300,27 @@ def test_a_reappearance_clears_both(writer: Session, user: User) -> None:
 
 def test_a_sighting_between_misses_restarts_the_count(writer: Session, user: User) -> None:
     """Consecutive means consecutive: seen once in between, and two misses are one each."""
-    mapping.apply_page(writer, user, _page(PEOPLE[:2]))
-    _age(writer, user, PEOPLE[:1])
-    mapping.apply_page(writer, user, _page(PEOPLE[1:2], mode=SyncMode.INCREMENTAL, at=LATER))
-    _age(writer, user, PEOPLE[:1])
-    mateo = _by_urn(writer, user, PEOPLE[1])
-    assert (mateo.li_missing_count, mateo.li_disconnected_at) == (1, None)
+    mapping.apply_page(writer, user, _page(PEOPLE[:3]))
+    _age(writer, user, PEOPLE[:2])
+    mapping.apply_page(writer, user, _page(PEOPLE[2:3], mode=SyncMode.INCREMENTAL, at=LATER))
+    _age(writer, user, PEOPLE[:2])
+    hana = _by_urn(writer, user, PEOPLE[2])
+    assert (hana.li_missing_count, hana.li_disconnected_at) == (1, None)
 
 
 def test_the_threshold_comes_from_the_caller(writer: Session, user: User) -> None:
-    mapping.apply_page(writer, user, _page(PEOPLE[:2]))
+    mapping.apply_page(writer, user, _page(PEOPLE[:3]))
     for _ in range(2):
         mapping.age_unseen(
             writer,
             user,
-            frozenset({PEOPLE[0].urn}),
+            frozenset({PEOPLE[0].urn, PEOPLE[1].urn}),
             observed_at=LATER,
             disconnect_after_misses=3,
+            created_by_sync=frozenset(),
         )
-    assert _by_urn(writer, user, PEOPLE[1]).li_disconnected_at is None
+    hana = _by_urn(writer, user, PEOPLE[2])
+    assert (hana.li_missing_count, hana.li_disconnected_at) == (2, None)
 
 
 def test_contacts_without_a_urn_or_merged_away_never_age(writer: Session, user: User) -> None:
@@ -337,17 +340,24 @@ def test_contacts_without_a_urn_or_merged_away_never_age(writer: Session, user: 
 
 def test_another_users_contacts_are_never_aged(writer: Session, user: User) -> None:
     other = factories.make_user(writer)
-    mapping.apply_page(writer, other, _page(PEOPLE[:2]))
-    _age(writer, user, PEOPLE[:1])
-    _age(writer, user, PEOPLE[:1])
-    assert _by_urn(writer, other, PEOPLE[1]).li_missing_count == 0
+    mapping.apply_page(writer, user, _page(PEOPLE[:3]))
+    mapping.apply_page(writer, other, _page(PEOPLE[3:5]))
+    _age(writer, user, PEOPLE[:2])
+    _age(writer, user, PEOPLE[:2])
+    assert _by_urn(writer, user, PEOPLE[2]).li_missing_count == 2  # aging did run
+    assert _missing(writer, other, PEOPLE[3:5]) == [0, 0]
 
 
 def test_a_sync_that_saw_nobody_ages_nobody(writer: Session, user: User) -> None:
     mapping.apply_page(writer, user, _page(PEOPLE[:3]))
 
     aging = mapping.age_unseen(
-        writer, user, frozenset(), observed_at=LATER, disconnect_after_misses=1
+        writer,
+        user,
+        frozenset(),
+        observed_at=LATER,
+        disconnect_after_misses=1,
+        created_by_sync=frozenset(),
     )
 
     assert aging.refused == "the full sync saw no connections"
@@ -363,6 +373,7 @@ def test_a_threshold_below_one_is_refused(writer: Session, user: User, threshold
             frozenset({PEOPLE[0].urn}),
             observed_at=LATER,
             disconnect_after_misses=threshold,
+            created_by_sync=frozenset(),
         )
 
 
@@ -394,13 +405,13 @@ def test_aging_up_to_the_share_goes_ahead_and_one_more_is_refused(
 
     ok = mapping.age_unseen(
         writer, user, frozenset(p.urn for p in crowd[20:]), observed_at=LATER,
-        disconnect_after_misses=2,
+        disconnect_after_misses=2, created_by_sync=frozenset(),
     )  # fmt: skip
     assert (ok.missed, ok.refused) == (20, None)
 
     refused = mapping.age_unseen(
         writer, user, frozenset(p.urn for p in crowd[21:]), observed_at=LATER,
-        disconnect_after_misses=2,
+        disconnect_after_misses=2, created_by_sync=frozenset(),
     )  # fmt: skip
     assert refused.refused is not None and "21 of 200" in refused.refused
     assert refused.missed == 0
@@ -416,6 +427,7 @@ def _age_all_but(
         frozenset(p.urn for p in crowd[missing:]),
         observed_at=LATER,
         disconnect_after_misses=2,
+        created_by_sync=frozenset(),
         **kwargs,  # type: ignore[arg-type]
     )
 
@@ -432,29 +444,40 @@ def test_a_whole_network_never_misses_at_once(writer: Session, user: User) -> No
         crowd = _crowd(size)
         mapping.apply_page(writer, other, _page(crowd))
         aging = mapping.age_unseen(
-            writer, other, frozenset({stranger}), observed_at=LATER, disconnect_after_misses=1
+            writer,
+            other,
+            frozenset({stranger}),
+            observed_at=LATER,
+            disconnect_after_misses=1,
+            created_by_sync=frozenset(),
         )
         assert aging.refused is not None and f"all {size}" in aging.refused, size
         assert _missing(writer, other, crowd) == [0] * size
 
 
-def test_more_than_half_of_a_small_network_is_refused_and_half_is_not(
-    writer: Session, user: User
-) -> None:
+def test_half_of_a_small_network_is_refused_and_less_is_not(writer: Session, user: User) -> None:
     crowd = _crowd(10)
     mapping.apply_page(writer, user, _page(crowd))
 
-    six = _age_all_but(writer, user, crowd, 6)
-    assert six.refused is not None and "more than half" in six.refused
+    five = _age_all_but(writer, user, crowd, 5)
+    assert five.refused is not None and "half or more" in five.refused
     assert _missing(writer, user, crowd) == [0] * 10
 
-    five = _age_all_but(writer, user, crowd, 5)
-    assert (five.refused, five.missed) == (None, 5)
+    four = _age_all_but(writer, user, crowd, 4)
+    assert (four.refused, four.missed) == (None, 4)
 
 
-def test_twenty_contacts_may_lose_ten_but_not_eleven(writer: Session, user: User) -> None:
-    """At 20 the floor (10) and the half rule (10) meet; 11 is refused."""
+def test_twenty_contacts_may_lose_nine_but_not_ten(writer: Session, user: User) -> None:
+    """At 20 the floor (10) and the half rule (10) meet; half is refused."""
     crowd = _crowd(20)
+    mapping.apply_page(writer, user, _page(crowd))
+    assert _age_all_but(writer, user, crowd, 10).refused is not None
+    assert _age_all_but(writer, user, crowd, 9).refused is None
+
+
+def test_twenty_two_contacts_may_lose_ten_but_not_eleven(writer: Session, user: User) -> None:
+    """Above 20 the floor of ten binds before half does."""
+    crowd = _crowd(22)
     mapping.apply_page(writer, user, _page(crowd))
     assert _age_all_but(writer, user, crowd, 11).refused is not None
     assert _age_all_but(writer, user, crowd, 10).refused is None
@@ -474,6 +497,7 @@ def test_the_unmatched_floor_applies_only_once_more_than_ten_urns_were_seen(
         frozenset({p.urn for p in crowd[1:]} | {stranger}),
         observed_at=LATER,
         disconnect_after_misses=2,
+        created_by_sync=frozenset(),
     )
     assert few.refused is not None and "match no contact" in few.refused
 
@@ -485,6 +509,7 @@ def test_the_unmatched_floor_applies_only_once_more_than_ten_urns_were_seen(
         frozenset({p.urn for p in [*crowd, *many]} | {stranger}),
         observed_at=LATER,
         disconnect_after_misses=2,
+        created_by_sync=frozenset(),
     )
     assert ok.refused is None
 
@@ -505,6 +530,7 @@ def test_the_unmatched_share_is_of_what_was_seen_not_of_what_is_stored(
             frozenset(everyone | set(strangers[:extra])),
             observed_at=LATER,
             disconnect_after_misses=2,
+            created_by_sync=frozenset(),
         )
 
     assert age(22).refused is None
@@ -550,7 +576,105 @@ def test_seen_urns_that_match_no_contact_refuse_aging_even_when_few_would_miss(
         frozenset({p.urn for p in crowd[5:]} | strangers),
         observed_at=LATER,
         disconnect_after_misses=1,
+        created_by_sync=frozenset(),
     )
 
     assert aging.refused is not None and "match no contact" in aging.refused
     assert _missing(writer, user, crowd[:5]) == [0] * 5
+
+
+# --- #169: a sync that replaced the network, and slugs as they are stored -----------------
+
+
+def _strangers(count: int) -> list[Person]:
+    """``count`` people who share nothing with :func:`_crowd`: new URNs, new slugs, new names."""
+    return [
+        Person(700 + i, f"Other{i}", f"Stranger{i}", None, urn_prefix="ACoAANEW")
+        for i in range(count)
+    ]
+
+
+@pytest.mark.parametrize("size", [1, 2, 3, 5, 10])
+def test_a_sync_that_replaced_the_whole_network_ages_nobody(
+    writer: Session, user: User, size: int
+) -> None:
+    """#169 A: every URN and slug changes at once, as after a parser regression.
+
+    The sync creates ``size`` rows and misses the ``size`` stored ones. Counted
+    against all ``2 * size`` rows that can age, that is exactly half, which a
+    more-than-half rule let through; counted against the ``size`` that existed
+    before the sync, it is all of them.
+    """
+    old = _crowd(size)
+    mapping.apply_page(writer, user, _page(old))
+    new = _strangers(size)
+    counts = mapping.apply_page(writer, user, _page(new, at=LATER))
+    assert counts.created == size and len(counts.created_contact_ids) == size
+
+    aging = mapping.age_unseen(
+        writer,
+        user,
+        frozenset(p.urn for p in new),
+        observed_at=LATER,
+        disconnect_after_misses=1,
+        created_by_sync=frozenset(counts.created_contact_ids),
+        seen_public_ids=frozenset(p.slug for p in new),
+    )
+
+    assert aging.refused is not None and f"all {size}" in aging.refused
+    assert _missing(writer, user, old) == [0] * size
+    assert all(_by_urn(writer, user, p).li_disconnected_at is None for p in old)
+
+
+def test_rows_the_sync_created_do_not_count_toward_what_may_age(
+    writer: Session, user: User
+) -> None:
+    """Ten stored, six new: four missing goes ahead and five, half of the ten, does not.
+
+    Counted over all sixteen, five missing would be under half and go ahead.
+    """
+    old = _crowd(10)
+    mapping.apply_page(writer, user, _page(old))
+    new = _strangers(6)
+    counts = mapping.apply_page(writer, user, _page([*old[4:], *new], at=LATER))
+    created = frozenset(counts.created_contact_ids)
+
+    five = mapping.age_unseen(
+        writer,
+        user,
+        frozenset(p.urn for p in [*old[5:], *new]),
+        observed_at=LATER,
+        disconnect_after_misses=2,
+        created_by_sync=created,
+    )
+    assert five.refused is not None and "5 of 10" in five.refused
+
+    four = mapping.age_unseen(
+        writer,
+        user,
+        frozenset(p.urn for p in [*old[4:], *new]),
+        observed_at=LATER,
+        disconnect_after_misses=2,
+        created_by_sync=created,
+    )
+    assert (four.refused, four.missed) == (None, 4)
+
+
+def test_a_seen_slug_counts_as_stored_after_url_decoding(writer: Session, user: User) -> None:
+    """#169 D: the list can report a slug percent-encoded; the contact stores it decoded."""
+    crowd = _crowd(20)
+    mapping.apply_page(writer, user, _page(crowd))
+    accented = _by_urn(writer, user, crowd[0])
+    accented.li_public_id = "josé-fake-núñez-0500"
+    writer.flush()
+
+    aging = _age_all_but(
+        writer,
+        user,
+        crowd,
+        2,
+        seen_public_ids=frozenset({"Jos%C3%A9-Fake-N%C3%BA%C3%B1ez-0500"}),
+    )
+
+    assert aging.missed == 1
+    assert _missing(writer, user, crowd[:2]) == [0, 1]

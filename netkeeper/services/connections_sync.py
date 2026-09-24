@@ -254,6 +254,7 @@ async def sync_connections(
                 result.seen_urns,
                 observed_at=clock(),
                 disconnect_after_misses=settings.disconnect_after_misses,
+                created_by_sync=frozenset(counts.created_contact_ids),
                 seen_public_ids=result.seen_public_ids,
                 held_for_review=frozenset(counts.review_contact_ids),
             )
