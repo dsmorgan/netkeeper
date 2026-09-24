@@ -50,7 +50,7 @@ import logging
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Final, Protocol
 
 from sqlalchemy import select
@@ -58,6 +58,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings
 from netkeeper.db import is_writer, session_scope
+from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import (
     JsonValue,
@@ -69,7 +70,11 @@ from netkeeper.models import (
 )
 from netkeeper.scoping import get_scoped, scoped, scoped_count
 from netkeeper.services import heat as heat_service
-from netkeeper.services.linkedin_accounts import ensure_account, scheduled_runs_armed
+from netkeeper.services.linkedin_accounts import (
+    ensure_account,
+    local_account_id,
+    scheduled_runs_armed,
+)
 from netkeeper.services.linkedin_session import session_flag
 
 log = logging.getLogger(__name__)
@@ -89,6 +94,50 @@ INTERRUPTED: Final = "interrupted: the netkeeper process running it stopped"
 
 #: The longest ``error`` or ``notes`` line kept. A traceback belongs in the log.
 MAX_MESSAGE_LENGTH: Final = 500
+
+#: How long a ``running`` run may go without its account's browser lock being
+#: held before it counts as left behind by a process that went away. A live run
+#: holds the lock for its whole length, except in the moment between the row
+#: being committed and the worker taking the lock; this grace covers that
+#: moment, so a run just asked for is never failed under the process about to
+#: start it (#175 review, F7).
+STALE_AFTER: Final = timedelta(minutes=2)
+
+BrowserHeld = Callable[[int], bool]
+
+
+def lock_held(account_id: int, *, legacy: bool) -> bool:
+    """Whether any process holds ``account_id``'s browser lock (and, for the local
+    user's account, ``legacy``, the pre-P2-10 ``browser-local.lock``). Never attaches.
+
+    Reads the lock files with a shared peek that is dropped at once. When a lock
+    cannot be inspected at all the answer is "held": a run nobody can prove is
+    over is left alone rather than failed under a process that may be running it.
+    """
+    try:
+        if activity_lock.inspect(activity_lock.account_key(account_id)).held:
+            return True
+        return legacy and activity_lock.inspect(activity_lock.LEGACY_SHARED_KEY).held
+    except OSError:
+        return True
+
+
+def browser_held_for(session: Session) -> BrowserHeld:
+    """:func:`lock_held` for this database: the legacy lock counts for the local account."""
+    local = local_account_id(session)
+    return lambda account_id: lock_held(account_id, legacy=account_id == local)
+
+
+def _stale(run: SyncRun, *, now: datetime, held: BrowserHeld) -> bool:
+    return now - run.started_at >= STALE_AFTER and not held(run.linkedin_account_id)
+
+
+def _fail_stale(run: SyncRun, *, now: datetime) -> None:
+    run.status = SyncRunStatus.FAILED
+    run.completed_at = now
+    run.stop_reason = "interrupted"
+    run.error = INTERRUPTED
+    log.warning("run %d was left running by a process that went away; marked failed", run.id)
 
 
 class RunError(ValueError):
@@ -195,6 +244,7 @@ def create_run(
     now: datetime,
     max_visits: int | None = None,
     resume_of_id: int | None = None,
+    browser_held: BrowserHeld | None = None,
 ) -> SyncRun:
     """Record a new ``running`` run of ``kind`` for ``user``'s account, and return it.
 
@@ -203,6 +253,12 @@ def create_run(
     (:class:`RunAlreadyRunning`), and a scheduled run on a disarmed account
     (:class:`ScheduledRunsDisarmed`). ``max_visits`` is for enrichment only
     and must be at least 1; it can only lower the day's budget.
+
+    A ``running`` run whose account's browser lock nobody holds, older than
+    :data:`STALE_AFTER`, was left behind by a process that went away (a CLI run
+    killed with ``SIGKILL``): it is marked ``failed`` here rather than blocking
+    every new run until the next start. ``browser_held`` defaults to reading the
+    lock files (:func:`browser_held_for`).
     """
     _require_writer(session)
     _require_aware(now)
@@ -222,6 +278,9 @@ def create_run(
             " `netkeeper linkedin schedule arm` once a supervised run has gone well"
         )
     busy = running_run(session, user, account.id)
+    if busy is not None and _stale(busy, now=now, held=browser_held or browser_held_for(session)):
+        _fail_stale(busy, now=now)
+        busy = None
     if busy is not None:
         raise RunAlreadyRunning(
             f"run {busy.id} ({busy.kind.value}) is still running for this account;"
@@ -294,16 +353,28 @@ def finish_run(
     return run
 
 
-def request_cancel(session: Session, user: User, run_id: int, *, now: datetime) -> SyncRun:
+def request_cancel(
+    session: Session,
+    user: User,
+    run_id: int,
+    *,
+    now: datetime,
+    browser_held: BrowserHeld | None = None,
+) -> SyncRun:
     """Ask the run to stop at its next check (spec 9.9). Idempotent while it runs.
 
-    :class:`RunFinished` for a run that already ended.
+    :class:`RunFinished` for a run that already ended. A run left behind by a
+    process that went away (see :func:`create_run`) has nobody to read the flag,
+    so it is marked ``failed`` at once instead, and returned.
     """
     _require_writer(session)
     _require_aware(now)
     run = get_run(session, user, run_id)
     if run.status is not SyncRunStatus.RUNNING:
         raise RunFinished(f"run {run_id} already ended {run.status.value}")
+    if _stale(run, now=now, held=browser_held or browser_held_for(session)):
+        _fail_stale(run, now=now)
+        return run
     if run.cancel_requested_at is None:
         run.cancel_requested_at = now
         log.info("cancel requested for run %d", run_id)
@@ -321,18 +392,22 @@ def fail_interrupted_runs(
     session: Session,
     *,
     now: datetime,
-    browser_held: Callable[[int], bool] = lambda account_id: False,
+    browser_held: BrowserHeld | None = None,
 ) -> int:
     """Mark every user's ``running`` run ``failed``: its process is gone. Returns how many.
 
     Called once at process start, before anything could start a run. Walks every
     user, one scoped query each. ``browser_held(account_id)`` says whether some
-    process holds that account's browser lock right now; a run on such an
-    account is left alone, because it may be a ``netkeeper linkedin sync`` in a
-    terminal that is still going.
+    process holds that account's browser lock right now (default: the lock
+    files, :func:`browser_held_for`); a run on such an account is left alone,
+    because it may be a ``netkeeper linkedin sync`` in a terminal that is still
+    going. So is one younger than :data:`STALE_AFTER`: a terminal's run in the
+    moment between committing its row and taking the lock (#175 review, F7).
+    ``create_run`` and ``request_cancel`` catch it later if it really was left.
     """
     _require_writer(session)
     _require_aware(now)
+    held = browser_held or browser_held_for(session)
     users = session.scalars(select(User).order_by(User.id)).all()
     total = 0
     for user in users:
@@ -340,12 +415,9 @@ def fail_interrupted_runs(
             scoped(user, SyncRun).where(SyncRun.status == SyncRunStatus.RUNNING)
         ).all()
         for run in stale:
-            if browser_held(run.linkedin_account_id):
+            if not _stale(run, now=now, held=held):
                 continue
-            run.status = SyncRunStatus.FAILED
-            run.completed_at = now
-            run.stop_reason = "interrupted"
-            run.error = INTERRUPTED
+            _fail_stale(run, now=now)
             total += 1
     if total:
         log.warning("marked %d run(s) left running by a stopped process as failed", total)

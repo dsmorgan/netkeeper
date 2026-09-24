@@ -291,6 +291,8 @@ def load_plan(session: Session, user: User, run_id: int) -> StoredPlan:
         run = _enrich_run(session, user, run_id)
     except runs.RunNotFound as exc:
         raise PlanNotFound(f"no enrichment run {run_id}") from exc
+    except ValueError as exc:  # a connections sync: it has no plan to load or resume
+        raise PlanNotFound(str(exc)) from exc
     if run.plan_json is None:
         raise PlanNotFound(f"run {run_id} has no enrichment plan")
     return _plan_of(run)

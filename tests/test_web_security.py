@@ -108,7 +108,7 @@ async def test_post_without_the_header_is_refused(client: httpx.AsyncClient) -> 
 
 
 async def test_post_with_the_header_and_same_origin_passes(client: httpx.AsyncClient) -> None:
-    response = await client.post(PATH, headers={**CSRF, "Origin": "http://testserver"})
+    response = await client.post(PATH, headers={**CSRF, "Origin": "http://127.0.0.1"})
     assert response.status_code == 202
 
 
@@ -128,3 +128,15 @@ async def test_get_is_never_blocked(client: httpx.AsyncClient) -> None:
     hostile = {"Origin": "http://evil.example", "Sec-Fetch-Site": "cross-site"}
     response = await client.get("/api/v1/health", headers=hostile)
     assert response.status_code == 200
+
+
+def test_the_host_names_are_loopback_only() -> None:
+    """#175 review F8: pinned, so the list cannot quietly grow a wildcard."""
+    from netkeeper.web.security import LOOPBACK_HOSTNAMES, host_violation
+
+    assert frozenset({"127.0.0.1", "localhost", "::1"}) == LOOPBACK_HOSTNAMES
+    for bad in ("evil.example:8000", "127.0.0.1.evil.example", "", "localhost.evil:80", "[::2]"):
+        assert host_violation({"host": bad}, LOOPBACK_HOSTNAMES), bad
+    assert host_violation({}, LOOPBACK_HOSTNAMES)
+    for good in ("127.0.0.1:8000", "localhost", "[::1]:8000"):
+        assert not host_violation({"host": good}, LOOPBACK_HOSTNAMES), good

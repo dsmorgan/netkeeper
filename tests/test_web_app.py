@@ -262,7 +262,7 @@ def test_operation_ids_are_snake_case(app: FastAPI) -> None:
 
 def _static_client(app: FastAPI) -> httpx.AsyncClient:
     # No lifespan: the static routes do not touch the database.
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1")
 
 
 async def test_serves_the_built_frontend(

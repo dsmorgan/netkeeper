@@ -84,7 +84,7 @@ def _current_flag(factory: sessionmaker[Session]) -> Outcome | None:
 
 
 def _logged_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("netkeeper.cli.AttachBrowserProvider", lambda cdp_url: make_provider())
+    monkeypatch.setattr("netkeeper.cli.AttachBrowserProvider", lambda cdp_url, **_: make_provider())
 
 
 # --- F1: only LoggedOut auto-clears; Checkpoint never does -----------------------

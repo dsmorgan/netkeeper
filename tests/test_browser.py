@@ -617,3 +617,14 @@ async def test_an_older_process_holding_the_legacy_lock_blocks_account_one() -> 
     async with provider.run(SINGLE_ACCOUNT_KEY):
         assert activity_lock.try_claim(activity_lock.LEGACY_SHARED_KEY) is None
     assert not activity_lock.inspect(activity_lock.LEGACY_SHARED_KEY).held
+
+
+async def test_the_legacy_lock_goes_with_the_named_partner_account() -> None:
+    """#175 review F10: whichever account is the local user's co-claims the legacy lock."""
+    from netkeeper.linkedin import activity_lock
+
+    provider = make_provider(locks=ActivityLocks(legacy_partner="account-5"))
+    async with provider.run("account-5"):
+        assert activity_lock.inspect(activity_lock.LEGACY_SHARED_KEY).held
+    async with provider.run(SINGLE_ACCOUNT_KEY):
+        assert not activity_lock.inspect(activity_lock.LEGACY_SHARED_KEY).held

@@ -17,6 +17,7 @@ catch-up after a restart, retry parking, a restart with a run left ``running``
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -46,7 +47,7 @@ from netkeeper.services.linkedin_accounts import (
     scheduled_runs_armed,
 )
 from netkeeper.services.linkedin_session import flag_session
-from netkeeper.services.scheduled_runs import ServeExtractor
+from netkeeper.services.scheduled_runs import ServeExtractor, serve_registry
 from netkeeper.web.app import create_app
 from netkeeper.web.security import CLIENT_HEADER, CLIENT_HEADER_VALUE
 
@@ -94,7 +95,7 @@ async def drive(app: FastAPI, clock: Clock, until: datetime) -> None:
 
 
 def client_for(app: FastAPI) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1")
 
 
 def _rows(engine: Engine) -> list[SyncRun]:
@@ -163,16 +164,46 @@ async def _every_get(app: FastAPI) -> None:
 
 
 async def test_a_disarmed_serve_never_touches_the_browser_across_a_week(
-    bare_engine: Engine, settings: Settings, no_frontend: None
+    bare_engine: Engine,
+    settings: Settings,
+    no_frontend: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """The week, then each of the three checks attacked with the ones in front of it gone.
+
+    1. The drive itself: every due fire the real heartbeat reached reports
+       ``skipped_reason == "disarmed"`` -- the scheduler's gate, not a later check,
+       stopped it -- and nothing logs an error.
+    2. As if the gate had let a fire through: ``serve``'s own handlers are called
+       directly. ``create_run`` refuses, so no run is recorded.
+    3. As if ``create_run`` had recorded one too: a scheduled row is written by hand
+       and handed to the worker. It refuses before it attaches.
+
+    Each check, removed on its own, turns this test red (#175 review, F1).
+    """
+    fires: list[scheduler.FireResult] = []
+    real_poll = scheduler.poll_and_fire
+
+    async def spy(*args: Any, **kwargs: Any) -> scheduler.FireResult | None:
+        result = await real_poll(*args, **kwargs)
+        if result is not None:
+            fires.append(result)
+        return result
+
+    monkeypatch.setattr(scheduler, "poll_and_fire", spy)
+    caplog.set_level(logging.WARNING)
+
     connector, context, clock = await _a_week_of_serve(bare_engine, settings, arm=False)
 
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors == []
+    assert fires, "the heartbeat never reached a due fire"
+    assert {(f.fired, f.skipped_reason) for f in fires} == {(False, "disarmed")}
+    assert {f.kind for f in fires} == set(scheduler.SERVED_SCHEDULES)
     assert connector.attaches == 0
     assert context.pages == [] and context.fetches == []
     assert _rows(bare_engine) == []  # not even a refused scheduled run was recorded
-    # The scheduler did poll, and did reach due fires: the full sync, never run,
-    # keeps being offered an hour after each disarmed skip, and the daily and
-    # three-hourly kinds moved on from their first due times.
     factory = make_session_factory(bare_engine)
     with session_scope(factory) as session:
         user = _local(session)
@@ -184,6 +215,39 @@ async def test_a_disarmed_serve_never_touches_the_browser_across_a_week(
     assert full is not None and full > clock.at - timedelta(days=1)
     assert enrich is not None and enrich > START + timedelta(days=8)
     assert inbox is None  # no runner, not scheduled
+
+    # 2 and 3: past the gate, then past create_run too.
+    provider, connector = fake_provider()
+    async with served(bare_engine, settings, provider, clock) as app:
+        factory = app.state.session_factory
+        with session_scope(factory) as session:
+            user = _local(session)
+            user_id, account = user.id, ensure_account(session, user).id
+        registry = serve_registry(factory, app.state.executor, app.state.tasks, clock=clock)
+        for kind, handler in registry.items():
+            outcome = await handler(
+                scheduler.JobContext(
+                    user_id=user_id, account_id=account, kind=kind, due=clock.at, catch_up=False
+                )
+            )
+            assert outcome is None
+        await app.state.tasks.join()
+        assert _rows(bare_engine) == []
+        with session_scope(factory, write=True) as session:
+            forged = SyncRun(
+                user_id=user_id,
+                linkedin_account_id=account,
+                kind=SyncRunKind.CONNECTIONS_FULL,
+                trigger=SyncRunTrigger.SCHEDULED,
+                started_at=clock.at,
+            )
+            session.add(forged)
+            session.flush()
+            forged_id = forged.id
+        await app.state.executor.execute(forged_id, user_id)
+    assert connector.attaches == 0
+    ((row),) = _rows(bare_engine)
+    assert (row.status, row.stop_reason) == (SyncRunStatus.FAILED, "disarmed")
 
 
 async def test_the_same_week_armed_does_attach(
@@ -520,16 +584,31 @@ async def test_the_worker_refuses_a_scheduled_run_on_a_disarmed_account(
         assert (stored.status, stored.stop_reason) == (SyncRunStatus.FAILED, "disarmed")
 
 
-def test_the_real_serve_builds_its_extractor_on_the_attach_provider(settings: Settings) -> None:
-    """``netkeeper serve``'s app gets the worker on the one attach provider, and building
-    it attaches to nothing (there is no connect before a run)."""
+def test_the_real_serve_builds_its_extractor_on_the_attach_provider(
+    session_factory: Any, settings: Settings
+) -> None:
+    """``netkeeper serve``'s app gets the worker on the one attach provider, building it
+    attaches to nothing, and the legacy-lock co-claim goes with the local user's
+    account whatever its id (#175 review, F10)."""
+    import factories
+
+    from netkeeper.linkedin.activity_lock import account_key
+    from netkeeper.models import UserKind
     from netkeeper.worker import BrowserWorker, serve_extractor
 
-    extractor = serve_extractor(settings)
-    executor = extractor.executor(None, None)  # type: ignore[arg-type]
+    with session_scope(session_factory, write=True) as session:
+        hosted = factories.make_user(session, kind=UserKind.HOSTED)
+        ensure_account(session, hosted)  # takes id 1
+        local = factories.make_user(session)
+        local_account = ensure_account(session, local).id
+    assert local_account != 1
+
+    executor = serve_extractor(settings).executor(session_factory, None)  # type: ignore[arg-type]
+
     assert isinstance(executor, BrowserWorker)
     assert isinstance(executor.provider, AttachBrowserProvider)
     assert executor.provider.cdp_url == settings.linkedin.cdp_url
+    assert executor.provider.locks.legacy_partner == account_key(local_account)
 
 
 async def test_shutting_down_mid_run_records_it_interrupted(
@@ -578,3 +657,96 @@ async def test_a_live_sync_reads_the_api_first_and_the_dom_after_a_route_change(
     assert CONNECTIONS_PAGE_URL == "https://www.linkedin.com/mynetwork/invite-connect/connections/"
     assert connector.attaches == 1  # building the sources loaded no page
     assert all(page.goto_calls == [] for page in connector.browsers[0].context_list[0].pages)
+
+
+# --- #175 review F2, F3: the landing check, and the worker's own refusal -------------------
+
+
+def _manual_run(factory: Any, kind: SyncRunKind) -> tuple[int, int]:
+    import factories
+
+    with session_scope(factory, write=True) as session:
+        user = factories.make_user(session)
+        run = runs.create_run(
+            session, user, kind, trigger=SyncRunTrigger.MANUAL, now=datetime.now(UTC)
+        )
+        return run.id, user.id
+
+
+async def test_a_connections_page_that_lands_on_a_checkpoint_fetches_nothing(
+    session_factory: Any, settings: Settings
+) -> None:
+    """The first page load is classified before any in-page fetch: a checkpoint stops
+    the run as one, raises the session flag, and nothing is evaluated in the page."""
+    from run_fakes import CheckpointContext
+
+    from netkeeper.services.linkedin_session import session_flag
+    from netkeeper.worker import BrowserWorker
+
+    context = CheckpointContext()
+    provider, connector = fake_provider(context)
+    run_id, user_id = _manual_run(session_factory, SyncRunKind.CONNECTIONS_FULL)
+
+    await BrowserWorker(provider, session_factory, settings.linkedin).execute(run_id, user_id)
+
+    assert connector.attaches == 1
+    assert all(page.evaluate_calls == [] for page in context.pages)
+    assert context.fetches == []
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        run = runs.get_run(session, user, run_id)
+        assert (run.status, run.stop_reason) == (SyncRunStatus.ABORTED, "checkpoint")
+        flag = session_flag(session, user)
+        assert flag is not None and flag.outcome is Outcome.CHECKPOINT
+
+
+async def test_the_worker_refuses_a_flagged_session_before_it_attaches(
+    session_factory: Any, settings: Settings
+) -> None:
+    """A run recorded before the flag was raised still never reaches the browser."""
+    from netkeeper.worker import BrowserWorker
+
+    provider, connector = fake_provider()
+    run_id, user_id = _manual_run(session_factory, SyncRunKind.ENRICH)
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        flag_session(session, user, Outcome.LOGGED_OUT, url="/authwall")
+
+    outcome = await BrowserWorker(provider, session_factory, settings.linkedin).execute(
+        run_id, user_id
+    )
+
+    assert outcome is runs.RunOutcome.DONE and connector.attaches == 0
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        run = runs.get_run(session, user, run_id)
+        assert (run.status, run.stop_reason) == (SyncRunStatus.FAILED, "session_flagged")
+
+
+async def test_the_worker_refuses_heat_before_it_attaches(
+    session_factory: Any, settings: Settings
+) -> None:
+    from netkeeper.worker import BrowserWorker
+
+    provider, connector = fake_provider()
+    run_id, user_id = _manual_run(session_factory, SyncRunKind.CONNECTIONS_INCREMENTAL)
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        account = ensure_account(session, user).id
+        now = datetime.now(UTC)
+        while not heat.should_skip(
+            session, user, account, now=now, settings=settings.linkedin.heat
+        ):
+            heat.raise_heat(session, user, account, now=now, settings=settings.linkedin.heat)
+
+    await BrowserWorker(provider, session_factory, settings.linkedin).execute(run_id, user_id)
+
+    assert connector.attaches == 0
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        assert runs.get_run(session, user, run_id).stop_reason == "heat_skip"

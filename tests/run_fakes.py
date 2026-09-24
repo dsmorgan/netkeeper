@@ -123,3 +123,21 @@ class Clock:
 
     def __call__(self) -> datetime:
         return self.at
+
+
+class CheckpointContext(ConnectionsContext):
+    """Every navigation lands on a checkpoint, the way LinkedIn redirects a flagged session."""
+
+    LANDING = "https://www.linkedin.com/checkpoint/challenge/AgFAKE?ctx=invented"
+
+    async def new_page(self) -> Any:
+        page = await super().new_page()
+        real_goto = page.goto
+
+        async def goto(url: str) -> object:
+            await real_goto(url)
+            page._url = self.LANDING
+            return None
+
+        page.goto = goto
+        return page

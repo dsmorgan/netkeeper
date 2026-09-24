@@ -131,7 +131,12 @@ def test_runs_run_and_cancel(cli_db: sessionmaker[Session]) -> None:
     with session_scope(cli_db, write=True) as session:
         user = _user(session)
         running = runs.create_run(
-            session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW, max_visits=5
+            session,
+            user,
+            SyncRunKind.ENRICH,
+            trigger=SyncRunTrigger.MANUAL,
+            now=datetime.now(UTC),
+            max_visits=5,
         ).id
 
     listed = runner.invoke(cli, ["linkedin", "runs"])
@@ -149,3 +154,82 @@ def test_runs_run_and_cancel(cli_db: sessionmaker[Session]) -> None:
 def test_resuming_what_cannot_be_resumed_says_why(cli_db: sessionmaker[Session]) -> None:
     result = CliRunner().invoke(cli, ["linkedin", "enrich", "--resume", "42"])
     assert result.exit_code == 1 and "no enrichment run 42" in result.output
+
+
+def test_cancelling_a_run_nobody_is_running_fails_it(cli_db: sessionmaker[Session]) -> None:
+    """#175 review F6: a CLI run killed with SIGKILL leaves its row running and its lock
+    free. Cancelling it marks it failed at once; nothing would ever read the flag."""
+    with session_scope(cli_db, write=True) as session:
+        left = runs.create_run(
+            session, _user(session), SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW
+        ).id
+
+    result = CliRunner().invoke(cli, ["linkedin", "cancel", str(left)])
+
+    assert result.exit_code == 0 and "marked it failed" in result.output
+    with session_scope(cli_db) as session:
+        run = runs.get_run(session, _user(session), left)
+        assert (run.status, run.stop_reason) == (SyncRunStatus.FAILED, "interrupted")
+
+
+def test_arming_asks_before_it_takes_the_write_lock(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#175 review F4: while the prompt waits on a person, another writer (serve) is not
+    locked out. The concurrent write inside the prompt would wait out the busy timeout
+    and fail if the command held a writer session across it."""
+    wrote: list[bool] = []
+
+    def confirm_while_serve_writes(text: str) -> bool:
+        with session_scope(cli_db, write=True) as session:
+            flag_session(session, _user(session), Outcome.LOGGED_OUT, url="/authwall")
+        wrote.append(True)
+        return True
+
+    monkeypatch.setattr("typer.confirm", confirm_while_serve_writes)
+    monkeypatch.setattr("netkeeper.db.SQLITE_BUSY_TIMEOUT_MS", 100)
+
+    result = CliRunner().invoke(cli, ["linkedin", "schedule", "arm"])
+
+    assert result.exit_code == 0, result.output
+    assert wrote == [True] and _armed(cli_db)
+
+
+def test_resuming_a_sync_says_it_has_no_plan(cli_db: sessionmaker[Session]) -> None:
+    """#175 review F5: a clean message, not a traceback."""
+    with session_scope(cli_db, write=True) as session:
+        user = _user(session)
+        sync = runs.create_run(
+            session, user, SyncRunKind.CONNECTIONS_FULL, trigger=SyncRunTrigger.MANUAL, now=NOW
+        )
+        runs.finish_run(session, user, sync.id, status=SyncRunStatus.ABORTED, now=NOW)
+    result = CliRunner().invoke(cli, ["linkedin", "enrich", "--resume", str(sync.id)])
+    assert result.exit_code == 1 and "not an enrichment run" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+@pytest.mark.parametrize("error", ["OperationalError", "ProgrammingError"])
+def test_an_unreadable_schema_keys_the_lock_by_account_one(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch, error: str
+) -> None:
+    """#175 review F9: SQLite calls a missing column operational, PostgreSQL a
+    programming error; either way preflight keys the lock by account 1, not a crash."""
+    from sqlalchemy import exc
+
+    from netkeeper.linkedin.activity_lock import SINGLE_ACCOUNT_KEY
+
+    def schema_too_old(*args: object) -> int:
+        raise getattr(exc, error)("SELECT ...", {}, Exception("no such column"))
+
+    monkeypatch.setattr(cli_module, "account_id_for", schema_too_old)
+    assert cli_module._browser_lock_key() == SINGLE_ACCOUNT_KEY
+
+
+def test_the_lock_key_is_the_local_users_account(cli_db: sessionmaker[Session]) -> None:
+    with session_scope(cli_db, write=True) as session:
+        account = ensure_account(session, _user(session)).id
+    from netkeeper.linkedin.activity_lock import account_key
+
+    assert cli_module._browser_lock_key() == account_key(account)
+    provider = cli_module._provider(Settings())
+    assert provider.locks.legacy_partner == account_key(account)

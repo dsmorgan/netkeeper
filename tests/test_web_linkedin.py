@@ -164,3 +164,82 @@ async def test_a_resume_takes_the_rest_of_the_plan_and_runs_it(
     assert (new["resume_of_id"], new["max_visits"], new["planned"]) == (old_id, 1, 2)
     assert new["status"] != "running"  # the fake Chrome answered; the run ended
     assert connector.attaches == 1
+
+
+# --- #175 review ---------------------------------------------------------------------------
+
+
+async def test_resume_is_refused_while_flagged_and_a_sync_has_nothing_to_resume(
+    bare_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """X3: the resume endpoint refuses a flagged session with 409 and records nothing.
+    F5: resuming a connections sync is a 404, not a 500."""
+    from netkeeper.linkedin.classify import Outcome
+    from netkeeper.services.linkedin_session import flag_session
+
+    monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", "/nonexistent-dist")
+    settings = Settings()
+    provider, connector = fake_provider()
+    async with served(bare_engine, settings, provider, Clock(NOW)) as app:
+        with session_scope(_factory(app), write=True) as session:
+            user = _local(session)
+            ids = [factories.make_contact(session, user).id for _ in range(2)]
+            enrich = runs.create_run(
+                session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW
+            )
+            enrich_plan.store_plan(session, user, enrich.id, ids)
+            runs.finish_run(session, user, enrich.id, status=SyncRunStatus.ABORTED, now=NOW)
+            sync = runs.create_run(
+                session, user, SyncRunKind.CONNECTIONS_FULL, trigger=SyncRunTrigger.MANUAL, now=NOW
+            )
+            runs.finish_run(session, user, sync.id, status=SyncRunStatus.ABORTED, now=NOW)
+            flag_session(session, user, Outcome.CHECKPOINT, url="/checkpoint/x")
+            enrich_id, sync_id = enrich.id, sync.id
+        async with client_for(app) as client:
+            flagged = await client.post(
+                f"/api/v1/linkedin/runs/{enrich_id}/resume", json={}, headers=HEADERS
+            )
+            not_enrichment = await client.post(
+                f"/api/v1/linkedin/runs/{sync_id}/resume", json={}, headers=HEADERS
+            )
+            total = (await client.get("/api/v1/linkedin/runs")).json()["total"]
+
+    assert flagged.status_code == 409 and "flagged" in flagged.json()["detail"]
+    assert not_enrichment.status_code == 404
+    assert "not an enrichment run" in not_enrichment.json()["detail"]
+    assert total == 2 and connector.attaches == 0
+
+
+async def test_a_rebinding_request_is_refused_before_it_reaches_a_route(
+    running_app: FastAPI,
+) -> None:
+    """F8: a page on another name re-pointed at 127.0.0.1 sends its own name as Host and
+    as Origin. It is refused for writes, arming included, and for reads."""
+    evil = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=running_app), base_url="http://evil.example:8000"
+    )
+    async with evil:
+        arm = await evil.post(
+            "/api/v1/linkedin/schedule/arm",
+            json={"confirm": True},
+            headers={**HEADERS, "Origin": "http://evil.example:8000"},
+        )
+        read = await evil.get("/api/v1/linkedin/runs")
+        me = await evil.get("/api/v1/me")
+    assert (arm.status_code, read.status_code, me.status_code) == (421, 421, 421)
+    assert arm.json()["rule"] == "host"
+    with session_scope(_factory(running_app)) as session:
+        account = ensure_account(session, _local(session))
+        assert account.scheduled_runs_armed_at is None
+
+
+@pytest.mark.parametrize(
+    "host", ["127.0.0.1:8000", "localhost:5173", "[::1]:8000", "LOCALHOST", "127.0.0.1"]
+)
+async def test_loopback_names_on_any_port_are_served(running_app: FastAPI, host: str) -> None:
+    """The Vite dev proxy forwards the browser's Host unchanged (changeOrigin: false),
+    so a dev request names the dev server's port; the name is what matters."""
+    transport = httpx.ASGITransport(app=running_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        response = await client.get("/api/v1/me", headers={"host": host})
+    assert response.status_code == 200

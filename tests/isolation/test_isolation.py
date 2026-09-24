@@ -98,7 +98,7 @@ async def _post(
 ) -> dict[str, Any]:
     with acting_as(app, user_id):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
             response = await client.post(
                 f"{API_PREFIX}{path}",
                 json=body,
@@ -153,7 +153,7 @@ async def test_deleting_a_draft_import_run_is_isolated(running_app: FastAPI) -> 
 async def _delete(app: FastAPI, user_id: int, run_id: int, *, want: int) -> None:
     with acting_as(app, user_id):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
             response = await client.delete(
                 f"{API_PREFIX}/imports/{run_id}", headers={CLIENT_HEADER: CLIENT_HEADER_VALUE}
             )
