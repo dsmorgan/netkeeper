@@ -44,19 +44,50 @@ const CLEAN: Posture = {
 }
 
 describe('PostureSection', () => {
-  it('shows every protection with its state and detail', async () => {
+  it('shows every protection with its state and detail, in the >= sm table', async () => {
     renderSection(CLEAN)
+    const table = await screen.findByTestId('posture-table')
 
-    const browserRow = (await screen.findByText('browser mode')).closest('tr')
-    expect(browserRow).not.toBeNull()
-    expect(within(browserRow as HTMLElement).getByText('on')).toBeInTheDocument()
-    expect(within(browserRow as HTMLElement).getByText('attach only')).toBeInTheDocument()
+    const browserRow = within(table).getByText('browser mode').closest('tr') as HTMLElement
+    expect(within(browserRow).getByText('on')).toBeInTheDocument()
+    expect(within(browserRow).getByText('attach only')).toBeInTheDocument()
 
-    const sessionRow = screen.getByText('linkedin session').closest('tr') as HTMLElement
+    const sessionRow = within(table).getByText('linkedin session').closest('tr') as HTMLElement
     expect(within(sessionRow).getByText('unknown')).toBeInTheDocument()
     expect(
       within(sessionRow).getByText('no browser probe was run, so the session is unknown'),
     ).toBeInTheDocument()
+  })
+
+  it('shows every protection with its state and detail, in the below-sm stacked blocks too (M2)', async () => {
+    renderSection(CLEAN)
+    const blocks = await screen.findByTestId('posture-blocks')
+
+    const browserBlock = within(blocks).getByText('browser mode').closest('li') as HTMLElement
+    expect(within(browserBlock).getByText('on')).toBeInTheDocument()
+    expect(within(browserBlock).getByText('attach only')).toBeInTheDocument()
+
+    const sessionBlock = within(blocks).getByText('linkedin session').closest('li') as HTMLElement
+    expect(within(sessionBlock).getByText('unknown')).toBeInTheDocument()
+    expect(
+      within(sessionBlock).getByText('no browser probe was run, so the session is unknown'),
+    ).toBeInTheDocument()
+  })
+
+  it('renders markdown in a gap, not literal asterisks or backticks (review179r2)', async () => {
+    renderSection({
+      ...CLEAN,
+      gaps: [
+        '**this report reads configuration and counters, never callers.** Run `netkeeper posture` for the terminal version.',
+      ],
+    })
+    const bold = await screen.findByText(
+      'this report reads configuration and counters, never callers.',
+    )
+    expect(bold.tagName).toBe('STRONG')
+    expect(screen.getByText('netkeeper posture').tagName).toBe('CODE')
+    expect(screen.queryByText(/\*\*/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/`netkeeper/)).not.toBeInTheDocument()
   })
 
   it('shows the gaps list', async () => {
