@@ -62,6 +62,7 @@ API_PATHS = {
     "/api/v1/linkedin/schedule/arm",
     "/api/v1/linkedin/schedule/disarm",
     "/api/v1/linkedin/status",
+    "/api/v1/linkedin/browser",
     "/api/v1/tags",
     "/api/v1/tags/{tag_id}",
     "/api/v1/contacts/{contact_id}/tags",
