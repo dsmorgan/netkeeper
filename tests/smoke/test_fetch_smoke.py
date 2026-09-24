@@ -96,9 +96,19 @@ class _FixtureServer(BaseHTTPRequestHandler):
             self._send(body, "text/html; charset=utf-8", set_cookie=False)
         elif self.path.startswith("/expire-cookie"):
             self._send(b"", "text/plain", set_cookie=False, expire_cookie=True)
-        else:
+        elif self.path == "/" or self.path.startswith("/?"):
+            # #173 review, F6: the cookie is set on exactly this route. A real
+            # Chrome tab requests /favicon.ico on its own for any top-level
+            # navigation with no <link rel="icon">, and that request used to hit
+            # the catch-all below, which re-set the cookie moments after the
+            # teardown navigation to /expire-cookie had just cleared it --
+            # #170 item 4 was never actually fixed while every path re-armed it.
             body = b"<!doctype html><title>netkeeper fetch smoke fixture</title><body></body>"
             self._send(body, "text/html; charset=utf-8", set_cookie=True)
+        else:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
     def _redirect(self, location: str) -> None:
         self.send_response(302)
@@ -150,6 +160,12 @@ async def site(provider: AttachBrowserProvider) -> AsyncIterator[str]:
     response in front of the browser that is actually holding the cookie. The
     `Max-Age=60` this fixture set in the first place is the backstop if this
     teardown itself cannot run (Chrome closed between the test and its teardown).
+
+    After navigating, reads the jar back and asserts ``JSESSIONID`` is actually
+    gone (#173 review's jar check) -- names only, the same discipline
+    ``preflight.py`` holds to: this reaches the developer's real Chrome profile,
+    so the assertion below never prints a cookie's value, only whether a name
+    it must not still hold is present.
     """
     _FixtureServer.seen_headers = {}
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FixtureServer)
@@ -162,6 +178,16 @@ async def site(provider: AttachBrowserProvider) -> AsyncIterator[str]:
         try:
             async with provider.run() as run:
                 await run.goto(f"{base}/expire-cookie")
+                jar = await run.context.cookies()
+                survived = [
+                    str(cookie.get("name"))
+                    for cookie in jar
+                    if str(cookie.get("domain", "")).lstrip(".") == "127.0.0.1"
+                    and cookie.get("name") == "JSESSIONID"
+                ]
+                assert not survived, (
+                    f"{len(survived)} JSESSIONID cookie(s) survived teardown on 127.0.0.1"
+                )
         except BrowserUnavailable as exc:
             log.warning("could not navigate to expire the fetch smoke suite's cookie: %s", exc)
         server.shutdown()
