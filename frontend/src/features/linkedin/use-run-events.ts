@@ -1,5 +1,7 @@
 import { useQueryClient } from '@tanstack/react-query'
+import { useEffect, useRef } from 'react'
 
+import { useEventStreamStatus } from '@/features/events/event-stream-context'
 import { useServerEvent } from '@/features/events/use-server-event'
 
 import { linkedinKeys } from './api'
@@ -33,6 +35,24 @@ interface RunFinished {
  */
 export function useRunEvents(): void {
   const queryClient = useQueryClient()
+  const status = useEventStreamStatus()
+  const everConnected = useRef(false)
+  const previousStatus = useRef(status)
+
+  useEffect(() => {
+    // M1: SSE is fire-and-forget — a gap in the connection is a gap in what
+    // this page saw, and nothing replays a missed event once reconnected.
+    // Recover by invalidating everything on this page the moment the
+    // connection comes *back*, so a dropped run.progress or run.finished
+    // shows up as a plain refetch instead of silently going stale. Guarded by
+    // `everConnected` so the very first connect (nothing was ever missed)
+    // does not double the page's initial fetch.
+    if (status === 'connected' && previousStatus.current === 'disconnected' && everConnected.current) {
+      void queryClient.invalidateQueries({ queryKey: linkedinKeys.all })
+    }
+    if (status === 'connected') everConnected.current = true
+    previousStatus.current = status
+  }, [status, queryClient])
 
   useServerEvent<RunStarted>('run.started', () => {
     void queryClient.invalidateQueries({ queryKey: linkedinKeys.runs() })

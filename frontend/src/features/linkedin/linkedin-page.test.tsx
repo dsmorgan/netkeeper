@@ -41,6 +41,11 @@ describe('session banner', () => {
     expect(within(banner).getByText(/resolve the checkpoint/i)).toBeInTheDocument()
     expect(within(banner).getByText(/netkeeper linkedin clear-flag/i)).toBeInTheDocument()
     expect(within(banner).queryByRole('button')).not.toBeInTheDocument()
+    // R-13: nothing here may say or imply netkeeper clears this on its own —
+    // a live session cookie is not proof a checkpoint is resolved (spec 9.7),
+    // so only a person, running the CLI command above, ends this banner.
+    expect(banner).not.toHaveTextContent(/automatic/i)
+    expect(banner).not.toHaveTextContent(/on its own/i)
   })
 })
 
@@ -127,5 +132,41 @@ describe('SSE updates (spec 14.1, this item’s "done when"): no reload, no poll
       expect(pinsCalls).toBeGreaterThan(before.pinsCalls)
       expect(statusCalls).toBeGreaterThan(before.statusCalls)
     })
+  })
+
+  it('also refetches the runs list itself when a run finishes (R-07)', async () => {
+    let runsCalls = 0
+    const { source } = renderLinkedInPage({
+      'GET /api/v1/linkedin/runs': () => {
+        runsCalls += 1
+        return jsonResponse(runPage([run({ id: 1 })]))
+      },
+    })
+    await screen.findByRole('heading', { name: 'Runs' })
+    const before = runsCalls
+
+    act(() => source.emit('run.finished', { run_id: 1, status: 'completed' }))
+
+    await waitFor(() => expect(runsCalls).toBeGreaterThan(before))
+  })
+
+  it('never sends a non-GET request as a reaction to any SSE event (R-02)', async () => {
+    const { calls, source } = renderLinkedInPage({
+      'GET /api/v1/linkedin/runs': () => jsonResponse(runPage([run({ id: 1 })])),
+      'GET /api/v1/linkedin/runs/1': () => jsonResponse(run({ id: 1 })),
+    })
+    await screen.findByRole('heading', { name: 'Runs' })
+    calls.length = 0
+
+    act(() => source.emit('run.started', { run_id: 1, kind: 'connections_incremental' }))
+    act(() => source.emit('run.progress', { run_id: 1, pages: 1, connections: 40, total: 400 }))
+    act(() => source.emit('run.finished', { run_id: 1, status: 'completed' }))
+    // Give every invalidated query's background refetch a turn to settle,
+    // including one whose promise rejects — a rejection is swallowed by
+    // `void queryClient.invalidateQueries(...)`, not surfaced as a request.
+    await waitFor(() => expect(calls.length).toBeGreaterThan(0))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(calls.every((call) => call.method === 'GET')).toBe(true)
   })
 })
