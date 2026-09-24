@@ -28,19 +28,20 @@ Start Chrome first with the command ``netkeeper browser launch`` prints.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
-from collections.abc import Iterator, Mapping
-from contextlib import suppress
+from collections.abc import AsyncIterator, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import httpx
 import pytest
 
 from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserUnavailable
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.fetch import PageVoyagerFetch, VoyagerNotOk, parse_ok
 from netkeeper.linkedin.voyager import CONNECTIONS_PATH, VoyagerRequest, parse_connections_page
+
+log = logging.getLogger(__name__)
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("NETKEEPER_BROWSER_TESTS") != "1",
@@ -131,12 +132,24 @@ class _FixtureServer(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def site() -> Iterator[str]:
+def provider() -> AttachBrowserProvider:
+    return AttachBrowserProvider(CDP_URL)
+
+
+@pytest.fixture
+async def site(provider: AttachBrowserProvider) -> AsyncIterator[str]:
     """A fresh loopback fixture server, its own port, for the length of the test.
 
-    Teardown hits ``/expire-cookie`` over plain HTTP (no browser needed for this
-    part) so the ``JSESSIONID`` this fixture set is gone from the developer's
-    Chrome profile before the next test, or the next real session, starts (F7).
+    Teardown **navigates the tab** to ``/expire-cookie`` rather than hitting it with
+    ``httpx`` (#170 item 4): an HTTP client making its own request never touches
+    Chrome's cookie jar at all -- the ``Set-Cookie: JSESSIONID=; Max-Age=0`` that
+    route answers with only expires the cookie in whatever store actually received
+    the response, and an ``httpx.get`` call's store is httpx's own, not the
+    developer's real Chrome profile this suite runs against (spec 9.1). Only a real
+    navigation, through the same ``BrowserRun`` the tests themselves use, puts that
+    response in front of the browser that is actually holding the cookie. The
+    `Max-Age=60` this fixture set in the first place is the backstop if this
+    teardown itself cannot run (Chrome closed between the test and its teardown).
     """
     _FixtureServer.seen_headers = {}
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FixtureServer)
@@ -146,16 +159,14 @@ def site() -> Iterator[str]:
     try:
         yield base
     finally:
-        with suppress(httpx.HTTPError):
-            httpx.get(f"{base}/expire-cookie", timeout=5)
+        try:
+            async with provider.run() as run:
+                await run.goto(f"{base}/expire-cookie")
+        except BrowserUnavailable as exc:
+            log.warning("could not navigate to expire the fetch smoke suite's cookie: %s", exc)
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
-
-
-@pytest.fixture
-def provider() -> AttachBrowserProvider:
-    return AttachBrowserProvider(CDP_URL)
 
 
 async def test_the_fetch_carries_the_built_headers_and_the_body_round_trips(
