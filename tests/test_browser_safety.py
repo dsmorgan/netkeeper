@@ -122,6 +122,9 @@ BROWSER_MODULES = (
     # The in-page Voyager fetch (#150) awaits a real `page.evaluate` fetch --
     # exactly the deadlock risk the other three exist to keep out of a handler.
     "netkeeper.linkedin.fetch",
+    # P2-08's DOM fallback: a scroll replay's dwell and a page.evaluate read
+    # are exactly as long-running as the in-page Voyager fetch above.
+    "netkeeper.linkedin.dom",
 )
 
 # The modules that may reach the provider at all, as paths from the repository root.
@@ -134,6 +137,7 @@ BROWSER_CALLERS = frozenset(
         Path("netkeeper/linkedin/preflight.py"),  # the report, inside a run
         Path("netkeeper/linkedin/rehearse.py"),  # the rehearsal, inside a run
         Path("netkeeper/linkedin/fetch.py"),  # PageVoyagerFetch, inside a run (#150)
+        Path("netkeeper/linkedin/dom.py"),  # DomConnectionsSource/DomContactInfoSource (P2-08)
     }
 )
 
