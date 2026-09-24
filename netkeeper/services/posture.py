@@ -546,11 +546,14 @@ GAPS: Final[tuple[str, ...]] = (
     "this reports the *stored* due time for each job kind, not whether the"
     " process that would fire it is running. A schedule established by a"
     " `netkeeper serve` that has since exited still reads as scheduled.",
-    "the heat skip gate reported is the one this report was handed. Run from"
-    " the command line that is the gate a scheduler started from this config"
-    " would use; it cannot see a gate some other running process was passed."
-    " `netkeeper serve` passes the configured `[linkedin.heat]`; no API serves"
-    " this report from inside that process yet.",
+    "the heat skip gate reported is the one this report was handed, not one it"
+    " goes and inspects. Run from the command line, or read from the Settings"
+    " page's `GET /api/v1/posture` (P2-12) -- which now runs inside the same"
+    " process `netkeeper serve` starts the scheduler in -- that is still only"
+    " the gate this config would build a scheduler with; neither rereads the"
+    " live scheduler's own gate object, so a gate passed some other way than"
+    " `[linkedin.heat]` is not seen either way. `netkeeper serve` passes the"
+    " configured `[linkedin.heat]`.",
     "whether a LinkedIn session is not merely present but still accepted is"
     " something only a real job learns, from the response classification in"
     " spec 9.7. This reports the cookie jar and the last flag raised, which is"
