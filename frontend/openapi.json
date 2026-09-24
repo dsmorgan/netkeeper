@@ -5675,6 +5675,66 @@
         "title": "PinOut",
         "type": "object"
       },
+      "PostureOut": {
+        "description": "Every protection the LinkedIn extractor has, read-only (P2-11, P2-12, CP3).\n\nBuilt from `netkeeper.services.posture.posture()` with no browser probe: a\nlive attach-and-read-the-session check has to await browser work, which may\nnot happen inside a request handler (CLAUDE.md), so the session protection\nhere is always reported unknown rather than checked live — `netkeeper\npreflight` is the live check, still a terminal command only.\n\n``gaps`` are known limits of what this report can see, not warnings; they\nnever affect ``ok``. ``verdict`` is `netkeeper.services.posture.verdict()`'s\nown sentence, exactly as `netkeeper posture` prints it -- \"nothing is\nmisconfigured\" on a clean report, never \"you are safe\" (that module's own\ndocstring says why: this reads configuration and counters, not whether the\ncode that would enforce them actually runs).",
+        "properties": {
+          "checked_at": {
+            "format": "date-time",
+            "title": "Checked At",
+            "type": "string"
+          },
+          "gaps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Gaps",
+            "type": "array"
+          },
+          "local_time": {
+            "format": "date-time",
+            "title": "Local Time",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "protections": {
+            "items": {
+              "$ref": "#/components/schemas/ProtectionOut"
+            },
+            "title": "Protections",
+            "type": "array"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          },
+          "verdict": {
+            "title": "Verdict",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "checked_at",
+          "timezone",
+          "local_time",
+          "protections",
+          "warnings",
+          "gaps",
+          "ok",
+          "verdict"
+        ],
+        "title": "PostureOut",
+        "type": "object"
+      },
       "PreferredNameIn": {
         "description": "What you call this person. Empty means \"use the first name\".",
         "properties": {
@@ -5711,6 +5771,38 @@
           "decision"
         ],
         "title": "PreferredNameOut",
+        "type": "object"
+      },
+      "ProtectionOut": {
+        "description": "One row of the posture report (spec section 9): what it is, whether it is in\nforce, and anything wrong with it. ``status`` is `netkeeper.services.posture.Status`'s\nvalue (``on``, ``off``, ``unknown``); ``off``/``unknown`` always carry a warning.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "status",
+          "value",
+          "warnings"
+        ],
+        "title": "ProtectionOut",
         "type": "object"
       },
       "RepliedIn": {
@@ -5789,7 +5881,7 @@
         "type": "object"
       },
       "RunOut": {
-        "description": "One run: what it is, how far it got, and how it ended. Counts only, never names.\n\n``planned``/``completed`` are an enrichment plan's size and progress.\n``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.",
+        "description": "One run: what it is, how far it got, and how it ended. Counts only, never names.\n\n``planned``/``completed`` are an enrichment plan's size and progress.\n``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.\n``resumed_by`` is the id of the run that already took over this one's\nremaining plan, or null when it has not been (and so still may be, spec 9.9).",
         "properties": {
           "aging_refused": {
             "anyOf": [
@@ -5927,6 +6019,17 @@
             ],
             "title": "Resume Of Id"
           },
+          "resumed_by": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resumed By"
+          },
           "started_at": {
             "format": "date-time",
             "title": "Started At",
@@ -5968,7 +6071,8 @@
           "error",
           "planned",
           "completed",
-          "aging_refused"
+          "aging_refused",
+          "resumed_by"
         ],
         "title": "RunOut",
         "type": "object"
@@ -11858,6 +11962,27 @@
         "summary": "Update My Position",
         "tags": [
           "positions"
+        ]
+      }
+    },
+    "/api/v1/posture": {
+      "get": {
+        "operationId": "get_posture",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PostureOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Posture",
+        "tags": [
+          "posture"
         ]
       }
     },

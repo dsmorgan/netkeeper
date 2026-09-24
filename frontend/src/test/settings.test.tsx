@@ -20,6 +20,18 @@ describe('settings', () => {
           timezone: 'America/New_York',
         })
       }
+      if (pathname === '/api/v1/posture') {
+        return jsonResponse({
+          checked_at: '2026-09-24T10:00:00Z',
+          timezone: 'America/New_York',
+          local_time: '2026-09-24T06:00:00-04:00',
+          protections: [],
+          warnings: [],
+          gaps: [],
+          ok: false,
+          verdict: 'NOT clear: no protection is disabled, but 1 warning needs reading',
+        })
+      }
       return jsonResponse({ status: 'ok', version: '0.0.1-test' })
     })
 

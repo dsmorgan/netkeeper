@@ -16,7 +16,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.crm import import_runs as import_service
 from netkeeper.db import session_scope
+from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import User, UserKind
+from netkeeper.services.linkedin_session import flag_session
 from netkeeper.web.app import API_PREFIX
 from netkeeper.web.security import CLIENT_HEADER, CLIENT_HEADER_VALUE
 
@@ -160,3 +162,47 @@ async def _delete(app: FastAPI, user_id: int, run_id: int, *, want: int) -> None
     assert response.status_code == want, (
         f"delete run {run_id} as {user_id}: {response.status_code} {response.text}"
     )
+
+
+# --- posture -----------------------------------------------------------------
+
+
+async def _get(app: FastAPI, user_id: int, path: str) -> dict[str, Any]:
+    with acting_as(app, user_id):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            response = await client.get(f"{API_PREFIX}{path}")
+    assert response.status_code == 200, (
+        f"{path} as {user_id}: {response.status_code} {response.text}"
+    )
+    parsed: dict[str, Any] = response.json()
+    return parsed
+
+
+async def test_posture_is_isolated(running_app: FastAPI) -> None:
+    """Not a list operation (a single report), so ``GET /posture`` is not in
+    ``REGISTRY`` either; it reads a user's own session flag, heat, and budget
+    counters, so it gets the same two-user treatment as the rows above.
+    """
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        a = User(kind=UserKind.HOSTED, display_name="A")
+        b = User(kind=UserKind.HOSTED, display_name="B")
+        session.add_all([a, b])
+        session.flush()
+        flag_session(session, a, Outcome.CHECKPOINT, url="https://example.invalid/checkpoint/x")
+        a_id, b_id = a.id, b.id
+
+    a_report = await _get(running_app, a_id, "/posture")
+    b_report = await _get(running_app, b_id, "/posture")
+
+    a_flag = next(row for row in a_report["protections"] if row["name"] == "session flag")
+    b_flag = next(row for row in b_report["protections"] if row["name"] == "session flag")
+    # A's checkpoint warns on A's own report and never reaches B's.
+    assert a_flag["warnings"] != []
+    assert b_flag["warnings"] == []
+    assert a_report["ok"] is False
+    # B's report is not "not clear" for a reason that traces back to A's flag —
+    # the one unavoidable warning here (no browser probe, spec 9.1) is the
+    # only thing keeping it False, not anything of A's.
+    assert all("checkpoint" not in warning for warning in b_report["warnings"])

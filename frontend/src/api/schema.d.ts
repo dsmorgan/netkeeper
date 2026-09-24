@@ -1338,6 +1338,23 @@ export interface paths {
         patch: operations["update_my_position"];
         trace?: never;
     };
+    "/api/v1/posture": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Posture */
+        get: operations["get_posture"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tags": {
         parameters: {
             query?: never;
@@ -3499,6 +3516,47 @@ export interface components {
             last_name: string | null;
         };
         /**
+         * PostureOut
+         * @description Every protection the LinkedIn extractor has, read-only (P2-11, P2-12, CP3).
+         *
+         *     Built from `netkeeper.services.posture.posture()` with no browser probe: a
+         *     live attach-and-read-the-session check has to await browser work, which may
+         *     not happen inside a request handler (CLAUDE.md), so the session protection
+         *     here is always reported unknown rather than checked live — `netkeeper
+         *     preflight` is the live check, still a terminal command only.
+         *
+         *     ``gaps`` are known limits of what this report can see, not warnings; they
+         *     never affect ``ok``. ``verdict`` is `netkeeper.services.posture.verdict()`'s
+         *     own sentence, exactly as `netkeeper posture` prints it -- "nothing is
+         *     misconfigured" on a clean report, never "you are safe" (that module's own
+         *     docstring says why: this reads configuration and counters, not whether the
+         *     code that would enforce them actually runs).
+         */
+        PostureOut: {
+            /**
+             * Checked At
+             * Format: date-time
+             */
+            checked_at: string;
+            /** Gaps */
+            gaps: string[];
+            /**
+             * Local Time
+             * Format: date-time
+             */
+            local_time: string;
+            /** Ok */
+            ok: boolean;
+            /** Protections */
+            protections: components["schemas"]["ProtectionOut"][];
+            /** Timezone */
+            timezone: string;
+            /** Verdict */
+            verdict: string;
+            /** Warnings */
+            warnings: string[];
+        };
+        /**
          * PreferredNameIn
          * @description What you call this person. Empty means "use the first name".
          */
@@ -3516,6 +3574,22 @@ export interface components {
             decision: components["schemas"]["TriageDecisionOut"];
             /** Preferred Name */
             preferred_name: string;
+        };
+        /**
+         * ProtectionOut
+         * @description One row of the posture report (spec section 9): what it is, whether it is in
+         *     force, and anything wrong with it. ``status`` is `netkeeper.services.posture.Status`'s
+         *     value (``on``, ``off``, ``unknown``); ``off``/``unknown`` always carry a warning.
+         */
+        ProtectionOut: {
+            /** Name */
+            name: string;
+            /** Status */
+            status: string;
+            /** Value */
+            value: string;
+            /** Warnings */
+            warnings: string[];
         };
         /** RepliedIn */
         RepliedIn: {
@@ -3560,6 +3634,8 @@ export interface components {
          *
          *     ``planned``/``completed`` are an enrichment plan's size and progress.
          *     ``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.
+         *     ``resumed_by`` is the id of the run that already took over this one's
+         *     remaining plan, or null when it has not been (and so still may be, spec 9.9).
          */
         RunOut: {
             /** Aging Refused */
@@ -3593,6 +3669,8 @@ export interface components {
             } | null;
             /** Resume Of Id */
             resume_of_id: number | null;
+            /** Resumed By */
+            resumed_by: number | null;
             /**
              * Started At
              * Format: date-time
@@ -7365,6 +7443,26 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    get_posture: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PostureOut"];
+                };
             };
         };
     };
