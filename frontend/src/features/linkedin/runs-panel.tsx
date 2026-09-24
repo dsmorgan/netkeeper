@@ -58,7 +58,7 @@ export function RunsPanel({
           </label>
           <select
             id="run-kind-filter"
-            className={SELECT_CLASS}
+            className={cn(SELECT_CLASS, 'w-full sm:w-auto')}
             value={kind}
             onChange={(event) => {
               setKind(event.target.value as RunKind | '')
@@ -77,7 +77,7 @@ export function RunsPanel({
           </label>
           <select
             id="run-status-filter"
-            className={SELECT_CLASS}
+            className={cn(SELECT_CLASS, 'w-full sm:w-auto')}
             value={status}
             onChange={(event) => {
               setStatus(event.target.value as RunStatus | '')
