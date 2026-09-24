@@ -1156,12 +1156,19 @@ def _drop(session: Session, *rows: ContactTag | ContactTagSuppression | None) ->
 def _merge_scalars(survivor: Contact, loser: Contact) -> None:
     survivor_default_name = survivor.preferred_name in ("", survivor.first_name)
     loser_custom_name = bool(loser.preferred_name) and loser.preferred_name != loser.first_name
+    # #184: a survivor still waiting for review holds a connections-page card's
+    # text in its unrecorded fields. Merging a contact that is not waiting into it
+    # is the person saying which contact this is, so those fields count as empty
+    # and the loser's values win with the loser's sources, as they would have had
+    # the person picked the loser as the survivor.
+    card_survivor = survivor.needs_review_at is not None and loser.needs_review_at is None
     for name in PROVENANCE_ORDER:
         if name in ("li_urn", "li_public_id"):
             continue  # _merge_identity did these
         mine: str | date | None = getattr(survivor, name)
         theirs: str | date | None = getattr(loser, name)
-        if mine in (None, "") and theirs not in (None, ""):
+        open_to_loser = mine in (None, "") or (card_survivor and name not in survivor.field_sources)
+        if open_to_loser and theirs not in (None, ""):
             setattr(survivor, name, theirs)
             _take_source(survivor, loser, name)
     if survivor_default_name:

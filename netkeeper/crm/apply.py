@@ -146,12 +146,24 @@ UNMATCHED_MAX_SHARE: Final = 0.10
 CARD_NAME_MAX_CHARS: Final = 100
 CARD_NAME_MAX_WORDS: Final = 6
 #: Words and marks that a person's name does not carry and a card's surrounding
-#: text does: the link's accessible label, a url, an address, a digit, and the
-#: separators LinkedIn puts between a name and an occupation.
+#: text does: the link's accessible label, LinkedIn's visually hidden labels
+#: ("Member's name", "Member's occupation", "Status is online"; the apostrophe is
+#: often U+2019), a url, an address, a digit, and the separators LinkedIn puts
+#: between a name and an occupation.
+#:
+#: Known limit: a name and an occupation run together with no separator and no
+#: headline on the card ("Jane DoeSoftware Engineer") passes. Catching it would
+#: take camel-case detection, which would refuse McDonald and DeAndre; the
+#: needs-review mark is what covers it.
 CARD_NAME_JUNK: Final = re.compile(
-    r"(?i)\bview\b|\bprofile\b|\bconnection\b|https?:|www\.|@|\d|[|\u2022\u00b7\u2013\u2014]"
-    r"|\s-\s|\sat\s"
+    r"(?i)\bview\b|\bprofile\b|\bconnection\b|\bmember\W?s\b|\boccupation\b|\bstatus\b"
+    r"|https?:|www\.|@|\d|[|\u2022\u00b7\u2013\u2014]|\s-\s|\sat\s"
 )
+#: Direction marks a rendered name can carry and a stored one never needs.
+_DIRECTION_MARKS: Final = str.maketrans("", "", "\u200e\u200f")
+#: Joiners that some scripts' names genuinely contain (ZWNJ in Persian, ZWJ in
+#: several Indic scripts): format characters, but not junk.
+_NAME_JOINERS: Final = frozenset("\u200c\u200d")
 #: The longest headline stored from a card; the column holds 500.
 CARD_HEADLINE_MAX_CHARS: Final = 500
 #: A slug as LinkedIn's own routing allows it: one path segment, no whitespace.
@@ -436,11 +448,14 @@ def card_name(first: str, last: str, headline: str | None) -> tuple[str, str]:
     break the extractor let through), longer than :data:`CARD_NAME_MAX_CHARS`,
     more than :data:`CARD_NAME_MAX_WORDS` words, anything :data:`CARD_NAME_JUNK`
     finds, and a name that contains the card's own headline (the occupation
-    leaked into the link text). A refused name is never trimmed into shape:
+    leaked into the link text; :func:`_holds_headline`). Direction marks (LRM,
+    RLM) are stripped first; the joiners ZWNJ and ZWJ are kept, since names in
+    some scripts contain them. A refused name is never trimmed into shape:
     guessing which part is the name is how a stranger's words end up on a
     contact.
     """
-    first, last = first.strip(), last.strip()
+    first = first.translate(_DIRECTION_MARKS).strip()
+    last = last.translate(_DIRECTION_MARKS).strip()
     whole = f"{first} {last}".strip()
     if not whole or len(whole) > CARD_NAME_MAX_CHARS:
         return "", ""
@@ -448,13 +463,25 @@ def card_name(first: str, last: str, headline: str | None) -> tuple[str, str]:
         return "", ""
     if CARD_NAME_JUNK.search(whole):
         return "", ""
-    if (
-        headline is not None
-        and headline.strip()
-        and headline.strip().casefold() in whole.casefold()
-    ):
+    if headline is not None and _holds_headline(whole, headline.strip()):
         return "", ""
     return first, last
+
+
+def _holds_headline(name: str, headline: str) -> bool:
+    """True when the card's headline is inside its name text: the occupation leaked in.
+
+    Word-bounded, so a headline of "Ann" does not refuse "Anna Karenina". The one
+    unbounded case is the join LinkedIn's markup produces when two text nodes run
+    together: a lowercase letter directly followed by the headline as the card
+    wrote it ("OkaforData engineer").
+    """
+    if not headline:
+        return False
+    escaped = re.escape(headline)
+    if re.search(rf"(?<!\w){escaped}(?!\w)", name, re.IGNORECASE):
+        return True
+    return headline[0].isupper() and re.search(rf"(?<=[a-z]){escaped}(?!\w)", name) is not None
 
 
 def card_headline(headline: str | None) -> str | None:
@@ -468,9 +495,13 @@ def card_headline(headline: str | None) -> str | None:
 
 
 def _has_control(text: str) -> bool:
-    """A control or format character, or a line or paragraph separator: never in a name."""
+    """A control or format character, or a line or paragraph separator: never in a name.
+
+    ZWNJ and ZWJ are format characters that names in some scripts contain, so they pass.
+    """
     return any(
-        unicodedata.category(ch)[0] == "C" or unicodedata.category(ch) in ("Zl", "Zp")
+        ch not in _NAME_JOINERS
+        and (unicodedata.category(ch)[0] == "C" or unicodedata.category(ch) in ("Zl", "Zp"))
         for ch in text
     )
 

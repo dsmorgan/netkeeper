@@ -370,6 +370,23 @@ def test_campaign_audience_never_exports_a_do_not_contact_person(session: Sessio
     assert {row["do_not_contact"] for row in full_rows} == {False, True}
 
 
+def test_campaign_audience_never_exports_a_contact_waiting_for_review(session: Session) -> None:
+    """#184: a contact read off a connections-page card is nobody to reach yet."""
+    user = factories.make_user(session)
+    factories.make_contact(session, user, emails=["reach@example.test"])
+    factories.make_contact(
+        session,
+        user,
+        emails=["card@example.test"],
+        needs_review_at=datetime(2026, 9, 24, tzinfo=UTC),
+    )
+    rows = json.loads(_run(session, user, preset="campaign-audience", output_format="json"))
+    assert [row["email"] for row in rows] == ["reach@example.test"]
+
+    full_rows = json.loads(_run(session, user, preset="full", output_format="json"))
+    assert len(full_rows) == 2  # other presets still export it
+
+
 # --- vCard 4.0: escaping and 75-octet line folding -----------------------------
 
 

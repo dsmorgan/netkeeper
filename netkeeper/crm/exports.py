@@ -63,7 +63,9 @@ Four presets:
   A contact with ``do_not_contact`` set is never in it: producing a mail-merge
   file is a send path by proxy (spec F15's "every send path" includes the
   paths outside this tool, once the file leaves it), and the whole point of
-  the preset is that someone pastes it straight into a mailing tool.
+  the preset is that someone pastes it straight into a mailing tool. Nor is a
+  contact waiting for review (``needs_review_at``, #184): one read off a
+  connections-page card is not somebody to reach until it is confirmed.
 
 Every export goes through :func:`netkeeper.crm.filters.compile_filter` and
 :func:`netkeeper.crm.filters.apply_sort` — the same compiler the contacts
@@ -86,7 +88,7 @@ from datetime import UTC, date, datetime, tzinfo
 from typing import Any, Final, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import ColumnElement, Select
+from sqlalchemy import ColumnElement, Select, and_
 from sqlalchemy.orm import Session, selectinload
 
 from netkeeper.crm.filters import FilterTree, SortKey, apply_sort, compile_filter, paginate
@@ -132,7 +134,8 @@ def _contacts_statement(
     still turn it into a 422 (#95).
 
     ``extra_where`` ANDs onto the compiled filter before sorting and paging —
-    ``campaign-audience`` uses it to hold out ``do_not_contact`` rows regardless
+    ``campaign-audience`` uses it to hold out ``do_not_contact`` rows (and
+    contacts waiting for review, #184) regardless
     of what the caller's own filter says, so that preset can never produce a
     mail-merge file containing someone who asked to be left alone.
     """
@@ -605,7 +608,11 @@ def export_stream(
     worse than a 500 because nothing about it looks like an error (#95).
     """
     today = _local_today(user, now)
-    extra_where = Contact.do_not_contact.is_(False) if preset == "campaign-audience" else None
+    extra_where = (
+        and_(Contact.do_not_contact.is_(False), Contact.needs_review_at.is_(None))
+        if preset == "campaign-audience"
+        else None
+    )
     base = _contacts_statement(session, user, tree, sort, now=now, extra_where=extra_where)
     return _render(
         session,

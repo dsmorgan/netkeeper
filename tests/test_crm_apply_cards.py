@@ -214,6 +214,11 @@ def test_another_users_slug_is_unknown_to_this_user(writer: Session, user: User)
         ("Priya", "Okafor https://example.test", None),
         ("Priya", "okafor@example.test", None),
         ("A", "B C D E F G", None),  # seven words
+        ("Member\u2019s", "name Jane Doe", None),  # LinkedIn's visually hidden label
+        ("Member's", "name Jane Doe", None),
+        ("Jane", "Doe Status is online", None),
+        ("Member\u2019s", "nameJane DoeMember\u2019s occupationEngineer", None),
+        ("Jane", "Doe Occupation", None),
         ("P" * 60, "O" * 60, None),  # 121 characters
         ("", "", None),
     ],
@@ -233,10 +238,23 @@ def test_a_card_name_that_is_not_a_name_is_refused(
         ("Maria", "de la Cruz Gomez"),
         ("Zoë", "Ångström"),
         ("Priya", ""),
+        ("Maria José", "de la Cruz Gómez"),  # six words: the most allowed
+        ("Pegah", "Ra\u200cfiei"),  # ZWNJ, as Persian names carry it
+        ("Anand", "Kum\u200dar"),  # ZWJ
     ],
 )
 def test_a_plain_card_name_is_kept_as_the_card_gave_it(first: str, last: str) -> None:
     assert mapping.card_name(first, last, "Data engineer at Fictional") == (first, last)
+
+
+def test_a_headline_is_matched_as_words_not_letters() -> None:
+    """A headline of "Ann" is not inside "Anna Karenina"; it is inside "Jo Ann Smith"."""
+    assert mapping.card_name("Anna", "Karenina", "Ann") == ("Anna", "Karenina")
+    assert mapping.card_name("Jo", "Ann Smith", "Ann") == ("", "")
+
+
+def test_direction_marks_are_stripped_not_refused() -> None:
+    assert mapping.card_name("\u200fPriya", "Okafor\u200e", None) == ("Priya", "Okafor")
 
 
 def test_a_card_with_no_usable_name_is_named_by_its_slug(writer: Session, user: User) -> None:
@@ -373,6 +391,20 @@ def test_a_preferred_name_that_was_only_the_cards_follows_the_real_first_name(
     assert (contact.first_name, contact.preferred_name) == ("Priya", "Priya")
 
 
+def test_a_sync_rename_never_moves_a_real_contacts_preferred_name(
+    writer: Session, user: User
+) -> None:
+    """Only a preferred name that was a card's default follows the first name."""
+    priya = dataclasses.replace(PEOPLE[0], public_id="priya-okafor-real")
+    mapping.apply_page(writer, user, _voyager_page([priya], at=NOW))
+    renamed = dataclasses.replace(priya, first="Pria")
+
+    mapping.apply_page(writer, user, _voyager_page([renamed]))
+
+    contact = _by_slug(writer, user, "priya-okafor-real")
+    assert (contact.first_name, contact.preferred_name) == ("Pria", "Priya")
+
+
 def test_a_preferred_name_the_person_chose_stays(writer: Session, user: User) -> None:
     mapping.apply_page(writer, user, _page([_card(PEOPLE[0].slug, "Pri", "Okafor")]))
     contact = _by_slug(writer, user, PEOPLE[0].slug)
@@ -498,16 +530,35 @@ def test_merging_a_card_contact_into_a_real_one_confirms_and_keeps_its_text_lowe
     assert "headline" not in real.field_sources  # still open to every source
 
 
-def test_merging_a_real_contact_into_a_card_contact_confirms_it(
+def test_merging_a_real_contact_into_a_card_contact_confirms_it_and_the_real_values_win(
     writer: Session, user: User
 ) -> None:
-    mapping.apply_page(writer, user, _page([_card("card-slug")]))
+    """The person picked the card contact as the survivor; the real contact's name
+    and headline still win, with their sync provenance, over the card's text."""
+    mapping.apply_page(writer, user, _page([_card("card-slug", "Pri", "Oka", "Card headline")]))
     card = _by_slug(writer, user, "card-slug")
-    real = factories.make_contact(writer, user)
+    real = factories.make_contact(
+        writer,
+        user,
+        first_name="Priya",
+        last_name="Okafor",
+        headline="Data engineer at Fictional Robotics Co",
+        field_sources={"first_name": "sync", "last_name": "sync", "headline": "sync"},
+    )
 
     merge(writer, user, card.id, real.id)
 
     assert card.needs_review_at is None
+    assert (card.first_name, card.last_name, card.headline, card.preferred_name) == (
+        "Priya",
+        "Okafor",
+        "Data engineer at Fictional Robotics Co",
+        "Priya",
+    )
+    assert {name: card.field_sources.get(name) for name in ("first_name", "headline")} == {
+        "first_name": "sync",
+        "headline": "sync",
+    }
 
 
 def test_merging_two_card_contacts_confirms_neither(writer: Session, user: User) -> None:
