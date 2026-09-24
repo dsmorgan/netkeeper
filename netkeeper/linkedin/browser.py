@@ -140,14 +140,27 @@ class ContextLike(Protocol):
     async def cookies(self, urls: str | Sequence[str] | None = None) -> Sequence[Mapping[str, Any]]:
         """Every cookie in this context's jar, or only those visible to ``urls``.
 
-        A caller that only needs to check one site's cookies -- the fetch
-        smoke suite's teardown, against the developer's real Chrome profile
-        (spec 9.1) -- should always pass ``urls`` (#174 item 7): the
-        unfiltered form pulls *every* cookie in the profile, every site the
-        developer is logged into, into process memory for no reason. Optional
-        rather than required because :func:`preflight.py`'s own read has no
-        one url to scope to -- it is checking the account's own session
-        cookie, whichever url actually holds it.
+        Mirrors Playwright's own ``BrowserContext.cookies()``: a cookie is
+        included when no ``urls`` are given, or when its domain and path
+        make it visible to at least one of them (ordinary browser
+        cookie-scoping rules, not a netkeeper filter). A caller that knows
+        which site's cookies it actually needs should pass ``urls`` (#174
+        item 7): the unfiltered form pulls *every* cookie in the context's
+        jar -- every site the profile is logged into -- into process memory
+        for no reason. ``tests/smoke/test_fetch_smoke.py``'s teardown does
+        this, scoped to its own loopback fixture, against the developer's
+        real Chrome profile (spec 9.1).
+
+        ``netkeeper.linkedin.preflight``'s own read stays unscoped for now
+        (#176 review, L8): its two cookie names (``li_at``, ``JSESSIONID``)
+        are already filtered to a ``linkedin.com`` domain suffix in Python,
+        so scoping the call itself with ``urls=["https://www.linkedin.com/"]``
+        looks safe in principle, but this codebase has no way to verify,
+        without reaching the site, that LinkedIn never sets either cookie on
+        a narrower host a ``www.linkedin.com`` url would not see -- and a
+        false "no session" reading there is a worse failure than the small
+        amount of extra jar this one, already narrow, name+domain+expiry-only
+        read pulls in. Left alone rather than guessed at.
         """
         ...
 
