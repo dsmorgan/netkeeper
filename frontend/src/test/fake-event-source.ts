@@ -48,10 +48,7 @@ export class FakeEventSource {
    * `useServerEvent` is the one place that unwraps it back out.
    */
   emit(type: string, data: unknown): void {
-    this.emitRaw(
-      type,
-      JSON.stringify({ type, data, ts: new Date().toISOString(), user_id: 1 }),
-    )
+    this.emitRaw(type, JSON.stringify({ type, data, ts: new Date().toISOString(), user_id: 1 }))
   }
 
   /** Like {@link emit}, but with the wire text as-is — for a payload that is not valid JSON. */

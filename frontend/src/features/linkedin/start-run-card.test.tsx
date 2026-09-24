@@ -133,7 +133,10 @@ describe('StartRunCard', () => {
   it('disables the input and Start, and says why, when today’s budget is spent (L1)', async () => {
     renderCard({
       'GET /api/v1/linkedin/budget': () =>
-        jsonResponse({ ...BUDGET, profile_visits_today: { ...BUDGET.profile_visits_today, remaining: 0 } }),
+        jsonResponse({
+          ...BUDGET,
+          profile_visits_today: { ...BUDGET.profile_visits_today, remaining: 0 },
+        }),
     })
     fireEvent.change(await screen.findByLabelText('Kind'), { target: { value: 'enrich' } })
 
@@ -146,7 +149,10 @@ describe('StartRunCard', () => {
   it('does not disable a sync start when the enrichment budget is spent', async () => {
     renderCard({
       'GET /api/v1/linkedin/budget': () =>
-        jsonResponse({ ...BUDGET, profile_visits_today: { ...BUDGET.profile_visits_today, remaining: 0 } }),
+        jsonResponse({
+          ...BUDGET,
+          profile_visits_today: { ...BUDGET.profile_visits_today, remaining: 0 },
+        }),
     })
     // Default kind is a sync, not enrich: the profile-visit budget does not gate it.
     expect(await screen.findByRole('button', { name: 'Start run' })).not.toBeDisabled()

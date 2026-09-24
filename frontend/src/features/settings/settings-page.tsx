@@ -21,8 +21,8 @@ export function SettingsPage() {
         <CardContent className="flex items-center gap-2">
           <Badge variant="outline">Phase 0</Badge>
           <span className="text-muted-foreground">
-            Only the current user and posture are wired up. Each section arrives with its
-            feature's phase.
+            Only the current user and posture are wired up. Each section arrives with its feature's
+            phase.
           </span>
         </CardContent>
       </Card>
