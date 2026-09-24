@@ -11,10 +11,11 @@ maps an extractor result onto a table. The harvest half is
 :func:`apply_harvest`; see its docstring for how a profile is matched to the
 contact it was visited for, and why a harvest never takes a value away.
 
-**Each connection** becomes an :class:`~netkeeper.crm.identity.IncomingContact`
-with source ``sync`` and goes through identity resolution, exactly as the
-archive importer's rows do (:mod:`netkeeper.crm.archive`) one rank lower:
-``sync`` beats ``archive`` beats ``csv`` and a person's own edit beats them all
+**Each Voyager-sourced connection** (a real URN: spec 9.3's in-page API)
+becomes an :class:`~netkeeper.crm.identity.IncomingContact` with source
+``sync`` and goes through identity resolution, exactly as the archive
+importer's rows do (:mod:`netkeeper.crm.archive`) one rank lower: ``sync``
+beats ``archive`` beats ``csv`` and a person's own edit beats them all
 (:mod:`netkeeper.crm.provenance`), so a sync refreshes what an import wrote and
 never what a person typed. A headline change writes a ``contact_snapshot`` of
 the values before it (:func:`netkeeper.crm.identity.apply`). A row that
@@ -23,18 +24,30 @@ for a person, as the archive importer does; guessing would merge two people.
 A row whose URN or slug another contact already holds is counted and skipped
 rather than failing the page.
 
+**A DOM-sourced connection (P2-08's fallback, no URN) is sighting-only** and
+never reaches identity resolution at all -- see :func:`apply_page`'s
+docstring for the full reasoning (a slug is not owned by one person forever,
+spec 9.6) and :mod:`netkeeper.linkedin.dom`'s module docstring for the
+scenarios that found the alternative unsafe. It only ever marks an
+already-known contact seen; it creates nothing and writes no field.
+
 **The edge lifecycle (spec 9.8).**
 
 * A contact whose URN appears on a page, in either mode, is a connection:
-  ``li_missing_count`` goes to 0 and ``li_disconnected_at`` is cleared. Being
-  seen is evidence whichever job saw it, so an incremental sync clears a
-  disconnect too; it just never *adds* one.
+  ``li_missing_count`` goes to 0 and ``li_disconnected_at`` is cleared. A
+  contact whose *current* slug a DOM sighting names is a connection the same
+  way, whether or not it also carries a URN. Being seen is evidence
+  whichever job saw it, so an incremental sync clears a disconnect too; it
+  just never *adds* one.
 * :func:`age_unseen` runs once, after a *complete* full sync
   (:attr:`~netkeeper.linkedin.connections.SyncResult.complete`), and gives
   every contact with a URN the run did not see one more miss. At
   ``disconnect_after_misses`` (config, default 2) ``li_disconnected_at`` is set.
   An incremental sync never ages anyone, a full sync that stopped early never
-  ages anyone, and nothing is ever deleted.
+  ages anyone, a full sync that ever fell back to DOM never ages anyone
+  (:attr:`~netkeeper.linkedin.connections.SyncResult.complete` refuses
+  outright once :attr:`~netkeeper.linkedin.connections.SyncResult.source_switched`
+  is true), and nothing is ever deleted.
 
 Which contacts can age: those with a URN, not merged into another. A URN is
 what the connections list reports, so a contact without one (a CSV row, an
@@ -121,12 +134,16 @@ UNMATCHED_MAX_SHARE: Final = 0.10
 class PageCounts:
     """What mapping pages did, summed over a run.
 
-    ``seen`` is every connection on the pages; it splits into ``created``,
-    ``updated``, ``needs_review`` (a candidate, left for a person) and
-    ``conflicts`` (a URN or slug another contact holds). ``reconnected`` counts
-    contacts whose ``li_disconnected_at`` a sighting cleared. ``review_contact_ids``
-    is every contact a candidate row named: someone the sync may have seen under
-    another identity, which :func:`age_unseen` must not age while a person decides.
+    ``seen`` is every connection on the pages; a Voyager-sourced one (a real
+    URN) splits into ``created``, ``updated``, ``needs_review`` (a candidate,
+    left for a person) and ``conflicts`` (a URN or slug another contact
+    holds). ``sightings`` counts the rest -- DOM-sourced rows (P2-08, no URN),
+    which are never resolved or applied at all: see :func:`apply_page`'s
+    docstring for why a DOM row is sighting-only. ``reconnected`` counts
+    contacts whose ``li_disconnected_at`` a sighting cleared, from either
+    kind. ``review_contact_ids`` is every contact a candidate row named:
+    someone the sync may have seen under another identity, which
+    :func:`age_unseen` must not age while a person decides.
     ``created_contact_ids`` is every contact these pages created: :func:`age_unseen`
     measures its limits against the contacts that existed *before* the sync, and
     these did not (#169).
@@ -137,6 +154,7 @@ class PageCounts:
     updated: int = 0
     needs_review: int = 0
     conflicts: int = 0
+    sightings: int = 0
     reconnected: int = 0
     review_contact_ids: set[int] = field(default_factory=set)
     created_contact_ids: set[int] = field(default_factory=set)
@@ -162,7 +180,26 @@ def known_urns(session: Session, user: User) -> frozenset[str]:
 def apply_page(
     session: Session, user: User, page: ConnectionsPage, counts: PageCounts | None = None
 ) -> PageCounts:
-    """Write every connection on ``page`` to ``user``'s contacts and mark each one seen.
+    """Write every Voyager-sourced connection on ``page`` to ``user``'s contacts, mark
+    every connection seen, and never do either for a DOM-sourced one.
+
+    **A DOM row (P2-08's fallback, no URN: :class:`~netkeeper.linkedin.voyager.ConnectionSummary`'s
+    docstring) is sighting-only (#173 review's design decision).** Its only
+    identity signal is a public-id slug, and a slug is not owned by one
+    person forever -- LinkedIn lets an account release a vanity url and
+    another claim it (spec 9.6). Resolving and applying it the way a
+    Voyager row is resolved would risk writing a stranger's name or headline
+    onto the contact who used to hold that slug, or creating a duplicate
+    under a slug an authoritative source has not caught up to yet
+    (:mod:`netkeeper.linkedin.dom`'s module docstring has the fuller
+    argument, and the scenarios that found this). So a DOM row never calls
+    :func:`~netkeeper.crm.identity.resolve` or
+    :func:`~netkeeper.crm.identity.apply` at all: it only ever contributes
+    its (normalized) slug to the "mark seen" pass below, which can clear a
+    disconnect but can never create a contact, write a field, or itself
+    cause one. A slug nobody currently holds is silently a no-op -- the new
+    or renamed connection it would have described arrives honestly through
+    the next Voyager sync or archive import.
 
     Returns ``counts`` (a new one when none is given) with this page added.
     Nothing is committed.
@@ -170,8 +207,22 @@ def apply_page(
     _require_writer(session)
     counts = PageCounts() if counts is None else counts
     zone = _zone(user)
+    urns: set[str] = set()
+    sighted_public_ids: set[str] = set()
     for connection in page.connections:
         counts.seen += 1
+        if connection.urn is None:
+            # DOM sighting: see the docstring above. normalize_public_id(unquote(...))
+            # matches exactly how a Voyager/archive row's own slug is normalized
+            # before it is ever stored (crm.identity.IncomingContact), so a
+            # differently-cased or percent-encoded DOM read still matches the
+            # contact's stored slug (#173 review, F1/S2).
+            normalized = normalize_public_id(unquote(connection.public_id))
+            if normalized is not None:
+                sighted_public_ids.add(normalized)
+            counts.sightings += 1
+            continue
+        urns.add(connection.urn)
         incoming = _incoming(connection, page.observed_at, zone)
         resolution = resolve(session, user, incoming)
         match resolution:
@@ -196,12 +247,15 @@ def apply_page(
                         counts.created_contact_ids.add(written.id)
                     else:
                         counts.updated += 1
-    counts.reconnected += _mark_seen(
-        session,
-        user,
-        urns={c.urn for c in page.connections if c.urn is not None},
-        public_ids={c.public_id for c in page.connections},
-    )
+    # F1 of the #173 review: public_ids here is built *only* from DOM sightings,
+    # never from a Voyager row's own slug. A Voyager row already carries a real
+    # URN, which is the identity signal that clears its own disconnect above --
+    # feeding its slug in too let a *different* person now holding that slug
+    # (a stale vanity url a sync happens to see) wrongly clear a third, unrelated
+    # contact's disconnect, on every ordinary sync (the S1 scenario). Matching a
+    # URN-holding contact by a DOM slug is still allowed and still safe: it can
+    # only prevent an aging that should not happen, never cause one (#173 review).
+    counts.reconnected += _mark_seen(session, user, urns=urns, public_ids=sighted_public_ids)
     session.flush()
     return counts
 
@@ -648,26 +702,33 @@ def _month(year: int | None, month: int | None) -> date | None:
 
 def _mark_seen(session: Session, user: User, *, urns: set[str], public_ids: set[str]) -> int:
     """Clear the miss count, any disconnect, and any NotFound streak on every contact
-    holding one of ``urns`` or, when a page carried no URN, one of ``public_ids``.
+    holding one of ``urns`` or one of ``public_ids``.
 
     A sighting is evidence the profile is there, so an enrichment NotFound streak
     (spec 9.8) starts over too: without that, a contact marked gone and then seen
     again would be marked gone by its next single NotFound. Returns how many had
-    been disconnected. Runs after the page's rows are written, so a contact the
-    page just matched by slug has its URN by now -- which is also why
-    ``public_ids`` changes nothing for a Voyager page: every connection there
-    already has a real URN (spec 9.3), and a slug match on such a page already
-    learned it during resolution (spec 8.2 step 2), so the URN branch alone
-    would have found the same contact.
+    been disconnected. Runs after the page's rows are written, so a Voyager
+    connection the page just matched by slug has its URN by now, already covered
+    by the ``urns`` branch.
 
-    ``public_ids`` exists for P2-08's DOM fallback, whose pages carry no URN at
-    all (:class:`~netkeeper.linkedin.voyager.ConnectionSummary`'s docstring).
-    Without it, a contact seen only through a DOM page would never have its
-    miss count, disconnect, or NotFound streak cleared here, even though spec
-    9.8 says "being seen is evidence whichever job made it" -- and
-    ``li_public_id`` is exactly as reliable an identity as ``li_urn`` (both
-    unique per user), so matching on it is not a weaker check, only a
-    different key.
+    **``public_ids`` is normalized-slug evidence from DOM sightings only (#173
+    review, F1) -- ``apply_page`` never includes a Voyager row's own slug here.**
+    A Voyager row already carries a real URN, the identity signal the ``urns``
+    branch reads; feeding its slug in too would let *whoever currently holds
+    that slug* clear a disconnect for it, which is wrong the moment that slug
+    has since passed to someone else -- a Voyager sighting of a person who
+    happens to be reported with a stale vanity url would then wrongly reconnect
+    a *different*, actually-removed contact still recorded under it (the S1
+    scenario the review found: without this restriction, an ordinary sync could
+    silently undo a real disconnection every time a released slug resurfaces).
+    Matching by slug at all exists for P2-08's DOM fallback, whose pages carry
+    no URN (:class:`~netkeeper.linkedin.voyager.ConnectionSummary`'s
+    docstring): without it, a contact seen only through DOM would never have
+    its miss count, disconnect, or NotFound streak cleared, even though spec
+    9.8 says "being seen is evidence whichever job made it". Matching a
+    URN-holding contact by a DOM slug is still allowed and still safe in that
+    one direction: it can only *prevent* an aging that should not happen, and
+    can never itself disconnect or age anyone.
     """
     if not urns and not public_ids:
         return 0

@@ -7,6 +7,7 @@ real job is exercised end to end in ``tests/test_connections_sync.py``.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator, Sequence
 from datetime import UTC, date, datetime, timedelta
 
@@ -150,34 +151,67 @@ def test_a_second_page_updates_rather_than_duplicates(writer: Session, user: Use
     assert _count(writer, user) == 3
 
 
-def test_a_dom_sourced_connection_with_no_urn_creates_a_contact_by_slug_alone(
-    writer: Session, user: User
-) -> None:
-    """P2-08: a DOM page can create a contact with no URN at all -- identity resolves
-    it by public_id (spec 8.2), and nothing here invents one."""
+def test_a_dom_sighting_of_an_unknown_slug_creates_nothing(writer: Session, user: User) -> None:
+    """#173 review's design decision: a DOM row is sighting-only. A slug nobody
+    holds does not become a new contact -- a DOM row never reaches identity
+    resolution at all, so there is nothing here that *could* create one. The new
+    connection this would have described arrives honestly through the next
+    Voyager sync or archive import."""
     priya = PEOPLE[0]
 
     counts = mapping.apply_page(writer, user, _dom_page([priya]))
 
-    assert (counts.created, counts.updated) == (1, 0)
-    contact = _by_slug(writer, user, priya.slug)
-    assert contact.li_urn is None
-    assert contact.li_public_id == priya.slug
-    assert contact.first_name == priya.first
+    assert (counts.created, counts.updated, counts.sightings) == (0, 0, 1)
+    assert _count(writer, user) == 0
 
 
-def test_a_dom_sourced_page_never_erases_an_existing_urn(writer: Session, user: User) -> None:
-    """A DOM page's urn=None must read as 'no information', never as 'clear this
-    field' -- the same rule an absent headline already gets."""
+def test_a_dom_sourced_page_never_writes_any_field(writer: Session, user: User) -> None:
+    """A DOM row is sighting-only (#173 review): it may clear a disconnect for an
+    existing contact, but it never creates a contact and never writes a field --
+    not the URN, not the name, not the headline. S4/S5 of the review found that
+    letting a DOM row through identity resolution could overwrite a contact's
+    correct Voyager-sourced name with a crude DOM name-split, or a stranger's
+    name entirely if the slug had since passed to someone else; sighting-only
+    makes both impossible by construction rather than by care."""
     priya = PEOPLE[0]
     mapping.apply_page(writer, user, _page([priya]))
-    assert _by_urn(writer, user, priya).li_urn == priya.urn
+    before = _by_urn(writer, user, priya)
+    assert (before.li_urn, before.first_name, before.headline) == (
+        priya.urn,
+        priya.first,
+        priya.headline,
+    )
 
-    mapping.apply_page(writer, user, _dom_page([priya], at=LATER))
+    # A DOM sighting under the same slug, but with a *different* name and
+    # headline than what is stored -- if this module wrote anything, it would
+    # show up as corruption, not merely as "unchanged".
+    impostor_card = ConnectionSummary(
+        urn=None,
+        public_id=priya.slug,
+        first_name="Someone",
+        last_name="Else",
+        headline="A completely different headline",
+        connected_at=None,
+    )
+    page = ConnectionsPage(
+        mode=SyncMode.FULL,
+        number=0,
+        start=0,
+        total=0,
+        connections=(impostor_card,),
+        observed_at=LATER,
+    )
+    counts = mapping.apply_page(writer, user, page)
 
-    contact = _by_urn(writer, user, priya)
-    assert contact.li_urn == priya.urn  # untouched
-    assert contact.field_sources["li_urn"] == "sync"  # still attributed to the sync that set it
+    after = _by_urn(writer, user, priya)
+    assert (after.li_urn, after.first_name, after.headline) == (
+        priya.urn,
+        priya.first,
+        priya.headline,
+    )
+    assert after.field_sources["li_urn"] == "sync"  # still attributed to the sync that set it
+    assert counts.sightings == 1
+    assert (counts.created, counts.updated) == (0, 0)
 
 
 def test_an_archive_contact_is_matched_by_slug_and_learns_its_urn(
@@ -371,6 +405,156 @@ def test_a_dom_sourced_reappearance_clears_both_too(writer: Session, user: User)
     assert (tomasz.li_missing_count, tomasz.li_disconnected_at) == (0, None)
     assert tomasz.li_urn == PEOPLE[3].urn  # still the real one; the DOM page never touched it
     assert counts.reconnected == 1
+
+
+# --- #173 review scenarios: a released slug, reused by someone else --------------
+#
+# LinkedIn lets an account release a vanity url and another claim it (spec 9.6).
+# These pin the two things that go wrong if a sync ever trusts a slug alone to
+# mean "the same person as last time": wrongly reconnecting someone who was
+# actually removed (F1/S1), and -- before the sighting-only design decision --
+# wrongly writing a stranger's data onto the wrong contact, or creating a
+# duplicate (F2-F4/S3-S5). S2 and S6 round out the slug-matching and
+# name-parsing edges the same scenarios surfaced.
+
+
+def test_S1_a_voyager_sighting_of_a_released_slug_never_reconnects_its_old_holder(
+    writer: Session, user: User
+) -> None:
+    """F1 (HIGH): a Voyager row's *own* slug must never feed _mark_seen's public_id
+    matching -- only a DOM sighting's does. Without that restriction, person A
+    (a new URN) reported under a slug B (a removed person) used to hold would
+    wrongly clear B's disconnect on every ordinary sync that happens to see A."""
+    b = dataclasses.replace(PEOPLE[3], public_id="shared-slug")
+    mapping.apply_page(writer, user, _page([*PEOPLE[:3], b]))
+    _age(writer, user, PEOPLE[:3])
+    _age(writer, user, PEOPLE[:3], at=LATER + timedelta(days=7))
+    assert _by_urn(writer, user, b).li_disconnected_at is not None
+
+    # A different, unrelated person (a new URN) now holds "shared-slug" and
+    # shows up on an ordinary Voyager page. Identity resolution correctly
+    # refuses to guess whether this is B under a new URN or somebody else
+    # entirely (a URN/slug conflict is a Candidate, left for a person) -- that
+    # part is unaffected by this fix. The fix is what happens to B.
+    a = dataclasses.replace(PEOPLE[5], public_id="shared-slug")
+    counts = mapping.apply_page(writer, user, _page([a], at=LATER + timedelta(days=14)))
+    assert counts.needs_review == 1
+
+    b_after = _by_urn(writer, user, b)
+    assert b_after.li_disconnected_at is not None, "B (removed) was wrongly reconnected by A's slug"
+
+
+def test_S2_a_dom_sighting_matches_the_stored_slug_case_insensitively(
+    writer: Session, user: User
+) -> None:
+    """F1's normalization half: a DOM-read slug in a different case than the one
+    stored (LinkedIn resolves slugs case-insensitively, and so does identity
+    resolution's own normalize_public_id -- crm.models.contacts) must still
+    reconnect the contact it names."""
+    mapping.apply_page(writer, user, _page(PEOPLE[:4]))
+    _age(writer, user, PEOPLE[:3])
+    _age(writer, user, PEOPLE[:3])
+    assert _by_urn(writer, user, PEOPLE[3]).li_disconnected_at is not None
+
+    upper = dataclasses.replace(PEOPLE[3], public_id=PEOPLE[3].slug.upper())
+    mapping.apply_page(writer, user, _dom_page([upper], at=LATER))
+
+    tomasz = _by_urn(writer, user, PEOPLE[3])
+    assert tomasz.li_disconnected_at is None, "a case-different DOM slug should still reconnect"
+
+
+def test_S3_a_dom_sighting_under_a_renamed_slug_creates_no_duplicate(
+    writer: Session, user: User
+) -> None:
+    """F2-F4's design decision in action: a DOM sighting under a slug nobody yet
+    holds (Priya renamed her vanity url, and DOM saw the new one before any
+    Voyager sync did) is a no-op, not a new contact under the wrong identity.
+    The rename arrives honestly once a real Voyager sync sees it."""
+    mapping.apply_page(writer, user, _page(PEOPLE[:2]))
+    renamed = dataclasses.replace(PEOPLE[0], public_id="priya-new-vanity")
+
+    dom_counts = mapping.apply_page(writer, user, _dom_page([renamed], at=LATER))
+    assert (dom_counts.created, dom_counts.updated) == (0, 0)
+    assert _count(writer, user) == 2  # no phantom third contact
+
+    # The real Voyager sync catches up later, matched by URN, and the rename
+    # lands on the existing contact.
+    mapping.apply_page(writer, user, _page([renamed], at=LATER + timedelta(days=1)))
+    assert _count(writer, user) == 2
+    assert _by_urn(writer, user, renamed).li_public_id == "priya-new-vanity"
+
+
+def test_S4_a_dom_sighting_never_overwrites_a_correct_voyager_name_split(
+    writer: Session, user: User
+) -> None:
+    """S4: a compound first name ("Mary Ann Smith") is stored correctly by
+    Voyager's own first/last fields. A DOM card's crude single-split heuristic
+    would read it wrong ("Mary" | "Ann Smith") -- sighting-only means that never
+    reaches the contact regardless of what the DOM split gets right or wrong."""
+    mary = Person(201, "Mary Ann", "Smith", "Engineer", public_id="mary-ann-smith")
+    mapping.apply_page(writer, user, _page([mary]))
+
+    card = ConnectionSummary(
+        urn=None,
+        public_id="mary-ann-smith",
+        first_name="Mary",  # what _split_name("Mary Ann Smith") actually produces
+        last_name="Ann Smith",
+        headline="Engineer",
+        connected_at=None,
+    )
+    page = ConnectionsPage(
+        mode=SyncMode.FULL, number=0, start=0, total=0, connections=(card,), observed_at=LATER
+    )
+    mapping.apply_page(writer, user, page)
+
+    contact = _by_urn(writer, user, mary)
+    assert (contact.first_name, contact.last_name) == ("Mary Ann", "Smith")
+
+
+def test_S5_a_dom_sighting_of_a_reused_slug_never_writes_a_strangers_name(
+    writer: Session, user: User
+) -> None:
+    """S5: the slug "shared-slug" used to belong to B and now (in the DOM's own,
+    unauthoritative rendering) shows someone else's name. Sighting-only means
+    that never overwrites B's stored name or headline."""
+    b = dataclasses.replace(PEOPLE[3], public_id="shared-slug")
+    mapping.apply_page(writer, user, _page([b]))
+
+    impostor = ConnectionSummary(
+        urn=None,
+        public_id="shared-slug",
+        first_name="Zed",
+        last_name="Other",
+        headline="Someone else entirely",
+        connected_at=None,
+    )
+    page = ConnectionsPage(
+        mode=SyncMode.FULL, number=0, start=0, total=0, connections=(impostor,), observed_at=LATER
+    )
+    mapping.apply_page(writer, user, page)
+
+    contact = _by_urn(writer, user, b)
+    assert contact.first_name == b.first
+    assert contact.headline == b.headline
+    assert contact.snapshots == []  # nothing was ever written, so nothing to snapshot
+
+
+def test_S6_a_garbled_dom_name_split_never_reaches_the_database(
+    writer: Session, user: User
+) -> None:
+    """S6: when a card's name selector misses and falls back to a link's full
+    text, the text can carry an embedded headline after blank lines
+    ("Priya Okafor\\n\\n  Data engineer at Fictional"). _parse_one_card's own
+    whitespace collapsing (dom.py) keeps this from ever containing a literal
+    newline, and sighting-only keeps it from ever being written regardless."""
+    from netkeeper.linkedin.dom import _parse_one_card
+
+    card = _parse_one_card(
+        {"publicId": "x", "name": "Priya Okafor\n\n  Data engineer at Fictional", "headline": None}
+    )
+    assert card is not None
+    assert "\n" not in card.last_name
+    assert card.first_name == "Priya"
 
 
 def test_a_sighting_between_misses_restarts_the_count(writer: Session, user: User) -> None:
