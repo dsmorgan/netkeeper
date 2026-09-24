@@ -26,6 +26,7 @@ from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserRun
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.fetch import (
     _NO_CSRF_MARKER,
+    _ORIGIN_MISMATCH_MARKER,
     LINKEDIN_ORIGIN,
     NotLinkedInOrigin,
     PageVoyagerFetch,
@@ -274,6 +275,20 @@ def test_extra_headers_override_the_base_set() -> None:
     assert _base_headers({"accept": "text/plain"})["accept"] == "text/plain"
 
 
+@pytest.mark.parametrize("spelling", ["csrf-token", "CSRF-TOKEN", "Csrf-Token", "cSrF-tOkEn"])
+def test_a_caller_cannot_override_or_merge_with_csrf_token_whatever_the_case(
+    spelling: str,
+) -> None:
+    """#170 item 5 (mutation R7): a caller header spelled differently than
+    ``csrf-token`` must not survive into the headers this module hands the script --
+    it would otherwise land under its own casing and get *combined* with the
+    script's live value by fetch()'s own Headers merging, rather than overridden.
+    """
+    headers = _base_headers({spelling: "attacker-supplied-value"})
+    assert "attacker-supplied-value" not in headers.values()
+    assert all(name.lower() != CSRF_HEADER_NAME.lower() for name in headers)
+
+
 async def test_a_callers_extra_header_reaches_the_script() -> None:
     context = make_context(evaluate_result=fetch_result(status=200, body="{}", url="x"))
     async with run_with(context) as run:
@@ -283,6 +298,22 @@ async def test_a_callers_extra_header_reaches_the_script() -> None:
         page = context.pages[0]
 
     assert json.dumps("text/plain") in page.evaluate_calls[-1]
+
+
+async def test_a_callers_csrf_token_header_never_reaches_the_script_whatever_the_case() -> None:
+    """The end-to-end version of the ``_base_headers`` unit tests above: even a
+    caller reaching for ``PageVoyagerFetch`` directly cannot get a value of its own
+    choosing sent as (or merged into) ``csrf-token``."""
+    context = make_context(evaluate_result=fetch_result(status=200, body="{}", url="x"))
+    async with run_with(context) as run:
+        await on_origin(run)
+        fetch = PageVoyagerFetch(run)
+        await fetch(
+            VoyagerRequest(path=CONNECTIONS_PATH, headers={"CSRF-Token": "attacker-supplied"})
+        )
+        page = context.pages[0]
+
+    assert "attacker-supplied" not in page.evaluate_calls[-1]
 
 
 async def test_the_url_and_base_headers_reach_the_script() -> None:
@@ -302,29 +333,56 @@ async def test_the_url_and_base_headers_reach_the_script() -> None:
 
 
 def test_the_script_reads_document_cookie_for_jsessionid() -> None:
-    text = _fetch_expression("https://example.invalid/x", {"accept": "a"})
+    text = _fetch_expression("https://example.invalid/x", {"accept": "a"}, origin=LINKEDIN_ORIGIN)
     assert "document.cookie" in text
     assert "JSESSIONID" in text
 
 
 def test_the_script_strips_the_cookies_surrounding_quotes() -> None:
-    text = _fetch_expression("https://example.invalid/x", {})
+    text = _fetch_expression("https://example.invalid/x", {}, origin=LINKEDIN_ORIGIN)
     assert "slice(1, -1)" in text, "the quote-stripping this module documents must be in the script"
 
 
 def test_the_script_refuses_an_empty_or_missing_csrf_token() -> None:
     """N6: an empty (or absent) JSESSIONID must not be sent as an empty header value."""
-    text = _fetch_expression("https://example.invalid/x", {})
+    text = _fetch_expression("https://example.invalid/x", {}, origin=LINKEDIN_ORIGIN)
     assert "if (!t)" in text
     assert json.dumps(_NO_CSRF_MARKER) in text
 
 
 def test_the_script_never_embeds_a_python_known_csrf_value() -> None:
     """There is nothing to embed any more -- pinned so a regression is a red test, not a re-read."""
-    text = _fetch_expression("https://example.invalid/x", _base_headers({}))
+    text = _fetch_expression("https://example.invalid/x", _base_headers({}), origin=LINKEDIN_ORIGIN)
     assert CSRF_HEADER_NAME not in json.dumps(_base_headers({}))
     # The header *name* legitimately appears once, added by the script itself.
     assert text.count(json.dumps(CSRF_HEADER_NAME)) == 1
+
+
+# --- #170 item 3: the origin check is repeated atomically inside the script -------
+
+
+def test_the_script_checks_its_own_origin_before_anything_else() -> None:
+    text = _fetch_expression("https://example.invalid/x", {}, origin=LINKEDIN_ORIGIN)
+    assert f"location.origin !== {json.dumps(LINKEDIN_ORIGIN)}" in text
+    assert json.dumps(_ORIGIN_MISMATCH_MARKER) in text
+    # Checked before the cookie is ever read: the whole point is to fail before
+    # touching anything else, not merely to fail eventually.
+    assert text.index("location.origin") < text.index("document.cookie")
+
+
+async def test_an_origin_mismatch_inside_the_script_is_a_clear_fetch_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Python-side page.url check can't catch a navigation that happens in the
+    gap between that read and page.evaluate actually running; this simulates the
+    in-page script itself catching it, the way a real browser would."""
+    context = make_context()
+    async with run_with(context) as run:
+        await on_origin(run)
+        fetch = PageVoyagerFetch(run)
+        context.pages[0].fail_next_evaluate(RuntimeError(_ORIGIN_MISMATCH_MARKER))
+        with pytest.raises(VoyagerFetchError, match="navigated away"):
+            await fetch(VoyagerRequest(path=CONNECTIONS_PATH))
 
 
 async def test_satisfies_the_voyager_fetch_protocol() -> None:

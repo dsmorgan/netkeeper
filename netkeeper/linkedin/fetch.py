@@ -107,6 +107,12 @@ _LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1", "localho
 #: the text of whatever exception ``page.evaluate`` raises.
 _NO_CSRF_MARKER: Final = "netkeeper-fetch: no live JSESSIONID cookie readable on this page"
 
+#: What the in-page script throws when ``location.origin`` does not match the
+#: origin this instance is bound to, checked a second time *inside* the script
+#: itself (#170 item 3). Same discipline as :data:`_NO_CSRF_MARKER`: a fixed
+#: string netkeeper chose, never anything a page could echo back through.
+_ORIGIN_MISMATCH_MARKER: Final = "netkeeper-fetch: page origin does not match the expected origin"
+
 
 class NotLinkedInOrigin(ValueError):
     """An origin a :class:`PageVoyagerFetch` was asked to use is neither LinkedIn nor loopback."""
@@ -204,8 +210,18 @@ class PageVoyagerFetch:
         base_headers = _base_headers(request.headers)
         url = self._url_for(request)
         try:
-            raw = await page.evaluate(_fetch_expression(url, base_headers))
+            raw = await page.evaluate(_fetch_expression(url, base_headers, origin=self._origin))
         except Exception as exc:
+            if _ORIGIN_MISMATCH_MARKER in str(exc):
+                # #170 item 3: the Python-side check above already read page.url, but
+                # a page can navigate in the gap between that read and this evaluate
+                # actually running -- this is the in-page script's own, atomic check
+                # of the same thing, from inside the page at the moment it runs.
+                raise VoyagerFetchError(
+                    f"the tab navigated away from {self._origin!r} between the origin"
+                    " check and the fetch itself; refusing to run a Voyager fetch from"
+                    " a page that might not be able to be trusted"
+                ) from exc
             if _NO_CSRF_MARKER in str(exc):
                 raise VoyagerFetchError(
                     f"no live {CSRF_COOKIE} cookie readable on this page; log in to"
@@ -227,13 +243,26 @@ def _base_headers(extra: Mapping[str, str]) -> dict[str, str]:
     except ``csrf-token`` -- which only the in-page script can supply, from the
     page's own live cookie (see the module docstring). Reads the same constants
     ``build_headers`` does, so the two cannot drift apart on the headers they share.
+
+    ``extra`` (``request.headers``) can override any header here -- ``accept``
+    among them, on purpose (see :meth:`PageVoyagerFetch.__call__`'s docstring) --
+    except ``csrf-token`` itself, matched case-insensitively (#170 item 5): HTTP
+    header names are case-insensitive, and a caller spelling it ``CSRF-Token`` was
+    found to slip past a plain ``dict`` key check, land in this dict under its own
+    casing, and then get *combined* with the script's own value rather than
+    overridden by it -- ``fetch()``'s ``Headers`` merges same-name headers
+    case-insensitively instead of replacing one. Dropping every casing of it here,
+    before it ever reaches the in-page script, is what keeps that value entirely
+    out of ``request.headers``'s reach, whatever a caller spells it as.
     """
     headers: dict[str, str] = {
         "accept": ACCEPT_HEADER,
         "x-restli-protocol-version": RESTLI_PROTOCOL_VERSION,
         "x-li-lang": LANG_HEADER_VALUE,
     }
-    headers.update(extra)
+    headers.update(
+        (name, value) for name, value in extra.items() if name.lower() != CSRF_HEADER_NAME.lower()
+    )
     return headers
 
 
@@ -259,19 +288,27 @@ def _require_page_on_origin(page_url: str, origin: str) -> None:
         )
 
 
-def _fetch_expression(url: str, base_headers: Mapping[str, str]) -> str:
+def _fetch_expression(url: str, base_headers: Mapping[str, str], *, origin: str) -> str:
     """The script :meth:`PageVoyagerFetch.__call__` hands to ``page.evaluate``.
 
     ``PageLike.evaluate`` (spec 9.10 keeps it narrow) takes one expression string and
-    no separate argument, so ``url`` and ``base_headers`` are embedded as JSON
-    literals rather than passed alongside -- safe because JSON string syntax is a
+    no separate argument, so ``url``, ``base_headers``, and ``origin`` are embedded as
+    JSON literals rather than passed alongside -- safe because JSON string syntax is a
     strict subset of a JavaScript string literal, so ``json.dumps``'s own escaping is
     already enough. ``credentials: 'same-origin'`` is what makes the fetch carry the
     tab's session cookies at all; without it a same-origin fetch still sends them by
     default in every browser netkeeper supports, but naming it is cheap insurance
     against ever changing that default by accident.
 
-    The script itself reads ``document.cookie``, finds ``JSESSIONID``, and strips its
+    **The very first thing the script does is check its own origin again (#170 item
+    3).** :meth:`PageVoyagerFetch.__call__` already checks ``page.url`` in Python
+    before calling this, but there is a real gap between that read and this script
+    actually starting to run inside the page -- the tab is free to navigate in
+    between. Checking again from inside the page, atomically with everything else
+    the script does, closes that gap; a mismatch throws
+    :data:`_ORIGIN_MISMATCH_MARKER` before touching a cookie or sending a request.
+
+    The script then reads ``document.cookie``, finds ``JSESSIONID``, and strips its
     surrounding quotes the same way :func:`~netkeeper.linkedin.voyager.strip_jsessionid`
     does for the value this module used to read over CDP -- the value never crosses
     into Python at all now (see the module docstring). An absent or empty cookie
@@ -280,6 +317,8 @@ def _fetch_expression(url: str, base_headers: Mapping[str, str]) -> str:
     """
     return (
         "(async () => {"
+        f"if (location.origin !== {json.dumps(origin)}) "
+        f"{{ throw new Error({json.dumps(_ORIGIN_MISMATCH_MARKER)}); }}"
         "const m = document.cookie.match(/(?:^|;\\s*)JSESSIONID=([^;]*)/);"
         "let t = m ? decodeURIComponent(m[1]) : '';"
         "if (t.length >= 2 && t[0] === '\"' && t[t.length - 1] === '\"') { t = t.slice(1, -1); }"
