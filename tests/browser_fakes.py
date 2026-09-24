@@ -113,6 +113,9 @@ class FakeContext:
         self.new_page_error = new_page_error
         self.new_page_calls = 0
         self.cookie_calls = 0
+        #: The ``urls`` argument the most recent ``cookies()`` call passed, for a
+        #: test that wants to assert a caller scoped its read (#174 item 7).
+        self.last_cookies_urls: str | Sequence[str] | None = None
 
     async def new_page(self) -> PageLike:
         self.new_page_calls += 1
@@ -124,8 +127,9 @@ class FakeContext:
         self.pages.append(page)
         return page
 
-    async def cookies(self) -> Sequence[Mapping[str, Any]]:
+    async def cookies(self, urls: str | Sequence[str] | None = None) -> Sequence[Mapping[str, Any]]:
         self.cookie_calls += 1
+        self.last_cookies_urls = urls
         if self.cookie_error is not None:
             raise self.cookie_error
         return list(self.cookie_jar)

@@ -137,7 +137,19 @@ class ContextLike(Protocol):
 
     async def new_page(self) -> PageLike: ...
 
-    async def cookies(self) -> Sequence[Mapping[str, Any]]: ...
+    async def cookies(self, urls: str | Sequence[str] | None = None) -> Sequence[Mapping[str, Any]]:
+        """Every cookie in this context's jar, or only those visible to ``urls``.
+
+        A caller that only needs to check one site's cookies -- the fetch
+        smoke suite's teardown, against the developer's real Chrome profile
+        (spec 9.1) -- should always pass ``urls`` (#174 item 7): the
+        unfiltered form pulls *every* cookie in the profile, every site the
+        developer is logged into, into process memory for no reason. Optional
+        rather than required because :func:`preflight.py`'s own read has no
+        one url to scope to -- it is checking the account's own session
+        cookie, whichever url actually holds it.
+        """
+        ...
 
 
 class BrowserLike(Protocol):
