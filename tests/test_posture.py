@@ -887,25 +887,30 @@ def test_the_scanner_can_actually_find_a_caller() -> None:
     package = Path(browser_safety.PACKAGE)
     assert package / "cli.py" in _callers_of("netkeeper.services.users.ensure_local_user")
     assert _callers_of("netkeeper.linkedin.pacing.is_active_at", live_only=False) == {
-        package / "services" / "scheduler.py"
+        package / "services" / "scheduler.py",
+        package / "services" / "enrichment.py",
     }
     assert not _callers_of("netkeeper.linkedin.pacing.a_function_nobody_wrote", live_only=False)
 
 
 def test_a_caller_nothing_starts_is_not_live() -> None:
-    """The runner and the scheduler call enforcement for real and are still not live.
+    """The runners and the scheduler call enforcement for real and are still not live.
 
     Each is reachable only through a report or a rehearsal (``posture`` reads the
-    scheduler's constants, ``simulate`` runs a fake schedule), or not at all.
+    scheduler's constants, ``simulate`` runs a fake schedule, ``rehearse`` drives
+    the enrichment job at a loopback replica), or not at all.
     """
     package = Path(browser_safety.PACKAGE)
     live = _live_modules()
     assert package / "services" / "connections_sync.py" not in live
+    assert package / "services" / "enrichment.py" not in live
+    assert package / "linkedin" / "enrich.py" not in live
     assert package / "services" / "scheduler.py" not in live
     assert package / "services" / "users.py" in live  # the CLI and the app both reach it
     assert package / "web" / "api" / "contacts.py" in live  # discovered, not imported
     assert _callers_of("netkeeper.services.heat.raise_heat", live_only=False) == {
-        package / "services" / "connections_sync.py"
+        package / "services" / "connections_sync.py",
+        package / "services" / "enrichment.py",
     }
     assert not _callers_of("netkeeper.services.heat.raise_heat")
 
@@ -1104,6 +1109,7 @@ def test_the_gap_lists_the_protections_nothing_enforces_yet(writer: Session, use
     ):
         assert name in unwired, name
     assert "connections sync runner" in gaps
+    assert "enrichment runner" in gaps
 
 
 _CONNECTION_PAGES = f"{_CONSUME}[netkeeper.services.budgets.ActionClass.CONNECTION_PAGES]"

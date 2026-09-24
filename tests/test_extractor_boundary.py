@@ -27,7 +27,7 @@ import boundary
 import call_targets
 import test_browser_safety as browser_safety
 
-from netkeeper.linkedin import connections
+from netkeeper.linkedin import connections, enrich
 from netkeeper.models import Base
 
 # --- the interface is plain data ---------------------------------------------------
@@ -39,6 +39,10 @@ INTERFACE = (
     connections.ProgressEvent,
     connections.SyncResult,
     connections.SourcePage,
+    enrich.EnrichJobSpec,
+    enrich.ProfileHarvest,
+    enrich.ProgressEvent,
+    enrich.EnrichResult,
 )
 
 #: The leaf types an interface field may hold.
@@ -118,6 +122,14 @@ def test_the_job_takes_a_spec_and_returns_a_result() -> None:
     first = next(iter(signature.parameters))
     assert hints[first] is connections.SyncJobSpec
     assert hints["return"] is connections.SyncResult
+
+
+def test_the_enrichment_job_takes_a_spec_and_returns_a_result() -> None:
+    signature = inspect.signature(enrich.run_enrichment)
+    hints = typing.get_type_hints(enrich.run_enrichment)
+    first = next(iter(signature.parameters))
+    assert hints[first] is enrich.EnrichJobSpec
+    assert hints["return"] is enrich.EnrichResult
 
 
 # --- one module maps results onto rows ----------------------------------------------

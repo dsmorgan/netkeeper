@@ -242,6 +242,15 @@ class Contact(UserOwned, TimestampMixin, Base):
     # Enrichment scheduling (spec 9.6).
     last_enriched_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     enrich_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The NotFound streak (spec 9.8): consecutive enrichment visits that found no
+    # profile, when the streak began, and the latest. Three across at least 14 days
+    # marks the profile gone (``netkeeper.crm.apply``); a visit that finds it resets
+    # all three. The server default is what migration 0012 filled existing rows with.
+    li_not_found_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    li_not_found_since: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    li_not_found_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     # Denormalized: the ``at`` of the newest outbound interaction, so the
     # ``last_contacted`` filter and sort (spec 10.4) never scan ``interactions``.
     # Whoever writes an outbound interaction keeps it current (P1-10, then the

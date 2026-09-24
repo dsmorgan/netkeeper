@@ -488,9 +488,10 @@ ENFORCED_BY: Final[dict[str, tuple[str, ...]]] = {
 #: the app ``netkeeper serve`` starts, or an API module, and not only through
 #: this report or a rehearsal. Code that exists but nothing starts enforces
 #: nothing. Today that is everything: the scheduler (P2-09) holds the active
-#: hours and heat skip gate and the connections sync runner (P2-06) spends
-#: connection pages, raises heat, and sets the session flag, but neither is
-#: started by any command or by ``serve`` yet. Kept in sync by
+#: hours and heat skip gate, the connections sync runner (P2-06) spends
+#: connection pages, raises heat, and sets the session flag, and the enrichment
+#: runner (P2-07) spends profile visits under the warm-up ramp, weekend damping,
+#: and its pacing plan, but none is started by any command or by ``serve`` yet. Kept in sync by
 #: ``test_the_unenforced_list_is_what_the_package_actually_shows``, which is the
 #: whole point: a hand-maintained list of "not wired up yet" is wrong the week
 #: after it is written.
@@ -528,10 +529,11 @@ GAPS: Final[tuple[str, ...]] = (
     " that the code which will do the work remembers to ask. The protections"
     f" listed next have no enforcing caller that netkeeper runs yet: {_UNENFORCED_TEXT}."
     " Code that calls them can exist and still not count: the connections sync"
-    " runner and the scheduler are written, but no command and nothing `netkeeper"
-    " serve` starts reaches either one. Until something netkeeper runs calls it,"
-    " each of those is a setting rather than a brake, and this report says the"
-    " same thing on the day it is wired as on the day it is not.",
+    " runner, the enrichment runner, and the scheduler are written, but no command"
+    " and nothing `netkeeper serve` starts reaches any of them. Until something"
+    " netkeeper runs calls it, each of those is a setting rather than a brake,"
+    " and this report says the same thing on the day it is wired as on the day"
+    " it is not.",
     "the activity lock binds netkeeper processes that share this data directory on"
     " this machine: it is a file lock under the data directory. A netkeeper started"
     " with a different NETKEEPER_DATA, a netkeeper on another machine, or any other"
