@@ -675,6 +675,43 @@ def test_the_unreadable_limit_is_two() -> None:
     assert enrich.MAX_UNREADABLE_IN_A_ROW == 2
 
 
+async def test_a_not_found_between_two_unreadable_profiles_resets_the_count() -> None:
+    """#172 N04: Mateo unreadable (fetch 2), Hana not found (3), Tomasz unreadable (4).
+
+    A NotFound is a profile that answered; it breaks the run of unreadable ones, so
+    the run goes on to Aiko rather than calling the route changed.
+    """
+    browser = FakeBrowser.of(PROFILES, script={2: UNRECOGNIZED, 3: NOT_FOUND, 4: UNRECOGNIZED})
+
+    result, harvests, _ = await _run(_spec(PROFILES), browser)
+
+    assert result.reason is StopReason.END_OF_PLAN
+    assert (result.unreadable, result.not_found) == (2, 1)
+    assert [h.outcome for h in harvests[1:4]] == [
+        Outcome.ROUTE_CHANGED,
+        Outcome.NOT_FOUND,
+        Outcome.ROUTE_CHANGED,
+    ]
+    assert len(browser.visited()) == len(PROFILES)
+
+
+async def test_three_scattered_unreadable_profiles_stop_the_run() -> None:
+    """#172: every other profile unreadable never trips the in-a-row rule; the third
+    unreadable profile in one run stops it, as the route having changed.
+
+    Fetches: Priya 0 (unreadable), Mateo 1-2, Hana 3 (unreadable), Tomasz 4-5, Aiko 6
+    (unreadable). The two people after Aiko are never visited.
+    """
+    people = [*PROFILES, Profile(201, "Extra", "One"), Profile(202, "Extra", "Two")]
+    browser = FakeBrowser.of(people, script={0: UNRECOGNIZED, 3: UNRECOGNIZED, 6: UNRECOGNIZED})
+
+    result, _, _ = await _run(_spec(people), browser)
+
+    assert result.reason is StopReason.RESPONSE and result.outcome is Outcome.ROUTE_CHANGED
+    assert result.unreadable == enrich.MAX_UNREADABLE_PER_RUN == 3
+    assert browser.visited() == [p.slug for p in PROFILES]
+
+
 # --- #171 review: a pause between the two fetches (F9) ---------------------------------------
 
 

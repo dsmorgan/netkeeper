@@ -31,22 +31,26 @@ has seen has one. A contact whose last visit wrote nothing (no profile, a
 profile under another URN, a slug another contact holds, an unreadable shape)
 waits :data:`ENRICH_RETRY_AFTER` before the next, so it cannot head every run,
 and spec 9.8's NotFound streak ("3 across at least 14 days") is spread across
-two weeks rather than spent on three consecutive days. A pin overrides the
-tiers and the wait, never the eligibility.
+two weeks rather than spent on three consecutive days. A visit whose harvest
+was applied does not wait (#172): it wrote something, so ``last_enriched_at``
+is as new as ``li_enrich_attempted_at``, and only a fresh ask
+(``enrich_priority``, which the harvest cleared) brings the contact back before
+it goes stale. A pin overrides the tiers and the wait, never the eligibility.
 
 **Pins (spec 9.6).** At most :data:`MAX_PINS`, stored in ``settings_kv`` per
 account. A pin is removed when a run finishes with that contact (harvested or
 not found), so it pins the *next* run, as igtracker's pins did.
 
-**The stored plan (spec 9.9).** Every run stores its ordered contact ids and,
-as each visit's harvest is written, the ids it completed -- in the same
-transaction as the harvest, so the two never disagree. A resumed run reuses
-that list, skips what completed, and never re-plans. The cancel flag lives on
-the plan too, checked between profiles and inside the waits between them.
-``sync_run`` (spec 8.4) does not exist yet; P2-10 adds it, and then the plan
-moves onto its row (``progress_json``, ``resume_of_id``) and this record goes.
-Until then it is ``settings_kv`` under :func:`plan_key`, and its id is what a
-resume names.
+**The stored plan (spec 9.9).** Every enrichment run stores its ordered
+contact ids on its own ``sync_runs`` row (``plan_json``, P2-10) and, as each
+visit's harvest is written, the ids it completed -- in the same transaction as
+the harvest, so the two never disagree. A resume (:func:`start_resume`) is a
+new run whose plan is the old one's remaining contacts in the old order
+(``resume_of_id`` names the old run): it skips what completed and never
+re-plans, and a plan is resumed at most once. The cancel flag is the run's
+(``services.runs.request_cancel``), checked between profiles and inside the
+waits between them. Before P2-10 the plan lived in ``settings_kv``; migration
+0013 moved every unfinished one onto a run.
 
 Transactions belong to the caller. Every writer here reads first, so it needs a
 writer session.
@@ -55,17 +59,25 @@ writer session.
 from __future__ import annotations
 
 import logging
-import secrets
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Final, Literal
+from typing import Final
 
 from sqlalchemy import Select, and_, case, or_
 from sqlalchemy.orm import Session
 
 from netkeeper.db import is_writer
-from netkeeper.models import Contact, ContactMet, User
+from netkeeper.models import (
+    Contact,
+    ContactMet,
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunTrigger,
+    User,
+)
 from netkeeper.scoping import scoped
+from netkeeper.services import runs
 from netkeeper.services.settings_kv import get_setting, set_setting
 
 log = logging.getLogger(__name__)
@@ -81,21 +93,17 @@ MAX_PINS: Final = 5
 #: land across 14 days.
 ENRICH_RETRY_AFTER: Final = timedelta(days=7)
 
-PlanStatus = Literal["running", "aborted", "completed"]
-
-_PLAN_VERSION: Final = 1
-
 
 class PinError(ValueError):
     """A pin that cannot be taken: the list is full, or the contact cannot be visited."""
 
 
 class PlanNotFound(LookupError):
-    """No stored plan with that id for this account."""
+    """No enrichment run with that id, or one with no plan."""
 
 
 class PlanFinished(ValueError):
-    """The stored plan already completed; there is nothing to resume."""
+    """The plan has nothing to resume: completed, empty, still running, or already resumed."""
 
 
 # --- who may be visited -------------------------------------------------------
@@ -159,6 +167,9 @@ def prioritize(
             or_(
                 Contact.li_enrich_attempted_at.is_(None),
                 Contact.li_enrich_attempted_at <= now - ENRICH_RETRY_AFTER,
+                # The wait is for a visit that wrote nothing (#172): a visit whose
+                # harvest was applied set last_enriched_at to the same instant.
+                Contact.last_enriched_at >= Contact.li_enrich_attempted_at,
             ),
         )
         .order_by(
@@ -240,16 +251,20 @@ def unpin(session: Session, user: User, account_id: int, contact_id: int) -> lis
 
 @dataclass(frozen=True, slots=True)
 class StoredPlan:
-    """One run's plan as ``settings_kv`` holds it. ``contact_ids`` is in visiting order."""
+    """One enrichment run's plan, as its ``sync_runs`` row holds it (``plan_json``).
 
-    plan_id: str
+    ``contact_ids`` is in visiting order and ``completed`` what the run finished
+    with. ``status`` is the run's. ``resumed_by`` is the run that took the rest
+    of this plan over, once one has: a plan is resumed at most once, so two
+    resumes of one aborted run cannot visit the same people twice.
+    """
+
+    run_id: int
     account_id: int
-    created_at: datetime
-    status: PlanStatus
+    status: SyncRunStatus
     contact_ids: tuple[int, ...]
     completed: tuple[int, ...] = ()
-    cancel_requested: bool = False
-    stopped: str | None = None
+    resumed_by: int | None = None
 
     @property
     def remaining(self) -> tuple[int, ...]:
@@ -258,113 +273,86 @@ class StoredPlan:
         return tuple(contact_id for contact_id in self.contact_ids if contact_id not in done)
 
 
-def plan_key(account_id: int, plan_id: str) -> str:
-    return f"linkedin.enrich.{account_id}.plan.{plan_id}"
-
-
-def create_plan(
-    session: Session, user: User, account_id: int, contact_ids: list[int], *, now: datetime
-) -> StoredPlan:
-    """Store a new running plan for ``contact_ids`` and return it."""
+def store_plan(session: Session, user: User, run_id: int, contact_ids: list[int]) -> StoredPlan:
+    """Give enrichment run ``run_id`` its plan: ``contact_ids``, in visiting order."""
     _require_writer(session)
     if len(set(contact_ids)) != len(contact_ids):
         raise ValueError("a contact may appear in an enrichment plan only once")
-    plan = StoredPlan(
-        plan_id=secrets.token_hex(8),
-        account_id=account_id,
-        created_at=now,
-        status="running",
-        contact_ids=tuple(contact_ids),
-    )
-    _store(session, user, plan)
-    return plan
+    run = _enrich_run(session, user, run_id)
+    if run.plan_json is not None:
+        raise ValueError(f"run {run_id} already has a plan; a plan is never re-planned")
+    run.plan_json = {"contact_ids": list(contact_ids), "completed": []}
+    return _plan_of(run)
 
 
-def load_plan(session: Session, user: User, account_id: int, plan_id: str) -> StoredPlan:
-    """The stored plan ``plan_id`` of ``account_id``; :class:`PlanNotFound` otherwise. Read-only."""
-    raw = get_setting(session, user, plan_key(account_id, plan_id))
-    if not isinstance(raw, dict):
-        raise PlanNotFound(f"no enrichment plan {plan_id!r} for this account")
+def load_plan(session: Session, user: User, run_id: int) -> StoredPlan:
+    """Run ``run_id``'s plan; :class:`PlanNotFound` when it has none. Read-only."""
     try:
-        status = raw["status"]
-        if status not in ("running", "aborted", "completed"):
-            raise ValueError(f"unknown status {status!r}")
-        stopped = raw.get("stopped")
-        return StoredPlan(
-            plan_id=str(raw["plan_id"]),
-            account_id=int(raw["account_id"]),
-            created_at=datetime.fromisoformat(str(raw["created_at"])),
-            status=status,
-            contact_ids=tuple(int(item) for item in raw["contact_ids"]),
-            completed=tuple(int(item) for item in raw["completed"]),
-            cancel_requested=bool(raw["cancel_requested"]),
-            stopped=None if stopped is None else str(stopped),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise PlanNotFound(f"enrichment plan {plan_id!r} is unreadable: {exc}") from exc
+        run = _enrich_run(session, user, run_id)
+    except runs.RunNotFound as exc:
+        raise PlanNotFound(f"no enrichment run {run_id}") from exc
+    if run.plan_json is None:
+        raise PlanNotFound(f"run {run_id} has no enrichment plan")
+    return _plan_of(run)
 
 
-def mark_completed(
-    session: Session, user: User, account_id: int, plan_id: str, contact_id: int
-) -> StoredPlan:
+def mark_completed(session: Session, user: User, run_id: int, contact_id: int) -> StoredPlan:
     """Record that the run finished with ``contact_id``, and unpin it.
 
     Call in the same transaction as the harvest's mapping, so a plan never
     says "done" about a contact whose harvest was not written, or the reverse.
     """
     _require_writer(session)
-    plan = load_plan(session, user, account_id, plan_id)
+    run = _enrich_run(session, user, run_id)
+    plan = _plan_of(run)
     if contact_id not in plan.contact_ids:
-        raise ValueError(f"contact {contact_id} is not in enrichment plan {plan_id!r}")
+        raise ValueError(f"contact {contact_id} is not in the plan of run {run_id}")
     if contact_id not in plan.completed:
-        plan = replace(plan, completed=(*plan.completed, contact_id))
-        _store(session, user, plan)
-    unpin(session, user, account_id, contact_id)
-    return plan
+        # A new dict, so the JSON column sees the change.
+        run.plan_json = {**(run.plan_json or {}), "completed": [*plan.completed, contact_id]}
+    unpin(session, user, run.linkedin_account_id, contact_id)
+    return _plan_of(run)
 
 
-def reopen(session: Session, user: User, account_id: int, plan_id: str) -> StoredPlan:
-    """Mark a stored plan running again for a resume, clearing any cancel request.
-
-    :class:`PlanFinished` when it completed: a resume of a finished plan would
-    visit nobody, and saying so beats a run that silently does nothing.
-    """
-    _require_writer(session)
-    plan = load_plan(session, user, account_id, plan_id)
-    if plan.status == "completed":
-        raise PlanFinished(f"enrichment plan {plan_id!r} completed; there is nothing to resume")
-    plan = replace(plan, status="running", cancel_requested=False, stopped=None)
-    _store(session, user, plan)
-    return plan
-
-
-def finish(
+def start_resume(
     session: Session,
     user: User,
-    account_id: int,
-    plan_id: str,
+    of_run_id: int,
     *,
-    status: PlanStatus,
-    stopped: str,
-) -> StoredPlan:
-    """Record how the run on ``plan_id`` ended."""
+    now: datetime,
+    max_visits: int | None = None,
+) -> SyncRun:
+    """Record a manual run that takes over what enrichment run ``of_run_id`` left (spec 9.9).
+
+    The new run's plan is the old plan's remaining contacts, in the old order:
+    never re-planned. :class:`PlanNotFound` when there is no such plan,
+    :class:`PlanFinished` when it completed, has nothing left, is still running,
+    or was already resumed. The refusals of
+    :func:`netkeeper.services.runs.create_run` apply as well.
+    """
     _require_writer(session)
-    plan = replace(load_plan(session, user, account_id, plan_id), status=status, stopped=stopped)
-    _store(session, user, plan)
-    return plan
-
-
-def request_cancel(session: Session, user: User, account_id: int, plan_id: str) -> StoredPlan:
-    """Ask the run on ``plan_id`` to stop at its next check (spec 9.9: cooperative)."""
-    _require_writer(session)
-    plan = replace(load_plan(session, user, account_id, plan_id), cancel_requested=True)
-    _store(session, user, plan)
-    return plan
-
-
-def cancel_requested(session: Session, user: User, account_id: int, plan_id: str) -> bool:
-    """Whether a person asked the run on ``plan_id`` to stop. Read-only."""
-    return load_plan(session, user, account_id, plan_id).cancel_requested
+    plan = load_plan(session, user, of_run_id)
+    if plan.status is SyncRunStatus.RUNNING:
+        raise PlanFinished(f"run {of_run_id} is still running; cancel it before resuming it")
+    if plan.status is SyncRunStatus.COMPLETED or not plan.remaining:
+        raise PlanFinished(f"run {of_run_id} completed its plan; there is nothing to resume")
+    if plan.resumed_by is not None:
+        raise PlanFinished(
+            f"run {of_run_id} was already resumed by run {plan.resumed_by}; resume that one"
+        )
+    new = runs.create_run(
+        session,
+        user,
+        SyncRunKind.ENRICH,
+        trigger=SyncRunTrigger.MANUAL,
+        now=now,
+        max_visits=max_visits,
+        resume_of_id=of_run_id,
+    )
+    new.plan_json = {"contact_ids": list(plan.remaining), "completed": []}
+    old = _enrich_run(session, user, of_run_id)
+    old.plan_json = {**(old.plan_json or {}), "resumed_by": new.id}
+    return new
 
 
 def targets_for(session: Session, user: User, plan: StoredPlan) -> list[tuple[int, str]]:
@@ -390,23 +378,29 @@ def targets_for(session: Session, user: User, plan: StoredPlan) -> list[tuple[in
     ]
 
 
-def _store(session: Session, user: User, plan: StoredPlan) -> None:
-    set_setting(
-        session,
-        user,
-        plan_key(plan.account_id, plan.plan_id),
-        {
-            "version": _PLAN_VERSION,
-            "plan_id": plan.plan_id,
-            "account_id": plan.account_id,
-            "created_at": plan.created_at.isoformat(),
-            "status": plan.status,
-            "contact_ids": list(plan.contact_ids),
-            "completed": list(plan.completed),
-            "cancel_requested": plan.cancel_requested,
-            "stopped": plan.stopped,
-        },
-    )
+def _enrich_run(session: Session, user: User, run_id: int) -> SyncRun:
+    run = runs.get_run(session, user, run_id)
+    if run.kind is not SyncRunKind.ENRICH:
+        raise ValueError(f"run {run_id} is a {run.kind.value} run, not an enrichment run")
+    return run
+
+
+def _plan_of(run: SyncRun) -> StoredPlan:
+    raw = run.plan_json
+    if not isinstance(raw, dict):
+        raise PlanNotFound(f"run {run.id} has no enrichment plan")
+    try:
+        resumed_by = raw.get("resumed_by")
+        return StoredPlan(
+            run_id=run.id,
+            account_id=run.linkedin_account_id,
+            status=run.status,
+            contact_ids=tuple(int(item) for item in raw["contact_ids"]),
+            completed=tuple(int(item) for item in raw["completed"]),
+            resumed_by=None if resumed_by is None else int(resumed_by),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PlanNotFound(f"the plan of run {run.id} is unreadable: {exc}") from exc
 
 
 def _require_writer(session: Session) -> None:

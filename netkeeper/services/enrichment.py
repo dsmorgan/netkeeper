@@ -16,11 +16,13 @@ logic, only what the job may do and what happens after it stops:
   Sunday), and heat's shrink (spec 9.7), applied in that order, the order
   ``netkeeper posture`` reports and ``netkeeper simulate`` replays
   (:func:`todays_visits`). What is left of that after today's spend, and of
-  the week's ceiling, is the run's visit budget. A plan is cut at it, so a pin
-  takes a place within the budget, never one on top of it.
-* **Between visits.** Before every profile the gate checks the plan's cancel
-  flag, the active window (spec 9.5: a run that outlasts the window stops at
-  its edge, between profiles), and spends one ``profile_visits`` unit through
+  the week's ceiling, is the run's visit budget, lowered to the run's own
+  ``max_visits`` when a person gave one (never raised by it). A plan is cut at
+  it, so a pin takes a place within the budget, never one on top of it.
+* **Between visits.** Before every profile the gate checks the run's cancel
+  flag (``sync_runs.cancel_requested_at``), the active window (spec 9.5: a run
+  that outlasts the window stops at its edge, between profiles), and spends
+  one ``profile_visits`` unit through
   :func:`netkeeper.services.budgets.consume`, each in its own short writer
   session, never partway through a profile. The wait between two profiles is
   sliced, and the cancel flag is read between slices (spec 9.9).
@@ -28,36 +30,36 @@ logic, only what the job may do and what happens after it stops:
   same transaction as the stored plan's record that the contact is done, so a
   resumed plan skips exactly what was written.
 * **The stopping response.** ``Throttled`` or ``Checkpoint`` raises heat;
-  ``Checkpoint`` or ``LoggedOut`` sets the session flag (spec 9.7). The plan is
-  marked ``completed`` when every target was visited and ``aborted`` otherwise,
-  and a run that ends by exception is marked ``aborted`` on the way out.
-* **Resume** (:func:`resume_enrichment`, spec 9.9) reopens a stored plan and
-  runs what it has left, in its order, against today's budget. It never
-  re-plans.
+  ``Checkpoint`` or ``LoggedOut`` sets the session flag (spec 9.7). The run is
+  recorded ``completed`` when every target was visited and ``aborted``
+  otherwise, with its counts; a refusal or an exception is recorded ``failed``
+  on the way out (:func:`netkeeper.services.runs.recording`).
+* **Resume** (:func:`resume_enrichment`, spec 9.9) records a new run whose plan
+  is what the old run left, in its order, and runs it against today's budget.
+  It never re-plans.
 
 The caller holds the account's browser activity lock (spec 9.9) for the length
 of the run and passes the source that reads through that browser run. Nothing
-here attaches to a browser, and nothing yet calls this: the scheduler and the
-runs API (P2-09, P2-10) wire it.
+here attaches to a browser: ``netkeeper.worker`` does, for the scheduler, the
+runs API, and ``netkeeper linkedin enrich``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, datetime, time
 from typing import Final
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings
 from netkeeper.crm import apply as mapping
 from netkeeper.db import session_scope
-from netkeeper.linkedin import heat as heat_math
 from netkeeper.linkedin import pacing
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.enrich import (
@@ -72,14 +74,21 @@ from netkeeper.linkedin.enrich import (
     StopReason,
     run_enrichment,
 )
-from netkeeper.models import User
-from netkeeper.services import budgets, enrich_plan
+from netkeeper.models import JsonValue, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
+from netkeeper.services import budgets, enrich_plan, runs
 from netkeeper.services import heat as heat_service
-from netkeeper.services.budgets import HARD_MAX_PER_DAY, ActionClass, BudgetExceeded
-from netkeeper.services.connections_sync import HeatSkipped, SessionFlagged
-from netkeeper.services.linkedin_accounts import ensure_account
-from netkeeper.services.linkedin_session import flag_session, session_flag
+from netkeeper.services.budgets import ActionClass, BudgetExceeded
+from netkeeper.services.linkedin_session import flag_session
 from netkeeper.services.pacing import profiles
+from netkeeper.services.runs import (
+    HeatSkipped,
+    SessionFlagged,
+    refuse_if_flagged_or_hot,
+    stop_reason_of,
+)
+from netkeeper.services.runs import recording as runs_recording
+from netkeeper.services.visit_budget import TodaysVisits as TodaysVisits
+from netkeeper.services.visit_budget import todays_visits as todays_visits
 
 log = logging.getLogger(__name__)
 
@@ -107,43 +116,40 @@ __all__ = [
 
 
 @dataclass(frozen=True, slots=True)
-class TodaysVisits:
-    """Today's profile-visit allowance, step by step (spec 9.5 then 9.7), and what is left.
-
-    ``ramp`` is the warm-up's figure for the day, ``after_weekend`` that damped,
-    ``after_heat`` that shrunk; ``spent_today`` and ``week_left`` come from the
-    counters. ``remaining`` is the run's visit budget.
-    """
-
-    ramp: int
-    after_weekend: int
-    after_heat: int
-    spent_today: int
-    week_left: int | None
-
-    @property
-    def remaining(self) -> int:
-        left = max(self.after_heat - self.spent_today, 0)
-        return left if self.week_left is None else min(left, self.week_left)
-
-
-@dataclass(frozen=True, slots=True)
 class EnrichRunReport:
-    """What one run did: the plan it ran, the job's result, the mapping's counts.
+    """What one run did: its run row, the job's result, the mapping's counts.
 
     ``skipped`` counts planned contacts that could no longer be visited when the
     run started (merged away, archived, disconnected: a resume never re-plans,
-    so they are simply left out).
+    so they are simply left out). ``visit_budget`` is what the run was allowed:
+    today's remaining visits, lowered to the run's ``max_visits`` when it has one.
     """
 
     account_id: int
-    plan_id: str
+    run_id: int
     visits: TodaysVisits
     result: EnrichResult
     harvests: mapping.HarvestCounts
+    visit_budget: int = 0
     skipped: int = 0
     heat_raised: bool = False
     session_flagged: bool = False
+
+    def counts(self) -> dict[str, JsonValue]:
+        """The run's ``counts_json``: numbers and reason words only."""
+        return {
+            "planned": self.result.planned,
+            "visits": self.result.visits,
+            "completed": len(self.result.completed),
+            "not_found": self.result.not_found,
+            "unreadable": self.result.unreadable,
+            "skipped": self.skipped,
+            "visit_budget": self.visit_budget,
+            "harvests": dataclasses.asdict(self.harvests),
+            "outcome": None if self.result.outcome is None else self.result.outcome.value,
+            "heat_raised": self.heat_raised,
+            "session_flagged": self.session_flagged,
+        }
 
 
 def _utcnow() -> datetime:
@@ -155,57 +161,6 @@ def _load_user(session: Session, user_id: int) -> User:
     if user is None:
         raise ValueError(f"no user {user_id}")
     return user
-
-
-def todays_visits(
-    session: Session,
-    user: User,
-    account_id: int,
-    *,
-    now: datetime,
-    settings: LinkedInSettings,
-    multiplier: float,
-) -> TodaysVisits:
-    """Today's ramped, weekend-damped, heat-shrunk profile visits (spec 9.5, 9.7). Read-only.
-
-    Day 0 of the ramp is the day the user row was created (first start), in the
-    account's zone, as ``netkeeper posture`` counts it. The cap is the
-    configured daily budget clamped to spec 9.6's hard maximum.
-    """
-    zone = ZoneInfo(settings.timezone)
-    local_now = pacing.local_time_of(now, zone)
-    cap = min(settings.budget.profile_visits_per_day, HARD_MAX_PER_DAY[ActionClass.PROFILE_VISITS])
-    ramp = pacing.warmup_budget(
-        _days_since_install(user, local_now.date(), zone),
-        cap,
-        start=settings.budget.warmup_start,
-        step=settings.budget.warmup_step,
-    )
-    after_weekend = pacing.apply_weekend_multiplier(
-        ramp, local_now.date(), multiplier=settings.weekend_multiplier
-    )
-    after_heat = (
-        heat_math.shrink(after_weekend, max(multiplier, heat_math.COOLDOWN_FLOOR))
-        if after_weekend >= 1
-        else after_weekend
-    )
-    status = budgets.status(
-        session, user, account_id, ActionClass.PROFILE_VISITS, now=now, settings=settings.budget
-    )
-    return TodaysVisits(
-        ramp=ramp,
-        after_weekend=after_weekend,
-        after_heat=after_heat,
-        spent_today=status.day.count,
-        week_left=None if status.week is None else status.week.remaining,
-    )
-
-
-def _days_since_install(user: User, today: date, zone: ZoneInfo) -> int:
-    created = user.created_at
-    if created.tzinfo is None or created.utcoffset() is None:
-        created = created.replace(tzinfo=UTC)
-    return max((today - created.astimezone(zone).date()).days, 0)
 
 
 def _active_window(settings: LinkedInSettings) -> tuple[time, time]:
@@ -222,7 +177,7 @@ class _Gate:
     factory: sessionmaker[Session]
     user_id: int
     account_id: int
-    plan_id: str
+    run_id: int
     settings: LinkedInSettings
     window: tuple[time, time]
     clock: Clock
@@ -231,7 +186,7 @@ class _Gate:
     def _cancelled(self) -> bool:
         with session_scope(self.factory) as session:
             user = _load_user(session, self.user_id)
-            return enrich_plan.cancel_requested(session, user, self.account_id, self.plan_id)
+            return runs.cancel_requested(session, user, self.run_id)
 
     async def before_visit(self, number: int) -> StopReason | None:
         if self._cancelled():
@@ -276,188 +231,201 @@ async def enrich_contacts(
     source: ProfileSource,
     *,
     settings: LinkedInSettings,
+    run_id: int | None = None,
     on_progress: ProgressSink | None = None,
     clock: Clock = _utcnow,
     sleep: Sleep = asyncio.sleep,
     rng: random.Random | None = None,
 ) -> EnrichRunReport:
-    """Plan today's enrichment for ``user_id`` (spec 9.6), store the plan, and run it.
+    """Run enrichment run ``run_id`` for ``user_id`` and record how it ended on the run.
+
+    ``run_id`` is a ``running`` enrichment run (``services.runs.create_run``,
+    or ``enrich_plan.start_resume`` for a resume); ``None`` records a new
+    manual one first. A run with no plan yet is planned now (spec 9.6) and the
+    plan stored on it; a resume's plan is already there and is run as it
+    stands, never re-planned (spec 9.9).
 
     ``SessionFlagged`` while the session flag is set, and ``HeatSkipped`` when
     heat is at or above its skip threshold; either way nothing is planned,
-    fetched, or spent. Every other stop is an :class:`EnrichRunReport`, whose
-    ``plan_id`` a resume names.
+    fetched, or spent, and the run is recorded ``failed`` with that reason.
+    Every other stop is an :class:`EnrichRunReport`, recorded ``completed``
+    (the whole plan visited) or ``aborted``. A run that ends by exception is
+    recorded ``failed`` (``aborted``, "interrupted", when it was cancelled from
+    outside) and the exception propagates.
     """
-    return await _run(
-        factory,
-        user_id,
-        source,
-        plan_id=None,
-        settings=settings,
-        on_progress=on_progress,
-        clock=clock,
-        sleep=sleep,
-        rng=rng,
-    )
-
-
-async def resume_enrichment(
-    factory: sessionmaker[Session],
-    user_id: int,
-    plan_id: str,
-    source: ProfileSource,
-    *,
-    settings: LinkedInSettings,
-    on_progress: ProgressSink | None = None,
-    clock: Clock = _utcnow,
-    sleep: Sleep = asyncio.sleep,
-    rng: random.Random | None = None,
-) -> EnrichRunReport:
-    """Run what a stored plan has left, in its order, within today's budget (spec 9.9).
-
-    Skips every contact the plan completed and never re-plans; a cancel
-    request on the plan is cleared, since resuming is the person saying go on.
-    :class:`~netkeeper.services.enrich_plan.PlanNotFound` for an unknown plan,
-    :class:`~netkeeper.services.enrich_plan.PlanFinished` for a completed one,
-    and the same refusals as :func:`enrich_contacts` before either is touched.
-    """
-    return await _run(
-        factory,
-        user_id,
-        source,
-        plan_id=plan_id,
-        settings=settings,
-        on_progress=on_progress,
-        clock=clock,
-        sleep=sleep,
-        rng=rng,
-    )
-
-
-async def _run(
-    factory: sessionmaker[Session],
-    user_id: int,
-    source: ProfileSource,
-    *,
-    plan_id: str | None,
-    settings: LinkedInSettings,
-    on_progress: ProgressSink | None,
-    clock: Clock,
-    sleep: Sleep,
-    rng: random.Random | None,
-) -> EnrichRunReport:
     window = _active_window(settings)
     with session_scope(factory, write=True) as session:
         user = _load_user(session, user_id)
-        account_id = ensure_account(session, user).id
         now = clock()
-        flagged_by = session_flag(session, user)
-        if flagged_by is not None:
-            raise SessionFlagged(
-                f"the LinkedIn session is flagged ({flagged_by.outcome.value}); not enriching"
-                " until it is cleared"
-            )
-        if heat_service.should_skip(session, user, account_id, now=now, settings=settings.heat):
-            raise HeatSkipped(f"heat is at or above {settings.heat.skip_threshold}; not enriching")
-        multiplier = heat_service.cooldown_multiplier(
-            session, user, account_id, now=now, settings=settings.heat
-        )
-        visits = todays_visits(
-            session, user, account_id, now=now, settings=settings, multiplier=multiplier
-        )
-        if plan_id is None:
-            chosen = enrich_plan.prioritize(
-                session,
-                user,
-                account_id,
-                now=now,
-                limit=visits.remaining,
-                stale_days=settings.enrich_stale_days,
-            )
-            plan = enrich_plan.create_plan(
-                session, user, account_id, [contact_id for contact_id, _ in chosen], now=now
-            )
-        else:
-            plan = enrich_plan.reopen(session, user, account_id, plan_id)
-            chosen = enrich_plan.targets_for(session, user, plan)
-        skipped = len(plan.remaining) - len(chosen)
+        if run_id is None:
+            run_id = runs.create_run(
+                session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=now
+            ).id
+        run = runs.get_run(session, user, run_id)
+        if run.kind is not SyncRunKind.ENRICH:
+            raise ValueError(f"run {run_id} is a {run.kind.value} run, not an enrichment run")
+        account_id = run.linkedin_account_id
+        max_visits = run.max_visits
+        planned_already = run.plan_json is not None
 
-    configured = profiles(settings.pacing)
-    spec = EnrichJobSpec(
-        targets=tuple(EnrichTarget(contact_id, slug) for contact_id, slug in chosen),
-        visit_budget=visits.remaining,
-        pacing=PacingProfile(delay=configured.delay, burst=configured.burst),
-        heat_multiplier=multiplier,
-    )
-    gate = _Gate(
-        factory=factory,
-        user_id=user_id,
-        account_id=account_id,
-        plan_id=plan.plan_id,
-        settings=settings,
-        window=window,
-        clock=clock,
-        sleep=sleep,
-    )
-    counts = mapping.HarvestCounts()
-
-    async def on_harvest(harvest: ProfileHarvest) -> None:
+    with runs_recording(factory, user_id, run_id, clock=clock):
         with session_scope(factory, write=True) as session:
             user = _load_user(session, user_id)
-            mapping.apply_harvest(session, user, harvest, counts)
-            enrich_plan.mark_completed(session, user, account_id, plan.plan_id, harvest.contact_ref)
+            now = clock()
+            refuse_if_flagged_or_hot(session, user, account_id, now=now, settings=settings)
+            multiplier = heat_service.cooldown_multiplier(
+                session, user, account_id, now=now, settings=settings.heat
+            )
+            visits = todays_visits(
+                session, user, account_id, now=now, settings=settings, multiplier=multiplier
+            )
+            # A run's own cap only ever lowers the day's budget, never raises it.
+            visit_budget = (
+                visits.remaining if max_visits is None else min(visits.remaining, max_visits)
+            )
+            if not planned_already:
+                chosen = enrich_plan.prioritize(
+                    session,
+                    user,
+                    account_id,
+                    now=now,
+                    limit=visit_budget,
+                    stale_days=settings.enrich_stale_days,
+                )
+                plan = enrich_plan.store_plan(
+                    session, user, run_id, [contact_id for contact_id, _ in chosen]
+                )
+            else:
+                plan = enrich_plan.load_plan(session, user, run_id)
+                chosen = enrich_plan.targets_for(session, user, plan)
+            skipped = len(plan.remaining) - len(chosen)
 
-    async def no_progress(event: ProgressEvent) -> None:
-        return None
+        configured = profiles(settings.pacing)
+        spec = EnrichJobSpec(
+            targets=tuple(EnrichTarget(contact_id, slug) for contact_id, slug in chosen),
+            visit_budget=visit_budget,
+            pacing=PacingProfile(delay=configured.delay, burst=configured.burst),
+            heat_multiplier=multiplier,
+        )
+        gate = _Gate(
+            factory=factory,
+            user_id=user_id,
+            account_id=account_id,
+            run_id=run_id,
+            settings=settings,
+            window=window,
+            clock=clock,
+            sleep=sleep,
+        )
+        counts = mapping.HarvestCounts()
 
-    finished = False
-    try:
+        async def on_harvest(harvest: ProfileHarvest) -> None:
+            with session_scope(factory, write=True) as session:
+                user = _load_user(session, user_id)
+                mapping.apply_harvest(session, user, harvest, counts)
+                enrich_plan.mark_completed(session, user, run_id, harvest.contact_ref)
+
+        async def progress(event: ProgressEvent) -> None:
+            with session_scope(factory, write=True) as session:
+                runs.record_progress(
+                    session,
+                    _load_user(session, user_id),
+                    run_id,
+                    {
+                        "planned": event.planned,
+                        "visited": event.visited,
+                        "harvested": event.harvested,
+                        "not_found": event.not_found,
+                        "unreadable": event.unreadable,
+                        "stopped": None if event.stopped is None else event.stopped.value,
+                    },
+                )
+            if on_progress is not None:
+                await on_progress(event)
+
         result = await run_enrichment(
             spec,
             source,
             gate,
             on_harvest=on_harvest,
             rng=rng if rng is not None else random.Random(),  # noqa: S311 -- pacing, not crypto
-            on_progress=on_progress if on_progress is not None else no_progress,
+            on_progress=progress,
             clock=clock,
             sleep=sleep,
         )
-        finished = True
-    finally:
-        if not finished:
-            with session_scope(factory, write=True) as session:
-                user = _load_user(session, user_id)
-                enrich_plan.finish(
-                    session, user, account_id, plan.plan_id, status="aborted", stopped="error"
-                )
 
-    heat_raised = flagged = False
+        heat_raised = flagged = False
+        with session_scope(factory, write=True) as session:
+            user = _load_user(session, user_id)
+            if result.reason is StopReason.RESPONSE and result.outcome is not None:
+                if result.outcome in _HEAT_OUTCOMES:
+                    heat_service.raise_heat(
+                        session, user, account_id, now=clock(), settings=settings.heat
+                    )
+                    heat_raised = True
+                if result.outcome in _FLAG_OUTCOMES:
+                    flag_session(session, user, result.outcome, url=result.final_url or "")
+                    flagged = True
+            report = EnrichRunReport(
+                account_id=account_id,
+                run_id=run_id,
+                visits=visits,
+                result=result,
+                harvests=counts,
+                visit_budget=visit_budget,
+                skipped=skipped,
+                heat_raised=heat_raised,
+                session_flagged=flagged,
+            )
+            runs.finish_run(
+                session,
+                user,
+                run_id,
+                status=(
+                    SyncRunStatus.COMPLETED
+                    if result.reason is StopReason.END_OF_PLAN
+                    else SyncRunStatus.ABORTED
+                ),
+                now=clock(),
+                stop_reason=stop_reason_of(result.reason.value, result.outcome),
+                counts=report.counts(),
+            )
+    return report
+
+
+async def resume_enrichment(
+    factory: sessionmaker[Session],
+    user_id: int,
+    of_run_id: int,
+    source: ProfileSource,
+    *,
+    settings: LinkedInSettings,
+    max_visits: int | None = None,
+    on_progress: ProgressSink | None = None,
+    clock: Clock = _utcnow,
+    sleep: Sleep = asyncio.sleep,
+    rng: random.Random | None = None,
+) -> EnrichRunReport:
+    """Record a resume of run ``of_run_id`` (spec 9.9) and run it within today's budget.
+
+    Skips every contact the old run completed and never re-plans.
+    :class:`~netkeeper.services.enrich_plan.PlanNotFound` for an unknown run,
+    :class:`~netkeeper.services.enrich_plan.PlanFinished` for one with nothing
+    left to resume, and the same refusals as :func:`enrich_contacts` after that.
+    """
     with session_scope(factory, write=True) as session:
         user = _load_user(session, user_id)
-        if result.reason is StopReason.RESPONSE and result.outcome is not None:
-            if result.outcome in _HEAT_OUTCOMES:
-                heat_service.raise_heat(
-                    session, user, account_id, now=clock(), settings=settings.heat
-                )
-                heat_raised = True
-            if result.outcome in _FLAG_OUTCOMES:
-                flag_session(session, user, result.outcome, url=result.final_url or "")
-                flagged = True
-        enrich_plan.finish(
-            session,
-            user,
-            account_id,
-            plan.plan_id,
-            status="completed" if result.reason is StopReason.END_OF_PLAN else "aborted",
-            stopped=result.reason.value,
-        )
-    return EnrichRunReport(
-        account_id=account_id,
-        plan_id=plan.plan_id,
-        visits=visits,
-        result=result,
-        harvests=counts,
-        skipped=skipped,
-        heat_raised=heat_raised,
-        session_flagged=flagged,
+        run_id = enrich_plan.start_resume(
+            session, user, of_run_id, now=clock(), max_visits=max_visits
+        ).id
+    return await enrich_contacts(
+        factory,
+        user_id,
+        source,
+        settings=settings,
+        run_id=run_id,
+        on_progress=on_progress,
+        clock=clock,
+        sleep=sleep,
+        rng=rng,
     )

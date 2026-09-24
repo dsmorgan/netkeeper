@@ -41,6 +41,9 @@ from netkeeper.models import (
     MetSource,
     PhoneKind,
     RuleField,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunTrigger,
     TagKind,
     TagMetSignal,
     TagSource,
@@ -1563,3 +1566,155 @@ class TriageSuggestionApplyOut(BaseModel):
     batch_id: str
     met: ContactMet
     progress: TriageProgressOut
+
+
+# --- LinkedIn runs, budget, heat, pins, schedule (P2-10) -------------------------
+
+
+class RunStartIn(BaseModel):
+    """Start a run by hand. ``max_visits`` (enrichment only) only ever lowers today's budget."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: SyncRunKind
+    max_visits: int | None = Field(default=None, ge=1)
+
+
+class RunResumeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_visits: int | None = Field(default=None, ge=1)
+
+
+class RunAccepted(BaseModel):
+    """The ``202`` of a start or a resume: the recorded run, and the task running it."""
+
+    run_id: int
+    task_id: str
+
+
+class RunOut(BaseModel):
+    """One run: what it is, how far it got, and how it ended. Counts only, never names.
+
+    ``planned``/``completed`` are an enrichment plan's size and progress.
+    ``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.
+    """
+
+    id: int
+    kind: SyncRunKind
+    status: SyncRunStatus
+    trigger: SyncRunTrigger
+    started_at: datetime
+    completed_at: datetime | None
+    stop_reason: str | None
+    cancel_requested_at: datetime | None
+    max_visits: int | None
+    resume_of_id: int | None
+    browser_mode: str
+    progress: dict[str, Any] | None
+    counts: dict[str, Any] | None
+    notes: str | None
+    error: str | None
+    planned: int | None
+    completed: int | None
+    aging_refused: str | None
+
+
+class RunPage(BaseModel):
+    items: list[RunOut]
+    total: int
+
+
+class PeriodBudgetOut(BaseModel):
+    count: int
+    limit: int
+    remaining: int
+
+
+class BudgetOut(BaseModel):
+    """One action class's counters against its limits (spec 9.6)."""
+
+    action: str
+    day: PeriodBudgetOut
+    week: PeriodBudgetOut | None
+
+
+class TodaysVisitsOut(BaseModel):
+    """Today's profile visits, step by step: warm-up, weekend, heat; then what is left."""
+
+    ramp: int
+    after_weekend: int
+    after_heat: int
+    spent_today: int
+    week_left: int | None
+    remaining: int
+
+
+class BudgetStatusOut(BaseModel):
+    budgets: list[BudgetOut]
+    profile_visits_today: TodaysVisitsOut
+
+
+class HeatOut(BaseModel):
+    """Heat as spec 9.7 says the page shows it: level, last raised, when runs resume."""
+
+    score: float
+    threshold: float
+    multiplier: float
+    tripped: bool
+    last_raised_at: datetime | None
+    cleared_at: datetime | None
+    resumes_at: datetime | None
+
+
+class PinIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contact_id: int
+
+
+class PinOut(BaseModel):
+    """A pinned contact (spec 9.6: at most 5, to the front of the next run)."""
+
+    contact_id: int
+    first_name: str | None
+    last_name: str | None
+
+
+class ScheduledJobOut(BaseModel):
+    kind: str
+    interval_hours: float
+    next_due: datetime | None
+
+
+class ScheduleOut(BaseModel):
+    """Whether scheduled runs may fire, and when each kind is next due.
+
+    ``armed`` is false on every install until a person arms it; while false the
+    scheduler still keeps due times, and no scheduled LinkedIn job fires.
+    ``scheduler_running`` is whether this process runs a scheduler at all.
+    """
+
+    armed: bool
+    armed_at: datetime | None
+    scheduler_running: bool
+    jobs: list[ScheduledJobOut]
+
+
+class ScheduleArmIn(BaseModel):
+    """Arming needs ``confirm: true``: it lets netkeeper visit LinkedIn on its own."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: bool
+
+
+class LinkedInStatusOut(BaseModel):
+    """The LinkedIn page's banner: the session flag, heat, arming, and any running run."""
+
+    session_flag: str | None
+    session_flagged_at: datetime | None
+    heat_tripped: bool
+    armed: bool
+    running_run_id: int | None
+    can_start_runs: bool

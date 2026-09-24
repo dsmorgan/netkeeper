@@ -515,7 +515,8 @@ def test_preflight_with_a_checkpoint_flag_never_opens_a_writer(
 
     assert result.exit_code == 0, result.output
     assert "leaving the checkpoint session flag in place" in result.output
-    assert writes == [False], f"a checkpoint report must only ever read, got write={writes}"
+    # Two reads: the browser lock's account key (#169 F), then the flag itself.
+    assert writes == [False, False], f"a checkpoint report must only ever read, got {writes}"
 
 
 def test_preflight_re_checks_the_flag_before_clearing_it(

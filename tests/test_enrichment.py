@@ -41,9 +41,9 @@ from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.enrich import StopReason
 from netkeeper.linkedin.pacing import plan_enrichment
-from netkeeper.models import Contact, ContactMet, User
-from netkeeper.scoping import get_scoped, scoped
-from netkeeper.services import budgets, enrich_plan
+from netkeeper.models import Contact, ContactMet, SyncRun, SyncRunKind, SyncRunTrigger, User
+from netkeeper.scoping import get_scoped
+from netkeeper.services import budgets, enrich_plan, runs
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass
 from netkeeper.services.enrichment import (
@@ -131,7 +131,7 @@ async def _enrich(
     settings: LinkedInSettings = SMALL,
     clock: Callable[[], datetime] | None = None,
     sleeps: Sleeps | None = None,
-    plan_id: str | None = None,
+    resume_of: int | None = None,
 ) -> EnrichRunReport:
     kwargs = {
         "settings": settings,
@@ -139,9 +139,9 @@ async def _enrich(
         "sleep": sleeps or Sleeps(),
         "rng": random.Random(SEED),
     }
-    if plan_id is None:
+    if resume_of is None:
         return await enrich_contacts(factory, user_id, browser.source(), **kwargs)  # type: ignore[arg-type]
-    return await resume_enrichment(factory, user_id, plan_id, browser.source(), **kwargs)  # type: ignore[arg-type]
+    return await resume_enrichment(factory, user_id, resume_of, browser.source(), **kwargs)  # type: ignore[arg-type]
 
 
 def _read[T](factory: sessionmaker[Session], user_id: int, read: Callable[[Session, User], T]) -> T:
@@ -178,8 +178,24 @@ def _plan(factory: sessionmaker[Session], user_id: int, report: EnrichRunReport)
     return _read(
         factory,
         user_id,
-        lambda s, u: enrich_plan.load_plan(s, u, report.account_id, report.plan_id),
+        lambda s, u: enrich_plan.load_plan(s, u, report.run_id),
     )
+
+
+def _last_run(factory: sessionmaker[Session], user_id: int) -> SyncRun:
+    """The newest enrichment run, detached: how a run that raised is looked at."""
+
+    def read(session: Session, user: User) -> SyncRun:
+        run = runs.latest_run(session, user, SyncRunKind.ENRICH)
+        assert run is not None
+        session.expunge(run)
+        return run
+
+    return _read(factory, user_id, read)
+
+
+def _stop_reason(factory: sessionmaker[Session], user_id: int, run_id: int) -> str | None:
+    return _read(factory, user_id, lambda s, u: runs.get_run(s, u, run_id).stop_reason)
 
 
 # --- done when: a run visits in order and writes what it harvested ---------------------------
@@ -518,23 +534,11 @@ def _cancel_after(
         with session_scope(factory, write=True) as session:
             user = session.get(User, user_id)
             assert user is not None
-            account = ensure_account(session, user).id
-            prefix = enrich_plan.plan_key(account, "")
-            running = [
-                key.removeprefix(prefix)
-                for key in _plan_keys(session, user)
-                if key.startswith(prefix)
-            ]
-            (plan_id,) = running
-            enrich_plan.request_cancel(session, user, account, plan_id)
+            running = runs.running_run(session, user, ensure_account(session, user).id)
+            assert running is not None
+            runs.request_cancel(session, user, running.id, now=NOW)
 
     return on_event
-
-
-def _plan_keys(session: Session, user: User) -> list[str]:
-    from netkeeper.models import SettingKV
-
-    return [row.key for row in session.scalars(scoped(user, SettingKV))]
 
 
 async def test_cancel_stops_between_profiles_and_keeps_what_completed(
@@ -555,7 +559,8 @@ async def test_cancel_stops_between_profiles_and_keeps_what_completed(
     assert sum(sleeps.waits[:-1]) == pytest.approx((steps[0].delay_after_s or 0.0) + gaps)
     assert sleeps.waits[-1] == min(CANCEL_SLICE_S, steps[1].delay_after_s or 0.0)
     plan = _plan(session_factory, user_id, report)
-    assert (plan.status, plan.stopped) == ("aborted", "cancelled")
+    assert plan.status == "aborted"
+    assert _stop_reason(session_factory, user_id, report.run_id) == "cancelled"
     assert plan.completed == (ids[101], ids[102])
     assert _contact(session_factory, user_id, ids[102]).headline == PROFILES[1].headline
     assert _spent(session_factory, user_id) == 2
@@ -592,18 +597,20 @@ async def test_resume_skips_what_completed_and_never_re_plans(
         session_factory,
         user_id,
         browser,
-        plan_id=first.plan_id,
+        resume_of=first.run_id,
         clock=Clock(NOW + timedelta(hours=1)),
     )
 
     assert browser.visited() == [p.slug for p in people[2:]]
-    assert second.plan_id == first.plan_id
+    assert second.run_id != first.run_id
     assert second.result.reason is StopReason.END_OF_PLAN
     plan = _plan(session_factory, user_id, second)
     assert plan.status == "completed"
-    assert plan.completed == tuple(ids[p.n] for p in people)
+    assert plan.contact_ids == plan.completed == tuple(ids[p.n] for p in people[2:])
     with pytest.raises(enrich_plan.PlanFinished):
-        await _enrich(session_factory, user_id, browser, plan_id=first.plan_id)
+        await _enrich(session_factory, user_id, browser, resume_of=first.run_id)
+    with pytest.raises(enrich_plan.PlanFinished):
+        await _enrich(session_factory, user_id, browser, resume_of=second.run_id)
 
 
 async def test_a_resume_spends_only_todays_budget_and_can_be_resumed_again(
@@ -631,7 +638,9 @@ async def test_a_resume_spends_only_todays_budget_and_can_be_resumed_again(
             )
     browser = FakeBrowser.of(people)
 
-    second = await _enrich(session_factory, user_id, browser, plan_id=first.plan_id, clock=tomorrow)
+    second = await _enrich(
+        session_factory, user_id, browser, resume_of=first.run_id, clock=tomorrow
+    )
 
     assert browser.visited() == [p.slug for p in people[1:4]]
     assert second.result.reason is StopReason.VISIT_BUDGET
@@ -641,7 +650,7 @@ async def test_a_resume_spends_only_todays_budget_and_can_be_resumed_again(
         session_factory,
         user_id,
         third_browser,
-        plan_id=first.plan_id,
+        resume_of=second.run_id,
         clock=Clock(NOW + timedelta(days=2)),
     )
     assert third_browser.visited() == [p.slug for p in people[4:]]
@@ -663,24 +672,20 @@ async def test_a_run_that_dies_is_marked_aborted_and_resumes_where_it_stopped(
     with pytest.raises(RuntimeError, match="went away"):
         await _enrich(session_factory, user_id, browser)
 
-    with session_scope(session_factory) as session:
-        user = session.get(User, user_id)
-        assert user is not None
-        account = ensure_account(session, user).id
-        (key,) = [k for k in _plan_keys(session, user) if ".plan." in k]
-        plan_id = key.rsplit(".", 1)[1]
-        plan = enrich_plan.load_plan(session, user, account, plan_id)
-    assert (plan.status, plan.stopped, len(plan.completed)) == ("aborted", "error", 2)
+    died = _last_run(session_factory, user_id)
+    plan = _read(session_factory, user_id, lambda s, u: enrich_plan.load_plan(s, u, died.id))
+    assert (plan.status, died.stop_reason, len(plan.completed)) == ("failed", "error", 2)
+    assert died.error == "RuntimeError: the browser went away"
 
     again = FakeBrowser.of(people)
-    await _enrich(session_factory, user_id, again, plan_id=plan_id)
+    await _enrich(session_factory, user_id, again, resume_of=died.id)
     assert again.visited() == [p.slug for p in people[2:]]
 
 
 async def test_resuming_an_unknown_plan_is_refused(session_factory: sessionmaker[Session]) -> None:
     user_id, _ = _setup(session_factory, _people(1))
     with pytest.raises(enrich_plan.PlanNotFound):
-        await _enrich(session_factory, user_id, FakeBrowser.of([]), plan_id="nope")
+        await _enrich(session_factory, user_id, FakeBrowser.of([]), resume_of=9999)
 
 
 async def test_a_resume_leaves_out_who_can_no_longer_be_visited(
@@ -701,7 +706,7 @@ async def test_a_resume_leaves_out_who_can_no_longer_be_visited(
         archived.archived_at = NOW
     browser = FakeBrowser.of(people)
 
-    second = await _enrich(session_factory, user_id, browser, plan_id=first.plan_id)
+    second = await _enrich(session_factory, user_id, browser, resume_of=first.run_id)
 
     assert browser.visited() == [people[1].slug, people[3].slug]
     assert second.skipped == 1
@@ -757,13 +762,15 @@ async def test_the_gate_checks_the_cancel_flag_before_a_visit_as_well(
         user = session.get(User, user_id)
         assert user is not None
         account = ensure_account(session, user).id
-        plan = enrich_plan.create_plan(session, user, account, [], now=NOW)
-        enrich_plan.request_cancel(session, user, account, plan.plan_id)
+        run = runs.create_run(
+            session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW
+        )
+        runs.request_cancel(session, user, run.id, now=NOW)
     gate = _Gate(
         factory=session_factory,
         user_id=user_id,
         account_id=account,
-        plan_id=plan.plan_id,
+        run_id=run.id,
         settings=SMALL,
         window=(time(8, 30), time(21, 30)),
         clock=Clock(),
@@ -792,15 +799,15 @@ async def test_a_broken_fetch_aborts_the_plan_and_says_nothing_about_the_session
     with pytest.raises(VoyagerFetchError):
         await _enrich(session_factory, user_id, browser)
 
+    died = _last_run(session_factory, user_id)
     with session_scope(session_factory) as session:
         user = session.get(User, user_id)
         assert user is not None
         account = ensure_account(session, user).id
-        (key,) = [k for k in _plan_keys(session, user) if ".plan." in k]
-        plan = enrich_plan.load_plan(session, user, account, key.rsplit(".", 1)[1])
+        plan = enrich_plan.load_plan(session, user, died.id)
         assert session_flag(session, user) is None
         assert heat_service.state(session, user, account) is None
-    assert (plan.status, plan.stopped, len(plan.completed)) == ("aborted", "error", 2)
+    assert (plan.status, died.stop_reason, len(plan.completed)) == ("failed", "error", 2)
 
 
 # --- #171 review --------------------------------------------------------------------------------
@@ -912,10 +919,95 @@ async def test_a_harvest_that_fails_to_write_is_not_marked_done(
     with pytest.raises(RuntimeError, match="harvest could not"):
         await _enrich(session_factory, user_id, FakeBrowser.of(people))
 
-    with session_scope(session_factory) as session:
+    died = _last_run(session_factory, user_id)
+    plan = _read(session_factory, user_id, lambda s, u: enrich_plan.load_plan(s, u, died.id))
+    assert (plan.completed, plan.status) == ((), "failed")
+
+
+# --- P2-10: a run's own cap, and what the run row records --------------------------------------
+
+
+async def _enrich_capped(
+    factory: sessionmaker[Session], user_id: int, browser: FakeBrowser, max_visits: int
+) -> EnrichRunReport:
+    with session_scope(factory, write=True) as session:
         user = session.get(User, user_id)
         assert user is not None
-        account = ensure_account(session, user).id
-        (key,) = [k for k in _plan_keys(session, user) if ".plan." in k]
-        plan = enrich_plan.load_plan(session, user, account, key.rsplit(".", 1)[1])
-    assert (plan.completed, plan.status) == ((), "aborted")
+        run_id = runs.create_run(
+            session,
+            user,
+            SyncRunKind.ENRICH,
+            trigger=SyncRunTrigger.MANUAL,
+            now=NOW,
+            max_visits=max_visits,
+        ).id
+    return await enrich_contacts(
+        factory,
+        user_id,
+        browser.source(),
+        settings=SMALL,
+        run_id=run_id,
+        clock=Clock(),
+        sleep=Sleeps(),
+        rng=random.Random(SEED),
+    )
+
+
+async def test_max_visits_lowers_the_budget(session_factory: sessionmaker[Session]) -> None:
+    """CP4's supervised first enrichment: `--max-visits 5` visits at most five."""
+    people = _people(12)
+    user_id, _ = _setup(session_factory, people)
+    browser = FakeBrowser.of(people)
+
+    report = await _enrich_capped(session_factory, user_id, browser, max_visits=3)
+
+    assert report.visit_budget == 3 and report.visits.remaining == 10
+    assert browser.visited() == [p.slug for p in people[:3]]
+    assert _spent(session_factory, user_id) == 3
+    plan = _plan(session_factory, user_id, report)
+    assert len(plan.contact_ids) == 3  # the plan itself is cut at the cap
+
+
+async def test_max_visits_never_raises_the_budget(session_factory: sessionmaker[Session]) -> None:
+    people = _people(12)
+    user_id, _ = _setup(session_factory, people)
+    browser = FakeBrowser.of(people)
+
+    report = await _enrich_capped(session_factory, user_id, browser, max_visits=50)
+
+    assert report.visit_budget == report.visits.remaining == 10
+    assert len(browser.visited()) == 10 == _spent(session_factory, user_id)
+
+
+async def test_the_run_row_records_how_the_run_ended(
+    session_factory: sessionmaker[Session],
+) -> None:
+    people = _people(3)
+    user_id, _ = _setup(session_factory, people)
+
+    report = await _enrich(session_factory, user_id, FakeBrowser.of(people))
+
+    run = _read(session_factory, user_id, lambda s, u: runs.get_run(s, u, report.run_id))
+    assert (run.status, run.stop_reason, run.trigger) == ("completed", "end_of_plan", "manual")
+    assert run.counts_json is not None
+    assert run.counts_json["harvests"]["applied"] == 3 and run.counts_json["visits"] == 3
+    assert run.progress_json is not None and run.progress_json["visited"] == 3
+    assert run.completed_at == NOW
+
+
+async def test_a_refused_run_is_recorded_failed_with_its_reason(
+    session_factory: sessionmaker[Session],
+) -> None:
+    user_id, _ = _setup(session_factory, _people(2))
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        flag_session(session, user, Outcome.CHECKPOINT, url="/checkpoint/challenge")
+    browser = FakeBrowser.of(_people(2))
+
+    with pytest.raises(SessionFlagged):
+        await _enrich(session_factory, user_id, browser)
+
+    run = _last_run(session_factory, user_id)
+    assert (run.status, run.stop_reason) == ("failed", "session_flagged")
+    assert run.plan_json is None and browser.visited() == []

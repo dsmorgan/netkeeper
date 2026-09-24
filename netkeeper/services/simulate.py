@@ -201,6 +201,9 @@ async def simulate(
             registry=registry,
             schedules=schedules,
             heat_settings=heat_settings,
+            # A scratch schedule of an invented account: there is nobody to arm it,
+            # and nothing it fires reaches a browser (the caller's handlers).
+            armed=sched.ARMING_NOT_REQUIRED,
             active_start=active_start,
             active_end=active_end,
             rng=rng,

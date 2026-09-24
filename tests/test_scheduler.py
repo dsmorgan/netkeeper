@@ -497,6 +497,7 @@ async def test_heat_above_threshold_skips_the_handler(
         tz="UTC",
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],
+        armed=scheduler.ARMING_NOT_REQUIRED,
     )
 
     assert calls == []
@@ -549,6 +550,7 @@ async def test_removing_the_heat_check_would_fail_the_skip_test(
         tz="UTC",
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],
+        armed=scheduler.ARMING_NOT_REQUIRED,
     )
 
     assert len(calls) == 1
@@ -589,6 +591,7 @@ async def test_cold_account_is_not_skipped(session_factory: sessionmaker[Session
         tz="UTC",
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],
+        armed=scheduler.ARMING_NOT_REQUIRED,
     )
 
     assert len(calls) == 1
@@ -627,6 +630,7 @@ async def test_poll_and_fire_is_a_noop_before_the_due_time(
         schedule=SCHEDULE,
         registry=scheduler.default_registry(),
         tz="UTC",
+        armed=scheduler.ARMING_NOT_REQUIRED,
     )
     assert result is None
 
@@ -647,6 +651,7 @@ async def test_poll_and_fire_is_a_noop_when_never_established(
         schedule=SCHEDULE,
         registry=scheduler.default_registry(),
         tz="UTC",
+        armed=scheduler.ARMING_NOT_REQUIRED,
     )
     assert result is None
 
@@ -761,6 +766,7 @@ async def test_waking_from_a_long_sleep_fires_once_not_once_per_missed_interval(
             tz="UTC",
             active_start=ALL_DAY[0],
             active_end=ALL_DAY[1],
+            armed=scheduler.ARMING_NOT_REQUIRED,
         )
         if result is not None:
             results.append(result)
@@ -830,6 +836,7 @@ async def test_poll_once_never_fires_two_kinds_in_the_same_poll(
         schedules=schedules,
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],
+        armed=scheduler.ARMING_NOT_REQUIRED,
     )
 
     assert len(calls) == 1, f"both kinds ran in one poll: {calls}"
@@ -853,6 +860,7 @@ async def test_poll_once_never_fires_two_kinds_in_the_same_poll(
         schedules=schedules,
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],
+        armed=scheduler.ARMING_NOT_REQUIRED,
     )
     assert len(later) == 1
     assert calls == [calls[0], deferred]
@@ -1176,6 +1184,7 @@ async def test_a_heat_skipped_first_full_sync_is_offered_again_soon(
         tz="UTC",
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],
+        armed=scheduler.ARMING_NOT_REQUIRED,
     )
 
     assert calls == []
@@ -1330,6 +1339,7 @@ async def test_build_scheduler_skips_a_hot_account_without_being_handed_heat_set
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],
         rng=Random(0),
+        armed=scheduler.ARMING_NOT_REQUIRED,
     )  # no heat_settings argument at all -- the case P2-06 will hit
     _make_due_and_hot(session_factory, owner, scheduler.JobKind.ENRICH)
 
@@ -1366,6 +1376,7 @@ async def test_build_scheduler_with_the_skip_explicitly_disabled_still_fires(
         active_end=ALL_DAY[1],
         heat_settings=scheduler.HEAT_SKIP_DISABLED,
         rng=Random(0),
+        armed=scheduler.ARMING_NOT_REQUIRED,
     )
     _make_due_and_hot(session_factory, owner, scheduler.JobKind.ENRICH)
 
@@ -1430,6 +1441,7 @@ async def test_poll_once_defers_the_second_of_two_kinds_due_at_the_same_instant(
         schedules=TWO_KINDS,
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],
+        armed=scheduler.ARMING_NOT_REQUIRED,
     )
     assert len(fired) == 1
     assert len(calls) == 1
@@ -1467,6 +1479,7 @@ async def test_a_heat_skipped_kind_does_not_consume_the_interleave_slot(
         heat_settings=HEAT_SETTINGS,
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],
+        armed=scheduler.ARMING_NOT_REQUIRED,
     )
     assert calls == []
     assert len(fired) == 2

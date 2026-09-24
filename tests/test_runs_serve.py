@@ -1,0 +1,580 @@
+"""``netkeeper serve`` never contacts LinkedIn on its own until a person arms it (P2-10).
+
+The maintainer runs ``netkeeper serve`` against their real, logged-in Chrome
+every day. Scheduled LinkedIn runs therefore ship disarmed, and this module
+drives the real ``serve`` startup path -- :func:`netkeeper.web.app.create_app`'s
+lifespan with the extractor ``netkeeper serve`` hands it, the real scheduler,
+the real worker, on a fake Chrome and a fake clock -- across every due time a
+week holds (the first-setup full sync, the daily incremental, enrichment every
+three hours, a catch-up after downtime) and asserts the browser is never
+attached. The anti-coincidence test runs the same drive armed and sees it attach.
+
+Every path the review asked about is walked here: the lifespan, first setup,
+catch-up after a restart, retry parking, a restart with a run left ``running``
+(nothing replays it), the SSE stream and every ``GET`` (read only).
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+from browser_fakes import FakeConnector
+from fastapi import FastAPI
+from run_fakes import Clock, ConnectionsContext, Gate, fake_provider, worker_extractor
+from sqlalchemy import Engine, select
+from sqlalchemy.orm import Session
+from test_web_events import SSEClient
+
+from netkeeper.config import Settings
+from netkeeper.db import make_session_factory, session_scope
+from netkeeper.linkedin import activity_lock
+from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserUnavailable
+from netkeeper.linkedin.classify import Outcome
+from netkeeper.models import SyncRun, SyncRunKind, SyncRunStatus, SyncRunTrigger, User, UserKind
+from netkeeper.scoping import install_scope_guard, scoped
+from netkeeper.services import heat, runs, scheduler
+from netkeeper.services.linkedin_accounts import (
+    arm_scheduled_runs,
+    ensure_account,
+    scheduled_runs_armed,
+)
+from netkeeper.services.linkedin_session import flag_session
+from netkeeper.services.scheduled_runs import ServeExtractor
+from netkeeper.web.app import create_app
+from netkeeper.web.security import CLIENT_HEADER, CLIENT_HEADER_VALUE
+
+#: Wednesday 2026-09-23, 02:00 in New York: before the active window opens, so
+#: the first day's due times are all snapped to 08:30 and then land in it.
+START = datetime(2026, 9, 23, 6, 0, tzinfo=UTC)
+STEP = timedelta(hours=1)
+HEADERS = {CLIENT_HEADER: CLIENT_HEADER_VALUE}
+
+
+@pytest.fixture
+def settings() -> Settings:
+    return Settings()
+
+
+@asynccontextmanager
+async def serving(
+    engine: Engine, settings: Settings, extractor: ServeExtractor
+) -> AsyncIterator[FastAPI]:
+    """The app ``netkeeper serve`` runs, inside its lifespan, on ``engine``."""
+    app = create_app(settings, engine=engine, extractor=extractor)
+    async with app.router.lifespan_context(app):
+        yield app
+
+
+def served(
+    engine: Engine, settings: Settings, provider: AttachBrowserProvider, clock: Clock
+) -> Any:
+    """:func:`serving` with the worker ``netkeeper serve`` builds, on ``provider``."""
+    return serving(engine, settings, worker_extractor(provider, settings, clock=clock))
+
+
+async def heartbeat(app: FastAPI) -> None:
+    """One tick of the scheduler ``serve`` started: its real heartbeat job, run now."""
+    job = app.state.scheduler.get_job(scheduler.HEARTBEAT_JOB_ID)
+    assert job is not None
+    await job.func()
+
+
+async def drive(app: FastAPI, clock: Clock, until: datetime) -> None:
+    while clock.at < until:
+        clock.at += STEP
+        await heartbeat(app)
+        await app.state.tasks.join()
+
+
+def client_for(app: FastAPI) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
+
+
+def _rows(engine: Engine) -> list[SyncRun]:
+    factory = make_session_factory(engine)
+    install_scope_guard(factory)
+    with session_scope(factory) as session:
+        found: list[SyncRun] = []
+        for user in session.scalars(select(User)):
+            found.extend(session.scalars(scoped(user, SyncRun)))
+        for run in found:
+            session.expunge(run)
+        return found
+
+
+def _local(session: Session) -> User:
+    user = session.scalars(select(User).where(User.kind == UserKind.LOCAL)).one()
+    return user
+
+
+@pytest.fixture
+def no_frontend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", str(tmp_path / "no-dist"))
+
+
+# --- THE property ------------------------------------------------------------------
+
+
+async def _a_week_of_serve(
+    engine: Engine, settings: Settings, *, arm: bool
+) -> tuple[FakeConnector, ConnectionsContext, Clock]:
+    """Serve for four days, stop for two (downtime), serve for three more, polling
+    every twenty minutes, with every GET the page makes once a day."""
+    context = ConnectionsContext()
+    provider, connector = fake_provider(context)
+    clock = Clock(START)
+    async with served(engine, settings, provider, clock) as app:
+        if arm:
+            async with client_for(app) as client:
+                armed = await client.post(
+                    "/api/v1/linkedin/schedule/arm", json={"confirm": True}, headers=HEADERS
+                )
+                assert armed.status_code == 200 and armed.json()["armed"] is True
+        for _ in range(4):
+            await drive(app, clock, clock.at + timedelta(days=1))
+            await _every_get(app)
+    clock.at += timedelta(days=2)  # the process is down; everything due lapses
+    async with served(engine, settings, provider, clock) as app:
+        await drive(app, clock, clock.at + timedelta(days=3))
+        await _every_get(app)
+    return connector, context, clock
+
+
+async def _every_get(app: FastAPI) -> None:
+    async with client_for(app) as client:
+        for path in (
+            "/api/v1/linkedin/status",
+            "/api/v1/linkedin/runs",
+            "/api/v1/linkedin/schedule",
+            "/api/v1/linkedin/budget",
+            "/api/v1/linkedin/heat",
+            "/api/v1/linkedin/pins",
+            "/api/v1/me",
+        ):
+            response = await client.get(path)
+            assert response.status_code == 200, (path, response.text)
+
+
+async def test_a_disarmed_serve_never_touches_the_browser_across_a_week(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    connector, context, clock = await _a_week_of_serve(bare_engine, settings, arm=False)
+
+    assert connector.attaches == 0
+    assert context.pages == [] and context.fetches == []
+    assert _rows(bare_engine) == []  # not even a refused scheduled run was recorded
+    # The scheduler did poll, and did reach due fires: the full sync, never run,
+    # keeps being offered an hour after each disarmed skip, and the daily and
+    # three-hourly kinds moved on from their first due times.
+    factory = make_session_factory(bare_engine)
+    with session_scope(factory) as session:
+        user = _local(session)
+        account = ensure_account(session, user).id
+        assert not scheduled_runs_armed(session, user, account)
+        full = scheduler.stored_due(session, user, account, scheduler.JobKind.CONNECTIONS_FULL)
+        enrich = scheduler.stored_due(session, user, account, scheduler.JobKind.ENRICH)
+        inbox = scheduler.stored_due(session, user, account, scheduler.JobKind.INBOX)
+    assert full is not None and full > clock.at - timedelta(days=1)
+    assert enrich is not None and enrich > START + timedelta(days=8)
+    assert inbox is None  # no runner, not scheduled
+
+
+async def test_the_same_week_armed_does_attach(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    """Anti-coincidence: the drive above reaches the browser once a person arms it."""
+    connector, context, _ = await _a_week_of_serve(bare_engine, settings, arm=True)
+
+    assert connector.attaches > 0
+    assert context.fetches
+    rows = _rows(bare_engine)
+    assert rows and {run.trigger for run in rows} == {SyncRunTrigger.SCHEDULED}
+    assert SyncRunKind.CONNECTIONS_FULL in {run.kind for run in rows}
+
+
+async def test_first_setup_waits_for_arming_then_runs_within_the_hour(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    """#164's full sync on day 0 does not fire on a disarmed install. Armed later,
+    the full sync (never run) is offered again within FIRST_SETUP_RETRY."""
+    provider, connector = fake_provider()
+    clock = Clock(START + timedelta(hours=8))  # 10:00 in New York: in the window
+    async with served(bare_engine, settings, provider, clock) as app:
+        await drive(app, clock, clock.at + timedelta(hours=3))
+        assert connector.attaches == 0
+        async with client_for(app) as client:
+            await client.post(
+                "/api/v1/linkedin/schedule/arm", json={"confirm": True}, headers=HEADERS
+            )
+        await drive(app, clock, clock.at + scheduler.FIRST_SETUP_RETRY + STEP)
+    assert connector.attaches >= 1
+    kinds = [run.kind for run in _rows(bare_engine)]
+    assert kinds[0] is SyncRunKind.CONNECTIONS_FULL
+
+
+async def test_a_run_left_running_is_failed_at_start_and_never_replayed(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    """A task queue with nothing persisted replays nothing; the row says what happened."""
+    provider, connector = fake_provider()
+    clock = Clock(START)
+    async with served(bare_engine, settings, provider, clock):
+        pass
+    factory = make_session_factory(bare_engine)
+    install_scope_guard(factory)
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        left = runs.create_run(
+            session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=START
+        ).id
+
+    async with served(bare_engine, settings, provider, clock) as app:
+        await drive(app, clock, clock.at + timedelta(hours=1))
+
+    assert connector.attaches == 0
+    (run,) = _rows(bare_engine)
+    assert (run.id, run.status, run.stop_reason, run.error) == (
+        left,
+        SyncRunStatus.FAILED,
+        "interrupted",
+        runs.INTERRUPTED,
+    )
+
+
+async def test_a_run_whose_browser_lock_is_held_is_left_running_at_start(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    """A `netkeeper linkedin sync` in a terminal holds the lock; serve starting must not
+    mark its run failed under it."""
+    provider, _ = fake_provider()
+    clock = Clock(START)
+    async with served(bare_engine, settings, provider, clock):
+        pass
+    factory = make_session_factory(bare_engine)
+    install_scope_guard(factory)
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        account = ensure_account(session, user).id
+        runs.create_run(session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=START)
+    claim = activity_lock.try_claim(activity_lock.account_key(account))
+    assert claim is not None
+    try:
+        async with served(bare_engine, settings, provider, clock):
+            pass
+    finally:
+        claim.release()
+    (run,) = _rows(bare_engine)
+    assert run.status is SyncRunStatus.RUNNING
+
+
+async def test_an_app_without_the_extractor_starts_no_scheduler_and_no_run(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    assert running_app.state.scheduler is None
+    response = await client.post(
+        "/api/v1/linkedin/runs", json={"kind": "connections_incremental"}, headers=HEADERS
+    )
+    assert response.status_code == 503
+    assert (await client.get("/api/v1/linkedin/runs")).json()["total"] == 0
+
+
+async def test_the_event_stream_starts_nothing(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    """Subscribing (and reconnecting) to ``/events`` is a read: no run, no attach."""
+    provider, connector = fake_provider()
+    clock = Clock(START)
+    async with served(bare_engine, settings, provider, clock) as app:
+        for _ in range(3):  # a reconnect is the same request again
+            stream = SSEClient(app)
+            stream.start()
+            async with asyncio.timeout(2):
+                await stream.started.wait()
+            assert stream.status == 200
+            await stream.close()
+        await drive(app, clock, clock.at + timedelta(hours=2))
+    assert connector.attaches == 0 and _rows(bare_engine) == []
+
+
+# --- arming: a person's act, never a default -----------------------------------------
+
+
+async def test_arming_takes_confirm_and_the_client_header(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    provider, _ = fake_provider()
+    async with (
+        served(bare_engine, settings, provider, Clock(START)) as app,
+        client_for(app) as client,
+    ):
+        no_header = await client.post("/api/v1/linkedin/schedule/arm", json={"confirm": True})
+        unconfirmed = await client.post(
+            "/api/v1/linkedin/schedule/arm", json={"confirm": False}, headers=HEADERS
+        )
+        state = (await client.get("/api/v1/linkedin/schedule")).json()
+        assert (no_header.status_code, unconfirmed.status_code) == (403, 422)
+        assert state["armed"] is False and state["scheduler_running"] is True
+        assert [job["kind"] for job in state["jobs"]] == [
+            "connections_incremental",
+            "connections_full",
+            "enrich",
+        ]
+        armed = await client.post(
+            "/api/v1/linkedin/schedule/arm", json={"confirm": True}, headers=HEADERS
+        )
+        assert armed.json()["armed"] is True
+        disarmed = await client.post("/api/v1/linkedin/schedule/disarm", headers=HEADERS)
+        assert disarmed.json()["armed"] is False
+
+
+# --- start, watch, stop: P2-10's done-when ---------------------------------------------
+
+
+async def test_the_ui_can_start_a_run_watch_it_and_stop_it(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    """A manual run, allowed while disarmed: 202 at once, progress on the bus, cancel.
+
+    The wait between pages is held shut until the cancel is in, so the cancel lands
+    inside the wait (spec 9.9's sliced cooldown), after the first page was written.
+    """
+    context = ConnectionsContext(_many(120))
+    provider, connector = fake_provider(context)
+    gate = Gate()
+    clock = Clock(START + timedelta(hours=8))
+    extractor = worker_extractor(provider, settings, clock=clock, sleep=gate)
+    async with serving(bare_engine, settings, extractor) as app:
+        subscription = app.state.bus.subscribe()
+        async with client_for(app) as client:
+            started = await client.post(
+                "/api/v1/linkedin/runs", json={"kind": "connections_full"}, headers=HEADERS
+            )
+            assert started.status_code == 202, started.text
+            run_id = started.json()["run_id"]
+            assert started.json()["task_id"]
+            again = await client.post(
+                "/api/v1/linkedin/runs", json={"kind": "enrich"}, headers=HEADERS
+            )
+            assert again.status_code == 409  # one run per account at a time
+
+            seen: list[str] = []
+            async with asyncio.timeout(5):
+                async for event in subscription:
+                    seen.append(event.type)
+                    if event.type == "run.progress":
+                        assert event.data["run_id"] == run_id and event.data["pages"] == 1
+                        break
+            watching = (await client.get(f"/api/v1/linkedin/runs/{run_id}")).json()
+            assert watching["status"] == "running" and watching["progress"]["pages"] == 1
+            # #169 F: the run holds its own account's lock file, and every other
+            # netkeeper process on this data directory would be told it is busy.
+            with session_scope(app.state.session_factory) as session:
+                account = ensure_account(session, _local(session)).id
+            assert activity_lock.inspect(activity_lock.account_key(account)).held
+
+            cancelled = await client.post(f"/api/v1/linkedin/runs/{run_id}/cancel", headers=HEADERS)
+            assert cancelled.status_code == 200 and cancelled.json()["cancel_requested_at"]
+            gate.open()
+            await app.state.tasks.join()
+            async with asyncio.timeout(5):
+                async for event in subscription:
+                    seen.append(event.type)
+                    if event.type == "run.finished":
+                        break
+            done = (await client.get(f"/api/v1/linkedin/runs/{run_id}")).json()
+            too_late = await client.post(f"/api/v1/linkedin/runs/{run_id}/cancel", headers=HEADERS)
+        app.state.bus.unsubscribe(subscription)
+
+    assert "run.started" in seen and seen[-1] == "run.finished"
+    assert (done["status"], done["stop_reason"], done["trigger"]) == (
+        "aborted",
+        "cancelled",
+        "manual",
+    )
+    assert done["counts"]["pages"] == 1 and done["counts"]["aging"] is None
+    assert too_late.status_code == 409
+    assert connector.attaches == 1 and len(context.fetches) == 1
+
+
+def _many(count: int) -> list[Any]:
+    from voyager_pages import Person
+
+    return [Person(1000 + i, f"Given{i}", f"Family{i}", f"Role {i}") for i in range(count)]
+
+
+async def test_a_start_is_refused_while_flagged_or_hot_and_records_nothing(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    provider, connector = fake_provider()
+    async with served(bare_engine, settings, provider, Clock(START)) as app:
+        factory = app.state.session_factory
+        with session_scope(factory, write=True) as session:
+            flag_session(session, _local(session), Outcome.CHECKPOINT, url="/checkpoint/x")
+        async with client_for(app) as client:
+            flagged = await client.post(
+                "/api/v1/linkedin/runs", json={"kind": "connections_full"}, headers=HEADERS
+            )
+        with session_scope(factory, write=True) as session:
+            from netkeeper.services.linkedin_session import clear_session_flag
+
+            user = _local(session)
+            clear_session_flag(session, user)
+            account = ensure_account(session, user).id
+            while not heat.should_skip(
+                session, user, account, now=datetime.now(UTC), settings=settings.linkedin.heat
+            ):
+                heat.raise_heat(
+                    session, user, account, now=datetime.now(UTC), settings=settings.linkedin.heat
+                )
+        async with client_for(app) as client:
+            hot = await client.post(
+                "/api/v1/linkedin/runs", json={"kind": "connections_full"}, headers=HEADERS
+            )
+    assert (flagged.status_code, hot.status_code) == (409, 409)
+    assert "flagged" in flagged.json()["detail"] and "heat" in hot.json()["detail"]
+    assert connector.attaches == 0 and _rows(bare_engine) == []
+
+
+async def test_a_start_without_the_client_header_is_refused(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    provider, connector = fake_provider()
+    async with (
+        served(bare_engine, settings, provider, Clock(START)) as app,
+        client_for(app) as client,
+    ):
+        response = await client.post("/api/v1/linkedin/runs", json={"kind": "enrich"})
+    assert response.status_code == 403
+    assert connector.attaches == 0 and _rows(bare_engine) == []
+
+
+# --- tab loss: the scheduler parks a retry 20 to 50 minutes out (spec 9.9) --------------
+
+
+async def test_an_unreachable_browser_parks_a_retry_twenty_to_fifty_minutes_out(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    provider, connector = fake_provider(error=BrowserUnavailable("Chrome is not running"))
+    clock = Clock(START + timedelta(hours=8))
+    async with served(bare_engine, settings, provider, clock) as app:
+        factory = app.state.session_factory
+        with session_scope(factory, write=True) as session:
+            arm_scheduled_runs(session, _local(session), now=clock.at)
+        while connector.attaches == 0:
+            clock.at += STEP
+            await heartbeat(app)
+            await app.state.tasks.join()
+        failed_at = clock.at
+        with session_scope(factory) as session:
+            user = _local(session)
+            account = ensure_account(session, user).id
+            due = scheduler.stored_due(session, user, account, scheduler.JobKind.CONNECTIONS_FULL)
+    (run,) = _rows(bare_engine)
+    assert (run.status, run.stop_reason) == (SyncRunStatus.FAILED, "browser_unavailable")
+    assert due is not None
+    assert failed_at + timedelta(minutes=20) <= due <= failed_at + timedelta(minutes=50)
+
+
+# --- the worker is the third check -------------------------------------------------------
+
+
+async def test_the_worker_refuses_a_scheduled_run_on_a_disarmed_account(
+    session_factory: Any, settings: Settings
+) -> None:
+    """Even a scheduled run someone recorded by going around ``create_run`` never attaches."""
+    import factories
+
+    from netkeeper.worker import BrowserWorker
+
+    provider, connector = fake_provider()
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        account = ensure_account(session, user)
+        run = SyncRun(
+            user_id=user.id,
+            linkedin_account_id=account.id,
+            kind=SyncRunKind.CONNECTIONS_FULL,
+            trigger=SyncRunTrigger.SCHEDULED,
+            started_at=START,
+        )
+        session.add(run)
+        session.flush()
+        run_id, user_id = run.id, user.id
+    worker = BrowserWorker(provider, session_factory, settings.linkedin)
+
+    outcome = await worker.execute(run_id, user_id)
+
+    assert outcome is runs.RunOutcome.DONE
+    assert connector.attaches == 0
+    with session_scope(session_factory) as session:
+        owner = session.get(User, user_id)
+        assert owner is not None
+        stored = runs.get_run(session, owner, run_id)
+        assert (stored.status, stored.stop_reason) == (SyncRunStatus.FAILED, "disarmed")
+
+
+def test_the_real_serve_builds_its_extractor_on_the_attach_provider(settings: Settings) -> None:
+    """``netkeeper serve``'s app gets the worker on the one attach provider, and building
+    it attaches to nothing (there is no connect before a run)."""
+    from netkeeper.worker import BrowserWorker, serve_extractor
+
+    extractor = serve_extractor(settings)
+    executor = extractor.executor(None, None)  # type: ignore[arg-type]
+    assert isinstance(executor, BrowserWorker)
+    assert isinstance(executor.provider, AttachBrowserProvider)
+    assert executor.provider.cdp_url == settings.linkedin.cdp_url
+
+
+async def test_shutting_down_mid_run_records_it_interrupted(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    """The lifespan cancels running tasks; the run keeps what it wrote and says why it
+    stopped, and the next start has nothing left running to sweep up."""
+    provider, _ = fake_provider(ConnectionsContext(_many(120)))
+    gate = Gate()  # never opened: the run is parked in its wait between pages
+    extractor = worker_extractor(provider, settings, clock=Clock(START), sleep=gate)
+    async with serving(bare_engine, settings, extractor) as app:
+        subscription = app.state.bus.subscribe()
+        async with client_for(app) as client:
+            started = await client.post(
+                "/api/v1/linkedin/runs", json={"kind": "connections_full"}, headers=HEADERS
+            )
+        async with asyncio.timeout(5):
+            async for event in subscription:
+                if event.type == "run.progress":
+                    break
+    (run,) = _rows(bare_engine)
+    assert run.id == started.json()["run_id"]
+    assert (run.status, run.stop_reason, run.error) == (
+        SyncRunStatus.ABORTED,
+        "interrupted",
+        runs.INTERRUPTED,
+    )
+    assert run.progress_json is not None and run.progress_json["pages"] == 1
+
+
+async def test_a_live_sync_reads_the_api_first_and_the_dom_after_a_route_change() -> None:
+    """P2-08's fallback is what the worker hands the connections runner: one per run,
+    the in-page API behind the connections page load first, the DOM scroll second."""
+    from netkeeper.linkedin.connections import FallbackConnectionsSource
+    from netkeeper.linkedin.dom import DomConnectionsSource
+    from netkeeper.worker import CONNECTIONS_PAGE_URL, _LandFirst, connections_source
+
+    provider, connector = fake_provider()
+    async with provider.run("account-9") as run:
+        first, second = connections_source(run), connections_source(run)
+    assert isinstance(first, FallbackConnectionsSource) and first is not second
+    assert isinstance(first.primary, _LandFirst) and isinstance(
+        first.fallback, DomConnectionsSource
+    )
+    assert first.primary.url == CONNECTIONS_PAGE_URL
+    assert CONNECTIONS_PAGE_URL == "https://www.linkedin.com/mynetwork/invite-connect/connections/"
+    assert connector.attaches == 1  # building the sources loaded no page
+    assert all(page.goto_calls == [] for page in connector.browsers[0].context_list[0].pages)

@@ -32,18 +32,28 @@ from voyager_pages import (
     Scripted,
 )
 
-from netkeeper.config import BudgetSettings, LinkedInSettings
+from netkeeper.config import BudgetSettings, LinkedInSettings, Settings
 from netkeeper.crm import apply as mapping
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import StopReason, SyncMode, VoyagerConnections
 from netkeeper.linkedin.pacing import human_delay
-from netkeeper.models import Contact, ContactAlias, LinkedInAccount, User
+from netkeeper.models import (
+    Contact,
+    ContactAlias,
+    LinkedInAccount,
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunTrigger,
+    User,
+)
 from netkeeper.scoping import scoped
-from netkeeper.services import budgets
+from netkeeper.services import budgets, runs
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass
 from netkeeper.services.connections_sync import (
+    CANCEL_SLICE_S,
     HeatSkipped,
     SessionFlagged,
     SyncRunReport,
@@ -52,6 +62,7 @@ from netkeeper.services.connections_sync import (
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.linkedin_session import clear_session_flag, session_flag
 from netkeeper.services.pacing import profiles
+from netkeeper.services.posture import posture
 
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
 SETTINGS = LinkedInSettings()
@@ -86,11 +97,28 @@ class Clock:
 
 
 class Sleeps:
+    """Records every sleep. The wait between two pages is sliced (``CANCEL_SLICE_S``)
+    so a cancel lands inside it; :attr:`gaps` puts each wait back together."""
+
     def __init__(self) -> None:
-        self.waits: list[float] = []
+        self.slices: list[float] = []
 
     async def __call__(self, seconds: float) -> None:
-        self.waits.append(seconds)
+        self.slices.append(seconds)
+
+    @property
+    def waits(self) -> list[float]:
+        """The waits between pages: runs of full slices ended by a shorter one."""
+        gaps: list[float] = []
+        current = 0.0
+        for piece in self.slices:
+            current += piece
+            if piece < CANCEL_SLICE_S:
+                gaps.append(current)
+                current = 0.0
+        if current:
+            gaps.append(current)
+        return gaps
 
 
 async def _sync(
@@ -747,3 +775,145 @@ async def test_a_candidate_matched_by_an_old_slug_is_held_not_aged(
     assert all(r.aging is not None and r.aging.missed == 0 for r in reports)
     held = _contacts(session_factory, user_id)[target.urn]
     assert (held.li_missing_count, held.li_disconnected_at) == (0, None)
+
+
+# --- P2-10: the run row, cancel, and a refused aging said out loud (#169 E) --------------
+
+
+def _run_row(factory: sessionmaker[Session], user_id: int, run_id: int) -> SyncRun:
+    with session_scope(factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        run = runs.get_run(session, user, run_id)
+        session.expunge(run)
+        return run
+
+
+async def test_a_refused_aging_is_on_the_run_and_in_posture(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    people = _many(10)
+    first = await _sync(session_factory, user_id, FakeVoyagerFetch(people))
+    newcomers = [
+        Person(900 + i, f"Other{i}", f"Stranger{i}", None, urn_prefix="ACoAANEW") for i in range(6)
+    ]
+    later = NOW + timedelta(days=7)
+    report = await _sync(
+        session_factory, user_id, FakeVoyagerFetch([*newcomers, *people[5:]]), at=later
+    )
+
+    assert report.aging is not None and report.aging.refused is not None
+    run = _run_row(session_factory, user_id, report.run_id)
+    assert (run.status, run.stop_reason) == (SyncRunStatus.COMPLETED, "end_of_list")
+    assert run.counts_json is not None
+    assert run.counts_json["aging"]["refused"] == report.aging.refused
+    assert run.notes == f"aged nobody: {report.aging.refused}"
+    assert runs.view(run).aging_refused == report.aging.refused
+    assert _run_row(session_factory, user_id, first.run_id).notes is None
+
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        found = posture(session, user, report.account_id, now=later, settings=Settings())
+    (aging,) = [p for p in found.protections if p.name == "network aging"]
+    assert aging.warnings and report.aging.refused in aging.warnings[0]
+    assert f"run {report.run_id}" in aging.warnings[0]
+
+
+async def test_a_full_sync_that_aged_as_usual_does_not_warn(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    report = await _sync(session_factory, user_id, FakeVoyagerFetch(_many(10)))
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        found = posture(session, user, report.account_id, now=NOW, settings=Settings())
+    (aging,) = [p for p in found.protections if p.name == "network aging"]
+    assert aging.warnings == () and "aged as usual" in aging.value
+
+
+class CancelsOnFirstWait(Sleeps):
+    """Asks the running run to stop during the first wait between two pages."""
+
+    def __init__(self, factory: sessionmaker[Session], user_id: int) -> None:
+        super().__init__()
+        self.factory = factory
+        self.user_id = user_id
+
+    async def __call__(self, seconds: float) -> None:
+        if not self.slices:
+            with session_scope(self.factory, write=True) as session:
+                user = session.get(User, self.user_id)
+                assert user is not None
+                running = runs.running_run(session, user, ensure_account(session, user).id)
+                assert running is not None
+                runs.request_cancel(session, user, running.id, now=NOW)
+        await super().__call__(seconds)
+
+
+async def test_a_cancel_inside_the_wait_stops_before_the_next_page(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    fetch = FakeVoyagerFetch(_many(200))
+    sleeps = CancelsOnFirstWait(session_factory, user_id)
+
+    report = await _sync(session_factory, user_id, fetch, sleeps=sleeps)
+
+    assert fetch.starts == [0]
+    assert sleeps.slices == [CANCEL_SLICE_S]  # one slice, then the flag was read
+    assert report.cancelled and not report.result.complete and report.aging is None
+    run = _run_row(session_factory, user_id, report.run_id)
+    assert (run.status, run.stop_reason) == (SyncRunStatus.ABORTED, "cancelled")
+    assert run.counts_json is not None and run.counts_json["pages"] == 1
+    assert len(_contacts(session_factory, user_id)) == 40  # what it read is kept
+
+
+async def test_a_cancel_before_the_first_page_fetches_nothing(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        run = runs.create_run(
+            session, user, SyncRunKind.CONNECTIONS_FULL, trigger=SyncRunTrigger.MANUAL, now=NOW
+        )
+        runs.request_cancel(session, user, run.id, now=NOW)
+        run_id = run.id
+    fetch = FakeVoyagerFetch(_many(50))
+
+    report = await sync_connections(
+        session_factory,
+        user_id,
+        SyncMode.FULL,
+        VoyagerConnections(fetch),
+        settings=SETTINGS,
+        run_id=run_id,
+        clock=Clock(NOW),
+        sleep=Sleeps(),
+    )
+
+    assert fetch.requests == [] and report.cancelled
+    assert _spent(session_factory, user_id, report.account_id, NOW) == 0
+    assert _run_row(session_factory, user_id, run_id).stop_reason == "cancelled"
+
+
+async def test_an_incremental_sync_that_caught_up_is_completed(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    people = _many(50)
+    await _sync(session_factory, user_id, FakeVoyagerFetch(people))
+    report = await _sync(session_factory, user_id, FakeVoyagerFetch(people), SyncMode.INCREMENTAL)
+    run = _run_row(session_factory, user_id, report.run_id)
+    assert run.kind is SyncRunKind.CONNECTIONS_INCREMENTAL
+    assert (run.status, run.stop_reason) == (SyncRunStatus.COMPLETED, "caught_up")
+
+
+async def test_a_throttled_page_is_recorded_as_the_outcome(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    report = await _sync(
+        session_factory, user_id, FakeVoyagerFetch(_many(100), script={1: THROTTLED})
+    )
+    run = _run_row(session_factory, user_id, report.run_id)
+    assert (run.status, run.stop_reason) == (SyncRunStatus.ABORTED, "throttled")
+    assert run.counts_json is not None and run.counts_json["heat_raised"] is True

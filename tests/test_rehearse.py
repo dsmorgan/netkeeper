@@ -953,3 +953,34 @@ def test_the_replicas_expiry_route_expires_the_cookie() -> None:
     with serve_replica() as base:
         answer = httpx.get(f"{base}/expire-cookie", timeout=5)
     assert answer.headers["set-cookie"] == "JSESSIONID=; Path=/; Max-Age=0"
+
+
+# --- #172: the replica's cookie is expired even when the rehearsal fails -----------
+
+
+async def test_a_rehearsal_that_fails_still_expires_the_replicas_cookie() -> None:
+    """The cleanup navigation is in a ``finally``: a job that raises between two
+    profiles still sends the tab to the expiry path before the tab closes, and the
+    job's own exception is the one that comes out."""
+    provider, context, _ = _setup()
+    waits = 0
+
+    async def breaks_on_the_second_wait(seconds: float) -> None:
+        nonlocal waits
+        waits += 1
+        if waits == 2:
+            raise RuntimeError("the rehearsal broke mid-run")
+
+    with pytest.raises(RuntimeError, match="broke mid-run"):
+        await rehearse(
+            provider,
+            site=SITE,
+            visits=3,
+            seed=SEED,
+            sleep=breaks_on_the_second_wait,
+            clock=Ticker(),
+        )
+
+    (page,) = context.replays
+    assert page.goto_calls[-1] == f"{SITE}/expire-cookie"
+    assert page.is_closed()

@@ -920,6 +920,233 @@ export interface paths {
         patch: operations["update_interaction"];
         trace?: never;
     };
+    "/api/v1/linkedin/budget": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Budget
+         * @description Every action class's counters against its limits, and today's profile-visit chain.
+         */
+        get: operations["get_linkedin_budget"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/heat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Heat */
+        get: operations["get_linkedin_heat"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/pins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Pins */
+        get: operations["list_linkedin_pins"];
+        put?: never;
+        /**
+         * Pin Contact
+         * @description Pin a contact to the front of the next enrichment (spec 9.6, at most five).
+         */
+        post: operations["pin_linkedin_contact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/pins/{contact_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Unpin Contact */
+        delete: operations["unpin_linkedin_contact"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Runs */
+        get: operations["list_linkedin_runs"];
+        put?: never;
+        /**
+         * Start Run
+         * @description Record a manual run and submit it; answers at once, before any browser work.
+         */
+        post: operations["start_linkedin_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Run */
+        get: operations["get_linkedin_run"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/runs/{run_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Run
+         * @description Ask a running run to stop at its next check (spec 9.9).
+         */
+        post: operations["cancel_linkedin_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/runs/{run_id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume Run
+         * @description Record a resume of an enrichment run's remaining plan and submit it.
+         */
+        post: operations["resume_linkedin_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/schedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Schedule */
+        get: operations["get_linkedin_schedule"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/schedule/arm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Arm Schedule
+         * @description Let scheduled LinkedIn runs fire. Needs ``confirm: true``; a person's act only.
+         */
+        post: operations["arm_linkedin_schedule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/schedule/disarm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disarm Schedule
+         * @description Stop scheduled LinkedIn runs from firing. A run already going is not cancelled.
+         */
+        post: operations["disarm_linkedin_schedule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Status */
+        get: operations["get_linkedin_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/lists": {
         parameters: {
             query?: never;
@@ -1661,6 +1888,22 @@ export interface components {
              * @description The LinkedIn export zip, exactly as downloaded.
              */
             file: string;
+        };
+        /**
+         * BudgetOut
+         * @description One action class's counters against its limits (spec 9.6).
+         */
+        BudgetOut: {
+            /** Action */
+            action: string;
+            day: components["schemas"]["PeriodBudgetOut"];
+            week: components["schemas"]["PeriodBudgetOut"] | null;
+        };
+        /** BudgetStatusOut */
+        BudgetStatusOut: {
+            /** Budgets */
+            budgets: components["schemas"]["BudgetOut"][];
+            profile_visits_today: components["schemas"]["TodaysVisitsOut"];
         };
         /**
          * BulkCountIn
@@ -2475,6 +2718,26 @@ export interface components {
             version: string;
         };
         /**
+         * HeatOut
+         * @description Heat as spec 9.7 says the page shows it: level, last raised, when runs resume.
+         */
+        HeatOut: {
+            /** Cleared At */
+            cleared_at: string | null;
+            /** Last Raised At */
+            last_raised_at: string | null;
+            /** Multiplier */
+            multiplier: number;
+            /** Resumes At */
+            resumes_at: string | null;
+            /** Score */
+            score: number;
+            /** Threshold */
+            threshold: number;
+            /** Tripped */
+            tripped: boolean;
+        };
+        /**
          * ImportChangeOut
          * @description One field a row would write, with the value that is there now.
          */
@@ -2900,6 +3163,24 @@ export interface components {
          * @enum {string}
          */
         LinkKind: "website" | "twitter" | "github" | "other";
+        /**
+         * LinkedInStatusOut
+         * @description The LinkedIn page's banner: the session flag, heat, arming, and any running run.
+         */
+        LinkedInStatusOut: {
+            /** Armed */
+            armed: boolean;
+            /** Can Start Runs */
+            can_start_runs: boolean;
+            /** Heat Tripped */
+            heat_tripped: boolean;
+            /** Running Run Id */
+            running_run_id: number | null;
+            /** Session Flag */
+            session_flag: string | null;
+            /** Session Flagged At */
+            session_flagged_at: string | null;
+        };
         /** ListCreate */
         ListCreate: {
             filter?: components["schemas"]["FilterTree-Input"] | null;
@@ -3139,11 +3420,37 @@ export interface components {
             /** Started On */
             started_on: string | null;
         };
+        /** PeriodBudgetOut */
+        PeriodBudgetOut: {
+            /** Count */
+            count: number;
+            /** Limit */
+            limit: number;
+            /** Remaining */
+            remaining: number;
+        };
         /**
          * PhoneKind
          * @enum {string}
          */
         PhoneKind: "mobile" | "home" | "work" | "other";
+        /** PinIn */
+        PinIn: {
+            /** Contact Id */
+            contact_id: number;
+        };
+        /**
+         * PinOut
+         * @description A pinned contact (spec 9.6: at most 5, to the front of the next run).
+         */
+        PinOut: {
+            /** Contact Id */
+            contact_id: number;
+            /** First Name */
+            first_name: string | null;
+            /** Last Name */
+            last_name: string | null;
+        };
         /**
          * PreferredNameIn
          * @description What you call this person. Empty means "use the first name".
@@ -3190,6 +3497,86 @@ export interface components {
          * @enum {string}
          */
         RuleField: "title" | "headline" | "company";
+        /**
+         * RunAccepted
+         * @description The ``202`` of a start or a resume: the recorded run, and the task running it.
+         */
+        RunAccepted: {
+            /** Run Id */
+            run_id: number;
+            /** Task Id */
+            task_id: string;
+        };
+        /**
+         * RunOut
+         * @description One run: what it is, how far it got, and how it ended. Counts only, never names.
+         *
+         *     ``planned``/``completed`` are an enrichment plan's size and progress.
+         *     ``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.
+         */
+        RunOut: {
+            /** Aging Refused */
+            aging_refused: string | null;
+            /** Browser Mode */
+            browser_mode: string;
+            /** Cancel Requested At */
+            cancel_requested_at: string | null;
+            /** Completed */
+            completed: number | null;
+            /** Completed At */
+            completed_at: string | null;
+            /** Counts */
+            counts: {
+                [key: string]: unknown;
+            } | null;
+            /** Error */
+            error: string | null;
+            /** Id */
+            id: number;
+            kind: components["schemas"]["SyncRunKind"];
+            /** Max Visits */
+            max_visits: number | null;
+            /** Notes */
+            notes: string | null;
+            /** Planned */
+            planned: number | null;
+            /** Progress */
+            progress: {
+                [key: string]: unknown;
+            } | null;
+            /** Resume Of Id */
+            resume_of_id: number | null;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            status: components["schemas"]["SyncRunStatus"];
+            /** Stop Reason */
+            stop_reason: string | null;
+            trigger: components["schemas"]["SyncRunTrigger"];
+        };
+        /** RunPage */
+        RunPage: {
+            /** Items */
+            items: components["schemas"]["RunOut"][];
+            /** Total */
+            total: number;
+        };
+        /** RunResumeIn */
+        RunResumeIn: {
+            /** Max Visits */
+            max_visits?: number | null;
+        };
+        /**
+         * RunStartIn
+         * @description Start a run by hand. ``max_visits`` (enrichment only) only ever lowers today's budget.
+         */
+        RunStartIn: {
+            kind: components["schemas"]["SyncRunKind"];
+            /** Max Visits */
+            max_visits?: number | null;
+        };
         /** SavedViewCreate */
         SavedViewCreate: {
             /** Columns */
@@ -3235,6 +3622,41 @@ export interface components {
             name?: string | null;
             /** Sort */
             sort?: components["schemas"]["SortKey"][] | null;
+        };
+        /**
+         * ScheduleArmIn
+         * @description Arming needs ``confirm: true``: it lets netkeeper visit LinkedIn on its own.
+         */
+        ScheduleArmIn: {
+            /** Confirm */
+            confirm: boolean;
+        };
+        /**
+         * ScheduleOut
+         * @description Whether scheduled runs may fire, and when each kind is next due.
+         *
+         *     ``armed`` is false on every install until a person arms it; while false the
+         *     scheduler still keeps due times, and no scheduled LinkedIn job fires.
+         *     ``scheduler_running`` is whether this process runs a scheduler at all.
+         */
+        ScheduleOut: {
+            /** Armed */
+            armed: boolean;
+            /** Armed At */
+            armed_at: string | null;
+            /** Jobs */
+            jobs: components["schemas"]["ScheduledJobOut"][];
+            /** Scheduler Running */
+            scheduler_running: boolean;
+        };
+        /** ScheduledJobOut */
+        ScheduledJobOut: {
+            /** Interval Hours */
+            interval_hours: number;
+            /** Kind */
+            kind: string;
+            /** Next Due */
+            next_due: string | null;
         };
         /**
          * SharedCompanyOut
@@ -3314,6 +3736,23 @@ export interface components {
             /** Value */
             value: string;
         };
+        /**
+         * SyncRunKind
+         * @description Spec 8.4's run kinds. ``inbox`` and ``message_send`` have no runner yet.
+         * @enum {string}
+         */
+        SyncRunKind: "connections_full" | "connections_incremental" | "enrich" | "inbox" | "message_send";
+        /**
+         * SyncRunStatus
+         * @enum {string}
+         */
+        SyncRunStatus: "running" | "completed" | "aborted" | "failed";
+        /**
+         * SyncRunTrigger
+         * @description Who asked for the run: a person (API or CLI), or the scheduler.
+         * @enum {string}
+         */
+        SyncRunTrigger: "manual" | "scheduled";
         /**
          * SyncedValueOut
          * @description What an automated source last reported for one field: what a revert restores.
@@ -3506,6 +3945,24 @@ export interface components {
              */
             kind: "snapshot";
             snapshot: components["schemas"]["SnapshotOut"];
+        };
+        /**
+         * TodaysVisitsOut
+         * @description Today's profile visits, step by step: warm-up, weekend, heat; then what is left.
+         */
+        TodaysVisitsOut: {
+            /** After Heat */
+            after_heat: number;
+            /** After Weekend */
+            after_weekend: number;
+            /** Ramp */
+            ramp: number;
+            /** Remaining */
+            remaining: number;
+            /** Spent Today */
+            spent_today: number;
+            /** Week Left */
+            week_left: number | null;
         };
         /**
          * TriageCardOut
@@ -5980,6 +6437,453 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_linkedin_budget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BudgetStatusOut"];
+                };
+            };
+        };
+    };
+    get_linkedin_heat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HeatOut"];
+                };
+            };
+        };
+    };
+    list_linkedin_pins: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PinOut"][];
+                };
+            };
+        };
+    };
+    pin_linkedin_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PinIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PinOut"][];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Cannot pin */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unpin_linkedin_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PinOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_linkedin_runs: {
+        parameters: {
+            query?: {
+                kind?: components["schemas"]["SyncRunKind"] | null;
+                status?: components["schemas"]["SyncRunStatus"] | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_linkedin_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RunStartIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunAccepted"];
+                };
+            };
+            /** @description A run is running, the session is flagged, or heat is too high */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A kind with no runner, or max_visits on a sync */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description This process has no browser worker */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_linkedin_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunOut"];
+                };
+            };
+            /** @description No run */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_linkedin_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunOut"];
+                };
+            };
+            /** @description No run */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The run already ended */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_linkedin_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RunResumeIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunAccepted"];
+                };
+            };
+            /** @description No enrichment run with a plan */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Nothing to resume, or the run cannot start now */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description This process has no browser worker */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_linkedin_schedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleOut"];
+                };
+            };
+        };
+    };
+    arm_linkedin_schedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScheduleArmIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleOut"];
+                };
+            };
+            /** @description confirm was not true */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    disarm_linkedin_schedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleOut"];
+                };
+            };
+        };
+    };
+    get_linkedin_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LinkedInStatusOut"];
                 };
             };
         };

@@ -16,8 +16,16 @@ import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.db import session_scope
-from netkeeper.models import Contact, ContactMet, User
-from netkeeper.services import enrich_plan
+from netkeeper.models import (
+    Contact,
+    ContactMet,
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunTrigger,
+    User,
+)
+from netkeeper.services import enrich_plan, runs
 from netkeeper.services.enrich_plan import (
     ENRICH_RETRY_AFTER,
     MAX_PINS,
@@ -121,6 +129,34 @@ def test_a_contact_whose_visit_wrote_nothing_is_visited_again_after_a_week(
     assert _order(writer, user) == [waited.id]
 
 
+def test_a_visit_that_wrote_something_does_not_wait_when_asked_for_again(
+    writer: Session, user: User
+) -> None:
+    """#172: the week's wait is for a visit that wrote nothing, as spec 9.6 says.
+
+    A tier-1 contact (``enrich_priority``, set by the campaign engine) whose last
+    visit was applied yesterday is visited again when asked; one whose last visit
+    wrote nothing still waits, priority or not.
+    """
+    yesterday = NOW - timedelta(days=1)
+    applied = _contact(
+        writer,
+        user,
+        enrich_priority=5,
+        last_enriched_at=yesterday,
+        li_enrich_attempted_at=yesterday,
+    )
+    _contact(writer, user, enrich_priority=5, li_enrich_attempted_at=yesterday)
+    _contact(
+        writer,
+        user,
+        enrich_priority=5,
+        last_enriched_at=yesterday - timedelta(days=30),
+        li_enrich_attempted_at=yesterday,
+    )
+    assert _order(writer, user) == [applied.id]
+
+
 def test_the_limit_cuts_the_list(writer: Session, user: User) -> None:
     for year in range(2020, 2026):
         _contact(writer, user, connected=date(year, 1, 1))
@@ -210,75 +246,122 @@ def test_unreadable_pins_are_no_pins(writer: Session, user: User) -> None:
     assert enrich_plan.pinned(writer, user, ACCOUNT) == []
 
 
-# --- the stored plan ------------------------------------------------------------------
+# --- the stored plan (on the run's row since P2-10) -------------------------------------
+
+
+def _run(writer: Session, user: User) -> SyncRun:
+    return runs.create_run(writer, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW)
 
 
 def test_a_plan_round_trips_and_records_what_completed(writer: Session, user: User) -> None:
     contacts = [_contact(writer, user) for _ in range(3)]
     ids = [c.id for c in contacts]
-    enrich_plan.pin(writer, user, ACCOUNT, ids[1])
-    plan = enrich_plan.create_plan(writer, user, ACCOUNT, ids, now=NOW)
+    run = _run(writer, user)
+    enrich_plan.pin(writer, user, run.linkedin_account_id, ids[1])
+    enrich_plan.store_plan(writer, user, run.id, ids)
 
-    enrich_plan.mark_completed(writer, user, ACCOUNT, plan.plan_id, ids[1])
-    stored = enrich_plan.load_plan(writer, user, ACCOUNT, plan.plan_id)
+    enrich_plan.mark_completed(writer, user, run.id, ids[1])
+    stored = enrich_plan.load_plan(writer, user, run.id)
 
     assert stored.contact_ids == tuple(ids) and stored.completed == (ids[1],)
     assert stored.remaining == (ids[0], ids[2])
-    assert (stored.status, stored.created_at) == ("running", NOW)
-    assert enrich_plan.pinned(writer, user, ACCOUNT) == []  # done with, so unpinned
+    assert stored.status is SyncRunStatus.RUNNING
+    assert run.plan_json == {"contact_ids": ids, "completed": [ids[1]]}
+    assert enrich_plan.pinned(writer, user, run.linkedin_account_id) == []  # done with
+
+
+def test_a_plan_is_never_replanned(writer: Session, user: User) -> None:
+    run = _run(writer, user)
+    enrich_plan.store_plan(writer, user, run.id, [1])
+    with pytest.raises(ValueError, match="never re-planned"):
+        enrich_plan.store_plan(writer, user, run.id, [2])
 
 
 def test_completing_a_contact_not_in_the_plan_is_refused(writer: Session, user: User) -> None:
-    plan = enrich_plan.create_plan(writer, user, ACCOUNT, [1, 2], now=NOW)
-    with pytest.raises(ValueError, match="not in enrichment plan"):
-        enrich_plan.mark_completed(writer, user, ACCOUNT, plan.plan_id, 3)
+    run = _run(writer, user)
+    enrich_plan.store_plan(writer, user, run.id, [1, 2])
+    with pytest.raises(ValueError, match="not in the plan"):
+        enrich_plan.mark_completed(writer, user, run.id, 3)
 
 
-def test_a_plan_is_another_accounts_and_users_business(writer: Session, user: User) -> None:
+def test_a_plan_is_another_users_business(writer: Session, user: User) -> None:
     other = factories.make_user(writer)
-    plan = enrich_plan.create_plan(writer, user, ACCOUNT, [1], now=NOW)
+    run = _run(writer, user)
+    enrich_plan.store_plan(writer, user, run.id, [1])
     with pytest.raises(PlanNotFound):
-        enrich_plan.load_plan(writer, other, ACCOUNT, plan.plan_id)
+        enrich_plan.load_plan(writer, other, run.id)
     with pytest.raises(PlanNotFound):
-        enrich_plan.load_plan(writer, user, ACCOUNT + 1, plan.plan_id)
+        enrich_plan.load_plan(writer, user, run.id + 1)
 
 
-def test_cancel_reopen_and_finish(writer: Session, user: User) -> None:
-    plan = enrich_plan.create_plan(writer, user, ACCOUNT, [1, 2], now=NOW)
-    enrich_plan.request_cancel(writer, user, ACCOUNT, plan.plan_id)
-    assert enrich_plan.cancel_requested(writer, user, ACCOUNT, plan.plan_id)
-    enrich_plan.finish(writer, user, ACCOUNT, plan.plan_id, status="aborted", stopped="cancelled")
+def test_a_run_with_no_plan_has_none_to_load(writer: Session, user: User) -> None:
+    run = _run(writer, user)
+    with pytest.raises(PlanNotFound):
+        enrich_plan.load_plan(writer, user, run.id)
 
-    reopened = enrich_plan.reopen(writer, user, ACCOUNT, plan.plan_id)
 
-    assert (reopened.status, reopened.cancel_requested, reopened.stopped) == (
-        "running",
-        False,
-        None,
+def test_a_sync_run_holds_no_plan(writer: Session, user: User) -> None:
+    run = runs.create_run(
+        writer, user, SyncRunKind.CONNECTIONS_FULL, trigger=SyncRunTrigger.MANUAL, now=NOW
     )
-    enrich_plan.finish(
-        writer, user, ACCOUNT, plan.plan_id, status="completed", stopped="end_of_plan"
-    )
-    with pytest.raises(PlanFinished):
-        enrich_plan.reopen(writer, user, ACCOUNT, plan.plan_id)
+    with pytest.raises(ValueError, match="not an enrichment run"):
+        enrich_plan.store_plan(writer, user, run.id, [1])
+
+
+def _aborted_with_plan(writer: Session, user: User, ids: list[int], done: list[int]) -> SyncRun:
+    run = _run(writer, user)
+    enrich_plan.store_plan(writer, user, run.id, ids)
+    for contact_id in done:
+        enrich_plan.mark_completed(writer, user, run.id, contact_id)
+    runs.finish_run(writer, user, run.id, status=SyncRunStatus.ABORTED, now=NOW)
+    return run
+
+
+def test_a_resume_takes_over_what_is_left_in_order_once(writer: Session, user: User) -> None:
+    old = _aborted_with_plan(writer, user, [4, 2, 9, 7], done=[2])
+
+    new = enrich_plan.start_resume(writer, user, old.id, now=NOW, max_visits=3)
+
+    assert (new.resume_of_id, new.max_visits, new.trigger) == (old.id, 3, SyncRunTrigger.MANUAL)
+    assert enrich_plan.load_plan(writer, user, new.id).contact_ids == (4, 9, 7)
+    assert enrich_plan.load_plan(writer, user, old.id).resumed_by == new.id
+    runs.finish_run(writer, user, new.id, status=SyncRunStatus.ABORTED, now=NOW)
+    with pytest.raises(PlanFinished, match="already resumed by run"):
+        enrich_plan.start_resume(writer, user, old.id, now=NOW)
+    # The resume itself can be resumed.
+    assert enrich_plan.start_resume(writer, user, new.id, now=NOW).resume_of_id == new.id
+
+
+def test_a_completed_or_running_plan_is_not_resumed(writer: Session, user: User) -> None:
+    done = _aborted_with_plan(writer, user, [1, 2], done=[1, 2])
+    with pytest.raises(PlanFinished, match="nothing to resume"):
+        enrich_plan.start_resume(writer, user, done.id, now=NOW)
+    running = _run(writer, user)
+    enrich_plan.store_plan(writer, user, running.id, [3])
+    with pytest.raises(PlanFinished, match="still running"):
+        enrich_plan.start_resume(writer, user, running.id, now=NOW)
+    with pytest.raises(PlanNotFound):
+        enrich_plan.start_resume(writer, user, running.id + 99, now=NOW)
 
 
 def test_a_plan_names_each_contact_once(writer: Session, user: User) -> None:
+    run = _run(writer, user)
     with pytest.raises(ValueError, match="only once"):
-        enrich_plan.create_plan(writer, user, ACCOUNT, [1, 1], now=NOW)
+        enrich_plan.store_plan(writer, user, run.id, [1, 1])
 
 
 def test_the_remaining_targets_keep_the_order_and_read_slugs_now(
     writer: Session, user: User
 ) -> None:
     a, b, c, d = (_contact(writer, user) for _ in range(4))
-    plan = enrich_plan.create_plan(writer, user, ACCOUNT, [d.id, b.id, a.id, c.id], now=NOW)
-    enrich_plan.mark_completed(writer, user, ACCOUNT, plan.plan_id, b.id)
+    run = _run(writer, user)
+    enrich_plan.store_plan(writer, user, run.id, [d.id, b.id, a.id, c.id])
+    enrich_plan.mark_completed(writer, user, run.id, b.id)
     a.li_public_id = "renamed-since"
     c.archived_at = NOW
     writer.flush()
 
-    plan = enrich_plan.load_plan(writer, user, ACCOUNT, plan.plan_id)
+    plan = enrich_plan.load_plan(writer, user, run.id)
     targets = enrich_plan.targets_for(writer, user, plan)
 
     assert targets == [(d.id, d.li_public_id), (a.id, "renamed-since")]
