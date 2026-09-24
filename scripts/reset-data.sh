@@ -87,26 +87,49 @@ run() {
   fi
 }
 
-# Every process holding the database open, one per line. Empty when it is free.
-# lsof exits non-zero when nothing matches, which is the common case, not an error.
+# Both checks below guard the one destructive thing this script does. A missing
+# tool must stop it, never read as "nothing holds the database".
+require_tools() {
+  command -v lsof >/dev/null 2>&1 || die "lsof is needed to check that nothing has the database open"
+  command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 is needed to archive and verify the database"
+  if [ -n "${NETKEEPER_DATABASE_URL:-}" ]; then
+    die "NETKEEPER_DATABASE_URL is set, so the server does not use $db. This script only resets the SQLite file in the data directory."
+  fi
+}
+
+# Every process holding the database or its sidecars open, one pid per line.
+# lsof exits 1 both when nothing matches (the common case) and on some errors,
+# so an error is told apart by what it wrote to stderr.
 holders() {
-  [ -f "$db" ] || return 0
-  lsof -t -- "$db" 2>/dev/null || true
+  set --
+  for suffix in '' '-wal' '-shm'; do
+    [ -e "$db$suffix" ] && set -- "$@" "$db$suffix"
+  done
+  [ $# -gt 0 ] || return 0
+  err=$(mktemp)
+  out=$(lsof -t -- "$@" 2>"$err") || true
+  if [ -z "$out" ] && [ -s "$err" ]; then
+    printf 'error: lsof could not check the database:\n' >&2
+    cat "$err" >&2
+    rm -f "$err"
+    exit 1
+  fi
+  rm -f "$err"
+  printf '%s\n' "$out" | sort -u | sed '/^$/d'
 }
 
 refuse_if_in_use() {
   pids=$(holders)
   [ -n "$pids" ] || return 0
   printf 'error: the database is open in another process:\n' >&2
-  # shellcheck disable=SC2086 # deliberate word splitting: one -p per pid is not needed.
-  ps -o pid=,command= -p $pids >&2 || true
+  # shellcheck disable=SC2046 # a comma list of pids: no spaces to split.
+  ps -o pid=,command= -p $(printf '%s' "$pids" | tr '\n' ',' | sed 's/,$//') >&2 || true
   printf '\nStop the server first, then run this again.\n' >&2
   exit 1
 }
 
 human_size() {
-  # BSD stat; the fallback keeps this working if stat is missing.
-  bytes=$(stat -f %z -- "$1" 2>/dev/null || wc -c <"$1")
+  bytes=$(wc -c <"$1" | tr -d ' ')
   awk -v b="$bytes" 'BEGIN {
     split("B KB MB GB", unit, " ")
     i = 1
@@ -115,59 +138,85 @@ human_size() {
   }'
 }
 
+# A real, readable database: a non-empty file, opened read-only (sqlite3 would
+# otherwise create an empty one and call it "ok"), that passes SQLite's own
+# consistency check and has at least one table in it.
+verified() {
+  [ -s "$1" ] || return 1
+  [ "$(sqlite3 -readonly "$1" 'PRAGMA quick_check' 2>/dev/null)" = ok ] || return 1
+  tables=$(sqlite3 -readonly "$1" 'SELECT count(*) FROM sqlite_master' 2>/dev/null) || return 1
+  [ "${tables:-0}" -gt 0 ]
+}
+
 list_archives() {
-  if [ ! -d "$archives" ]; then
-    printf 'no archives in %s\n' "$archives"
-    return 0
-  fi
-  found=no
-  # Newest first. -t on the glob, not on the directory, so stray files stay out.
-  for path in $(ls -t "$archives"/netkeeper-*.sqlite3 2>/dev/null); do
-    found=yes
+  # Newest first: the UTC stamp in the name sorts by time. A glob, not ls, so a
+  # data directory with a space in it (the macOS default) stays one path.
+  for path in "$archives"/netkeeper-*.sqlite3; do
+    [ -f "$path" ] || continue
+    printf '%s\n' "$path"
+  done | sort -r | while IFS= read -r path; do
     printf '%s  %s\n' "$(basename "$path")" "$(human_size "$path")"
-  done
-  [ "$found" = yes ] || printf 'no archives in %s\n' "$archives"
+  done | grep . || printf 'no archives in %s\n' "$archives"
 }
 
 confirm() {
   [ "$assume_yes" = no ] || return 0
   [ "$dry_run" = no ] || return 0
   printf '%s [y/N] ' "$1"
-  read -r reply
+  read -r reply || reply=
   case $reply in
     y|Y|yes|YES) return 0 ;;
     *) printf 'nothing changed\n'; exit 0 ;;
   esac
 }
 
-# Copy the live database to $1. VACUUM INTO checkpoints the WAL into a single
-# compacted file, so the copy needs no sidecars. If SQLite refuses (a corrupt
-# database is exactly when you most want the copy), fall back to the raw files.
+# A name in $archives nothing else has taken. Two runs in one second must not
+# share one, or the second overwrites the first.
+archive_path() {
+  candidate="$archives/netkeeper-$stamp.sqlite3"
+  n=1
+  while [ -e "$candidate" ] || [ -e "$candidate-wal" ]; do
+    candidate="$archives/netkeeper-$stamp-$n.sqlite3"
+    n=$((n + 1))
+  done
+  printf '%s\n' "$candidate"
+}
+
+# Copy the live database to $1 and prove the copy is readable before anything is
+# deleted. VACUUM INTO writes one compacted file with the WAL already folded in.
+# If SQLite refuses, copy the raw files, then fold the WAL into the copy, so an
+# archive is always one self-contained file -- and verify it either way.
 archive_db() {
   target=$1
   run mkdir -p "$archives"
   if [ "$dry_run" = yes ]; then
-    printf '  would: sqlite3 %s "VACUUM INTO %s"\n' "$db" "$target"
+    printf '  would: sqlite3 %s "VACUUM INTO %s", then verify it\n' "$db" "$target"
     return 0
   fi
-  if sqlite3 "$db" "VACUUM INTO '$target'" 2>/dev/null; then
-    printf 'archived %s (%s)\n' "$target" "$(human_size "$target")"
-    return 0
+  quoted=$(printf '%s' "$target" | sed "s/'/''/g")
+  if ! sqlite3 "$db" "VACUUM INTO '$quoted'"; then
+    printf 'warning: VACUUM INTO failed; copying the raw files instead\n' >&2
+    rm -f -- "$target"
+    for suffix in '' '-wal' '-shm'; do
+      [ -f "$db$suffix" ] || continue
+      cp -- "$db$suffix" "$target$suffix" || die "could not copy $db$suffix; nothing deleted"
+    done
+    sqlite3 "$target" 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;' >/dev/null 2>&1 || true
+    rm -f -- "$target-wal" "$target-shm"
   fi
-  printf 'warning: VACUUM INTO failed; copying the raw files instead\n' >&2
-  for suffix in '' '-wal' '-shm'; do
-    [ -f "$db$suffix" ] || continue
-    cp -- "$db$suffix" "$target$suffix"
-  done
-  printf 'archived %s and its sidecars\n' "$target"
+  if ! verified "$target"; then
+    die "the archive $target did not pass SQLite's quick_check; the database was left in place"
+  fi
+  printf 'archived %s (%s, verified)\n' "$target" "$(human_size "$target")"
 }
 
+# The file and both sidecars, whichever exist. A -wal left next to a restored
+# file would be replayed onto it, so this runs even when the main file is gone.
 remove_db() {
   for suffix in '' '-wal' '-shm'; do
-    [ -f "$db$suffix" ] || continue
+    [ -e "$db$suffix" ] || continue
     run rm -- "$db$suffix"
   done
-  [ "$dry_run" = yes ] || printf 'removed %s\n' "$db"
 }
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -178,16 +227,21 @@ case $mode in
     ;;
 
   reset)
+    require_tools
     if [ ! -f "$db" ]; then
       printf 'no database at %s: already clean\n' "$db"
       exit 0
     fi
     refuse_if_in_use
+    target=$(archive_path)
     printf 'database: %s (%s)\n' "$db" "$(human_size "$db")"
-    printf 'archive:  %s/netkeeper-%s.sqlite3\n' "$archives" "$stamp"
+    printf 'archive:  %s\n' "$target"
     confirm 'Archive it and start from an empty database?'
-    archive_db "$archives/netkeeper-$stamp.sqlite3"
+    # Again: a server started while the prompt waited holds it now.
+    refuse_if_in_use
+    archive_db "$target"
     remove_db
+    [ "$dry_run" = yes ] || printf 'removed %s\n' "$db"
     printf '\nStart the server to build a new one:\n'
     printf '  make serve      # or: make dev, for reload\n'
     ;;
@@ -199,17 +253,20 @@ case $mode in
       *) source="$archives/$restore_from" ;;
     esac
     [ -f "$source" ] || die "$source: no such file"
+    require_tools
+    verified "$source" || die "$source did not pass SQLite's quick_check; not restoring it"
     refuse_if_in_use
+    target=$(archive_path)
     printf 'restoring: %s (%s)\n' "$source" "$(human_size "$source")"
     if [ -f "$db" ]; then
-      printf 'the database in place is archived first, to %s/netkeeper-%s.sqlite3\n' \
-        "$archives" "$stamp"
+      printf 'the database in place is archived first, to %s\n' "$target"
     fi
     confirm "Replace $db with this archive?"
+    refuse_if_in_use
     if [ -f "$db" ]; then
-      archive_db "$archives/netkeeper-$stamp.sqlite3"
-      remove_db
+      archive_db "$target"
     fi
+    remove_db
     run mkdir -p "$data_dir"
     run cp -- "$source" "$db"
     printf 'restored %s\n' "$db"
