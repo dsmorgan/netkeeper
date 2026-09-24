@@ -18,7 +18,8 @@ from netkeeper.cli import app as cli
 from netkeeper.config import LinkedInSettings, Settings
 from netkeeper.db import make_session_factory
 from netkeeper.models import User, UserKind
-from netkeeper.web.app import API_PREFIX, create_app, dev_app, discover_routers, openapi_json
+from netkeeper.web.app import API_PREFIX, create_app, discover_routers, openapi_json
+from netkeeper.worker import dev_app
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 API_PATHS = {
@@ -49,6 +50,18 @@ API_PATHS = {
     "/api/v1/contacts/{contact_id}/timeline",
     "/api/v1/contacts/{contact_id}/notes",
     "/api/v1/interactions/{interaction_id}",
+    "/api/v1/linkedin/runs",
+    "/api/v1/linkedin/runs/{run_id}",
+    "/api/v1/linkedin/runs/{run_id}/cancel",
+    "/api/v1/linkedin/runs/{run_id}/resume",
+    "/api/v1/linkedin/budget",
+    "/api/v1/linkedin/heat",
+    "/api/v1/linkedin/pins",
+    "/api/v1/linkedin/pins/{contact_id}",
+    "/api/v1/linkedin/schedule",
+    "/api/v1/linkedin/schedule/arm",
+    "/api/v1/linkedin/schedule/disarm",
+    "/api/v1/linkedin/status",
     "/api/v1/tags",
     "/api/v1/tags/{tag_id}",
     "/api/v1/contacts/{contact_id}/tags",
@@ -191,6 +204,7 @@ def test_known_api_modules_are_discovered() -> None:
         "health",
         "imports",
         "interactions",
+        "linkedin",
         "lists",
         "me",
         "positions",

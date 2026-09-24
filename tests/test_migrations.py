@@ -1225,3 +1225,132 @@ def test_an_account_label_is_unique_per_user_and_goes_with_its_user(
     with migration_engine.begin() as connection:
         connection.execute(text("DELETE FROM users WHERE id = 1"))
         assert _count(connection, "linkedin_accounts") == 1
+
+
+# --- extractor runs; plans move off settings_kv; everyone disarmed (0013) --------------
+
+
+def _plan_value(status: str, contact_ids: list[int], completed: list[int]) -> str:
+    return json.dumps(
+        {
+            "version": 1,
+            "plan_id": "x",
+            "account_id": 1,
+            "created_at": "2026-09-22T10:00:00+00:00",
+            "status": status,
+            "contact_ids": contact_ids,
+            "completed": completed,
+            "cancel_requested": False,
+            "stopped": "cancelled" if status == "aborted" else None,
+        }
+    )
+
+
+def test_unfinished_plans_become_resumable_runs_and_nobody_is_armed(
+    migration_engine: Engine,
+) -> None:
+    """An in-flight plan (running or aborted, work left) becomes an aborted enrichment
+    run with the same plan; a finished plan is dropped; what cannot be read, or whose
+    account is not the user's, stays where it is. No account comes out armed."""
+    migrations.upgrade(migration_engine, "0012")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        for user_id in (1, 2):
+            connection.execute(
+                text(
+                    "INSERT INTO linkedin_accounts (user_id, label, created_at, updated_at)"
+                    " VALUES (:user_id, 'default', :t, :t)"
+                ),
+                {"user_id": user_id, "t": STAMP},
+            )
+        _put_setting(
+            connection, 1, "linkedin.enrich.1.plan.aaaa", _plan_value("aborted", [5, 6, 7], [5])
+        )
+        _put_setting(
+            connection, 1, "linkedin.enrich.1.plan.bbbb", _plan_value("running", [8, 9], [])
+        )
+        _put_setting(
+            connection, 1, "linkedin.enrich.1.plan.cccc", _plan_value("completed", [1], [1])
+        )
+        _put_setting(connection, 1, "linkedin.enrich.1.plan.dddd", _plan_value("aborted", [2], [2]))
+        _put_setting(connection, 1, "linkedin.enrich.1.plan.eeee", '"not a plan"')
+        _put_setting(connection, 1, "linkedin.enrich.2.plan.ffff", _plan_value("aborted", [3], []))
+        _put_setting(connection, 1, "linkedin.enrich.1.pins", "[4]")
+
+    migrations.upgrade(migration_engine, "0013")
+
+    with migration_engine.begin() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT user_id, linkedin_account_id, kind, status, trigger, plan_json,"
+                " stop_reason, completed_at FROM sync_runs ORDER BY id"
+            )
+        ).all()
+        assert [tuple(row[:5]) for row in rows] == [
+            (1, 1, "enrich", "aborted", "manual"),
+            (1, 1, "enrich", "aborted", "manual"),
+        ]
+        # SQLite hands JSON back as text; PostgreSQL's driver decodes it.
+        plans = [row[5] if isinstance(row[5], dict) else json.loads(row[5]) for row in rows]
+        assert {(tuple(p["contact_ids"]), tuple(p["completed"])) for p in plans} == {
+            ((5, 6, 7), (5,)),
+            ((8, 9), ()),
+        }
+        assert {row[6] for row in rows} == {"cancelled", "interrupted"}
+        assert all(row[7] is not None for row in rows)
+        assert _keys(connection, 1) == {
+            "linkedin.enrich.1.plan.eeee",  # unreadable: left alone
+            "linkedin.enrich.2.plan.ffff",  # account 2 is user 2's, not user 1's
+            "linkedin.enrich.1.pins",
+        }
+        armed = connection.execute(
+            text("SELECT scheduled_runs_armed_at FROM linkedin_accounts")
+        ).scalars()
+        assert list(armed) == [None, None]
+
+    migrations.downgrade(migration_engine, "0012")
+
+    names = set(inspect(migration_engine).get_table_names())
+    assert "sync_runs" not in names
+    columns = {c["name"] for c in inspect(migration_engine).get_columns("linkedin_accounts")}
+    assert "scheduled_runs_armed_at" not in columns
+
+
+def test_a_run_goes_with_its_user_and_its_resume_link_is_cleared(
+    migration_engine: Engine,
+) -> None:
+    migrations.upgrade(migration_engine)
+    insert = text(
+        "INSERT INTO sync_runs (user_id, linkedin_account_id, kind, status, trigger, started_at,"
+        " browser_mode, resume_of_id, created_at, updated_at)"
+        " VALUES (:user_id, :account, 'enrich', 'aborted', 'manual', :t, 'attach', :resume, :t, :t)"
+    )
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        connection.execute(
+            text(
+                "INSERT INTO linkedin_accounts (user_id, label, created_at, updated_at)"
+                " VALUES (1, 'default', :t, :t), (2, 'default', :t, :t)"
+            ),
+            {"t": STAMP},
+        )
+        connection.execute(insert, {"user_id": 1, "account": 1, "t": STAMP, "resume": None})
+        connection.execute(insert, {"user_id": 1, "account": 1, "t": STAMP, "resume": 1})
+        connection.execute(insert, {"user_id": 2, "account": 2, "t": STAMP, "resume": None})
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO sync_runs (user_id, linkedin_account_id, kind, status, trigger,"
+                " started_at, browser_mode, created_at, updated_at)"
+                " VALUES (1, 1, 'inbox_poll', 'running', 'manual', :t, 'attach', :t, :t)"
+            ),
+            {"t": STAMP},
+        )
+    with migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM sync_runs WHERE id = 1"))
+        assert (
+            connection.execute(text("SELECT resume_of_id FROM sync_runs WHERE id = 2")).scalar()
+            is None
+        )
+        connection.execute(text("DELETE FROM users WHERE id = 2"))
+        assert _count(connection, "sync_runs") == 1

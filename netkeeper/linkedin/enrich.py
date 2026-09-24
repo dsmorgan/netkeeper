@@ -35,7 +35,8 @@ streak). A body that classified ``Ok`` but that the parser cannot read is an
 yet, and stopping on it would leave that person at the head of every run's
 queue for ever. :data:`MAX_UNREADABLE_IN_A_ROW` unreadable profiles in a row,
 on different contacts, is the signal that the route itself changed, and stops
-the run as ``RouteChanged``. A ``400`` or a body that is not JSON at all
+the run as ``RouteChanged``; so is :data:`MAX_UNREADABLE_PER_RUN` in one run,
+scattered or not (#172). A ``400`` or a body that is not JSON at all
 (classify's own ``RouteChanged``) stops the run at once. Nothing is retried, a
 checkpoint least of all; like the connections job, a throttle stops the run
 at once rather than taking spec 9.7's "at most 3 attempts", and the next
@@ -163,6 +164,14 @@ FETCH_GAP_SIGMA: Final = 0.5
 #: Unreadable profiles in a row (on different contacts) that mean the route
 #: changed rather than one person's profile being unusual. The run stops there.
 MAX_UNREADABLE_IN_A_ROW: Final = 2
+
+#: Unreadable profiles in one run, in a row or not, that stop it the same way
+#: (#172). Without it, a route that fails every other profile never trips the
+#: in-a-row rule and the run spends half its visits on profiles it cannot read.
+#: An absolute count rather than a share of the visits: a share would stop a run
+#: on its first profile, which is exactly the one unusual person the in-a-row
+#: rule exists to forgive.
+MAX_UNREADABLE_PER_RUN: Final = 3
 
 #: The reasons a gate may give for refusing a visit.
 GATE_REASONS: Final = frozenset({StopReason.BUDGET, StopReason.CANCELLED, StopReason.INACTIVE})
@@ -626,7 +635,9 @@ async def run_enrichment(
         await on_harvest(harvest)
         completed.append(target.contact_ref)
         await on_progress(progress())
-        if unreadable_in_a_row >= MAX_UNREADABLE_IN_A_ROW:
+        if outcome is Outcome.ROUTE_CHANGED and (
+            unreadable_in_a_row >= MAX_UNREADABLE_IN_A_ROW or unreadable >= MAX_UNREADABLE_PER_RUN
+        ):
             assert failed is not None
             return await stop(StopReason.RESPONSE, Outcome.ROUTE_CHANGED, failed.final_url)
 

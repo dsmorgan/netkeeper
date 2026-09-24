@@ -76,7 +76,7 @@ from netkeeper.linkedin.pacing import (
     next_window_start,
     warmup_budget,
 )
-from netkeeper.models import User
+from netkeeper.models import SyncRunKind, SyncRunStatus, User
 from netkeeper.services import heat as heat_rows
 from netkeeper.services.budgets import (
     HARD_MAX_PER_DAY,
@@ -86,7 +86,10 @@ from netkeeper.services.budgets import (
     configured_default,
 )
 from netkeeper.services.budgets import status as budget_status
+from netkeeper.services.linkedin_accounts import find_account, scheduled_runs_armed
 from netkeeper.services.linkedin_session import session_flag
+from netkeeper.services.runs import latest_run
+from netkeeper.services.runs import view as run_view
 from netkeeper.services.scheduler import (
     CATCHUP_MAX_MINUTES,
     CATCHUP_MIN_MINUTES,
@@ -116,8 +119,8 @@ ATTACH_ONLY: Final = "attach"
 #: and the id the first user's account row gets. ``netkeeper posture`` now reads
 #: the user's row (``services.linkedin_accounts.account_id_for``) and falls back
 #: to this only for a user with no row yet; ``netkeeper simulate`` keeps it for
-#: its scratch database. ``linkedin.activity_lock.SINGLE_ACCOUNT_KEY`` is still
-#: the lock's key until the browser side keys it by the row too.
+#: its scratch database. The browser lock is keyed by the row too
+#: (``linkedin.activity_lock.account_key``, #169 F).
 SINGLE_ACCOUNT_ID: Final = 1
 
 #: Hosts a CDP url may point at. Chrome's debug port is only ever on the
@@ -369,7 +372,7 @@ def posture(
     started from this config would use.
 
     ``lock`` is the account's activity lock as the caller inspected it; ``None``
-    inspects :data:`~netkeeper.linkedin.activity_lock.SINGLE_ACCOUNT_KEY` here. The
+    inspects ``account_id``'s own lock (``activity_lock.account_key``) here. The
     inspection peeks with a shared file lock it drops at once, and creates nothing.
 
     Read-only: a plain ``session_scope(factory)`` is enough and a writer is not
@@ -399,7 +402,7 @@ def posture(
 
     protections: list[Protection] = [
         _browser_mode(browser_mode, linkedin.cdp_url),
-        _activity_lock(lock, now=now),
+        _activity_lock(lock, now=now, account=activity_lock.account_key(account_id)),
         _linkedin_session(probe),
         _session_flag(session, user),
         _active_hours(linkedin, zone, zone_warning, now=now, local_now=local_now),
@@ -412,6 +415,8 @@ def posture(
         _heat(heat_posture, effective_heat),
         _heat_skip_gate(gate),
         _scheduled_jobs(scheduler),
+        _scheduled_runs_armed(session, user, account_id),
+        _network_aging(session, user),
     ]
     return PostureReport(
         checked_at=now,
@@ -487,26 +492,17 @@ ENFORCED_BY: Final[dict[str, tuple[str, ...]]] = {
 #: caller counts only when it is *live*: reached through imports from the CLI,
 #: the app ``netkeeper serve`` starts, or an API module, and not only through
 #: this report or a rehearsal. Code that exists but nothing starts enforces
-#: nothing. Today that is everything: the scheduler (P2-09) holds the active
-#: hours and heat skip gate, the connections sync runner (P2-06) spends
-#: connection pages, raises heat, and sets the session flag, and the enrichment
-#: runner (P2-07) spends profile visits under the warm-up ramp, weekend damping,
-#: and its pacing plan, but none is started by any command or by ``serve`` yet. Kept in sync by
+#: nothing. Since P2-10 the connections sync and enrichment runners are live --
+#: ``netkeeper linkedin sync``/``enrich``, the runs API, and ``serve``'s
+#: scheduler all reach them through ``netkeeper.worker`` -- so what is left is
+#: the two budgets whose jobs do not exist yet: the inbox poll and LinkedIn
+#: auto-send (phase 3 and later). Kept in sync by
 #: ``test_the_unenforced_list_is_what_the_package_actually_shows``, which is the
 #: whole point: a hand-maintained list of "not wired up yet" is wrong the week
 #: after it is written.
 UNENFORCED_TODAY: Final[tuple[str, ...]] = (
-    f"{_CONSUME}[{_ACTION_CLASS}.CONNECTION_PAGES]",
-    f"{_CONSUME}[{_ACTION_CLASS}.PROFILE_VISITS]",
     f"{_CONSUME}[{_ACTION_CLASS}.INBOX_POLLS]",
     f"{_CONSUME}[{_ACTION_CLASS}.LI_MESSAGES_AUTO]",
-    "netkeeper.linkedin.pacing.warmup_budget",
-    "netkeeper.linkedin.pacing.apply_weekend_multiplier",
-    "netkeeper.linkedin.pacing.plan_enrichment",
-    "netkeeper.services.heat.raise_heat",
-    "netkeeper.services.linkedin_session.flag_session",
-    "netkeeper.linkedin.pacing.is_active_at",
-    "netkeeper.services.heat.should_skip",
 )
 
 
@@ -528,12 +524,10 @@ GAPS: Final[tuple[str, ...]] = (
     " tell you a limit is set and how much of it is spent; it cannot tell you"
     " that the code which will do the work remembers to ask. The protections"
     f" listed next have no enforcing caller that netkeeper runs yet: {_UNENFORCED_TEXT}."
-    " Code that calls them can exist and still not count: the connections sync"
-    " runner, the enrichment runner, and the scheduler are written, but no command"
-    " and nothing `netkeeper serve` starts reaches any of them. Until something"
-    " netkeeper runs calls it, each of those is a setting rather than a brake,"
-    " and this report says the same thing on the day it is wired as on the day"
-    " it is not.",
+    " Their jobs (the inbox poll, LinkedIn auto-send) do not exist yet, so each of"
+    " those limits is a setting rather than a brake until they do. The connections"
+    " sync and enrichment runners are wired: `netkeeper linkedin sync` and"
+    " `enrich`, the runs API, and `netkeeper serve`'s scheduler reach them.",
     "the activity lock binds netkeeper processes that share this data directory on"
     " this machine: it is a file lock under the data directory. A netkeeper started"
     " with a different NETKEEPER_DATA, a netkeeper on another machine, or any other"
@@ -544,18 +538,19 @@ GAPS: Final[tuple[str, ...]] = (
     " locking a file nobody else can open, so the next process claims a fresh one"
     " and attaches as a second CDP client. Nothing in netkeeper deletes it; only a"
     " manual `rm` can cause this, so leave `locks/` alone while `netkeeper serve` runs.",
-    "nothing wires the scheduler into `netkeeper serve` yet (that is P2-10), so"
-    " on a normal install no schedule is established and no job fires on its"
-    " own. The schedule in this report is whatever a caller has established;"
-    " until serve starts one, runs are the ones you start by hand.",
+    "`netkeeper serve` runs the scheduler for the connections syncs and"
+    " enrichment; the inbox poll has no runner yet and is not scheduled. A"
+    " scheduled run fires only while the scheduled-runs row above says armed;"
+    " this report reads that flag from the database and cannot see a scheduler"
+    " some process was started with differently.",
     "this reports the *stored* due time for each job kind, not whether the"
     " process that would fire it is running. A schedule established by a"
     " `netkeeper serve` that has since exited still reads as scheduled.",
     "the heat skip gate reported is the one this report was handed. Run from"
     " the command line that is the gate a scheduler started from this config"
     " would use; it cannot see a gate some other running process was passed."
-    " Serving this report from inside the process that owns the scheduler"
-    " (P2-10) closes that.",
+    " `netkeeper serve` passes the configured `[linkedin.heat]`; no API serves"
+    " this report from inside that process yet.",
     "whether a LinkedIn session is not merely present but still accepted is"
     " something only a real job learns, from the response classification in"
     " spec 9.7. This reports the cookie jar and the last flag raised, which is"
@@ -591,7 +586,12 @@ def _browser_mode(mode: str, cdp_url: str) -> Protection:
     )
 
 
-def _activity_lock(state: activity_lock.LockState | None, *, now: datetime) -> Protection:
+def _activity_lock(
+    state: activity_lock.LockState | None,
+    *,
+    now: datetime,
+    account: str = activity_lock.SINGLE_ACCOUNT_KEY,
+) -> Protection:
     """One browser client per account, across processes (spec 9.9): free, or held by whom.
 
     Held is normally the lock doing its job -- a run is in progress and anything
@@ -605,7 +605,7 @@ def _activity_lock(state: activity_lock.LockState | None, *, now: datetime) -> P
     name = "one browser client"
     if state is None:
         try:
-            state = activity_lock.inspect(activity_lock.SINGLE_ACCOUNT_KEY)
+            state = activity_lock.inspect(account)
         except OSError as exc:
             return Protection(
                 name=name,
@@ -1129,6 +1129,62 @@ def _scheduled_jobs(scheduler: SchedulerPosture) -> Protection:
     )
 
 
+def _scheduled_runs_armed(session: Session, user: User, account_id: int) -> Protection:
+    """Whether ``netkeeper serve`` may run LinkedIn jobs on its own (P2-10).
+
+    Disarmed is the default on every install, and it is the protection doing
+    its job: the scheduler keeps due times and fires nothing, and every run is
+    one a person started. Armed is a person's decision, made after a supervised
+    run (CP4), so it is in force either way and says which.
+    """
+    account = find_account(session, user)
+    armed = scheduled_runs_armed(session, user, account_id)
+    if not armed or account is None or account.scheduled_runs_armed_at is None:
+        return Protection(
+            name="scheduled runs",
+            status=Status.ON,
+            value="disarmed: no LinkedIn job fires on its own; runs are the ones you start",
+        )
+    return Protection(
+        name="scheduled runs",
+        status=Status.ON,
+        value=(
+            f"armed since {account.scheduled_runs_armed_at:%Y-%m-%d %H:%M UTC}: due jobs fire"
+            " within the budgets and active hours (`netkeeper linkedin schedule disarm`)"
+        ),
+    )
+
+
+def _network_aging(session: Session, user: User) -> Protection:
+    """Whether the last complete full sync aged the network, or refused to (spec 9.8, #169 E).
+
+    A refusal is the protection firing: a complete sync that would have aged too
+    much of the network ages nobody. But a refusal every week means removals are
+    never recorded at all, so the latest one is said out loud.
+    """
+    latest = latest_run(session, user, SyncRunKind.CONNECTIONS_FULL, status=SyncRunStatus.COMPLETED)
+    if latest is None:
+        return Protection(name="network aging", status=Status.ON, value="no complete full sync yet")
+    refused = run_view(latest).aging_refused
+    when = f"{latest.started_at:%Y-%m-%d}"
+    if refused is None:
+        return Protection(
+            name="network aging",
+            status=Status.ON,
+            value=f"the last complete full sync (run {latest.id}, {when}) aged as usual",
+        )
+    return Protection(
+        name="network aging",
+        status=Status.ON,
+        value=f"the last complete full sync (run {latest.id}, {when}) aged nobody",
+        warnings=(
+            f"the last complete full sync (run {latest.id}, {when}) refused to age anyone:"
+            f" {refused}. Removed connections are not being recorded while this holds;"
+            " check the run (`netkeeper linkedin run " + str(latest.id) + "`)",
+        ),
+    )
+
+
 def _heat(posture_of_heat: HeatPosture, heat_settings: HeatSettings) -> Protection:
     """Heat's level, its skip threshold, and whether it is holding runs back (spec 9.7)."""
     warnings: list[str] = []
@@ -1199,6 +1255,13 @@ def _heat(posture_of_heat: HeatPosture, heat_settings: HeatSettings) -> Protecti
 
 
 # --- the numbers behind them -------------------------------------------------
+
+
+def heat_status(
+    session: Session, user: User, account_id: int, *, now: datetime, settings: LinkedInSettings
+) -> HeatPosture:
+    """Heat as the LinkedIn page shows it (spec 9.7), read the way this report reads it."""
+    return _heat_posture(session, user, account_id, now=now, heat_settings=settings.heat)
 
 
 def _heat_posture(
@@ -1377,7 +1440,8 @@ def _host_of(url: str) -> str | None:
 
 # --- rendering ----------------------------------------------------------------
 # Separate from the report on purpose: `netkeeper posture` prints this table,
-# and P2-10's API serves the dataclasses above as JSON. Neither shape is
+# and an API can serve the dataclasses above as JSON (`GET /linkedin/heat`
+# serves `HeatPosture`'s fields; a posture endpoint is P2-12's). Neither shape is
 # derived from the other, and adding a field to the report never silently
 # changes what the CLI prints.
 
@@ -1441,8 +1505,8 @@ def _verdict(report: PostureReport) -> str:
     """What this report is entitled to claim, which is narrower than "you are safe".
 
     The report reads configuration and counters. It cannot see whether the code
-    that will do the work calls the enforcement -- and today, for several of
-    the protections, nothing does (:data:`UNENFORCED_TODAY`, stated in
+    that will do the work calls the enforcement -- and today, for two of the
+    budgets, nothing does (:data:`UNENFORCED_TODAY`, stated in
     :data:`GAPS`). So a clean report says *nothing is misconfigured*, which is
     true and worth a great deal, rather than *every protection is in force*,
     which would be the same sentence on the day a protection works and the day

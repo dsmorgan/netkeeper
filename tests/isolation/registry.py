@@ -25,9 +25,14 @@ from netkeeper.models import (
     InteractionKind,
     ListKind,
     RuleField,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunTrigger,
     User,
 )
 from netkeeper.scoping import scoped
+from netkeeper.services import enrich_plan, runs
+from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.web.app import API_PREFIX
 
 Body = dict[str, Any]
@@ -286,6 +291,27 @@ def _seed_positions(session: Session, user: User) -> int:
     return 1
 
 
+def _seed_runs(session: Session, user: User) -> int:
+    """Two finished LinkedIn runs of ``user`` (P2-10)."""
+    first = runs.create_run(
+        session, user, SyncRunKind.CONNECTIONS_FULL, trigger=SyncRunTrigger.MANUAL, now=SEED_AT
+    )
+    runs.finish_run(session, user, first.id, status=SyncRunStatus.COMPLETED, now=SEED_AT)
+    second = runs.create_run(
+        session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=SEED_AT
+    )
+    runs.finish_run(session, user, second.id, status=SyncRunStatus.ABORTED, now=SEED_AT)
+    return 2
+
+
+def _seed_pins(session: Session, user: User) -> int:
+    """Two contacts of ``user`` pinned to the front of the next enrichment."""
+    account = ensure_account(session, user)
+    for _ in range(2):
+        enrich_plan.pin(session, user, account.id, factories.make_contact(session, user).id)
+    return 2
+
+
 REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/contacts", seed_contacts, paged_count),
     ListEndpoint(
@@ -346,4 +372,6 @@ REGISTRY: list[ListEndpoint] = [
         path_params=_suggestion_key,
     ),
     ListEndpoint(f"{API_PREFIX}/me/positions", _seed_positions, array_count),
+    ListEndpoint(f"{API_PREFIX}/linkedin/runs", _seed_runs, paged_count),
+    ListEndpoint(f"{API_PREFIX}/linkedin/pins", _seed_pins, array_count),
 ]

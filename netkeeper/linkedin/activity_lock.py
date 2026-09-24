@@ -6,7 +6,9 @@ in every netkeeper process claims its account here *before* it attaches: ``netke
 serve``'s jobs, ``netkeeper preflight``, ``netkeeper posture --probe``, and ``netkeeper
 rehearse`` all meet at the same file, and whichever arrives second is refused.
 
-**The mechanism is ``flock(2)``** on ``<data dir>/locks/browser-<account>.lock``, taken
+**The mechanism is ``flock(2)``** on ``<data dir>/locks/browser-<account>.lock``
+(``browser-account-<id>.lock``, :func:`account_key`, plus the legacy
+``browser-local.lock`` a hold of account 1 also claims, :data:`LEGACY_SHARED_KEY`), taken
 with ``LOCK_EX | LOCK_NB``. The kernel owns the lock and drops it when the descriptor
 closes, and the descriptor closes when the process exits *however* it exits, ``SIGKILL``
 included. A crashed holder therefore cannot park the lock: there is no heartbeat, no
@@ -43,11 +45,33 @@ from netkeeper.paths import data_dir
 #: Directory under the data directory that holds one lock file per LinkedIn account.
 LOCKS_DIRNAME = "locks"
 
-#: Lock key for the single LinkedIn account v1 has. Budgets, heat, and this lock
-#: belong to a ``linkedin_account`` row (ADR 0005); until that table lands, every
-#: browser path shares this key, and the key is what a caller passes, never a
-#: process-wide global, so a second account is never blocked by the first.
-SINGLE_ACCOUNT_KEY = "local"
+
+def account_key(account_id: int) -> str:
+    """The lock key of ``linkedin_accounts`` row ``account_id`` (#169 F): ``account-<id>``.
+
+    Budgets, heat, and this lock belong to the account row (ADR 0005), so two
+    accounts never block each other while two runs on one account always do.
+    """
+    if account_id < 1:
+        raise ValueError(f"an account id is a positive integer, not {account_id}")
+    return f"account-{account_id}"
+
+
+#: The key of the account a caller with no database uses: account 1, the first
+#: user's account (migration 0011). ``netkeeper preflight`` and ``rehearse`` on a
+#: fresh install, before any database exists, hold this one.
+SINGLE_ACCOUNT_KEY = account_key(1)
+
+#: The key every browser path used before the lock was keyed by account (#169 F).
+#: A netkeeper process started from older code and still running (a ``serve``,
+#: a ``preflight``) holds ``browser-local.lock`` and knows nothing of
+#: ``browser-account-1.lock``. Older code only ever acted for the first user's
+#: account, account 1, so :class:`~netkeeper.linkedin.browser.ActivityLocks`
+#: claims this file *as well as* :data:`SINGLE_ACCOUNT_KEY`, first, whenever it
+#: holds account 1: an old holder and a new one can never both attach. Any other
+#: account is not affected and never waits on it. Dropping this co-claim, once no
+#: pre-P2-10 process can still be running, is a follow-up.
+LEGACY_SHARED_KEY = "local"
 
 _SAFE_KEY = re.compile(r"[A-Za-z0-9_-]{1,64}")
 

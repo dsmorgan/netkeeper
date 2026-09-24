@@ -133,7 +133,7 @@ Drift signals to watch for at every checkpoint:
 
 ### CP4: a week of scheduled runs
 
-- **First:** one supervised live incremental sync with `profile_visits_per_day = 5`, watching the tab. Before it, verify the Voyager endpoint constants against a DevTools capture from your own session (#149), and confirm only one browser client per account across processes (#153). Moved here from CP3.
+- **First:** one supervised live incremental sync with `profile_visits_per_day = 5`, watching the tab. Before it, verify the Voyager endpoint constants against a DevTools capture from your own session (#149), and confirm only one browser client per account across processes (#153). Moved here from CP3. Scheduled runs ship disarmed (P2-10), so this run is by hand: `netkeeper linkedin sync` (incremental), then `netkeeper linkedin enrich --max-visits 5`. Arm scheduled runs with `netkeeper linkedin schedule arm` only after it.
 - **Demo:** Runs page for the week: every run, its counts, budget spend per day, heat history, any `Throttled` or `Checkpoint`.
 - **Questions:** Any throttle at all? If so, on which endpoint, and did the probes pass? Did the warm-up ramp as designed? Did contacts you pinned get enriched first? Did any contact get a wrong email (spot-check ten against the overlay by hand)?
 - **Re-read:** spec section 9.8, the igtracker lesson about 429s that are not rate limits.

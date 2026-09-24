@@ -33,6 +33,7 @@ from netkeeper.crm.identity import CreateNew
 from netkeeper.crm.lists import ListCount, list_lists, list_views, member_counts
 from netkeeper.crm.tags import ensure_default_rules, list_tags, run_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
+from netkeeper.linkedin.activity_lock import SINGLE_ACCOUNT_KEY, account_key
 from netkeeper.linkedin.archive import ArchiveFormatError, open_archive
 from netkeeper.linkedin.browser import (
     CHROME_PROFILE_DIRNAME,
@@ -46,9 +47,20 @@ from netkeeper.linkedin.rehearse import NotANeutralSite, Rehearsal, serve_replic
 from netkeeper.linkedin.rehearse import rehearse as run_rehearsal
 from netkeeper.linkedin.rehearse import render as render_rehearsal
 from netkeeper.logging_setup import setup_logging
-from netkeeper.models import ImportResolution, ImportRun, ImportStatus, User, UserKind
+from netkeeper.models import (
+    ImportResolution,
+    ImportRun,
+    ImportStatus,
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunTrigger,
+    User,
+    UserKind,
+)
 from netkeeper.paths import CONFIG_ENV, data_dir
 from netkeeper.scoping import install_scope_guard
+from netkeeper.services import enrich_plan, runs
 from netkeeper.services.backup import (
     BACKUPS_DIRNAME,
     BackupError,
@@ -56,7 +68,14 @@ from netkeeper.services.backup import (
     list_backups,
     prune_backups,
 )
-from netkeeper.services.linkedin_accounts import account_id_for
+from netkeeper.services.events import EventBus
+from netkeeper.services.linkedin_accounts import (
+    account_id_for,
+    arm_scheduled_runs,
+    disarm_scheduled_runs,
+    ensure_account,
+    find_account,
+)
 from netkeeper.services.linkedin_session import clear_session_flag, session_flag
 from netkeeper.services.pacing import profiles as pacing_profiles
 from netkeeper.services.posture import SessionProbe, posture
@@ -68,10 +87,11 @@ from netkeeper.services.simulate_run import InvalidSimulation, run_simulation
 from netkeeper.services.simulate_run import render as render_simulation
 from netkeeper.services.users import ensure_local_user
 from netkeeper.web.app import create_app, openapi_json
+from netkeeper.worker import BrowserWorker, serve_app
 
 log = logging.getLogger(__name__)
 
-APP_FACTORY = "netkeeper.web.app:dev_app"
+APP_FACTORY = "netkeeper.worker:dev_app"
 
 app = typer.Typer(help="netkeeper: keep your professional network warm.", no_args_is_help=True)
 config_app = typer.Typer(help="Inspect the resolved configuration.", no_args_is_help=True)
@@ -92,7 +112,8 @@ browser_app = typer.Typer(
     help="The Chrome netkeeper attaches to (it never starts one).", no_args_is_help=True
 )
 linkedin_app = typer.Typer(
-    help="LinkedIn extractor housekeeping that isn't a job.", no_args_is_help=True
+    help="LinkedIn runs by hand, their history, cancel, and scheduled-run arming.",
+    no_args_is_help=True,
 )
 app.add_typer(config_app, name="config")
 app.add_typer(db_app, name="db")
@@ -192,7 +213,7 @@ def serve(
             APP_FACTORY, factory=True, reload=True, host=bind_host, port=bind_port, log_config=None
         )
         return
-    uvicorn.run(create_app(settings), host=bind_host, port=bind_port, log_config=None)
+    uvicorn.run(serve_app(settings), host=bind_host, port=bind_port, log_config=None)
 
 
 @config_app.command("show")
@@ -348,7 +369,7 @@ def preflight(ctx: typer.Context) -> None:
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
     provider = AttachBrowserProvider(settings.linkedin.cdp_url)
-    report = asyncio.run(run_preflight(provider))
+    report = asyncio.run(run_preflight(provider, _browser_lock_key()))
     for line in _clear_session_flag_after_login(report):
         typer.echo(line)
     for line in _preflight_lines(report):
@@ -634,7 +655,9 @@ def posture_command(
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
     provider = _provider(settings)
-    session_probe = _session_probe(asyncio.run(run_preflight(provider))) if probe else None
+    session_probe = (
+        _session_probe(asyncio.run(run_preflight(provider, _browser_lock_key()))) if probe else None
+    )
     engine = make_engine(database_url())
     try:
         factory = make_session_factory(engine)
@@ -727,6 +750,7 @@ def rehearse_command(
             rehearsal = asyncio.run(
                 run_rehearsal(
                     _provider(settings),
+                    account=_browser_lock_key(),
                     site=base,
                     visits=visits,
                     seed=chosen_seed,
@@ -750,6 +774,40 @@ def _report_rehearsal(rehearsal: Rehearsal, log: Path | None) -> None:
     if log is not None:
         log.write_text(text, encoding="utf-8")
         typer.echo(f"wrote the request log to {log}")
+
+
+def _browser_lock_key() -> str:
+    """The activity-lock key of the local user's LinkedIn account (#169 F).
+
+    Every browser path in every process has to meet at the same lock file, and
+    `netkeeper serve` keys its runs by the account row. So a command that
+    attaches (preflight, posture's probe, rehearse) reads the row too, without
+    writing anything: no database yet (a fresh install, before `db upgrade`), no
+    local user, or no account row all mean account 1, the first user's, which
+    is also the row every existing install has (migration 0011).
+    """
+    url = database_url()
+    parsed = make_url(url)
+    if parsed.get_backend_name() == "sqlite" and (
+        parsed.database in (None, ":memory:") or not Path(parsed.database or "").exists()
+    ):
+        return SINGLE_ACCOUNT_KEY
+    engine = make_engine(url)
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = session.scalars(
+                select(User).where(User.kind == UserKind.LOCAL).order_by(User.id)
+            ).first()
+            if user is None:
+                return SINGLE_ACCOUNT_KEY
+            return account_key(account_id_for(session, user))
+    except OperationalError as exc:
+        log.debug("no account row to key the browser lock by (%s); using account 1", exc)
+        return SINGLE_ACCOUNT_KEY
+    finally:
+        engine.dispose()
 
 
 def _provider(settings: Settings) -> AttachBrowserProvider:
@@ -801,6 +859,334 @@ def simulate_command(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(render_simulation(report), nl=False)
+
+
+# --- LinkedIn runs: start by hand, watch, cancel, arm the schedule (P2-10) -----------
+
+schedule_app = typer.Typer(
+    help="Whether scheduled LinkedIn runs may fire. Every install starts disarmed.",
+    no_args_is_help=True,
+)
+linkedin_app.add_typer(schedule_app, name="schedule")
+
+
+@linkedin_app.command("sync")
+def linkedin_sync(
+    ctx: typer.Context,
+    full: Annotated[
+        bool,
+        typer.Option(
+            "--full/--incremental",
+            help="Page the whole connections list (--full) or stop at the first page of"
+            " connections already known (--incremental, the default).",
+        ),
+    ] = False,
+) -> None:
+    """Run one connections sync now, in this terminal, and wait for it.
+
+    This visits LinkedIn: it attaches to the Chrome you started, takes the same
+    per-account browser lock `netkeeper serve` takes, loads your connections
+    page, and reads it through LinkedIn's own in-page API, within today's page
+    budget and with the same pacing, heat, and session-flag rules a scheduled
+    run has. It works while scheduled runs are disarmed: this is how the first
+    supervised run is done. Ctrl-C stops it; what it read is kept.
+    """
+    kind = SyncRunKind.CONNECTIONS_FULL if full else SyncRunKind.CONNECTIONS_INCREMENTAL
+    _run_by_hand(ctx, kind)
+
+
+@linkedin_app.command("enrich")
+def linkedin_enrich(
+    ctx: typer.Context,
+    max_visits: Annotated[
+        int | None,
+        typer.Option(
+            "--max-visits",
+            min=1,
+            help="Visit at most this many profiles. It only lowers today's budget; it"
+            " never raises it.",
+            show_default=False,
+        ),
+    ] = None,
+    resume: Annotated[
+        int | None,
+        typer.Option(
+            "--resume",
+            help="Resume an aborted enrichment run's remaining plan, in its order.",
+            show_default=False,
+        ),
+    ] = None,
+) -> None:
+    """Run one enrichment now, in this terminal, and wait for it.
+
+    This visits LinkedIn profiles: each visit is a real page view, a scroll, and
+    two in-page API reads, paced like a person, within today's warm-up-ramped,
+    weekend-damped, heat-shrunk budget (`netkeeper posture` shows it). Pinned
+    contacts go first. It works while scheduled runs are disarmed. Ctrl-C stops
+    it between profiles; `--resume <run id>` picks up what it left.
+    """
+    _run_by_hand(ctx, SyncRunKind.ENRICH, max_visits=max_visits, resume=resume)
+
+
+def _run_by_hand(
+    ctx: typer.Context,
+    kind: SyncRunKind,
+    *,
+    max_visits: int | None = None,
+    resume: int | None = None,
+) -> None:
+    state = ctx.ensure_object(CliState)
+    settings = _load_settings_or_exit(state)
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            user_id = user.id
+            try:
+                account_id = ensure_account(session, user).id
+                runs.refuse_if_flagged_or_hot(
+                    session, user, account_id, now=datetime.now(UTC), settings=settings.linkedin
+                )
+                if resume is not None:
+                    run = enrich_plan.start_resume(
+                        session, user, resume, now=datetime.now(UTC), max_visits=max_visits
+                    )
+                else:
+                    run = runs.create_run(
+                        session,
+                        user,
+                        kind,
+                        trigger=SyncRunTrigger.MANUAL,
+                        now=datetime.now(UTC),
+                        max_visits=max_visits,
+                    )
+            except (
+                runs.RunError,
+                runs.HeatSkipped,
+                runs.SessionFlagged,
+                enrich_plan.PlanNotFound,
+                enrich_plan.PlanFinished,
+            ) as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            run_id = run.id
+        typer.echo(
+            f"run {run_id} ({kind.value}) started; `netkeeper linkedin cancel {run_id}` stops it"
+        )
+        bus = EventBus()
+        worker = BrowserWorker(_provider(settings), factory, settings.linkedin, bus=bus)
+        asyncio.run(_execute_printing(worker, bus, run_id, user_id))
+        with session_scope(factory) as session:
+            finished = runs.get_run(session, _local_user_or_exit(session), run_id)
+            lines = _run_lines(finished)
+            failed = finished.status is SyncRunStatus.FAILED
+    finally:
+        engine.dispose()
+    for line in lines:
+        typer.echo(line)
+    if failed:
+        raise typer.Exit(code=1)
+
+
+async def _execute_printing(
+    worker: BrowserWorker, bus: EventBus, run_id: int, user_id: int
+) -> None:
+    subscription = bus.subscribe()
+
+    async def show() -> None:
+        async for event in subscription:
+            if event.type == "run.progress":
+                counts = ", ".join(
+                    f"{key} {value}"
+                    for key, value in event.data.items()
+                    if key != "run_id" and value is not None
+                )
+                typer.echo(f"  {counts}")
+
+    printer = asyncio.create_task(show())
+    try:
+        await worker.execute(run_id, user_id)
+    finally:
+        bus.unsubscribe(subscription)
+        await printer
+
+
+def _run_lines(run: SyncRun) -> list[str]:
+    """A run as a field table: kind, status, how it ended, its counts."""
+    derived = runs.view(run)
+    rows: list[tuple[str, str]] = [
+        ("run", str(run.id)),
+        ("kind", run.kind.value),
+        ("trigger", run.trigger.value),
+        ("status", run.status.value),
+        ("started", f"{run.started_at:%Y-%m-%d %H:%M UTC}"),
+        ("ended", "-" if run.completed_at is None else f"{run.completed_at:%Y-%m-%d %H:%M UTC}"),
+        ("stopped by", run.stop_reason or "-"),
+    ]
+    if derived.planned is not None:
+        rows.append(("plan", f"{derived.completed or 0} of {derived.planned} done"))
+    if run.max_visits is not None:
+        rows.append(("max visits", str(run.max_visits)))
+    if run.resume_of_id is not None:
+        rows.append(("resumes", f"run {run.resume_of_id}"))
+    for key, value in sorted((run.counts_json or {}).items()):
+        if isinstance(value, dict):
+            value = ", ".join(f"{k} {v}" for k, v in value.items() if v is not None) or "-"
+        rows.append((key.replace("_", " "), "-" if value is None else str(value)))
+    if derived.aging_refused is not None:
+        rows.append(("aging refused", derived.aging_refused))
+    if run.notes:
+        rows.append(("notes", run.notes))
+    if run.error:
+        rows.append(("error", run.error))
+    return _format_table(("FIELD", "VALUE"), rows).splitlines()
+
+
+@linkedin_app.command("runs")
+def linkedin_runs(
+    limit: Annotated[int, typer.Option(min=1, max=200, help="How many runs to list.")] = 20,
+) -> None:
+    """List recent LinkedIn runs, newest first. Reads only."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            rows, total = runs.list_runs(session, user, limit=limit)
+            table = [
+                (
+                    str(run.id),
+                    run.kind.value,
+                    run.trigger.value,
+                    run.status.value,
+                    f"{run.started_at:%Y-%m-%d %H:%M}",
+                    run.stop_reason or "-",
+                )
+                for run in rows
+            ]
+    finally:
+        engine.dispose()
+    if not table:
+        typer.echo("no runs yet")
+        return
+    typer.echo(
+        _format_table(("RUN", "KIND", "TRIGGER", "STATUS", "STARTED (UTC)", "STOPPED BY"), table),
+        nl=False,
+    )
+    if total > len(table):
+        typer.echo(f"({total - len(table)} older runs not shown)")
+
+
+@linkedin_app.command("run")
+def linkedin_run(run_id: Annotated[int, typer.Argument(help="The run to show.")]) -> None:
+    """Show one run: how far it got, how it ended, and its counts. Reads only."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            try:
+                lines = _run_lines(runs.get_run(session, user, run_id))
+            except runs.RunNotFound as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+    finally:
+        engine.dispose()
+    for line in lines:
+        typer.echo(line)
+
+
+@linkedin_app.command("cancel")
+def linkedin_cancel(run_id: Annotated[int, typer.Argument(help="The run to stop.")]) -> None:
+    """Ask a running run to stop at its next check (between pages or profiles).
+
+    Works across processes: the flag is on the run's row, so this stops a run
+    `netkeeper serve` or another terminal is doing. The run ends `aborted` and
+    keeps what it completed.
+    """
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            try:
+                runs.request_cancel(session, user, run_id, now=datetime.now(UTC))
+            except (runs.RunNotFound, runs.RunFinished) as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+    finally:
+        engine.dispose()
+    typer.echo(f"asked run {run_id} to stop; it stops at its next check")
+
+
+@schedule_app.command("status")
+def linkedin_schedule_status() -> None:
+    """Whether scheduled LinkedIn runs are armed. Reads only."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            account = find_account(session, user)
+            armed_at = None if account is None else account.scheduled_runs_armed_at
+    finally:
+        engine.dispose()
+    if armed_at is None:
+        typer.echo(
+            "disarmed: `netkeeper serve` fires no scheduled LinkedIn run. Runs are the ones"
+            " you start (`netkeeper linkedin sync`, `netkeeper linkedin enrich`)."
+        )
+    else:
+        typer.echo(f"armed since {armed_at:%Y-%m-%d %H:%M UTC}: scheduled runs fire when due")
+
+
+@schedule_app.command("arm")
+def linkedin_schedule_arm(
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    """Let `netkeeper serve` run LinkedIn jobs on its own schedule.
+
+    Until this, serve's scheduler keeps due times and fires nothing. Once armed,
+    the weekly full sync (due soon after arming if it has never run), the daily
+    incremental sync, and enrichment run on their own, within your budgets and
+    active hours. Arm only after a supervised run by hand has gone well.
+    """
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            if not yes and not typer.confirm(
+                "arm scheduled LinkedIn runs? netkeeper serve will then visit LinkedIn on its"
+                " own schedule, without you starting each run"
+            ):
+                typer.echo("cancelled: scheduled runs stay disarmed")
+                raise typer.Exit(code=1)
+            arm_scheduled_runs(session, user, now=datetime.now(UTC))
+    finally:
+        engine.dispose()
+    typer.echo("scheduled LinkedIn runs armed; `netkeeper linkedin schedule disarm` undoes it")
+
+
+@schedule_app.command("disarm")
+def linkedin_schedule_disarm() -> None:
+    """Stop scheduled LinkedIn runs from firing. A run already going is not stopped."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            disarm_scheduled_runs(session, _local_user_or_exit(session))
+    finally:
+        engine.dispose()
+    typer.echo("scheduled LinkedIn runs disarmed")
 
 
 @backup_app.callback()

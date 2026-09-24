@@ -86,6 +86,20 @@ write lock with it) *before* awaiting the injected handler: a real enrichment
 run is minutes of bursts and human-like delays (spec 9.5), and holding a write
 transaction open for that long would starve every other writer in the process.
 
+**Wired into ``netkeeper serve`` (P2-10), disarmed.** ``serve``'s lifespan
+builds and starts this scheduler (:mod:`netkeeper.services.scheduled_runs`)
+for :data:`SERVED_SCHEDULES` -- the connections syncs and enrichment; the
+inbox poll has no runner yet -- with handlers that record a ``sync_runs`` row
+and hand it to the browser worker. Before any of that, :func:`poll_and_fire`
+asks the **arm gate**: while a person has not armed the account's scheduled
+runs (every account starts disarmed) a due fire is skipped as ``"disarmed"``
+exactly the way heat skips one, cadence and first-setup standing included. The
+gate is on by default at every entry point (:data:`DEFAULT_ARM_GATE`); only
+:data:`ARMING_NOT_REQUIRED`, which ``netkeeper simulate``'s scratch schedule
+passes, turns it off. A handler that could not reach the browser answers
+:attr:`JobOutcome.RETRY_LATER`, and :func:`park_retry` parks one retry 20 to 50
+minutes out (spec 9.9).
+
 **The interleave gap.** Spec 9.5's last bullet: "never run enrichment and a
 message send in the same minute; the scheduler interleaves job kinds with a
 gap." Two mechanisms, one constant (:data:`MIN_JOB_KIND_GAP`).
@@ -127,6 +141,7 @@ from netkeeper.linkedin import pacing
 from netkeeper.models import JsonValue, User
 from netkeeper.models.base import utcnow
 from netkeeper.services import heat as heat_service
+from netkeeper.services.linkedin_accounts import scheduled_runs_armed
 from netkeeper.services.settings_kv import get_setting, set_setting
 
 log = logging.getLogger(__name__)
@@ -155,7 +170,17 @@ class JobContext:
     catch_up: bool
 
 
-JobHandler = Callable[[JobContext], Awaitable[None]]
+class JobOutcome(enum.Enum):
+    """What a handler may tell the scheduler about the fire it just ran."""
+
+    RETRY_LATER = "retry_later"
+    """The browser was unreachable or busy (spec 9.9): park one retry
+    :data:`RETRY_MIN_MINUTES` to :data:`RETRY_MAX_MINUTES` out."""
+
+
+#: A handler returns ``None`` when the fire ran (whatever the run made of it),
+#: or :attr:`JobOutcome.RETRY_LATER`.
+JobHandler = Callable[[JobContext], Awaitable[JobOutcome | None]]
 JobRegistry = Mapping[JobKind, JobHandler]
 
 
@@ -233,6 +258,21 @@ FIRST_SETUP_RETRY: Final = timedelta(hours=1)
 # `stagger_due_times`), with room for polling jitter around the boundary.
 MIN_JOB_KIND_GAP: Final = timedelta(minutes=2)
 
+# Spec 9.9: when the browser is gone (``BrowserUnavailable``) -- or another
+# netkeeper process holds it -- "the scheduler parks a retry 20 to 50 minutes
+# out". Never sooner (Chrome is not coming back in seconds, and a tight loop of
+# attach attempts is noise), never much later (the day's run should still land).
+RETRY_MIN_MINUTES: Final = 20.0
+RETRY_MAX_MINUTES: Final = 50.0
+
+#: The kinds ``netkeeper serve`` schedules: the ones with a runner (P2-06,
+#: P2-07). ``inbox`` is left out, not registered-but-inert: it has no runner
+#: until the inbox poll exists, and a due time for a job that does nothing would
+#: read in ``netkeeper posture`` as a job that runs.
+SERVED_SCHEDULES: Final[dict[JobKind, JobSchedule]] = {
+    kind: schedule for kind, schedule in DEFAULT_SCHEDULES.items() if kind is not JobKind.INBOX
+}
+
 
 # --- the heat gate: on unless explicitly, namedly disabled (spec 9.7) --------
 
@@ -253,6 +293,28 @@ HEAT_SKIP_DISABLED: Final = HeatSkip.DISABLED
 DEFAULT_HEAT_SETTINGS: Final = LinkedInSettings().heat
 
 HeatGate = HeatSettings | HeatSkip
+
+
+# --- the arm gate: nothing scheduled fires until a person arms it (P2-10) ----
+
+
+class Arming(enum.Enum):
+    """The one value that turns the arm gate off. For a scheduler that drives no
+    real account -- ``netkeeper simulate``'s scratch database, and the
+    scheduler's own tests -- never for ``netkeeper serve``."""
+
+    NOT_REQUIRED = "not_required"
+
+
+ARMING_NOT_REQUIRED: Final = Arming.NOT_REQUIRED
+
+ArmCheck = Callable[[Session, User, int], bool]
+ArmGate = ArmCheck | Arming
+
+#: The production gate, and every entry point's default: whether a person has
+#: armed the account's scheduled runs (``linkedin_accounts.scheduled_runs_armed_at``).
+#: Every account starts disarmed, so a scheduler that nobody armed fires nothing.
+DEFAULT_ARM_GATE: Final[ArmCheck] = scheduled_runs_armed
 
 
 # --- active hours: delegates to netkeeper.linkedin.pacing, never reimplements it ---
@@ -713,10 +775,12 @@ async def poll_and_fire(
     schedule: JobSchedule,
     registry: JobRegistry,
     heat_settings: HeatGate = DEFAULT_HEAT_SETTINGS,
+    armed: ArmGate = DEFAULT_ARM_GATE,
     tz: str,
     active_start: time = pacing.DEFAULT_ACTIVE_START,
     active_end: time = pacing.DEFAULT_ACTIVE_END,
     rng: random.Random | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> FireResult | None:
     """One heartbeat's check for ``(account_id, kind)``: fire if due, else no-op.
 
@@ -730,11 +794,21 @@ async def poll_and_fire(
     replaying one fire per missed interval. ``rng`` supplies that jitter and
     defaults to a fresh :class:`random.Random`; pass a seeded one to replay it.
 
-    Above the configured heat threshold (spec 9.7) the browser job is skipped
-    -- the injected handler is not called -- but the cadence still advances, so
-    the scheduler does not spin retrying the same fire on every subsequent
-    heartbeat while heat is elevated. The skip is on unless ``heat_settings``
-    is :data:`HEAT_SKIP_DISABLED`.
+    While the account's scheduled runs are disarmed (``armed``, P2-10; every
+    account starts disarmed) the handler is not called either, and the fire
+    is skipped as ``"disarmed"``. Above the configured heat threshold (spec
+    9.7) the browser job is skipped as ``"heat"``. Either way the cadence still
+    advances, so the scheduler does not spin retrying the same fire on every
+    heartbeat, and a skipped fire has not *run*: a ``run_on_first_setup`` kind
+    keeps its first-setup standing and is offered again
+    :data:`FIRST_SETUP_RETRY` later. The heat skip is on unless
+    ``heat_settings`` is :data:`HEAT_SKIP_DISABLED`; the arm gate is on unless
+    ``armed`` is :data:`ARMING_NOT_REQUIRED`.
+
+    A handler that answers :attr:`JobOutcome.RETRY_LATER` (the browser was
+    unreachable or busy) has one retry parked :data:`RETRY_MIN_MINUTES` to
+    :data:`RETRY_MAX_MINUTES` after ``clock()`` (spec 9.9), unless the next
+    due time is already sooner. ``clock`` defaults to returning ``now``.
 
     The writer session that reads and advances the due time is closed *before*
     the (possibly long-running) handler is awaited, so a real job never holds
@@ -770,7 +844,9 @@ async def poll_and_fire(
         due = state.due
         is_catchup = state.is_catchup
         skipped_reason: str | None = None
-        if isinstance(heat_settings, HeatSettings) and heat_service.should_skip(
+        if not isinstance(armed, Arming) and not armed(session, user, account_id):
+            skipped_reason = "disarmed"
+        elif isinstance(heat_settings, HeatSettings) and heat_service.should_skip(
             session, user, account_id, now=now, settings=heat_settings
         ):
             skipped_reason = "heat"
@@ -793,7 +869,23 @@ async def poll_and_fire(
         ctx = JobContext(
             user_id=user.id, account_id=account_id, kind=kind, due=due, catch_up=is_catchup
         )
-        await handler(ctx)
+        outcome = await handler(ctx)
+        if outcome is JobOutcome.RETRY_LATER:
+            next_due = park_retry(
+                session_factory,
+                user,
+                account_id,
+                kind,
+                now=clock() if clock is not None else now,
+                schedule=schedule,
+                rng=rng if rng is not None else random.Random(),  # noqa: S311 -- jitter
+                tz=tz,
+                active_start=active_start,
+                active_end=active_end,
+            )
+    elif skipped_reason == "disarmed":
+        # Every poll of a disarmed account lands here; it is the expected state.
+        log.debug("scheduler: %s for account %d not fired: disarmed", kind.value, account_id)
     else:
         log.warning(
             "scheduler: skipping %s for account %d (%s)", kind.value, account_id, skipped_reason
@@ -816,9 +908,11 @@ async def poll_once(
     registry: JobRegistry,
     schedules: Mapping[JobKind, JobSchedule] = DEFAULT_SCHEDULES,
     heat_settings: HeatGate = DEFAULT_HEAT_SETTINGS,
+    armed: ArmGate = DEFAULT_ARM_GATE,
     active_start: time = pacing.DEFAULT_ACTIVE_START,
     active_end: time = pacing.DEFAULT_ACTIVE_END,
     rng: random.Random | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> list[FireResult]:
     """:func:`poll_and_fire` every ``(user, account_id)`` in ``accounts`` across
     every kind in ``schedules``. The body of the heartbeat job in
@@ -857,10 +951,12 @@ async def poll_once(
                 schedule=schedules[kind],
                 registry=registry,
                 heat_settings=heat_settings,
+                armed=armed,
                 tz=tz,
                 active_start=active_start,
                 active_end=active_end,
                 rng=rng,
+                clock=clock,
             )
             if result is None:
                 continue
@@ -890,6 +986,52 @@ def _defer_past_the_gap(
         _store_state(session, user, account_id, kind, replace(state, due=target))
 
 
+def park_retry(
+    session_factory: sessionmaker[Session],
+    user: User,
+    account_id: int,
+    kind: JobKind,
+    *,
+    now: datetime,
+    schedule: JobSchedule,
+    rng: random.Random,
+    tz: str,
+    active_start: time = pacing.DEFAULT_ACTIVE_START,
+    active_end: time = pacing.DEFAULT_ACTIVE_END,
+) -> datetime:
+    """Park one retry of ``kind`` :data:`RETRY_MIN_MINUTES` to :data:`RETRY_MAX_MINUTES`
+    after ``now`` (spec 9.9: the browser went away), and return the due time now stored.
+
+    A stored due time that is already sooner is kept: a retry never pushes a
+    fire later. The parked time goes through active hours like every other due
+    time, and is not a catch-up.
+    """
+    retry = now + timedelta(minutes=rng.uniform(RETRY_MIN_MINUTES, RETRY_MAX_MINUTES))
+    retry = _snap_to_active_hours(
+        retry,
+        tz,
+        start=active_start,
+        end=active_end,
+        respect_active_hours=schedule.respect_active_hours,
+    )
+    with session_scope(session_factory, write=True) as session:
+        state = _load_state(session, user, account_id, kind)
+        if state is None:
+            raise RuntimeError(
+                f"park_retry: no established schedule for account {account_id}/{kind.value}"
+            )
+        if state.due <= retry:
+            return state.due
+        _store_state(session, user, account_id, kind, replace(state, due=retry, is_catchup=False))
+    log.info(
+        "scheduler: %s for account %d could not reach the browser; retrying at %s",
+        kind.value,
+        account_id,
+        retry.isoformat(),
+    )
+    return retry
+
+
 # --- production wiring: build, never start -----------------------------------
 
 HEARTBEAT_JOB_ID: Final = "netkeeper-scheduler-heartbeat"
@@ -908,7 +1050,9 @@ def build_scheduler(
     active_start: time = pacing.DEFAULT_ACTIVE_START,
     active_end: time = pacing.DEFAULT_ACTIVE_END,
     heat_settings: HeatGate = DEFAULT_HEAT_SETTINGS,
+    armed: ArmGate = DEFAULT_ARM_GATE,
     rng: random.Random | None = None,
+    clock: Callable[[], datetime] = utcnow,
 ) -> AsyncIOScheduler:
     """Build (never start) an :class:`AsyncIOScheduler` with one heartbeat job.
 
@@ -931,7 +1075,12 @@ def build_scheduler(
     ``heat_settings`` defaults to :data:`DEFAULT_HEAT_SETTINGS`, so a caller
     that wires up the scheduler and passes nothing still gets spec 9.7's skip;
     production passes its loaded ``settings.linkedin.heat``, and only
-    :data:`HEAT_SKIP_DISABLED` turns it off.
+    :data:`HEAT_SKIP_DISABLED` turns it off. ``armed`` defaults to
+    :data:`DEFAULT_ARM_GATE` the same way: a scheduler built with no word
+    about arming fires nothing on an account nobody armed.
+
+    ``clock`` is read for every "now" -- the establishing pass and every
+    heartbeat -- so a test can drive the real heartbeat across a due time.
     """
     registry = dict(registry) if registry is not None else default_registry()
     schedules = dict(schedules) if schedules is not None else dict(DEFAULT_SCHEDULES)
@@ -944,7 +1093,7 @@ def build_scheduler(
                 session,
                 user,
                 account_id,
-                now=utcnow(),
+                now=clock(),
                 schedules=schedules,
                 rng=jitter,
                 tz=user.timezone,
@@ -956,13 +1105,15 @@ def build_scheduler(
         await poll_once(
             session_factory,
             accounts(),
-            now=utcnow(),
+            now=clock(),
             registry=registry,
             schedules=schedules,
             heat_settings=heat_settings,
+            armed=armed,
             active_start=active_start,
             active_end=active_end,
             rng=jitter,
+            clock=clock,
         )
 
     scheduler.add_job(

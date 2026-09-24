@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
 from netkeeper.linkedin import activity_lock
+from netkeeper.linkedin.activity_lock import LEGACY_SHARED_KEY
 from netkeeper.linkedin.activity_lock import SINGLE_ACCOUNT_KEY as SINGLE_ACCOUNT_KEY
 from netkeeper.linkedin.pacing import ScrollPlan
 
@@ -262,7 +263,12 @@ class ActivityLocks:
         lock = self._locks.get(account)
         if lock is not None and lock.locked():
             return True
-        return activity_lock.inspect(account, self.directory).held
+        if activity_lock.inspect(account, self.directory).held:
+            return True
+        return (
+            account == SINGLE_ACCOUNT_KEY
+            and activity_lock.inspect(LEGACY_SHARED_KEY, self.directory).held
+        )
 
     @asynccontextmanager
     async def hold(self, account: str, *, wait: bool = False) -> AsyncIterator[None]:
@@ -282,25 +288,44 @@ class ActivityLocks:
             )
         await lock.acquire()
         try:
-            claim = await self._claim(account, wait=wait)
+            claims = await self._claims(account, wait=wait)
             try:
                 yield
             finally:
-                claim.release()
+                for claim in reversed(claims):
+                    claim.release()
         finally:
             lock.release()
 
-    async def _claim(self, account: str, *, wait: bool) -> activity_lock.Claim:
-        """The account's file lock, or :class:`BrowserBusy` when another process has it."""
-        claim = activity_lock.try_claim(account, self.directory)
+    async def _claims(self, account: str, *, wait: bool) -> list[activity_lock.Claim]:
+        """The account's file lock; for account 1, the legacy one first (#169 F).
+
+        See :data:`~netkeeper.linkedin.activity_lock.LEGACY_SHARED_KEY`: a process
+        running older code holds only the legacy file, and only ever for account 1.
+        Either one busy releases whatever was taken and raises.
+        """
+        keys = [LEGACY_SHARED_KEY, account] if account == SINGLE_ACCOUNT_KEY else [account]
+        held: list[activity_lock.Claim] = []
+        try:
+            for key in keys:
+                held.append(await self._claim(key, wait=wait, account=account))
+        except BaseException:
+            for claim in reversed(held):
+                claim.release()
+            raise
+        return held
+
+    async def _claim(self, key: str, *, wait: bool, account: str) -> activity_lock.Claim:
+        """The file lock ``key``, or :class:`BrowserBusy` when another process has it."""
+        claim = activity_lock.try_claim(key, self.directory)
         if claim is None:
             await asyncio.sleep(self.CONFIRM_S)
-            claim = activity_lock.try_claim(account, self.directory)
+            claim = activity_lock.try_claim(key, self.directory)
         while claim is None and wait:
             await asyncio.sleep(self.POLL_S)
-            claim = activity_lock.try_claim(account, self.directory)
+            claim = activity_lock.try_claim(key, self.directory)
         if claim is None:
-            holder = activity_lock.read_holder(account, self.directory)
+            holder = activity_lock.read_holder(key, self.directory)
             who = holder.describe() if holder is not None else "another netkeeper process"
             raise BrowserBusy(
                 f"the browser for LinkedIn account {account!r} is in use by {who}; {_BUSY_ADVICE}"

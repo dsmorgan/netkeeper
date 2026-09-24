@@ -6,8 +6,11 @@ task's lifecycle goes out on the :class:`EventBus` as ``task.started``,
 ``task.progress``, ``task.finished``, and ``task.failed`` so the UI can follow it
 over SSE.
 
-This is the skeleton: one in-process runner, no persistence, no activity lock.
-The browser activity lock (one per LinkedIn account) arrives with the extractor.
+One in-process runner, no persistence: a task does not outlive its process,
+and nothing is replayed at the next start. The browser activity lock (one per
+LinkedIn account) is the browser worker's, not this runner's; a LinkedIn run
+is submitted here like any other task (``services.scheduled_runs``,
+``web/api/linkedin.py``).
 """
 
 from __future__ import annotations
@@ -102,6 +105,18 @@ class TaskRunner:
         if task_id is None:
             raise RuntimeError("TaskRunner.progress() must be called from inside a submitted task")
         self._publish("task.progress", self._tasks[task_id], dict(data))
+
+    async def wait(self, task_id: str) -> TaskInfo | None:
+        """Wait for one task to finish and return its final snapshot.
+
+        Never raises the task's own exception (that is on the snapshot). A task
+        that is not running any more returns at once; a cancellation of the
+        waiter itself propagates, and cancels nothing else.
+        """
+        task = self._running.get(task_id)
+        if task is not None:
+            await asyncio.wait({task})
+        return self._tasks.get(task_id)
 
     async def join(self) -> None:
         """Wait for every running task to finish (tests and shutdown flushes)."""

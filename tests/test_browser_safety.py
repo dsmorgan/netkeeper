@@ -125,6 +125,9 @@ BROWSER_MODULES = (
     # P2-08's DOM fallback: a scroll replay's dwell and a page.evaluate read
     # are exactly as long-running as the in-page Voyager fetch above.
     "netkeeper.linkedin.dom",
+    # The run worker (P2-10) attaches and runs a whole run. A route that imported
+    # it could await it; routes submit runs to the task runner instead.
+    "netkeeper.worker",
 )
 
 # The modules that may reach the provider at all, as paths from the repository root.
@@ -138,6 +141,10 @@ BROWSER_CALLERS = frozenset(
         Path("netkeeper/linkedin/rehearse.py"),  # the rehearsal, inside a run
         Path("netkeeper/linkedin/fetch.py"),  # PageVoyagerFetch, inside a run (#150)
         Path("netkeeper/linkedin/dom.py"),  # DomConnectionsSource/DomContactInfoSource (P2-08)
+        # The run worker (P2-10): takes the lock, attaches, runs a recorded run. Not
+        # under web/ or services/, and nothing under either imports it: the app and
+        # the runs API hold it only as services.runs.RunExecutor.
+        Path("netkeeper/worker.py"),
     }
 )
 

@@ -228,6 +228,8 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "heat",
         "heat skip gate",
         "scheduled jobs",
+        "scheduled runs",
+        "network aging",
     ]
 
 
@@ -787,7 +789,7 @@ def _module_file(name: str) -> Path | None:
     return None
 
 
-def _live_modules() -> set[Path]:
+def _live_modules(also_unfollowed: frozenset[Path] = frozenset()) -> set[Path]:
     """Every module an entry point reaches through imports, module-level or in a function.
 
     Liveness here is *import* reachability, not call reachability: an import
@@ -800,10 +802,11 @@ def _live_modules() -> set[Path]:
     The rehearsal and report modules (:func:`_not_production`) are reached but not
     followed: ``netkeeper simulate`` importing the scheduler runs a *simulated*
     schedule, and ``netkeeper posture`` importing it reads constants. Neither makes
-    the scheduler part of a live run.
+    the scheduler part of a live run. ``also_unfollowed`` adds modules to that
+    set, for a test showing which path makes something live.
     """
     package = Path(browser_safety.PACKAGE)
-    not_followed = _not_production(package)
+    not_followed = _not_production(package) | also_unfollowed
     reached: set[Path] = set()
     queue = sorted(_entry_points())
     while queue:
@@ -894,25 +897,40 @@ def test_the_scanner_can_actually_find_a_caller() -> None:
 
 
 def test_a_caller_nothing_starts_is_not_live() -> None:
-    """The runners and the scheduler call enforcement for real and are still not live.
+    """Liveness is reachability from an entry point, and the worker is the one path.
 
-    Each is reachable only through a report or a rehearsal (``posture`` reads the
-    scheduler's constants, ``simulate`` runs a fake schedule, ``rehearse`` drives
-    the enrichment job at a loopback replica), or not at all.
+    Since P2-10 the runners are live: ``netkeeper.worker`` reaches them from the
+    CLI (``linkedin sync``/``enrich``) and from ``serve`` (the scheduler and the
+    runs API hold it as an executor). Take the worker out of the walk and the
+    enrichment job and the connections sync runner fall out of it: nothing else
+    netkeeper runs imports them, so no route or report is a hidden path to the
+    browser work (#167's review, still load-bearing).
     """
     package = Path(browser_safety.PACKAGE)
     live = _live_modules()
-    assert package / "services" / "connections_sync.py" not in live
-    assert package / "services" / "enrichment.py" not in live
-    assert package / "linkedin" / "enrich.py" not in live
-    assert package / "services" / "scheduler.py" not in live
+    worker = package / "worker.py"
+    for runner in (
+        package / "services" / "connections_sync.py",
+        package / "services" / "enrichment.py",
+        package / "linkedin" / "enrich.py",
+        package / "services" / "scheduler.py",
+    ):
+        assert runner in live, runner
+    without_worker = _live_modules(also_unfollowed=frozenset({worker}))
+    assert worker in without_worker  # reached, just not followed
+    assert package / "services" / "connections_sync.py" not in without_worker
+    assert package / "services" / "enrichment.py" not in without_worker
+    assert package / "linkedin" / "enrich.py" not in without_worker
     assert package / "services" / "users.py" in live  # the CLI and the app both reach it
     assert package / "web" / "api" / "contacts.py" in live  # discovered, not imported
     assert _callers_of("netkeeper.services.heat.raise_heat", live_only=False) == {
         package / "services" / "connections_sync.py",
         package / "services" / "enrichment.py",
     }
-    assert not _callers_of("netkeeper.services.heat.raise_heat")
+    assert _callers_of("netkeeper.services.heat.raise_heat") == {
+        package / "services" / "connections_sync.py",
+        package / "services" / "enrichment.py",
+    }
 
 
 # The scanner, shown snippets as if they were a file in the package (#162).
@@ -1038,10 +1056,11 @@ def test_the_rehearsal_is_ignored_because_it_does_pace() -> None:
     imported = {name for _, name in browser_safety.imported_names(rehearse.read_text(), rehearse)}
     assert any(name.startswith("netkeeper.linkedin.enrich") for name in imported)
     assert _calls(job.read_text(encoding="utf-8"), job, _PLAN)
-    live = _live_modules()
+    # Since P2-10 the worker makes the job live on its own account, so the
+    # rehearsal's part is shown with the worker taken out of the walk.
+    live = _live_modules(also_unfollowed=frozenset({Path(browser_safety.PACKAGE) / "worker.py"}))
     assert rehearse in live
     assert job not in live
-    assert job not in _callers_of(_PLAN)
 
 
 def test_every_enforcement_target_is_a_function_that_exists() -> None:
@@ -1086,7 +1105,7 @@ def test_a_clean_report_claims_configuration_and_not_enforcement(
     """The verdict is the one sentence most likely to be read on its own.
 
     "every protection is in force" would be the same sentence on the day a
-    protection works and the day nothing calls it, which for five of them is
+    protection works and the day nothing calls it, which for two budgets is
     today. "nothing is misconfigured" is what this module actually checks.
     """
     text = render(_report(writer, user))
@@ -1095,7 +1114,7 @@ def test_a_clean_report_claims_configuration_and_not_enforcement(
     assert "in force" not in text.split("nothing is misconfigured")[1]
     assert "never callers" in text
     for name in _report(writer, user).protections:
-        if name.name in ("budget profile_visits", "warm-up ramp", "weekend damping"):
+        if name.name in ("budget inbox_polls", "budget li_messages_auto"):
             assert name.name in text.split("not covered by this report:")[1]
 
 
@@ -1108,8 +1127,10 @@ def test_the_gap_lists_the_protections_nothing_enforces_yet(writer: Session, use
     unwired = gaps.split("no enforcing caller that netkeeper runs yet:")[1].split(".")[0]
     assert unwired.strip()
 
-    # Nothing netkeeper runs reaches the scheduler or the connections sync runner
-    # yet, so every protection either of them would enforce is listed.
+    # Since P2-10 the runners and the scheduler are live (netkeeper.worker), so
+    # what is left is the two budgets whose jobs do not exist yet -- and nothing
+    # the runners enforce may still be listed as unwired.
+    assert unwired.strip() == "budget inbox_polls, budget li_messages_auto"
     for name in (
         "budget connection_pages",
         "budget profile_visits",
@@ -1117,11 +1138,9 @@ def test_the_gap_lists_the_protections_nothing_enforces_yet(writer: Session, use
         "active hours",
         "heat skip gate",
         "session flag",
-        "heat",
     ):
-        assert name in unwired, name
-    assert "connections sync runner" in gaps
-    assert "enrichment runner" in gaps
+        assert name not in unwired, name
+    assert "sync and enrichment runners are wired" in gaps
 
 
 _CONNECTION_PAGES = f"{_CONSUME}[netkeeper.services.budgets.ActionClass.CONNECTION_PAGES]"

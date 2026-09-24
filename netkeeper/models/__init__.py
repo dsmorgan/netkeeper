@@ -48,6 +48,7 @@ from netkeeper.models.lists import (
     ListMember,
     SavedView,
 )
+from netkeeper.models.runs import SyncRun, SyncRunKind, SyncRunStatus, SyncRunTrigger
 from netkeeper.models.settings import JsonValue, SettingKV
 from netkeeper.models.tags import (
     TAG_NAME_MAX_LENGTH,
@@ -121,6 +122,10 @@ __all__ = [
     "RuleField",
     "SavedView",
     "SettingKV",
+    "SyncRun",
+    "SyncRunKind",
+    "SyncRunStatus",
+    "SyncRunTrigger",
     "SyncedValue",
     "Tag",
     "TagKind",

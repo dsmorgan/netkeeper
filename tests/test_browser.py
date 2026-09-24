@@ -576,3 +576,44 @@ async def test_an_uncancelled_scroll_ignores_a_cancelled_callback_that_says_no()
 
     assert outcome.cancelled is False
     assert sleeper.waits == [0.05, 0.25]
+
+
+# --- #169 F: keyed by the account row, and never alongside an older process ------------
+
+
+def test_the_lock_key_is_the_account_row() -> None:
+    from netkeeper.linkedin import activity_lock
+
+    assert activity_lock.account_key(1) == "account-1" == SINGLE_ACCOUNT_KEY
+    assert activity_lock.account_key(12) == "account-12"
+    assert activity_lock.LEGACY_SHARED_KEY == "local"
+    with pytest.raises(ValueError):
+        activity_lock.account_key(0)
+
+
+async def test_an_older_process_holding_the_legacy_lock_blocks_account_one() -> None:
+    """A pre-P2-10 netkeeper holds only ``browser-local.lock``; a new hold of account 1
+    must not attach alongside it, and a new hold must keep an old one out too."""
+    from netkeeper.linkedin import activity_lock
+
+    old = activity_lock.try_claim(activity_lock.LEGACY_SHARED_KEY)
+    assert old is not None
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    try:
+        with pytest.raises(BrowserBusy):
+            async with asyncio.timeout(BUSY_TIMEOUT_S), provider.run(SINGLE_ACCOUNT_KEY):
+                pass
+        assert connector.attaches == 0
+        assert provider.locks.is_busy(SINGLE_ACCOUNT_KEY)
+        # Another account never waits on the legacy file.
+        async with provider.run("account-2"):
+            pass
+        # A refused hold of account 1 took nothing with it.
+        assert not activity_lock.inspect(SINGLE_ACCOUNT_KEY).held
+    finally:
+        old.release()
+
+    async with provider.run(SINGLE_ACCOUNT_KEY):
+        assert activity_lock.try_claim(activity_lock.LEGACY_SHARED_KEY) is None
+    assert not activity_lock.inspect(activity_lock.LEGACY_SHARED_KEY).held

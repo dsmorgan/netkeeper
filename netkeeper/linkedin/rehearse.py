@@ -379,22 +379,35 @@ async def rehearse(
         # Not a cryptographic use: the seed is printed in the log precisely so a
         # rehearsal can be repeated line for line, which is the opposite of what a
         # secure generator is for.
-        result = await run_enrichment(
-            spec,
-            source,
-            gate,
-            on_harvest=on_harvest,
-            rng=Random(seed),  # noqa: S311
-            clock=lambda: started_at,
-            sleep=_scaled_sleep(sleep, time_scale),
-        )
-        if urls:
-            grouped.append(recorder.close_visit())
-        # The replica's csrf cookie is for 127.0.0.1 on every port (a cookie
-        # ignores the port), so it is expired before the tab closes rather than
-        # left for its two minutes. Recorded on its own, and checked like the rest.
-        await run.goto(f"{base}{REPLICA_EXPIRE_PATH}")
-        cleanup = recorder.close_visit()
+        finished = False
+        try:
+            result = await run_enrichment(
+                spec,
+                source,
+                gate,
+                on_harvest=on_harvest,
+                rng=Random(seed),  # noqa: S311
+                clock=lambda: started_at,
+                sleep=_scaled_sleep(sleep, time_scale),
+            )
+            finished = True
+        finally:
+            if urls:
+                grouped.append(recorder.close_visit())
+            # The replica's csrf cookie is for 127.0.0.1 on every port (a cookie
+            # ignores the port), so it is expired before the tab closes rather than
+            # left for its two minutes -- in a `finally`, so a rehearsal that ends
+            # by exception expires it too (#172). Recorded on its own, and checked
+            # like the rest.
+            try:
+                await run.goto(f"{base}{REPLICA_EXPIRE_PATH}")
+            except Exception:
+                if finished:
+                    raise
+                # The job's own exception is the one worth seeing; a tab that
+                # is already gone cannot expire anything anyway.
+                log.warning("could not expire the replica's cookie after the rehearsal failed")
+            cleanup = recorder.close_visit()
 
     stopped = (
         None

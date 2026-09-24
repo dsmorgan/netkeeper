@@ -607,6 +607,55 @@
         "title": "Body_import_archive",
         "type": "object"
       },
+      "BudgetOut": {
+        "description": "One action class's counters against its limits (spec 9.6).",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "day": {
+            "$ref": "#/components/schemas/PeriodBudgetOut"
+          },
+          "week": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PeriodBudgetOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "action",
+          "day",
+          "week"
+        ],
+        "title": "BudgetOut",
+        "type": "object"
+      },
+      "BudgetStatusOut": {
+        "properties": {
+          "budgets": {
+            "items": {
+              "$ref": "#/components/schemas/BudgetOut"
+            },
+            "title": "Budgets",
+            "type": "array"
+          },
+          "profile_visits_today": {
+            "$ref": "#/components/schemas/TodaysVisitsOut"
+          }
+        },
+        "required": [
+          "budgets",
+          "profile_visits_today"
+        ],
+        "title": "BudgetStatusOut",
+        "type": "object"
+      },
       "BulkCountIn": {
         "additionalProperties": false,
         "description": "Ask how many contacts an action would touch, and for the token that confirms it.\n\nIt carries the ``value`` and ``reason`` the action would write, not only the\nselection, because those are part of what the person confirms: \"mark 214\npeople do-not-contact\" and \"clear do-not-contact on 214 people\" are two\ndifferent sentences at the same count.",
@@ -3662,6 +3711,74 @@
         "title": "HealthOut",
         "type": "object"
       },
+      "HeatOut": {
+        "description": "Heat as spec 9.7 says the page shows it: level, last raised, when runs resume.",
+        "properties": {
+          "cleared_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cleared At"
+          },
+          "last_raised_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Raised At"
+          },
+          "multiplier": {
+            "title": "Multiplier",
+            "type": "number"
+          },
+          "resumes_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resumes At"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "threshold": {
+            "title": "Threshold",
+            "type": "number"
+          },
+          "tripped": {
+            "title": "Tripped",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "score",
+          "threshold",
+          "multiplier",
+          "tripped",
+          "last_raised_at",
+          "cleared_at",
+          "resumes_at"
+        ],
+        "title": "HeatOut",
+        "type": "object"
+      },
       "ImportChangeOut": {
         "description": "One field a row would write, with the value that is there now.",
         "properties": {
@@ -4792,6 +4909,67 @@
         "title": "LinkKind",
         "type": "string"
       },
+      "LinkedInStatusOut": {
+        "description": "The LinkedIn page's banner: the session flag, heat, arming, and any running run.",
+        "properties": {
+          "armed": {
+            "title": "Armed",
+            "type": "boolean"
+          },
+          "can_start_runs": {
+            "title": "Can Start Runs",
+            "type": "boolean"
+          },
+          "heat_tripped": {
+            "title": "Heat Tripped",
+            "type": "boolean"
+          },
+          "running_run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Running Run Id"
+          },
+          "session_flag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Flag"
+          },
+          "session_flagged_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Flagged At"
+          }
+        },
+        "required": [
+          "session_flag",
+          "session_flagged_at",
+          "heat_tripped",
+          "armed",
+          "running_run_id",
+          "can_start_runs"
+        ],
+        "title": "LinkedInStatusOut",
+        "type": "object"
+      },
       "ListCreate": {
         "properties": {
           "filter": {
@@ -5368,6 +5546,29 @@
         "title": "OverlapOut",
         "type": "object"
       },
+      "PeriodBudgetOut": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "remaining": {
+            "title": "Remaining",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count",
+          "limit",
+          "remaining"
+        ],
+        "title": "PeriodBudgetOut",
+        "type": "object"
+      },
       "PhoneKind": {
         "enum": [
           "mobile",
@@ -5377,6 +5578,58 @@
         ],
         "title": "PhoneKind",
         "type": "string"
+      },
+      "PinIn": {
+        "additionalProperties": false,
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "contact_id"
+        ],
+        "title": "PinIn",
+        "type": "object"
+      },
+      "PinOut": {
+        "description": "A pinned contact (spec 9.6: at most 5, to the front of the next run).",
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          }
+        },
+        "required": [
+          "contact_id",
+          "first_name",
+          "last_name"
+        ],
+        "title": "PinOut",
+        "type": "object"
       },
       "PreferredNameIn": {
         "description": "What you call this person. Empty means \"use the first name\".",
@@ -5471,6 +5724,276 @@
         ],
         "title": "RuleField",
         "type": "string"
+      },
+      "RunAccepted": {
+        "description": "The ``202`` of a start or a resume: the recorded run, and the task running it.",
+        "properties": {
+          "run_id": {
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "task_id": {
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "task_id"
+        ],
+        "title": "RunAccepted",
+        "type": "object"
+      },
+      "RunOut": {
+        "description": "One run: what it is, how far it got, and how it ended. Counts only, never names.\n\n``planned``/``completed`` are an enrichment plan's size and progress.\n``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.",
+        "properties": {
+          "aging_refused": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aging Refused"
+          },
+          "browser_mode": {
+            "title": "Browser Mode",
+            "type": "string"
+          },
+          "cancel_requested_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancel Requested At"
+          },
+          "completed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "counts": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counts"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SyncRunKind"
+          },
+          "max_visits": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Visits"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "planned": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planned"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progress"
+          },
+          "resume_of_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resume Of Id"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SyncRunStatus"
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Reason"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/SyncRunTrigger"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "trigger",
+          "started_at",
+          "completed_at",
+          "stop_reason",
+          "cancel_requested_at",
+          "max_visits",
+          "resume_of_id",
+          "browser_mode",
+          "progress",
+          "counts",
+          "notes",
+          "error",
+          "planned",
+          "completed",
+          "aging_refused"
+        ],
+        "title": "RunOut",
+        "type": "object"
+      },
+      "RunPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RunOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "RunPage",
+        "type": "object"
+      },
+      "RunResumeIn": {
+        "additionalProperties": false,
+        "properties": {
+          "max_visits": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Visits"
+          }
+        },
+        "title": "RunResumeIn",
+        "type": "object"
+      },
+      "RunStartIn": {
+        "additionalProperties": false,
+        "description": "Start a run by hand. ``max_visits`` (enrichment only) only ever lowers today's budget.",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/SyncRunKind"
+          },
+          "max_visits": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Visits"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "RunStartIn",
+        "type": "object"
       },
       "SavedViewCreate": {
         "properties": {
@@ -5631,6 +6154,92 @@
           }
         },
         "title": "SavedViewPatch",
+        "type": "object"
+      },
+      "ScheduleArmIn": {
+        "additionalProperties": false,
+        "description": "Arming needs ``confirm: true``: it lets netkeeper visit LinkedIn on its own.",
+        "properties": {
+          "confirm": {
+            "title": "Confirm",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "confirm"
+        ],
+        "title": "ScheduleArmIn",
+        "type": "object"
+      },
+      "ScheduleOut": {
+        "description": "Whether scheduled runs may fire, and when each kind is next due.\n\n``armed`` is false on every install until a person arms it; while false the\nscheduler still keeps due times, and no scheduled LinkedIn job fires.\n``scheduler_running`` is whether this process runs a scheduler at all.",
+        "properties": {
+          "armed": {
+            "title": "Armed",
+            "type": "boolean"
+          },
+          "armed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Armed At"
+          },
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduledJobOut"
+            },
+            "title": "Jobs",
+            "type": "array"
+          },
+          "scheduler_running": {
+            "title": "Scheduler Running",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "armed",
+          "armed_at",
+          "scheduler_running",
+          "jobs"
+        ],
+        "title": "ScheduleOut",
+        "type": "object"
+      },
+      "ScheduledJobOut": {
+        "properties": {
+          "interval_hours": {
+            "title": "Interval Hours",
+            "type": "number"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "next_due": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Due"
+          }
+        },
+        "required": [
+          "kind",
+          "interval_hours",
+          "next_due"
+        ],
+        "title": "ScheduledJobOut",
         "type": "object"
       },
       "SharedCompanyOut": {
@@ -5816,6 +6425,37 @@
         ],
         "title": "StartsWith",
         "type": "object"
+      },
+      "SyncRunKind": {
+        "description": "Spec 8.4's run kinds. ``inbox`` and ``message_send`` have no runner yet.",
+        "enum": [
+          "connections_full",
+          "connections_incremental",
+          "enrich",
+          "inbox",
+          "message_send"
+        ],
+        "title": "SyncRunKind",
+        "type": "string"
+      },
+      "SyncRunStatus": {
+        "enum": [
+          "running",
+          "completed",
+          "aborted",
+          "failed"
+        ],
+        "title": "SyncRunStatus",
+        "type": "string"
+      },
+      "SyncRunTrigger": {
+        "description": "Who asked for the run: a person (API or CLI), or the scheduler.",
+        "enum": [
+          "manual",
+          "scheduled"
+        ],
+        "title": "SyncRunTrigger",
+        "type": "string"
       },
       "SyncedValueOut": {
         "description": "What an automated source last reported for one field: what a revert restores.",
@@ -6261,6 +6901,52 @@
           "snapshot"
         ],
         "title": "TimelineSnapshot",
+        "type": "object"
+      },
+      "TodaysVisitsOut": {
+        "description": "Today's profile visits, step by step: warm-up, weekend, heat; then what is left.",
+        "properties": {
+          "after_heat": {
+            "title": "After Heat",
+            "type": "integer"
+          },
+          "after_weekend": {
+            "title": "After Weekend",
+            "type": "integer"
+          },
+          "ramp": {
+            "title": "Ramp",
+            "type": "integer"
+          },
+          "remaining": {
+            "title": "Remaining",
+            "type": "integer"
+          },
+          "spent_today": {
+            "title": "Spent Today",
+            "type": "integer"
+          },
+          "week_left": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Week Left"
+          }
+        },
+        "required": [
+          "ramp",
+          "after_weekend",
+          "after_heat",
+          "spent_today",
+          "week_left",
+          "remaining"
+        ],
+        "title": "TodaysVisitsOut",
         "type": "object"
       },
       "TriageCardOut": {
@@ -10079,6 +10765,552 @@
         "summary": "Update Interaction",
         "tags": [
           "interactions"
+        ]
+      }
+    },
+    "/api/v1/linkedin/budget": {
+      "get": {
+        "description": "Every action class's counters against its limits, and today's profile-visit chain.",
+        "operationId": "get_linkedin_budget",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Budget",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/heat": {
+      "get": {
+        "operationId": "get_linkedin_heat",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HeatOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Heat",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/pins": {
+      "get": {
+        "operationId": "list_linkedin_pins",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PinOut"
+                  },
+                  "title": "Response List Linkedin Pins",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Pins",
+        "tags": [
+          "linkedin"
+        ]
+      },
+      "post": {
+        "description": "Pin a contact to the front of the next enrichment (spec 9.6, at most five).",
+        "operationId": "pin_linkedin_contact",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PinIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PinOut"
+                  },
+                  "title": "Response Pin Linkedin Contact",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "description": "Cannot pin"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pin Contact",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/pins/{contact_id}": {
+      "delete": {
+        "operationId": "unpin_linkedin_contact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PinOut"
+                  },
+                  "title": "Response Unpin Linkedin Contact",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unpin Contact",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/runs": {
+      "get": {
+        "operationId": "list_linkedin_runs",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/SyncRunKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/SyncRunStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Runs",
+        "tags": [
+          "linkedin"
+        ]
+      },
+      "post": {
+        "description": "Record a manual run and submit it; answers at once, before any browser work.",
+        "operationId": "start_linkedin_run",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunStartIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "A run is running, the session is flagged, or heat is too high"
+          },
+          "422": {
+            "description": "A kind with no runner, or max_visits on a sync"
+          },
+          "503": {
+            "description": "This process has no browser worker"
+          }
+        },
+        "summary": "Start Run",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/runs/{run_id}": {
+      "get": {
+        "operationId": "get_linkedin_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No run"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Run",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/runs/{run_id}/cancel": {
+      "post": {
+        "description": "Ask a running run to stop at its next check (spec 9.9).",
+        "operationId": "cancel_linkedin_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No run"
+          },
+          "409": {
+            "description": "The run already ended"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Run",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/runs/{run_id}/resume": {
+      "post": {
+        "description": "Record a resume of an enrichment run's remaining plan and submit it.",
+        "operationId": "resume_linkedin_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunResumeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No enrichment run with a plan"
+          },
+          "409": {
+            "description": "Nothing to resume, or the run cannot start now"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "This process has no browser worker"
+          }
+        },
+        "summary": "Resume Run",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/schedule": {
+      "get": {
+        "operationId": "get_linkedin_schedule",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Schedule",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/schedule/arm": {
+      "post": {
+        "description": "Let scheduled LinkedIn runs fire. Needs ``confirm: true``; a person's act only.",
+        "operationId": "arm_linkedin_schedule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleArmIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "confirm was not true"
+          }
+        },
+        "summary": "Arm Schedule",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/schedule/disarm": {
+      "post": {
+        "description": "Stop scheduled LinkedIn runs from firing. A run already going is not cancelled.",
+        "operationId": "disarm_linkedin_schedule",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Disarm Schedule",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/status": {
+      "get": {
+        "operationId": "get_linkedin_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkedInStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Status",
+        "tags": [
+          "linkedin"
         ]
       }
     },
