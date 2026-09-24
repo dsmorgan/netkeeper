@@ -91,11 +91,18 @@ def imports_pulled_in_by(module: str) -> list[str]:
 
 #: Spec 9.10's "Out" column as it exists so far: what the extractor hands the core.
 #: A module that imports one of these modules, or one of these names, handles
-#: extractor results. ``ProfileHarvest``, ``InboxDelta``, and ``MessageOutcome`` join
-#: with the jobs that return them (P2-07, P4). ``voyager.ConnectionSummary`` is named
-#: alone because the rest of ``voyager`` is request plumbing, not results.
-RESULT_MODULES = ("netkeeper.linkedin.connections",)
-RESULT_TYPES = ("netkeeper.linkedin.voyager.ConnectionSummary",)
+#: extractor results. ``InboxDelta`` and ``MessageOutcome`` join with the jobs that
+#: return them (P4). The ``voyager`` types are named alone because the rest of
+#: ``voyager`` is request plumbing, not results; the three profile types are what a
+#: ``ProfileHarvest`` carries (P2-07).
+RESULT_MODULES = ("netkeeper.linkedin.connections", "netkeeper.linkedin.enrich")
+RESULT_TYPES = (
+    "netkeeper.linkedin.voyager.ConnectionSummary",
+    "netkeeper.linkedin.voyager.ProfileDetails",
+    "netkeeper.linkedin.voyager.ContactInfo",
+    "netkeeper.linkedin.voyager.PositionEntry",
+    "netkeeper.linkedin.voyager.EducationEntry",
+)
 
 #: The modules allowed to turn an extractor result into rows: spec 9.10's
 #: ``crm/apply.py``, and nothing else.

@@ -1,11 +1,15 @@
-"""Map the extractor's connections pages onto contacts, and run the edge lifecycle (spec 9.8, 9.10).
+"""Map the extractor's results onto contacts, and run the edge lifecycle (spec 9.8, 9.10).
 
 The core side of the boundary. :mod:`netkeeper.linkedin.connections` reads the
 list and hands back :class:`~netkeeper.linkedin.connections.ConnectionsPage`
-values without touching the database; this is the one module that turns them
-into rows (spec 9.10: "the core's ``crm/apply.py`` maps them onto contacts,
-snapshots, and messages inside a session"). ``tests/test_extractor_boundary.py``
-fails if any other module maps an extractor result onto a table.
+values, and :mod:`netkeeper.linkedin.enrich` visits profiles and hands back
+:class:`~netkeeper.linkedin.enrich.ProfileHarvest` values, without touching the
+database; this is the one module that turns them into rows (spec 9.10: "the
+core's ``crm/apply.py`` maps them onto contacts, snapshots, and messages inside
+a session"). ``tests/test_extractor_boundary.py`` fails if any other module
+maps an extractor result onto a table. The harvest half is
+:func:`apply_harvest`; see its docstring for how a profile is matched to the
+contact it was visited for, and why a harvest never takes a value away.
 
 **Each connection** becomes an :class:`~netkeeper.crm.identity.IncomingContact`
 with source ``sync`` and goes through identity resolution, exactly as the
@@ -44,21 +48,50 @@ writes, so the session must be a writer (``session_scope(factory, write=True)``)
 
 from __future__ import annotations
 
+import enum
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import date, datetime, tzinfo
+from datetime import date, datetime, timedelta, tzinfo
 from typing import Final
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
-from netkeeper.crm.identity import Candidate, IncomingContact, Matched, New, apply, resolve
+from netkeeper.crm.identity import (
+    Candidate,
+    IncomingContact,
+    IncomingEmail,
+    IncomingLink,
+    IncomingPhone,
+    IncomingPosition,
+    Matched,
+    New,
+    apply,
+    resolve,
+    resolve_survivor,
+)
 from netkeeper.db import is_writer
+from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import ConnectionsPage
-from netkeeper.linkedin.voyager import ConnectionSummary
-from netkeeper.models import Contact, ContactSource, User, normalize_public_id
+from netkeeper.linkedin.enrich import ProfileHarvest
+from netkeeper.linkedin.voyager import (
+    ConnectionSummary,
+    ContactInfo,
+    PositionEntry,
+    ProfileDetails,
+)
+from netkeeper.models import (
+    Contact,
+    ContactSource,
+    EmailKind,
+    Interaction,
+    InteractionKind,
+    LinkKind,
+    User,
+    normalize_public_id,
+)
 from netkeeper.scoping import scoped
 
 log = logging.getLogger(__name__)
@@ -311,6 +344,265 @@ def _implausible(*, missed: int, can_age: int, unmatched: int, seen: int) -> str
             " stored URNs and LinkedIn's may no longer name the same people"
         )
     return None
+
+
+# --- profile harvests (spec 9.4 enrichment, 9.8's NotFound streak) -------------------
+
+#: Spec 9.8: "A NotFound streak of 3 across at least 14 days marks the profile as
+#: gone." A deactivated profile looks exactly like a deleted one and often comes
+#: back, so one visit that finds nothing proves nothing, and neither do three in a
+#: row on consecutive days.
+NOT_FOUND_GONE_AFTER: Final = 3
+NOT_FOUND_GONE_SPAN: Final = timedelta(days=14)
+
+#: The link a harvested Twitter handle is stored as. A handle is not a url, and
+#: ``contact_links`` holds urls; this is the one place the two meet.
+TWITTER_URL: Final = "https://twitter.com/{handle}"
+
+
+class HarvestResult(enum.StrEnum):
+    """What :func:`apply_harvest` did with one harvest."""
+
+    APPLIED = "applied"
+    """The profile was the contact's; its fields and children were written."""
+
+    NOT_FOUND = "not_found"
+    """No profile: one more on the contact's NotFound streak."""
+
+    GONE = "gone"
+    """No profile, and the streak reached spec 9.8's bar: marked gone."""
+
+    MISMATCH = "mismatch"
+    """The profile found is not the contact's (another URN); nothing was written."""
+
+    CONFLICT = "conflict"
+    """The profile's slug belongs to another contact; nothing was written."""
+
+    MISSING = "missing"
+    """The contact is no longer one of the user's; nothing was written."""
+
+
+@dataclass(slots=True)
+class HarvestCounts:
+    """What mapping harvests did, summed over a run, one count per :class:`HarvestResult`.
+
+    ``snapshots`` counts the ``contact_snapshot`` rows the applied harvests wrote.
+    """
+
+    applied: int = 0
+    not_found: int = 0
+    gone: int = 0
+    mismatch: int = 0
+    conflict: int = 0
+    missing: int = 0
+    snapshots: int = 0
+
+    def add(self, result: HarvestResult) -> None:
+        setattr(self, result.value, getattr(self, result.value) + 1)
+
+
+def apply_harvest(
+    session: Session, user: User, harvest: ProfileHarvest, counts: HarvestCounts | None = None
+) -> HarvestResult:
+    """Write one profile visit's harvest to the contact it was visited for (spec 9.4 step 4).
+
+    **Whose profile it is.** The job visits a slug, and a slug is a vanity url
+    a person can give up and another can claim. So the harvest is written only
+    when the profile's URN is the one the contact already holds: enrichment
+    visits only contacts a sync has seen, which all have one. A profile under
+    another URN is :attr:`HarvestResult.MISMATCH` and writes nothing. A merged
+    contact stands for its survivor. A slug change under the same URN is a
+    vanity-url rename, and goes through identity resolution's usual path: the
+    old slug becomes an alias. A new slug another contact holds is
+    :attr:`HarvestResult.CONFLICT` and writes nothing, as a connections page
+    does with the same row.
+
+    **Nothing known is taken away.** The harvest becomes an
+    :class:`~netkeeper.crm.identity.IncomingContact` with source ``sync``, and
+    an incoming field that is absent is "not provided": a profile without a
+    headline, a location, or a current position leaves the stored one. Child
+    rows (emails, phones, links, positions) are upserted by natural key and
+    never removed, and a position's end date is only ever filled in. A field a
+    person edited stays theirs (spec 10.5). A change to the headline, title,
+    company, or location writes a ``contact_snapshot`` of the values before it.
+    Education has no table (spec 8.1) and is not stored.
+
+    **NotFound.** A harvest that found no profile adds to the contact's streak;
+    at :data:`NOT_FOUND_GONE_AFTER` across at least :data:`NOT_FOUND_GONE_SPAN`
+    the contact gets ``li_disconnected_at`` and a note on its timeline (spec
+    9.8). An applied harvest ends the streak.
+
+    ``last_enriched_at`` is set, and ``enrich_priority`` cleared, only by an
+    applied harvest. Nothing is committed; the session must be a writer.
+    """
+    _require_writer(session)
+    counts = HarvestCounts() if counts is None else counts
+    try:
+        contact = resolve_survivor(session, user, harvest.contact_ref)
+    except ValueError:
+        log.warning("enrichment: contact %d is not one of user %d's", harvest.contact_ref, user.id)
+        counts.add(HarvestResult.MISSING)
+        return HarvestResult.MISSING
+    if harvest.outcome is Outcome.NOT_FOUND:
+        result = _record_not_found(session, user, contact, harvest.observed_at)
+        counts.add(result)
+        return result
+    details, info = harvest.details, harvest.contact_info
+    assert details is not None and info is not None  # ProfileHarvest's own invariant
+    if contact.li_urn is None or details.urn != contact.li_urn:
+        log.warning(
+            "enrichment: the profile visited for contact %d of user %d is not theirs"
+            " (%s URN); nothing written",
+            contact.id,
+            user.id,
+            "no stored" if contact.li_urn is None else "another",
+        )
+        counts.add(HarvestResult.MISMATCH)
+        return HarvestResult.MISMATCH
+    incoming = _harvested(details, info, harvest.observed_at)
+    before = len(contact.snapshots)
+    try:
+        apply(session, user, incoming, Matched(contact.id, "urn"))
+    except ValueError:
+        # apply() checks before its first write, so the contact is untouched.
+        # The error names the slug; the log does not need it.
+        log.warning(
+            "enrichment: the profile visited for contact %d of user %d carries a slug another"
+            " contact holds; merge the two to let it through",
+            contact.id,
+            user.id,
+        )
+        counts.add(HarvestResult.CONFLICT)
+        return HarvestResult.CONFLICT
+    counts.snapshots += len(contact.snapshots) - before
+    contact.last_enriched_at = harvest.observed_at
+    contact.enrich_priority = 0
+    contact.li_not_found_count = 0
+    contact.li_not_found_since = None
+    contact.li_not_found_at = None
+    session.flush()
+    counts.add(HarvestResult.APPLIED)
+    return HarvestResult.APPLIED
+
+
+def _record_not_found(
+    session: Session, user: User, contact: Contact, observed_at: datetime
+) -> HarvestResult:
+    """One more on ``contact``'s NotFound streak; mark it gone at spec 9.8's bar."""
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("observed_at must be timezone-aware")
+    if contact.li_not_found_count == 0 or contact.li_not_found_since is None:
+        contact.li_not_found_since = observed_at
+    contact.li_not_found_count += 1
+    contact.li_not_found_at = observed_at
+    since = contact.li_not_found_since
+    if (
+        contact.li_not_found_count >= NOT_FOUND_GONE_AFTER
+        and observed_at - since >= NOT_FOUND_GONE_SPAN
+        and contact.li_disconnected_at is None
+    ):
+        contact.li_disconnected_at = observed_at
+        contact.interactions.append(
+            Interaction(
+                user_id=user.id,
+                kind=InteractionKind.NOTE,
+                at=observed_at,
+                summary=(
+                    f"LinkedIn profile not found on {contact.li_not_found_count} visits since"
+                    f" {since.date().isoformat()}; marked as gone. A profile that comes back"
+                    " clears this at the next sync that sees it."
+                ),
+                source=ContactSource.SYNC,
+                observed_at=observed_at,
+            )
+        )
+        session.flush()
+        log.info("enrichment: contact %d of user %d marked gone", contact.id, user.id)
+        return HarvestResult.GONE
+    session.flush()
+    return HarvestResult.NOT_FOUND
+
+
+def _harvested(
+    details: ProfileDetails, info: ContactInfo, observed_at: datetime
+) -> IncomingContact:
+    """A harvest as the row identity resolution applies. Absent means not provided."""
+    current = next((p for p in details.positions if p.end_year is None), None)
+    return IncomingContact(
+        source=ContactSource.SYNC,
+        observed_at=observed_at,
+        li_urn=details.urn,
+        li_public_id=details.public_id,
+        first_name=details.first_name,
+        last_name=details.last_name,
+        headline=details.headline,
+        current_title=current.title if current is not None else None,
+        current_company=current.company if current is not None else None,
+        location=details.location,
+        emails=_emails(info),
+        phones=_phones(info),
+        links=_links(info),
+        positions=tuple(_position(p) for p in details.positions if p.title or p.company),
+    )
+
+
+def _emails(info: ContactInfo) -> tuple[IncomingEmail, ...]:
+    if info.email is None:
+        return ()
+    try:
+        # Primary only when the contact has none yet; an existing primary stays.
+        return (IncomingEmail(info.email, kind=EmailKind.OTHER, is_primary=True),)
+    except ValueError:
+        return ()
+
+
+def _phones(info: ContactInfo) -> tuple[IncomingPhone, ...]:
+    phones: list[IncomingPhone] = []
+    for raw in info.phones:
+        try:
+            phones.append(IncomingPhone(raw))
+        except ValueError:
+            continue  # no digits: nothing to dial, nothing to key on
+    return tuple(phones)
+
+
+def _links(info: ContactInfo) -> tuple[IncomingLink, ...]:
+    links: list[IncomingLink] = []
+    for url in info.websites:
+        if url.strip():
+            links.append(IncomingLink(url, kind=_link_kind(url)))
+    for handle in info.twitter_handles:
+        cleaned = handle.strip().lstrip("@")
+        if cleaned:
+            links.append(IncomingLink(TWITTER_URL.format(handle=cleaned), kind=LinkKind.TWITTER))
+    return tuple(links)
+
+
+def _link_kind(url: str) -> LinkKind:
+    try:
+        host = (urlsplit(url if "://" in url else f"https://{url}").hostname or "").lower()
+    except ValueError:
+        return LinkKind.WEBSITE
+    if host == "github.com" or host.endswith(".github.com"):
+        return LinkKind.GITHUB
+    return LinkKind.WEBSITE
+
+
+def _position(entry: PositionEntry) -> IncomingPosition:
+    """A position with its dates as the first of the month, as the archive importer stores them."""
+    return IncomingPosition(
+        title=entry.title,
+        company=entry.company,
+        started_on=_month(entry.start_year, entry.start_month),
+        ended_on=_month(entry.end_year, entry.end_month),
+        is_current=entry.end_year is None,
+    )
+
+
+def _month(year: int | None, month: int | None) -> date | None:
+    if year is None or not 1 <= year <= 9999:
+        return None
+    return date(year, month if month is not None and 1 <= month <= 12 else 1, 1)
 
 
 def _mark_seen(session: Session, user: User, urns: set[str]) -> int:
