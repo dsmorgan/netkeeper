@@ -1,20 +1,22 @@
 """``netkeeper.linkedin.fetch``: the in-page Voyager fetch and its gate (P2-01, #150).
 
 Offline throughout: everything here drives ``PageVoyagerFetch`` against
-``tests/browser_fakes.py``'s fake tab, never a real page. The opt-in smoke suite
-(``tests/smoke/test_fetch_smoke.py``) is what proves the same class works against a
-real Chrome and a served fixture.
-
-The fixtures below are invented: no real LinkedIn cookie value, URN, or profile ever
-appears here, and the assertions in the "cookie handling" section are what keep any
-cookie value that *is* invented out of an exception message.
+``tests/browser_fakes.py``'s fake tab, never a real page. The fakes cannot execute
+the JavaScript this module hands to ``page.evaluate`` -- they return whatever
+``context.evaluate_result`` is set to, or raise whatever ``fail_next_evaluate`` was
+armed with, regardless of the script's actual text -- so the tests below split into
+two kinds: ones that drive the *Python* side (origin checks, header composition, the
+in-page failure translated into a friendly error, response-shape validation, the
+``parse_ok`` gate) end to end, and structural checks on the generated script's text
+for the logic that only a real browser can execute (reading ``document.cookie``,
+refusing an empty token). The opt-in smoke suite (``tests/smoke/test_fetch_smoke.py``)
+is what proves the script itself, run by a real Chrome, does the right thing.
 """
 
 from __future__ import annotations
 
 import json
 from contextlib import AbstractAsyncContextManager
-from typing import Any
 from urllib.parse import urlencode
 
 import pytest
@@ -23,15 +25,19 @@ from browser_fakes import FakeBrowser, FakeConnector, FakeContext
 from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserRun
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.fetch import (
+    _NO_CSRF_MARKER,
     LINKEDIN_ORIGIN,
     NotLinkedInOrigin,
     PageVoyagerFetch,
     VoyagerFetchError,
     VoyagerNotOk,
+    _base_headers,
+    _fetch_expression,
     parse_ok,
 )
 from netkeeper.linkedin.voyager import (
     CONNECTIONS_PATH,
+    CSRF_HEADER_NAME,
     VoyagerFetch,
     VoyagerRequest,
     VoyagerResponse,
@@ -42,31 +48,22 @@ from netkeeper.linkedin.voyager import (
 
 CDP_URL = "http://127.0.0.1:9222"
 LOOPBACK_ORIGIN = "http://127.0.0.1:52341"
-
-# Invented, and never a value any assertion below expects to see leave this module.
-RAW_JSESSIONID = '"ajax:MARKER-CSRF-VALUE-0000"'
-STRIPPED_CSRF = "ajax:MARKER-CSRF-VALUE-0000"
+OTHER_LOOPBACK_ORIGIN = "http://127.0.0.1:9"
 
 
-def jsessionid_cookie(
-    *, domain: str = ".www.linkedin.com", value: str = RAW_JSESSIONID
-) -> dict[str, str]:
-    return {"name": "JSESSIONID", "value": value, "domain": domain, "path": "/"}
-
-
-def make_context(
-    cookies: list[dict[str, Any]] | None = None, evaluate_result: object = None
-) -> FakeContext:
-    return FakeContext(
-        cookies=[jsessionid_cookie()] if cookies is None else cookies,
-        evaluate_result=evaluate_result,
-    )
+def make_context(evaluate_result: object = None) -> FakeContext:
+    return FakeContext(evaluate_result=evaluate_result)
 
 
 def run_with(context: FakeContext) -> AbstractAsyncContextManager[BrowserRun]:
     connector = FakeConnector([FakeBrowser([context])])
     provider = AttachBrowserProvider(CDP_URL, connector=connector)
     return provider.run()
+
+
+async def on_origin(run: BrowserRun, origin: str = LINKEDIN_ORIGIN) -> None:
+    """Put the run's tab on ``origin``, which every real fetch call now requires (F2a)."""
+    await run.goto(origin)
 
 
 CONNECTIONS_RESPONSE = {
@@ -90,7 +87,7 @@ def fetch_result(*, status: int = 200, body: object = "", url: str = "") -> dict
     return {"status": status, "body": body, "url": url}
 
 
-# --- origin restriction --------------------------------------------------------
+# --- origin restriction (construction time) -------------------------------------
 
 
 async def test_the_default_origin_is_linkedin() -> None:
@@ -126,7 +123,28 @@ async def test_a_loopback_looking_host_over_an_unlisted_scheme_is_still_refused(
             PageVoyagerFetch(run, origin="ftp://127.0.0.1:9999")
 
 
-# --- path restriction ------------------------------------------------------------
+async def test_an_http_downgrade_of_the_linkedin_origin_is_refused() -> None:
+    """F3/N4: the production origin is fixed to https. A bare scheme swap must not pass."""
+    async with run_with(make_context()) as run:
+        with pytest.raises(NotLinkedInOrigin):
+            PageVoyagerFetch(run, origin="http://www.linkedin.com")
+
+
+async def test_the_whatwg_backslash_userinfo_trick_is_refused() -> None:
+    """F3: the exact url a reviewer showed reads as loopback to urlsplit, LinkedIn to Chrome."""
+    async with run_with(make_context()) as run:
+        with pytest.raises(NotLinkedInOrigin):
+            PageVoyagerFetch(run, origin="http://www.linkedin.com\\@127.0.0.1:8080")
+
+
+async def test_a_substring_loopback_lookalike_host_is_refused() -> None:
+    """F3/N3: 'localhost.evil.example' must not pass because it contains 'localhost'."""
+    async with run_with(make_context()) as run:
+        with pytest.raises(NotLinkedInOrigin):
+            PageVoyagerFetch(run, origin="http://localhost.evil.example:9999")
+
+
+# --- path restriction (never touches the page) ------------------------------------
 
 
 async def test_a_non_voyager_path_is_refused() -> None:
@@ -136,111 +154,177 @@ async def test_a_non_voyager_path_is_refused() -> None:
             await fetch(VoyagerRequest(path="/feed/update/urn:li:activity:1"))
 
 
-# --- reading the live csrf cookie -------------------------------------------------
+# --- the page must actually be on this instance's origin (F2a) --------------------
 
 
-async def test_no_jsessionid_cookie_is_a_fetch_error() -> None:
-    context = make_context(cookies=[], evaluate_result=fetch_result())
+async def test_a_fetch_before_the_tab_is_ever_navigated_is_refused() -> None:
+    """A fresh tab is on about:blank -- nothing in this module may run a script there."""
+    context = make_context(evaluate_result=fetch_result(status=200, body="{}", url="x"))
     async with run_with(context) as run:
         fetch = PageVoyagerFetch(run)
-        with pytest.raises(VoyagerFetchError, match="JSESSIONID"):
+        with pytest.raises(VoyagerFetchError, match="not on"):
             await fetch(VoyagerRequest(path=CONNECTIONS_PATH))
+        # The whole point: nothing was ever handed to the page.
+        assert context.pages[0].evaluate_calls == []
 
 
-async def test_a_jsessionid_for_an_unrelated_domain_does_not_count() -> None:
-    context = make_context(
-        cookies=[jsessionid_cookie(domain=".example.invalid")], evaluate_result=fetch_result()
-    )
+async def test_a_fetch_while_the_tab_is_on_a_different_loopback_port_is_refused() -> None:
+    context = make_context(evaluate_result=fetch_result(status=200, body="{}", url="x"))
     async with run_with(context) as run:
-        fetch = PageVoyagerFetch(run)
-        with pytest.raises(VoyagerFetchError, match="JSESSIONID"):
-            await fetch(VoyagerRequest(path=CONNECTIONS_PATH))
-
-
-async def test_an_unreadable_cookie_jar_is_a_fetch_error_not_a_crash() -> None:
-    context = make_context(evaluate_result=fetch_result())
-    context.cookie_error = RuntimeError("Protocol error")
-    async with run_with(context) as run:
-        fetch = PageVoyagerFetch(run)
-        with pytest.raises(VoyagerFetchError, match="cookie jar"):
-            await fetch(VoyagerRequest(path=CONNECTIONS_PATH))
-
-
-async def test_a_loopback_fetch_matches_the_cookie_by_the_loopback_host_itself() -> None:
-    """The domain suffix a csrf cookie must match tracks ``origin``, not a hardcoded host."""
-    context = make_context(
-        cookies=[jsessionid_cookie(domain="127.0.0.1")],
-        evaluate_result=fetch_result(status=200, body="{}", url=f"{LOOPBACK_ORIGIN}/x"),
-    )
-    async with run_with(context) as run:
+        await on_origin(run, OTHER_LOOPBACK_ORIGIN)
         fetch = PageVoyagerFetch(run, origin=LOOPBACK_ORIGIN)
-        response = await fetch(VoyagerRequest(path=CONNECTIONS_PATH))
-    assert response.status == 200
+        with pytest.raises(VoyagerFetchError, match="not on"):
+            await fetch(VoyagerRequest(path=CONNECTIONS_PATH))
+        assert context.pages[0].evaluate_calls == []
 
 
-async def test_the_cookie_value_never_reaches_an_exception_message() -> None:
-    """A fetch failure must never echo what the in-page script actually returned."""
-    context = make_context(evaluate_result=f"broken shape carrying {STRIPPED_CSRF}")
+async def test_a_fetch_after_navigating_to_the_matching_origin_proceeds() -> None:
+    context = make_context(evaluate_result=fetch_result(status=200, body="{}", url="x"))
     async with run_with(context) as run:
+        await on_origin(run, LOOPBACK_ORIGIN)
+        fetch = PageVoyagerFetch(run, origin=LOOPBACK_ORIGIN)
+        await fetch(VoyagerRequest(path=CONNECTIONS_PATH))
+        assert len(context.pages[0].evaluate_calls) == 1
+
+
+# --- the in-page failure modes, translated without leaking anything (F2b, F6) -------
+
+
+async def test_no_readable_csrf_cookie_in_the_page_is_a_friendly_fetch_error() -> None:
+    """What a real page throws when document.cookie has no JSESSIONID, simulated."""
+    context = make_context()
+    async with run_with(context) as run:
+        await on_origin(run)
         fetch = PageVoyagerFetch(run)
+        context.pages[0].fail_next_evaluate(RuntimeError(_NO_CSRF_MARKER))
+
+        with pytest.raises(VoyagerFetchError, match="JSESSIONID") as excinfo:
+            await fetch(VoyagerRequest(path=CONNECTIONS_PATH))
+
+    assert "log in to LinkedIn" in str(excinfo.value)
+
+
+async def test_a_generic_in_page_failure_is_wrapped_into_a_fixed_message() -> None:
+    """F6: a cross-origin redirect's 'Failed to fetch', or any other in-page failure.
+
+    This replaces a tautological version of this test (#168 review, F6): asserting
+    only that some marker the test itself chose is absent proves nothing about
+    what the module actually does with the failure. This asserts the *positive*
+    claim instead -- the raised message is one exact, fixed string, built from no
+    part of the underlying failure -- so a future change that starts interpolating
+    the driver's own exception text into the message fails this test even if the
+    interpolated text happens not to contain whatever marker a test chose.
+    """
+    context = make_context()
+    async with run_with(context) as run:
+        await on_origin(run)
+        fetch = PageVoyagerFetch(run)
+        context.pages[0].fail_next_evaluate(
+            TypeError("Failed to fetch: net::ERR_FAILED (a cross-origin redirect)")
+        )
+
         with pytest.raises(VoyagerFetchError) as excinfo:
             await fetch(VoyagerRequest(path=CONNECTIONS_PATH))
-    assert STRIPPED_CSRF not in str(excinfo.value)
+
+    assert str(excinfo.value) == (
+        "the in-page fetch failed (a network error, a cross-origin redirect, or the"
+        " page navigating away mid-request)"
+    )
+    assert "ERR_FAILED" not in str(excinfo.value)
+    assert "Failed to fetch" not in str(excinfo.value)
 
 
-async def test_a_real_evaluate_failure_never_leaks_the_cookie_value_either() -> None:
-    """Playwright's own error, not this module's -- it must not carry the value either.
+async def test_no_error_from_this_module_ever_carries_cookie_or_driver_data() -> None:
+    """N10, generalized: nothing this module raises may embed data from the failure it wraps.
 
-    The csrf-token value is embedded in the very script ``page.evaluate`` runs (see
-    ``_fetch_expression``), so a driver error naming the failing call is exactly the
-    place a value could leak if this module ever wrapped or re-raised it carelessly.
-    It does not: the failure propagates unchanged, unwrapped, carrying nothing this
-    module added -- which is what this asserts for the one value it must never leak.
+    Moot in one sense after F2b (there is no cookie value in Python to leak any
+    more), but the invariant this pins is broader than that one value: an
+    exception's ``str()`` here is always one of this module's own fixed sentences.
     """
-    context = make_context(evaluate_result=fetch_result())
+    context = make_context()
     async with run_with(context) as run:
+        await on_origin(run)
         fetch = PageVoyagerFetch(run)
-        # Open the tab first, so the failure can be armed on it before the fetch
-        # reaches the same (idempotent) `ensure_page()` call internally.
-        await run.ensure_page()
-        context.pages[0].fail_next_evaluate(RuntimeError("Execution context was destroyed"))
+        secret_shaped = 'RuntimeError: cookie="ajax:should-never-appear-anywhere"'
+        context.pages[0].fail_next_evaluate(RuntimeError(secret_shaped))
 
-        with pytest.raises(RuntimeError, match="Execution context") as excinfo:
+        with pytest.raises(VoyagerFetchError) as excinfo:
             await fetch(VoyagerRequest(path=CONNECTIONS_PATH))
 
-    assert STRIPPED_CSRF not in str(excinfo.value)
+    assert "should-never-appear-anywhere" not in str(excinfo.value)
+    assert "ajax:" not in str(excinfo.value)
 
 
-# --- the request the in-page script actually carries ------------------------------
+# --- headers: composed in Python, minus the one value that never is (F2b) ----------
 
 
-async def test_the_fetch_carries_exactly_what_build_headers_produces() -> None:
+def test_base_headers_never_include_a_csrf_token_key() -> None:
+    assert CSRF_HEADER_NAME not in _base_headers({})
+
+
+def test_base_headers_match_build_headers_minus_the_csrf_token() -> None:
+    """No drift: this module reads the same constants build_headers does."""
+    placeholder_full = build_headers("placeholder-not-a-real-cookie", extra={"x-extra": "1"})
+    del placeholder_full[CSRF_HEADER_NAME]
+
+    assert _base_headers({"x-extra": "1"}) == placeholder_full
+
+
+def test_extra_headers_override_the_base_set() -> None:
+    assert _base_headers({"accept": "text/plain"})["accept"] == "text/plain"
+
+
+async def test_a_callers_extra_header_reaches_the_script() -> None:
     context = make_context(evaluate_result=fetch_result(status=200, body="{}", url="x"))
     async with run_with(context) as run:
-        fetch = PageVoyagerFetch(run)
-        await fetch(VoyagerRequest(path=CONNECTIONS_PATH, query=connections_query(start=0)))
-        page = context.pages[0]
-
-    expected_headers = build_headers(RAW_JSESSIONID)
-    expected_url = f"{LINKEDIN_ORIGIN}{CONNECTIONS_PATH}?{urlencode(connections_query(start=0))}"
-    sent = page.evaluate_calls[-1]
-    assert json.dumps(expected_headers) in sent
-    assert json.dumps(expected_url) in sent
-    # The still-quoted raw cookie value, JSON-encoded as a string in its own right
-    # (its embedded quotes escaped), is what the header would carry if the quotes
-    # were never stripped; it must not appear anywhere near the csrf-token value.
-    unstripped = json.dumps(RAW_JSESSIONID)
-    assert unstripped not in sent, "the quotes must be stripped from the JSESSIONID cookie"
-
-
-async def test_a_callers_extra_header_overrides_build_headers_own_value() -> None:
-    context = make_context(evaluate_result=fetch_result(status=200, body="{}", url="x"))
-    async with run_with(context) as run:
+        await on_origin(run)
         fetch = PageVoyagerFetch(run)
         await fetch(VoyagerRequest(path=CONNECTIONS_PATH, headers={"accept": "text/plain"}))
         page = context.pages[0]
 
     assert json.dumps("text/plain") in page.evaluate_calls[-1]
+
+
+async def test_the_url_and_base_headers_reach_the_script() -> None:
+    context = make_context(evaluate_result=fetch_result(status=200, body="{}", url="x"))
+    async with run_with(context) as run:
+        await on_origin(run)
+        fetch = PageVoyagerFetch(run)
+        await fetch(VoyagerRequest(path=CONNECTIONS_PATH, query=connections_query(start=0)))
+        sent = context.pages[0].evaluate_calls[-1]
+
+    expected_url = f"{LINKEDIN_ORIGIN}{CONNECTIONS_PATH}?{urlencode(connections_query(start=0))}"
+    assert json.dumps(expected_url) in sent
+    assert json.dumps(_base_headers({})) in sent
+
+
+# --- structural checks on the generated script (what a browser executes) -----------
+
+
+def test_the_script_reads_document_cookie_for_jsessionid() -> None:
+    text = _fetch_expression("https://example.invalid/x", {"accept": "a"})
+    assert "document.cookie" in text
+    assert "JSESSIONID" in text
+
+
+def test_the_script_strips_the_cookies_surrounding_quotes() -> None:
+    text = _fetch_expression("https://example.invalid/x", {})
+    assert "slice(1, -1)" in text, "the quote-stripping this module documents must be in the script"
+
+
+def test_the_script_refuses_an_empty_or_missing_csrf_token() -> None:
+    """N6: an empty (or absent) JSESSIONID must not be sent as an empty header value."""
+    text = _fetch_expression("https://example.invalid/x", {})
+    assert "if (!t)" in text
+    assert json.dumps(_NO_CSRF_MARKER) in text
+
+
+def test_the_script_never_embeds_a_python_known_csrf_value() -> None:
+    """There is nothing to embed any more -- pinned so a regression is a red test, not a re-read."""
+    text = _fetch_expression("https://example.invalid/x", _base_headers({}))
+    assert CSRF_HEADER_NAME not in json.dumps(_base_headers({}))
+    # The header *name* legitimately appears once, added by the script itself.
+    assert text.count(json.dumps(CSRF_HEADER_NAME)) == 1
 
 
 async def test_satisfies_the_voyager_fetch_protocol() -> None:
@@ -257,6 +341,7 @@ async def test_the_fetch_result_round_trips_into_a_parser() -> None:
         )
     )
     async with run_with(context) as run:
+        await on_origin(run)
         fetch = PageVoyagerFetch(run)
         response = await fetch(VoyagerRequest(path=CONNECTIONS_PATH))
 
@@ -270,21 +355,25 @@ async def test_the_fetch_result_round_trips_into_a_parser() -> None:
 
 
 @pytest.mark.parametrize(
-    "raw",
+    ("raw", "expected_message"),
     [
-        "not a mapping",
-        {"status": "200", "body": "x", "url": "x"},
-        {"status": 200, "body": 5, "url": "x"},
-        {"status": 200, "body": "x", "url": 5},
-        {"status": True, "body": "x", "url": "x"},  # bool must not pass as an int status
-        {},
+        ("not a mapping", "the in-page fetch returned str, not an object"),
+        ({"status": "200", "body": "x", "url": "x"}, "no numeric 'status'"),
+        ({"status": 200, "body": 5, "url": "x"}, "no string 'body'"),
+        ({"status": 200, "body": "x", "url": 5}, "no string 'url'"),
+        ({"status": True, "body": "x", "url": "x"}, "no numeric 'status'"),
+        ({}, "no numeric 'status'"),
     ],
 )
-async def test_a_malformed_evaluate_result_is_a_fetch_error(raw: object) -> None:
+async def test_a_malformed_evaluate_result_raises_a_fixed_structural_message(
+    raw: object, expected_message: str
+) -> None:
+    """The message names the shape problem, never the value that caused it (F6, generalized)."""
     context = make_context(evaluate_result=raw)
     async with run_with(context) as run:
+        await on_origin(run)
         fetch = PageVoyagerFetch(run)
-        with pytest.raises(VoyagerFetchError):
+        with pytest.raises(VoyagerFetchError, match=expected_message):
             await fetch(VoyagerRequest(path=CONNECTIONS_PATH))
 
 
@@ -330,3 +419,20 @@ def test_parse_ok_never_calls_the_parser_on_anything_but_ok(
     assert excinfo.value.outcome is expected
     assert excinfo.value.response is response
     assert calls == [], "the gate let a non-Ok response reach the parser"
+
+
+def test_voyager_not_oks_message_never_includes_the_body_or_the_query_string() -> None:
+    """N5: a marker placed in the body or a query string must never surface in str()."""
+    response = VoyagerResponse(
+        status=429,
+        body="a-body-marker-that-must-never-appear-in-the-message",
+        final_url="https://www.linkedin.com/voyager/api/x?token=a-query-marker-too",
+    )
+
+    with pytest.raises(VoyagerNotOk) as excinfo:
+        parse_ok(response, lambda text: text)
+
+    message = str(excinfo.value)
+    assert "a-body-marker-that-must-never-appear-in-the-message" not in message
+    assert "a-query-marker-too" not in message
+    assert message == "voyager response classified throttled, not ok"
