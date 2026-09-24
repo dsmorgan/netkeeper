@@ -68,6 +68,7 @@ from sqlalchemy.orm import Session
 from netkeeper.config import HeatSettings, LinkedInSettings, PacingSettings, Settings
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin import heat as heat_math
+from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.pacing import (
     apply_weekend_multiplier,
     is_active_at,
@@ -720,7 +721,15 @@ def _linkedin_session(probe: SessionProbe | None) -> Protection:
 
 
 def _session_flag(session: Session, user: User) -> Protection:
-    """The flag a ``Checkpoint`` or ``LoggedOut`` classification raises (spec 9.7)."""
+    """The flag a ``Checkpoint`` or ``LoggedOut`` classification raises (spec 9.7).
+
+    The advice differs by outcome (#168 review, F1): ``netkeeper preflight`` clears a
+    ``LoggedOut`` flag itself the moment it finds a live session again, so that one
+    just needs a login and another preflight. A ``Checkpoint`` flag is never
+    auto-cleared -- a live ``li_at`` cookie is not proof the checkpoint is solved --
+    so its advice names the one thing that does clear it, `netkeeper linkedin
+    clear-flag`, run by hand once the account is confirmed healthy.
+    """
     flag = session_flag(session, user)
     if flag is None:
         return Protection(
@@ -728,15 +737,26 @@ def _session_flag(session: Session, user: User) -> Protection:
             status=Status.ON,
             value="clear (checkpoint and logged-out raise it)",
         )
+    if flag.outcome is Outcome.LOGGED_OUT:
+        advice = (
+            "log in to LinkedIn in the netkeeper Chrome profile, then run `netkeeper"
+            " preflight`: a preflight that finds a live session clears a logged-out"
+            " flag on its own"
+        )
+    else:
+        advice = (
+            "a checkpoint is never retried, and a live session cookie is not proof it"
+            " is resolved, so `netkeeper preflight` leaves this one alone. Once you"
+            " have opened LinkedIn in the netkeeper profile and confirmed the account"
+            " is healthy, clear it by hand with `netkeeper linkedin clear-flag`"
+        )
     return Protection(
         name="session flag",
         status=Status.ON,
         value=f"{flag.outcome.value} at {flag.url or '/'}",
         warnings=(
             f"the session was flagged {flag.outcome.value} on"
-            f" {flag.flagged_at:%Y-%m-%d %H:%M UTC}. Runs stop while a flag is up; a"
-            " checkpoint is never retried. Clear it only once you have opened LinkedIn"
-            " in the netkeeper profile and seen the account is healthy",
+            f" {flag.flagged_at:%Y-%m-%d %H:%M UTC}. Runs stop while a flag is up; {advice}",
         ),
     )
 

@@ -39,6 +39,7 @@ from netkeeper.linkedin.browser import (
     AttachBrowserProvider,
     BrowserError,
 )
+from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.preflight import LoginState, PreflightReport
 from netkeeper.linkedin.preflight import preflight as run_preflight
 from netkeeper.linkedin.rehearse import NotANeutralSite, Rehearsal, serve_replica
@@ -56,7 +57,7 @@ from netkeeper.services.backup import (
     prune_backups,
 )
 from netkeeper.services.linkedin_accounts import account_id_for
-from netkeeper.services.linkedin_session import clear_session_flag
+from netkeeper.services.linkedin_session import clear_session_flag, session_flag
 from netkeeper.services.pacing import profiles as pacing_profiles
 from netkeeper.services.posture import SessionProbe, posture
 from netkeeper.services.posture import render as render_posture
@@ -90,6 +91,9 @@ contacts_app = typer.Typer(help="Inspect your contacts.", no_args_is_help=True)
 browser_app = typer.Typer(
     help="The Chrome netkeeper attaches to (it never starts one).", no_args_is_help=True
 )
+linkedin_app = typer.Typer(
+    help="LinkedIn extractor housekeeping that isn't a job.", no_args_is_help=True
+)
 app.add_typer(config_app, name="config")
 app.add_typer(db_app, name="db")
 app.add_typer(openapi_app, name="openapi")
@@ -99,6 +103,7 @@ app.add_typer(lists_app, name="lists")
 app.add_typer(import_app, name="import")
 app.add_typer(contacts_app, name="contacts")
 app.add_typer(browser_app, name="browser")
+app.add_typer(linkedin_app, name="linkedin")
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,41 +338,75 @@ def preflight(ctx: typer.Context) -> None:
     attaching, so while `netkeeper serve` or another command holds the browser, this
     reports which process holds it and exits non-zero instead of attaching alongside.
 
-    A run that finds a live session clears `linkedin.session_flag` if a checkpoint or
-    a login wall had set it: logging back in to the netkeeper Chrome profile is the
-    actual fix for that condition, and this is where the fix gets noticed (#154).
+    A run that finds a live session clears `linkedin.session_flag` if a login wall
+    had set it: logging back in to the netkeeper Chrome profile is the actual fix
+    for that condition, and this is where the fix gets noticed (#154). A checkpoint
+    flag is different -- a live session cookie is not proof a checkpoint is
+    resolved -- so it is left in place, with a line saying so and naming
+    `netkeeper linkedin clear-flag` (#168 review, F1).
     """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
     provider = AttachBrowserProvider(settings.linkedin.cdp_url)
     report = asyncio.run(run_preflight(provider))
-    _clear_session_flag_after_login(report)
+    for line in _clear_session_flag_after_login(report):
+        typer.echo(line)
     for line in _preflight_lines(report):
         typer.echo(line)
     if not report.ok:
         raise typer.Exit(code=1)
 
 
-def _clear_session_flag_after_login(report: PreflightReport) -> None:
-    """The other half of `linkedin.session_flag` (#144): a live session clears it.
+def _clear_session_flag_after_login(report: PreflightReport) -> list[str]:
+    """The other half of `linkedin.session_flag` (#144): a live session can clear it.
 
-    Only `LoginState.LOGGED_IN` clears the flag. `LoginState.NO_SESSION` is not
-    treated as its opposite: preflight's cookie-jar read is weaker evidence than
-    LinkedIn actually answering with a login wall (`classify.Outcome.LOGGED_OUT`),
+    Only `LoginState.LOGGED_IN` does anything at all. `LoginState.NO_SESSION` is
+    not treated as its opposite: preflight's cookie-jar read is weaker evidence
+    than LinkedIn actually answering with a login wall (`classify.Outcome.LOGGED_OUT`),
     which is the whole reason #145 kept the two enums from comparing equal, so a
     missing cookie must never *set* the flag here either -- only a job that gets an
     answer from LinkedIn does that (spec 9.7, `services.linkedin_session.flag_session`).
 
+    **Only a `LoggedOut` flag is auto-cleared (#168 review, F1, decided
+    conservatively).** `li_at` being present is not proof a `Checkpoint` has been
+    resolved -- a checkpoint leaves `li_at` in place, so clearing it on that
+    evidence alone would send the next job straight back into an open checkpoint
+    (spec 9.7). A `Checkpoint` flag is left exactly as it was, with one line saying
+    why, and is only ever cleared by hand, with `netkeeper linkedin clear-flag`. (A
+    later `Ok` classification could plausibly also clear it; that is out of scope
+    here, deliberately, and left for a follow-up once a real job classifies
+    responses at all.)
+
     `linkedin/preflight.py` may not open a database session (spec 9.10, ADR 0005),
     so the clearing happens here, in the CLI -- the one place both the browser
-    report and the database are reachable. A database that has never been migrated
-    (no `netkeeper db upgrade` yet) is not an error this command should surface:
-    preflight answers from the browser alone and always has, so a missing schema or
-    a missing local user is silently nothing to clear rather than a failure.
+    report and the database are reachable. Returns the line(s) this command should
+    print, so the CLI body stays a plain "compute, then echo" and this stays
+    testable without capturing stdout.
+
+    A fresh install (before `netkeeper db upgrade`) must see none of this: preflight
+    answers from the browser alone and always has, and `make_engine` creates the
+    data directory and an empty sqlite file as a side effect of merely being called
+    (spec 15) -- so the sqlite file's existence is checked *first*, without ever
+    opening an engine, and a missing file returns with nothing printed and nothing
+    created (#168 review, F4). Once a database is genuinely there, only "no such
+    table" (the schema itself is missing -- also a fresh, pre-`db upgrade` install)
+    and no local user row are silent; anything else `OperationalError` can mean --
+    locked, read-only, a disk I/O error -- is logged at WARNING and printed as one
+    line, and still exits 0: a failure to clear an advisory flag is not a reason to
+    fail the command that just told you the browser and the session are fine.
     """
     if report.login is not LoginState.LOGGED_IN:
-        return
-    engine = make_engine(database_url())
+        return []
+    url = database_url()
+    parsed_url = make_url(url)
+    sqlite_file = parsed_url.database
+    is_sqlite_file = parsed_url.get_backend_name() == "sqlite" and sqlite_file not in (
+        None,
+        ":memory:",
+    )
+    if is_sqlite_file and sqlite_file is not None and not Path(sqlite_file).exists():
+        return []
+    engine = make_engine(url)
     try:
         factory = make_session_factory(engine)
         install_scope_guard(factory)
@@ -376,12 +415,77 @@ def _clear_session_flag_after_login(report: PreflightReport) -> None:
                 select(User).where(User.kind == UserKind.LOCAL).order_by(User.id)
             ).first()
             if user is None:
-                return
-            clear_session_flag(session, user)
-    except OperationalError:
-        log.debug("no database to clear the session flag in yet; nothing to do")
+                return []
+            flag = session_flag(session, user)
+            if flag is None:
+                return []
+            if flag.outcome is Outcome.LOGGED_OUT:
+                clear_session_flag(session, user)
+                return ["cleared the logged-out session flag: LinkedIn accepted this session"]
+            if flag.outcome is Outcome.CHECKPOINT:
+                return [
+                    "leaving the checkpoint session flag in place: a live session cookie is"
+                    " not proof the checkpoint is resolved. Once you have opened LinkedIn in"
+                    " the netkeeper Chrome profile and confirmed the account is healthy, clear"
+                    " it with `netkeeper linkedin clear-flag`"
+                ]
+            return []
+    except OperationalError as exc:
+        if _is_missing_schema(exc):
+            log.debug("no schema to clear the session flag in yet: %s", exc)
+            return []
+        log.warning("could not clear the session flag: %s", exc)
+        return [f"could not clear the session flag: {exc.orig or exc}"]
     finally:
         engine.dispose()
+
+
+def _is_missing_schema(exc: OperationalError) -> bool:
+    """Whether ``exc`` is sqlite's "no such table", the fresh-install case that stays silent."""
+    return "no such table" in str(exc.orig or exc).lower()
+
+
+@linkedin_app.command("clear-flag")
+def linkedin_clear_flag(
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Skip the confirmation prompt."),
+    ] = False,
+) -> None:
+    """Clear `linkedin.session_flag` by hand -- the way back from a checkpoint.
+
+    `netkeeper preflight` clears the flag itself once it finds a live session, but
+    only for a `LoggedOut` flag: LinkedIn actually answering again is real evidence
+    the login wall is gone. It never does that for a `Checkpoint` flag, because a
+    live `li_at` cookie is not proof a checkpoint has been solved (spec 9.7) -- so
+    that one is only ever cleared here, by hand, once you have opened LinkedIn in
+    the netkeeper Chrome profile yourself and confirmed the account looks healthy.
+
+    Asks for confirmation first, naming what is being cleared and when it was
+    raised; `--yes` skips the prompt for a script.
+    """
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            flag = session_flag(session, user)
+            if flag is None:
+                typer.echo("no session flag is set")
+                return
+            if not yes:
+                confirmed = typer.confirm(
+                    f"clear the {flag.outcome.value} session flag (raised"
+                    f" {flag.flagged_at:%Y-%m-%d %H:%M UTC} at {flag.url or '/'})?"
+                )
+                if not confirmed:
+                    typer.echo("cancelled: the flag is unchanged")
+                    raise typer.Exit(code=1)
+            clear_session_flag(session, user)
+    finally:
+        engine.dispose()
+    typer.echo("session flag cleared")
 
 
 def _preflight_lines(report: PreflightReport) -> list[str]:
