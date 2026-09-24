@@ -4,6 +4,8 @@ import { meQuery } from '@/api/queries'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 
+import { PostureSection } from './posture-section'
+
 export function SettingsPage() {
   const me = useQuery(meQuery)
 
@@ -13,17 +15,19 @@ export function SettingsPage() {
         <CardHeader>
           <CardTitle>Settings</CardTitle>
           <CardDescription>
-            Gmail auth, pacing, budgets, send windows, LLM, [me] merge fields, backups, posture
-            summary.
+            Gmail auth, pacing, budgets, send windows, LLM, [me] merge fields, backups.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex items-center gap-2">
           <Badge variant="outline">Phase 0</Badge>
           <span className="text-muted-foreground">
-            Only the current user is wired up. Each section arrives with its feature's phase.
+            Only the current user and posture are wired up. Each section arrives with its
+            feature's phase.
           </span>
         </CardContent>
       </Card>
+
+      <PostureSection />
 
       <Card size="sm">
         <CardHeader>

@@ -1474,7 +1474,7 @@ def render(report: PostureReport) -> str:
         for gap in report.gaps:
             lines.extend(_wrapped(gap, first="  - ", rest="    "))
     lines.append("")
-    lines.append(_verdict(report))
+    lines.append(verdict(report))
     return "".join(f"{line}\n" for line in lines)
 
 
@@ -1501,7 +1501,7 @@ def _hours(interval: float) -> str:
     return f"{interval / 24:g} d" if interval >= 24 else f"{interval:g} h"
 
 
-def _verdict(report: PostureReport) -> str:
+def verdict(report: PostureReport) -> str:
     """What this report is entitled to claim, which is narrower than "you are safe".
 
     The report reads configuration and counters. It cannot see whether the code

@@ -97,6 +97,7 @@ API_PATHS = {
     "/api/v1/triage/suggestions",
     "/api/v1/triage/suggestions/{key}/contacts",
     "/api/v1/triage/suggestions/{key}/apply",
+    "/api/v1/posture",
 }
 
 
@@ -209,6 +210,7 @@ def test_known_api_modules_are_discovered() -> None:
         "lists",
         "me",
         "positions",
+        "posture",
         "tags",
         "tasks",
         "triage",
