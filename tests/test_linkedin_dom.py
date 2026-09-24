@@ -144,10 +144,13 @@ def card(public_id: str, name: str, headline: str | None = None) -> dict[str, ob
     return {"publicId": public_id, "name": name, "headline": headline}
 
 
-def read(cards: list[dict[str, object]], *, container: bool = True) -> dict[str, object]:
+def read(
+    cards: list[dict[str, object]], *, container: bool = True, end_of_list: bool = False
+) -> dict[str, object]:
     """One scripted ``evaluate`` result for the connections list: the
-    ``{containerPresent, cards}`` shape ``_cards_expression`` actually returns."""
-    return {"containerPresent": container, "cards": cards}
+    ``{containerPresent, cards, endOfList}`` shape ``_cards_expression`` actually
+    returns (``endOfList`` added by #174 item 5)."""
+    return {"containerPresent": container, "cards": cards, "endOfList": end_of_list}
 
 
 def overlay(
@@ -279,12 +282,15 @@ async def test_scrolling_settles_across_a_few_attempts_until_enough_cards_load()
 
 
 async def test_scrolling_gives_up_after_max_settle_attempts_and_refuses() -> None:
-    """#173 review, F5(c): the list never grows past one card, and count=5 is never
-    reached. Exhausting every settle attempt without a confirmed answer is a
-    refusal (ROUTE_CHANGED), never an ``Ok`` short page -- this module cannot tell
+    """#173 review, F5(c); the stall half of #174 item 5: the list never grows
+    past one card, count=5 is never reached, and LinkedIn's own end-of-list
+    marker never appears either -- this is a stall, not a confirmed end.
+    Exhausting every settle attempt without a confirmed answer is a refusal
+    (ROUTE_CHANGED), never an ``Ok`` short page -- this module cannot tell
     "the list truly has only one connection" apart from "a slow render never
     caught up", and guessing the friendlier reading is exactly the mistake a
-    fallback exists not to make."""
+    fallback exists not to make. See the sibling test below for the case this
+    one is deliberately not: the same growth, but the marker present."""
     context = SequencedContext([read([card("a", "A One")])])
     async with run_with(context) as run:
         source = DomConnectionsSource(run, origin=ORIGIN, sleep=_fast_sleep)
@@ -293,6 +299,42 @@ async def test_scrolling_gives_up_after_max_settle_attempts_and_refuses() -> Non
     assert result.page is None
     # Bounded: MAX_SETTLE_ATTEMPTS reads, not one per caller-requested count.
     assert len(context.pages[0].evaluate_calls) == MAX_SETTLE_ATTEMPTS
+
+
+async def test_scrolling_gives_up_but_the_end_of_list_marker_makes_it_a_clean_page() -> None:
+    """#174 item 5: the same exhaustion as the test above -- growth stalls at
+    one card and count=5 is never reached -- but this time LinkedIn's own
+    end-of-list marker is present on every read. That distinguishes a clean
+    end of list from a stall: exhaustion now hands back whatever was actually
+    accumulated as a confirmed, short ``Ok`` page instead of refusing."""
+    context = SequencedContext([read([card("a", "A One")], end_of_list=True)])
+    async with run_with(context) as run:
+        source = DomConnectionsSource(run, origin=ORIGIN, sleep=_fast_sleep)
+        result = await source.fetch_page(start=0, count=5)
+    assert result.outcome is Outcome.OK
+    assert result.page is not None
+    assert [c.public_id for c in result.page.connections] == ["a"]
+    assert result.page.total == 0  # still never a claimed total -- module docstring
+    assert len(context.pages[0].evaluate_calls) == MAX_SETTLE_ATTEMPTS
+
+
+async def test_the_end_of_list_marker_does_not_short_circuit_normal_growth() -> None:
+    """The marker only matters once the settle loop actually exhausts; while the
+    list is still growing toward what was asked for, its presence changes
+    nothing -- a scroll that keeps reaching the requested count behaves the
+    same whether or not the page also renders the marker early."""
+    context = SequencedContext(
+        [
+            read([card("a", "A One")], end_of_list=True),
+            read([card("a", "A One"), card("b", "B Two")], end_of_list=True),
+        ]
+    )
+    async with run_with(context) as run:
+        source = DomConnectionsSource(run, origin=ORIGIN, sleep=_fast_sleep)
+        result = await source.fetch_page(start=0, count=2)
+    assert result.outcome is Outcome.OK
+    assert result.page is not None
+    assert [c.public_id for c in result.page.connections] == ["a", "b"]
 
 
 async def test_reaching_the_target_on_the_final_attempt_still_succeeds() -> None:
@@ -309,17 +351,42 @@ async def test_reaching_the_target_on_the_final_attempt_still_succeeds() -> None
     assert [c.public_id for c in result.page.connections] == ["a", "b"]
 
 
-async def test_a_missing_list_container_is_route_changed_at_once() -> None:
-    """#173 review, F5(b): a page that never renders the container at all -- an
-    error page, a wall in its place -- is refused immediately, without spending
-    the remaining settle attempts scrolling at something that cannot resolve."""
+async def test_a_missing_list_container_still_missing_after_one_retry_is_route_changed() -> None:
+    """#173 review, F5(b), retried once per #174 item 6: a page that never
+    renders the container at all -- an error page, a wall in its place -- gets
+    one paced re-check (not a fresh scroll: nothing new to scroll to) and is
+    refused once that retry still finds it missing, without spending the
+    remaining settle attempts scrolling at something that cannot resolve."""
     context = SequencedContext([read([], container=False)])
     async with run_with(context) as run:
         source = DomConnectionsSource(run, origin=ORIGIN, sleep=_fast_sleep)
         result = await source.fetch_page(start=0, count=3)
     assert result.outcome is Outcome.ROUTE_CHANGED
     assert result.page is None
-    assert len(context.pages[0].evaluate_calls) == 1
+    # The initial read plus exactly one retry -- not a full extra settle
+    # attempt, which would need a second scroll (only one settle attempt's
+    # worth of scrolling happened: see the sibling test below for the
+    # positive case, where reaching the goal after the retry needs no more
+    # scrolling than this failing case did).
+    assert len(context.pages[0].evaluate_calls) == 2
+
+
+async def test_a_missing_list_container_that_appears_on_retry_succeeds() -> None:
+    """#174 item 6: the mirror of the test above -- a container missing on the
+    first read but present by the paced retry is a success, not a refusal,
+    and costs no second scroll to get there: exactly the settle loop's first
+    (and only) scroll, same as the failing case above, just with a container
+    that shows up on the retry instead of staying missing."""
+    context = SequencedContext(
+        [read([], container=False), read([card("a", "A One")])],
+    )
+    async with run_with(context) as run:
+        source = DomConnectionsSource(run, origin=ORIGIN, sleep=_fast_sleep)
+        result = await source.fetch_page(start=0, count=1)
+    assert result.outcome is Outcome.OK
+    assert result.page is not None
+    assert [c.public_id for c in result.page.connections] == ["a"]
+    assert len(context.pages[0].evaluate_calls) == 2
 
 
 async def test_a_login_wall_is_classified_not_parsed_as_an_empty_list() -> None:
