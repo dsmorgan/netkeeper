@@ -106,6 +106,7 @@ exist mainly so a caller inspecting a page can log or display what was seen.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -161,6 +162,19 @@ LIST_CONTAINER_SELECTOR: Final = '[data-view-name="connections-list"]'
 #: the expected wrapper for an infinite-scroll list. Authored 2026-09-23.
 CARD_SELECTOR: Final = 'li[data-view-name="connections-list-item"]'
 
+#: A marker LinkedIn's own infinite scroll is presumed to render once the list
+#: has genuinely reached its end -- the same ``data-view-name`` naming
+#: convention :data:`CARD_SELECTOR` and friends use elsewhere in this module
+#: (#174 item 5). Its presence is what tells a clean end of list apart from a
+#: stall (a slow or broken render that never grows further either): see
+#: :meth:`DomConnectionsSource.fetch_page`'s docstring. Not this module's own
+#: invention -- LinkedIn is expected to show *something* once a person
+#: scrolls past their last connection -- but genuinely unverified like every
+#: other selector here; #149 tracks verifying it, and every selector in this
+#: module, against a real session before a real run relies on it. Authored
+#: 2026-09-23.
+LIST_END_SELECTOR: Final = '[data-view-name="connections-list-end"]'
+
 #: Within a card, the profile link -- the one selector here built on
 #: something LinkedIn's URL routing itself guarantees rather than a guessed
 #: attribute. Authored 2026-09-23.
@@ -183,8 +197,20 @@ CONTACT_INFO_OVERLAY_PATH_TEMPLATE: Final = "/in/{public_id}/overlay/contact-inf
 #: ARIA role, not a guessed class name, and every contact-info query below is
 #: scoped inside it -- the surrounding profile page carries its own links
 #: (a bio's ``mailto:``, an unrelated website) that are not contact info the
-#: person shared through this overlay. Authored 2026-09-23.
+#: person shared through this overlay. A real profile page can render more
+#: than one element with this role at once (a messaging overlay is a dialog
+#: too), so this selector alone only finds *candidates* -- see
+#: :data:`CONTACT_INFO_HEADING_PREFIX` and :func:`_contact_info_expression`
+#: for how exactly one is chosen (#174 item 1). Authored 2026-09-23.
 CONTACT_INFO_DIALOG_SELECTOR: Final = '[role="dialog"]'
+
+#: The overlay's own heading text, matched as a case-insensitive prefix --
+#: the other half of #174 item 1's dialog-qualification check, alongside a
+#: link back to the public id the read navigated to (see
+#: :func:`_contact_info_expression`). LinkedIn's own title for this overlay,
+#: the same "ordinary HTML convention" a heading element is (see the module
+#: docstring). Authored 2026-09-23.
+CONTACT_INFO_HEADING_PREFIX: Final = "contact info"
 
 #: Url shorteners excluded from "websites" (#173 review, F7): LinkedIn's own
 #: (``lnkd.in``) and the handful of others common enough that a link through
@@ -194,6 +220,35 @@ CONTACT_INFO_DIALOG_SELECTOR: Final = '[role="dialog"]'
 #: Authored 2026-09-23.
 LINK_SHORTENER_HOSTS: Final[frozenset[str]] = frozenset(
     {"lnkd.in", "bit.ly", "t.co", "tinyurl.com"}
+)
+
+#: X/Twitter path segments that are the site's own reserved namespace, never a
+#: person's handle (#174 item 2). Compared case-insensitively. ``i`` was the
+#: only one excluded before this item (a tweet permalink's own first segment,
+#: ``/i/status/...``); ``intent``, ``share``, ``home``, ``search``,
+#: ``hashtag``, ``explore``, ``settings``, ``messages``, ``notifications``,
+#: ``login``, ``signup``, ``compose``, ``tos``, and ``privacy`` are the rest
+#: of a reasonable, named list -- not exhaustive, the same trade-off
+#: :data:`LINK_SHORTENER_HOSTS` makes: a new reserved path showing up is a
+#: missed exclusion, not a wrong handle. Authored 2026-09-23.
+RESERVED_X_PATHS: Final[frozenset[str]] = frozenset(
+    {
+        "i",
+        "intent",
+        "share",
+        "home",
+        "search",
+        "hashtag",
+        "explore",
+        "settings",
+        "messages",
+        "notifications",
+        "login",
+        "signup",
+        "compose",
+        "tos",
+        "privacy",
+    }
 )
 
 DOM_CONNECTIONS_ENDPOINT: Final = "dom/connections-list"
@@ -207,6 +262,15 @@ DOM_CONTACT_INFO_ENDPOINT: Final = "dom/contact-info-overlay"
 #: was asked for is never treated as a confirmed answer -- see
 #: :meth:`DomConnectionsSource.fetch_page`'s docstring (#173 review, F5(c)).
 MAX_SETTLE_ATTEMPTS: Final = 3
+
+#: How long to pace the single retry of a missing list-container check (#174
+#: item 6) before treating it as a structural break. A container that has not
+#: rendered yet will not appear because of another scroll -- there is nothing
+#: new to scroll to -- so this is a plain paced wait, not another
+#: :func:`~netkeeper.linkedin.pacing.scroll_like_a_person` cycle. Bounded to
+#: exactly one retry: a container still missing after this pause is the same
+#: structural break F5(b) already refuses.
+CONTAINER_RETRY_PAUSE_S: Final = 1.0
 
 #: What the in-page scripts throw when ``location.origin`` does not match the
 #: origin this instance is bound to, checked a second time *inside* the page
@@ -340,17 +404,21 @@ def _cards_expression(origin: str) -> str:
     Python-side origin check runs before this is even called, but the tab is
     free to navigate in the gap between that read and this script starting to
     run. Then looks for :data:`LIST_CONTAINER_SELECTOR`; its absence answers
-    ``{containerPresent: false}`` immediately, without reading cards at all
-    (#173 review, F5(b)) -- an error page or a wall rendered in its place is
-    structurally different from the connections list, and that is a stronger,
-    cheaper signal than counting cards. Every currently-rendered card inside
-    the container is read fresh -- LinkedIn's infinite scroll keeps every card
-    already loaded in the DOM as more are appended below it (never
-    virtualized away), so this always returns the *whole* list seen so far,
-    not only what a scroll just added; :meth:`DomConnectionsSource.fetch_page`
+    ``{containerPresent: false, ...}`` immediately, without reading cards at
+    all (#173 review, F5(b)) -- an error page or a wall rendered in its place
+    is structurally different from the connections list, and that is a
+    stronger, cheaper signal than counting cards. Every currently-rendered
+    card inside the container is read fresh -- LinkedIn's infinite scroll
+    keeps every card already loaded in the DOM as more are appended below it
+    (never virtualized away), so this always returns the *whole* list seen so
+    far, not only what a scroll just added; :meth:`DomConnectionsSource.fetch_page`
     is what turns that into pages. A card whose ``publicId`` fails to decode
     (a malformed percent-encoding) is skipped rather than failing the whole
-    read (#173 review, L2). Constants are embedded as JSON literals, the same
+    read (#173 review, L2). ``endOfList`` reports whether
+    :data:`LIST_END_SELECTOR` is present anywhere on the page -- read every
+    call, not only once growth stops, so :meth:`DomConnectionsSource.fetch_page`
+    always has an up to date answer for the exhaustion case it uses this for
+    (#174 item 5). Constants are embedded as JSON literals, the same
     technique ``fetch.py``'s ``_fetch_expression`` uses and for the same
     reason: JSON string syntax is a strict subset of a JavaScript string
     literal, so ``json.dumps``'s escaping is already enough.
@@ -360,7 +428,7 @@ def _cards_expression(origin: str) -> str:
         f"if (location.origin !== {json.dumps(origin)}) "
         f"{{ throw new Error({json.dumps(_ORIGIN_MISMATCH_MARKER)}); }}"
         f"const container = document.querySelector({json.dumps(LIST_CONTAINER_SELECTOR)});"
-        "if (!container) { return {containerPresent: false, cards: []}; }"
+        "if (!container) { return {containerPresent: false, cards: [], endOfList: false}; }"
         f"const cards = container.querySelectorAll({json.dumps(CARD_SELECTOR)});"
         "const out = [];"
         "for (const card of cards) {"
@@ -378,7 +446,8 @@ def _cards_expression(origin: str) -> str:
         "  const headline = headlineEl ? headlineEl.textContent.trim() : null;"
         "  out.push({publicId: publicId, name: name, headline: headline});"
         "}"
-        "return {containerPresent: true, cards: out};"
+        f"const endMarker = document.querySelector({json.dumps(LIST_END_SELECTOR)});"
+        "return {containerPresent: true, cards: out, endOfList: !!endMarker};"
         "}"
     )
 
@@ -504,22 +573,33 @@ class DomConnectionsSource:
     requests.
 
     **Every settle attempt spent without reaching what was asked for is a
-    refusal, never a confirmed empty or short page (#173 review, F5(c)).** A
-    page that never renders the list container at all is refused immediately
-    (F5(b)); one that renders it but never grows enough within
-    :data:`MAX_SETTLE_ATTEMPTS` tries is refused once those run out --
-    ``Outcome.ROUTE_CHANGED`` either way. This module has no reliable way to
-    tell "the list truly has fewer connections than asked for" apart from "a
-    slow render never caught up in time", and guessing the friendlier of the
-    two is exactly the mistake spec 9.3's fallback exists to not make;
-    returning an honest, empty ``Ok`` page here would let the caller read a
-    stall as a confirmed end of list. The cost is that a DOM run essentially
-    never gets to *positively* declare "I saw everyone" the way an empty
-    Voyager page can -- it only ever succeeds at handing over pages it is
-    confident about, or gives up. Combined with
-    :class:`~netkeeper.linkedin.connections.SyncResult`'s ``complete``
-    refusing outright once a fallback has ever switched to this class (see
-    the module docstring), that is the point, not a gap.
+    refusal, never a confirmed empty or short page -- unless LinkedIn's own
+    end-of-list marker says this is genuinely the end (#173 review, F5(c);
+    #174 item 5).** A page that never renders the list container at all is
+    refused immediately (F5(b), itself retried once, paced, for a slow
+    initial render before giving up -- #174 item 6, see :meth:`fetch_page`).
+    One that renders the container but never grows enough within
+    :data:`MAX_SETTLE_ATTEMPTS` tries is, by default, refused once those run
+    out too -- this module has no reliable way to tell "the list truly has
+    fewer connections than asked for" apart from "a slow render never caught
+    up in time", and guessing the friendlier of the two is exactly the
+    mistake spec 9.3's fallback exists to not make. The one exception is
+    :data:`LIST_END_SELECTOR`: when that marker is present on the final
+    exhausted attempt, this returns the shorter (possibly empty) page it
+    actually accumulated as a confirmed ``Ok`` page instead of refusing --
+    a clean end of list is not a stall, and conflating the two is what made
+    every DOM run's status read as failed even when it had read the whole
+    list (the issue #174 item 5 fixes). This still never lets a DOM run
+    *complete*: every page here still reports ``total=0``, and
+    :class:`~netkeeper.linkedin.connections.SyncResult.complete` refuses
+    outright once a fallback has ever switched to this class regardless (see
+    the module docstring) -- only the run's *status* changes, from an
+    across-the-board refusal to an honest end of list when one genuinely
+    happened. Absent that marker, exhaustion is still
+    ``Outcome.ROUTE_CHANGED``: the cost is that a DOM run without a
+    trustworthy end-of-list signal essentially never gets to *positively*
+    declare "I saw everyone" the way an empty Voyager page can -- it only
+    ever succeeds at handing over pages it is confident about, or gives up.
 
     A cancelled scroll (:attr:`~netkeeper.linkedin.browser.ScrollOutcome.cancelled`,
     spec 9.9's cooperative cancel) stops the settle loop at once and reports
@@ -574,6 +654,7 @@ class DomConnectionsSource:
         if blocked is not None:
             return SourcePage(outcome=blocked, final_url=page.url)
 
+        end_of_list = False
         for _attempt in range(MAX_SETTLE_ATTEMPTS):
             if len(self._cards) >= start + count:
                 break
@@ -596,17 +677,23 @@ class DomConnectionsSource:
             blocked = _classify_page_url(page.url)
             if blocked is not None:
                 return SourcePage(outcome=blocked, final_url=page.url)
-            raw = await _evaluate(page, self._cards_expression, what="the connections list DOM")
-            if not isinstance(raw, Mapping) or "containerPresent" not in raw or "cards" not in raw:
-                raise DomFetchError(
-                    f"the connections list DOM read returned {_type_name(raw)}, not the"
-                    " {containerPresent, cards} shape this module's own script produces"
-                )
+            raw = await self._read_cards(page)
             if not raw["containerPresent"]:
                 # F5(b): a missing container -- an error page, a wall rendered in
-                # place, or a shape change -- is never "zero connections", and
-                # scrolling again will not make a structural mismatch resolve.
-                return SourcePage(outcome=Outcome.ROUTE_CHANGED, final_url=page.url)
+                # place, or a shape change -- is never "zero connections". But a
+                # slow initial render can still be missing it on the very first
+                # read, and scrolling again will not make an element that has
+                # not rendered yet appear -- so this gets one paced, bounded
+                # retry of the check itself before treating it as the
+                # structural break it usually is (#174 item 6).
+                await self._pause(CONTAINER_RETRY_PAUSE_S)
+                _require_page_on_origin(page.url, self._origin)
+                blocked = _classify_page_url(page.url)
+                if blocked is not None:
+                    return SourcePage(outcome=blocked, final_url=page.url)
+                raw = await self._read_cards(page)
+                if not raw["containerPresent"]:
+                    return SourcePage(outcome=Outcome.ROUTE_CHANGED, final_url=page.url)
             try:
                 cards = _parse_cards(self.endpoint, raw["cards"])
             except RouteChanged:
@@ -617,9 +704,24 @@ class DomConnectionsSource:
             # counter moving rather than retrying forever -- MAX_SETTLE_ATTEMPTS
             # bounds how many extra scrolls one page of work may spend waiting
             # for a slow render before the `for`/`else` below gives up.
+            end_of_list = bool(raw["endOfList"])
         else:
             # F5(c): every attempt spent without ever reaching start + count.
-            # See the class docstring for why this is a refusal, not a page.
+            # #174 item 5: when LinkedIn's own end-of-list marker is present,
+            # this is a clean end, not a stall -- report whatever was actually
+            # accumulated as a confirmed (if short or empty) Ok page instead of
+            # refusing. See the class docstring for the stall case, still a
+            # refusal, and for why neither ever lets this source's run be
+            # SyncResult.complete.
+            if end_of_list:
+                selected = tuple(self._cards[start : start + count])
+                return SourcePage(
+                    outcome=Outcome.OK,
+                    final_url=page.url,
+                    page=ConnectionsPageResult(
+                        connections=selected, start=start, count=count, total=0
+                    ),
+                )
             return SourcePage(outcome=Outcome.ROUTE_CHANGED, final_url=page.url)
 
         selected = tuple(self._cards[start : start + count])
@@ -628,6 +730,33 @@ class DomConnectionsSource:
             final_url=page.url,
             page=ConnectionsPageResult(connections=selected, start=start, count=count, total=0),
         )
+
+    async def _read_cards(self, page: PageLike) -> Mapping[str, object]:
+        """One evaluate call of :attr:`_cards_expression`, shape-checked.
+
+        Factored out of :meth:`fetch_page` because #174 item 6 now calls this
+        twice on one attempt -- the initial read and its one paced retry when
+        the container was missing.
+        """
+        raw = await _evaluate(page, self._cards_expression, what="the connections list DOM")
+        if (
+            not isinstance(raw, Mapping)
+            or "containerPresent" not in raw
+            or "cards" not in raw
+            or "endOfList" not in raw
+        ):
+            raise DomFetchError(
+                f"the connections list DOM read returned {_type_name(raw)}, not the"
+                " {containerPresent, cards, endOfList} shape this module's own script produces"
+            )
+        return raw
+
+    async def _pause(self, seconds: float) -> None:
+        """A plain paced wait, not a scroll -- see :data:`CONTAINER_RETRY_PAUSE_S`."""
+        if self._sleep is not None:
+            await self._sleep(seconds)
+        else:
+            await asyncio.sleep(seconds)
 
     async def _goto_or_ensure(self) -> PageLike:
         if not self._navigated:
@@ -644,18 +773,28 @@ class DomConnectionsSource:
 # --- contact-info overlay -----------------------------------------------------
 
 
-def _contact_info_expression(origin: str) -> str:
+def _contact_info_expression(origin: str, public_id: str) -> str:
     """The script :class:`DomContactInfoSource` hands to ``page.evaluate``.
 
     Checks ``location.origin`` first, the same as :func:`_cards_expression`
-    and for the same reason (#173 review, L3). Then looks for
-    :data:`CONTACT_INFO_DIALOG_SELECTOR`; its absence answers
-    ``{dialogPresent: false}`` without reading anything else (#173 review,
-    F5(d)) -- an overlay that never rendered its dialog (an error page, a
-    wall) is not "nobody shared any contact info". Every query below is
-    scoped to that dialog element (#173 review, F7): the surrounding profile
-    page can carry its own ``mailto:`` link (a bio mentioning an email) or
-    website that has nothing to do with what this overlay actually shows.
+    and for the same reason (#173 review, L3). Then finds every
+    :data:`CONTACT_INFO_DIALOG_SELECTOR` candidate on the page and keeps only
+    the ones that *qualify* as the contact-info overlay (#174 item 1): a
+    dialog carrying a heading whose text starts with
+    :data:`CONTACT_INFO_HEADING_PREFIX`, or a link back to ``/in/<public_id>``
+    for the ``public_id`` this call navigated to and already knows -- a real
+    profile page can render more than one ``role="dialog"`` element at once
+    (a messaging overlay is a dialog too), and picking blindly among them
+    risks reading whatever unrelated dialog happens to render first. Exactly
+    one qualifying dialog answers ``{dialogPresent: true, ...}``; zero or more
+    than one answers ``{dialogPresent: false}`` without reading anything else
+    (#173 review, F5(d); #174 item 1) -- an overlay that never rendered its
+    dialog (an error page, a wall), and an ambiguous page with more than one
+    candidate, are both refused the same way a caller cannot trust. Every
+    query below is scoped to that one dialog element (#173 review, F7): the
+    surrounding profile page can carry its own ``mailto:`` link (a bio
+    mentioning an email) or website that has nothing to do with what this
+    overlay actually shows.
 
     Built on ``mailto:`` and ``tel:`` links (a standards-based convention,
     not a LinkedIn-specific one -- see the module docstring) rather than a
@@ -666,22 +805,46 @@ def _contact_info_expression(origin: str) -> str:
     of named url shorteners (:data:`LINK_SHORTENER_HOSTS`) are never a
     "website the person shared" (#173 review, F7). A Twitter/X handle is the
     *first* path segment, not the last -- ``.../i/status/12345`` is a tweet
-    permalink, not a profile, and its first segment ``i`` is X's own reserved
-    namespace, so that one specific first segment is rejected rather than
-    kept as if it were a handle (#173 review, F7).
+    permalink, not a profile -- and that first segment is checked against
+    :data:`RESERVED_X_PATHS`, X's own reserved namespace (``i``, ``intent``,
+    ``share``, and the rest), rejected rather than kept as if any of them
+    were a handle (#173 review, F7; #174 item 2).
     """
     return (
         "() => {"
         f"if (location.origin !== {json.dumps(origin)}) "
         f"{{ throw new Error({json.dumps(_ORIGIN_MISMATCH_MARKER)}); }}"
-        f"const dialog = document.querySelector({json.dumps(CONTACT_INFO_DIALOG_SELECTOR)});"
-        "if (!dialog) { return {dialogPresent: false}; }"
+        f"const wantId = {json.dumps(public_id.strip().lower())};"
+        f"const headingPrefix = {json.dumps(CONTACT_INFO_HEADING_PREFIX)};"
+        "function extractPublicId(href) {"
+        "  const m = (href || '').match(/\\/in\\/([^/?#]+)/);"
+        "  if (!m) { return null; }"
+        "  try { return decodeURIComponent(m[1]); } catch (e) { return null; }"
+        "}"
+        "function isContactInfoDialog(el) {"
+        "  const headings = Array.from(el.querySelectorAll('h1,h2,h3,h4,h5,h6'));"
+        "  const hasHeading = headings.some("
+        "    h => (h.textContent || '').trim().toLowerCase().startsWith(headingPrefix)"
+        "  );"
+        "  if (hasHeading) { return true; }"
+        "  const links = Array.from(el.querySelectorAll('a[href*=\"/in/\"]'));"
+        "  return links.some(a => {"
+        "    const id = extractPublicId(a.getAttribute('href'));"
+        "    return id !== null && id.toLowerCase() === wantId;"
+        "  });"
+        "}"
+        "const dialogs = Array.from("
+        f"document.querySelectorAll({json.dumps(CONTACT_INFO_DIALOG_SELECTOR)}));"
+        "const qualifying = dialogs.filter(isContactInfoDialog);"
+        "if (qualifying.length !== 1) { return {dialogPresent: false}; }"
+        "const dialog = qualifying[0];"
         "const email = dialog.querySelector('a[href^=\"mailto:\"]');"
         "const phones = Array.from(dialog.querySelectorAll('a[href^=\"tel:\"]'));"
         "const links = Array.from(dialog.querySelectorAll('a[href^=\"http\"]'));"
         "const websites = [];"
         "const twitterHandles = [];"
         f"const shorteners = new Set({json.dumps(sorted(LINK_SHORTENER_HOSTS))});"
+        f"const reservedXPaths = new Set({json.dumps(sorted(RESERVED_X_PATHS))});"
         "for (const a of links) {"
         "  let url;"
         "  try { url = new URL(a.href); } catch (e) { continue; }"
@@ -690,7 +853,7 @@ def _contact_info_expression(origin: str) -> str:
         "  if (host === 'twitter.com' || host === 'x.com') {"
         "    const segments = url.pathname.split('/').filter(Boolean);"
         "    const first = segments[0];"
-        "    if (first && first !== 'i') { twitterHandles.push(first); }"
+        "    if (first && !reservedXPaths.has(first.toLowerCase())) { twitterHandles.push(first); }"
         "    continue;"
         "  }"
         "  if (shorteners.has(host)) { continue; }"
@@ -764,6 +927,15 @@ class DomContactInfoSource:
     That is a deliberate scope boundary, not an oversight -- flagged here for
     whoever wires this in.
 
+    **Chooses among possibly several dialogs on the page (#174 item 1).** A
+    real profile page can render more than one ``role="dialog"`` element at
+    once -- a messaging overlay is a dialog too -- so this reads only the one
+    dialog that carries a contact-info marker (a heading titled "Contact
+    info", or a link back to the ``public_id`` this call navigated to), and
+    refuses as :attr:`~netkeeper.linkedin.classify.Outcome.ROUTE_CHANGED`
+    when zero or more than one dialog qualifies: see
+    :func:`_contact_info_expression`.
+
     **This class carries no URN of its own (#173 review, F7) and is not wired
     into enrichment.** :class:`~netkeeper.linkedin.contact_info.ContactInfoSource`
     answers by ``public_id`` alone; nothing here confirms the profile actually
@@ -786,7 +958,6 @@ class DomContactInfoSource:
     def __init__(self, run: BrowserRun, *, origin: str = LINKEDIN_ORIGIN) -> None:
         self._run = run
         self._origin = _require_dom_origin(origin)
-        self._contact_info_expression = _contact_info_expression(self._origin)
 
     @property
     def endpoint(self) -> str:
@@ -795,15 +966,17 @@ class DomContactInfoSource:
     async def fetch_contact_info(self, public_id: str) -> ContactInfoResult:
         if not public_id.strip():
             raise ValueError("public_id is empty")
+        public_id = public_id.strip()
         path = CONTACT_INFO_OVERLAY_PATH_TEMPLATE.format(public_id=public_id)
         page = await self._run.goto(f"{self._origin}{path}")
         _require_page_on_origin(page.url, self._origin)
         blocked = _classify_page_url(page.url)
         if blocked is not None:
             return ContactInfoResult(outcome=blocked, final_url=page.url)
-        raw = await _evaluate(
-            page, self._contact_info_expression, what="the contact-info overlay DOM"
-        )
+        # Built per call, not cached in __init__ (#174 item 1): the dialog
+        # qualification check needs this call's own public_id.
+        expression = _contact_info_expression(self._origin, public_id)
+        raw = await _evaluate(page, expression, what="the contact-info overlay DOM")
         if not isinstance(raw, Mapping) or "dialogPresent" not in raw:
             raise DomFetchError(
                 f"the contact-info overlay DOM read returned {_type_name(raw)}, not the"
