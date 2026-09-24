@@ -3,10 +3,14 @@
 Before anyone points this tool at their own LinkedIn account, they get to watch
 it work without it. A rehearsal drives the genuine attach path
 (:class:`netkeeper.linkedin.browser.AttachBrowserProvider`) through the genuine
-pacing plan (:func:`netkeeper.linkedin.pacing.plan_enrichment`) -- the same
-scroll deltas, the same dwell, the same lognormal waits between profiles, the
-same bursts -- at a replica of a profile page served on this machine's
-loopback, and records **every request the page made** while it did.
+enrichment job (:func:`netkeeper.linkedin.enrich.run_enrichment`, P2-07) -- the
+same navigation to a profile page, the same scroll deltas and dwell, the same
+two in-page API fetches for the profile's details and contact info
+(:class:`netkeeper.linkedin.fetch.PageVoyagerFetch`), the same lognormal waits
+between profiles, the same bursts -- at a replica of a profile page served on
+this machine's loopback, and records **every request the page made** while it
+did. The job is the one a real run uses, handed a source pointed at the
+replica: a rehearsal is that loop, not a copy of it.
 
 **The site is loopback, and that is enforced here rather than trusted.**
 :func:`rehearse` refuses any url whose host is not ``127.0.0.1``, ``::1``, or
@@ -27,10 +31,18 @@ not ``page.route``, so what the log records is what the browser genuinely sent.
 contacts, so it needs no session. The replica's profile slugs are made up on
 the spot.
 
-:func:`serve_replica` is the neutral site itself, a two-page loopback server
-this module can start for the length of a block. It is shipped rather than left
-in the tests because CP3's demo has to be one command, and because the smoke
-suite and the CLI then drive the same site rather than two that could drift.
+:func:`serve_replica` is the neutral site itself, a small loopback server this
+module can start for the length of a block: a profile-shaped page and its two
+sub-resources, and invented answers in Voyager's shapes at the two profile
+endpoints. It is shipped rather than left in the tests because CP3's demo has to
+be one command, and because the smoke suite and the CLI then drive the same site
+rather than two that could drift.
+
+**The replica sets one cookie.** The in-page fetch reads its csrf token from the
+page's own ``JSESSIONID`` cookie, the way the real client does, and never from
+Python (#168). So the replica's profile page sets an invented one for
+``127.0.0.1``, ``Max-Age`` two minutes, as the fetch smoke suite's fixture does.
+netkeeper still writes no cookie: the site does, the ordinary way a site does.
 """
 
 from __future__ import annotations
@@ -47,19 +59,28 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from random import Random
 from typing import Any, Final, Protocol, cast
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from netkeeper.linkedin.browser import SINGLE_ACCOUNT_KEY, BrowserProvider, PageLike
+from netkeeper.linkedin.enrich import (
+    BrowserProfiles,
+    EnrichJobSpec,
+    EnrichTarget,
+    PacingProfile,
+    ProfileHarvest,
+    StopReason,
+    run_enrichment,
+)
+from netkeeper.linkedin.fetch import PageVoyagerFetch
 from netkeeper.linkedin.pacing import (
     DEFAULT_BURST_PROFILE,
     DEFAULT_DELAY_PROFILE,
     BurstProfile,
     DelayProfile,
-    EnrichmentPlan,
     ScrollPlan,
-    plan_enrichment,
 )
 from netkeeper.linkedin.strict_origin import NotAStrictOrigin, parse_strict_origin
+from netkeeper.linkedin.voyager import CONTACT_INFO_PATH_TEMPLATE, PROFILE_PATH
 
 log = logging.getLogger(__name__)
 
@@ -196,6 +217,11 @@ class Rehearsal:
     #: recorded and then silently discarded, and the neutrality check that
     #: reads :attr:`requests` could not see them.
     trailing: tuple[RequestRecord, ...] = ()
+    #: How many visits the job harvested: both in-page fetches answered and parsed.
+    harvested: int = 0
+    #: Why the job stopped before its last visit, or ``None`` when it made them all.
+    #: Against the replica this should never be set; when it is, the log says so.
+    stopped: str | None = None
 
     @property
     def requests(self) -> tuple[RequestRecord, ...]:
@@ -285,53 +311,95 @@ async def rehearse(
     if not slugs:
         raise ValueError("a rehearsal needs at least one profile slug to visit")
 
-    # Not a cryptographic use: the seed is printed in the log precisely so a
-    # rehearsal can be repeated line for line, which is the opposite of what a
-    # secure generator is for.
-    plan: EnrichmentPlan = plan_enrichment(
-        Random(seed),  # noqa: S311
-        visits,
-        delay=delay,
-        burst=burst,
-    )
     started_at = datetime.now(UTC) if now is None else now
     origin = clock()
     recorder = _Recorder(clock, origin)
     notes: list[str] = []
-    made: list[RehearsalVisit] = []
+    urls: list[str] = []
+    grouped: list[tuple[RequestRecord, ...]] = []
+    gate = _RehearsalGate(sleep=sleep, time_scale=time_scale)
+    harvested = 0
+    # Each target is a slug on the replica; the reference is only its position,
+    # since a rehearsal has no contacts (and may visit a slug more than once).
+    spec = EnrichJobSpec(
+        targets=tuple(EnrichTarget(index, slugs[index % len(slugs)]) for index in range(visits)),
+        visit_budget=visits,
+        pacing=PacingProfile(delay=delay, burst=burst),
+    )
 
     async with provider.run(account) as run:
-        page = _as_rehearsal_page(await run.ensure_page())
-        recorder.follow(page)
-        for index, step in enumerate(plan.steps):
-            url = f"{base}/in/{slugs[index % len(slugs)]}/"
-            recorder.open_visit()
-            page = _as_rehearsal_page(await run.goto(url))
-            if recorder.follow(page):
+        recorder.follow(_as_rehearsal_page(await run.ensure_page()))
+
+        async def navigate(url: str) -> PageLike:
+            # A visit's requests run from its navigation to the next one's, so the
+            # wait after a profile is filed under that profile, as it happens.
+            if urls:
+                grouped.append(recorder.close_visit())
+            else:
+                recorder.open_visit()
+            urls.append(url)
+            page = await run.goto(url)
+            if recorder.follow(_as_rehearsal_page(page)):
                 notes.append(
-                    f"the tab was reopened before visit {index + 1}; requests it made"
+                    f"the tab was reopened before visit {len(urls)}; requests it made"
                     " before the listeners were reattached are not in this log"
                 )
-            scrolled = await run.scroll(step.scroll, sleep=_scaled_sleep(sleep, time_scale))
-            page = _as_rehearsal_page(scrolled.page)
-            if recorder.follow(page):
+            return page
+
+        async def scroll(plan: ScrollPlan) -> object:
+            scrolled = await run.scroll(plan, sleep=_scaled_sleep(sleep, time_scale))
+            if recorder.follow(_as_rehearsal_page(scrolled.page)):
                 notes.append(
-                    f"the tab had already been lost before visit {index + 1} could be"
+                    f"the tab had already been lost before visit {len(urls)} could be"
                     " scrolled and was reopened first; requests it made before the"
                     " listeners were reattached are not in this log"
                 )
-            waited = await _wait(step.delay_after_s, sleep=sleep, time_scale=time_scale)
-            made.append(
-                RehearsalVisit(
-                    index=index + 1,
-                    url=url,
-                    scroll=step.scroll,
-                    requests=recorder.close_visit(),
-                    planned_wait_s=step.delay_after_s,
-                    waited_s=waited,
-                    burst_break=step.burst_break,
-                )
-            )
+            return scrolled
+
+        async def on_harvest(harvest: ProfileHarvest) -> None:
+            nonlocal harvested
+            harvested += 1
+
+        source = BrowserProfiles(
+            navigate=navigate,
+            scroll_page=scroll,
+            fetch=PageVoyagerFetch(run, origin=base),
+            origin=base,
+        )
+        # Not a cryptographic use: the seed is printed in the log precisely so a
+        # rehearsal can be repeated line for line, which is the opposite of what a
+        # secure generator is for.
+        result = await run_enrichment(
+            spec,
+            source,
+            gate,
+            on_harvest=on_harvest,
+            rng=Random(seed),  # noqa: S311
+            clock=lambda: started_at,
+        )
+        if urls:
+            grouped.append(recorder.close_visit())
+
+    stopped = (
+        None
+        if result.reason is StopReason.END_OF_PLAN
+        else result.reason.value
+        + (f" ({result.outcome.value})" if result.outcome is not None else "")
+    )
+    made = [
+        RehearsalVisit(
+            index=index + 1,
+            url=url,
+            scroll=step.scroll,
+            requests=requests,
+            planned_wait_s=step.delay_after_s,
+            waited_s=gate.waited[index] if index < len(gate.waited) else 0.0,
+            burst_break=step.burst_break,
+        )
+        for index, (url, requests, step) in enumerate(
+            zip(urls, grouped, result.plan.steps, strict=False)
+        )
+    ]
 
     # Taken after the `async with` block, so it includes anything the tab asked
     # for while it was being closed. That window is not hypothetical: an unload
@@ -348,11 +416,13 @@ async def rehearse(
         started_at=started_at,
         seed=seed,
         time_scale=time_scale,
-        burst_sizes=plan.burst_sizes,
+        burst_sizes=result.plan.burst_sizes,
         visits=tuple(made),
         elapsed_s=clock() - origin,
         notes=tuple(notes),
         trailing=trailing,
+        harvested=harvested,
+        stopped=stopped,
     )
     _assert_stayed_neutral(rehearsal)
     return rehearsal
@@ -383,8 +453,8 @@ def _scaled_sleep(
     What :meth:`~netkeeper.linkedin.browser.BrowserRun.scroll` is handed in place of
     the plain ``sleep`` a real run would use: scaling the *wait*, not the *plan*, is
     ``rehearse``'s whole point (a scaled rehearsal still records what a run at this
-    pacing would actually wait -- see :func:`_wait`, which does the same division for
-    the pause between profiles).
+    pacing would actually wait -- see :class:`_RehearsalGate`, which does the same
+    division for the pause between profiles).
     """
 
     async def scaled(seconds: float) -> None:
@@ -393,14 +463,27 @@ def _scaled_sleep(
     return scaled
 
 
-async def _wait(
-    planned: float | None, *, sleep: Callable[[float], Awaitable[None]], time_scale: float
-) -> float:
-    if planned is None:
-        return 0.0
-    scaled = planned / time_scale
-    await sleep(scaled)
-    return scaled
+class _RehearsalGate:
+    """The enrichment job's gate, for a rehearsal: every visit goes ahead, every wait is kept.
+
+    A rehearsal has no budget to spend and no cancel flag to read; what it keeps
+    is the wait itself, divided by ``time_scale`` (the *planned* wait stays in the
+    job's plan, unscaled, for the log).
+    """
+
+    def __init__(self, *, sleep: Callable[[float], Awaitable[None]], time_scale: float) -> None:
+        self._sleep = sleep
+        self._time_scale = time_scale
+        self.waited: list[float] = []
+
+    async def before_visit(self, number: int) -> StopReason | None:
+        return None
+
+    async def pause(self, seconds: float) -> bool:
+        scaled = seconds / self._time_scale
+        await self._sleep(scaled)
+        self.waited.append(scaled)
+        return True
 
 
 def _as_rehearsal_page(page: PageLike) -> RehearsalPage:
@@ -571,20 +654,76 @@ REDACTED_HEADERS: Final[frozenset[str]] = frozenset(
 REDACTED: Final = "<redacted>"
 
 
+#: The csrf cookie the replica's profile page sets, so the in-page fetch has one to
+#: read (see the module docstring). Invented, and gone two minutes after the last
+#: profile page set it.
+REPLICA_COOKIE: Final = 'JSESSIONID="ajax:netkeeper-rehearsal-replica"; Path=/; Max-Age=120'
+
+
+def replica_voyager(path: str) -> bytes | None:
+    """The replica's answer at a Voyager path, or ``None`` when ``path`` is not one.
+
+    Invented people in the shapes :mod:`netkeeper.linkedin.voyager` parses, named
+    after the slug asked for: fake URNs, ``example.test`` addresses, a company that
+    does not exist. Shared with the offline tests so the fake tab answers exactly
+    what the served replica does.
+    """
+    split = urlsplit(path)
+    prefix, _, suffix = CONTACT_INFO_PATH_TEMPLATE.partition("{public_id}")
+    if split.path.startswith(prefix) and split.path.endswith(suffix):
+        slug = unquote(split.path[len(prefix) : -len(suffix)])
+        return json.dumps(
+            {
+                "emailAddress": f"{slug}@example.test",
+                "websites": [
+                    {"url": f"https://{slug}.example.test", "category": {"type": "PERSONAL"}}
+                ],
+            }
+        ).encode()
+    if split.path == PROFILE_PATH:
+        slug = parse_qs(split.query).get("memberIdentity", ["rehearsal"])[0]
+        first, _, last = slug.removeprefix("rehearsal-").partition("-")
+        fake = sum(ord(c) for c in slug) % 10_000_000
+        return json.dumps(
+            {
+                "data": {
+                    "entityUrn": f"urn:li:fsd_profile:ACoAAREHEARSAL{fake:07d}",
+                    "publicIdentifier": slug,
+                    "firstName": first.title() or "Rehearsal",
+                    "lastName": last.title() or "Replica",
+                    "headline": "A rehearsal profile on this machine's loopback",
+                },
+                "included": [
+                    {
+                        "entityUrn": f"urn:li:fsd_position:(ACoAAREHEARSAL{fake:07d},1)",
+                        "$type": "com.linkedin.voyager.dash.identity.profile.Position",
+                        "title": "Rehearsal Profile",
+                        "companyName": "Loopback Replica Co",
+                        "dateRange": {"start": {"year": 2020, "month": 1}},
+                    }
+                ],
+            }
+        ).encode()
+    return None
+
+
 class _ReplicaHandler(BaseHTTPRequestHandler):
-    """A profile page, a stylesheet, and an image, so a visit makes more than one request."""
+    """A profile page, a stylesheet, an image, and the two profile endpoints a visit fetches."""
 
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:
-        if self.path.startswith("/static/replica.css"):
+        voyager = replica_voyager(self.path)
+        if voyager is not None:
+            self._send(voyager, "application/json")
+        elif self.path.startswith("/static/replica.css"):
             self._send(_REPLICA_CSS, "text/css; charset=utf-8")
         elif self.path.startswith("/static/avatar.svg"):
             self._send(_AVATAR_SVG, "image/svg+xml")
         elif self.path.startswith("/headers"):
             self._send(json.dumps(self._echoed_headers()).encode(), "text/plain; charset=utf-8")
         else:
-            self._send(_PROFILE_PAGE, "text/html; charset=utf-8")
+            self._send(_PROFILE_PAGE, "text/html; charset=utf-8", cookie=REPLICA_COOKIE)
 
     def _echoed_headers(self) -> dict[str, str]:
         """The request's headers, with anything bearing a credential redacted.
@@ -602,10 +741,12 @@ class _ReplicaHandler(BaseHTTPRequestHandler):
             for name, value in self.headers.items()
         }
 
-    def _send(self, body: bytes, content_type: str) -> None:
+    def _send(self, body: bytes, content_type: str, *, cookie: str | None = None) -> None:
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if cookie is not None:
+            self.send_header("Set-Cookie", cookie)
         self.end_headers()
         self.wfile.write(body)
 
@@ -726,7 +867,14 @@ def _summary_lines(rehearsal: Rehearsal) -> list[str]:
         verdict,
         f"elapsed {rehearsal.elapsed_s:.1f}s; a run at this pacing would have waited"
         f" {rehearsal.planned_wait_s:.1f}s between profiles.",
+        f"{rehearsal.harvested} of {len(rehearsal.visits)} visits harvested the profile's"
+        " details and contact info through the in-page API.",
     ]
+    if rehearsal.stopped is not None:
+        lines.append(
+            f"the enrichment job stopped early: {rehearsal.stopped}. A real run would have"
+            " stopped at the same point."
+        )
     lines.extend(f"note: {note}" for note in rehearsal.notes)
     return lines
 

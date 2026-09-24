@@ -502,3 +502,89 @@ async def test_progress_events_hold_counts_and_nothing_else() -> None:
         (2, 2, StopReason.END_OF_PLAN),
     ]
     assert all(e.planned == 2 for e in events)
+
+
+# --- the real browser pieces fit the seam (#150, #152) -----------------------------------
+
+
+async def test_a_browser_runs_own_methods_are_the_source() -> None:
+    """``run.goto``, ``run.scroll``, and ``PageVoyagerFetch(run)`` are the source, unwrapped.
+
+    Over the shared fakes: the tab is a ``FakePage``, and its in-page ``evaluate``
+    answers every fetch with one profile's body. Nothing is fetched from anywhere.
+    """
+    import functools
+
+    from browser_fakes import FakeBrowser as FakeChrome
+    from browser_fakes import FakeConnector, FakeContext, FakePage
+
+    from netkeeper.linkedin.browser import ActivityLocks, AttachBrowserProvider
+    from netkeeper.linkedin.enrich import Navigate, Scroll
+    from netkeeper.linkedin.fetch import PageVoyagerFetch
+
+    context = FakeContext(
+        evaluate_result={
+            "status": 200,
+            "body": details_body(PROFILES[0]),
+            "url": "https://www.linkedin.com/voyager/api/identity/dash/profiles",
+        }
+    )
+    provider = AttachBrowserProvider(
+        "http://127.0.0.1:9222",
+        connector=FakeConnector([FakeChrome([context])]),
+        locks=ActivityLocks(),
+    )
+    waits: list[float] = []
+
+    async def no_wait(seconds: float) -> None:
+        waits.append(seconds)
+
+    harvests: list[ProfileHarvest] = []
+
+    async def keep(harvest: ProfileHarvest) -> None:
+        harvests.append(harvest)
+
+    async with provider.run("local") as run:
+        navigate: Navigate = run.goto  # the protocol is the method, as it stands
+        scroll: Scroll = run.scroll
+        assert navigate is not None and scroll is not None
+        source = BrowserProfiles(
+            navigate=run.goto,
+            scroll_page=functools.partial(run.scroll, sleep=no_wait),
+            fetch=PageVoyagerFetch(run),
+        )
+        result = await run_enrichment(
+            _spec(PROFILES[:1]), source, Gate(), on_harvest=keep, rng=random.Random(SEED)
+        )
+
+    (page,) = context.pages
+    assert isinstance(page, FakePage)
+    assert page.goto_calls == [f"https://www.linkedin.com/in/{PROFILES[0].slug}/"]
+    assert len(page.mouse.wheels) == len(result.plan.steps[0].scroll.steps)
+    assert len(page.evaluate_calls) == 2  # details, then contact info
+    assert result.reason is StopReason.END_OF_PLAN
+    assert harvests[0].details is not None and harvests[0].details.urn == PROFILES[0].urn
+
+
+async def test_a_broken_fetch_ends_the_run_by_exception() -> None:
+    """``VoyagerFetchError``: no response to classify, so nothing to decide from. The run ends."""
+    from netkeeper.linkedin.fetch import VoyagerFetchError
+
+    browser = FakeBrowser.of(PROFILES)
+
+    def plumbing_breaks(kind: str, value: object) -> None:
+        if kind == "details" and browser.kinds().count("details") == 2:
+            raise VoyagerFetchError("no live JSESSIONID cookie readable on this page")
+
+    browser.on_event = plumbing_breaks
+    harvested: list[int] = []
+
+    async def keep(harvest: ProfileHarvest) -> None:
+        harvested.append(harvest.contact_ref)
+
+    with pytest.raises(VoyagerFetchError):
+        await run_enrichment(
+            _spec(PROFILES), browser.source(), Gate(), on_harvest=keep, rng=random.Random(SEED)
+        )
+    assert harvested == [101]
+    assert len(browser.visited()) == 2

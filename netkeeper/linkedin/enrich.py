@@ -45,10 +45,28 @@ slug this job asked for is masked out of a url before it is classified
 profile named like one does not.
 
 **The source seam.** The job reads profiles through a :class:`ProfileSource`.
-:class:`BrowserProfiles` is the real one: a navigation, a scroll replay, and a
-:class:`~netkeeper.linkedin.voyager.VoyagerFetch`, all bound to one browser
-run by the caller. ``netkeeper rehearse`` builds the same class against the
-loopback replica, so a rehearsal is this loop, not a copy of it.
+:class:`BrowserProfiles` is the real one, built from one browser run's own
+methods and nothing else: ``navigate=run.goto``, ``scroll_page=run.scroll``
+(#152), and ``fetch=PageVoyagerFetch(run)`` (#150). ``netkeeper rehearse``
+builds the same class against the loopback replica, so a rehearsal is this
+loop, not a copy of it.
+
+**Classify, then parse.** Every fetched body goes through spec 9.7's
+classification before a parser sees it, the discipline
+:func:`netkeeper.linkedin.fetch.parse_ok` enforces. This module applies it
+itself rather than importing ``parse_ok``, for two reasons: ``fetch`` is a
+browser module (``tests/test_browser_safety.py``), and the job must stay
+importable by the core without dragging the browser in; and the url has to be
+classified with the slug masked (above), which ``parse_ok`` cannot know to do.
+
+**When the fetch itself breaks.** ``PageVoyagerFetch`` raises
+``VoyagerFetchError`` when there is no response to classify at all: no
+readable csrf cookie, a tab that moved off the origin, an in-page ``fetch()``
+that threw. The job does not catch it: it ends the run by exception, the
+runner marks the plan aborted and re-raises, and nothing raises heat or the
+session flag, since no response said anything about the session. A per-profile
+skip would be wrong here: whatever broke the plumbing for one profile breaks
+it for the next, and every skip would have spent a profile visit first.
 """
 
 from __future__ import annotations
@@ -278,8 +296,15 @@ class ProfileSource(Protocol):
         ...
 
 
-Navigate = Callable[[str], Awaitable[str]]
-"""Drive the tab to a url and return the url it landed on (after any redirect)."""
+class Landed(Protocol):
+    """What a navigation hands back: the tab, whose ``url`` is where it landed."""
+
+    @property
+    def url(self) -> str: ...
+
+
+Navigate = Callable[[str], Awaitable[Landed]]
+"""Drive the tab to a url and return it (``BrowserRun.goto``); its ``url`` is after redirects."""
 
 Scroll = Callable[[ScrollPlan], Awaitable[object]]
 """Replay a scroll plan on the tab (``BrowserRun.scroll``, #152)."""
@@ -306,8 +331,8 @@ class BrowserProfiles:
         return f"{self.origin.rstrip('/')}/in/{quote(public_id, safe='')}/"
 
     async def open_profile(self, public_id: str) -> Answer[None]:
-        landed = await self.navigate(self.profile_url(public_id))
-        masked = _masked(landed, public_id)
+        page = await self.navigate(self.profile_url(public_id))
+        masked = _masked(page.url, public_id)
         return Answer(outcome=_navigation_outcome(masked), final_url=masked)
 
     async def scroll(self, plan: ScrollPlan) -> None:

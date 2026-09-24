@@ -75,6 +75,27 @@ async def test_a_rehearsal_logs_what_a_real_page_load_asked_for(
     assert "VISIT 1" in render(rehearsal)
 
 
+async def test_a_rehearsal_is_the_enrichment_jobs_pattern_in_a_real_tab(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """P2-07: each visit is the page, then two in-page fetches the job parsed.
+
+    The fetch reads its csrf token from the cookie the replica's page set, inside
+    the page, the way it would on the real site; a rehearsal that harvested both
+    visits proves that path works in a real Chrome.
+    """
+    rehearsal = await rehearse(provider, site=site, visits=2, seed=SEED, time_scale=200.0)
+
+    assert (rehearsal.harvested, rehearsal.stopped) == (2, None)
+    for visit in rehearsal.visits:
+        fetches = [r.path for r in visit.requests if r.resource_type == "fetch"]
+        slug = visit.url.rstrip("/").rsplit("/", 1)[1]
+        assert len(fetches) == 2, visit.requests
+        assert fetches[0].startswith("/voyager/api/identity/dash/profiles?")
+        assert fetches[1] == f"/voyager/api/identity/profiles/{slug}/profileContactInfo"
+    assert not rehearsal.touched_linkedin
+
+
 async def test_the_rehearsal_scrolls_the_real_page(
     provider: AttachBrowserProvider, site: str
 ) -> None:
