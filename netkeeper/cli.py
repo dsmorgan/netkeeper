@@ -377,6 +377,16 @@ def _clear_session_flag_after_login(report: PreflightReport) -> list[str]:
     here, deliberately, and left for a follow-up once a real job classifies
     responses at all.)
 
+    **The flag is read once, in a read session, before anything writes (#170 item
+    6).** Preflight never contacts LinkedIn -- it only reads this Chrome profile's
+    own cookie jar (spec 9.1) -- so a `Checkpoint` report, which writes nothing,
+    has no business taking the write lock just to look at a value a running
+    `serve` might be waiting to write itself. Only a `LoggedOut` flag goes on to
+    open a writer, and even then it re-reads the flag first and clears it only if
+    it is still the exact flag this function already saw: a job that raised a new
+    flag, or a `netkeeper linkedin clear-flag` that ran, in the gap between the two
+    sessions must not be undone by a write this function decided on stale evidence.
+
     `linkedin/preflight.py` may not open a database session (spec 9.10, ADR 0005),
     so the clearing happens here, in the CLI -- the one place both the browser
     report and the database are reachable. Returns the line(s) this command should
@@ -410,26 +420,35 @@ def _clear_session_flag_after_login(report: PreflightReport) -> list[str]:
     try:
         factory = make_session_factory(engine)
         install_scope_guard(factory)
+        with session_scope(factory) as session:  # read: this command may not write yet
+            user = session.scalars(
+                select(User).where(User.kind == UserKind.LOCAL).order_by(User.id)
+            ).first()
+            flag = None if user is None else session_flag(session, user)
+        if flag is None:
+            return []
+        if flag.outcome is Outcome.CHECKPOINT:
+            return [
+                "leaving the checkpoint session flag in place: a live session cookie is"
+                " not proof the checkpoint is resolved. Once you have opened LinkedIn in"
+                " the netkeeper Chrome profile and confirmed the account is healthy, clear"
+                " it with `netkeeper linkedin clear-flag`"
+            ]
+        if flag.outcome is not Outcome.LOGGED_OUT:
+            return []
         with session_scope(factory, write=True) as session:
             user = session.scalars(
                 select(User).where(User.kind == UserKind.LOCAL).order_by(User.id)
             ).first()
-            if user is None:
+            if user is None or session_flag(session, user) != flag:
+                # Gone, or changed, since the read above: clear only the flag this
+                # function actually saw, never whatever is there now.
                 return []
-            flag = session_flag(session, user)
-            if flag is None:
-                return []
-            if flag.outcome is Outcome.LOGGED_OUT:
-                clear_session_flag(session, user)
-                return ["cleared the logged-out session flag: LinkedIn accepted this session"]
-            if flag.outcome is Outcome.CHECKPOINT:
-                return [
-                    "leaving the checkpoint session flag in place: a live session cookie is"
-                    " not proof the checkpoint is resolved. Once you have opened LinkedIn in"
-                    " the netkeeper Chrome profile and confirmed the account is healthy, clear"
-                    " it with `netkeeper linkedin clear-flag`"
-                ]
-            return []
+            clear_session_flag(session, user)
+        return [
+            "cleared the logged-out session flag: this Chrome profile's cookie jar"
+            " shows a live LinkedIn session again"
+        ]
     except OperationalError as exc:
         if _is_missing_schema(exc):
             log.debug("no schema to clear the session flag in yet: %s", exc)
@@ -455,33 +474,48 @@ def linkedin_clear_flag(
     """Clear `linkedin.session_flag` by hand -- the way back from a checkpoint.
 
     `netkeeper preflight` clears the flag itself once it finds a live session, but
-    only for a `LoggedOut` flag: LinkedIn actually answering again is real evidence
-    the login wall is gone. It never does that for a `Checkpoint` flag, because a
-    live `li_at` cookie is not proof a checkpoint has been solved (spec 9.7) -- so
-    that one is only ever cleared here, by hand, once you have opened LinkedIn in
-    the netkeeper Chrome profile yourself and confirmed the account looks healthy.
+    only for a `LoggedOut` flag: the cookie jar showing a live session again is
+    real evidence the login wall is gone. It never does that for a `Checkpoint`
+    flag, because a live `li_at` cookie is not proof a checkpoint has been solved
+    (spec 9.7) -- so that one is only ever cleared here, by hand, once you have
+    opened LinkedIn in the netkeeper Chrome profile yourself and confirmed the
+    account looks healthy.
 
     Asks for confirmation first, naming what is being cleared and when it was
     raised; `--yes` skips the prompt for a script.
+
+    **The write lock is not held across the prompt (#170 item 1).** The flag is
+    read in its own read session, before anything asks for confirmation, so a
+    `netkeeper serve` running at the same time never sees "database is locked"
+    for however long a person takes to answer. Only after the prompt returns (or
+    `--yes` skips it) does this open a writer, and even then it re-reads the flag
+    first and clears it only if it is still the exact flag this command showed --
+    a job that raised a new flag while the prompt was on screen must not have its
+    flag cleared by an answer given about a different one.
     """
     engine = make_engine(database_url())
     try:
         factory = make_session_factory(engine)
         install_scope_guard(factory)
-        with session_scope(factory, write=True) as session:
+        with session_scope(factory) as session:  # read: no write lock while we prompt
             user = _local_user_or_exit(session)
             flag = session_flag(session, user)
-            if flag is None:
-                typer.echo("no session flag is set")
-                return
-            if not yes:
-                confirmed = typer.confirm(
-                    f"clear the {flag.outcome.value} session flag (raised"
-                    f" {flag.flagged_at:%Y-%m-%d %H:%M UTC} at {flag.url or '/'})?"
-                )
-                if not confirmed:
-                    typer.echo("cancelled: the flag is unchanged")
-                    raise typer.Exit(code=1)
+        if flag is None:
+            typer.echo("no session flag is set")
+            return
+        if not yes:
+            confirmed = typer.confirm(
+                f"clear the {flag.outcome.value} session flag (raised"
+                f" {flag.flagged_at:%Y-%m-%d %H:%M UTC} at {flag.url or '/'})?"
+            )
+            if not confirmed:
+                typer.echo("cancelled: the flag is unchanged")
+                raise typer.Exit(code=1)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            if session_flag(session, user) != flag:
+                typer.echo("the session flag changed while waiting for an answer; not clearing it")
+                raise typer.Exit(code=1)
             clear_session_flag(session, user)
     finally:
         engine.dispose()
