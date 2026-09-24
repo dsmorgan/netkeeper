@@ -16,22 +16,48 @@ request/response shapes and the outcome), never the other way around -- so the p
 modules stay exercisable by fixtures alone, with no browser in sight, exactly as their
 own docstrings promise.
 
-**Origin is fixed, not configurable.** Every real call runs against
+**Origin is fixed, not configurable, and checked twice.** Every real call runs against
 :data:`LINKEDIN_ORIGIN`. The only way to point an instance anywhere else is the
-``origin`` keyword, and the constructor refuses anything that is not
-:data:`LINKEDIN_ORIGIN` itself or this machine's own loopback -- there is no config
+``origin`` keyword, whose value goes through
+:func:`~netkeeper.linkedin.strict_origin.parse_strict_origin` before anything else --
+refusing a backslash, userinfo, or a path/query/fragment closes the parser
+differential a reviewer found between ``urlsplit`` and a real browser's URL parser
+(see that module's docstring) -- and the constructor then refuses anything that is
+not :data:`LINKEDIN_ORIGIN` itself or this machine's own loopback. There is no config
 value, flag, or environment variable that reaches this far, so a misconfigured run
 cannot end up fetching from an arbitrary host. The loopback exception exists only so
 the opt-in smoke suite (``tests/smoke/``) can point this class at a fixture server it
 starts itself; :func:`netkeeper.linkedin.rehearse._require_neutral` refuses the
-opposite way (never LinkedIn, always loopback) with the same rigor.
+opposite way (never LinkedIn, always loopback) with the same rigor, through the same
+strict parser.
 
-**Cookie values never leave this module.** The csrf-token header needs the live
-``JSESSIONID`` cookie's value (spec 9.3), which only this module -- the one piece of
-the extractor with a browser -- can read, over CDP, the same way
-:mod:`netkeeper.linkedin.preflight` reads cookie names and expiry. The value is used
-once, to build a header, and is never logged, returned to a caller, or included in any
-exception message this module raises.
+**Every call also checks the page is actually there before running anything in it**
+(F2 of the #168 review): a security reviewer showed that a page on some *other*
+origin -- one a run's tab had merely been left on, or one it navigated to after this
+instance was built -- could shadow ``window.fetch`` and read back whatever this
+module handed to ``page.evaluate``, headers included. :meth:`PageVoyagerFetch.__call__`
+therefore compares ``page.url``'s scheme, host, and port against this instance's
+origin *before* evaluating anything, and refuses to proceed on a mismatch.
+
+**The csrf-token value never reaches Python, at all.** The earlier version of this
+module read the live ``JSESSIONID`` cookie over CDP (``context.cookies()``) and built
+the ``csrf-token`` header in Python. A security reviewer showed that value transiting
+Python was needless exposure: the in-page script now reads ``document.cookie``
+*inside the page itself* and sets the header there, so the token is generated,
+consumed, and discarded entirely inside the browser process. Python supplies every
+*other* header (from the same constants :func:`~netkeeper.linkedin.voyager.build_headers`
+uses) and the url; it never sees, logs, returns, or reports the cookie's value, and
+``context.cookies()`` is not called anywhere in this file any more. When the page has
+no readable ``JSESSIONID`` (not logged in, or the cookie is ``HttpOnly`` -- browsers
+do not make an ``HttpOnly`` cookie visible to ``document.cookie`` by design, so this
+is also the fallback for the day that assumption about LinkedIn's own cookie turns
+out to be wrong) the script raises inside the page, and :meth:`PageVoyagerFetch.__call__`
+turns that into a plain :class:`VoyagerFetchError` naming nothing but the cookie's
+*name*. That specific failure mode -- and the more general one, an in-page ``fetch()``
+that throws for any other reason, a cross-origin redirect's "Failed to fetch" among
+them -- gets verified for real at the first live run; this is flagged here and in the
+PR body rather than asserted, because nothing offline can prove a browser's own
+cookie-visibility rules without a browser.
 
 **The gate.** :func:`parse_ok` is the one obvious way to hand a fetched response to a
 parser: it classifies first (spec 9.7) and only calls the parser when the outcome is
@@ -48,11 +74,24 @@ from urllib.parse import urlencode, urlsplit
 
 from netkeeper.linkedin.browser import BrowserRun
 from netkeeper.linkedin.classify import Outcome, classify
-from netkeeper.linkedin.preflight import COOKIE_DOMAIN_SUFFIX, CSRF_COOKIE
-from netkeeper.linkedin.voyager import VoyagerRequest, VoyagerResponse, build_headers
+from netkeeper.linkedin.preflight import CSRF_COOKIE
+from netkeeper.linkedin.strict_origin import NotAStrictOrigin, parse_strict_origin
+from netkeeper.linkedin.voyager import (
+    ACCEPT_HEADER,
+    CSRF_HEADER_NAME,
+    LANG_HEADER_VALUE,
+    RESTLI_PROTOCOL_VERSION,
+    VoyagerRequest,
+    VoyagerResponse,
+)
 
 #: The only host a production fetch may run against.
 LINKEDIN_ORIGIN: Final = "https://www.linkedin.com"
+
+#: Parsed once, at import time, so every comparison against it goes through the same
+#: strict parser as any caller-supplied origin -- there is exactly one reading of
+#: what "LinkedIn" means here, never a raw string compared a different way.
+_LINKEDIN_ORIGIN_PARSED: Final = parse_strict_origin(LINKEDIN_ORIGIN)
 
 #: Every endpoint constant in ``voyager.py`` starts with this. A request path that
 #: does not is not a Voyager request, whatever origin it would otherwise reach.
@@ -61,6 +100,12 @@ VOYAGER_PATH_PREFIX: Final = "/voyager/api/"
 #: The three loopback spellings a test may point this class at -- the same set
 #: :mod:`netkeeper.linkedin.rehearse` allows for its own, opposite refusal.
 _LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1", "localhost"})
+
+#: What the in-page script throws when ``document.cookie`` has no live JSESSIONID.
+#: A string netkeeper itself chose and controls -- never anything a browser or a
+#: page could echo a cookie value through -- so it is always safe to look for it in
+#: the text of whatever exception ``page.evaluate`` raises.
+_NO_CSRF_MARKER: Final = "netkeeper-fetch: no live JSESSIONID cookie readable on this page"
 
 
 class NotLinkedInOrigin(ValueError):
@@ -72,27 +117,44 @@ class VoyagerFetchError(RuntimeError):
 
     Never a LinkedIn API change -- that is :class:`~netkeeper.linkedin.voyager.RouteChanged`,
     raised by a parser, or an :class:`Outcome` other than ``Ok`` from :func:`parse_ok`.
-    This is for the fetch plumbing breaking: no CSRF cookie in the jar, a cookie jar
-    that could not be read at all, or an in-page ``fetch()`` result that is not the
-    shape this module's own script produces.
+    This is for the fetch plumbing breaking: the page not being on the origin this
+    instance is bound to, no CSRF cookie readable on the page, an in-page ``fetch()``
+    that itself threw (a network error, a cross-origin redirect's "Failed to fetch"),
+    or a result that is not the shape this module's own script produces.
+
+    A caller of this module (P2-06 onward) has no :class:`VoyagerResponse` to
+    classify when this is raised -- there was no response, only a failure to get
+    one -- so it cannot be handed to :func:`parse_ok`. Spec 9.7's table has no row
+    for it either, because every row there classifies an *answer* LinkedIn gave.
+    Until P2-06 decides otherwise, the safe default is the same one an unclassifiable
+    failure gets anywhere else in the extractor: this unit of work did not complete,
+    it is not a checkpoint or a login wall (neither sets the session flag), and it is
+    worth logging loudly and moving on rather than retrying blindly.
     """
 
 
 def _require_fetchable_origin(origin: str) -> str:
-    """``origin``, if a fetch may run against it; :class:`NotLinkedInOrigin` otherwise.
+    """``origin``, rebuilt and canonical, if a fetch may run against it.
 
-    Refuses everything except :data:`LINKEDIN_ORIGIN` itself and this machine's own
-    loopback. There is no override: the only caller that ever passes something other
-    than the default is a test, on purpose, against a server it started itself.
+    Raises :class:`NotLinkedInOrigin` for anything else. ``origin`` first goes
+    through :func:`~netkeeper.linkedin.strict_origin.parse_strict_origin`, which
+    refuses a backslash, userinfo, or anything past the authority before ``urlsplit``
+    -- which disagrees with a real browser on some of those -- ever sees the string
+    (see that module's docstring). What is left is compared against
+    :data:`LINKEDIN_ORIGIN` and this machine's own loopback, on the *parsed and
+    rebuilt* origin, never the original string: a scheme, a host, and a port, with
+    no way for the two to differ again once parsing is done. There is no override:
+    the only caller that ever passes something other than the default is a test, on
+    purpose, against a server it started itself.
     """
     try:
-        split = urlsplit(origin)
-    except ValueError as exc:
-        raise NotLinkedInOrigin(f"{origin!r} is not a url a Voyager fetch can use") from exc
-    if origin == LINKEDIN_ORIGIN:
-        return origin
-    if split.scheme in ("http", "https") and split.hostname in _LOOPBACK_HOSTS:
-        return origin
+        parsed = parse_strict_origin(origin)
+    except NotAStrictOrigin as exc:
+        raise NotLinkedInOrigin(f"{origin!r} is not a usable Voyager origin: {exc}") from exc
+    if parsed == _LINKEDIN_ORIGIN_PARSED:
+        return str(parsed)
+    if parsed.scheme in ("http", "https") and parsed.host in _LOOPBACK_HOSTS:
+        return str(parsed)
     raise NotLinkedInOrigin(
         f"a Voyager fetch may only run against {LINKEDIN_ORIGIN!r}, or this machine's"
         f" own loopback for tests, got {origin!r}"
@@ -105,8 +167,11 @@ class PageVoyagerFetch:
     ``run`` is the :class:`~netkeeper.linkedin.browser.BrowserRun` whose tab the
     request runs inside; every call reads it through :meth:`BrowserRun.ensure_page`,
     so a tab the user closed is reopened the same way any other in-page work recovers
-    it (spec 9.9). ``origin`` defaults to :data:`LINKEDIN_ORIGIN` and should never be
-    passed to anything else outside a test (see the module docstring).
+    it (spec 9.9) -- but recovery restores the tab to wherever the run last
+    navigated it, never to this instance's origin on its own, so a caller must
+    already have put the tab on that origin (a ``run.goto(...)``) before the first
+    call. ``origin`` defaults to :data:`LINKEDIN_ORIGIN` and should never be passed
+    anything else outside a test (see the module docstring).
     """
 
     def __init__(self, run: BrowserRun, *, origin: str = LINKEDIN_ORIGIN) -> None:
@@ -121,81 +186,108 @@ class PageVoyagerFetch:
     async def __call__(self, request: VoyagerRequest) -> VoyagerResponse:
         """Run ``request`` as a real in-page ``fetch()`` and return what came back.
 
-        Builds the header set fresh on every call, from :func:`build_headers` and the
-        live ``JSESSIONID`` cookie -- a csrf token can rotate, and only this module
-        can read the browser's own jar (spec 9.10's boundary keeps that off the pure
-        side). ``request.headers`` is merged in as ``build_headers``'s ``extra``, so a
-        caller that already knows an override (a different ``accept``, say) still
-        wins on a key collision.
+        Every header but ``csrf-token`` is built here, from the same constants
+        :func:`~netkeeper.linkedin.voyager.build_headers` uses, merged with
+        ``request.headers`` (which can override any of them). ``csrf-token`` is not
+        one of them: the in-page script reads it fresh from ``document.cookie`` on
+        every call, and a caller cannot override it through ``request.headers`` --
+        letting anything but the page's own live cookie supply that value is exactly
+        what this module was rewritten not to do (see the module docstring's "the
+        csrf-token value never reaches Python" section).
         """
         if not request.path.startswith(VOYAGER_PATH_PREFIX):
             raise ValueError(
                 f"not a Voyager path (must start with {VOYAGER_PATH_PREFIX!r}): {request.path!r}"
             )
-        raw_csrf = await self._read_jsessionid()
-        headers = build_headers(raw_csrf, extra=request.headers)
-        url = self._url_for(request)
         page = await self._run.ensure_page()
-        raw = await page.evaluate(_fetch_expression(url, headers))
+        _require_page_on_origin(page.url, self._origin)
+        base_headers = _base_headers(request.headers)
+        url = self._url_for(request)
+        try:
+            raw = await page.evaluate(_fetch_expression(url, base_headers))
+        except Exception as exc:
+            if _NO_CSRF_MARKER in str(exc):
+                raise VoyagerFetchError(
+                    f"no live {CSRF_COOKIE} cookie readable on this page; log in to"
+                    " LinkedIn in the netkeeper Chrome profile first"
+                ) from exc
+            raise VoyagerFetchError(
+                "the in-page fetch failed (a network error, a cross-origin redirect,"
+                " or the page navigating away mid-request)"
+            ) from exc
         return _response_from(raw)
 
     def _url_for(self, request: VoyagerRequest) -> str:
         query = urlencode(request.query)
         return f"{self._origin}{request.path}" + (f"?{query}" if query else "")
 
-    async def _read_jsessionid(self) -> str:
-        """The live ``JSESSIONID`` cookie's raw value, quotes and all.
 
-        Read over CDP through the run's own context, the same call
-        :mod:`netkeeper.linkedin.preflight` uses to read cookie *names*; this is the
-        one place in netkeeper that reads a cookie *value*, because the csrf-token
-        header needs it (spec 9.3). The value is returned only to
-        :meth:`__call__`, which hands it straight to :func:`build_headers` and never
-        logs, stores, or reports it -- and neither does this method: every error path
-        below names the cookie by name, never by value.
-        """
-        domain_suffix = (
-            COOKIE_DOMAIN_SUFFIX if self._origin == LINKEDIN_ORIGIN else _host(self._origin)
-        )
-        try:
-            jar = await self._run.context.cookies()
-        except Exception as exc:
-            raise VoyagerFetchError("could not read the browser's cookie jar") from exc
-        for entry in jar:
-            if str(entry.get("name", "")) != CSRF_COOKIE:
-                continue
-            domain = str(entry.get("domain", "")).lstrip(".")
-            if domain != domain_suffix and not domain.endswith(f".{domain_suffix}"):
-                continue
-            value = entry.get("value")
-            if isinstance(value, str) and value:
-                return value
+def _base_headers(extra: Mapping[str, str]) -> dict[str, str]:
+    """Every header :func:`~netkeeper.linkedin.voyager.build_headers` would set,
+    except ``csrf-token`` -- which only the in-page script can supply, from the
+    page's own live cookie (see the module docstring). Reads the same constants
+    ``build_headers`` does, so the two cannot drift apart on the headers they share.
+    """
+    headers: dict[str, str] = {
+        "accept": ACCEPT_HEADER,
+        "x-restli-protocol-version": RESTLI_PROTOCOL_VERSION,
+        "x-li-lang": LANG_HEADER_VALUE,
+    }
+    headers.update(extra)
+    return headers
+
+
+def _require_page_on_origin(page_url: str, origin: str) -> None:
+    """Refuse to evaluate anything unless the tab is actually on ``origin``.
+
+    F2 of the #168 review: a page on some other origin -- left over from a previous
+    navigation, or one the tab moved to after this instance was constructed -- could
+    shadow ``window.fetch`` and read back the headers this module hands to
+    ``page.evaluate``, cookie-derived csrf-token included. ``page_url`` is Chrome's
+    own, already-resolved url (not a string this module has to distrust the parsing
+    of, unlike a caller-supplied ``origin`` -- see :mod:`netkeeper.linkedin.strict_origin`),
+    so a plain ``urlsplit`` compare of scheme, host, and port is enough here.
+    """
+    page = urlsplit(page_url)
+    want = urlsplit(origin)
+    if (page.scheme, page.hostname, page.port) != (want.scheme, want.hostname, want.port):
         raise VoyagerFetchError(
-            f"no live {CSRF_COOKIE} cookie for this profile; log in to LinkedIn in the"
-            " netkeeper Chrome profile first"
+            f"the tab is not on {origin!r} (it is on"
+            f" {page.scheme or '?'}://{page.hostname or '?'}"
+            f"{f':{page.port}' if page.port else ''}); refusing to run a Voyager fetch"
+            " from a page that might not be able to be trusted"
         )
 
 
-def _host(origin: str) -> str:
-    return urlsplit(origin).hostname or origin
-
-
-def _fetch_expression(url: str, headers: Mapping[str, str]) -> str:
+def _fetch_expression(url: str, base_headers: Mapping[str, str]) -> str:
     """The script :meth:`PageVoyagerFetch.__call__` hands to ``page.evaluate``.
 
     ``PageLike.evaluate`` (spec 9.10 keeps it narrow) takes one expression string and
-    no separate argument, so ``url`` and ``headers`` are embedded as JSON literals
-    rather than passed alongside -- safe because JSON string syntax is a strict
-    subset of a JavaScript string literal, so ``json.dumps``'s own escaping is
+    no separate argument, so ``url`` and ``base_headers`` are embedded as JSON
+    literals rather than passed alongside -- safe because JSON string syntax is a
+    strict subset of a JavaScript string literal, so ``json.dumps``'s own escaping is
     already enough. ``credentials: 'same-origin'`` is what makes the fetch carry the
     tab's session cookies at all; without it a same-origin fetch still sends them by
     default in every browser netkeeper supports, but naming it is cheap insurance
     against ever changing that default by accident.
+
+    The script itself reads ``document.cookie``, finds ``JSESSIONID``, and strips its
+    surrounding quotes the same way :func:`~netkeeper.linkedin.voyager.strip_jsessionid`
+    does for the value this module used to read over CDP -- the value never crosses
+    into Python at all now (see the module docstring). An absent or empty cookie
+    throws :data:`_NO_CSRF_MARKER`, a fixed string ``__call__`` recognizes and turns
+    into a :class:`VoyagerFetchError` that names nothing but the cookie's name.
     """
     return (
         "(async () => {"
+        "const m = document.cookie.match(/(?:^|;\\s*)JSESSIONID=([^;]*)/);"
+        "let t = m ? decodeURIComponent(m[1]) : '';"
+        "if (t.length >= 2 && t[0] === '\"' && t[t.length - 1] === '\"') { t = t.slice(1, -1); }"
+        f"if (!t) {{ throw new Error({json.dumps(_NO_CSRF_MARKER)}); }}"
+        "const headers = Object.assign({}, "
+        f"{json.dumps(dict(base_headers))}, {{{json.dumps(CSRF_HEADER_NAME)}: t}});"
         f"const r = await fetch({json.dumps(url)}, "
-        f"{{method: 'GET', credentials: 'same-origin', headers: {json.dumps(dict(headers))}}});"
+        "{method: 'GET', credentials: 'same-origin', headers: headers});"
         "const body = await r.text();"
         "return {status: r.status, body: body, url: r.url};"
         "})()"

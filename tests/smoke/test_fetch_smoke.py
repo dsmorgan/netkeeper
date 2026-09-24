@@ -8,11 +8,19 @@ fixture body and records the headers each request actually carried, and it sets 
 on the first page load -- rather than anything netkeeper writes itself (ADR 0002 forbids
 ``context.add_cookies``, and this smoke suite proves the fetch works without it).
 
+This runs against the developer's own, real Chrome profile (spec 9.1), so the fixture
+cookie it sets is bounded (``Max-Age=60``) and every test tears itself down by hitting
+a route that expires it immediately -- the smoke suite must not leave anything behind
+in a browser the developer keeps using for their own LinkedIn session (#168 review, F7).
+
 What it proves that ``tests/test_linkedin_fetch.py`` cannot, because that one drives a
-fake tab: that ``page.evaluate`` really runs a ``fetch()`` inside a real Chrome tab,
-that the request the fixture server actually received carried the headers
-``build_headers`` produces, and that the response really round-trips into a parser
-end to end.
+fake tab that never actually runs the generated script: that ``page.evaluate`` really
+runs a ``fetch()`` inside a real Chrome tab, that ``document.cookie`` really is where
+the csrf-token value comes from now (F2 of the #168 review -- it no longer reaches
+Python at all), that the request the fixture server actually received carried the
+headers ``build_headers`` produces, that a real redirect is followed and its *actual*
+final url is what gets classified (not the url the request started at -- #168 review,
+F6/N2), and that the response really round-trips into a parser end to end.
 
 Start Chrome first with the command ``netkeeper browser launch`` prints.
 """
@@ -23,12 +31,15 @@ import json
 import os
 import threading
 from collections.abc import Iterator, Mapping
+from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import httpx
 import pytest
 
 from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserUnavailable
-from netkeeper.linkedin.fetch import PageVoyagerFetch, parse_ok
+from netkeeper.linkedin.classify import Outcome
+from netkeeper.linkedin.fetch import PageVoyagerFetch, VoyagerNotOk, parse_ok
 from netkeeper.linkedin.voyager import CONNECTIONS_PATH, VoyagerRequest, parse_connections_page
 
 pytestmark = pytest.mark.skipif(
@@ -59,9 +70,15 @@ CONNECTIONS_FIXTURE = {
 # never a real LinkedIn session value.
 FIXTURE_JSESSIONID = '"ajax:smoke-fixture-csrf-token"'
 
+# A Voyager-shaped path (so PageVoyagerFetch's own prefix check accepts it) that the
+# fixture server answers with a redirect instead of JSON, landing on a path shaped
+# like LinkedIn's own checkpoint interstitial (spec 9.7).
+CHECKPOINT_TRIGGER_PATH = "/voyager/api/smoke/checkpoint-trigger"
+CHECKPOINT_PATH = "/checkpoint/challenge"
+
 
 class _FixtureServer(BaseHTTPRequestHandler):
-    """A two-route loopback site: a page that sets the csrf cookie, and Voyager's path."""
+    """A loopback site: a page that sets the csrf cookie, Voyager's path, and a redirect."""
 
     protocol_version = "HTTP/1.1"
     seen_headers: dict[str, str] = {}
@@ -71,16 +88,41 @@ class _FixtureServer(BaseHTTPRequestHandler):
             type(self).seen_headers = {name.lower(): value for name, value in self.headers.items()}
             body = json.dumps(CONNECTIONS_FIXTURE).encode()
             self._send(body, "application/json", set_cookie=False)
-            return
-        body = b"<!doctype html><title>netkeeper fetch smoke fixture</title><body></body>"
-        self._send(body, "text/html; charset=utf-8", set_cookie=True)
+        elif self.path.startswith(CHECKPOINT_TRIGGER_PATH):
+            self._redirect(CHECKPOINT_PATH)
+        elif self.path.startswith(CHECKPOINT_PATH):
+            body = b"<!doctype html><title>smoke checkpoint interstitial</title><body></body>"
+            self._send(body, "text/html; charset=utf-8", set_cookie=False)
+        elif self.path.startswith("/expire-cookie"):
+            self._send(b"", "text/plain", set_cookie=False, expire_cookie=True)
+        else:
+            body = b"<!doctype html><title>netkeeper fetch smoke fixture</title><body></body>"
+            self._send(body, "text/html; charset=utf-8", set_cookie=True)
 
-    def _send(self, body: bytes, content_type: str, *, set_cookie: bool) -> None:
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _send(
+        self,
+        body: bytes,
+        content_type: str,
+        *,
+        set_cookie: bool,
+        expire_cookie: bool = False,
+    ) -> None:
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         if set_cookie:
-            self.send_header("Set-Cookie", f"JSESSIONID={FIXTURE_JSESSIONID}; Path=/")
+            # Bounded lifetime (F7): this runs against the developer's real Chrome
+            # profile, and a session cookie with no Max-Age would otherwise outlive
+            # this one test run in a Chrome the developer keeps open.
+            self.send_header("Set-Cookie", f"JSESSIONID={FIXTURE_JSESSIONID}; Path=/; Max-Age=60")
+        if expire_cookie:
+            self.send_header("Set-Cookie", "JSESSIONID=; Path=/; Max-Age=0")
         self.end_headers()
         self.wfile.write(body)
 
@@ -90,14 +132,22 @@ class _FixtureServer(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def site() -> Iterator[str]:
-    """A fresh loopback fixture server, its own port, for the length of the test."""
+    """A fresh loopback fixture server, its own port, for the length of the test.
+
+    Teardown hits ``/expire-cookie`` over plain HTTP (no browser needed for this
+    part) so the ``JSESSIONID`` this fixture set is gone from the developer's
+    Chrome profile before the next test, or the next real session, starts (F7).
+    """
     _FixtureServer.seen_headers = {}
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FixtureServer)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
     try:
-        yield f"http://127.0.0.1:{server.server_port}"
+        yield base
     finally:
+        with suppress(httpx.HTTPError):
+            httpx.get(f"{base}/expire-cookie", timeout=5)
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
@@ -135,3 +185,27 @@ async def test_the_fetch_carries_the_built_headers_and_the_body_round_trips(
     # put the value the fixture server issued into anything the suite prints, and
     # this assertion is the only place in this file that is allowed to name it.
     assert FIXTURE_JSESSIONID not in repr(response)
+
+
+async def test_a_redirect_to_a_checkpoint_is_classified_from_the_real_final_url(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """N2: the classified url must be where the browser actually landed (``r.url``),
+    not the url the request started at -- a script that returned the request url
+    instead would classify this as an unrecognized 200, not a checkpoint, and spec
+    9.7's "never retry a checkpoint" rule would never fire.
+    """
+    try:
+        async with provider.run() as run:
+            await run.goto(f"{site}/")
+            fetch = PageVoyagerFetch(run, origin=site)
+            response = await fetch(VoyagerRequest(path=CHECKPOINT_TRIGGER_PATH))
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert response.final_url.endswith(CHECKPOINT_PATH), response.final_url
+    assert response.final_url != f"{site}{CHECKPOINT_TRIGGER_PATH}"
+
+    with pytest.raises(VoyagerNotOk) as excinfo:
+        parse_ok(response, parse_connections_page)
+    assert excinfo.value.outcome is Outcome.CHECKPOINT
