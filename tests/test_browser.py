@@ -438,14 +438,47 @@ async def test_scroll_sends_one_wheel_per_step_then_sleeps_each_pause_and_the_dw
     sleeper = Sleeper()
 
     async with provider.run() as run:
-        returned = await run.scroll(plan, sleep=sleeper)
+        outcome = await run.scroll(plan, sleep=sleeper)
 
     page = only_page(context)
-    assert returned is page
+    assert outcome.page is page
+    assert outcome.cancelled is False
     assert page.mouse.wheels == [(0, 120), (0, -90), (0, 500)]
     # Order matters as much as the values: a plan replayed out of order, or with
     # the dwell folded into a step's own pause, would still sum to the same total.
     assert sleeper.waits == [0.4, 0.2, 0.9, 3.0]
+
+
+async def test_scroll_sends_each_steps_wheel_event_before_its_own_sleep() -> None:
+    """N15: a step's wheel event must land before its sleep, not after.
+
+    ``wheels`` and ``waits`` are recorded on two separate objects, so a plan
+    replayed as "sleep, then wheel" instead of "wheel, then sleep" still produces
+    the identical two lists in the identical order -- neither list alone can tell
+    the two apart. This merges both into one interleaved, tagged log instead.
+    """
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    plan = make_plan((1, 0.1), (2, 0.2), dwell_s=9.0)
+    events: list[str] = []
+
+    async def logging_sleep(seconds: float) -> None:
+        events.append(f"sleep:{seconds}")
+
+    async with provider.run() as run:
+        page = await run.ensure_page()
+        real_page = connector.browsers[0].context_list[0].pages[0]
+        assert page is real_page
+        real_wheel = real_page.mouse.wheel
+
+        async def logging_wheel(delta_x: float, delta_y: float) -> None:
+            events.append(f"wheel:{delta_y}")
+            await real_wheel(delta_x, delta_y)
+
+        real_page.mouse.wheel = logging_wheel  # type: ignore[method-assign]
+        await run.scroll(plan, sleep=logging_sleep)
+
+    assert events == ["wheel:1", "sleep:0.1", "wheel:2", "sleep:0.2", "sleep:9.0"]
 
 
 async def test_scroll_with_no_steps_still_sleeps_the_dwell() -> None:
@@ -479,10 +512,11 @@ async def test_scroll_reopens_a_lost_tab_and_scrolls_the_recovered_one() -> None
         lost = only_page(context)
         lost.user_closed_it()
 
-        returned = await run.scroll(plan, sleep=Sleeper())
+        outcome = await run.scroll(plan, sleep=Sleeper())
 
         recovered = context.pages[-1]
-        assert returned is recovered
+        assert outcome.page is recovered
+        assert outcome.cancelled is False
         assert recovered is not lost
         assert not recovered.is_closed()
         assert recovered.mouse.wheels == [(0, 100)]
@@ -504,10 +538,11 @@ async def test_a_cancelled_scroll_stops_before_its_next_wheel_event() -> None:
         return calls > 1  # let the first wheel event through, then stop
 
     async with provider.run() as run:
-        returned = await run.scroll(plan, sleep=sleeper, cancelled=cancelled)
+        outcome = await run.scroll(plan, sleep=sleeper, cancelled=cancelled)
 
     page = only_page(context)
-    assert returned is page
+    assert outcome.page is page
+    assert outcome.cancelled is True, "F8: the outcome must say so, not leave the caller to guess"
     assert page.mouse.wheels == [(0, 1)], "a cancelled replay must not send the rest of the plan"
     assert sleeper.waits == [0.1], "nor wait out the steps or the dwell it never reached"
 
@@ -523,9 +558,10 @@ async def test_a_scroll_cancelled_only_before_the_dwell_still_sends_every_wheel_
         return len(sleeper.waits) >= 2  # both steps have paused; only the dwell is left
 
     async with provider.run() as run:
-        await run.scroll(plan, sleep=sleeper, cancelled=cancelled_after_steps)
+        outcome = await run.scroll(plan, sleep=sleeper, cancelled=cancelled_after_steps)
 
     page = only_page(context)
+    assert outcome.cancelled is True
     assert page.mouse.wheels == [(0, 1), (0, 2)], "cancelling before the dwell must not skip a step"
     assert sleeper.waits == [0.1, 0.1], "the dwell itself must not run once cancelled"
 
@@ -536,6 +572,7 @@ async def test_an_uncancelled_scroll_ignores_a_cancelled_callback_that_says_no()
     sleeper = Sleeper()
 
     async with provider.run() as run:
-        await run.scroll(plan, sleep=sleeper, cancelled=lambda: False)
+        outcome = await run.scroll(plan, sleep=sleeper, cancelled=lambda: False)
 
+    assert outcome.cancelled is False
     assert sleeper.waits == [0.05, 0.25]

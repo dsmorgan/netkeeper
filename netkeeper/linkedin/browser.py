@@ -105,6 +105,22 @@ class _ScrollablePage(PageLike, Protocol):
     def mouse(self) -> _MouseLike: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ScrollOutcome:
+    """What :meth:`BrowserRun.scroll` actually did.
+
+    ``page`` is the page it scrolled (reopened first if it had already been lost --
+    see the method's docstring). ``cancelled`` is ``True`` when the ``cancelled``
+    callback stopped the replay before it sent every wheel event and waited out the
+    dwell -- the caller's own signal to stop, echoed back, so it does not have to
+    re-poll that callback itself or reconstruct the answer by comparing how many
+    wheel events landed against how many the plan had (#168 review, F8).
+    """
+
+    page: PageLike
+    cancelled: bool
+
+
 class ContextLike(Protocol):
     """The slice of a Playwright ``BrowserContext`` this package uses.
 
@@ -365,7 +381,7 @@ class BrowserRun:
         *,
         sleep: Callable[[float], Awaitable[None]] = _real_sleep,
         cancelled: Callable[[], bool] | None = None,
-    ) -> PageLike:
+    ) -> ScrollOutcome:
         """Replay ``plan`` on this run's tab: one ``mouse.wheel`` per step, then the dwell.
 
         #152's decision: :mod:`netkeeper.linkedin.pacing` builds the plan as plain
@@ -374,10 +390,16 @@ class BrowserRun:
         the wider :class:`_ScrollablePage` slice locally rather than widening the
         protocol every other caller shares.
 
-        Calls :meth:`ensure_page` first, so a tab the user closed (or a browser that
-        went away) is reopened the same way a navigation would recover it, and returns
-        the page actually scrolled -- a caller tracking the previous one (a request
-        listener, say) should re-attach to what comes back if it differs.
+        Calls :meth:`ensure_page` first, so a tab that was *already* closed (or a
+        browser that had already gone away) before this call started is reopened the
+        same way a navigation would recover it. That recovery happens once, up
+        front: a tab lost *during* the replay itself -- between one wheel event and
+        the next -- is not detected or reopened mid-loop, the same as a navigation's
+        own failure belongs to the caller once the tab is confirmed present (see
+        :meth:`goto`'s docstring for the parallel case). The returned
+        :class:`ScrollOutcome` names the page actually scrolled either way -- a
+        caller tracking the previous one (a request listener, say) should re-attach
+        to it if it differs.
 
         ``sleep`` stands in for the wait after each step and the final dwell; inject a
         fake in an offline test so it takes zero real time and records what it was
@@ -389,18 +411,21 @@ class BrowserRun:
         between profiles and inside sliced cooldowns") has somewhere to plug one in;
         nothing here reads a database or a settings flag itself (spec 9.10 keeps that
         off this side of the boundary), so the check is the caller's to supply. A
-        cancelled replay returns the page without sending its remaining wheel events
-        or waiting out the dwell.
+        cancelled replay stops before sending its remaining wheel events or waiting
+        out the dwell, and :attr:`ScrollOutcome.cancelled` says so -- the caller does
+        not have to re-poll its own ``cancelled`` callback, or compare how many wheel
+        events landed against how many the plan had, to find out (#168 review, F8).
         """
         page = cast(_ScrollablePage, await self.ensure_page())
         for step in plan.steps:
             if cancelled is not None and cancelled():
-                return page
+                return ScrollOutcome(page=page, cancelled=True)
             await page.mouse.wheel(0, step.delta_px)
             await sleep(step.pause_s)
-        if cancelled is None or not cancelled():
-            await sleep(plan.dwell_s)
-        return page
+        if cancelled is not None and cancelled():
+            return ScrollOutcome(page=page, cancelled=True)
+        await sleep(plan.dwell_s)
+        return ScrollOutcome(page=page, cancelled=False)
 
     async def goto(self, url: str) -> PageLike:
         """Navigate this run's tab, reopening it first, or again, if it was lost.
