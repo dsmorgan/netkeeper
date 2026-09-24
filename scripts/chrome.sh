@@ -7,10 +7,13 @@
 # that printed command plus the checks a person otherwise does by hand: is it
 # already running, is the port taken by something else, is the profile open
 # without the port, and is a crash-left profile lock in the way.
+#
+# The port and profile come from netkeeper itself (`browser launch --json`), so
+# this starts Chrome where `serve` and `preflight` will look for it.
 set -eu
 
 PROFILE_DIRNAME="chrome-profile"   # netkeeper.services.browser_launch.CHROME_PROFILE_DIRNAME
-DEFAULT_PORT=9222                  # netkeeper.services.browser_launch default CDP port
+DEFAULT_PORT=9222                  # netkeeper.services.browser_launch.DEFAULT_CDP_PORT
 WAIT_SECONDS=30
 
 usage() {
@@ -22,12 +25,13 @@ Usage: scripts/chrome.sh [--port N] [--data-dir PATH | --profile-dir PATH] [--dr
 Start Chrome on the netkeeper profile with --remote-debugging-port, then wait
 until the port answers. If that Chrome is already up, say so and change nothing.
 
+The port and profile default to what netkeeper uses: linkedin.cdp_url from your
+config, and <data dir>/$PROFILE_DIRNAME. If netkeeper cannot be run, they fall
+back to port $DEFAULT_PORT and \$NETKEEPER_DATA (or the macOS default), with a warning.
+
 Options:
-  --port N            Debugging port. Default: the port in \$NETKEEPER_CDP_URL,
-                      else $DEFAULT_PORT.
-  --data-dir PATH     netkeeper data directory. Default: \$NETKEEPER_DATA, else
-                      ~/Library/Application Support/netkeeper. The profile is
-                      <data-dir>/$PROFILE_DIRNAME.
+  --port N            Debugging port, instead of linkedin.cdp_url's.
+  --data-dir PATH     netkeeper data directory, instead of \$NETKEEPER_DATA.
   --profile-dir PATH  Use this Chrome profile directory instead.
   --status            Report whether the port answers and whether the profile
                       is open. Changes nothing.
@@ -35,7 +39,7 @@ Options:
   --help              This text.
 
 After a crash, Chrome can leave a lock in the profile that makes the next start
-fail with "profile in use". When no running Chrome has the profile open, this
+fail with "profile in use". When no running Chrome holds the profile, this
 removes that lock (SingletonLock, SingletonCookie, SingletonSocket) first.
 USAGE
 }
@@ -45,7 +49,7 @@ die() {
   exit 1
 }
 
-data_dir=${NETKEEPER_DATA:-"$HOME/Library/Application Support/netkeeper"}
+data_dir=
 profile=
 port=
 mode=start
@@ -66,29 +70,104 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$profile" ] || profile="$data_dir/$PROFILE_DIRNAME"
-
-if [ -z "$port" ]; then
-  # http://127.0.0.1:9222 -> 9222; anything without a port keeps the default.
-  port=$(printf '%s' "${NETKEEPER_CDP_URL:-}" | sed -n 's#^[a-z]*://[^/:]*:\([0-9][0-9]*\).*#\1#p')
-  [ -n "$port" ] || port=$DEFAULT_PORT
-fi
 case $port in
-  ''|*[!0-9]*) die "--port must be a number, not '$port'" ;;
+  *[!0-9]*) die "--port must be a number, not '$port'" ;;
 esac
+
+command -v curl >/dev/null 2>&1 || die "curl is needed to check the debugging port"
+command -v lsof >/dev/null 2>&1 || die "lsof is needed to check what holds the port"
+
+# --- where: ask netkeeper, unless told ------------------------------------------
+
+repo=$(cd "$(dirname "$0")/.." && pwd -P)
+netkeeper_bin=
+if [ -x "$repo/.venv/bin/netkeeper" ]; then
+  netkeeper_bin="$repo/.venv/bin/netkeeper"
+elif command -v netkeeper >/dev/null 2>&1; then
+  netkeeper_bin=$(command -v netkeeper)
+fi
+
+if [ -z "$port" ] || [ -z "$profile" ]; then
+  answer=
+  if [ -n "$netkeeper_bin" ]; then
+    if [ -n "$data_dir" ]; then
+      answer=$(NETKEEPER_DATA="$data_dir" "$netkeeper_bin" browser launch --json 2>/dev/null) || answer=
+    else
+      answer=$("$netkeeper_bin" browser launch --json 2>/dev/null) || answer=
+    fi
+  fi
+  if [ -n "$answer" ]; then
+    # One field per line: port, profile, remote note (empty when none).
+    fields=$(printf '%s' "$answer" | "$(dirname "$netkeeper_bin")/python" -c '
+import json, sys
+d = json.load(sys.stdin)
+print(d["port"]); print(d["profile"]); print(d["remote"] or "")' 2>/dev/null) || fields=
+  else
+    fields=
+  fi
+  if [ -n "$fields" ]; then
+    asked_port=$(printf '%s\n' "$fields" | sed -n 1p)
+    asked_profile=$(printf '%s\n' "$fields" | sed -n 2p)
+    remote=$(printf '%s\n' "$fields" | sed -n 3p)
+    if [ -z "$port" ] && [ -n "$remote" ]; then
+      die "$remote"
+    fi
+    [ -n "$port" ] || port=$asked_port
+    [ -n "$profile" ] || profile=$asked_profile
+  else
+    printf 'warning: could not ask netkeeper for its port and profile; using the defaults\n' >&2
+    [ -n "$port" ] || port=$DEFAULT_PORT
+    if [ -z "$profile" ]; then
+      [ -n "$data_dir" ] || data_dir=${NETKEEPER_DATA:-"$HOME/Library/Application Support/netkeeper"}
+      profile="$data_dir/$PROFILE_DIRNAME"
+    fi
+  fi
+fi
+
+# One spelling of the profile, however it was given: absolute, symlinks
+# resolved, no trailing slash (pwd -P, and dirname/basename, drop it). Chrome gets this spelling, and every check
+# compares against it.
+case $profile in
+  /*) ;;
+  *) profile="$PWD/$profile" ;;
+esac
+if [ -d "$profile" ]; then
+  profile=$(cd "$profile" && pwd -P)
+elif [ -d "$(dirname "$profile")" ]; then
+  profile="$(cd "$(dirname "$profile")" && pwd -P)/$(basename "$profile")"
+fi
+
+# --- what is running ------------------------------------------------------------
 
 # The browser's own answer on the port, or nothing.
 cdp_version() {
   curl -fsS --max-time 2 "http://127.0.0.1:$port/json/version" 2>/dev/null || true
 }
 
-# PIDs of Chrome processes started on this profile. Matches the exact flag, so a
-# Chrome on another profile (your everyday one) never counts.
+# PIDs of processes started with exactly this profile: the flag must end at a
+# space or the end of the line, so .../chrome-profile never matches
+# .../chrome-profile-old. The flag goes through the environment, not awk's
+# arguments, so this pipeline never appears in its own match.
 profile_pids() {
-  # The flag goes through the environment, not awk's arguments, so this pipeline
-  # never appears in its own match.
-  ps -axo pid=,command= | CHROME_SH_FLAG="--user-data-dir=$profile" \
-    awk 'index($0, ENVIRON["CHROME_SH_FLAG"]) { print $1 }'
+  ps -axo pid=,command= | CHROME_SH_FLAG="--user-data-dir=$profile" awk '
+    { line = $0 " " }
+    index(line, ENVIRON["CHROME_SH_FLAG"] " ") { print $1 }'
+}
+
+# The pid Chrome wrote into the profile's lock, when that process is alive and
+# is a Chrome. Chrome's own check, and it does not care how the path was spelled
+# when that Chrome was started.
+lock_holder() {
+  target=$(readlink "$profile/SingletonLock" 2>/dev/null) || return 0
+  pid=${target##*-}
+  case $pid in ''|*[!0-9]*) return 0 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 0
+  # The executable's own name, not its arguments or directory: a crashed
+  # Chrome's pid reused by anything else is no holder.
+  exe=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
+  case $(basename "$exe" | tr '[:upper:]' '[:lower:]') in
+    *chrome*|*chromium*) printf '%s\n' "$pid" ;;
+  esac
 }
 
 port_listener() {
@@ -99,8 +178,13 @@ browser_name() {
   printf '%s' "$1" | sed -n 's/.*"Browser"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
 }
 
+first_line() {
+  printf '%s\n' "$1" | sed -n 1p
+}
+
 version=$(cdp_version)
 pids=$(profile_pids)
+holder=$(lock_holder)
 
 if [ "$mode" = status ]; then
   printf 'profile  %s\n' "$profile"
@@ -114,8 +198,8 @@ if [ "$mode" = status ]; then
       printf 'port     %s: nothing is listening\n' "$port"
     fi
   fi
-  if [ -n "$pids" ]; then
-    printf 'chrome   running on this profile (pid %s)\n' "$(printf '%s' "$pids" | tr '\n' ' ' | sed 's/ $//')"
+  if [ -n "$pids" ] || [ -n "$holder" ]; then
+    printf 'chrome   running on this profile (pid %s)\n' "$(first_line "${pids:-$holder}")"
   else
     printf 'chrome   not running on this profile\n'
   fi
@@ -123,24 +207,25 @@ if [ "$mode" = status ]; then
 fi
 
 if [ -n "$version" ]; then
-  if [ -n "$pids" ]; then
+  if [ -n "$pids" ] || [ -n "$holder" ]; then
     printf 'Already running: %s on port %s, profile %s\n' "$(browser_name "$version")" "$port" "$profile"
     printf 'Next: netkeeper preflight\n'
     exit 0
   fi
-  die "port $port already answers as $(browser_name "$version"), but not on this profile. Quit that browser, or pick another port with --port and set NETKEEPER_CDP_URL to match."
+  die "port $port already answers as $(browser_name "$version"), but not on this profile. Quit that browser, or pick another port with --port and set linkedin.cdp_url in your config to match."
 fi
 
 listener=$(port_listener)
-[ -z "$listener" ] || die "port $port is held by $listener, which is not a debuggable Chrome. Free it, or use --port."
+[ -z "$listener" ] || die "port $port is held by $listener, which is not a debuggable Chrome. Free it, or use --port and set linkedin.cdp_url to match."
 
-if [ -n "$pids" ]; then
-  die "Chrome is running on this profile without the debugging port (pid $(printf '%s' "$pids" | tr '\n' ' ' | sed 's/ $//')). Quit that window with Cmd-Q, then run this again: a running Chrome cannot gain the port."
+if [ -n "$pids" ] || [ -n "$holder" ]; then
+  die "Chrome is running on this profile without the debugging port (pid $(first_line "${pids:-$holder}")). Quit that window with Cmd-Q, then run this again: a running Chrome cannot gain the port."
 fi
 
-# A Chrome that crashed leaves these behind. With no process on the profile they
-# are stale, and Chrome can refuse to start ("profile in use") when the lock
-# names another host -- which happens when this Mac's hostname changes.
+# A Chrome that crashed leaves these behind. Nothing holds the profile (checked
+# above, by command line and by the lock's own pid), so they are stale, and
+# Chrome can refuse to start ("profile in use") when the lock names another
+# host -- which happens when this Mac's network-assigned hostname changes.
 stale=
 for name in SingletonLock SingletonCookie SingletonSocket; do
   if [ -L "$profile/$name" ] || [ -e "$profile/$name" ]; then

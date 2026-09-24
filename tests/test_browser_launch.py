@@ -13,6 +13,7 @@ import forgetting to happen fails loudly rather than passing by coincidence.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -97,3 +98,30 @@ def test_cli_browser_launch_prints_exactly_this_modules_command() -> None:
     assert result.exit_code == 0, result.output
     for line in expected:
         assert f"  {line}" in result.output
+
+
+def test_cli_browser_launch_json_is_what_scripts_chrome_sh_reads(tmp_path: Path) -> None:
+    """`make chrome` starts Chrome from these fields, so they must be the configured ones."""
+    config = tmp_path / "config.toml"
+    config.write_text('[linkedin]\ncdp_url = "http://127.0.0.1:9333"\n')
+
+    result = CliRunner().invoke(cli, ["--config", str(config), "browser", "launch", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {
+        "cdp_url": "http://127.0.0.1:9333",
+        "port": 9333,
+        "profile": str(data_dir() / CHROME_PROFILE_DIRNAME),
+        "remote": None,
+    }
+
+
+def test_cli_browser_launch_json_names_a_remote_cdp_url(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text('[linkedin]\ncdp_url = "http://10.0.0.5:9222"\n')
+
+    result = CliRunner().invoke(cli, ["--config", str(config), "browser", "launch", "--json"])
+
+    assert result.exit_code == 0, result.output
+    remote = json.loads(result.output)["remote"]
+    assert isinstance(remote, str) and "10.0.0.5" in remote

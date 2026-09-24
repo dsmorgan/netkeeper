@@ -287,7 +287,16 @@ def openapi_export(
 
 
 @browser_app.command("launch")
-def browser_launch(ctx: typer.Context) -> None:
+def browser_launch(
+    ctx: typer.Context,
+    as_json: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Print the port, profile, and CDP URL as JSON instead (for scripts/chrome.sh).",
+        ),
+    ] = False,
+) -> None:
     """Print the command that starts Chrome with a debug port. netkeeper never runs it.
 
     netkeeper attaches to a browser you run; it does not own one. A browser netkeeper
@@ -302,6 +311,21 @@ def browser_launch(ctx: typer.Context) -> None:
     settings = _load_settings_or_exit(state)
     cdp_url = settings.linkedin.cdp_url
     profile = data_dir() / CHROME_PROFILE_DIRNAME
+    if as_json:
+        # What `make chrome` reads, so it starts Chrome on the port `serve` and
+        # `preflight` will attach to, not on a guess. `remote` is the reason the
+        # printed command would not work on this machine, or null.
+        typer.echo(
+            json.dumps(
+                {
+                    "cdp_url": cdp_url,
+                    "port": cdp_port(cdp_url),
+                    "profile": str(profile),
+                    "remote": remote_host_note(cdp_url),
+                }
+            )
+        )
+        return
     typer.echo("netkeeper attaches to a Chrome you start yourself. It never starts one.")
     typer.echo("Run this in a terminal (again whenever that Chrome is not running):")
     typer.echo()
