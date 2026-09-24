@@ -468,7 +468,16 @@ def test_a_dom_sighting_of_a_reused_slug_during_a_voyager_outage_never_reconnect
     mapping.apply_page(writer, user, _page([*PEOPLE[:3], b]))
     _age(writer, user, PEOPLE[:3])
     _age(writer, user, PEOPLE[:3], at=LATER + timedelta(days=7))
-    assert _by_urn(writer, user, b).li_disconnected_at is not None
+    b_before = _by_urn(writer, user, b)
+    assert b_before.li_disconnected_at is not None
+    # An in-progress enrichment NotFound streak, unrelated to the connections
+    # sync's own disconnect above (spec 9.8's other "gone" path) -- set
+    # directly, since nothing about DOM sightings should ever touch it
+    # (#176 review L6): a slug-only match resets the miss count only, not
+    # this streak either (_mark_seen's docstring).
+    b_before.li_not_found_count = 2
+    b_before.li_not_found_since = LATER
+    writer.flush()
 
     # A (a different person) now renders under "shared-slug" -- the only kind
     # of page a fallback run produces once it has switched to DOM.
@@ -495,6 +504,10 @@ def test_a_dom_sighting_of_a_reused_slug_during_a_voyager_outage_never_reconnect
     assert b_after.li_disconnected_at is not None, (
         "B (removed) was wrongly reconnected by A's DOM sighting"
     )
+    assert b_after.li_not_found_count == 2, (
+        "a slug-only sighting must never touch the NotFound streak"
+    )
+    assert b_after.li_not_found_since == LATER
     assert b_after.li_missing_count == 0, (
         "the miss count still resets -- only the disconnect is protected"
     )
