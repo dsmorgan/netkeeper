@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { jsonResponse, mockFetch } from '@/test/fetch'
@@ -40,6 +40,19 @@ describe('RunDetail', () => {
     expect(calls.some((call) => call.path === '/api/v1/linkedin/runs/1/cancel')).toBe(true)
   })
 
+  it('offers no Stop for a run that has already ended (R-10)', async () => {
+    const labels = { completed: 'Completed', aborted: 'Aborted', failed: 'Failed' } as const
+    for (const status of ['completed', 'aborted', 'failed'] as const) {
+      renderDetail(1, {
+        'GET /api/v1/linkedin/runs/1': () => jsonResponse(run({ id: 1, status })),
+      })
+      await screen.findByText(labels[status])
+      expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Stopping…' })).not.toBeInTheDocument()
+      cleanup()
+    }
+  })
+
   it('shows the network-aging note when a complete full sync refused to age anyone', async () => {
     renderDetail(1, {
       'GET /api/v1/linkedin/runs/1': () =>
@@ -73,6 +86,61 @@ describe('RunDetail', () => {
         ),
     })
     expect(await screen.findByRole('button', { name: 'Resume' })).toBeInTheDocument()
+  })
+
+  it('offers Resume for a failed enrichment with a remaining plan (L3)', async () => {
+    // failed: the run never touched the browser (BrowserUnavailable, a
+    // pre-attach refusal) — its stored plan is exactly as resumable as an
+    // aborted one, and the backend already allows it (enrich_plan.start_resume).
+    renderDetail(1, {
+      'GET /api/v1/linkedin/runs/1': () =>
+        jsonResponse(
+          run({
+            id: 1,
+            kind: 'enrich',
+            status: 'failed',
+            stop_reason: 'browser_unavailable',
+            error: 'BrowserUnavailable: tab lost',
+            planned: 10,
+            completed: 4,
+          }),
+        ),
+    })
+    expect(await screen.findByRole('button', { name: 'Resume' })).toBeInTheDocument()
+  })
+
+  it('offers no Resume once the run has already been resumed (L3)', async () => {
+    renderDetail(1, {
+      'GET /api/v1/linkedin/runs/1': () =>
+        jsonResponse(
+          run({
+            id: 1,
+            kind: 'enrich',
+            status: 'aborted',
+            planned: 10,
+            completed: 4,
+            resumed_by: 42,
+          }),
+        ),
+    })
+    await screen.findByText('Aborted')
+    expect(screen.queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument()
+  })
+
+  it('offers no Resume for a completed enrichment, whatever its counts say (R-05)', async () => {
+    // A completed run's plan.completed always equals plan.contact_ids in real
+    // data, so `completed < planned` alone would never be false-positive here
+    // in practice — the status check is what stands between "done" and
+    // "resumable" if that arithmetic invariant is ever wrong, so this pins it
+    // as its own check rather than trusting the counts alone.
+    renderDetail(1, {
+      'GET /api/v1/linkedin/runs/1': () =>
+        jsonResponse(
+          run({ id: 1, kind: 'enrich', status: 'completed', planned: 10, completed: 4 }),
+        ),
+    })
+    await screen.findByText('Completed')
+    expect(screen.queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument()
   })
 
   it('does not offer Resume once the plan is complete', async () => {

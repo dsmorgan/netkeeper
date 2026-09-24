@@ -1598,6 +1598,8 @@ class RunOut(BaseModel):
 
     ``planned``/``completed`` are an enrichment plan's size and progress.
     ``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.
+    ``resumed_by`` is the id of the run that already took over this one's
+    remaining plan, or null when it has not been (and so still may be, spec 9.9).
     """
 
     id: int
@@ -1618,6 +1620,7 @@ class RunOut(BaseModel):
     planned: int | None
     completed: int | None
     aging_refused: str | None
+    resumed_by: int | None
 
 
 class RunPage(BaseModel):
@@ -1718,6 +1721,44 @@ class LinkedInStatusOut(BaseModel):
     armed: bool
     running_run_id: int | None
     can_start_runs: bool
+
+
+class ProtectionOut(BaseModel):
+    """One row of the posture report (spec section 9): what it is, whether it is in
+    force, and anything wrong with it. ``status`` is `netkeeper.services.posture.Status`'s
+    value (``on``, ``off``, ``unknown``); ``off``/``unknown`` always carry a warning."""
+
+    name: str
+    status: str
+    value: str
+    warnings: list[str]
+
+
+class PostureOut(BaseModel):
+    """Every protection the LinkedIn extractor has, read-only (P2-11, P2-12, CP3).
+
+    Built from `netkeeper.services.posture.posture()` with no browser probe: a
+    live attach-and-read-the-session check has to await browser work, which may
+    not happen inside a request handler (CLAUDE.md), so the session protection
+    here is always reported unknown rather than checked live — `netkeeper
+    preflight` is the live check, still a terminal command only.
+
+    ``gaps`` are known limits of what this report can see, not warnings; they
+    never affect ``ok``. ``verdict`` is `netkeeper.services.posture.verdict()`'s
+    own sentence, exactly as `netkeeper posture` prints it -- "nothing is
+    misconfigured" on a clean report, never "you are safe" (that module's own
+    docstring says why: this reads configuration and counters, not whether the
+    code that would enforce them actually runs).
+    """
+
+    checked_at: datetime
+    timezone: str
+    local_time: datetime
+    protections: list[ProtectionOut]
+    warnings: list[str]
+    gaps: list[str]
+    ok: bool
+    verdict: str
 
 
 class BrowserLaunchOut(BaseModel):
