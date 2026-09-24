@@ -48,6 +48,7 @@ import {
   fetchQueue,
   decidedByFor,
   fetchQueueAhead,
+  reviewContact,
   setPreferredName,
   statesFor,
   tagContact,
@@ -250,6 +251,8 @@ export interface TriageQueue extends TriageQueueState {
   dismissConflict: () => void
   dismissError: () => void
   rename: (contactId: number, preferredName: string) => Promise<void>
+  /** Confirm or reject a contact read off a connections-page card (#184). */
+  review: (contactId: number, verdict: 'confirm' | 'reject') => Promise<void>
   addTag: (contactId: number, tag: TriageTag) => Promise<void>
   removeTag: (contactId: number, tagId: number) => Promise<void>
   applyBulk: (key: string, expectedCount: number) => Promise<BulkOutcome>
@@ -887,6 +890,45 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
     [commit, enqueue],
   )
 
+  const review = useCallback(
+    async (contactId: number, verdict: 'confirm' | 'reject') => {
+      await enqueue(async () => {
+        try {
+          const outcome = await reviewContact(contactId, verdict)
+          commit((state) => {
+            const patched = patchContact(state, contactId, (contact) => ({
+              ...contact,
+              needs_review_at: outcome.needs_review_at,
+              archived_at: outcome.archived_at,
+            }))
+            // Neither is a triage decision, so neither goes on the undo stack:
+            // a rejected contact comes back from its own page, with Unarchive.
+            return {
+              ...patched,
+              notice:
+                verdict === 'confirm'
+                  ? 'Confirmed. netkeeper treats this contact like any other now.'
+                  : 'Rejected and archived, so this contact leaves the queue. → moves on; Unarchive on its page brings it back.',
+            }
+          })
+        } catch (error) {
+          commit((state) =>
+            withFailure(
+              state,
+              messageOf(
+                error,
+                verdict === 'confirm'
+                  ? 'the contact was not confirmed'
+                  : 'the contact was not rejected',
+              ),
+            ),
+          )
+        }
+      })
+    },
+    [commit, enqueue],
+  )
+
   const patchTags = useCallback(
     (contactId: number, update: (tags: TriageTag[]) => TriageTag[]) => {
       commit((state) =>
@@ -1008,6 +1050,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
       [commit],
     ),
     rename,
+    review,
     addTag,
     removeTag,
     applyBulk,

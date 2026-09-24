@@ -42,6 +42,7 @@
             "triaged_at",
             "li_disconnected_at",
             "archived_at",
+            "needs_review_at",
             "created_at",
             "updated_at"
           ],
@@ -246,6 +247,7 @@
             "triaged_at",
             "li_disconnected_at",
             "archived_at",
+            "needs_review_at",
             "created_at",
             "updated_at",
             "do_not_contact"
@@ -410,6 +412,7 @@
             "triaged_at",
             "li_disconnected_at",
             "archived_at",
+            "needs_review_at",
             "created_at",
             "updated_at"
           ],
@@ -456,6 +459,7 @@
             "triaged_at",
             "li_disconnected_at",
             "archived_at",
+            "needs_review_at",
             "created_at",
             "updated_at"
           ],
@@ -582,6 +586,7 @@
             "triaged_at",
             "li_disconnected_at",
             "archived_at",
+            "needs_review_at",
             "created_at",
             "updated_at"
           ],
@@ -680,6 +685,7 @@
             "triaged_at",
             "li_disconnected_at",
             "archived_at",
+            "needs_review_at",
             "created_at",
             "updated_at"
           ],
@@ -726,6 +732,7 @@
             "triaged_at",
             "li_disconnected_at",
             "archived_at",
+            "needs_review_at",
             "created_at",
             "updated_at"
           ],
@@ -783,6 +790,7 @@
             "triaged_at",
             "li_disconnected_at",
             "archived_at",
+            "needs_review_at",
             "created_at",
             "updated_at",
             "do_not_contact"
@@ -1217,6 +1225,20 @@
       "values": [
         "manual",
         "automatic"
+      ]
+    },
+    "needs_review_at": {
+      "kind": "datetime",
+      "label": "needs review since",
+      "ops": [
+        "eq",
+        "neq",
+        "is_empty",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between"
       ]
     },
     "preferred_name": {

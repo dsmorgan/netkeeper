@@ -24,12 +24,15 @@ for a person, as the archive importer does; guessing would merge two people.
 A row whose URN or slug another contact already holds is counted and skipped
 rather than failing the page.
 
-**A DOM-sourced connection (P2-08's fallback, no URN) is sighting-only** and
-never reaches identity resolution at all -- see :func:`apply_page`'s
-docstring for the full reasoning (a slug is not owned by one person forever,
-spec 9.6) and :mod:`netkeeper.linkedin.dom`'s module docstring for the
-scenarios that found the alternative unsafe. It only ever marks an
-already-known contact seen; it creates nothing and writes no field.
+**A DOM-sourced connection (P2-08's fallback, no URN) never reaches identity
+resolution** -- see :func:`apply_page`'s docstring for the full reasoning (a
+slug is not owned by one person forever, spec 9.6) and
+:mod:`netkeeper.linkedin.dom`'s module docstring for the scenarios that found
+the alternative unsafe. Against a contact that already holds its slug it is
+sighting-only: it marks that contact seen and writes no field. A slug no
+contact holds creates one contact **marked needs review** (#184), which
+nothing enriches, enrolls, or ages until a person confirms it or a Voyager
+sync attaches a URN to it.
 
 **The edge lifecycle (spec 9.8).**
 
@@ -52,7 +55,8 @@ already-known contact seen; it creates nothing and writes no field.
   outright once :attr:`~netkeeper.linkedin.connections.SyncResult.source_switched`
   is true), and nothing is ever deleted.
 
-Which contacts can age: those with a URN, not merged into another. A URN is
+Which contacts can age: those with a URN, not merged into another, and not
+waiting for review (#184). A URN is
 what the connections list reports, so a contact without one (a CSV row, an
 archive row the sync has not matched yet) has nothing a full sync could have
 failed to see. The first full sync gives every archive contact it matches by
@@ -67,6 +71,8 @@ from __future__ import annotations
 import enum
 import logging
 import math
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Final
@@ -100,6 +106,7 @@ from netkeeper.linkedin.voyager import (
 )
 from netkeeper.models import (
     Contact,
+    ContactAlias,
     ContactSource,
     EmailKind,
     Interaction,
@@ -131,6 +138,25 @@ AGING_FLOOR: Final = 10
 #: seen: with five seen, one stranger is already too many.
 UNMATCHED_MAX_SHARE: Final = 0.10
 
+#: What a name read off a connections-page card may look like before it is stored
+#: (#184; the #173 review's F3). A card whose name selector missed falls back to the
+#: profile link's own text, which can be "View Jane Doe's profile" (its
+#: ``aria-label``) or the name and the occupation run together; anything past these
+#: limits is not a name, and the contact is named by its slug instead.
+CARD_NAME_MAX_CHARS: Final = 100
+CARD_NAME_MAX_WORDS: Final = 6
+#: Words and marks that a person's name does not carry and a card's surrounding
+#: text does: the link's accessible label, a url, an address, a digit, and the
+#: separators LinkedIn puts between a name and an occupation.
+CARD_NAME_JUNK: Final = re.compile(
+    r"(?i)\bview\b|\bprofile\b|\bconnection\b|https?:|www\.|@|\d|[|\u2022\u00b7\u2013\u2014]"
+    r"|\s-\s|\sat\s"
+)
+#: The longest headline stored from a card; the column holds 500.
+CARD_HEADLINE_MAX_CHARS: Final = 500
+#: A slug as LinkedIn's own routing allows it: one path segment, no whitespace.
+_CARD_SLUG: Final = re.compile(r"[^\s/?#]{1,100}")
+
 
 @dataclass(slots=True)
 class PageCounts:
@@ -141,7 +167,10 @@ class PageCounts:
     left for a person) and ``conflicts`` (a URN or slug another contact
     holds). ``sightings`` counts the rest -- DOM-sourced rows (P2-08, no URN),
     which are never resolved or applied at all: see :func:`apply_page`'s
-    docstring for why a DOM row is sighting-only. ``reconnected`` counts
+    docstring for why a DOM row is sighting-only against a contact that holds
+    its slug (``cards_created``, below, is the other case). ``needs_review``
+    is the candidate count, not the needs-review mark #184 puts on a card's
+    contact. ``reconnected`` counts
     contacts whose ``li_disconnected_at`` a *URN* sighting cleared -- a DOM
     sighting resets a miss count but never clears an existing disconnect
     (#174 item 4, :func:`_mark_seen`'s docstring), so it never adds to this
@@ -151,6 +180,15 @@ class PageCounts:
     ``created_contact_ids`` is every contact these pages created: :func:`age_unseen`
     measures its limits against the contacts that existed *before* the sync, and
     these did not (#169).
+
+    ``cards_created`` counts the contacts a DOM row created because no contact
+    held its slug, each marked needs review (#184); they are not in
+    ``created_contact_ids``, because they are not connections anything can age
+    yet. ``confirmed_by_urn`` counts needs-review contacts a Voyager row's URN
+    confirmed on these pages, and ``confirmed_contact_ids`` names them: they
+    were not real connections before this sync either, so :func:`age_unseen`'s
+    "existed before the sync" set leaves them out the way it leaves out
+    ``created_contact_ids`` (:attr:`new_connection_ids`).
     """
 
     seen: int = 0
@@ -162,6 +200,15 @@ class PageCounts:
     reconnected: int = 0
     review_contact_ids: set[int] = field(default_factory=set)
     created_contact_ids: set[int] = field(default_factory=set)
+    cards_created: int = 0
+    confirmed_by_urn: int = 0
+    confirmed_contact_ids: set[int] = field(default_factory=set)
+
+    @property
+    def new_connection_ids(self) -> frozenset[int]:
+        """Every contact that became a connection on these pages: :func:`age_unseen`'s
+        ``created_by_sync``."""
+        return frozenset(self.created_contact_ids | self.confirmed_contact_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,28 +232,49 @@ def apply_page(
     session: Session, user: User, page: ConnectionsPage, counts: PageCounts | None = None
 ) -> PageCounts:
     """Write every Voyager-sourced connection on ``page`` to ``user``'s contacts, mark
-    every connection seen, and never do either for a DOM-sourced one.
+    every connection seen, and turn a DOM-sourced one for a slug nobody holds into a
+    contact marked needs review.
 
     **A DOM row (P2-08's fallback, no URN: :class:`~netkeeper.linkedin.voyager.ConnectionSummary`'s
-    docstring) is sighting-only (#173 review's design decision).** Its only
-    identity signal is a public-id slug, and a slug is not owned by one
-    person forever -- LinkedIn lets an account release a vanity url and
-    another claim it (spec 9.6). Resolving and applying it the way a
-    Voyager row is resolved would risk writing a stranger's name or headline
-    onto the contact who used to hold that slug, or creating a duplicate
-    under a slug an authoritative source has not caught up to yet
-    (:mod:`netkeeper.linkedin.dom`'s module docstring has the fuller
-    argument, and the scenarios that found this). So a DOM row never calls
-    :func:`~netkeeper.crm.identity.resolve` or
-    :func:`~netkeeper.crm.identity.apply` at all: it only ever contributes
-    its (normalized) slug to the "mark seen" pass below, which can reset a
-    miss count but can never clear an existing disconnect, create a contact,
-    write a field, or itself cause a disconnect (#174 item 4: a slug is
-    weaker evidence than a URN, so only a URN sighting undoes a disconnect --
-    see :func:`_mark_seen`'s docstring). A slug nobody currently holds is
-    silently a no-op -- the new
-    or renamed connection it would have described arrives honestly through
-    the next Voyager sync or archive import.
+    docstring) never goes through identity resolution.** Its only identity
+    signal is a public-id slug, and a slug is not owned by one person forever
+    -- LinkedIn lets an account release a vanity url and another claim it (spec
+    9.6). Resolving and applying it the way a Voyager row is resolved would
+    risk writing a stranger's name or headline onto the contact who used to
+    hold that slug (:mod:`netkeeper.linkedin.dom`'s module docstring has the
+    fuller argument, and the scenarios that found this). So a DOM row never
+    calls :func:`~netkeeper.crm.identity.resolve` or
+    :func:`~netkeeper.crm.identity.apply`, and what it does depends only on
+    whether its (normalized) slug is known:
+
+    * **A slug some contact holds, as its slug or as an old one** -- the row is
+      sighting-only (#173 review). It contributes the slug to the "mark seen"
+      pass below, which can reset a miss count but never clears an existing
+      disconnect and never writes a field (#174 item 4: a slug is weaker
+      evidence than a URN; see :func:`_mark_seen`'s docstring). An old slug (an
+      alias) matches nothing in that pass, as before: it only stops a second
+      contact being created under it.
+    * **A slug nobody holds** -- during an API outage this is how a new
+      connection shows up, so it is not dropped (#184). It creates exactly one
+      contact: the slug, the card's name and headline, no URN, and
+      ``needs_review_at`` set (:func:`_create_from_card`). The card's text is
+      written with no recorded source, the lowest provenance there is, so any
+      source that names the person -- a sync, the archive, a CSV import --
+      overwrites it (spec 10.5). A later DOM row for the same slug finds this
+      contact and is sighting-only, so repeats never duplicate it.
+
+    **A Voyager row that reaches a needs-review contact confirms it.** Identity
+    resolution finds it by slug and gives it the row's URN (spec 8.2 step 2);
+    once the contact holds the URN the row carries, the mark is cleared,
+    because a URN from LinkedIn's own API is the confirmation the mark was
+    waiting for (#184). The card's values are replaced under the ordinary
+    provenance rules without a ``contact_snapshot`` (a card is no job history);
+    a card headline the row does not replace is dropped rather than kept under
+    the URN (the slug may have passed to someone else since the card was read);
+    and a preferred name that was only ever the card's first name follows the
+    new first name. A Voyager row whose URN is another contact's and whose slug
+    is the needs-review contact's is a candidate naming both, as any URN and
+    slug that disagree are: it is never merged silently.
 
     Returns ``counts`` (a new one when none is given) with this page added.
     Nothing is committed.
@@ -219,7 +287,7 @@ def apply_page(
     for connection in page.connections:
         counts.seen += 1
         if connection.urn is None:
-            # DOM sighting: see the docstring above. normalize_public_id(unquote(...))
+            # DOM row: see the docstring above. normalize_public_id(unquote(...))
             # matches exactly how a Voyager/archive row's own slug is normalized
             # before it is ever stored (crm.identity.IncomingContact), so a
             # differently-cased or percent-encoded DOM read still matches the
@@ -227,6 +295,9 @@ def apply_page(
             normalized = normalize_public_id(unquote(connection.public_id))
             if normalized is not None:
                 sighted_public_ids.add(normalized)
+                if _CARD_SLUG.fullmatch(normalized) and not _slug_known(session, user, normalized):
+                    _create_from_card(session, user, connection, normalized, page.observed_at)
+                    counts.cards_created += 1
             counts.sightings += 1
             continue
         urns.add(connection.urn)
@@ -237,8 +308,17 @@ def apply_page(
                 counts.needs_review += 1
                 counts.review_contact_ids.update(contact_ids)
             case Matched() | New():
+                target = (
+                    resolve_survivor(session, user, resolution.contact_id)
+                    if isinstance(resolution, Matched)
+                    else None
+                )
+                unconfirmed = target is not None and target.needs_review_at is not None
+                card_named = target is not None and "first_name" not in target.field_sources
+                first_before = target.first_name if target is not None else ""
+                preferred_before = target.preferred_name if target is not None else ""
                 try:
-                    written = apply(session, user, incoming, resolution)
+                    written = apply(session, user, incoming, resolution, snapshot=not unconfirmed)
                 except ValueError:
                     # apply() checks before its first write, so the row is untouched.
                     # The error names the slug; the log does not need it.
@@ -254,6 +334,23 @@ def apply_page(
                         counts.created_contact_ids.add(written.id)
                     else:
                         counts.updated += 1
+                    if (
+                        card_named
+                        and preferred_before == first_before
+                        and written.first_name != first_before
+                    ):
+                        # The preferred name was only ever the default (the card's first
+                        # name, or the slug standing in for one): it follows the real one.
+                        written.preferred_name = written.first_name
+                    if unconfirmed and written.li_urn == connection.urn:
+                        if "headline" not in written.field_sources:
+                            # The row gave no headline, so the card's is still there, and
+                            # the URN says who this is, not that the card was theirs: the
+                            # slug may have passed to this person since the card was read.
+                            written.headline = None
+                        written.needs_review_at = None
+                        counts.confirmed_by_urn += 1
+                        counts.confirmed_contact_ids.add(written.id)
     # F1 of the #173 review: public_ids here is built *only* from DOM sightings,
     # never from a Voyager row's own slug. A Voyager row already carries a real
     # URN, which is the identity signal that clears its own disconnect above --
@@ -269,6 +366,113 @@ def apply_page(
     counts.reconnected += _mark_seen(session, user, urns=urns, public_ids=sighted_public_ids)
     session.flush()
     return counts
+
+
+def _slug_known(session: Session, user: User, slug: str) -> bool:
+    """True when one of ``user``'s contacts holds ``slug``, as its slug or an old one.
+
+    Any contact counts, archived or not: a person who rejected a card's contact
+    (which archives it) is not asked about the same card again on the next run.
+    """
+    held = scoped(user, Contact).with_only_columns(Contact.id).where(Contact.li_public_id == slug)
+    if session.scalars(held.limit(1)).first() is not None:
+        return True
+    alias = (
+        scoped(user, ContactAlias)
+        .with_only_columns(ContactAlias.id)
+        .where(ContactAlias.li_public_id == slug)
+    )
+    return session.scalars(alias.limit(1)).first() is not None
+
+
+def _create_from_card(
+    session: Session,
+    user: User,
+    connection: ConnectionSummary,
+    slug: str,
+    observed_at: datetime,
+) -> Contact:
+    """One contact from a connections-page card whose slug nobody holds (#184).
+
+    The slug, the card's name and headline (:func:`card_name`,
+    :func:`card_headline`), no URN, and ``needs_review_at``. No field records a
+    source and nothing goes into ``synced_values``: a card is not a source a
+    person could want to revert to, and a field with no recorded source is open
+    to every source that names the person (spec 10.5), so the first sync,
+    archive, or CSV row to reach the contact replaces what the card said.
+    ``source`` is ``sync``, because the connections sync is what found it; the
+    mark is what says nobody has confirmed it. Nothing is committed.
+    """
+    first, last = card_name(connection.first_name, connection.last_name, connection.headline)
+    contact = Contact(
+        user_id=user.id,
+        source=ContactSource.SYNC,
+        field_sources={},
+        synced_values={},
+        li_public_id=slug,
+        first_name=first if first else slug,
+        last_name=last if first else "",
+        headline=card_headline(connection.headline),
+        needs_review_at=observed_at,
+    )
+    session.add(contact)
+    session.flush()
+    log.info(
+        "connections sync: created contact %d for user %d from a connections-page card;"
+        " it needs review",
+        contact.id,
+        user.id,
+    )
+    return contact
+
+
+def card_name(first: str, last: str, headline: str | None) -> tuple[str, str]:
+    """A card's name as ``(first, last)``, or ``("", "")`` when it is not a name.
+
+    The card's text is the person's name only when the card marked it as one; a
+    card whose name selector missed hands over whatever the profile link said
+    (the #173 review's F3), such as "View Jane Doe's profile" or the name and the
+    occupation run together. Refused: anything with a control character (a line
+    break the extractor let through), longer than :data:`CARD_NAME_MAX_CHARS`,
+    more than :data:`CARD_NAME_MAX_WORDS` words, anything :data:`CARD_NAME_JUNK`
+    finds, and a name that contains the card's own headline (the occupation
+    leaked into the link text). A refused name is never trimmed into shape:
+    guessing which part is the name is how a stranger's words end up on a
+    contact.
+    """
+    first, last = first.strip(), last.strip()
+    whole = f"{first} {last}".strip()
+    if not whole or len(whole) > CARD_NAME_MAX_CHARS:
+        return "", ""
+    if _has_control(whole) or len(whole.split()) > CARD_NAME_MAX_WORDS:
+        return "", ""
+    if CARD_NAME_JUNK.search(whole):
+        return "", ""
+    if (
+        headline is not None
+        and headline.strip()
+        and headline.strip().casefold() in whole.casefold()
+    ):
+        return "", ""
+    return first, last
+
+
+def card_headline(headline: str | None) -> str | None:
+    """A card's headline, or None when it is empty, carries a control character, or is too long."""
+    if headline is None:
+        return None
+    cleaned = headline.strip()
+    if not cleaned or len(cleaned) > CARD_HEADLINE_MAX_CHARS or _has_control(cleaned):
+        return None
+    return cleaned
+
+
+def _has_control(text: str) -> bool:
+    """A control or format character, or a line or paragraph separator: never in a name."""
+    return any(
+        unicodedata.category(ch)[0] == "C" or unicodedata.category(ch) in ("Zl", "Zp")
+        for ch in text
+    )
 
 
 def age_unseen(
@@ -333,8 +537,14 @@ def age_unseen(
     if not seen_urns:
         log.warning("connections sync for user %d saw no connections; aging nobody", user.id)
         return AgingCounts(refused="the full sync saw no connections")
+    # A contact waiting for review (#184) is not a connection anything has
+    # confirmed, so it neither ages nor counts toward the shares below. One can
+    # only hold a URN here by a path other than a sync (a merge, an edit): a
+    # sync that sees its URN confirms it before this runs.
     statement = scoped(user, Contact).where(
-        Contact.li_urn.is_not(None), Contact.merged_into_id.is_(None)
+        Contact.li_urn.is_not(None),
+        Contact.merged_into_id.is_(None),
+        Contact.needs_review_at.is_(None),
     )
     ageable = list(session.scalars(statement))
     stored = {contact.li_urn for contact in ageable}

@@ -368,6 +368,7 @@ ContactColumn = Literal[
     "last_contacted_at",
     "notes",
     "archived_at",
+    "needs_review_at",
     "source",
     "created_at",
     "updated_at",
@@ -448,6 +449,8 @@ class ContactRow(BaseModel):
     last_contacted_at: datetime | None = None
     notes: str | None = None
     archived_at: datetime | None = None
+    needs_review_at: datetime | None = None
+    """Set while the contact, read off a connections-page card, waits to be confirmed (#184)."""
     source: ContactSource | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -654,6 +657,15 @@ class ContactDetail(BaseModel):
     last_contacted_at: datetime | None
     notes: str | None
     archived_at: datetime | None
+    needs_review_at: datetime | None
+    """When netkeeper created this contact from a connections-page card, while it waits.
+
+    Set only for a contact the connections sync read off the page during an API
+    outage (#184): its name and headline are the card's, and nothing confirms the
+    card is who the slug says. Cleared by `POST /contacts/{id}/confirm` or by a
+    sync that attaches a URN. While set, the contact is never enriched, enrolled,
+    or aged.
+    """
     source: ContactSource
     created_at: datetime
     updated_at: datetime
@@ -1325,6 +1337,13 @@ class TriageContactOut(BaseModel):
 
     A merged-away contact is out of the queue exactly as an archived one is: the
     survivor carries the decision now.
+    """
+    needs_review_at: datetime | None
+    """Set while this contact, read off a connections-page card, waits to be confirmed (#184).
+
+    The card says so, and offers `POST /contacts/{id}/confirm` and
+    `POST /contacts/{id}/reject`. It is still in the queue: have-you-met is a
+    separate question from whether the card was who it said.
     """
 
 

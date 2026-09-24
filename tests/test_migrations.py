@@ -1354,3 +1354,28 @@ def test_a_run_goes_with_its_user_and_its_resume_link_is_cleared(
         )
         connection.execute(text("DELETE FROM users WHERE id = 2"))
         assert _count(connection, "sync_runs") == 1
+
+
+# --- the needs-review mark (0014, #184) ------------------------------------------------
+
+
+def test_existing_contacts_need_no_review_and_the_mark_downgrades_away(
+    migration_engine: Engine,
+) -> None:
+    """Every contact before 0014 came from a source netkeeper trusts, so none is marked."""
+    migrations.upgrade(migration_engine, "0013")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+    migrations.upgrade(migration_engine, "0014")
+    with migration_engine.begin() as connection:
+        mark = connection.execute(text("SELECT needs_review_at FROM contacts WHERE id = 1"))
+        assert mark.scalar() is None
+        connection.execute(
+            text("UPDATE contacts SET needs_review_at = :t WHERE id = 1"), {"t": STAMP}
+        )
+    migrations.downgrade(migration_engine, "0013")
+    columns = {column["name"] for column in inspect(migration_engine).get_columns("contacts")}
+    assert "needs_review_at" not in columns
+    with migration_engine.begin() as connection:
+        assert _count(connection, "contacts") == 1

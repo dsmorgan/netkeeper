@@ -264,6 +264,13 @@ class Contact(UserOwned, TimestampMixin, Base):
     last_contacted_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     notes: Mapped[str | None] = mapped_column(Text)
     archived_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # Set when netkeeper created this contact from a card on the connections page
+    # (P2-08's DOM fallback, #184) rather than from a source that names the person
+    # by URN: a slug and card text, neither of which is trusted until the person
+    # confirms the contact or a Voyager sync attaches a URN, either of which clears
+    # it. While set, the contact is never enriched, never enrolled, and never aged
+    # (spec 9.8, 10.2). A reject archives the contact and leaves this set.
+    needs_review_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     source: Mapped[ContactSource] = mapped_column(
         string_enum(ContactSource, "contact_source"), nullable=False, default=ContactSource.MANUAL
     )

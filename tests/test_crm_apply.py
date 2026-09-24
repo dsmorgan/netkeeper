@@ -151,24 +151,41 @@ def test_a_second_page_updates_rather_than_duplicates(writer: Session, user: Use
     assert _count(writer, user) == 3
 
 
-def test_a_dom_sighting_of_an_unknown_slug_creates_nothing(writer: Session, user: User) -> None:
-    """#173 review's design decision: a DOM row is sighting-only. A slug nobody
-    holds does not become a new contact -- a DOM row never reaches identity
-    resolution at all, so there is nothing here that *could* create one. The new
-    connection this would have described arrives honestly through the next
-    Voyager sync or archive import."""
+def test_a_dom_row_for_an_unknown_slug_creates_one_contact_marked_needs_review(
+    writer: Session, user: User
+) -> None:
+    """#184, revising #173's sighting-only rule for this one case: during an API
+    outage a new connection shows up only as a card, so a slug nobody holds
+    becomes exactly one contact -- the slug, the card's name and headline, no URN,
+    and the needs-review mark. Nothing records a source for the card's text: it
+    sits below every source that names the person (spec 10.5)."""
     priya = PEOPLE[0]
 
     counts = mapping.apply_page(writer, user, _dom_page([priya]))
 
-    assert (counts.created, counts.updated, counts.sightings) == (0, 0, 1)
-    assert _count(writer, user) == 0
+    assert (counts.created, counts.updated, counts.sightings, counts.cards_created) == (0, 0, 1, 1)
+    assert counts.created_contact_ids == set()  # not a connection anything may age yet
+    contact = _by_slug(writer, user, priya.slug)
+    assert _count(writer, user) == 1
+    assert contact.li_urn is None
+    assert contact.li_url == f"https://www.linkedin.com/in/{priya.slug}/"
+    assert (contact.first_name, contact.last_name, contact.preferred_name) == (
+        "Priya",
+        "Okafor",
+        "Priya",
+    )
+    assert contact.headline == priya.headline
+    assert contact.needs_review_at == NOW
+    assert contact.field_sources == {}
+    assert contact.synced_values == {}
+    assert contact.source is ContactSource.SYNC
+    assert contact.connected_on is None
 
 
 def test_a_dom_sourced_page_never_writes_any_field(writer: Session, user: User) -> None:
-    """A DOM row is sighting-only (#173 review): it may clear a disconnect for an
-    existing contact, but it never creates a contact and never writes a field --
-    not the URN, not the name, not the headline. S4/S5 of the review found that
+    """A DOM row for a slug a contact holds is sighting-only (#173 review): it
+    never writes a field of that contact -- not the URN, not the name, not the
+    headline -- and never creates a second one. S4/S5 of the review found that
     letting a DOM row through identity resolution could overwrite a contact's
     correct Voyager-sourced name with a crude DOM name-split, or a stranger's
     name entirely if the slug had since passed to someone else; sighting-only
@@ -540,25 +557,32 @@ def test_S2_a_dom_sighting_matches_the_stored_slug_case_insensitively(
     assert tomasz.li_disconnected_at is not None, "but never reconnect on its own (#174 item 4)"
 
 
-def test_S3_a_dom_sighting_under_a_renamed_slug_creates_no_duplicate(
+def test_S3_a_dom_card_under_a_renamed_slug_waits_for_review_and_never_merges_silently(
     writer: Session, user: User
 ) -> None:
-    """F2-F4's design decision in action: a DOM sighting under a slug nobody yet
-    holds (Priya renamed her vanity url, and DOM saw the new one before any
-    Voyager sync did) is a no-op, not a new contact under the wrong identity.
-    The rename arrives honestly once a real Voyager sync sees it."""
+    """Priya renamed her vanity url and DOM saw the new one before any Voyager sync
+    did. Nobody holds the new slug, so the card becomes a contact marked needs
+    review (#184) -- it cannot know it is Priya. The Voyager sync that catches up
+    names Priya's URN and the new slug at once, which point at two contacts: a
+    candidate for a person, never a silent merge, and neither contact changes."""
     mapping.apply_page(writer, user, _page(PEOPLE[:2]))
     renamed = dataclasses.replace(PEOPLE[0], public_id="priya-new-vanity")
 
     dom_counts = mapping.apply_page(writer, user, _dom_page([renamed], at=LATER))
-    assert (dom_counts.created, dom_counts.updated) == (0, 0)
-    assert _count(writer, user) == 2  # no phantom third contact
+    assert (dom_counts.created, dom_counts.updated, dom_counts.cards_created) == (0, 0, 1)
+    assert _count(writer, user) == 3
+    card = _by_slug(writer, user, "priya-new-vanity")
+    assert card.needs_review_at is not None
 
-    # The real Voyager sync catches up later, matched by URN, and the rename
-    # lands on the existing contact.
-    mapping.apply_page(writer, user, _page([renamed], at=LATER + timedelta(days=1)))
-    assert _count(writer, user) == 2
-    assert _by_urn(writer, user, renamed).li_public_id == "priya-new-vanity"
+    later = mapping.apply_page(writer, user, _page([renamed], at=LATER + timedelta(days=1)))
+    priya = _by_urn(writer, user, renamed)
+    assert later.needs_review == 1
+    assert later.review_contact_ids == {priya.id, card.id}
+    assert later.confirmed_by_urn == 0
+    assert _count(writer, user) == 3
+    assert priya.li_public_id == PEOPLE[0].slug  # not taken from the card's contact
+    assert (card.li_urn, card.merged_into_id) == (None, None)
+    assert card.needs_review_at is not None
 
 
 def test_S4_a_dom_sighting_never_overwrites_a_correct_voyager_name_split(
@@ -616,22 +640,35 @@ def test_S5_a_dom_sighting_of_a_reused_slug_never_writes_a_strangers_name(
     assert contact.snapshots == []  # nothing was ever written, so nothing to snapshot
 
 
-def test_S6_a_garbled_dom_name_split_never_reaches_the_database(
-    writer: Session, user: User
-) -> None:
+def test_S6_a_garbled_dom_name_is_never_split_into_a_name(writer: Session, user: User) -> None:
     """S6: when a card's name selector misses and falls back to a link's full
     text, the text can carry an embedded headline after blank lines
-    ("Priya Okafor\\n\\n  Data engineer at Fictional"). _parse_one_card's own
-    whitespace collapsing (dom.py) keeps this from ever containing a literal
-    newline, and sighting-only keeps it from ever being written regardless."""
+    ("Priya Okafor\\n\\n  Data engineer at Fictional"). The extractor reports
+    that name unknown rather than splitting it (#184), and the contact the card
+    creates is named by its slug."""
     from netkeeper.linkedin.dom import _parse_one_card
 
     card = _parse_one_card(
-        {"publicId": "x", "name": "Priya Okafor\n\n  Data engineer at Fictional", "headline": None}
+        {
+            "publicId": "priya-x",
+            "name": "Priya Okafor\n\n  Data engineer at Fictional",
+            "headline": None,
+        }
     )
     assert card is not None
-    assert "\n" not in card.last_name
-    assert card.first_name == "Priya"
+    assert (card.first_name, card.last_name) == ("", "")
+    page = ConnectionsPage(
+        mode=SyncMode.FULL, number=0, start=0, total=0, connections=(card,), observed_at=NOW
+    )
+
+    mapping.apply_page(writer, user, page)
+
+    contact = _by_slug(writer, user, "priya-x")
+    assert (contact.first_name, contact.last_name, contact.preferred_name) == (
+        "priya-x",
+        "",
+        "priya-x",
+    )
 
 
 def test_a_sighting_between_misses_restarts_the_count(writer: Session, user: User) -> None:

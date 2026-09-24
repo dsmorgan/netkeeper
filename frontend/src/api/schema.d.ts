@@ -302,6 +302,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/contacts/{contact_id}/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm Contact
+         * @description Confirm a contact netkeeper read off a connections-page card (#184).
+         *
+         *     Clears `needs_review_at`. A contact not waiting for review is returned as it
+         *     is. Until confirmed, or until a sync attaches a URN, such a contact is never
+         *     enriched, enrolled, or aged.
+         */
+        post: operations["confirm_contact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/contacts/{contact_id}/emails": {
         parameters: {
             query?: never;
@@ -481,6 +505,29 @@ export interface paths {
         head?: never;
         /** Update Contact Phone */
         patch: operations["update_contact_phone"];
+        trace?: never;
+    };
+    "/api/v1/contacts/{contact_id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reject Contact
+         * @description Reject a contact netkeeper read off a connections-page card: archive it (#184).
+         *
+         *     Never a delete. `needs_review_at` stays set, so unarchiving brings back an
+         *     unconfirmed contact. `409` for a contact that is not waiting for review.
+         */
+        post: operations["reject_contact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/contacts/{contact_id}/revert-field": {
@@ -1913,7 +1960,7 @@ export interface components {
              * Field
              * @enum {string}
              */
-            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at";
+            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "needs_review_at" | "created_at" | "updated_at";
             /** High */
             high: string | number | boolean;
             /** Low */
@@ -2173,6 +2220,8 @@ export interface components {
             merged_into_id: number | null;
             met: components["schemas"]["ContactMet"];
             met_source: components["schemas"]["MetSource"];
+            /** Needs Review At */
+            needs_review_at: string | null;
             /** Notes */
             notes: string | null;
             /** Overridden Fields */
@@ -2410,7 +2459,7 @@ export interface components {
          */
         ContactQuery: {
             /** Columns */
-            columns?: ("li_urn" | "li_public_id" | "li_url" | "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "connected_on" | "degree" | "met" | "met_source" | "triaged_at" | "do_not_contact" | "do_not_contact_reason" | "li_missing_count" | "li_disconnected_at" | "last_enriched_at" | "enrich_priority" | "last_contacted_at" | "notes" | "archived_at" | "source" | "created_at" | "updated_at")[] | null;
+            columns?: ("li_urn" | "li_public_id" | "li_url" | "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "connected_on" | "degree" | "met" | "met_source" | "triaged_at" | "do_not_contact" | "do_not_contact_reason" | "li_missing_count" | "li_disconnected_at" | "last_enriched_at" | "enrich_priority" | "last_contacted_at" | "notes" | "archived_at" | "needs_review_at" | "source" | "created_at" | "updated_at")[] | null;
             filter?: components["schemas"]["FilterTree-Input"] | null;
             /**
              * Limit
@@ -2484,6 +2533,8 @@ export interface components {
             location?: string | null;
             met?: components["schemas"]["ContactMet"] | null;
             met_source?: components["schemas"]["MetSource"] | null;
+            /** Needs Review At */
+            needs_review_at?: string | null;
             /** Notes */
             notes?: string | null;
             /** Preferred Name */
@@ -2659,7 +2710,7 @@ export interface components {
              * Field
              * @enum {string}
              */
-            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "met_source" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at" | "do_not_contact";
+            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "met_source" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "needs_review_at" | "created_at" | "updated_at" | "do_not_contact";
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -2706,7 +2757,7 @@ export interface components {
              * Field
              * @enum {string}
              */
-            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at";
+            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "needs_review_at" | "created_at" | "updated_at";
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -2721,7 +2772,7 @@ export interface components {
              * Field
              * @enum {string}
              */
-            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at";
+            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "needs_review_at" | "created_at" | "updated_at";
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -3192,7 +3243,7 @@ export interface components {
              * Field
              * @enum {string}
              */
-            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at";
+            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "needs_review_at" | "created_at" | "updated_at";
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -3324,7 +3375,7 @@ export interface components {
              * Field
              * @enum {string}
              */
-            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at";
+            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "needs_review_at" | "created_at" | "updated_at";
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -3339,7 +3390,7 @@ export interface components {
              * Field
              * @enum {string}
              */
-            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at";
+            field: "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "needs_review_at" | "created_at" | "updated_at";
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -3388,7 +3439,7 @@ export interface components {
              * Field
              * @enum {string}
              */
-            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "met_source" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at" | "do_not_contact";
+            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "met_source" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "needs_review_at" | "created_at" | "updated_at" | "do_not_contact";
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -3844,7 +3895,7 @@ export interface components {
              * Field
              * @enum {string}
              */
-            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "met_source" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "created_at" | "updated_at" | "do_not_contact";
+            field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "met_source" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "needs_review_at" | "created_at" | "updated_at" | "do_not_contact";
         };
         /** StartsWith */
         StartsWith: {
@@ -4130,6 +4181,8 @@ export interface components {
             merged_into_id: number | null;
             met: components["schemas"]["ContactMet"];
             met_source: components["schemas"]["MetSource"];
+            /** Needs Review At */
+            needs_review_at: string | null;
             /** Notes */
             notes: string | null;
             /** Preferred Name */
@@ -5067,6 +5120,53 @@ export interface operations {
             };
         };
     };
+    confirm_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactDetail"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact was merged into another */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MergedConflict"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     add_contact_email: {
         parameters: {
             query?: never;
@@ -5666,6 +5766,53 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reject_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactDetail"];
+                };
+            };
+            /** @description No such contact */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact was merged into another */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MergedConflict"];
+                };
             };
             /** @description Validation Error */
             422: {

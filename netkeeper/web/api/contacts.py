@@ -259,6 +259,31 @@ def unarchive_contact(contact_id: int, user: CurrentUser, session: SessionDep) -
     return _detail(session, user, contact, None)
 
 
+@router.post("/contacts/{contact_id}/confirm", operation_id="confirm_contact", responses=WRITE)
+def confirm_contact(contact_id: int, user: CurrentUser, session: SessionDep) -> ContactDetail:
+    """Confirm a contact netkeeper read off a connections-page card (#184).
+
+    Clears `needs_review_at`. A contact not waiting for review is returned as it
+    is. Until confirmed, or until a sync attaches a URN, such a contact is never
+    enriched, enrolled, or aged.
+    """
+    with translate_errors():
+        contact = service.confirm_contact(session, user, contact_id)
+    return _detail(session, user, contact, None)
+
+
+@router.post("/contacts/{contact_id}/reject", operation_id="reject_contact", responses=WRITE)
+def reject_contact(contact_id: int, user: CurrentUser, session: SessionDep) -> ContactDetail:
+    """Reject a contact netkeeper read off a connections-page card: archive it (#184).
+
+    Never a delete. `needs_review_at` stays set, so unarchiving brings back an
+    unconfirmed contact. `409` for a contact that is not waiting for review.
+    """
+    with translate_errors():
+        contact = service.reject_contact(session, user, contact_id)
+    return _detail(session, user, contact, None)
+
+
 @router.post(
     "/contacts/{contact_id}/merge",
     operation_id="merge_contacts",
