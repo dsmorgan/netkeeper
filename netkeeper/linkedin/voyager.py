@@ -447,11 +447,26 @@ class ConnectionSummary:
     ``headline`` and ``connected_at`` are the two fields LinkedIn does not
     always populate (a fresh connection can be missing a headline; an older
     export-era connection can be missing ``createdAt``) and so are optional.
-    Everything else is required: a connections-list row this module cannot
-    read a URN, public id, or name out of is not a connections-list row.
+    ``public_id`` and both names are required: a connections-list row this
+    module cannot read a public id or a name out of is not a connections-list
+    row, from either source below.
+
+    ``urn`` is optional for a different reason (P2-08): this endpoint's own
+    parser, :func:`parse_connections_page`, always fills it from
+    ``entityUrn`` and never produces ``None`` -- but LinkedIn's internal URN
+    is not printed anywhere in the connections list page's rendered HTML, so
+    :mod:`netkeeper.linkedin.dom`'s scroll-driven fallback has no honest way
+    to read one. ``None`` there is not "unknown, guess"; it is "this source
+    cannot supply a URN", and :mod:`netkeeper.crm.identity` already resolves
+    a row with no URN by ``public_id`` alone (spec 8.2's fallback order) and
+    never treats an absent field as "clear the stored value" -- so a
+    DOM-sourced row matches an existing contact by slug and leaves whatever
+    real URN it already holds untouched. Never invent one here to fill the
+    gap: a fabricated URN would either match nothing (creating a duplicate
+    contact) or, worse, collide with a real one by accident.
     """
 
-    urn: str
+    urn: str | None
     public_id: str
     first_name: str
     last_name: str

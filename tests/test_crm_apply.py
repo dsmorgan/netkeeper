@@ -73,8 +73,36 @@ def _page(
     )
 
 
+def _dom_page(people: Sequence[Person], *, at: datetime = NOW) -> ConnectionsPage:
+    """A page shaped like P2-08's DOM fallback: every connection has ``urn=None``
+    (:class:`ConnectionSummary`'s docstring) and a total of 0 (this module's docstring
+    on why a DOM-sourced page never claims a total)."""
+    return ConnectionsPage(
+        mode=SyncMode.FULL,
+        number=0,
+        start=0,
+        total=0,
+        connections=tuple(
+            ConnectionSummary(
+                urn=None,
+                public_id=p.slug,
+                first_name=p.first,
+                last_name=p.last,
+                headline=p.headline,
+                connected_at=None,
+            )
+            for p in people
+        ),
+        observed_at=at,
+    )
+
+
 def _by_urn(session: Session, user: User, person: Person) -> Contact:
     return session.scalars(scoped(user, Contact).where(Contact.li_urn == person.urn)).one()
+
+
+def _by_slug(session: Session, user: User, slug: str) -> Contact:
+    return session.scalars(scoped(user, Contact).where(Contact.li_public_id == slug)).one()
 
 
 def _count(session: Session, user: User) -> int:
@@ -120,6 +148,36 @@ def test_a_second_page_updates_rather_than_duplicates(writer: Session, user: Use
     counts = mapping.apply_page(writer, user, _page(PEOPLE[:3], at=LATER))
     assert (counts.created, counts.updated) == (0, 3)
     assert _count(writer, user) == 3
+
+
+def test_a_dom_sourced_connection_with_no_urn_creates_a_contact_by_slug_alone(
+    writer: Session, user: User
+) -> None:
+    """P2-08: a DOM page can create a contact with no URN at all -- identity resolves
+    it by public_id (spec 8.2), and nothing here invents one."""
+    priya = PEOPLE[0]
+
+    counts = mapping.apply_page(writer, user, _dom_page([priya]))
+
+    assert (counts.created, counts.updated) == (1, 0)
+    contact = _by_slug(writer, user, priya.slug)
+    assert contact.li_urn is None
+    assert contact.li_public_id == priya.slug
+    assert contact.first_name == priya.first
+
+
+def test_a_dom_sourced_page_never_erases_an_existing_urn(writer: Session, user: User) -> None:
+    """A DOM page's urn=None must read as 'no information', never as 'clear this
+    field' -- the same rule an absent headline already gets."""
+    priya = PEOPLE[0]
+    mapping.apply_page(writer, user, _page([priya]))
+    assert _by_urn(writer, user, priya).li_urn == priya.urn
+
+    mapping.apply_page(writer, user, _dom_page([priya], at=LATER))
+
+    contact = _by_urn(writer, user, priya)
+    assert contact.li_urn == priya.urn  # untouched
+    assert contact.field_sources["li_urn"] == "sync"  # still attributed to the sync that set it
 
 
 def test_an_archive_contact_is_matched_by_slug_and_learns_its_urn(
@@ -295,6 +353,23 @@ def test_a_reappearance_clears_both(writer: Session, user: User) -> None:
 
     tomasz = _by_urn(writer, user, PEOPLE[3])
     assert (tomasz.li_missing_count, tomasz.li_disconnected_at) == (0, None)
+    assert counts.reconnected == 1
+
+
+def test_a_dom_sourced_reappearance_clears_both_too(writer: Session, user: User) -> None:
+    """P2-08: a DOM page carries no URN, so the reconnect signal has to travel by
+    slug instead -- 'being seen is evidence whichever job made it' (spec 9.8) must
+    not stop being true just because the job that saw them was the DOM fallback."""
+    mapping.apply_page(writer, user, _page(PEOPLE[:4]))
+    _age(writer, user, PEOPLE[:3])
+    _age(writer, user, PEOPLE[:3])
+    assert _by_urn(writer, user, PEOPLE[3]).li_disconnected_at is not None
+
+    counts = mapping.apply_page(writer, user, _dom_page(PEOPLE[3:4], at=LATER))
+
+    tomasz = _by_urn(writer, user, PEOPLE[3])
+    assert (tomasz.li_missing_count, tomasz.li_disconnected_at) == (0, None)
+    assert tomasz.li_urn == PEOPLE[3].urn  # still the real one; the DOM page never touched it
     assert counts.reconnected == 1
 
 

@@ -58,9 +58,16 @@ incomplete and ages nobody that week; the next one catches up.
 
 **The source seam.** The job reads pages through a :class:`ConnectionsSource`.
 :class:`VoyagerConnections` is the in-page API implementation (spec 9.3);
-P2-08's DOM fallback implements the same protocol, so choosing the fallback
-after a ``RouteChanged`` is a caller's decision about which source to pass,
-not a change to this loop.
+:mod:`netkeeper.linkedin.dom`'s :class:`~netkeeper.linkedin.dom.DomConnectionsSource`
+implements the same protocol, so choosing the fallback after a ``RouteChanged``
+is a caller's decision about which source to pass, not a change to this loop.
+:class:`FallbackConnectionsSource` is that decision, made once: it wraps a
+primary and a fallback source behind the same :class:`ConnectionsSource`
+interface and switches, at most once per run, the first time the primary
+answers ``RouteChanged`` -- so this loop never learns there were two sources
+at all, and a caller that wants automatic DOM fallback constructs one composite
+source and passes it here exactly as it would pass :class:`VoyagerConnections`
+alone.
 """
 
 from __future__ import annotations
@@ -278,6 +285,63 @@ class VoyagerConnections:
         return SourcePage(outcome=Outcome.OK, final_url=response.final_url, page=page)
 
 
+@dataclass(slots=True)
+class FallbackConnectionsSource:
+    """A :class:`ConnectionsSource` over two others: Voyager first, DOM second (spec 9.3).
+
+    Every call goes to ``primary`` until ``primary`` answers ``RouteChanged``.
+    From that page on, every call -- including this one, for this same page --
+    goes to ``fallback`` instead, for the rest of this source's life. The switch
+    is one-way and happens at most once:
+
+    * **It cannot loop.** ``primary`` is never retried once ``_switched`` is
+      set, even if ``fallback`` itself later answers ``RouteChanged`` -- that
+      just ends the run the way any other non-``Ok`` answer does (spec 9.7),
+      through the normal :attr:`StopReason.RESPONSE` path. There is no third
+      source to bounce back to and no code path that clears ``_switched``.
+    * **It cannot double-spend budget.** :meth:`~ConnectionsSource.fetch_page`
+      is called once per page by :func:`run_connections_sync`, after the
+      gate's ``before_page`` has already spent one ``connection_pages`` unit
+      (spec 9.6) for that page. Trying ``primary`` and falling through to
+      ``fallback`` both happen *inside* that one call, so a page that needed
+      both attempts still costs exactly one budgeted unit, the same as a page
+      that needed only one.
+    * **Aging stays honest.** This class knows nothing about totals or
+      completeness -- it only decides which source answers a call. Whatever
+      ``fallback`` reports as each page's ``total`` (P2-08's DOM source always
+      reports ``0``: see its module docstring) flows straight through to
+      :class:`SyncResult`, whose own ``complete`` property is what actually
+      decides whether anyone can be aged.
+
+    A single instance is for one run. Building a fresh one per run is what
+    keeps the "at most once" promise meaningful: a shared instance would carry
+    ``_switched`` across runs and a primary that recovered between runs would
+    never be tried again.
+    """
+
+    primary: ConnectionsSource
+    fallback: ConnectionsSource
+    _switched: bool = field(default=False, init=False, repr=False)
+
+    @property
+    def endpoint(self) -> str:
+        """The endpoint currently answering: ``fallback``'s once switched, else ``primary``'s."""
+        return self.fallback.endpoint if self._switched else self.primary.endpoint
+
+    async def fetch_page(self, *, start: int, count: int) -> SourcePage:
+        if not self._switched:
+            answer = await self.primary.fetch_page(start=start, count=count)
+            if answer.outcome is not Outcome.ROUTE_CHANGED:
+                return answer
+            log.warning(
+                "connections: %s route changed; falling back to %s for the rest of this run",
+                self.primary.endpoint,
+                self.fallback.endpoint,
+            )
+            self._switched = True
+        return await self.fallback.fetch_page(start=start, count=count)
+
+
 # --- the gate ----------------------------------------------------------------
 
 
@@ -408,7 +472,18 @@ async def run_connections_sync(
         connections += len(result.connections)
         total = result.total
         max_total = max(max_total, result.total)
-        urns = {connection.urn for connection in result.connections}
+        # A DOM-sourced page (P2-08) reports urn=None for every connection -- see
+        # ConnectionSummary's docstring -- so it is filtered out here rather than
+        # joining seen_urns as a literal `None`. slugs is unaffected: public_id is
+        # required from either source, so it is the identity signal a fallback run
+        # actually has. One consequence worth naming: SyncJobSpec.known_urns is
+        # URN-keyed, so an incremental sync that falls back mid-run sees an *empty*
+        # urns set on every DOM page, which is trivially "<= known_urns" and stops
+        # the run the moment DOM takes over (StopReason.CAUGHT_UP). That is a real
+        # loss of thoroughness, not a safety issue -- an incremental sync never ages
+        # anyone (SyncResult.complete requires SyncMode.FULL) -- and the next
+        # incremental or weekly full sync catches up.
+        urns = {connection.urn for connection in result.connections if connection.urn is not None}
         seen.update(urns)
         slugs.update(connection.public_id for connection in result.connections)
         await on_progress(
