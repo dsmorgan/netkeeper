@@ -40,28 +40,38 @@ export function PostureSection() {
         {posture.isError && <p role="alert">{message(posture.error)}</p>}
         {posture.isSuccess && (
           <>
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-max text-left">
-                <thead className="text-muted-foreground">
-                  <tr>
-                    <th scope="col" className="py-1 pr-3 font-medium">
-                      Protection
-                    </th>
-                    <th scope="col" className="py-1 pr-3 font-medium">
-                      State
-                    </th>
-                    <th scope="col" className="py-1 font-medium">
-                      Detail
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {posture.data.protections.map((row) => (
-                    <ProtectionRow key={row.name} row={row} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            {/* Not min-w-max like the Runs/Budget tables: those hold short numeric
+                cells that read badly wrapped, so they scroll horizontally within
+                their own card instead. Detail here holds full sentences (a
+                protection's warning), which want to wrap, not scroll — a
+                paragraph of prose you have to scroll sideways to read is worse
+                than one that just wraps. table-fixed + a Detail column width
+                keeps the name/state columns from being squeezed by a long one. */}
+            <table className="w-full table-fixed text-left">
+              <colgroup>
+                <col className="w-20 sm:w-40" />
+                <col className="w-16 sm:w-20" />
+                <col />
+              </colgroup>
+              <thead className="text-muted-foreground">
+                <tr>
+                  <th scope="col" className="py-1 pr-3 font-medium">
+                    Protection
+                  </th>
+                  <th scope="col" className="py-1 pr-3 font-medium">
+                    State
+                  </th>
+                  <th scope="col" className="py-1 font-medium">
+                    Detail
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {posture.data.protections.map((row) => (
+                  <ProtectionRow key={row.name} row={row} />
+                ))}
+              </tbody>
+            </table>
 
             {posture.data.gaps.length > 0 && (
               <div>
@@ -89,7 +99,7 @@ export function PostureSection() {
 function ProtectionRow({ row }: { row: Protection }) {
   return (
     <tr className="border-t border-border/60 align-top">
-      <th scope="row" className="py-2 pr-3 font-normal">
+      <th scope="row" className="py-2 pr-3 font-normal break-words">
         {row.name}
       </th>
       <td className="py-2 pr-3">
@@ -102,7 +112,7 @@ function ProtectionRow({ row }: { row: Protection }) {
           {row.status}
         </span>
       </td>
-      <td className="py-2">
+      <td className="py-2 break-words">
         <p>{row.value}</p>
         {row.warnings.length > 0 && (
           <ul className="mt-1 space-y-1 text-destructive">
