@@ -47,7 +47,11 @@ export function useRunEvents(): void {
     // shows up as a plain refetch instead of silently going stale. Guarded by
     // `everConnected` so the very first connect (nothing was ever missed)
     // does not double the page's initial fetch.
-    if (status === 'connected' && previousStatus.current === 'disconnected' && everConnected.current) {
+    if (
+      status === 'connected' &&
+      previousStatus.current === 'disconnected' &&
+      everConnected.current
+    ) {
       void queryClient.invalidateQueries({ queryKey: linkedinKeys.all })
     }
     if (status === 'connected') everConnected.current = true

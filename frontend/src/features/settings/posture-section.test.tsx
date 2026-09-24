@@ -101,9 +101,7 @@ describe('PostureSection', () => {
   it('shows the verdict verbatim, exactly as the backend sends it', async () => {
     renderSection(CLEAN)
     expect(
-      await screen.findByText(
-        'NOT clear: no protection is disabled, but 1 warning needs reading',
-      ),
+      await screen.findByText('NOT clear: no protection is disabled, but 1 warning needs reading'),
     ).toBeInTheDocument()
   })
 
@@ -114,7 +112,12 @@ describe('PostureSection', () => {
   })
 
   it('shows a clean report’s own verdict wording too', async () => {
-    renderSection({ ...CLEAN, ok: true, warnings: [], verdict: 'nothing is misconfigured: 12 protections, none of them disabled' })
+    renderSection({
+      ...CLEAN,
+      ok: true,
+      warnings: [],
+      verdict: 'nothing is misconfigured: 12 protections, none of them disabled',
+    })
     expect(
       await screen.findByText('nothing is misconfigured: 12 protections, none of them disabled'),
     ).toBeInTheDocument()

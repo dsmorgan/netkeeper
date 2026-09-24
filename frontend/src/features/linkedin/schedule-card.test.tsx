@@ -145,7 +145,8 @@ describe('ScheduleCard', () => {
     let armed = false
     renderCard(
       {
-        'GET /api/v1/linkedin/schedule': () => jsonResponse(armed ? SCHEDULE_ARMED : SCHEDULE_DISARMED),
+        'GET /api/v1/linkedin/schedule': () =>
+          jsonResponse(armed ? SCHEDULE_ARMED : SCHEDULE_DISARMED),
         'POST /api/v1/linkedin/schedule/arm': () => {
           armed = true
           return jsonResponse(SCHEDULE_ARMED)
