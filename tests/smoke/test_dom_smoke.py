@@ -46,6 +46,7 @@ from netkeeper.linkedin.dom import (
     CONTACT_INFO_OVERLAY_PATH_TEMPLATE,
     DomConnectionsSource,
     DomContactInfoSource,
+    DomFetchError,
 )
 from netkeeper.linkedin.pacing import ScrollProfile
 
@@ -94,7 +95,7 @@ _CONNECTIONS_PAGE = (
 <title>netkeeper dom smoke replica: connections</title></head>
 <body>
 <main>
-  <ul id="connections-list"></ul>
+  <ul id="connections-list" data-view-name="connections-list"></ul>
   <div style="height:6000px">tall enough to scroll like a person would</div>
 </main>
 <script>
@@ -137,21 +138,77 @@ _CONNECTIONS_PAGE = (
 """
 )
 
+#: F5(b) of the #173 review: an error page with no list container at all --
+#: reused near-verbatim from the review's own scenario script.
+_ERROR_PAGE = b"""<!doctype html>
+<html><head><title>smoke: error</title></head>
+<body><main>Something went wrong</main></body></html>
+"""
+
 _LOGIN_WALL_PAGE = b"""<!doctype html>
 <html><head><title>smoke: sign in</title></head><body><h1>Sign in</h1></body></html>
 """
 
+#: F7 of the #173 review: the actual contact info lives inside role="dialog",
+#: and the surrounding profile page carries its own, unrelated links -- a bio's
+#: mailto:, a LinkedIn short link, and an x.com status permalink (not a handle)
+#: -- that must never be read as if the overlay had shared them. Modeled on the
+#: review's own reproduction script.
 _CONTACT_INFO_OVERLAY = b"""<!doctype html>
 <html><head><title>netkeeper dom smoke replica: contact info</title></head>
 <body>
 <main>
-  <a href="mailto:jamie.fake@example.test">Email</a>
-  <a href="tel:+15550100000">Phone</a>
+  <section>About: I write at
+    <a href="https://blog.someone-else.example/post">a post</a>,
+    reach my old team at
+    <a href="mailto:team@former-employer.example">team@former-employer.example</a>,
+    my link-in-bio is
+    <a href="https://lnkd.in/abc123">here</a>, and I liked
+    <a href="https://x.com/i/status/12345">this post</a>.
+  </section>
+</main>
+<div role="dialog">
+  <h2>Contact info</h2>
+  <a href="mailto:jamie.fake@example.test">jamie.fake@example.test</a>
+  <a href="tel:+15550100000">+1 555 010 0000</a>
   <a href="https://jamie-fake.example.test/">Website</a>
   <a href="https://x.com/jamiefake">X profile</a>
   <a href="https://www.linkedin.com/in/jamie-fake-rivera-1a2b/">Back to profile</a>
-</main>
+</div>
 </body></html>
+"""
+
+#: F5(d): an overlay whose dialog never rendered -- an error page in its place.
+_OVERLAY_ERROR_PAGE = b"""<!doctype html>
+<html><head><title>smoke: error</title></head>
+<body><main>Something went wrong</main></body></html>
+"""
+
+
+#: A page with two good cards and one whose href carries a malformed
+#: percent-encoding (L2 of the #173 review): a real browser's
+#: decodeURIComponent throws on "%zz", and the read must skip only that card.
+_MALFORMED_CARD_PAGE = b"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>malformed card</title></head>
+<body><main>
+<ul data-view-name="connections-list">
+  <li data-view-name="connections-list-item">
+    <a href="/in/good-fake-one/">
+      <span data-view-name="connections-list-item-name">Good One</span>
+    </a>
+  </li>
+  <li data-view-name="connections-list-item">
+    <a href="/in/malformed-%zz-slug/">
+      <span data-view-name="connections-list-item-name">Bad Slug</span>
+    </a>
+  </li>
+  <li data-view-name="connections-list-item">
+    <a href="/in/good-fake-two/">
+      <span data-view-name="connections-list-item-name">Good Two</span>
+    </a>
+  </li>
+</ul>
+</main></body></html>
 """
 
 
@@ -160,14 +217,24 @@ class _Replica(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
     force_login_wall = False
+    force_error_page = False
+    force_malformed_card = False
+    force_overlay_error = False
 
     def do_GET(self) -> None:
-        if type(self).force_login_wall and self.path.startswith(CONNECTIONS_LIST_PATH):
+        cls = type(self)
+        if cls.force_login_wall and self.path.startswith(CONNECTIONS_LIST_PATH):
             self._redirect("/uas/login?session_redirect=x")
         elif self.path.startswith("/uas/login"):
             self._send(_LOGIN_WALL_PAGE, "text/html; charset=utf-8")
+        elif cls.force_error_page and self.path.startswith(CONNECTIONS_LIST_PATH):
+            self._send(_ERROR_PAGE, "text/html; charset=utf-8")
+        elif cls.force_malformed_card and self.path.startswith(CONNECTIONS_LIST_PATH):
+            self._send(_MALFORMED_CARD_PAGE, "text/html; charset=utf-8")
         elif self.path.startswith(CONNECTIONS_LIST_PATH):
             self._send(_CONNECTIONS_PAGE.encode(), "text/html; charset=utf-8")
+        elif cls.force_overlay_error and "/overlay/contact-info/" in self.path:
+            self._send(_OVERLAY_ERROR_PAGE, "text/html; charset=utf-8")
         elif self.path.startswith("/in/") and "/overlay/contact-info/" in self.path:
             self._send(_CONTACT_INFO_OVERLAY, "text/html; charset=utf-8")
         else:
@@ -190,16 +257,23 @@ class _Replica(BaseHTTPRequestHandler):
         """Keep the replica's own access log out of the test output."""
 
 
+def _reset_replica_flags() -> None:
+    _Replica.force_login_wall = False
+    _Replica.force_error_page = False
+    _Replica.force_malformed_card = False
+    _Replica.force_overlay_error = False
+
+
 @pytest.fixture
 def site() -> Iterator[str]:
-    _Replica.force_login_wall = False
+    _reset_replica_flags()
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Replica)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}"
     finally:
-        _Replica.force_login_wall = False
+        _reset_replica_flags()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
@@ -233,8 +307,10 @@ async def test_scrolling_a_real_page_loads_more_cards_and_the_run_completes_them
             source = DomConnectionsSource(run, origin=site, scroll_profile=_FAST_SCROLL)
             result = await run_connections_sync(
                 # page_size matching len(_PEOPLE) exactly: the whole list loads in
-                # one settled page, so only the trailing confirming-empty page (spec
-                # 9.3's short/empty-page logic) needs a second round of settling.
+                # one settled page. The *next* page, asking for 7 more that will
+                # never come, exhausts every settle attempt -- #173 review, F5(c)
+                # -- and ends the run with ROUTE_CHANGED rather than a confirmed
+                # END_OF_LIST, which is what the assertions below now pin.
                 SyncJobSpec(mode=SyncMode.FULL, page_budget=20, page_size=len(_PEOPLE)),
                 source,
                 Gate(),
@@ -248,6 +324,7 @@ async def test_scrolling_a_real_page_loads_more_cards_and_the_run_completes_them
     assert all(c.urn is None for page in pages for c in page.connections)
     assert result.max_total == 0
     assert not result.complete  # spec 9.3/P2-08: DOM alone never proves a total
+    assert result.outcome is Outcome.ROUTE_CHANGED  # F5(c): exhaustion is a refusal
 
     all_connections = [c for page in pages for c in page.connections]
     jamie = next(c for c in all_connections if c.public_id == "jamie-fake-rivera-1a2b")
@@ -298,3 +375,60 @@ async def test_the_overlay_url_visited_matches_the_public_id(
         page = await run.ensure_page()
     expected_path = CONTACT_INFO_OVERLAY_PATH_TEMPLATE.format(public_id="jamie-fake-rivera-1a2b")
     assert page.url == f"{site}{expected_path}"
+
+
+async def test_a_real_error_page_with_no_list_container_is_route_changed(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """#173 review, F5(b): a page structurally different from the connections
+    list -- no container at all, an error page in its place -- is refused
+    immediately, never parsed as zero connections."""
+    _Replica.force_error_page = True
+    try:
+        async with provider.run() as run:
+            source = DomConnectionsSource(run, origin=site, scroll_profile=_FAST_SCROLL)
+            answer = await source.fetch_page(start=0, count=3)
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert answer.outcome is Outcome.ROUTE_CHANGED
+    assert answer.page is None
+
+
+async def test_a_real_overlay_error_page_is_unreadable_not_an_empty_ok(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """#173 review, F5(d): an overlay whose dialog never rendered must not read as
+    "Ok, nobody shared anything"."""
+    _Replica.force_overlay_error = True
+    try:
+        async with provider.run() as run:
+            source = DomContactInfoSource(run, origin=site)
+            result = await source.fetch_contact_info("jamie-fake-rivera-1a2b")
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert result.outcome is Outcome.ROUTE_CHANGED
+    assert result.info is None
+
+
+async def test_a_real_malformed_percent_encoded_card_is_skipped_not_fatal(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """#173 review, L2: a real browser's decodeURIComponent throws on a malformed
+    percent-encoding ("%zz"); the script must catch that per-card and skip only
+    the one card, not fail the whole read with an uncaught exception."""
+    _Replica.force_malformed_card = True
+    try:
+        async with provider.run() as run:
+            source = DomConnectionsSource(run, origin=site, scroll_profile=_FAST_SCROLL)
+            # Exactly the two good cards: the malformed one never counts toward
+            # self._cards, so asking for more than 2 here would exhaust every
+            # settle attempt (F5(c)) instead of exercising L2's own skip.
+            answer = await source.fetch_page(start=0, count=2)
+    except (BrowserUnavailable, DomFetchError) as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert answer.outcome is Outcome.OK
+    assert answer.page is not None
+    assert [c.public_id for c in answer.page.connections] == ["good-fake-one", "good-fake-two"]
