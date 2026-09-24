@@ -690,10 +690,11 @@ async def test_a_fallback_run_that_only_ever_used_dom_is_never_complete() -> Non
     assert result.seen_public_ids == {"person-0000", "person-0001"}
 
 
-async def test_a_fallback_run_can_complete_only_when_voyager_alone_already_saw_the_total() -> None:
-    """The one case a mixed run can complete: Voyager's own page already reached
-    max_total by URN before DOM ever answered -- DOM's contribution here is fully
-    redundant with what Voyager already proved, not new evidence."""
+async def test_a_switched_run_is_never_complete_even_if_voyager_proved_the_total() -> None:
+    """#173 review, F5(a): the simple invariant. Voyager's own page already reached
+    max_total by URN before DOM ever answered -- the totals math alone would call
+    this complete -- but SyncResult.complete now refuses outright once the source
+    ever switched, regardless of what the totals say."""
     primary = ScriptedSource(
         "primary",
         [_ok([_summary(0, "urn:0"), _summary(1, "urn:1")], start=0, total=2), ROUTE_CHANGED],
@@ -710,8 +711,65 @@ async def test_a_fallback_run_can_complete_only_when_voyager_alone_already_saw_t
     )
 
     assert result.reason is StopReason.END_OF_LIST
-    assert result.complete
+    assert result.source_switched
+    assert not result.complete
     assert len(fallback.calls) == 1  # the switch happened, DOM just found nothing new
+    assert source.switched
+
+
+async def test_a_fallback_run_that_never_switches_can_still_complete() -> None:
+    """The baseline this whole invariant must not break: a fallback source whose
+    primary handles the entire run is exactly as capable of completing as a bare
+    VoyagerConnections would be."""
+    primary = ScriptedSource(
+        "primary",
+        [
+            _ok([_summary(0, "urn:0"), _summary(1, "urn:1")], start=0, total=2),
+            _ok([], start=2, total=0),
+        ],
+    )
+    fallback = ScriptedSource("fallback", [])
+    source = FallbackConnectionsSource(primary, fallback)
+
+    result = await run_connections_sync(
+        SyncJobSpec(mode=SyncMode.FULL, page_budget=50, page_size=2),
+        source,
+        Gate(),
+        on_page=Sink().page,
+        clock=lambda: NOW,
+    )
+
+    assert result.reason is StopReason.END_OF_LIST
+    assert not result.source_switched
+    assert result.complete
+    assert fallback.calls == []
+    assert not source.switched
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(Outcome.THROTTLED, id="throttled"),
+        pytest.param(Outcome.CHECKPOINT, id="checkpoint"),
+        pytest.param(Outcome.LOGGED_OUT, id="logged-out"),
+        pytest.param(Outcome.NOT_FOUND, id="not-found"),
+    ],
+)
+async def test_fallback_never_switches_on_anything_but_route_changed(outcome: Outcome) -> None:
+    """#173 review, R5 (mutation survived): a checkpoint, a throttle, a login wall,
+    or anything else that is not RouteChanged from the primary must stop the run
+    through the ordinary non-Ok path -- never trigger a switch to DOM, which is
+    only for "this endpoint's shape changed"."""
+    primary = ScriptedSource("primary", [SourcePage(outcome=outcome, final_url=CONNECTIONS_URL)])
+    fallback = ScriptedSource("fallback", [])
+    source = FallbackConnectionsSource(primary, fallback)
+
+    answer = await source.fetch_page(start=0, count=1)
+
+    assert answer.outcome is outcome
+    assert not source.switched
+    assert source.endpoint == "primary"
+    assert fallback.calls == []
 
 
 async def test_a_fallback_run_partway_through_a_larger_total_is_not_complete() -> None:
