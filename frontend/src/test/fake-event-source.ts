@@ -39,9 +39,19 @@ export class FakeEventSource {
     this.closed = true
   }
 
-  /** Simulates the backend sending a named event with this JSON-serializable payload. */
+  /**
+   * Simulates the backend sending a named event carrying this JSON-serializable
+   * payload — wrapped in the real envelope `Event.to_dict()` sends
+   * (`netkeeper/services/events.py`, pinned by `tests/test_web_events.py`):
+   * `{type, data, ts, user_id}`. `data` here is the *inner* payload (what a
+   * publisher passes as `Event(..., data=...)`), matching every real caller;
+   * `useServerEvent` is the one place that unwraps it back out.
+   */
   emit(type: string, data: unknown): void {
-    this.emitRaw(type, JSON.stringify(data))
+    this.emitRaw(
+      type,
+      JSON.stringify({ type, data, ts: new Date().toISOString(), user_id: 1 }),
+    )
   }
 
   /** Like {@link emit}, but with the wire text as-is — for a payload that is not valid JSON. */
