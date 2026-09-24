@@ -1104,3 +1104,84 @@ def test_a_bulk_action_resolves_now_once(
 
     assert affected == confirmed
     assert filter_calls == 0, "the filter resolved its own clock instead of the one passed in"
+
+
+# --- needs review: contacts read off a connections-page card (#184) ----------
+
+
+@pytest.fixture
+def card_contact(factory: sessionmaker[Session], owner: User, people: list[int]) -> int:
+    """One contact the connections sync created from a card, waiting for review."""
+    with session_scope(factory, write=True) as session:
+        user = session.get(User, owner.id)
+        assert user is not None
+        card = factories.make_contact(
+            session,
+            user,
+            first_name="Dee",
+            last_name="Card",
+            li_urn=None,
+            source=ContactSource.SYNC,
+            needs_review_at=AT,
+        )
+        return card.id
+
+
+async def test_the_mark_is_on_the_detail_the_row_and_the_triage_card(
+    client: httpx.AsyncClient, card_contact: int, people: list[int]
+) -> None:
+    detail = (await client.get(f"/api/v1/contacts/{card_contact}")).json()
+    assert detail["needs_review_at"] is not None
+    assert (await client.get(f"/api/v1/contacts/{people[0]}")).json()["needs_review_at"] is None
+
+    waiting = await _query(
+        client,
+        filter={"where": {"op": "not", "child": {"op": "is_empty", "field": "needs_review_at"}}},
+        columns=["first_name", "last_name", "needs_review_at"],
+    )
+    assert _names(waiting) == ["Dee Card"]
+    assert waiting["items"][0]["needs_review_at"] is not None
+
+    card = (await client.get("/api/v1/triage/next", params={"after_id": people[1]})).json()
+    assert card["card"]["contact"]["id"] == card_contact
+    assert card["card"]["contact"]["needs_review_at"] is not None
+
+
+async def test_confirm_clears_the_mark(client: httpx.AsyncClient, card_contact: int) -> None:
+    confirmed = await client.post(f"/api/v1/contacts/{card_contact}/confirm", headers=CSRF)
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["needs_review_at"] is None
+    assert confirmed.json()["archived_at"] is None
+
+
+async def test_reject_archives_and_keeps_the_mark(
+    client: httpx.AsyncClient, card_contact: int
+) -> None:
+    rejected = await client.post(f"/api/v1/contacts/{card_contact}/reject", headers=CSRF)
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["archived_at"] is not None
+    assert rejected.json()["needs_review_at"] is not None
+    assert "Dee Card" not in _names(await _query(client))
+    assert (await client.get(f"/api/v1/contacts/{card_contact}")).status_code == 200
+
+
+async def test_reject_refuses_a_contact_not_waiting_for_review(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    refused = await client.post(f"/api/v1/contacts/{people[0]}/reject", headers=CSRF)
+    assert refused.status_code == 409
+    assert (await client.get(f"/api/v1/contacts/{people[0]}")).json()["archived_at"] is None
+
+
+async def test_another_user_can_neither_confirm_nor_reject(
+    app: FastAPI, client: httpx.AsyncClient, factory: sessionmaker[Session], card_contact: int
+) -> None:
+    with session_scope(factory, write=True) as session:
+        stranger = factories.make_user(session).id
+    with acting_as(app, stranger):
+        for action in ("confirm", "reject"):
+            response = await client.post(f"/api/v1/contacts/{card_contact}/{action}", headers=CSRF)
+            assert response.status_code == 404
+    detail = (await client.get(f"/api/v1/contacts/{card_contact}")).json()
+    assert detail["needs_review_at"] is not None
+    assert detail["archived_at"] is None

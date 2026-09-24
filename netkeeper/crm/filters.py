@@ -205,6 +205,7 @@ AnyField = Literal[
     "triaged_at",
     "li_disconnected_at",
     "archived_at",
+    "needs_review_at",
     "created_at",
     "updated_at",
     "do_not_contact",
@@ -217,6 +218,7 @@ OrderedField = Literal[
     "triaged_at",
     "li_disconnected_at",
     "archived_at",
+    "needs_review_at",
     "created_at",
     "updated_at",
 ]
@@ -235,6 +237,7 @@ EmptyableField = Literal[
     "triaged_at",
     "li_disconnected_at",
     "archived_at",
+    "needs_review_at",
     "created_at",
     "updated_at",
 ]
@@ -259,6 +262,7 @@ _DATETIME_FIELDS: Final[tuple[str, ...]] = (
     "triaged_at",
     "li_disconnected_at",
     "archived_at",
+    "needs_review_at",
     "created_at",
     "updated_at",
 )
@@ -292,6 +296,7 @@ _LABELS: Final[dict[str, str]] = {
     "triaged_at": "triaged",
     "li_disconnected_at": "disconnected on LinkedIn",
     "archived_at": "archived",
+    "needs_review_at": "needs review since",
     "created_at": "created",
     "updated_at": "updated",
     "do_not_contact": "do not contact",

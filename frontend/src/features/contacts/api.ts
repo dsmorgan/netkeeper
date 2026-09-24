@@ -240,6 +240,27 @@ export async function setArchived(contactId: number, archived: boolean): Promise
   return data
 }
 
+/**
+ * Confirm a contact read off a connections-page card, or reject it (#184).
+ *
+ * Confirm clears the needs-review mark; reject archives the contact and keeps
+ * the mark, so unarchiving brings back an unconfirmed contact.
+ */
+export async function reviewContact(
+  contactId: number,
+  verdict: 'confirm' | 'reject',
+): Promise<ContactDetail> {
+  const path =
+    verdict === 'confirm'
+      ? ('/api/v1/contacts/{contact_id}/confirm' as const)
+      : ('/api/v1/contacts/{contact_id}/reject' as const)
+  const { data, error, response } = await api.POST(path, {
+    params: { path: { contact_id: contactId } },
+  })
+  if (data === undefined) fail(verdict, response.status, error)
+  return data
+}
+
 export async function tagContact(contactId: number, tagId: number): Promise<void> {
   const { error, response } = await api.POST('/api/v1/contacts/{contact_id}/tags', {
     params: { path: { contact_id: contactId } },

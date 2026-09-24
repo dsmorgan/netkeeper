@@ -79,29 +79,27 @@ or that a person it read from the DOM was not, in fact, new. This is a
 deliberate choice to trade completeness for aging safety (the item's own
 instruction), not an oversight.
 
-**Why every connection this module reports has ``urn=None``, and why a DOM
-row never creates a contact or writes a field (#173 review's design
-decision).** See :class:`~netkeeper.linkedin.voyager.ConnectionSummary`'s
-docstring for the URN half. The field-writing half goes further: a DOM row's
-*only* identity signal is a public-id slug, and a slug is not owned by one
-person forever -- LinkedIn lets an account release a vanity url and another
-claim it (spec 9.6), so a slug this module reads today could belong to
-someone else than the last time an authoritative source (Voyager, the
-archive) saw it. Writing a name, a headline, or any other field on the
-strength of a slug alone risks attributing a stranger's data to the wrong
-contact, or creating a duplicate under a renamed slug an authoritative
-source has not caught up to yet. So a DOM row is **sighting-only**:
-:func:`netkeeper.crm.apply.apply_page` never resolves or applies it as an
-:class:`~netkeeper.crm.identity.IncomingContact` -- it only uses the slug to
-mark an *already-known* contact as seen (:func:`netkeeper.crm.apply._mark_seen`),
-which is safe in one direction only (it can prevent an aging that should not
-happen; it can never itself age anyone) and creates nothing. A DOM sighting
-of a slug nobody holds is silently a no-op: the new or renamed connection it
-would have described is picked up honestly by the next Voyager sync or
-archive import, which carry (or already hold) a URN. ``first_name``,
-``last_name``, and ``headline`` on a DOM-sourced :class:`ConnectionSummary`
-are therefore read but never written to a contact by the mapping layer; they
-exist mainly so a caller inspecting a page can log or display what was seen.
+**Why every connection this module reports has ``urn=None``, and what a DOM
+row may write (#173 review's design decision, revised by #184).** See
+:class:`~netkeeper.linkedin.voyager.ConnectionSummary`'s docstring for the URN
+half. The field-writing half: a DOM row's *only* identity signal is a public-id
+slug, and a slug is not owned by one person forever -- LinkedIn lets an account
+release a vanity url and another claim it (spec 9.6), so a slug this module
+reads today could belong to someone else than the last time an authoritative
+source (Voyager, the archive) saw it. Writing a name or a headline onto a
+contact on the strength of a slug alone risks attributing a stranger's data to
+the wrong person. So :func:`netkeeper.crm.apply.apply_page` never resolves or
+applies a DOM row as an :class:`~netkeeper.crm.identity.IncomingContact`.
+Against a contact that already holds the slug it is **sighting-only**
+(:func:`netkeeper.crm.apply._mark_seen`): it can reset a miss count, which can
+prevent an aging that should not happen and can never itself age anyone, and it
+writes nothing. A slug nobody holds -- during an API outage, how a new
+connection shows up -- creates one contact **marked needs review**, carrying the
+card's name and headline at the lowest provenance and no URN; nothing enriches,
+enrolls, or ages it until the person confirms it or a Voyager sync attaches a
+URN (#184). ``first_name``, ``last_name``, and ``headline`` on a DOM-sourced
+:class:`ConnectionSummary` are read for that contact, and the mapping layer
+checks the name again before writing it (``crm.apply.card_name``).
 """
 
 from __future__ import annotations
@@ -520,6 +518,11 @@ def _split_name(name: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
+def _spans_lines(text: str) -> bool:
+    """True when ``text`` holds a line break of any kind (``str.splitlines``'s set)."""
+    return len(text.splitlines()) > 1
+
+
 def _parse_one_card(item: object) -> ConnectionSummary | None:
     """One raw card object as a :class:`ConnectionSummary`, or ``None`` if unreadable.
 
@@ -531,9 +534,11 @@ def _parse_one_card(item: object) -> ConnectionSummary | None:
 
     Reminder for the mapping layer (spec 9.8's as-built note, and this
     module's own docstring): ``first_name``/``last_name``/``headline`` are
-    read here for completeness and for a caller that wants to log or display
-    what was seen, but ``crm.apply.apply_page`` never writes them to a
-    contact -- a DOM row is sighting-only.
+    never written to a contact that already holds the slug -- that row is
+    sighting-only. They are written, at the lowest provenance and behind a
+    needs-review mark, only to the one contact a slug nobody holds creates
+    (#184), and ``crm.apply.card_name`` checks the name again before it does.
+    A name that spans lines comes back as ``("", "")``.
     """
     if not isinstance(item, Mapping):
         return None
@@ -546,7 +551,12 @@ def _parse_one_card(item: object) -> ConnectionSummary | None:
     headline_raw = item.get("headline")
     headline = headline_raw.strip() if isinstance(headline_raw, str) else None
     headline = headline if headline else None
-    first, last = _split_name(name.strip())
+    # A name that spans lines is not one element's name: the name selector missed
+    # and the link's own text came back, the name and whatever else the link
+    # holds (the occupation) on separate lines. The card is still a sighting of
+    # its slug; its name is reported unknown rather than split into something
+    # that looks like a name (#184, after the #173 review's F3 and S6).
+    first, last = ("", "") if _spans_lines(name.strip()) else _split_name(name.strip())
     return ConnectionSummary(
         urn=None,
         public_id=public_id.strip(),

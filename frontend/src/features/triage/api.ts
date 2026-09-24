@@ -368,6 +368,37 @@ export async function createTag(name: string): Promise<Tag> {
   return data
 }
 
+/** What confirming or rejecting a card contact changed: the two fields the card reads. */
+export interface ReviewOutcome {
+  needs_review_at: string | null
+  archived_at: string | null
+}
+
+/**
+ * Confirm the contact under triage, or reject it, when it was read off a
+ * connections-page card (#184). Reject archives it; nothing is ever deleted.
+ */
+export async function reviewContact(
+  contactId: number,
+  verdict: 'confirm' | 'reject',
+): Promise<ReviewOutcome> {
+  const path =
+    verdict === 'confirm'
+      ? ('/api/v1/contacts/{contact_id}/confirm' as const)
+      : ('/api/v1/contacts/{contact_id}/reject' as const)
+  const { data, error, response } = await api.POST(path, {
+    params: { path: { contact_id: contactId } },
+  })
+  if (data === undefined) {
+    fail(
+      response.status,
+      error,
+      verdict === 'confirm' ? 'the contact was not confirmed' : 'the contact was not rejected',
+    )
+  }
+  return { needs_review_at: data.needs_review_at, archived_at: data.archived_at }
+}
+
 /** Put a manual tag on the contact under triage. */
 export async function tagContact(contactId: number, tagId: number): Promise<void> {
   const { error, response } = await api.POST('/api/v1/contacts/{contact_id}/tags', {

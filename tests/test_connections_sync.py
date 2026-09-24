@@ -36,8 +36,14 @@ from netkeeper.config import BudgetSettings, LinkedInSettings, Settings
 from netkeeper.crm import apply as mapping
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
-from netkeeper.linkedin.connections import StopReason, SyncMode, VoyagerConnections
+from netkeeper.linkedin.connections import (
+    ConnectionsPage,
+    StopReason,
+    SyncMode,
+    VoyagerConnections,
+)
 from netkeeper.linkedin.pacing import human_delay
+from netkeeper.linkedin.voyager import ConnectionSummary
 from netkeeper.models import (
     Contact,
     ContactAlias,
@@ -917,3 +923,64 @@ async def test_a_throttled_page_is_recorded_as_the_outcome(
     run = _run_row(session_factory, user_id, report.run_id)
     assert (run.status, run.stop_reason) == (SyncRunStatus.ABORTED, "throttled")
     assert run.counts_json is not None and run.counts_json["heat_raised"] is True
+
+
+# --- #184: contacts read off connections-page cards ----------------------------------
+
+
+async def test_card_contacts_a_sync_confirms_do_not_dilute_its_aging_limits(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """Two real connections; an earlier fallback run left ten card contacts. A
+    complete sync confirms all ten by URN and misses one of the two: half of the
+    contacts that were connections before it ran, refused. Counting the ten it
+    confirmed among those would make it one of twelve, and age a real person."""
+    real = _many(2)
+    await _sync(session_factory, user_id, FakeVoyagerFetch(real))
+    cards = [
+        Person(700 + i, f"Card{i}", f"Person{i}", f"Role {i}", urn_prefix="ACoAACARD")
+        for i in range(10)
+    ]
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        mapping.apply_page(
+            session,
+            user,
+            ConnectionsPage(
+                mode=SyncMode.FULL,
+                number=0,
+                start=0,
+                total=0,
+                connections=tuple(
+                    ConnectionSummary(
+                        urn=None,
+                        public_id=p.slug,
+                        first_name=p.first,
+                        last_name=p.last,
+                        headline=p.headline,
+                        connected_at=None,
+                    )
+                    for p in cards
+                ),
+                observed_at=NOW,
+            ),
+        )
+
+    report = await _sync(
+        session_factory,
+        user_id,
+        FakeVoyagerFetch([real[0], *cards]),
+        at=NOW + timedelta(days=7),
+    )
+
+    assert report.result.complete
+    assert report.pages.confirmed_by_urn == 10
+    assert report.counts()["confirmed_by_urn"] == 10
+    assert report.aging is not None and report.aging.refused is not None
+    contacts = _contacts(session_factory, user_id)
+    assert (contacts[real[1].urn].li_missing_count, contacts[real[1].urn].li_disconnected_at) == (
+        0,
+        None,
+    )
+    assert all(contacts[p.urn].needs_review_at is None for p in cards)

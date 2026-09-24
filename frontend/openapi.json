@@ -543,6 +543,7 @@
               "triaged_at",
               "li_disconnected_at",
               "archived_at",
+              "needs_review_at",
               "created_at",
               "updated_at"
             ],
@@ -1176,6 +1177,18 @@
           "met_source": {
             "$ref": "#/components/schemas/MetSource"
           },
+          "needs_review_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Needs Review At"
+          },
           "notes": {
             "anyOf": [
               {
@@ -1305,6 +1318,7 @@
           "last_contacted_at",
           "notes",
           "archived_at",
+          "needs_review_at",
           "source",
           "created_at",
           "updated_at",
@@ -1972,6 +1986,7 @@
                     "last_contacted_at",
                     "notes",
                     "archived_at",
+                    "needs_review_at",
                     "source",
                     "created_at",
                     "updated_at"
@@ -2272,6 +2287,18 @@
                 "type": "null"
               }
             ]
+          },
+          "needs_review_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Needs Review At"
           },
           "notes": {
             "anyOf": [
@@ -2719,6 +2746,7 @@
               "triaged_at",
               "li_disconnected_at",
               "archived_at",
+              "needs_review_at",
               "created_at",
               "updated_at",
               "do_not_contact"
@@ -3219,6 +3247,20 @@
               "automatic"
             ]
           },
+          "needs_review_at": {
+            "kind": "datetime",
+            "label": "needs review since",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
           "preferred_name": {
             "kind": "string",
             "label": "preferred name",
@@ -3505,6 +3547,20 @@
               "automatic"
             ]
           },
+          "needs_review_at": {
+            "kind": "datetime",
+            "label": "needs review since",
+            "ops": [
+              "eq",
+              "neq",
+              "is_empty",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "between"
+            ]
+          },
           "preferred_name": {
             "kind": "string",
             "label": "preferred name",
@@ -3572,6 +3628,7 @@
               "triaged_at",
               "li_disconnected_at",
               "archived_at",
+              "needs_review_at",
               "created_at",
               "updated_at"
             ],
@@ -3618,6 +3675,7 @@
               "triaged_at",
               "li_disconnected_at",
               "archived_at",
+              "needs_review_at",
               "created_at",
               "updated_at"
             ],
@@ -4879,6 +4937,7 @@
               "triaged_at",
               "li_disconnected_at",
               "archived_at",
+              "needs_review_at",
               "created_at",
               "updated_at"
             ],
@@ -5226,6 +5285,7 @@
               "triaged_at",
               "li_disconnected_at",
               "archived_at",
+              "needs_review_at",
               "created_at",
               "updated_at"
             ],
@@ -5272,6 +5332,7 @@
               "triaged_at",
               "li_disconnected_at",
               "archived_at",
+              "needs_review_at",
               "created_at",
               "updated_at"
             ],
@@ -5372,6 +5433,7 @@
               "triaged_at",
               "li_disconnected_at",
               "archived_at",
+              "needs_review_at",
               "created_at",
               "updated_at",
               "do_not_contact"
@@ -6524,6 +6586,7 @@
               "triaged_at",
               "li_disconnected_at",
               "archived_at",
+              "needs_review_at",
               "created_at",
               "updated_at",
               "do_not_contact"
@@ -7240,6 +7303,18 @@
           "met_source": {
             "$ref": "#/components/schemas/MetSource"
           },
+          "needs_review_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Needs Review At"
+          },
           "notes": {
             "anyOf": [
               {
@@ -7300,7 +7375,8 @@
           "tags",
           "updated_at",
           "archived_at",
-          "merged_into_id"
+          "merged_into_id",
+          "needs_review_at"
         ],
         "title": "TriageContactOut",
         "type": "object"
@@ -8917,6 +8993,62 @@
         ]
       }
     },
+    "/api/v1/contacts/{contact_id}/confirm": {
+      "post": {
+        "description": "Confirm a contact netkeeper read off a connections-page card (#184).\n\nClears `needs_review_at`. A contact not waiting for review is returned as it\nis. Until confirmed, or until a sync attaches a URN, such a contact is never\nenriched, enrolled, or aged.",
+        "operationId": "confirm_contact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergedConflict"
+                }
+              }
+            },
+            "description": "The contact was merged into another"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirm Contact",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
     "/api/v1/contacts/{contact_id}/emails": {
       "post": {
         "description": "Add an address. The first one is primary; `is_primary` on a later one demotes the rest.",
@@ -9697,6 +9829,62 @@
           }
         },
         "summary": "Update Contact Phone",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/reject": {
+      "post": {
+        "description": "Reject a contact netkeeper read off a connections-page card: archive it (#184).\n\nNever a delete. `needs_review_at` stays set, so unarchiving brings back an\nunconfirmed contact. `409` for a contact that is not waiting for review.",
+        "operationId": "reject_contact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergedConflict"
+                }
+              }
+            },
+            "description": "The contact was merged into another"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reject Contact",
         "tags": [
           "contacts"
         ]

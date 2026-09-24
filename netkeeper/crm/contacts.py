@@ -469,6 +469,45 @@ def unarchive_contact(session: Session, user: User, contact_id: int) -> Contact:
     return contact
 
 
+def confirm_contact(session: Session, user: User, contact_id: int) -> Contact:
+    """Confirm a contact read off a connections-page card: clear ``needs_review_at`` (#184).
+
+    From here the contact is an ordinary one: enrichment may visit it once it has
+    a URN, a campaign may enroll it, and a complete sync may age it. What the card
+    said stays, at the lowest provenance, so the next sync or import that names
+    the person still replaces it. A contact not waiting for review is left as it
+    is, so a confirm that crosses a sync which already confirmed it is not an
+    error. :class:`NotFound`, or :class:`Merged` for a merged-away contact.
+    """
+    _require_writer(session)
+    contact = live_contact(session, user, contact_id)
+    if contact.needs_review_at is not None:
+        contact.needs_review_at = None
+        session.flush()
+    return contact
+
+
+def reject_contact(session: Session, user: User, contact_id: int) -> Contact:
+    """Reject a contact read off a connections-page card: archive it, never delete it (#184).
+
+    Contacts are archived, never deleted (spec 8). The mark stays, so a contact
+    brought back with :func:`unarchive_contact` is still unconfirmed and still
+    kept from enrichment, campaigns, and aging. Its slug stays held, so the same
+    card on the next fallback run is a sighting of this contact rather than a
+    new one. A rejected contact that is already archived keeps its
+    ``archived_at``. :class:`Conflict` for a contact that is not waiting for
+    review (archive that one instead), :class:`NotFound`, or :class:`Merged`.
+    """
+    _require_writer(session)
+    contact = live_contact(session, user, contact_id)
+    if contact.needs_review_at is None:
+        raise Conflict("this contact is not waiting for review; archive it instead")
+    if contact.archived_at is None:
+        contact.archived_at = utcnow()
+        session.flush()
+    return contact
+
+
 def merge_contacts(session: Session, user: User, survivor_id: int, loser_id: int) -> Contact:
     """Fold ``loser_id`` into ``survivor_id`` (:func:`netkeeper.crm.identity.merge`).
 

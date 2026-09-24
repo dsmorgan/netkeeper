@@ -13,6 +13,7 @@ import type { ReactNode } from 'react'
 import { Badge } from '@/components/ui/badge'
 
 import { displayName, formatDate, formatDateTime } from './format'
+import { NeedsReviewBadge } from './needs-review'
 import type { ContactColumn, ContactRow, SortField } from './types'
 import { MET_LABELS } from './types'
 
@@ -75,16 +76,20 @@ function timeColumn(id: ContactColumn, label: string, sort?: SortField): ColumnS
 const NAME_COLUMN: ColumnSpec = {
   id: 'name',
   label: 'Name',
-  requires: ['first_name', 'last_name', 'preferred_name'],
+  requires: ['first_name', 'last_name', 'preferred_name', 'needs_review_at'],
   sort: 'last_name',
   render: (row) => (
-    <Link
-      to="/contacts/$contactId"
-      params={{ contactId: String(row.id) }}
-      className="font-medium text-foreground underline-offset-4 hover:underline"
-    >
-      {displayName(row)}
-    </Link>
+    <span className="inline-flex items-center gap-2">
+      <Link
+        to="/contacts/$contactId"
+        params={{ contactId: String(row.id) }}
+        className="font-medium text-foreground underline-offset-4 hover:underline"
+      >
+        {displayName(row)}
+      </Link>
+      {/* A contact read off a connections-page card, waiting to be confirmed (#184). */}
+      {row.needs_review_at ? <NeedsReviewBadge /> : null}
+    </span>
   ),
 }
 
@@ -159,6 +164,7 @@ export const COLUMNS: readonly ColumnSpec[] = [
   textColumn('notes', 'Notes', { wide: true }),
   textColumn('source', 'Source', { sort: 'source' }),
   timeColumn('archived_at', 'Archived', 'archived_at'),
+  timeColumn('needs_review_at', 'Needs review since', 'needs_review_at'),
   timeColumn('created_at', 'Created', 'created_at'),
   timeColumn('updated_at', 'Updated', 'updated_at'),
 ]

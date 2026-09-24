@@ -78,6 +78,7 @@ export function contactDetail(overrides: Partial<ContactDetail> = {}): ContactDe
     last_contacted_at: null,
     notes: null,
     archived_at: null,
+    needs_review_at: null,
     source: 'sync',
     created_at: '2026-01-02T09:00:00Z',
     updated_at: '2026-01-02T09:00:00Z',

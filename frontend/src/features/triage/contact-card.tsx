@@ -42,6 +42,7 @@
 import { ExternalLink } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
+import { NeedsReviewBadge } from '@/features/contacts/needs-review'
 
 import { formatDay } from './format'
 import { passedStateLabel, type PassedCard } from './use-triage-queue'
@@ -113,7 +114,14 @@ export function ContactCard({
         <dt className="text-muted-foreground">Connected</dt>
         <dd>{formatDay(contact.connected_on)}</dd>
         <dt className="text-muted-foreground">State</dt>
-        <dd>{MET_LABELS[contact.met] ?? contact.met}</dd>
+        {/* The badge sits on the State line rather than on a line of its own:
+            it is on some cards and not others, and a line that comes and goes
+            would move the decision row under it (spec 10.2). Confirming or
+            rejecting leads the column beside the card, where it moves nothing. */}
+        <dd className="flex flex-wrap items-center gap-2">
+          {MET_LABELS[contact.met] ?? contact.met}
+          {contact.needs_review_at !== null && <NeedsReviewBadge />}
+        </dd>
       </dl>
 
       {contact.do_not_contact && (

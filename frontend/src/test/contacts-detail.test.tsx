@@ -300,4 +300,53 @@ describe('contact detail', () => {
     expect(alert).toHaveTextContent(/no contact 9/)
     expect(within(alert).getByRole('link', { name: /Back to contacts/ })).toBeInTheDocument()
   })
+
+  it('offers confirm and reject for a contact read off a card, and says what each did', async () => {
+    const waiting = contactDetail({
+      li_urn: null,
+      needs_review_at: '2026-09-24T12:00:00Z',
+    })
+    const { seen, set } = serveContact(waiting, (request) => {
+      const { pathname } = new URL(request.url)
+      if (pathname === '/api/v1/contacts/1/reject' && request.method === 'POST') {
+        const rejected = { ...waiting, archived_at: '2026-09-24T12:05:00Z' }
+        set(rejected)
+        return jsonResponse(rejected)
+      }
+      if (pathname === '/api/v1/contacts/1/confirm' && request.method === 'POST') {
+        const confirmed = { ...waiting, archived_at: '2026-09-24T12:05:00Z', needs_review_at: null }
+        set(confirmed)
+        return jsonResponse(confirmed)
+      }
+      return undefined
+    })
+    await renderApp('/contacts/1')
+    await screen.findByRole('heading', { name: 'Ada Ventura' })
+
+    const notice = screen.getByRole('region', { name: 'Needs review' })
+    expect(notice).toHaveTextContent(/won.t enrich it, add it to a campaign, or count it/)
+    expect(screen.getAllByTestId('needs-review-badge')).toHaveLength(1)
+
+    fireEvent.click(within(notice).getByRole('button', { name: /Reject Ada Ventura/ }))
+    await waitFor(() =>
+      expect(
+        seen.some((entry) => entry.path === '/api/v1/contacts/1/reject' && entry.method === 'POST'),
+      ).toBe(true),
+    )
+    // Rejected is archived, not deleted, and still waiting: confirm stays offered.
+    expect(await screen.findByText(/Rejected: it.s archived, not deleted/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Reject Ada Ventura/ })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Ada Ventura' }))
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Needs review' })).toBeNull())
+    expect(screen.queryByTestId('needs-review-badge')).toBeNull()
+  })
+
+  it('shows no review notice for an ordinary contact', async () => {
+    serveContact(contactDetail())
+    await renderApp('/contacts/1')
+    await screen.findByRole('heading', { name: 'Ada Ventura' })
+    expect(screen.queryByRole('region', { name: 'Needs review' })).toBeNull()
+    expect(screen.queryByTestId('needs-review-badge')).toBeNull()
+  })
 })

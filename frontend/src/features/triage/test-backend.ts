@@ -198,6 +198,7 @@ export function makeContact(index: number, options: { messages?: number } = {}):
     messageBody: messages > 0 ? 'Good to meet you at the Example Corp meetup.' : null,
     archived_at: null,
     merged_into_id: null,
+    needs_review_at: null,
   }
 }
 
@@ -865,6 +866,23 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
         batch_id: batchId,
         progress: progress(states),
       })
+    }
+
+    // Confirm and reject (#184), as `netkeeper.crm.contacts` does them: confirm
+    // clears the mark; reject archives and keeps it, and refuses a contact that
+    // is not waiting. The answer is a contact detail; the screen reads two fields.
+    const reviewMatch = /^\/api\/v1\/contacts\/(\d+)\/(confirm|reject)$/.exec(url.pathname)
+    if (reviewMatch !== null && request.method === 'POST') {
+      const contact = byId(Number(reviewMatch[1]))
+      if (reviewMatch[2] === 'confirm') {
+        contact.needs_review_at = null
+      } else {
+        if (contact.needs_review_at === null) {
+          return jsonResponse({ detail: 'this contact is not waiting for review' }, 409)
+        }
+        contact.archived_at ??= '2026-09-24T12:00:00Z'
+      }
+      return jsonResponse({ ...contact })
     }
 
     const tagMatch = /^\/api\/v1\/contacts\/(\d+)\/tags(?:\/(\d+))?$/.exec(url.pathname)

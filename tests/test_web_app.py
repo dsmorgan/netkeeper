@@ -39,6 +39,8 @@ API_PATHS = {
     "/api/v1/contacts/{contact_id}/revert-field",
     "/api/v1/contacts/{contact_id}/archive",
     "/api/v1/contacts/{contact_id}/unarchive",
+    "/api/v1/contacts/{contact_id}/confirm",
+    "/api/v1/contacts/{contact_id}/reject",
     "/api/v1/contacts/{contact_id}/merge",
     "/api/v1/contacts/{contact_id}/emails",
     "/api/v1/contacts/{contact_id}/emails/{email_id}",

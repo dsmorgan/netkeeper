@@ -24,18 +24,19 @@ unless something asks for it. The list is cut at the run's visit budget, so a
 pin takes a place *within* the budget, never one on top of it (spec 9.6).
 
 **Who enrichment may visit at all.** A contact that is not merged away, not
-archived, not disconnected, and not marked do-not-contact, with a URN and a
-slug. The URN is the point: it is how :func:`netkeeper.crm.apply.apply_harvest`
-knows the profile a slug led to is the contact's, and every connection a sync
-has seen has one. A contact whose last visit wrote nothing (no profile, a
-profile under another URN, a slug another contact holds, an unreadable shape)
-waits :data:`ENRICH_RETRY_AFTER` before the next, so it cannot head every run,
-and spec 9.8's NotFound streak ("3 across at least 14 days") is spread across
-two weeks rather than spent on three consecutive days. A visit whose harvest
-was applied does not wait (#172): it wrote something, so ``last_enriched_at``
-is as new as ``li_enrich_attempted_at``, and only a fresh ask
-(``enrich_priority``, which the harvest cleared) brings the contact back before
-it goes stale. A pin overrides the tiers and the wait, never the eligibility.
+archived, not disconnected, not marked do-not-contact, and not waiting for
+review (#184), with a URN and a slug. The URN is the point: it is how
+:func:`netkeeper.crm.apply.apply_harvest` knows the profile a slug led to is
+the contact's, and every connection a sync has seen has one. A contact whose
+last visit wrote nothing (no profile, a profile under another URN, a slug
+another contact holds, an unreadable shape) waits :data:`ENRICH_RETRY_AFTER`
+before the next, so it cannot head every run, and spec 9.8's NotFound streak
+("3 across at least 14 days") is spread across two weeks rather than spent on
+three consecutive days. A visit whose harvest was applied does not wait (#172):
+it wrote something, so ``last_enriched_at`` is as new as
+``li_enrich_attempted_at``, and only a fresh ask (``enrich_priority``, which
+the harvest cleared) brings the contact back before it goes stale. A pin
+overrides the tiers and the wait, never the eligibility.
 
 **Pins (spec 9.6).** At most :data:`MAX_PINS`, stored in ``settings_kv`` per
 account. A pin is removed when a run finishes with that contact (harvested or
@@ -117,6 +118,11 @@ def _eligible(user: User) -> Select[tuple[Contact]]:
         Contact.do_not_contact.is_(False),
         Contact.li_urn.is_not(None),
         Contact.li_public_id.is_not(None),
+        # #184: a contact read only off a connections-page card is not visited
+        # until a person confirms it or a sync gives it a URN. The URN rule above
+        # already keeps out every such contact a sync created; this keeps out one
+        # that came by a URN some other way (a merge, an edit) while still unconfirmed.
+        Contact.needs_review_at.is_(None),
     )
 
 

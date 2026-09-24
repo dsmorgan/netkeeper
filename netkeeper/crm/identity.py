@@ -518,6 +518,7 @@ def apply(
     resolution: Resolution,
     *,
     decision: Decision | None = None,
+    snapshot: bool = True,
 ) -> Contact:
     """Write ``incoming`` to the contact ``resolution`` names, or to a new one, and return it.
 
@@ -537,6 +538,11 @@ def apply(
     existing row's ``is_primary`` kept, and a position's ``is_current`` changed
     only when the row says so.
 
+    ``snapshot=False`` skips the ``contact_snapshot`` a job-field change would
+    write: the sync passes it when the values being replaced were only ever read
+    off a card on the connections page (a contact still marked needs review,
+    #184), which is no job history and must not read as a job change.
+
     A :class:`Candidate` needs ``decision``; any other resolution refuses one.
     ``ValueError`` for a missing or misplaced decision, for a contact that is not
     ``user``'s, and for a URN or slug that another contact of ``user`` holds
@@ -550,7 +556,8 @@ def apply(
     match resolution:
         case Matched(contact_id=contact_id):
             _no_decision(decision)
-            return _update(session, user, resolve_survivor(session, user, contact_id), incoming)
+            contact = resolve_survivor(session, user, contact_id)
+            return _update(session, user, contact, incoming, snapshot=snapshot)
         case New():
             _no_decision(decision)
             return _create(session, user, incoming)
@@ -563,7 +570,7 @@ def apply(
                     )
                 case MergeInto(contact_id=contact_id):
                     contact = resolve_survivor(session, user, contact_id)
-                    return _update(session, user, contact, incoming)
+                    return _update(session, user, contact, incoming, snapshot=snapshot)
                 case CreateNew():
                     return _create(session, user, incoming)
                 case _:
@@ -592,7 +599,14 @@ def _create(session: Session, user: User, incoming: IncomingContact) -> Contact:
     return contact
 
 
-def _update(session: Session, user: User, contact: Contact, incoming: IncomingContact) -> Contact:
+def _update(
+    session: Session,
+    user: User,
+    contact: Contact,
+    incoming: IncomingContact,
+    *,
+    snapshot: bool = True,
+) -> Contact:
     provided = incoming.provided_fields()
     # Decided once per field, from the state before any write: the rule reads the
     # live value, and an empty field that a lower-ranked row is free to fill would
@@ -617,7 +631,7 @@ def _update(session: Session, user: User, contact: Contact, incoming: IncomingCo
         if overwrite[name]:
             _record(contact, name, incoming.source)
     _record_synced(contact, incoming)
-    if any(
+    if snapshot and any(
         before[name] not in (None, "") and before[name] != getattr(contact, name)
         for name in JOB_FIELDS
     ):
@@ -921,6 +935,26 @@ def _source_of(contact: Contact, name: str) -> str:
     return contact.field_sources.get(name) or contact.source.value
 
 
+def _take_source(survivor: Contact, loser: Contact, name: str) -> None:
+    """The survivor's record for ``name`` becomes the loser's.
+
+    A loser with no record for the field lends its first source, as ever --
+    except a contact still waiting for review (#184), whose unrecorded fields are
+    a connections-page card's text written at the lowest provenance there is
+    (none: open to every source, spec 10.5). Recording its first source (``sync``)
+    for them on the survivor would promote a card's text to sync rank, and a
+    later archive import could no longer correct it; the survivor's field is
+    left unrecorded instead.
+    """
+    recorded = loser.field_sources.get(name)
+    if recorded is not None:
+        survivor.field_sources[name] = recorded
+    elif loser.needs_review_at is not None:
+        survivor.field_sources.pop(name, None)
+    else:
+        survivor.field_sources[name] = loser.source.value
+
+
 def _merge_children(survivor: Contact, loser: Contact) -> None:
     _move_keyed(survivor.emails, loser.emails, key=lambda row: row.email)
     _keep_one_primary(survivor.emails)
@@ -1129,7 +1163,7 @@ def _merge_scalars(survivor: Contact, loser: Contact) -> None:
         theirs: str | date | None = getattr(loser, name)
         if mine in (None, "") and theirs not in (None, ""):
             setattr(survivor, name, theirs)
-            survivor.field_sources[name] = _source_of(loser, name)
+            _take_source(survivor, loser, name)
     if survivor_default_name:
         # "" means "use first_name" on a stored row (the preferred_name validator).
         survivor.preferred_name = loser.preferred_name if loser_custom_name else ""
@@ -1161,6 +1195,11 @@ def _merge_scalars(survivor: Contact, loser: Contact) -> None:
         survivor.last_contacted_at = loser.last_contacted_at
     if loser.archived_at is None:
         survivor.archived_at = None
+    # #184: a contact read only off a card waits for a person to confirm it. Merging
+    # it with a contact that is not waiting is that confirmation (the person said
+    # which contact it is); merging two that are both waiting confirms neither.
+    if loser.needs_review_at is None:
+        survivor.needs_review_at = None
 
 
 def _merge_synced_values(survivor: Contact, loser: Contact) -> None:

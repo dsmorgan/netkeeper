@@ -9,7 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Facts } from '@/components/facts'
 import { cn } from '@/lib/utils'
 
-import { contactQuery, setArchived } from './api'
+import { contactQuery, reviewContact, setArchived } from './api'
 import { ContactChildren } from './contact-children'
 import { ContactTags } from './contact-tags'
 import { ContactTimeline } from './contact-timeline'
@@ -23,6 +23,7 @@ import {
 import { useContactWrite } from './use-contact-write'
 import { displayName, formatDate, formatDateTime, gmailSearchUrl } from './format'
 import { WriteError } from './merged-notice'
+import { NeedsReviewBadge, NeedsReviewNotice } from './needs-review'
 import { MET_LABELS } from './types'
 
 /** The fields you can type into, in the order the screen shows them. */
@@ -112,6 +113,7 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
         </Badge>
         {contact.do_not_contact && <Badge variant="destructive">Do not contact</Badge>}
         {archived && <Badge variant="outline">Archived</Badge>}
+        {contact.needs_review_at !== null && <NeedsReviewBadge />}
         <div className="ml-auto flex items-center gap-2">
           <ExternalAction
             href={contact.li_url}
@@ -154,6 +156,15 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
           </Link>
           .
         </p>
+      )}
+      {contact.needs_review_at !== null && contact.merged_into_id === null && (
+        <NeedsReviewNotice
+          name={name}
+          archived={archived}
+          pending={archive.isPending}
+          onConfirm={() => archive.mutate(() => reviewContact(contact.id, 'confirm'))}
+          onReject={() => archive.mutate(() => reviewContact(contact.id, 'reject'))}
+        />
       )}
       <WriteError error={archive.error} />
 

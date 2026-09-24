@@ -38,6 +38,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { NeedsReviewNotice } from '@/features/contacts/needs-review'
 
 import { ActionBar } from './action-bar'
 import { CardSteps } from './card-steps'
@@ -395,7 +396,24 @@ export function TriagePage() {
                     onAction={onAction}
                   />
                 </div>
-                <EvidencePanel card={card} />
+                {/* A contact read off a connections-page card (#184): the
+                    answers lead the column beside the card, not the card
+                    itself, so they move nothing above the decision row and are
+                    still on screen at 1280x800. Under lg the column stacks
+                    below the card, which keeps the same promise. */}
+                <div className="flex min-w-0 flex-col gap-4">
+                  {card.contact.needs_review_at !== null &&
+                    card.contact.merged_into_id === null && (
+                      <NeedsReviewNotice
+                        name={`${card.contact.preferred_name} ${card.contact.last_name}`.trim()}
+                        archived={card.contact.archived_at !== null}
+                        pending={false}
+                        onConfirm={() => void queue.review(card.contact.id, 'confirm')}
+                        onReject={() => void queue.review(card.contact.id, 'reject')}
+                      />
+                    )}
+                  <EvidencePanel card={card} />
+                </div>
               </div>
             )}
 

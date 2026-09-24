@@ -125,6 +125,8 @@ class SyncRunReport:
             "needs_review": pages.needs_review,
             "conflicts": pages.conflicts,
             "reconnected": pages.reconnected,
+            "cards_created": pages.cards_created,
+            "confirmed_by_urn": pages.confirmed_by_urn,
             "aging": None
             if self.aging is None
             else {
@@ -341,7 +343,7 @@ async def sync_connections(
                     result.seen_urns,
                     observed_at=clock(),
                     disconnect_after_misses=settings.disconnect_after_misses,
-                    created_by_sync=frozenset(counts.created_contact_ids),
+                    created_by_sync=counts.new_connection_ids,
                     seen_public_ids=result.seen_public_ids,
                     held_for_review=frozenset(counts.review_contact_ids),
                 )
