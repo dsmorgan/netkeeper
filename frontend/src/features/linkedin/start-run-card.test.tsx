@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { Profiler } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { jsonResponse, mockFetch } from '@/test/fetch'
@@ -171,5 +172,78 @@ describe('StartRunCard', () => {
     await queryClient.invalidateQueries({ queryKey: ['linkedin', 'budget'] })
 
     await waitFor(() => expect(maxVisits).toHaveValue(10))
+  })
+
+  it('re-clamps all the way to disabled without a render loop, from a live query update', async () => {
+    let remaining = 45
+    let renders = 0
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    mockFetch(
+      backend({
+        'GET /api/v1/linkedin/budget': () =>
+          jsonResponse({
+            ...BUDGET,
+            profile_visits_today: { ...BUDGET.profile_visits_today, remaining },
+          }),
+      }),
+    )
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Profiler id="start-run-card" onRender={() => (renders += 1)}>
+          <StartRunCard onStarted={vi.fn()} />
+        </Profiler>
+      </QueryClientProvider>,
+    )
+    fireEvent.change(await screen.findByLabelText('Kind'), { target: { value: 'enrich' } })
+    const maxVisits = (await screen.findByLabelText(/max visits/i)) as HTMLInputElement
+    fireEvent.change(maxVisits, { target: { value: '30' } })
+    expect(maxVisits.value).toBe('30')
+    const before = renders
+
+    remaining = 7
+    await act(async () => {
+      await queryClient.invalidateQueries()
+    })
+    await waitFor(() => expect(maxVisits.value).toBe('7'))
+
+    remaining = 0
+    await act(async () => {
+      await queryClient.invalidateQueries()
+    })
+    await waitFor(() => expect(maxVisits.value).toBe(''))
+    expect(maxVisits).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled()
+    // The render-time re-clamp (a `previousRemaining` state compared during
+    // render, not a `useEffect`) reads `remaining` back to the same value it
+    // just set every time it fires -- if it ever set state unconditionally
+    // instead of only on an actual change, React would keep re-rendering
+    // forever rather than settling. A generous ceiling, not an exact count:
+    // this asserts it settles at all, not how many renders getting there took.
+    expect(renders - before).toBeLessThan(20)
+  })
+
+  it('retries after an instant 409, from the same dialog (confirm-dialog guard)', async () => {
+    let attempts = 0
+    const { calls } = renderCard({
+      'POST /api/v1/linkedin/runs': () => {
+        attempts += 1
+        return attempts === 1
+          ? jsonResponse({ detail: 'run 3 is still running' }, 409)
+          : jsonResponse({ run_id: 9, task_id: 't' }, 202)
+      },
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Start run' }))
+    const dialog = await screen.findByRole('alertdialog')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    await within(dialog).findByText(/still running/)
+
+    // The mutation settled (with an error) fast enough in this jsdom test
+    // that `pending` may never have rendered `true` at all — exactly the case
+    // that used to leave `ConfirmDialog`'s same-tick click guard stuck. If it
+    // is stuck, this second click never reaches the backend and the count
+    // below stays at 1.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    await waitFor(() => expect(calls.filter((call) => call.method === 'POST')).toHaveLength(2))
   })
 })

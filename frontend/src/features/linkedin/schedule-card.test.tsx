@@ -123,4 +123,52 @@ describe('ScheduleCard', () => {
     expect(await screen.findByText('Disarmed — nothing runs on its own')).toBeInTheDocument()
     expect(calls.some((call) => call.path === '/api/v1/linkedin/schedule/disarm')).toBe(true)
   })
+
+  it('treats a response with no armed field as disarmed, never as an unknown "Armed" (R-09)', async () => {
+    // `armed` is required by `ScheduleOut`, so this can only happen from a
+    // malformed or partial response -- exactly the case the `?? false`
+    // fallback exists for. It is reachable here, behind `isSuccess`, unlike
+    // the loading and error cases above, which never render this text at
+    // all regardless of the fallback: an incomplete "success" is the one
+    // state where the fallback's own value is what decides what shows.
+    const { jobs, armed_at, scheduler_running } = SCHEDULE_DISARMED
+    renderCard({
+      'GET /api/v1/linkedin/schedule': () => jsonResponse({ jobs, armed_at, scheduler_running }),
+    })
+
+    expect(await screen.findByText('Disarmed — nothing runs on its own')).toBeInTheDocument()
+    expect(screen.queryByText(/^Armed/)).not.toBeInTheDocument()
+  })
+
+  it('arms again after a disarm, even after a mutation that settled before pending ever rendered true (B2)', async () => {
+    const calls: Call[] = []
+    let armed = false
+    renderCard(
+      {
+        'GET /api/v1/linkedin/schedule': () => jsonResponse(armed ? SCHEDULE_ARMED : SCHEDULE_DISARMED),
+        'POST /api/v1/linkedin/schedule/arm': () => {
+          armed = true
+          return jsonResponse(SCHEDULE_ARMED)
+        },
+        'POST /api/v1/linkedin/schedule/disarm': () => {
+          armed = false
+          return jsonResponse(SCHEDULE_DISARMED)
+        },
+      },
+      calls,
+    )
+
+    // The same `ConfirmDialog` instance is reused every time `asking` toggles
+    // -- it is never unmounted between an arm and the next one -- so a stuck
+    // same-tick guard from the first arm would silently drop the second.
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      fireEvent.click(await screen.findByRole('button', { name: 'Arm scheduled runs' }))
+      const dialog = await screen.findByRole('alertdialog')
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Arm scheduled runs' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Disarm' }))
+      await screen.findByRole('button', { name: 'Arm scheduled runs' })
+    }
+
+    expect(calls.filter((call) => call.path.endsWith('/arm'))).toHaveLength(2)
+  })
 })
