@@ -51,7 +51,7 @@ export function BrowserCard() {
         {browser.isSuccess && (
           <>
             <p>Run this in a terminal (again whenever that Chrome is not running):</p>
-            <pre className="overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs">
+            <pre className="rounded-md bg-muted p-3 font-mono text-xs break-all whitespace-pre-wrap">
               {browser.data.launch_command.join('\n')}
             </pre>
             <p className="text-muted-foreground">

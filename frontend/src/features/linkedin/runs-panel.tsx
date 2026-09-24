@@ -99,65 +99,69 @@ export function RunsPanel({
           <p className="text-muted-foreground">No runs yet.</p>
         )}
         {runs.isSuccess && runs.data.items.length > 0 && (
-          <table className="w-full text-left">
-            <thead className="text-muted-foreground">
-              <tr>
-                <th scope="col" className="py-1 pr-3 font-medium">
-                  Kind
-                </th>
-                <th scope="col" className="py-1 pr-3 font-medium">
-                  Status
-                </th>
-                <th scope="col" className="py-1 pr-3 font-medium">
-                  Started / finished
-                </th>
-                <th scope="col" className="py-1 pr-3 font-medium">
-                  Stop reason
-                </th>
-                <th scope="col" className="py-1 font-medium">
-                  Counts
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {runs.data.items.map((item) => (
-                <tr
-                  key={item.id}
-                  className={cn(
-                    'border-t border-border/60',
-                    item.id === selectedRunId && 'bg-muted/60',
-                  )}
-                >
-                  <th scope="row" className="py-2 pr-3 font-normal">
-                    <button
-                      type="button"
-                      className="underline underline-offset-4"
-                      aria-current={item.id === selectedRunId ? 'true' : undefined}
-                      onClick={() => onSelect(item.id)}
-                    >
-                      {RUN_KIND_LABELS[item.kind]}
-                    </button>
+          // Scrolls within the card at a narrow width instead of pushing the whole
+          // page wider than the screen (only a real browser lays this out; jsdom does not).
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-max text-left">
+              <thead className="text-muted-foreground">
+                <tr>
+                  <th scope="col" className="py-1 pr-3 font-medium">
+                    Kind
                   </th>
-                  <td className="py-2 pr-3">
-                    <span
-                      className={cn(
-                        'inline-flex h-5 shrink-0 items-center rounded-4xl px-2 text-xs font-medium',
-                        RUN_STATUS_CLASSES[item.status],
-                      )}
-                    >
-                      {RUN_STATUS_LABELS[item.status]}
-                    </span>
-                  </td>
-                  <td className="py-2 pr-3 text-muted-foreground">
-                    {formatWhen(item.started_at)}
-                    {item.completed_at !== null && ` → ${formatWhen(item.completed_at)}`}
-                  </td>
-                  <td className="py-2 pr-3 text-muted-foreground">{item.stop_reason ?? '—'}</td>
-                  <td className="py-2 text-muted-foreground">{summarizeFields(item.counts)}</td>
+                  <th scope="col" className="py-1 pr-3 font-medium">
+                    Status
+                  </th>
+                  <th scope="col" className="py-1 pr-3 font-medium">
+                    Started / finished
+                  </th>
+                  <th scope="col" className="py-1 pr-3 font-medium">
+                    Stop reason
+                  </th>
+                  <th scope="col" className="py-1 font-medium">
+                    Counts
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {runs.data.items.map((item) => (
+                  <tr
+                    key={item.id}
+                    className={cn(
+                      'border-t border-border/60',
+                      item.id === selectedRunId && 'bg-muted/60',
+                    )}
+                  >
+                    <th scope="row" className="py-2 pr-3 font-normal">
+                      <button
+                        type="button"
+                        className="underline underline-offset-4"
+                        aria-current={item.id === selectedRunId ? 'true' : undefined}
+                        onClick={() => onSelect(item.id)}
+                      >
+                        {RUN_KIND_LABELS[item.kind]}
+                      </button>
+                    </th>
+                    <td className="py-2 pr-3">
+                      <span
+                        className={cn(
+                          'inline-flex h-5 shrink-0 items-center rounded-4xl px-2 text-xs font-medium',
+                          RUN_STATUS_CLASSES[item.status],
+                        )}
+                      >
+                        {RUN_STATUS_LABELS[item.status]}
+                      </span>
+                    </td>
+                    <td className="py-2 pr-3 text-muted-foreground">
+                      {formatWhen(item.started_at)}
+                      {item.completed_at !== null && ` → ${formatWhen(item.completed_at)}`}
+                    </td>
+                    <td className="py-2 pr-3 text-muted-foreground">{item.stop_reason ?? '—'}</td>
+                    <td className="py-2 text-muted-foreground">{summarizeFields(item.counts)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
 
         {runs.isSuccess && runs.data.total > PAGE && (

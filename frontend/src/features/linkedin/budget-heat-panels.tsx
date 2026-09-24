@@ -46,36 +46,41 @@ export function BudgetPanel() {
                 emphasize
               />
             </ol>
-            <table className="w-full text-left">
-              <thead className="text-muted-foreground">
-                <tr>
-                  <th scope="col" className="py-1 pr-3 font-medium">
-                    Action
-                  </th>
-                  <th scope="col" className="py-1 pr-3 font-medium">
-                    Today
-                  </th>
-                  <th scope="col" className="py-1 font-medium">
-                    This week
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {budget.data.budgets.map((row) => (
-                  <tr key={row.action} className="border-t border-border/60">
-                    <th scope="row" className="py-1.5 pr-3 font-normal">
-                      {ACTION_CLASS_LABELS[row.action] ?? row.action}
+            {/* A narrow viewport can't fit this table at its natural width; scrolling it
+                within the card (not jsdom-visible — only a real browser lays out overflow)
+                keeps it from pushing the whole page wider than the screen. */}
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-max text-left">
+                <thead className="text-muted-foreground">
+                  <tr>
+                    <th scope="col" className="py-1 pr-3 font-medium">
+                      Action
                     </th>
-                    <td className="py-1.5 pr-3 tabular-nums">
-                      {row.day.count} / {row.day.limit}
-                    </td>
-                    <td className="py-1.5 tabular-nums">
-                      {row.week === null ? '—' : `${row.week.count} / ${row.week.limit}`}
-                    </td>
+                    <th scope="col" className="py-1 pr-3 font-medium">
+                      Today
+                    </th>
+                    <th scope="col" className="py-1 font-medium">
+                      This week
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {budget.data.budgets.map((row) => (
+                    <tr key={row.action} className="border-t border-border/60">
+                      <th scope="row" className="py-1.5 pr-3 font-normal">
+                        {ACTION_CLASS_LABELS[row.action] ?? row.action}
+                      </th>
+                      <td className="py-1.5 pr-3 tabular-nums">
+                        {row.day.count} / {row.day.limit}
+                      </td>
+                      <td className="py-1.5 tabular-nums">
+                        {row.week === null ? '—' : `${row.week.count} / ${row.week.limit}`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </>
         )}
       </CardContent>
