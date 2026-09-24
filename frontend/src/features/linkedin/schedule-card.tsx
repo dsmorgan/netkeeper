@@ -98,7 +98,7 @@ export function ScheduleCard() {
         onOpenChange={setAsking}
         title="Arm scheduled runs?"
         confirmVariant="default"
-        confirmLabel={arm.isPending ? 'Arming…' : 'Arm scheduled runs'}
+        confirmLabel="Arm scheduled runs"
         pending={arm.isPending}
         error={arm.isError ? message(arm.error) : null}
         onConfirm={() => arm.mutate()}

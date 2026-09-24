@@ -126,7 +126,19 @@ describe('one import run', () => {
     expect(dialog.getByText(/This deletes the 2 contacts the import created/)).toBeVisible()
     expect(calls.some((call) => call.method === 'POST')).toBe(false)
 
-    fireEvent.click(dialog.getByRole('button', { name: 'Delete 2 contacts and restore the rest' }))
+    // This caller never passes ConfirmDialog a confirmVariant (R-08): a
+    // rollback is genuinely destructive, so it must render that way by the
+    // component's own default, not by this caller opting in. `bg-destructive/10`
+    // is the destructive variant's own class (button.tsx) — not the generic
+    // `aria-invalid:*-destructive*` classes every button carries regardless
+    // of variant, and not `default`'s `bg-primary`.
+    const confirmButton = dialog.getByRole('button', {
+      name: 'Delete 2 contacts and restore the rest',
+    })
+    expect(confirmButton.className).toContain('bg-destructive/10')
+    expect(confirmButton.className).not.toContain('bg-primary')
+
+    fireEvent.click(confirmButton)
 
     expect(await screen.findByText('Rolled back')).toBeVisible()
     expect(within(screen.getByRole('main')).getByRole('status')).toHaveTextContent(
