@@ -200,17 +200,25 @@ CONTACT_INFO_OVERLAY_PATH_TEMPLATE: Final = "/in/{public_id}/overlay/contact-inf
 #: person shared through this overlay. A real profile page can render more
 #: than one element with this role at once (a messaging overlay is a dialog
 #: too), so this selector alone only finds *candidates* -- see
-#: :data:`CONTACT_INFO_HEADING_PREFIX` and :func:`_contact_info_expression`
-#: for how exactly one is chosen (#174 item 1). Authored 2026-09-23.
+#: :data:`CONTACT_INFO_HEADING_TEXT` and :func:`_contact_info_expression`
+#: for how exactly one is chosen (#174 item 1, revised by its own review --
+#: **both** a heading and a link-back are required, not either). Authored
+#: 2026-09-23.
 CONTACT_INFO_DIALOG_SELECTOR: Final = '[role="dialog"]'
 
-#: The overlay's own heading text, matched as a case-insensitive prefix --
-#: the other half of #174 item 1's dialog-qualification check, alongside a
-#: link back to the public id the read navigated to (see
-#: :func:`_contact_info_expression`). LinkedIn's own title for this overlay,
-#: the same "ordinary HTML convention" a heading element is (see the module
-#: docstring). Authored 2026-09-23.
-CONTACT_INFO_HEADING_PREFIX: Final = "contact info"
+#: The overlay's own heading text, matched *exactly* (after trimming and
+#: collapsing internal whitespace, case-insensitively) -- **required**, not
+#: merely one of two alternatives, for a dialog to qualify as the
+#: contact-info overlay (#174 item 1, #176 review H1/L1). A `startsWith`
+#: prefix match let "Contact info shared with advertisers" -- a real,
+#: differently-scoped LinkedIn dialog -- through; an exact match refuses it
+#: instead, and a localized heading ("Kontaktinfo") refuses too rather than
+#: guess a translation, which fails safe (flagged for #149: a real capture
+#: would tell us whether to add known translations here, never to guess
+#: one). LinkedIn's own title for this overlay, the same "ordinary HTML
+#: convention" a heading element is (see the module docstring). Authored
+#: 2026-09-23.
+CONTACT_INFO_HEADING_TEXT: Final = "contact info"
 
 #: Url shorteners excluded from "websites" (#173 review, F7): LinkedIn's own
 #: (``lnkd.in``) and the handful of others common enough that a link through
@@ -223,14 +231,14 @@ LINK_SHORTENER_HOSTS: Final[frozenset[str]] = frozenset(
 )
 
 #: X/Twitter path segments that are the site's own reserved namespace, never a
-#: person's handle (#174 item 2). Compared case-insensitively. ``i`` was the
-#: only one excluded before this item (a tweet permalink's own first segment,
-#: ``/i/status/...``); ``intent``, ``share``, ``home``, ``search``,
-#: ``hashtag``, ``explore``, ``settings``, ``messages``, ``notifications``,
-#: ``login``, ``signup``, ``compose``, ``tos``, and ``privacy`` are the rest
-#: of a reasonable, named list -- not exhaustive, the same trade-off
+#: person's handle (#174 item 2, extended by #176 review L7). Compared
+#: case-insensitively. ``i`` was the only one excluded before #174 (a tweet
+#: permalink's own first segment, ``/i/status/...``); the rest is a
+#: reasonable, named list -- not exhaustive, the same trade-off
 #: :data:`LINK_SHORTENER_HOSTS` makes: a new reserved path showing up is a
-#: missed exclusion, not a wrong handle. Authored 2026-09-23.
+#: missed exclusion, not a wrong handle. :data:`_X_HANDLE_PATTERN` is the
+#: other half of the guard, for a segment that is not a *real X handle* by
+#: shape even though it is not on this list either. Authored 2026-09-23.
 RESERVED_X_PATHS: Final[frozenset[str]] = frozenset(
     {
         "i",
@@ -248,8 +256,30 @@ RESERVED_X_PATHS: Final[frozenset[str]] = frozenset(
         "compose",
         "tos",
         "privacy",
+        "account",
+        "about",
+        "bookmarks",
+        "lists",
+        "logout",
+        "jobs",
+        "communities",
+        "download",
+        "oauth",
+        "en",
+        "premium",
+        "help",
+        "terms",
     }
 )
+
+#: A real X/Twitter handle's own shape (1-15 chars, letters/digits/underscore
+#: -- X's documented username rule), checked in addition to
+#: :data:`RESERVED_X_PATHS` (#176 review L7): a first path segment that is
+#: not on the denylist can still fail to look like a handle at all (a purely
+#: numeric id from a misread url, a segment with a dot or a space), and
+#: guessing it is one anyway is exactly the mistake this module's own
+#: fallback exists not to make.
+_X_HANDLE_PATTERN: Final = r"^[A-Za-z0-9_]{1,15}$"
 
 DOM_CONNECTIONS_ENDPOINT: Final = "dom/connections-list"
 DOM_CONTACT_INFO_ENDPOINT: Final = "dom/contact-info-overlay"
@@ -268,8 +298,15 @@ MAX_SETTLE_ATTEMPTS: Final = 3
 #: rendered yet will not appear because of another scroll -- there is nothing
 #: new to scroll to -- so this is a plain paced wait, not another
 #: :func:`~netkeeper.linkedin.pacing.scroll_like_a_person` cycle. Bounded to
-#: exactly one retry: a container still missing after this pause is the same
-#: structural break F5(b) already refuses.
+#: at most one retry *per* :meth:`DomConnectionsSource.fetch_page` *call*
+#: (#176 review L3), not one per settle attempt within it: a page whose
+#: container keeps disappearing and reappearing across attempts could
+#: otherwise spend up to :data:`MAX_SETTLE_ATTEMPTS` pauses in one call. A
+#: container still missing after the one retry this call gets is the same
+#: structural break F5(b) already refuses; the origin and classify checks
+#: run again after the pause too (#176 review M8/M9), the same as after
+#: every scroll (#173 review R9) -- the tab is as free to navigate during a
+#: plain wait as during one.
 CONTAINER_RETRY_PAUSE_S: Final = 1.0
 
 #: What the in-page scripts throw when ``location.origin`` does not match the
@@ -415,8 +452,15 @@ def _cards_expression(origin: str) -> str:
     is what turns that into pages. A card whose ``publicId`` fails to decode
     (a malformed percent-encoding) is skipped rather than failing the whole
     read (#173 review, L2). ``endOfList`` reports whether
-    :data:`LIST_END_SELECTOR` is present anywhere on the page -- read every
-    call, not only once growth stops, so :meth:`DomConnectionsSource.fetch_page`
+    :data:`LIST_END_SELECTOR` is present inside the container's own parent
+    element -- covering both a marker rendered as a descendant of the
+    container and one rendered as its sibling right after it, which is where
+    an "end of list" message realistically lands (not literally inside the
+    ``<ul>`` itself, alongside the cards) -- rather than searched for
+    anywhere on the whole page (#176 review L5): a page-wide search could
+    match a marker left over in an unrelated part of the DOM, or one that
+    belongs to a different, unrelated list entirely. Read every call, not
+    only once growth stops, so :meth:`DomConnectionsSource.fetch_page`
     always has an up to date answer for the exhaustion case it uses this for
     (#174 item 5). Constants are embedded as JSON literals, the same
     technique ``fetch.py``'s ``_fetch_expression`` uses and for the same
@@ -446,7 +490,8 @@ def _cards_expression(origin: str) -> str:
         "  const headline = headlineEl ? headlineEl.textContent.trim() : null;"
         "  out.push({publicId: publicId, name: name, headline: headline});"
         "}"
-        f"const endMarker = document.querySelector({json.dumps(LIST_END_SELECTOR)});"
+        "const endScope = container.parentElement || container;"
+        f"const endMarker = endScope.querySelector({json.dumps(LIST_END_SELECTOR)});"
         "return {containerPresent: true, cards: out, endOfList: !!endMarker};"
         "}"
     )
@@ -655,6 +700,7 @@ class DomConnectionsSource:
             return SourcePage(outcome=blocked, final_url=page.url)
 
         end_of_list = False
+        container_retry_used = False
         for _attempt in range(MAX_SETTLE_ATTEMPTS):
             if len(self._cards) >= start + count:
                 break
@@ -683,10 +729,21 @@ class DomConnectionsSource:
                 # place, or a shape change -- is never "zero connections". But a
                 # slow initial render can still be missing it on the very first
                 # read, and scrolling again will not make an element that has
-                # not rendered yet appear -- so this gets one paced, bounded
-                # retry of the check itself before treating it as the
-                # structural break it usually is (#174 item 6).
+                # not rendered yet appear -- so this gets one paced retry of the
+                # check itself before treating it as the structural break it
+                # usually is (#174 item 6) -- capped at one retry for the whole
+                # call, not one per settle attempt (#176 review L3): without the
+                # cap, a page that kept losing and regaining its container could
+                # spend up to MAX_SETTLE_ATTEMPTS pauses in a single fetch_page.
+                if container_retry_used:
+                    return SourcePage(outcome=Outcome.ROUTE_CHANGED, final_url=page.url)
+                container_retry_used = True
                 await self._pause(CONTAINER_RETRY_PAUSE_S)
+                # Re-checked after the pause, not just before it (#176 review
+                # L3/M8/M9): the tab is as free to navigate during a plain wait
+                # as during a scroll (R9's same reasoning, #173 review) -- a
+                # login wall landing mid-pause must classify as LOGGED_OUT here,
+                # not fall through and read as a structural ROUTE_CHANGED.
                 _require_page_on_origin(page.url, self._origin)
                 blocked = _classify_page_url(page.url)
                 if blocked is not None:
@@ -705,6 +762,13 @@ class DomConnectionsSource:
             # bounds how many extra scrolls one page of work may spend waiting
             # for a slow render before the `for`/`else` below gives up.
             end_of_list = bool(raw["endOfList"])
+            if len(self._cards) >= start + count:
+                # #176 review L4: checked here too, not only at the top of the
+                # *next* iteration -- growth that reaches the target on the
+                # last permitted attempt has no next iteration to catch it at
+                # the top, and fell through to the exhaustion branch below as
+                # if it had never reached anything.
+                break
         else:
             # F5(c): every attempt spent without ever reaching start + count.
             # #174 item 5: when LinkedIn's own end-of-list marker is present,
@@ -779,22 +843,44 @@ def _contact_info_expression(origin: str, public_id: str) -> str:
     Checks ``location.origin`` first, the same as :func:`_cards_expression`
     and for the same reason (#173 review, L3). Then finds every
     :data:`CONTACT_INFO_DIALOG_SELECTOR` candidate on the page and keeps only
-    the ones that *qualify* as the contact-info overlay (#174 item 1): a
-    dialog carrying a heading whose text starts with
-    :data:`CONTACT_INFO_HEADING_PREFIX`, or a link back to ``/in/<public_id>``
-    for the ``public_id`` this call navigated to and already knows -- a real
-    profile page can render more than one ``role="dialog"`` element at once
-    (a messaging overlay is a dialog too), and picking blindly among them
-    risks reading whatever unrelated dialog happens to render first. Exactly
-    one qualifying dialog answers ``{dialogPresent: true, ...}``; zero or more
-    than one answers ``{dialogPresent: false}`` without reading anything else
-    (#173 review, F5(d); #174 item 1) -- an overlay that never rendered its
-    dialog (an error page, a wall), and an ambiguous page with more than one
-    candidate, are both refused the same way a caller cannot trust. Every
-    query below is scoped to that one dialog element (#173 review, F7): the
-    surrounding profile page can carry its own ``mailto:`` link (a bio
-    mentioning an email) or website that has nothing to do with what this
-    overlay actually shows.
+    the ones that *qualify* as the contact-info overlay (#174 item 1, revised
+    by the #176 review's H1): a dialog carrying **both** a heading whose text
+    exactly matches :data:`CONTACT_INFO_HEADING_TEXT` (trimmed, internal
+    whitespace collapsed, case-insensitive) **and** a link back to
+    ``/in/<public_id>`` for the ``public_id`` this call navigated to and
+    already knows. **Both, not either** -- the heading alone let a promo
+    dialog ("Contact info shared with advertisers") through, and the
+    link-back alone let a docked chat with the *same* person qualify: a
+    chat's header commonly links to that person's own profile too, so on a
+    page with only a chat open (no contact-info overlay at all) the old
+    "either" rule handed back the chat's own email and links (#176 review
+    H1, the reviewer's probe case A). A real profile page can render more
+    than one ``role="dialog"`` element at once (a messaging overlay is a
+    dialog too), and picking blindly among them risks reading whatever
+    unrelated dialog happens to render first. The link-back check itself
+    only trusts a link whose own origin is this page's origin or
+    ``linkedin.com`` (#176 review M2) -- ``https://medium.example/in/<id>``
+    must not qualify a dialog just because its path happens to contain
+    ``/in/<id>`` -- and compares the extracted id case-insensitively, after
+    percent-decoding, against ``public_id``, also lower-cased on the Python
+    side before it is even embedded (#176 review M13: an upper-case or
+    percent-encoded id must still match the same way :func:`_cards_expression`
+    already handles one). Exactly one qualifying dialog answers
+    ``{dialogPresent: true, ...}``; zero or more than one answers
+    ``{dialogPresent: false}`` without reading anything else (#173 review,
+    F5(d); #174 item 1) -- an overlay that never rendered its dialog (an
+    error page, a wall), and an ambiguous page with more than one candidate,
+    are both refused the same way a caller cannot trust. A heading that would
+    only match after translation (a localized "Kontaktinfo") also refuses
+    rather than guess -- fails safe, flagged for #149. Nested dialogs (an
+    outer modal wrapper around an inner one, both containing the same
+    heading and link-back as descendants) also refuse as ambiguous, for the
+    same "more than one candidate" reason -- also flagged for #149, since a
+    real capture would show whether LinkedIn's own markup ever nests this way.
+    Every content query below is scoped to that one dialog element (#173
+    review, F7): the surrounding profile page can carry its own ``mailto:``
+    link (a bio mentioning an email) or website that has nothing to do with
+    what this overlay actually shows.
 
     Built on ``mailto:`` and ``tel:`` links (a standards-based convention,
     not a LinkedIn-specific one -- see the module docstring) rather than a
@@ -805,31 +891,42 @@ def _contact_info_expression(origin: str, public_id: str) -> str:
     of named url shorteners (:data:`LINK_SHORTENER_HOSTS`) are never a
     "website the person shared" (#173 review, F7). A Twitter/X handle is the
     *first* path segment, not the last -- ``.../i/status/12345`` is a tweet
-    permalink, not a profile -- and that first segment is checked against
-    :data:`RESERVED_X_PATHS`, X's own reserved namespace (``i``, ``intent``,
-    ``share``, and the rest), rejected rather than kept as if any of them
-    were a handle (#173 review, F7; #174 item 2).
+    permalink, not a profile -- and that first segment must both miss
+    :data:`RESERVED_X_PATHS`, X's own reserved namespace, *and* look like a
+    real handle by shape (:data:`_X_HANDLE_PATTERN`, #176 review L7): a
+    denylist alone only excludes what it happens to name, and a segment that
+    is not a plausible handle at all (too long, punctuation, whitespace) is
+    rejected on shape regardless of whether this module's own list has caught
+    up to it (#173 review, F7; #174 item 2).
     """
     return (
         "() => {"
         f"if (location.origin !== {json.dumps(origin)}) "
         f"{{ throw new Error({json.dumps(_ORIGIN_MISMATCH_MARKER)}); }}"
         f"const wantId = {json.dumps(public_id.strip().lower())};"
-        f"const headingPrefix = {json.dumps(CONTACT_INFO_HEADING_PREFIX)};"
-        "function extractPublicId(href) {"
-        "  const m = (href || '').match(/\\/in\\/([^/?#]+)/);"
+        f"const headingExact = {json.dumps(CONTACT_INFO_HEADING_TEXT)};"
+        f"const pageOrigin = {json.dumps(origin)};"
+        "function normalizeText(text) {"
+        "  return (text || '').replace(/\\s+/g, ' ').trim().toLowerCase();"
+        "}"
+        "function linkedProfileId(href) {"
+        "  let url;"
+        "  try { url = new URL(href || '', location.href); } catch (e) { return null; }"
+        "  const host = url.hostname.replace(/^www\\./, '').toLowerCase();"
+        "  const sameOrigin = url.origin === pageOrigin;"
+        "  const isLinkedin = host === 'linkedin.com' || host.endsWith('.linkedin.com');"
+        "  if (!sameOrigin && !isLinkedin) { return null; }"
+        "  const m = url.pathname.match(/^\\/in\\/([^/?#]+)/);"
         "  if (!m) { return null; }"
         "  try { return decodeURIComponent(m[1]); } catch (e) { return null; }"
         "}"
         "function isContactInfoDialog(el) {"
         "  const headings = Array.from(el.querySelectorAll('h1,h2,h3,h4,h5,h6'));"
-        "  const hasHeading = headings.some("
-        "    h => (h.textContent || '').trim().toLowerCase().startsWith(headingPrefix)"
-        "  );"
-        "  if (hasHeading) { return true; }"
+        "  const hasHeading = headings.some(h => normalizeText(h.textContent) === headingExact);"
+        "  if (!hasHeading) { return false; }"
         "  const links = Array.from(el.querySelectorAll('a[href*=\"/in/\"]'));"
         "  return links.some(a => {"
-        "    const id = extractPublicId(a.getAttribute('href'));"
+        "    const id = linkedProfileId(a.getAttribute('href'));"
         "    return id !== null && id.toLowerCase() === wantId;"
         "  });"
         "}"
@@ -845,6 +942,7 @@ def _contact_info_expression(origin: str, public_id: str) -> str:
         "const twitterHandles = [];"
         f"const shorteners = new Set({json.dumps(sorted(LINK_SHORTENER_HOSTS))});"
         f"const reservedXPaths = new Set({json.dumps(sorted(RESERVED_X_PATHS))});"
+        f"const handlePattern = new RegExp({json.dumps(_X_HANDLE_PATTERN)});"
         "for (const a of links) {"
         "  let url;"
         "  try { url = new URL(a.href); } catch (e) { continue; }"
@@ -853,7 +951,11 @@ def _contact_info_expression(origin: str, public_id: str) -> str:
         "  if (host === 'twitter.com' || host === 'x.com') {"
         "    const segments = url.pathname.split('/').filter(Boolean);"
         "    const first = segments[0];"
-        "    if (first && !reservedXPaths.has(first.toLowerCase())) { twitterHandles.push(first); }"
+        "    if ("
+        "      first && !reservedXPaths.has(first.toLowerCase()) && handlePattern.test(first)"
+        "    ) {"
+        "      twitterHandles.push(first);"
+        "    }"
         "    continue;"
         "  }"
         "  if (shorteners.has(host)) { continue; }"
@@ -927,12 +1029,16 @@ class DomContactInfoSource:
     That is a deliberate scope boundary, not an oversight -- flagged here for
     whoever wires this in.
 
-    **Chooses among possibly several dialogs on the page (#174 item 1).** A
-    real profile page can render more than one ``role="dialog"`` element at
-    once -- a messaging overlay is a dialog too -- so this reads only the one
-    dialog that carries a contact-info marker (a heading titled "Contact
-    info", or a link back to the ``public_id`` this call navigated to), and
-    refuses as :attr:`~netkeeper.linkedin.classify.Outcome.ROUTE_CHANGED`
+    **Chooses among possibly several dialogs on the page (#174 item 1,
+    revised by the #176 review's H1).** A real profile page can render more
+    than one ``role="dialog"`` element at once -- a messaging overlay is a
+    dialog too -- so this reads only the one dialog that carries **both** a
+    heading titled "Contact info" **and** a link back to the ``public_id``
+    this call navigated to; the link-back alone used to be enough, which let
+    a docked chat with the same person qualify (its header commonly links to
+    that person's profile too), returning the chat's own email and links
+    instead of refusing when no contact-info overlay was actually open.
+    Refuses as :attr:`~netkeeper.linkedin.classify.Outcome.ROUTE_CHANGED`
     when zero or more than one dialog qualifies: see
     :func:`_contact_info_expression`.
 

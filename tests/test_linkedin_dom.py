@@ -34,6 +34,7 @@ from netkeeper.linkedin.contact_info import ContactInfoResult
 from netkeeper.linkedin.dom import (
     CONNECTIONS_LIST_PATH,
     CONTACT_INFO_OVERLAY_PATH_TEMPLATE,
+    CONTAINER_RETRY_PAUSE_S,
     LINKEDIN_ORIGIN,
     MAX_SETTLE_ATTEMPTS,
     DomConnectionsSource,
@@ -337,9 +338,37 @@ async def test_the_end_of_list_marker_does_not_short_circuit_normal_growth() -> 
     assert [c.public_id for c in result.page.connections] == ["a", "b"]
 
 
-async def test_reaching_the_target_on_the_final_attempt_still_succeeds() -> None:
+async def test_end_of_list_reflects_only_the_latest_read_not_a_stale_earlier_one() -> None:
+    """#176 review M6: end_of_list must be read fresh on every settle attempt,
+    not stick once true. A marker seen on an early attempt that is genuinely
+    gone by a later one must not let a real, later stall be misread as a
+    clean end -- the exhaustion branch has to trust only the *last* read's
+    answer."""
+    context = SequencedContext(
+        [
+            read([card("a", "A One")], end_of_list=True),  # attempt 0: marker up, but short
+            read([card("a", "A One")], end_of_list=False),  # attempt 1: no growth, marker gone
+            read([card("a", "A One")], end_of_list=False),  # attempt 2: still gone, still short
+        ]
+    )
+    async with run_with(context) as run:
+        source = DomConnectionsSource(run, origin=ORIGIN, sleep=_fast_sleep)
+        result = await source.fetch_page(start=0, count=5)
+    # The latest read said no marker -- a real stall, refused, whatever an
+    # earlier attempt's marker said.
+    assert result.outcome is Outcome.ROUTE_CHANGED
+    assert result.page is None
+
+
+async def test_reaching_the_target_partway_through_a_later_attempt_still_succeeds() -> None:
     """The exhaustion refusal only fires when the loop never breaks -- growth that
-    lands exactly on the last attempt is still a confirmed, successful page."""
+    lands on a *later* attempt (not the very first) is still a confirmed,
+    successful page, caught by the top-of-loop check on the attempt after it
+    grew. (Renamed from "...on_the_final_attempt..." -- with
+    MAX_SETTLE_ATTEMPTS=3 this reaches the target during attempt 1 of 0-2 and
+    is caught at the top of attempt 2, which is not actually the *last*
+    attempt reaching it; see the test below for that literal edge case,
+    #176 review L4.)"""
     context = SequencedContext(
         [read([card("a", "A One")]), read([card("a", "A One"), card("b", "B Two")])]
     )
@@ -349,6 +378,36 @@ async def test_reaching_the_target_on_the_final_attempt_still_succeeds() -> None
     assert result.outcome is Outcome.OK
     assert result.page is not None
     assert [c.public_id for c in result.page.connections] == ["a", "b"]
+
+
+async def test_reaching_the_target_on_literally_the_final_settle_attempt_still_succeeds() -> None:
+    """#176 review L4: growth that reaches the target during the *last*
+    settle attempt (index MAX_SETTLE_ATTEMPTS - 1, with no next iteration
+    whose top-of-loop check could ever catch it) must still succeed. Before
+    this fix, the target-reached check ran only at the top of each
+    iteration, so a page whose growth simply took the entire settle budget
+    to catch up fell through to the exhaustion branch on its very last read,
+    even though it had genuinely reached what was asked for -- exactly the
+    kind of "genuinely fine" answer F5(c)'s refusal exists not to give,
+    but for the opposite reason (a real success misread as a stall)."""
+    assert MAX_SETTLE_ATTEMPTS == 3, "this test scripts exactly 3 reads for the 3 attempts"
+    context = SequencedContext(
+        [
+            read([card("a", "A One")]),  # attempt 0: short
+            read([card("a", "A One")]),  # attempt 1: no growth, still short
+            read(  # attempt 2 (the last one): reaches the target right here
+                [card("a", "A One"), card("b", "B Two"), card("c", "C Three")]
+            ),
+        ]
+    )
+    async with run_with(context) as run:
+        source = DomConnectionsSource(run, origin=ORIGIN, sleep=_fast_sleep)
+        result = await source.fetch_page(start=0, count=3)
+    assert result.outcome is Outcome.OK
+    assert result.page is not None
+    assert [c.public_id for c in result.page.connections] == ["a", "b", "c"]
+    # All 3 scripted reads were used and none were repeated/refused.
+    assert len(context.pages[0].evaluate_calls) == 3
 
 
 async def test_a_missing_list_container_still_missing_after_one_retry_is_route_changed() -> None:
@@ -387,6 +446,97 @@ async def test_a_missing_list_container_that_appears_on_retry_succeeds() -> None
     assert result.page is not None
     assert [c.public_id for c in result.page.connections] == ["a"]
     assert len(context.pages[0].evaluate_calls) == 2
+
+
+def test_container_retry_pause_is_pinned() -> None:
+    """#176 review M14: a safety-relevant constant gets one test pinning its
+    literal value (CLAUDE.md), not a self-referential ``== module.CONST`` --
+    a mutation to e.g. 0.0 would otherwise pass every other test here, since
+    none of them check the pause's actual duration, only that a pause of
+    *some* kind happened (see the sibling test below)."""
+    assert CONTAINER_RETRY_PAUSE_S == 1.0
+
+
+async def test_the_container_retry_pause_actually_waits() -> None:
+    """#176 review M7: proves the pause itself really happens, with the
+    documented duration -- a mutation that deletes the ``await
+    self._pause(...)`` call entirely still passes the other retry tests
+    (same 2 evaluate calls, same outcome) unless something pins the wait."""
+    waited: list[float] = []
+
+    async def spy_sleep(seconds: float) -> None:
+        waited.append(seconds)
+
+    context = SequencedContext([read([], container=False), read([card("a", "A One")])])
+    async with run_with(context) as run:
+        source = DomConnectionsSource(run, origin=ORIGIN, sleep=spy_sleep)
+        await source.fetch_page(start=0, count=1)
+    assert CONTAINER_RETRY_PAUSE_S in waited
+
+
+async def test_a_url_change_during_the_container_retry_pause_is_caught_by_origin_recheck() -> None:
+    """#176 review L3/M8: the origin re-check must run again after the
+    container retry's pause, not just once before it -- a tab is as free to
+    navigate during a plain wait as during a scroll (#173 review R9's same
+    reasoning). The custom sleep below only acts when its duration matches
+    the retry's own pause, so it never touches BrowserRun.scroll's unrelated
+    per-wheel waits."""
+    context = SequencedContext([read([], container=False)])
+
+    async def sleep_that_navigates_away(seconds: float) -> None:
+        if seconds == CONTAINER_RETRY_PAUSE_S:
+            page = context.pages[0]
+            assert isinstance(page, SequencedPage)
+            page._url = f"{OTHER_ORIGIN}{CONNECTIONS_LIST_PATH}"
+
+    async with run_with(context) as run:
+        source = DomConnectionsSource(run, origin=ORIGIN, sleep=sleep_that_navigates_away)
+        with pytest.raises(DomFetchError, match="not on"):
+            await source.fetch_page(start=0, count=3)
+
+
+async def test_a_login_wall_reached_during_the_container_retry_pause_is_classified() -> None:
+    """#176 review L3/M9: the classify check must run again after the pause
+    too -- a session kicked to a login wall *during* the wait must read as
+    LOGGED_OUT, not fall through and read as a structural ROUTE_CHANGED the
+    way a mutation that skips this re-check would produce."""
+    context = SequencedContext([read([], container=False)])
+
+    async def sleep_that_hits_a_login_wall(seconds: float) -> None:
+        if seconds == CONTAINER_RETRY_PAUSE_S:
+            page = context.pages[0]
+            assert isinstance(page, SequencedPage)
+            page._url = f"{ORIGIN}/uas/login?session_redirect=x"
+
+    async with run_with(context) as run:
+        source = DomConnectionsSource(run, origin=ORIGIN, sleep=sleep_that_hits_a_login_wall)
+        result = await source.fetch_page(start=0, count=3)
+    assert result.outcome is Outcome.LOGGED_OUT
+    assert result.page is None
+
+
+async def test_the_container_retry_is_capped_at_one_per_call() -> None:
+    """#176 review L3: a single ``fetch_page`` call may spend at most one
+    container retry total, not one per settle attempt -- the reviewer's own
+    probe found the uncapped version could pause up to MAX_SETTLE_ATTEMPTS
+    times in a single call. Missing again on a *later* attempt, after the
+    one retry this call gets was already spent, refuses at once instead of
+    pausing again."""
+    context = SequencedContext(
+        [
+            read([], container=False),  # attempt 0: missing
+            read([card("a", "A One")]),  # attempt 0's one retry: present, 1 card
+            read([], container=False),  # attempt 1: missing again -- no more retries left
+        ]
+    )
+    async with run_with(context) as run:
+        source = DomConnectionsSource(run, origin=ORIGIN, sleep=_fast_sleep)
+        result = await source.fetch_page(start=0, count=5)
+    assert result.outcome is Outcome.ROUTE_CHANGED
+    assert result.page is None
+    # attempt 0's initial read + its one retry, then attempt 1's single read
+    # (refused at once, no second retry) -- 3 total, not 4.
+    assert len(context.pages[0].evaluate_calls) == 3
 
 
 async def test_a_login_wall_is_classified_not_parsed_as_an_empty_list() -> None:
