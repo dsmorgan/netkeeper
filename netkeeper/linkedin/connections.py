@@ -75,7 +75,7 @@ from __future__ import annotations
 import enum
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Final, Protocol
 
@@ -194,6 +194,11 @@ class SyncResult:
     :attr:`StopReason.RESPONSE` (the core raises heat or the session flag from
     them), and are ``None`` otherwise. ``total`` is the last page's reported
     total and ``max_total`` the largest any page reported (0 before any page).
+    ``source_switched`` is true when :class:`FallbackConnectionsSource` ever
+    fell back to its secondary source during this run (folded from
+    :attr:`SourcePage.switched`, spec 9.3/P2-08's #173 review, F5(a)) --
+    :attr:`complete` refuses outright once it is true, regardless of what the
+    totals below would otherwise allow.
     """
 
     mode: SyncMode
@@ -206,19 +211,26 @@ class SyncResult:
     connections: int = 0
     max_total: int = 0
     seen_public_ids: frozenset[str] = frozenset()
+    source_switched: bool = False
 
     @property
     def complete(self) -> bool:
         """A full sync that read the whole list: the only run that may age anyone (spec 9.8).
 
-        Ended at the end of the list, the list claimed to hold someone, and the run saw
-        at least as many people as the largest total any page claimed.
+        Ended at the end of the list, the list claimed to hold someone, the run saw
+        at least as many people as the largest total any page claimed, and no page
+        of this run ever came from a source that had fallen back (``source_switched``) --
+        the simple invariant #173's review asks for, on top of (not instead of) the
+        totals check: once DOM has ever answered for this run, nothing it reported
+        can be trusted enough to call the run complete, whatever the totals math
+        alone would say.
         """
         return (
             self.mode is SyncMode.FULL
             and self.reason is StopReason.END_OF_LIST
             and self.max_total > 0
             and len(self.seen_urns) >= self.max_total
+            and not self.source_switched
         )
 
 
@@ -231,11 +243,16 @@ class SourcePage:
 
     ``page`` is ``None`` for every outcome but ``Ok``, and for an ``Ok``
     response whose body did not parse (then ``outcome`` is ``RouteChanged``).
+    ``switched`` is true when the source that answered this call had already
+    fallen back from its primary to a secondary source (:class:`FallbackConnectionsSource`
+    sets it; a bare source never does, so it defaults false). :func:`run_connections_sync`
+    folds it into :class:`SyncResult.source_switched` (#173 review, F5(a)).
     """
 
     outcome: Outcome
     final_url: str
     page: ConnectionsPageResult | None = None
+    switched: bool = False
 
 
 class ConnectionsSource(Protocol):
@@ -328,9 +345,27 @@ class FallbackConnectionsSource:
         """The endpoint currently answering: ``fallback``'s once switched, else ``primary``'s."""
         return self.fallback.endpoint if self._switched else self.primary.endpoint
 
+    @property
+    def switched(self) -> bool:
+        """Whether this instance has ever fallen back to ``fallback``.
+
+        One-way and sticky for this instance's life (see the class docstring):
+        never ``True`` before the first ``RouteChanged``, never ``False`` again
+        after it. :func:`run_connections_sync` reads :attr:`SourcePage.switched`
+        (set from this on every fallback-answered page) into
+        :class:`SyncResult.source_switched`, which :attr:`SyncResult.complete`
+        refuses outright once true (#173 review, F5(a)).
+        """
+        return self._switched
+
     async def fetch_page(self, *, start: int, count: int) -> SourcePage:
         if not self._switched:
             answer = await self.primary.fetch_page(start=start, count=count)
+            # Only RouteChanged switches -- never a checkpoint, a throttle, or a
+            # logged-out wall (#173 review, R5): those stop the run through the
+            # ordinary non-Ok path (spec 9.7) exactly as they would with no
+            # fallback at all, because none of them mean "this endpoint's shape
+            # changed", the one thing switching to DOM is for.
             if answer.outcome is not Outcome.ROUTE_CHANGED:
                 return answer
             log.warning(
@@ -339,7 +374,8 @@ class FallbackConnectionsSource:
                 self.fallback.endpoint,
             )
             self._switched = True
-        return await self.fallback.fetch_page(start=start, count=count)
+        answer = await self.fallback.fetch_page(start=start, count=count)
+        return replace(answer, switched=True)
 
 
 # --- the gate ----------------------------------------------------------------
@@ -397,6 +433,7 @@ async def run_connections_sync(
     total: int | None = None
     max_total = 0
     start = 0
+    source_switched = False
 
     def finish(
         reason: StopReason, outcome: Outcome | None = None, final_url: str | None = None
@@ -412,6 +449,7 @@ async def run_connections_sync(
             connections=connections,
             max_total=max_total,
             seen_public_ids=frozenset(slugs),
+            source_switched=source_switched,
         )
 
     async def stopped(result: SyncResult) -> SyncResult:
@@ -443,6 +481,7 @@ async def run_connections_sync(
             return await stopped(finish(StopReason.BUDGET))
 
         answer = await source.fetch_page(start=start, count=spec.page_size)
+        source_switched = source_switched or answer.switched
         if answer.outcome is not Outcome.OK or answer.page is None:
             outcome = Outcome.ROUTE_CHANGED if answer.outcome is Outcome.OK else answer.outcome
             return await stopped(finish(StopReason.RESPONSE, outcome, answer.final_url))

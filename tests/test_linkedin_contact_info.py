@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+import pytest
+
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.contact_info import (
     ApiContactInfoSource,
@@ -184,3 +186,30 @@ async def test_a_route_changed_profile_costs_exactly_one_primary_and_one_fallbac
     assert result.outcome is Outcome.OK
     assert primary.calls == ["jamie"]
     assert fallback.calls == ["jamie"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(Outcome.THROTTLED, id="throttled"),
+        pytest.param(Outcome.CHECKPOINT, id="checkpoint"),
+        pytest.param(Outcome.LOGGED_OUT, id="logged-out"),
+        pytest.param(Outcome.NOT_FOUND, id="not-found"),
+    ],
+)
+async def test_fallback_never_switches_on_anything_but_route_changed(outcome: Outcome) -> None:
+    """#173 review, R6 (mutation survived): a checkpoint, a throttle, a login wall,
+    or a 404 from the primary must answer as itself -- never trigger a switch to
+    DOM, which is only for "this endpoint's shape changed"."""
+    primary = ScriptedSource(
+        "primary", [ContactInfoResult(outcome=outcome, final_url=CONTACT_INFO_URL)]
+    )
+    fallback = ScriptedSource("fallback", [])
+    source = FallbackContactInfoSource(primary, fallback)
+
+    result = await source.fetch_contact_info("jamie")
+
+    assert result.outcome is outcome
+    assert not source.switched
+    assert source.endpoint == "primary"
+    assert fallback.calls == []

@@ -27,6 +27,16 @@ implementation of the same protocol (spec 9.3: "linkedin/dom.py holds the
 fallback for the two paths that matter most"); it lives there, alongside
 ``DomConnectionsSource``, because it is the one half of this seam that
 actually touches a browser.
+
+**Before wiring ``FallbackContactInfoSource``/``DomContactInfoSource`` into
+enrichment (#173 review, F7):** the DOM half carries no URN of its own --
+see :class:`~netkeeper.linkedin.dom.DomContactInfoSource`'s docstring for the
+full requirement. In short, a caller must guarantee the overlay is only ever
+read for a visit whose URN check on that same visit (``apply_harvest``'s
+"whose profile it is" check) has already passed, and that guarantee has to be
+written and tested at the call site that actually wires this in -- nothing in
+this module or ``dom.py`` can enforce it from here, since neither imports the
+database (ADR 0005).
 """
 
 from __future__ import annotations
@@ -142,9 +152,23 @@ class FallbackContactInfoSource:
     def endpoint(self) -> str:
         return self.fallback.endpoint if self._switched else self.primary.endpoint
 
+    @property
+    def switched(self) -> bool:
+        """Whether this instance has ever fallen back to ``fallback``.
+
+        One-way and sticky, the same as
+        :class:`~netkeeper.linkedin.connections.FallbackConnectionsSource`'s
+        own ``switched``.
+        """
+        return self._switched
+
     async def fetch_contact_info(self, public_id: str) -> ContactInfoResult:
         if not self._switched:
             answer = await self.primary.fetch_contact_info(public_id)
+            # Only RouteChanged switches -- never a checkpoint, a throttle, or a
+            # logged-out wall (#173 review, R6): those end this profile's fetch
+            # through the ordinary non-Ok path exactly as they would with no
+            # fallback at all.
             if answer.outcome is not Outcome.ROUTE_CHANGED:
                 return answer
             log.warning(
