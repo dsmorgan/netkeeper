@@ -322,6 +322,9 @@ def browser_launch(ctx: typer.Context) -> None:
         typer.echo()
         typer.echo(f"note: {note}")
     typer.echo()
+    typer.echo("From a checkout, `make chrome` (scripts/chrome.sh) runs that command for you,")
+    typer.echo("waits for the port, and clears a profile lock a crashed Chrome left behind.")
+    typer.echo()
     typer.echo(f"Check it with: netkeeper preflight   (attaches to {cdp_url})")
 
 

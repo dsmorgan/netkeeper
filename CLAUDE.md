@@ -15,6 +15,8 @@ make fmt              # ruff format + autofix
 make serve | make dev # backend; `pnpm dev` in frontend/ alongside for the UI
 make gen-client       # export OpenAPI → frontend/src/api/schema.d.ts
 make changelog-draft  # preview changelog.d/ fragments
+make chrome           # start the netkeeper Chrome profile with its debug port (a person runs this; netkeeper never does)
+make reset            # archive the database, then remove it (never against a live serve)
 ```
 
 Frontend: `cd frontend && pnpm install && pnpm dev | build | lint | test`.
