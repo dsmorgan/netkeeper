@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from collections.abc import Iterator
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 import pytest
@@ -422,3 +424,70 @@ def test_clear_flag_without_a_database_does_not_exit_zero(
     result = CliRunner().invoke(cli, ["linkedin", "clear-flag", "--yes"])
 
     assert result.exit_code != 0
+
+
+# --- #170 item 1: the write lock is not held across the prompt -------------------
+
+
+def test_clear_flag_prompt_does_not_hold_the_write_lock(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent writer -- standing in for a `netkeeper serve` process -- must
+    succeed while the confirmation prompt is on screen. Before the #170 item 1 fix,
+    `clear-flag` opened its own writer (`BEGIN IMMEDIATE`) before ever asking, so a
+    second engine's writer below would have blocked behind it for the whole
+    `SQLITE_BUSY_TIMEOUT_MS` and then raised "database is locked" -- this monkeypatch
+    of `typer.confirm` runs the concurrent write *during* the prompt itself, the one
+    place in the command's control flow where the bug could actually bite."""
+    _flag_a_checkpoint(cli_db)
+    concurrent_write_succeeded = False
+    started = time.monotonic()
+
+    def confirm_with_a_concurrent_writer(*_args: object, **_kwargs: object) -> bool:
+        nonlocal concurrent_write_succeeded
+        url = database_url()
+        engine = make_engine(url)
+        try:
+            factory = make_session_factory(engine)
+            with session_scope(factory, write=True) as session:
+                ensure_local_user(session, settings=Settings())
+            concurrent_write_succeeded = True
+        finally:
+            engine.dispose()
+        return True
+
+    monkeypatch.setattr("typer.confirm", confirm_with_a_concurrent_writer)
+
+    result = CliRunner().invoke(cli, ["linkedin", "clear-flag"])
+    elapsed = time.monotonic() - started
+
+    assert result.exit_code == 0, result.output
+    assert concurrent_write_succeeded, "a concurrent writer must succeed while the prompt is up"
+    assert elapsed < 2.0, f"took {elapsed:.1f}s -- looks like it waited on the busy timeout"
+    assert _current_flag(cli_db) is None
+
+
+# --- #170 item 6: preflight takes no write lock to report a CHECKPOINT flag ------
+
+
+def test_preflight_with_a_checkpoint_flag_never_opens_a_writer(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading a flag to report on it -- never clearing it -- costs no write lock."""
+    _flag_a_checkpoint(cli_db)
+    _logged_in(monkeypatch)
+    writes: list[bool] = []
+
+    def recording_session_scope(
+        factory: sessionmaker[Session], *, write: bool = False
+    ) -> AbstractContextManager[Session]:
+        writes.append(write)
+        return session_scope(factory, write=write)
+
+    monkeypatch.setattr("netkeeper.cli.session_scope", recording_session_scope)
+
+    result = CliRunner().invoke(cli, ["preflight"])
+
+    assert result.exit_code == 0, result.output
+    assert "leaving the checkpoint session flag in place" in result.output
+    assert writes == [False], f"a checkpoint report must only ever read, got write={writes}"
