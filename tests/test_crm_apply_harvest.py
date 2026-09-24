@@ -468,3 +468,168 @@ def test_a_profile_with_no_open_job_leaves_the_stored_one(writer: Session, user:
     all_ended = replace(PRIYA, jobs=(PRIYA.jobs[1],))
     apply_harvest(writer, user, _harvest(contact, all_ended))
     assert (contact.current_title, contact.current_company) == ("Counsel", "Old Firm")
+
+
+# --- #171 review ------------------------------------------------------------------------------
+
+
+def _unreadable(contact: Contact, at: datetime) -> ProfileHarvest:
+    return ProfileHarvest(
+        contact_ref=contact.id,
+        requested_public_id=contact.li_public_id or "x",
+        outcome=Outcome.ROUTE_CHANGED,
+        observed_at=at,
+    )
+
+
+def test_every_visit_records_its_attempt_time_even_one_that_wrote_nothing(
+    writer: Session, user: User
+) -> None:
+    """F1: a mismatch, a conflict, an unreadable shape, and NotFound all leave a mark."""
+    mismatched = _stored(writer, user, PRIYA)
+    conflicted = _stored(writer, user, MATEO)
+    holder = _stored(writer, user, TOMASZ)
+    unreadable = _stored(writer, user, HANA)
+    missing = _stored(writer, user, AIKO)
+    other_urn = replace(PRIYA, urn_prefix="ACoAANEW")
+    renamed = replace(MATEO, public_id=holder.li_public_id)
+
+    results = [
+        apply_harvest(writer, user, _harvest(mismatched, other_urn)),
+        apply_harvest(writer, user, _harvest(conflicted, renamed)),
+        apply_harvest(writer, user, _unreadable(unreadable, NOW)),
+        apply_harvest(writer, user, _not_found(missing, NOW)),
+    ]
+
+    assert results == [
+        HarvestResult.MISMATCH,
+        HarvestResult.CONFLICT,
+        HarvestResult.UNREADABLE,
+        HarvestResult.NOT_FOUND,
+    ]
+    for contact in (mismatched, conflicted, unreadable, missing):
+        assert contact.li_enrich_attempted_at == NOW
+        assert contact.last_enriched_at is None
+    assert conflicted.headline is None and unreadable.headline is None
+    assert holder.li_enrich_attempted_at is None
+
+
+def test_an_applied_harvest_records_its_attempt_too(writer: Session, user: User) -> None:
+    contact = _stored(writer, user, PRIYA)
+    apply_harvest(writer, user, _harvest(contact, PRIYA))
+    assert contact.li_enrich_attempted_at == NOW == contact.last_enriched_at
+
+
+def test_an_unreadable_harvest_counts_and_writes_only_the_attempt(
+    writer: Session, user: User
+) -> None:
+    contact = _stored(writer, user, PRIYA, headline="Keep me")
+    counts = HarvestCounts()
+    apply_harvest(writer, user, _unreadable(contact, NOW), counts)
+    assert counts.unreadable == 1 and contact.headline == "Keep me"
+    assert contact.li_not_found_count == 0
+
+
+def test_a_contact_seen_again_after_being_marked_gone_needs_a_whole_new_streak(
+    writer: Session, user: User
+) -> None:
+    """F4: spec 9.8's three across fourteen days, again, not one NotFound."""
+    from voyager_pages import Person
+
+    contact = _stored(writer, user, AIKO)
+    for d in (0, 7, 14):
+        apply_harvest(writer, user, _not_found(contact, NOW + timedelta(days=d)))
+    assert contact.li_disconnected_at is not None
+    assert (contact.li_not_found_count, contact.li_not_found_since) == (0, None)
+
+    sighting = Person(AIKO.n, AIKO.first, AIKO.last, None, public_id=AIKO.slug)
+    assert sighting.urn == AIKO.urn
+    mapping.apply_page(writer, user, _connections_page([sighting], NOW + timedelta(days=20)))
+    assert _disconnected(contact) is None
+
+    first = apply_harvest(writer, user, _not_found(contact, NOW + timedelta(days=21)))
+    assert first is HarvestResult.NOT_FOUND and _disconnected(contact) is None
+    second = apply_harvest(writer, user, _not_found(contact, NOW + timedelta(days=28)))
+    assert second is HarvestResult.NOT_FOUND
+    third = apply_harvest(writer, user, _not_found(contact, NOW + timedelta(days=35)))
+    assert third is HarvestResult.GONE
+    assert len(contact.interactions) == 2  # one note per gone-mark, not one per NotFound
+
+
+def test_a_sighting_restarts_a_streak_that_had_not_reached_gone(
+    writer: Session, user: User
+) -> None:
+    from voyager_pages import Person
+
+    contact = _stored(writer, user, AIKO)
+    for d in (0, 7):
+        apply_harvest(writer, user, _not_found(contact, NOW + timedelta(days=d)))
+    sighting = Person(AIKO.n, AIKO.first, AIKO.last, None, public_id=AIKO.slug)
+    mapping.apply_page(writer, user, _connections_page([sighting], NOW + timedelta(days=10)))
+    assert (contact.li_not_found_count, contact.li_not_found_since) == (0, None)
+    result = apply_harvest(writer, user, _not_found(contact, NOW + timedelta(days=14)))
+    assert result is HarvestResult.NOT_FOUND
+
+
+def _connections_page(people: list[Any], at: datetime) -> Any:
+    from netkeeper.linkedin.connections import ConnectionsPage, SyncMode
+    from netkeeper.linkedin.voyager import ConnectionSummary
+
+    return ConnectionsPage(
+        mode=SyncMode.INCREMENTAL,
+        number=0,
+        start=0,
+        total=len(people),
+        connections=tuple(
+            ConnectionSummary(
+                urn=p.urn,
+                public_id=p.slug,
+                first_name=p.first,
+                last_name=p.last,
+                headline=None,
+                connected_at=None,
+            )
+            for p in people
+        ),
+        observed_at=at,
+    )
+
+
+def test_an_end_month_without_a_year_is_still_an_end(writer: Session, user: User) -> None:
+    """M20: a position whose end has a month but no year ended; it is not the current job."""
+    contact = _stored(writer, user, PRIYA, current_title="Kept", current_company="Kept Co")
+    half_ended = replace(PRIYA, jobs=(Job("Odd Role", "Odd Co", start=(2020, 1), end=None),))
+    harvest = _harvest(contact, half_ended)
+    assert harvest.details is not None
+    (entry,) = harvest.details.positions
+    odd = replace(entry, end_month=6)
+    harvest = replace(harvest, details=replace(harvest.details, positions=(odd,)))
+
+    apply_harvest(writer, user, harvest)
+
+    (row,) = contact.positions
+    assert row.is_current is False
+    assert (contact.current_title, contact.current_company) == ("Kept", "Kept Co")
+
+
+def test_a_host_that_only_ends_in_github_com_is_a_website(writer: Session, user: User) -> None:
+    """M21."""
+    contact = _stored(writer, user, MATEO)
+    lookalike = replace(MATEO, websites=("https://notgithub.com/mateo",))
+    apply_harvest(writer, user, _harvest(contact, lookalike))
+    assert [(link.url, link.kind) for link in contact.links] == [
+        ("https://notgithub.com/mateo", LinkKind.WEBSITE)
+    ]
+
+
+def test_an_applied_harvest_does_not_clear_a_disconnect(writer: Session, user: User) -> None:
+    """M27: a profile that can be looked up is not proof of a connection; only a sync is."""
+    gone = NOW - timedelta(days=30)
+    contact = _stored(writer, user, PRIYA, li_disconnected_at=gone)
+    assert apply_harvest(writer, user, _harvest(contact, PRIYA)) is HarvestResult.APPLIED
+    assert contact.li_disconnected_at == gone
+
+
+def _disconnected(contact: Contact) -> datetime | None:
+    """Read afresh, so a type checker does not carry an earlier assertion across a write."""
+    return contact.li_disconnected_at

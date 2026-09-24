@@ -420,6 +420,7 @@ async def _run(
             rng=rng if rng is not None else random.Random(),  # noqa: S311 -- pacing, not crypto
             on_progress=on_progress if on_progress is not None else no_progress,
             clock=clock,
+            sleep=sleep,
         )
         finished = True
     finally:

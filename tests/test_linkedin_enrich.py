@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +33,7 @@ from voyager_profiles import (
     details_body,
 )
 
+from netkeeper.linkedin import enrich
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.enrich import (
     BrowserProfiles,
@@ -55,6 +57,8 @@ from netkeeper.linkedin.voyager import (
 
 FIXTURES = Path(__file__).parent / "fixtures" / "voyager"
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
+#: A 200 whose body is not JSON at all and names no wall: classify's own RouteChanged.
+NOT_JSON = Scripted(200, "<html><body>something else entirely</body></html>")
 SEED = 7
 
 
@@ -98,6 +102,19 @@ def _spec(
     )
 
 
+def _record_sleep(browser: FakeBrowser) -> Callable[[float], Awaitable[None]]:
+    """A sleep that waits no real time and lands in the browser's event log."""
+
+    async def sleep(seconds: float) -> None:
+        browser.events.append(("sleep", seconds))
+
+    return sleep
+
+
+async def _no_wait(seconds: float) -> None:
+    return None
+
+
 async def _run(
     spec: EnrichJobSpec, browser: FakeBrowser, gate: Gate | None = None
 ) -> tuple[EnrichResult, list[ProfileHarvest], list[ProgressEvent]]:
@@ -119,6 +136,7 @@ async def _run(
         on_progress=on_progress,
         rng=random.Random(SEED),
         clock=lambda: NOW,
+        sleep=_record_sleep(browser),
     )
     return result, harvests, events
 
@@ -170,7 +188,7 @@ async def test_each_visit_navigates_scrolls_then_fetches_then_hands_over() -> No
     result, harvests, _ = await _run(_spec(PROFILES[:3]), browser, gate)
 
     kinds = browser.kinds()
-    one_visit = ["gate", "goto", "scroll", "details", "contact_info", "harvest"]
+    one_visit = ["gate", "goto", "scroll", "details", "sleep", "contact_info", "harvest"]
     assert kinds == [*one_visit, "pause", *one_visit, "pause", *one_visit]
     assert browser.visited() == [p.slug for p in PROFILES[:3]]
     assert result.reason is StopReason.END_OF_PLAN
@@ -298,7 +316,7 @@ _STOPPING = [
     pytest.param(THROTTLED, Outcome.THROTTLED, id="throttled"),
     pytest.param(CHECKPOINT, Outcome.CHECKPOINT, id="checkpoint"),
     pytest.param(LOGGED_OUT, Outcome.LOGGED_OUT, id="logged-out"),
-    pytest.param(UNRECOGNIZED, Outcome.ROUTE_CHANGED, id="route-changed"),
+    pytest.param(NOT_JSON, Outcome.ROUTE_CHANGED, id="not-json"),
     pytest.param(BAD_REQUEST, Outcome.ROUTE_CHANGED, id="bad-request"),
 ]
 
@@ -490,8 +508,10 @@ def test_a_harvest_is_ok_with_both_halves_or_not_found_with_neither() -> None:
         ProfileHarvest(1, "a", Outcome.OK, NOW, details=details)
     with pytest.raises(ValueError, match="nothing"):
         ProfileHarvest(1, "a", Outcome.NOT_FOUND, NOW, contact_info=info)
-    with pytest.raises(ValueError, match="Ok or NotFound"):
+    with pytest.raises(ValueError, match="Ok, NotFound, or RouteChanged"):
         ProfileHarvest(1, "a", Outcome.THROTTLED, NOW)
+    with pytest.raises(ValueError, match="carries nothing"):
+        ProfileHarvest(1, "a", Outcome.ROUTE_CHANGED, NOW, details=details)
 
 
 async def test_progress_events_hold_counts_and_nothing_else() -> None:
@@ -554,7 +574,12 @@ async def test_a_browser_runs_own_methods_are_the_source() -> None:
             fetch=PageVoyagerFetch(run),
         )
         result = await run_enrichment(
-            _spec(PROFILES[:1]), source, Gate(), on_harvest=keep, rng=random.Random(SEED)
+            _spec(PROFILES[:1]),
+            source,
+            Gate(),
+            on_harvest=keep,
+            rng=random.Random(SEED),
+            sleep=no_wait,
         )
 
     (page,) = context.pages
@@ -584,7 +609,137 @@ async def test_a_broken_fetch_ends_the_run_by_exception() -> None:
 
     with pytest.raises(VoyagerFetchError):
         await run_enrichment(
-            _spec(PROFILES), browser.source(), Gate(), on_harvest=keep, rng=random.Random(SEED)
+            _spec(PROFILES),
+            browser.source(),
+            Gate(),
+            on_harvest=keep,
+            rng=random.Random(SEED),
+            sleep=_no_wait,
         )
     assert harvested == [101]
     assert len(browser.visited()) == 2
+
+
+# --- #171 review: one unreadable profile is that contact's problem (F2b) --------------------
+
+
+async def test_one_unreadable_profile_is_the_contacts_and_the_run_goes_on() -> None:
+    browser = FakeBrowser.of(PROFILES, script={2: UNRECOGNIZED})
+
+    result, harvests, events = await _run(_spec(PROFILES), browser)
+
+    assert result.reason is StopReason.END_OF_PLAN
+    assert result.completed == tuple(p.n for p in PROFILES)
+    unreadable = harvests[1]
+    assert (unreadable.contact_ref, unreadable.outcome) == (102, Outcome.ROUTE_CHANGED)
+    assert unreadable.details is None and unreadable.contact_info is None
+    assert result.unreadable == 1 and events[-1].unreadable == 1
+    # details did not parse, so its contact info was never asked for
+    assert [k for k in browser.kinds() if k in ("details", "contact_info")][2:4] == [
+        "details",
+        "details",
+    ]
+
+
+async def test_two_unreadable_profiles_in_a_row_mean_the_route_changed() -> None:
+    """Fetch 0-1 is Priya; 2 is Mateo's details; 3 is Hana's details (Mateo's info is skipped)."""
+    browser = FakeBrowser.of(PROFILES, script={2: UNRECOGNIZED, 3: UNRECOGNIZED})
+
+    result, harvests, _ = await _run(_spec(PROFILES), browser)
+
+    assert result.reason is StopReason.RESPONSE and result.outcome is Outcome.ROUTE_CHANGED
+    assert result.completed == (101, 102, 103)  # both unreadable ones handed over first
+    assert [h.outcome for h in harvests[1:]] == [Outcome.ROUTE_CHANGED] * 2
+    assert len(browser.visited()) == 3
+
+
+async def test_a_readable_profile_between_two_unreadable_ones_resets_the_count() -> None:
+    """Mateo's details (fetch 2) and Tomasz's (fetch 5) fail; Hana (3, 4) between is fine."""
+    browser = FakeBrowser.of(PROFILES, script={2: UNRECOGNIZED, 5: UNRECOGNIZED})
+
+    result, _, _ = await _run(_spec(PROFILES), browser)
+
+    assert result.reason is StopReason.END_OF_PLAN and result.unreadable == 2
+    # one entry per visit; no second fetch after an unreadable details answer
+    assert [gap is None for gap in result.fetch_gaps_s] == [False, True, False, True, False]
+
+
+async def test_an_unreadable_contact_info_is_the_contacts_too() -> None:
+    browser = FakeBrowser.of(PROFILES[:2], script={1: UNRECOGNIZED})
+    result, harvests, _ = await _run(_spec(PROFILES[:2]), browser)
+    assert result.reason is StopReason.END_OF_PLAN
+    assert [h.outcome for h in harvests] == [Outcome.ROUTE_CHANGED, Outcome.OK]
+
+
+def test_the_unreadable_limit_is_two() -> None:
+    assert enrich.MAX_UNREADABLE_IN_A_ROW == 2
+
+
+# --- #171 review: a pause between the two fetches (F9) ---------------------------------------
+
+
+def test_the_fetch_gap_is_a_second_and_a_half() -> None:
+    assert (enrich.FETCH_GAP_MEDIAN_S, enrich.FETCH_GAP_SIGMA) == (1.5, 0.5)
+
+
+async def test_a_person_pauses_between_the_two_fetches_and_the_plan_is_unchanged() -> None:
+    browser = FakeBrowser.of(PROFILES[:3])
+
+    result, _, _ = await _run(_spec(PROFILES[:3]), browser)
+
+    sleeps = [float(str(value)) for kind, value in browser.events if kind == "sleep"]
+    assert sleeps == [g for g in result.fetch_gaps_s if g is not None] and len(sleeps) == 3
+    assert all(0 < gap < 15 for gap in sleeps)
+    kinds = browser.kinds()
+    for i, kind in enumerate(kinds):
+        if kind == "sleep":
+            assert (kinds[i - 1], kinds[i + 1]) == ("details", "contact_info")
+    assert result.plan == plan_enrichment(random.Random(SEED), 3)  # drawn after the plan
+
+
+# --- #171 review: every profile segment is masked, whatever it says (F3) ------------------------
+
+
+@pytest.mark.parametrize(
+    "landed",
+    [
+        "https://www.linkedin.com/in/loginov-ivan/",  # the site redirected to a renamed slug
+        "https://www.linkedin.com/in/LoginOv-Ivan/",  # in another case
+        "https://www.linkedin.com/in/login%C3%A9-fake/",  # percent-encoded, non-ASCII
+        "https://www.linkedin.com/IN/checkpoint/",
+    ],
+)
+async def test_a_redirect_to_a_slug_that_reads_like_a_wall_is_still_a_profile(landed: str) -> None:
+    person = Profile(150, "Wren", "Sample", headline="Tester", public_id="wren-fake-sample")
+    browser = FakeBrowser.of([person], redirect={person.slug: landed})
+
+    result, harvests, _ = await _run(_spec([person]), browser)
+
+    assert result.reason is StopReason.END_OF_PLAN
+    assert [h.outcome for h in harvests] == [Outcome.OK]
+
+
+@pytest.mark.parametrize(
+    ("url", "masked"),
+    [
+        ("https://x.test/in/abc/", "https://x.test/in/_/"),
+        # the whole segment, however it is spelled: nothing of a slug survives into
+        # the url a session flag stores
+        ("https://x.test/in/login%C3%A9-fake/", "https://x.test/in/_/"),
+        ("https://x.test/in/loginé-fake.1_2~/", "https://x.test/in/_/"),
+        ("https://x.test/in/abc", "https://x.test/in/_"),
+        # only the segment itself, never the path after it
+        ("https://x.test/in/abc/overlay/checkpoint/", "https://x.test/in/_/overlay/checkpoint/"),
+        ("https://x.test/checkpoint/in/abc", "https://x.test/checkpoint/in/_"),
+        ("https://x.test/login-in/abc", "https://x.test/login-in/abc"),  # "/in/" must be whole
+        (
+            "https://x.test/voyager/api/identity/profiles/login-x/profileContactInfo",
+            "https://x.test/voyager/api/identity/profiles/_/profileContactInfo",
+        ),
+        # a query or fragment is left exactly as it came
+        ("https://x.test/authwall?r=/in/login-x/", "https://x.test/authwall?r=/in/login-x/"),
+        ("https://x.test/in/abc/#/in/def", "https://x.test/in/_/#/in/def"),
+    ],
+)
+def test_the_mask_takes_the_profile_segment_and_nothing_else(url: str, masked: str) -> None:
+    assert enrich._masked(url) == masked

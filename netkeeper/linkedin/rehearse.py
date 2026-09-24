@@ -41,8 +41,11 @@ rather than two that could drift.
 **The replica sets one cookie.** The in-page fetch reads its csrf token from the
 page's own ``JSESSIONID`` cookie, the way the real client does, and never from
 Python (#168). So the replica's profile page sets an invented one for
-``127.0.0.1``, ``Max-Age`` two minutes, as the fetch smoke suite's fixture does.
-netkeeper still writes no cookie: the site does, the ordinary way a site does.
+``127.0.0.1``, ``Max-Age`` two minutes, as the fetch smoke suite's fixture does,
+and a finished rehearsal navigates the tab to :data:`REPLICA_EXPIRE_PATH` to
+expire it at once (a cookie ignores the port, so it would otherwise reach every
+loopback site for those two minutes). netkeeper still writes no cookie: the
+site does, the ordinary way a site does.
 """
 
 from __future__ import annotations
@@ -193,6 +196,9 @@ class RehearsalVisit:
     planned_wait_s: float | None
     waited_s: float
     burst_break: bool
+    #: The pause taken between the profile-details and contact-info fetches, as
+    #: planned (unscaled); ``None`` when the second fetch was never made.
+    fetch_gap_s: float | None = None
 
     @property
     def scrolled_px(self) -> int:
@@ -222,10 +228,13 @@ class Rehearsal:
     #: Why the job stopped before its last visit, or ``None`` when it made them all.
     #: Against the replica this should never be set; when it is, the log says so.
     stopped: str | None = None
+    #: The navigation that expired the replica's csrf cookie once the last visit
+    #: was over (:data:`REPLICA_EXPIRE_PATH`), and anything it loaded.
+    cleanup: tuple[RequestRecord, ...] = ()
 
     @property
     def requests(self) -> tuple[RequestRecord, ...]:
-        """Every request the page made: the ones inside a visit, then any trailing ones.
+        """Every request the page made: inside a visit, the cleanup, then any trailing ones.
 
         :attr:`visits` partitions requests for reading. This is the complete
         list, and it is what :func:`_assert_stayed_neutral` checks -- a
@@ -233,6 +242,7 @@ class Rehearsal:
         """
         return (
             *(record for visit in self.visits for record in visit.requests),
+            *self.cleanup,
             *self.trailing,
         )
 
@@ -376,9 +386,15 @@ async def rehearse(
             on_harvest=on_harvest,
             rng=Random(seed),  # noqa: S311
             clock=lambda: started_at,
+            sleep=_scaled_sleep(sleep, time_scale),
         )
         if urls:
             grouped.append(recorder.close_visit())
+        # The replica's csrf cookie is for 127.0.0.1 on every port (a cookie
+        # ignores the port), so it is expired before the tab closes rather than
+        # left for its two minutes. Recorded on its own, and checked like the rest.
+        await run.goto(f"{base}{REPLICA_EXPIRE_PATH}")
+        cleanup = recorder.close_visit()
 
     stopped = (
         None
@@ -395,6 +411,7 @@ async def rehearse(
             planned_wait_s=step.delay_after_s,
             waited_s=gate.waited[index] if index < len(gate.waited) else 0.0,
             burst_break=step.burst_break,
+            fetch_gap_s=result.fetch_gaps_s[index] if index < len(result.fetch_gaps_s) else None,
         )
         for index, (url, requests, step) in enumerate(
             zip(urls, grouped, result.plan.steps, strict=False)
@@ -423,6 +440,7 @@ async def rehearse(
         trailing=trailing,
         harvested=harvested,
         stopped=stopped,
+        cleanup=cleanup,
     )
     _assert_stayed_neutral(rehearsal)
     return rehearsal
@@ -659,6 +677,10 @@ REDACTED: Final = "<redacted>"
 #: profile page set it.
 REPLICA_COOKIE: Final = 'JSESSIONID="ajax:netkeeper-rehearsal-replica"; Path=/; Max-Age=120'
 
+#: Where a rehearsal sends the tab when it is done, to expire that cookie at once.
+REPLICA_EXPIRE_PATH: Final = "/expire-cookie"
+REPLICA_EXPIRED_COOKIE: Final = "JSESSIONID=; Path=/; Max-Age=0"
+
 
 def replica_voyager(path: str) -> bytes | None:
     """The replica's answer at a Voyager path, or ``None`` when ``path`` is not one.
@@ -722,6 +744,8 @@ class _ReplicaHandler(BaseHTTPRequestHandler):
             self._send(_AVATAR_SVG, "image/svg+xml")
         elif self.path.startswith("/headers"):
             self._send(json.dumps(self._echoed_headers()).encode(), "text/plain; charset=utf-8")
+        elif self.path.startswith(REPLICA_EXPIRE_PATH):
+            self._send(b"done\n", "text/plain; charset=utf-8", cookie=REPLICA_EXPIRED_COOKIE)
         else:
             self._send(_PROFILE_PAGE, "text/html; charset=utf-8", cookie=REPLICA_COOKIE)
 
@@ -795,6 +819,10 @@ def render(rehearsal: Rehearsal) -> str:
     for visit in rehearsal.visits:
         lines.extend(_visit_lines(visit))
         lines.append("")
+    if rehearsal.cleanup:
+        lines.append("CLEANUP  (the replica's csrf cookie, expired)")
+        lines.extend(f"  {line}" for line in _request_table(rehearsal.cleanup).splitlines())
+        lines.append("")
     if rehearsal.trailing:
         lines.append("AFTER THE LAST VISIT  (the tab's own teardown)")
         lines.extend(f"  {line}" for line in _request_table(rehearsal.trailing).splitlines())
@@ -831,6 +859,10 @@ def _visit_lines(visit: RehearsalVisit) -> list[str]:
         f"  scrolled {len(visit.scroll.steps)} times over {visit.scrolled_px} px,"
         f" dwelled {visit.scroll.dwell_s:.1f}s"
     )
+    if visit.fetch_gap_s is not None:
+        lines.append(
+            f"  paused {visit.fetch_gap_s:.1f}s between the profile and contact-info fetches"
+        )
     if visit.planned_wait_s is None:
         lines.append("  no wait after the last profile of the run")
     else:

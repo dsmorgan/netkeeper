@@ -381,6 +381,10 @@ class HarvestResult(enum.StrEnum):
     MISSING = "missing"
     """The contact is no longer one of the user's; nothing was written."""
 
+    UNREADABLE = "unreadable"
+    """The profile answered in a shape the parser could not read; only the attempt
+    time was written."""
+
 
 @dataclass(slots=True)
 class HarvestCounts:
@@ -395,6 +399,7 @@ class HarvestCounts:
     mismatch: int = 0
     conflict: int = 0
     missing: int = 0
+    unreadable: int = 0
     snapshots: int = 0
 
     def add(self, result: HarvestResult) -> None:
@@ -410,12 +415,21 @@ def apply_harvest(
     a person can give up and another can claim. So the harvest is written only
     when the profile's URN is the one the contact already holds: enrichment
     visits only contacts a sync has seen, which all have one. A profile under
-    another URN is :attr:`HarvestResult.MISMATCH` and writes nothing. A merged
+    another URN is :attr:`HarvestResult.MISMATCH` and writes nothing but the
+    attempt time (below). A merged
     contact stands for its survivor. A slug change under the same URN is a
     vanity-url rename, and goes through identity resolution's usual path: the
     old slug becomes an alias. A new slug another contact holds is
-    :attr:`HarvestResult.CONFLICT` and writes nothing, as a connections page
-    does with the same row.
+    :attr:`HarvestResult.CONFLICT` and writes nothing but the attempt time, as a
+    connections page writes nothing of the same row.
+
+    **Every visit is an attempt.** Whatever the visit found, the contact's
+    ``li_enrich_attempted_at`` becomes its ``observed_at``, and the planner waits
+    a week after a visit that wrote nothing
+    (:data:`~netkeeper.services.enrich_plan.ENRICH_RETRY_AFTER`): without it, a
+    contact whose slug a CSV duplicate holds would cost a profile visit every
+    day until someone merged the two. An unreadable harvest
+    (:attr:`HarvestResult.UNREADABLE`) is recorded the same way.
 
     **Nothing known is taken away.** The harvest becomes an
     :class:`~netkeeper.crm.identity.IncomingContact` with source ``sync``, and
@@ -430,10 +444,15 @@ def apply_harvest(
     **NotFound.** A harvest that found no profile adds to the contact's streak;
     at :data:`NOT_FOUND_GONE_AFTER` across at least :data:`NOT_FOUND_GONE_SPAN`
     the contact gets ``li_disconnected_at`` and a note on its timeline (spec
-    9.8). An applied harvest ends the streak.
+    9.8), and the streak starts over, so marking gone once is not marking gone
+    again on each later visit. An applied harvest ends the streak, and so does a
+    sync that sees the contact (:func:`_mark_seen`).
 
     ``last_enriched_at`` is set, and ``enrich_priority`` cleared, only by an
-    applied harvest. Nothing is committed; the session must be a writer.
+    applied harvest. An applied harvest does **not** clear ``li_disconnected_at``:
+    a profile that can be looked up is not proof of a connection, and only a
+    sync that sees the contact in the connections list clears it. Nothing is
+    committed; the session must be a writer.
     """
     _require_writer(session)
     counts = HarvestCounts() if counts is None else counts
@@ -443,10 +462,15 @@ def apply_harvest(
         log.warning("enrichment: contact %d is not one of user %d's", harvest.contact_ref, user.id)
         counts.add(HarvestResult.MISSING)
         return HarvestResult.MISSING
+    contact.li_enrich_attempted_at = harvest.observed_at
     if harvest.outcome is Outcome.NOT_FOUND:
         result = _record_not_found(session, user, contact, harvest.observed_at)
         counts.add(result)
         return result
+    if harvest.outcome is Outcome.ROUTE_CHANGED:
+        session.flush()
+        counts.add(HarvestResult.UNREADABLE)
+        return HarvestResult.UNREADABLE
     details, info = harvest.details, harvest.contact_info
     assert details is not None and info is not None  # ProfileHarvest's own invariant
     if contact.li_urn is None or details.urn != contact.li_urn:
@@ -457,6 +481,7 @@ def apply_harvest(
             user.id,
             "no stored" if contact.li_urn is None else "another",
         )
+        session.flush()
         counts.add(HarvestResult.MISMATCH)
         return HarvestResult.MISMATCH
     incoming = _harvested(details, info, harvest.observed_at)
@@ -472,6 +497,7 @@ def apply_harvest(
             contact.id,
             user.id,
         )
+        session.flush()
         counts.add(HarvestResult.CONFLICT)
         return HarvestResult.CONFLICT
     counts.snapshots += len(contact.snapshots) - before
@@ -516,6 +542,10 @@ def _record_not_found(
                 observed_at=observed_at,
             )
         )
+        # Spec 9.8's bar is three across fourteen days, each time: the streak
+        # that marked the contact gone is spent, and a later one starts over.
+        contact.li_not_found_count = 0
+        contact.li_not_found_since = None
         session.flush()
         log.info("enrichment: contact %d of user %d marked gone", contact.id, user.id)
         return HarvestResult.GONE
@@ -527,7 +557,7 @@ def _harvested(
     details: ProfileDetails, info: ContactInfo, observed_at: datetime
 ) -> IncomingContact:
     """A harvest as the row identity resolution applies. Absent means not provided."""
-    current = next((p for p in details.positions if p.end_year is None), None)
+    current = next((p for p in details.positions if _is_open(p)), None)
     return IncomingContact(
         source=ContactSource.SYNC,
         observed_at=observed_at,
@@ -595,8 +625,13 @@ def _position(entry: PositionEntry) -> IncomingPosition:
         company=entry.company,
         started_on=_month(entry.start_year, entry.start_month),
         ended_on=_month(entry.end_year, entry.end_month),
-        is_current=entry.end_year is None,
+        is_current=_is_open(entry),
     )
+
+
+def _is_open(entry: PositionEntry) -> bool:
+    """A position with no end at all. An end with a month but no year still ended."""
+    return entry.end_year is None and entry.end_month is None
 
 
 def _month(year: int | None, month: int | None) -> date | None:
@@ -606,10 +641,14 @@ def _month(year: int | None, month: int | None) -> date | None:
 
 
 def _mark_seen(session: Session, user: User, urns: set[str]) -> int:
-    """Clear the miss count and any disconnect on every contact holding one of ``urns``.
+    """Clear the miss count, any disconnect, and any NotFound streak on every contact
+    holding one of ``urns``.
 
-    Returns how many had been disconnected. Runs after the page's rows are
-    written, so a contact the page just matched by slug has its URN by now.
+    A sighting is evidence the profile is there, so an enrichment NotFound streak
+    (spec 9.8) starts over too: without that, a contact marked gone and then seen
+    again would be marked gone by its next single NotFound. Returns how many had
+    been disconnected. Runs after the page's rows are written, so a contact the
+    page just matched by slug has its URN by now.
     """
     if not urns:
         return 0
@@ -621,6 +660,9 @@ def _mark_seen(session: Session, user: User, urns: set[str]) -> int:
             reconnected += 1
         if contact.li_missing_count != 0:
             contact.li_missing_count = 0
+        if contact.li_not_found_count != 0 or contact.li_not_found_since is not None:
+            contact.li_not_found_count = 0
+            contact.li_not_found_since = None
     return reconnected
 
 

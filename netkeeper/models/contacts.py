@@ -251,6 +251,12 @@ class Contact(UserOwned, TimestampMixin, Base):
     )
     li_not_found_since: Mapped[datetime | None] = mapped_column(UTCDateTime)
     li_not_found_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # The last enrichment visit that finished with this contact, whatever it found.
+    # A visit that wrote nothing (a profile under another URN, a slug another contact
+    # holds, a shape the parser could not read, no profile at all) waits a week before
+    # the next, so one such contact cannot cost a profile visit every day
+    # (``netkeeper.services.enrich_plan``).
+    li_enrich_attempted_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     # Denormalized: the ``at`` of the newest outbound interaction, so the
     # ``last_contacted`` filter and sort (spec 10.4) never scan ``interactions``.
     # Whoever writes an outbound interaction keeps it current (P1-10, then the
