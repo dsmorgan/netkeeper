@@ -112,6 +112,14 @@ class ProfilePage:
     silently_to: str | None = None  # a slug the tab ends on with no redirect answered
     overlay_request: str | None = None  # the page's own overlay request body, verbatim
     screen_status: int = 200
+    #: #197: the screen's answer (the document, or the screen request) arrives with a
+    #: body the browser cannot hand over, raising this. ``screen_lost_times`` is how
+    #: many visits to this profile lose it.
+    screen_error: Exception | None = None
+    screen_lost_times: int = 1
+    #: #197: the same for the overlay's answer, and for every lazy card.
+    overlay_error: Exception | None = None
+    component_error: Exception | None = None
 
     def screen_body(self) -> bytes:
         if self.screen is not None:
@@ -315,14 +323,27 @@ class ProfileSite(FakeContext):
             self._send(tab, "GET", url, int(landing.split(":")[1]), SHELL, "document")
         elif landing == "document":
             html = document_html(page.screen_body()).encode("utf-8")
-            self._send(tab, "GET", url, 200, html, "document")
+            self._send(tab, "GET", url, 200, html, "document", body_error=self._lose_screen(page))
         else:
             self._send(tab, "GET", url, 200, SHELL, "document")
             if landing == "screen":
                 screen_url = f"{self.origin}/flagship-web{urlsplit(url).path}"
                 self._send(
-                    tab, "POST", screen_url, page.screen_status, page.screen_body(), "fetch", "{}"
+                    tab,
+                    "POST",
+                    screen_url,
+                    page.screen_status,
+                    page.screen_body(),
+                    "fetch",
+                    "{}",
+                    body_error=self._lose_screen(page),
                 )
+
+    def _lose_screen(self, page: ProfilePage) -> Exception | None:
+        if page.screen_error is None or page.screen_lost_times <= 0:
+            return None
+        page.screen_lost_times -= 1
+        return page.screen_error
 
     def scrolled(self, tab: ProfileTab, delta_y: float) -> None:
         page = tab.profile
@@ -331,7 +352,16 @@ class ProfileSite(FakeContext):
         tab.scrolled = True
         for body, request in page.components:
             url = f"{self.origin}{COMPONENT_PATH}?componentId=fake"
-            self._send(tab, "POST", url, page.component_status, body, "fetch", request)
+            self._send(
+                tab,
+                "POST",
+                url,
+                page.component_status,
+                body,
+                "fetch",
+                request,
+                body_error=page.component_error,
+            )
         if page.tab_after_scroll is not None:
             tab._url = page.tab_after_scroll
 
@@ -362,7 +392,16 @@ class ProfileSite(FakeContext):
         if page.overlay_request is not None:
             request = page.overlay_request
         for _ in range(page.overlay_answers):
-            self._send(tab, "POST", url, page.overlay_status, page.overlay_body(), "fetch", request)
+            self._send(
+                tab,
+                "POST",
+                url,
+                page.overlay_status,
+                page.overlay_body(),
+                "fetch",
+                request,
+                body_error=page.overlay_error,
+            )
         if page.tab_after_click is not None:
             tab._url = page.tab_after_click
 
@@ -377,7 +416,16 @@ class ProfileSite(FakeContext):
         post_data: str | None = None,
         *,
         headers: Mapping[str, str] | None = None,
+        body_error: Exception | None = None,
     ) -> None:
         self.requests.append((method, urlsplit(url).path, post_data))
         request = SiteRequest(method, url, resource_type, post_data)
-        tab.emit(FakeResponse(url, status, body, request, headers=headers), request)  # type: ignore[arg-type]
+        response = FakeResponse(
+            url,
+            status,
+            body,
+            request,  # type: ignore[arg-type]
+            headers=headers,
+            body_error=body_error,
+        )
+        tab.emit(response, request)

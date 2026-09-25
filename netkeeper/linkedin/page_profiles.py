@@ -41,9 +41,18 @@ throttle or a wall on any answer the visit reads stops the run. Any other non-``
 answer for the profile itself stops the run as ``RouteChanged``; for a lazy card it is
 skipped (one card failing is not the profile); for the overlay it makes the visit
 unreadable, never ``NotFound`` (nothing in the capture says how LinkedIn answers an
-overlay for a missing profile). A ``200`` whose body could not be kept is the observation
-failing, not LinkedIn answering: :class:`~netkeeper.linkedin.observe.ObservationFailed`
-ends the run.
+overlay for a missing profile). A ``200`` whose body could not be kept because it was
+too large or too slow is the observation failing, not LinkedIn answering:
+:class:`~netkeeper.linkedin.observe.ObservationFailed` ends the run.
+
+**An answer whose body cannot be read** (#197): the browser received it, and had no
+body to hand over. For the profile's screen, the landing keeps waiting in case the page
+sends the screen another way; if none reads, the visit is unreadable, with the fixed
+cause (:func:`~netkeeper.linkedin.observe.unreadable_cause`) in
+:attr:`~netkeeper.linkedin.enrich.Answer.lost`. For the Contact info overlay, the visit
+is unreadable -- no contact info for that person this visit, and nothing is clicked
+again. A lazy card is skipped, as a card that failed is. Where the tab is still decides
+first: a checkpoint or a login wall there stops the run.
 
 **The click.** Only after the profile read whole, and only when the job has found its id
 to be the contact's (:mod:`netkeeper.linkedin.enrich`). If the control is missing, not
@@ -89,6 +98,7 @@ from netkeeper.linkedin.flagship_profile import (
 )
 from netkeeper.linkedin.observe import (
     FAILURE_REDIRECT,
+    FAILURE_UNREADABLE,
     Observation,
     ObservationFailed,
     ObservationLimits,
@@ -172,6 +182,10 @@ class PageProfiles:
         self._redirects: list[str] = []
         self._stopped: Answer[None] | None = None
         self._clicked = False
+        #: The fixed phrase for this visit's profile screen, when one arrived but
+        #: its body could not be read (#197); ``None`` otherwise.
+        self._lost_screen: str | None = None
+        self._page: PageLike | None = None
 
     @property
     def origin(self) -> str:
@@ -199,6 +213,7 @@ class PageProfiles:
         self._observation = await self._run.observe(match, limits=self._limits)
         page = await self._run.goto(self.profile_url(public_id))
         self._require_observed(page)
+        self._page = page
         blocked = self._land_where(page.url)
         if blocked is not None:
             return blocked
@@ -285,6 +300,8 @@ class PageProfiles:
         while answers < MAX_LANDING_ANSWERS:
             response = await observation.next(max(deadline - loop.time(), 0.0))
             if response is None:
+                if self._lost_screen is not None:
+                    return self._screen_lost()
                 log.warning("enrichment: the profile page loaded, but no profile screen arrived")
                 return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
             path = _path(response.url)
@@ -317,7 +334,15 @@ class PageProfiles:
             outcome = _status_outcome(response)
             if outcome is not Outcome.OK:
                 return Answer(outcome, masked(response.url))
-            assert response.body is not None  # _status_outcome refused a 200 without one
+            if response.body is None:
+                cause = _lost_cause(response)
+                # #197: this profile's screen arrived with no body the browser could
+                # hand over. The page may still send the screen another way (a
+                # document is followed by the screen request); if none reads, the
+                # visit is unreadable, never a failed run.
+                self._lost_screen = f"the profile screen could not be read ({cause})"
+                log.info("enrichment: %s; waiting for the page to send it again", self._lost_screen)
+                continue
             if response.method == "GET":
                 try:
                     payload = rehydration_payload(response.text() or "", endpoint=PROFILE_ENDPOINT)
@@ -339,8 +364,21 @@ class PageProfiles:
                 return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
             self._screen = payload
             return Answer(Outcome.OK, self._url)
+        if self._lost_screen is not None:
+            return self._screen_lost()
         log.warning("enrichment: %d answers arrived, none the profile screen", answers)
         return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
+
+    def _screen_lost(self) -> Answer[None]:
+        """The visit is unreadable: its screen's body was lost and none read after it.
+
+        Where the tab is still decides first: a wall it moved to stops the run.
+        """
+        assert self._lost_screen is not None and self._page is not None
+        wall = self._wall(self._page.url)
+        if wall is not None:
+            return wall
+        return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True, lost=self._lost_screen)
 
     def _redirect(self, response: ObservedResponse) -> Answer[None] | None:
         """A redirect: a wall is that wall, another profile is followed, else unreadable."""
@@ -386,6 +424,14 @@ class PageProfiles:
         if outcome in _STOPPING:
             return Answer(outcome, masked(response.url))
         if not keep or _path(response.url) != _path(COMPONENT_PATH) or outcome is not Outcome.OK:
+            return None
+        if response.body is None:
+            # #197: a lazy card whose body the browser could not hand over is skipped
+            # like a card that failed: one card is not the profile.
+            log.info(
+                "enrichment: skipped a lazy card that could not be read (%s)",
+                _lost_cause(response),
+            )
             return None
         if not _names_only(response.request_body, self._slug, None):
             log.info("enrichment: skipped a lazy card that names another member")
@@ -435,7 +481,13 @@ class PageProfiles:
                 # Never NotFound by guess: nothing captured says how a missing
                 # profile's overlay answers.
                 return Answer(Outcome.ROUTE_CHANGED, masked(response.url), unparsed=True)
-            assert response.body is not None
+            if response.body is None:
+                # #197: the overlay answered, but its body could not be handed over.
+                # No contact info for this person on this visit, and no second click:
+                # the visit is unreadable (read_contact_info checks the tab for a wall).
+                lost = f"the Contact info answer could not be read ({_lost_cause(response)})"
+                log.info("enrichment: %s; not clicking again", lost)
+                return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True, lost=lost)
             try:
                 info = parse_contact_info(response.body, slug=self._slug)
             except RouteChanged:
@@ -513,19 +565,31 @@ class PageProfiles:
 
 def _as[T](answer: Answer[None]) -> Answer[T]:
     """A visit's stop, as the answer to whichever step asked."""
-    return Answer(answer.outcome, answer.final_url, unparsed=answer.unparsed)
+    return Answer(answer.outcome, answer.final_url, unparsed=answer.unparsed, lost=answer.lost)
 
 
 def _status_outcome(response: ObservedResponse) -> Outcome:
     """What a non-redirect answer's status says (spec 9.7), never its body (#188 M1).
 
-    A ``200`` whose body could not be kept is the observation failing, not LinkedIn.
+    A ``200`` is ``Ok`` whether or not its body could be kept: the caller decides
+    what a missing body means for the answer it is reading (#197), through
+    :func:`_lost_cause`.
     """
     if response.status == 200:
-        if response.body is None:
-            raise ObservationFailed(f"an answer of the page could not be kept: {response.failure}")
         return Outcome.OK
     return classify(response.status, masked(response.url), "")
+
+
+def _lost_cause(response: ObservedResponse) -> str:
+    """The fixed cause of a ``200`` answer without a body, when the body was lost (#197).
+
+    Only a body the browser could not hand over is a lost answer. One that could not
+    be kept for any other reason (too large, too slow) is still the observation
+    failing, and ends the run by :class:`~netkeeper.linkedin.observe.ObservationFailed`.
+    """
+    if response.failure != FAILURE_UNREADABLE:
+        raise ObservationFailed(f"an answer of the page could not be kept: {response.failure}")
+    return response.cause or "unknown"
 
 
 def _answer_slug(response: ObservedResponse) -> str | None:

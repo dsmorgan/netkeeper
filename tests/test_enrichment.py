@@ -1171,3 +1171,41 @@ async def test_a_wall_after_the_contact_info_click_flags_the_session(
     assert report.result.visits == 1 and len(site.clicks) == 1
     flag = _read(session_factory, user_id, lambda s, u: session_flag(s, u))
     assert flag is not None
+
+
+# --- #197: a lost answer is an unreadable visit, named on the run --------------------------------
+
+_LOST = "the Contact info answer could not be read (Error (no resource))"
+
+
+async def test_a_lost_answer_is_an_unreadable_visit_named_on_the_run(
+    session_factory: sessionmaker[Session],
+) -> None:
+    from profile_fakes import Scripted
+
+    people = _people(3)
+    user_id, ids = _setup(session_factory, people)
+    lost = Scripted(Outcome.ROUTE_CHANGED, unparsed=True, lost=_LOST)
+    browser = FakeBrowser.of(people, script={3: lost})  # visit 2's contact info
+
+    report = await _enrich(session_factory, user_id, browser)
+
+    assert report.result.reason is StopReason.END_OF_PLAN
+    assert (report.harvests.applied, report.harvests.unreadable) == (2, 1)
+    assert (report.heat_raised, report.session_flagged) == (False, False)
+    run = _last_run(session_factory, user_id)
+    assert run.notes == f"unreadable answers: visit 2: {_LOST}."
+    assert run.counts_json is not None and run.counts_json["lost"] == 1
+    assert run.error is None
+    mateo = _contact(session_factory, user_id, ids[102])
+    assert (mateo.last_enriched_at, mateo.li_enrich_attempted_at) == (None, NOW)
+
+
+async def test_a_run_with_no_lost_answer_has_no_note(
+    session_factory: sessionmaker[Session],
+) -> None:
+    people = _people(2)
+    user_id, _ = _setup(session_factory, people)
+    await _enrich(session_factory, user_id, FakeBrowser.of(people))
+    run = _last_run(session_factory, user_id)
+    assert run.notes is None and run.counts_json is not None and run.counts_json["lost"] == 0

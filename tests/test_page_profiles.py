@@ -22,6 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import pytest
 from flagship_pages import (
@@ -531,6 +532,141 @@ async def test_a_slug_that_reads_like_a_wall_is_still_a_profile() -> None:
     site = ProfileSite([ProfilePage(person)])
     out = await visit(site, [target(person)])
     assert out.outcomes == [Outcome.OK]
+
+
+# --- an answer whose body cannot be read (#197) ---------------------------------------------------
+
+LOST = Exception(
+    "Protocol error (Network.getResponseBody): No resource with given identifier found"
+    " for https://www.linkedin.com/in/fake-lost-slug-0000/"
+)
+LOST_CAUSE = "Exception (no resource)"
+
+
+@pytest.mark.parametrize("landing", ["document", "screen"])
+async def test_a_profile_screen_that_cannot_be_read_is_an_unreadable_visit(
+    landing: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The next person is still visited: one lost answer is one unreadable profile."""
+    caplog.set_level(logging.DEBUG, logger="netkeeper")
+    site = ProfileSite([ProfilePage(PRIYA, landing=landing, screen_error=LOST), ProfilePage(MATEO)])
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.result.reason is StopReason.END_OF_PLAN
+    assert out.outcomes == [Outcome.ROUTE_CHANGED, Outcome.OK]
+    assert out.harvests[0].details is None and out.harvests[0].contact_info is None
+    assert out.result.unreadable == 1
+    assert out.result.lost == (f"visit 1: the profile screen could not be read ({LOST_CAUSE})",)
+    assert [slug for slug, _, _ in site.clicks] == [MATEO.slug]
+    assert "fake-lost-slug" not in caplog.text and "identifier" not in caplog.text
+    assert f"visit 1 was unreadable: the profile screen could not be read ({LOST_CAUSE})" in (
+        caplog.text
+    )
+
+
+async def test_a_lost_document_followed_by_a_screen_that_reads_is_a_whole_visit() -> None:
+    """The page may still send the screen another way: then nothing was lost."""
+
+    class ThenScreen(ProfileSite):
+        def navigated(self, tab, url):  # type: ignore[no-untyped-def]
+            super().navigated(tab, url)
+            page = self.profiles[PRIYA.slug.casefold()]
+            screen_url = f"{self.origin}/flagship-web{urlsplit(url).path}"
+            self._send(tab, "POST", screen_url, 200, page.screen_body(), "fetch", "{}")
+
+    site = ThenScreen([ProfilePage(PRIYA, screen_error=LOST)])
+    out = await visit(site, [target(PRIYA)])
+    assert out.outcomes == [Outcome.OK] and out.result.lost == ()
+    assert out.harvests[0].contact_info is not None
+
+
+async def test_lost_screens_count_toward_the_unreadable_limit() -> None:
+    """The same limit as every unreadable visit: two in a row stop the run as
+    route_changed, which for enrichment raises no heat and flags nothing."""
+    people = [PRIYA, MATEO, HANA]
+    site = ProfileSite([ProfilePage(p, screen_error=LOST) for p in people])
+    out = await visit(site, [target(p) for p in people])
+    assert out.outcomes == [Outcome.ROUTE_CHANGED] * MAX_UNREADABLE_IN_A_ROW
+    assert out.result.reason is StopReason.RESPONSE
+    assert out.result.outcome is Outcome.ROUTE_CHANGED
+    assert [line.split(":")[0] for line in out.result.lost] == ["visit 1", "visit 2"]
+    assert site.clicks == []
+
+
+async def test_a_lost_screen_on_a_tab_that_moved_to_a_wall_stops_the_run() -> None:
+    """Where the tab is still decides first."""
+
+    class WallLaterTab(ProfileTab):
+        """On the profile when the landing looks, on a checkpoint by the time the
+        visit gives up on the lost screen."""
+
+        reads = 0
+
+        @property
+        def url(self) -> str:
+            self.reads += 1
+            return self._url if self.reads == 1 else CHECKPOINT_URL
+
+    class WallLater(ProfileSite):
+        async def new_page(self):  # type: ignore[no-untyped-def]
+            tab = WallLaterTab(self)
+            self.tabs.append(tab)
+            self.pages.append(tab)
+            return tab
+
+    site = WallLater([ProfilePage(PRIYA, screen_error=LOST), ProfilePage(MATEO)])
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.result.outcome is Outcome.CHECKPOINT and out.harvests == []
+    assert out.result.lost == ()
+
+
+async def test_a_lost_contact_info_answer_is_an_unreadable_visit_and_no_second_click(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="netkeeper")
+    site = ProfileSite([ProfilePage(PRIYA, overlay_error=LOST), ProfilePage(MATEO)])
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.result.reason is StopReason.END_OF_PLAN
+    assert out.outcomes == [Outcome.ROUTE_CHANGED, Outcome.OK]
+    assert out.harvests[0].details is None and out.harvests[0].contact_info is None
+    assert out.result.lost == (
+        f"visit 1: the Contact info answer could not be read ({LOST_CAUSE})",
+    )
+    # One click per visit: Priya's was spent, and not tried again.
+    assert [slug for slug, _, _ in site.clicks] == [PRIYA.slug, MATEO.slug]
+    assert out.result.clicks == 2
+    assert "fake-lost-slug" not in caplog.text
+
+
+async def test_a_lost_contact_info_answer_on_a_tab_that_moved_to_a_wall_stops_the_run() -> None:
+    site = ProfileSite(
+        [ProfilePage(PRIYA, overlay_error=LOST, tab_after_click=LOGIN_URL), ProfilePage(MATEO)]
+    )
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.result.outcome is Outcome.LOGGED_OUT and out.harvests == []
+    assert [slug for slug, _, _ in site.clicks] == [PRIYA.slug]
+
+
+async def test_a_profile_under_another_urn_is_never_clicked_even_after_a_lost_answer() -> None:
+    """The member-id check still decides: a lost card changes nothing about whose
+    profile it is."""
+    site = ProfileSite([ProfilePage(PRIYA, components=((b"", None),), component_error=LOST)])
+    out = await visit(site, [target(PRIYA, urn=MATEO.urn)])
+    assert site.clicks == [] and out.result.mismatched == 1
+
+
+async def test_a_lazy_card_that_cannot_be_read_is_skipped_not_the_profile() -> None:
+    site = ProfileSite([ProfilePage(PRIYA, components=((b"", None),), component_error=LOST)])
+    out = await visit(site, [target(PRIYA)])
+    assert out.outcomes == [Outcome.OK] and out.result.lost == ()
+
+
+async def test_an_overlay_too_large_to_keep_still_ends_the_run() -> None:
+    """Only a body the browser could not hand over is lost; one too large to keep is
+    the observation failing, as before."""
+    site = ProfileSite([ProfilePage(PRIYA, overlay=b"0:" + b"0" * 5000)])
+    with pytest.raises(ObservationFailed):
+        await visit(site, [target(PRIYA)], limits=ObservationLimits(max_body_bytes=4000))
+    assert [slug for slug, _, _ in site.clicks] == [PRIYA.slug]  # it failed at the overlay
 
 
 # --- the mechanism failing ----------------------------------------------------------------------

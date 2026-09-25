@@ -72,9 +72,15 @@ one browser run's navigation, its scroll, its observation of what the page
 loads, and its one click. ``netkeeper rehearse`` builds the same class against
 the loopback replica, so a rehearsal is this loop, not a copy of it.
 
+**An answer whose body cannot be read** (#197) -- the profile's screen or the
+Contact info overlay arrived, but the browser had no body to hand over -- is an
+unreadable visit, counted toward the same two limits, with the answer and a fixed
+cause in :attr:`EnrichResult.lost` for the run's note. A wall on the tab still stops
+the run as that wall.
+
 **When the mechanism itself breaks.** A source raises when there is nothing to
 classify at all: the run's tab went away (``BrowserUnavailable``), or the
-observation dropped an answer (``ObservationFailed``). The job does not catch
+observation dropped an answer or could not keep one (``ObservationFailed``). The job does not catch
 either: it ends the run by exception, the runner marks the plan aborted and
 re-raises, and nothing raises heat or the session flag, since no response said
 anything about the session.
@@ -286,8 +292,10 @@ class EnrichResult:
     ``plan`` is the pacing plan the run followed, for a report to show;
     ``click_pauses_s`` the pause before each visit's Contact info click, one entry
     per visit in order, ``None`` for a visit that clicked nothing; ``clicks``
-    how many clicks the run asked for, never more than one per visit; and
-    ``mismatched`` how many profiles answered under another id than the contact's.
+    how many clicks the run asked for, never more than one per visit;
+    ``mismatched`` how many profiles answered under another id than the contact's;
+    and ``lost`` one fixed line per unreadable visit whose answer's body the browser
+    could not hand over (#197), naming the visit by its number in this run.
     """
 
     reason: StopReason
@@ -302,6 +310,7 @@ class EnrichResult:
     click_pauses_s: tuple[float | None, ...] = ()
     clicks: int = 0
     mismatched: int = 0
+    lost: tuple[str, ...] = ()
 
 
 # --- the source seam ---------------------------------------------------------
@@ -317,12 +326,16 @@ class Answer[T]:
     be, or the Contact info control was not there to click once. That is what tells
     an unreadable profile from an answer that stops the run. ``final_url`` is where
     the answer came from, with the profile's own path segment masked out.
+    ``lost`` is set on an unparsed answer whose body the browser could not hand
+    over (#197): which answer it was and why, in fixed words, never the
+    exception's message.
     """
 
     outcome: Outcome
     final_url: str
     value: T | None = None
     unparsed: bool = False
+    lost: str | None = None
 
 
 class ProfileSource(Protocol):
@@ -453,6 +466,7 @@ async def run_enrichment(
     )
     completed: list[int] = []
     pauses: list[float | None] = []
+    lost: list[str] = []
     visits = harvested = not_found = unreadable = unreadable_in_a_row = clicks = mismatched = 0
 
     def progress(stopped: StopReason | None = None) -> ProgressEvent:
@@ -492,6 +506,7 @@ async def run_enrichment(
             click_pauses_s=tuple(pauses),
             clicks=clicks,
             mismatched=mismatched,
+            lost=tuple(lost),
         )
 
     for index, step in enumerate(plan.steps):
@@ -550,6 +565,11 @@ async def run_enrichment(
             outcome = Outcome.ROUTE_CHANGED
             unreadable += 1
             unreadable_in_a_row += 1
+            if failed.lost is not None:
+                # #197: the browser received the answer but had no body to hand
+                # over. An unreadable visit like any other, counted the same way.
+                lost.append(f"visit {visits}: {failed.lost}")
+                log.info("enrichment: visit %d was unreadable: %s", visits, failed.lost)
         elif failed is not None:
             return await stop(StopReason.RESPONSE, failed.outcome, failed.final_url)
         elif mismatch:
