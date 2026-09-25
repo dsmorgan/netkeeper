@@ -691,13 +691,19 @@ async def test_scroll_rests_the_pointer_again_after_the_tab_is_lost_and_reopened
     assert recovered.mouse.moves, "the recovered tab must be rested again, not skipped"
 
 
-async def test_scroll_rests_the_pointer_at_the_center_of_the_content_box_when_found() -> None:
+async def test_scroll_rests_the_pointer_near_the_top_of_the_content_box_when_found() -> None:
     """#192 review, F1: real, on-screen geometry from a passive ``bounding_box``
     read -- not a guess at the viewport -- is what the pointer actually targets.
     A centered 800px column on an otherwise much wider window (the reviewer's
     2200px-ultrawide reproduction) is exactly the case a viewport-center guess
     missed: the old code aimed at (640, 400) regardless of where the content
-    actually was."""
+    actually was.
+
+    Horizontally it still centers (the box's width does not grow with the list).
+    Vertically it does not: #192 review round 2, N1 found that centering
+    vertically too aims below the real window once the box is tall enough --
+    this box (1200px) is exactly such a case, so the target lands
+    ``REST_VISIBLE_SPAN_PX`` below the box's top, not at its true center (900)."""
     connector = FakeConnector()
     provider = make_provider(connector)
     context = connector.browsers[0].context_list[0]
@@ -713,8 +719,128 @@ async def test_scroll_rests_the_pointer_at_the_center_of_the_content_box_when_fo
         await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(4))
 
     x, y = only_page(context).mouse.moves[-1]
-    assert (x, y) == (1100.0, 900.0)  # the box's own center, not a viewport guess
+    assert x == 1100.0  # the box's own horizontal center
+    assert y == 300.0 + browser.REST_VISIBLE_SPAN_PX  # near its top, not its center (900)
     assert only_page(context).locator_calls == [browser.CONTENT_LANDMARK_SELECTOR]
+
+
+async def test_scroll_rests_near_the_true_center_of_a_short_content_box() -> None:
+    """A box short enough that half its height is under ``REST_VISIBLE_SPAN_PX``
+    still centers, the same as before #192 review round 2 -- the visible-span cap
+    only matters once a box is tall enough to reach past the real window."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        page.content_boxes[browser.CONTENT_LANDMARK_SELECTOR] = {
+            "x": 700.0,
+            "y": 300.0,
+            "width": 800.0,
+            "height": 400.0,
+        }
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(4))
+
+    x, y = only_page(context).mouse.moves[-1]
+    assert (x, y) == (1100.0, 500.0)  # the box's own center: 300 + 400 / 2
+
+
+async def test_scroll_stays_within_the_visible_span_of_a_tall_content_box() -> None:
+    """#192 review round 2, N1: reproduces the actual failure -- an in-flow
+    ``<main>`` whose *ancestor* does the scrolling reports its own full content
+    height here (the whole list, ~2300px in the reviewer's report), not the
+    sliver the viewport shows. Centering on that, or letting jitter roam across
+    it, put the pointer hundreds of pixels below any real window and brought
+    back the #31 symptom. Every move must land within an ordinary window's reach
+    of the box's top, not deep inside a list that keeps growing."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        page.content_boxes[browser.CONTENT_LANDMARK_SELECTOR] = {
+            "x": 0.0,
+            "y": 56.0,
+            "width": 800.0,
+            "height": 2300.0,
+        }
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(4))
+
+    moves = only_page(context).mouse.moves
+    assert moves
+    assert all(y <= 400 for _, y in moves), moves
+    assert all(y >= browser.REST_MIN_Y_PX for _, y in moves), moves
+
+
+async def test_scroll_caps_a_tall_box_jitter_at_the_known_viewport_height() -> None:
+    """When Playwright *does* know the real viewport height, it caps the tall-box
+    bound even tighter than :data:`REST_VISIBLE_SPAN_PX` alone would (#192
+    review round 2, N1, point 2)."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        page.viewport_size = {"width": 800, "height": 300}
+        page.content_boxes[browser.CONTENT_LANDMARK_SELECTOR] = {
+            "x": 0.0,
+            "y": 56.0,
+            "width": 800.0,
+            "height": 2300.0,
+        }
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(4))
+
+    moves = only_page(context).mouse.moves
+    assert moves
+    assert all(y == 300.0 for _, y in moves), moves
+
+
+async def test_scroll_handles_a_box_whose_top_is_at_or_above_the_page_origin() -> None:
+    """#192 review round 2, N1, point 4: a zero or negative ``box.y`` (a box
+    already partly scrolled past, or one CSS places above the fold) must not
+    push the rest point above the header floor either."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        page.content_boxes[browser.CONTENT_LANDMARK_SELECTOR] = {
+            "x": 0.0,
+            "y": -50.0,
+            "width": 800.0,
+            "height": 2300.0,
+        }
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(4))
+
+    moves = only_page(context).mouse.moves
+    assert moves
+    assert all(y >= browser.REST_MIN_Y_PX for _, y in moves), moves
+
+
+async def test_scroll_keeps_the_pointer_on_screen_when_the_box_starts_off_screen() -> None:
+    """#192 review round 2, N1, point 3: a box partly (or wholly) off-screen to
+    the left must not send the pointer to a negative ``x``."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        page.content_boxes[browser.CONTENT_LANDMARK_SELECTOR] = {
+            "x": -500.0,
+            "y": 300.0,
+            "width": 800.0,
+            "height": 400.0,
+        }
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(4))
+
+    moves = only_page(context).mouse.moves
+    assert moves
+    assert all(x >= 0.0 for x, _ in moves), moves
 
 
 async def test_scroll_keeps_jitter_inside_the_content_box() -> None:
@@ -811,8 +937,11 @@ async def test_scroll_clamps_to_the_header_floor_on_a_tiny_viewport() -> None:
 
 async def test_scroll_clamps_to_the_header_floor_when_the_box_is_near_the_top() -> None:
     """The same floor, reached from the content-box path this time: a box that
-    starts (implausibly, but defensively) above the floor is still held below it,
-    not just the viewport-guess fallback (#192 review, F5)."""
+    starts (implausibly, but defensively) above the floor is still never let
+    above it, not just the viewport-guess fallback (#192 review, F5). Not exact
+    equality any more (#192 review round 2, N1 changed the formula so a short
+    box's own height also contributes) -- the invariant that still must hold
+    unconditionally is the lower bound."""
     connector = FakeConnector()
     provider = make_provider(connector)
     context = connector.browsers[0].context_list[0]
@@ -829,7 +958,7 @@ async def test_scroll_clamps_to_the_header_floor_when_the_box_is_near_the_top() 
 
     moves = only_page(context).mouse.moves
     assert moves
-    assert all(y == browser.REST_MIN_Y_PX for _, y in moves), moves
+    assert all(y >= browser.REST_MIN_Y_PX for _, y in moves), moves
 
 
 async def test_scroll_never_jitters_the_pointer_above_the_minimum_header_clearance() -> None:

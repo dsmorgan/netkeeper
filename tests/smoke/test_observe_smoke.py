@@ -13,11 +13,14 @@ any request -- the replica records every request it received, the page records
 every request it sent, and the two lists are the same, headers included.
 
 **The layout is deliberately not a flat scrolling document (#192).** A fixed header
-sits across the top of the viewport; below it, a ``<main>`` column scrolls (capped
-at 800px, centered) with non-scrolling left and right rails flanking it -- the
-``html``/``body`` do not scroll at all, and neither do the rails. That is what the
-#149 capture showed the real connections page does (a centered column, not a
-full-bleed one), and it is why the bug in #192 went uncaught here before:
+sits across the top of the viewport, over a centered content column -- the
+``html``/``body`` do not scroll at all. That much the #149 capture supports (it
+shows flagship-web's RSC payloads, not its rendered layout), but *what actually
+scrolls* under that header is an assumption either way, so two plausible shapes
+are both tested (:data:`_LAYOUTS`, below): ``<main>`` scrolling itself, flanked by
+non-scrolling rails, and ``<main>`` as a plain in-flow element inside a scrolling
+ancestor, which makes ``<main>``'s own box the whole list's height rather than the
+viewport's sliver of it. Both are why the bug in #192 went uncaught here before:
 Playwright's ``mouse.wheel`` fires at the virtual pointer's position, which starts
 at (0, 0) and sits under the fixed header, not over the scrolling column, so a
 wheel replay that never moved the pointer first scrolled nothing.
@@ -25,13 +28,15 @@ wheel replay that never moved the pointer first scrolled nothing.
 event now (``_rest_pointer_over_content``), reading ``<main>``'s own on-screen box
 rather than guessing at the viewport (#192 review, F1) -- a guess that missed the
 centered column entirely on a wide window, and had nowhere reliable to land on a
-narrow one. Without that fix,
-``test_a_real_page_loads_its_own_pages_and_the_run_reads_them_all`` below stalls
-and ends ``RouteChanged`` instead of ``END_OF_LIST`` -- checked by hand against the
-pre-#192 code, and recorded in that PR's description rather than as a test of the
-old code, which no longer exists to run. Run at several window sizes
-(560, 740, 1280, 2200px wide) to cover a phone-width netkeeper Chrome window, the
-maintainer's MacBook Air split-screen width, an ordinary laptop, and an ultrawide.
+narrow one -- near the top of that box, not its center (#192 review round 2, N1),
+since a tall in-flow ``<main>``'s center can sit far below the real window. Without
+those fixes, ``test_a_real_page_loads_its_own_pages_and_the_run_reads_them_all``
+below stalls and ends ``RouteChanged`` instead of ``END_OF_LIST`` -- checked by
+hand against the code from before each fix, and recorded in the PR's description
+rather than as a test of code that no longer exists to run. Run at several window
+sizes (560, 740, 1280, 2200px wide) to cover a phone-width netkeeper Chrome window,
+the maintainer's MacBook Air split-screen width, an ordinary laptop, and an
+ultrawide.
 
 Start Chrome first with the command ``netkeeper browser launch`` prints, and point
 ``NETKEEPER_CDP_URL`` at it.
@@ -93,18 +98,19 @@ def _people(count: int) -> list[Person]:
     return [*PEOPLE, *extra][:count]
 
 
-#: The real layout (#192, and the #192 review's F1): a fixed header across the top,
-#: covering (0, 0) -- where Playwright's virtual pointer starts -- flagship-web's
-#: own centered ~1128px column (``<main>``, capped here at 800px so it shows up at
-#: ordinary laptop widths too, not just an ultrawide), and non-scrolling left and
-#: right rails flanking it wide enough to fill whatever room the viewport has left.
-#: ``html``/``body`` do not scroll at all; neither do the rails -- only ``<main>``
-#: does, so a target that landed on a rail or the header, not on ``<main>``, has no
-#: scrollable ancestor to reach and scrolls nothing. This is what a plain fraction
-#: of a *guessed* viewport size misses on a wide monitor (a centered column, not a
-#: full-bleed one) and on a narrow one (too little width left for a fixed-pixel
-#: guess to land inside); reading ``<main>``'s own real box does not.
-_LAYOUT_CSS = """
+#: Two guesses at the real layout, both plausible, both tested (#192, and the
+#: #192 review's F1 and round 2's N1). The #149 capture is RSC payloads; it says
+#: nothing about how flagship-web lays the page out, so which of these -- or
+#: something else -- the real site actually does is an assumption, not something
+#: the capture showed. Both put a centered column under a fixed header covering
+#: (0, 0), where Playwright's virtual pointer starts; they differ in *what*
+#: scrolls. ``html``/``body`` never scroll at all in either.
+#:
+#: **"rails"**: ``<main>`` is the scrolling element itself (``overflow-y: auto``,
+#: a fixed height), flanked by non-scrolling left and right rails. A target that
+#: landed on a rail or the header has no scrollable ancestor to reach and scrolls
+#: nothing -- the original #192 bug, and what F1's box-based targeting fixed.
+_RAILS_LAYOUT_CSS = """
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; }
   #nav { position: fixed; top: 0; left: 0; right: 0; height: 56px;
@@ -124,6 +130,36 @@ _LAYOUT_CSS = """
   <div style="height:900px"></div>
 </main>
 """
+
+#: **"ancestor-scroll"**: ``<main>`` is a plain in-flow element -- no height or
+#: overflow of its own -- centered under the header by margin alone; its
+#: *ancestor* (``#scroll``) is the actual scrolling element. ``<main>``'s own
+#: rendered height is then the whole list's height, not the viewport's sliver of
+#: it, and grows as more pages load: the #192 review round 2, N1 case (measured
+#: on a real page at ``{x:240, y:56, w:800, h:2300}`` at 1280px wide), which
+#: centering on the box's full height -- rather than staying near its top -- got
+#: wrong again.
+_ANCESTOR_SCROLL_LAYOUT_CSS = """
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  #nav { position: fixed; top: 0; left: 0; right: 0; height: 56px;
+         background: #0a66c2; z-index: 10; }
+  #scroll { position: fixed; top: 56px; left: 0; right: 0; bottom: 0; overflow-y: auto; }
+  main { display: block; width: min(800px, 100vw); margin: 0 auto; background: #fff; }
+</style>
+<div id="nav"></div>
+<div id="scroll">
+  <main>
+    <div id="list"></div>
+    <div style="height:900px"></div>
+  </main>
+</div>
+"""
+
+_LAYOUTS: dict[str, str] = {
+    "rails": _RAILS_LAYOUT_CSS,
+    "ancestor-scroll": _ANCESTOR_SCROLL_LAYOUT_CSS,
+}
 
 #: The page's own script: render cards, and when the *container* (not the document)
 #: scrolls near the bottom, ask the pagination endpoint for the next page -- the way
@@ -177,6 +213,9 @@ class _Replica(BaseHTTPRequestHandler):
     stall_after: ClassVar[int | None] = None
     land_on_checkpoint: ClassVar[bool] = False
     received: ClassVar[list[dict[str, Any]]] = []
+    #: Which of :data:`_LAYOUTS` to serve. Both are pinned (#192 review round 2,
+    #: N1, point 5): set by the ``site`` fixture's ``layout`` parameter.
+    layout: ClassVar[str] = "rails"
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
@@ -189,7 +228,7 @@ class _Replica(BaseHTTPRequestHandler):
             first_next = "null" if len(first) >= len(self.people) else str(len(first))
             page = document_html(screen).replace(
                 "</body>",
-                _LAYOUT_CSS
+                _LAYOUTS[self.layout]
                 + _SCRIPT.replace("__TEMPLATE__", json.dumps(pagination_request(0)))
                 .replace("__FIRST_NEXT__", first_next)
                 .replace("__FIRST_CARDS__", str(len(first)))
@@ -249,12 +288,13 @@ class _Replica(BaseHTTPRequestHandler):
         """Keep the replica's own access log out of the test output."""
 
 
-@pytest.fixture
-def site() -> Iterator[str]:
+@pytest.fixture(params=sorted(_LAYOUTS), ids=lambda name: f"layout={name}")
+def site(request: pytest.FixtureRequest) -> Iterator[str]:
     _Replica.people = _people(35)
     _Replica.stall_after = None
     _Replica.land_on_checkpoint = False
     _Replica.received = []
+    _Replica.layout = request.param
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Replica)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
