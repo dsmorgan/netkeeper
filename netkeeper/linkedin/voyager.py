@@ -100,7 +100,7 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Final, Protocol, runtime_checkable
 
 log = logging.getLogger(__name__)
@@ -138,7 +138,7 @@ class RouteChanged(Exception):
         self.endpoint = endpoint
         self.detail = detail
         super().__init__(f"{endpoint}: {detail}")
-        log.warning("voyager route changed: %s: %s", endpoint, detail)
+        log.warning("route changed: %s: %s", endpoint, detail)
 
 
 # =============================================================================
@@ -474,6 +474,12 @@ class ConnectionSummary:
     last_name: str
     headline: str | None
     connected_at: datetime | None
+    #: The day the connection was made, when the source states a day rather than an
+    #: instant: the flagship-web card's "Connected on <Month d, yyyy>" is the day
+    #: LinkedIn shows the account owner, already in their zone, so turning it into a
+    #: midnight-UTC instant would move it a day for anyone west of Greenwich.
+    #: :func:`netkeeper.crm.apply.apply_page` prefers it over ``connected_at``.
+    connected_on: date | None = None
 
 
 @dataclass(frozen=True, slots=True)

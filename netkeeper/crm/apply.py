@@ -73,7 +73,7 @@ import logging
 import math
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Final
 from urllib.parse import unquote, urlsplit
@@ -325,6 +325,8 @@ def apply_page(
                     if isinstance(resolution, Matched)
                     else None
                 )
+                if target is not None:
+                    incoming = _keep_split(incoming, target)
                 unconfirmed = target is not None and target.needs_review_at is not None
                 card_named = target is not None and "first_name" not in target.field_sources
                 first_before = target.first_name if target is not None else ""
@@ -1032,9 +1034,10 @@ def _mark_seen(session: Session, user: User, *, urns: set[str], public_ids: set[
 def _incoming(
     connection: ConnectionSummary, observed_at: datetime, zone: tzinfo
 ) -> IncomingContact:
-    connected_on: date | None = None
-    if connection.connected_at is not None:
-        # The day LinkedIn shows, which is the day in the account owner's zone.
+    connected_on: date | None = connection.connected_on
+    if connected_on is None and connection.connected_at is not None:
+        # The day LinkedIn shows, which is the day in the account owner's zone. A
+        # source that states the day itself (the flagship-web card) is taken as is.
         connected_on = connection.connected_at.astimezone(zone).date()
     return IncomingContact(
         source=ContactSource.SYNC,
@@ -1046,6 +1049,25 @@ def _incoming(
         headline=connection.headline,
         connected_on=connected_on,
     )
+
+
+def _keep_split(incoming: IncomingContact, target: Contact) -> IncomingContact:
+    """``incoming`` with the contact's own first/last split when both spell the same name.
+
+    The flagship-web card gives one display name, split at its first space
+    (:func:`netkeeper.linkedin.flagship.split_display_name`); an archive or a CSV
+    import may have split the same name elsewhere ("Mary Ann" / "Smith"). When the
+    two join to the same words, the name has not changed, so the contact's split is
+    kept rather than rewritten on every sync. A name that did change is written as
+    the row gives it.
+    """
+    joined = " ".join(f"{incoming.first_name or ''} {incoming.last_name or ''}".split())
+    stored = " ".join(f"{target.first_name or ''} {target.last_name or ''}".split())
+    if not joined or joined != stored:
+        return incoming
+    if (incoming.first_name, incoming.last_name) == (target.first_name, target.last_name or None):
+        return incoming
+    return replace(incoming, first_name=target.first_name, last_name=target.last_name or None)
 
 
 def _zone(user: User) -> tzinfo:

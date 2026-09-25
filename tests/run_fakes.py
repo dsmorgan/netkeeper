@@ -1,10 +1,10 @@
-"""A fake browser that answers connections pages in-page, for the runs and ``serve`` tests (P2-10).
+"""A fake browser whose connections page loads its own answers, for the runs and ``serve`` tests.
 
-:class:`ConnectionsContext` is a :class:`browser_fakes.FakeContext` whose tabs
-answer the in-page Voyager fetch the way the real endpoint pages: it reads the
-url out of the script ``PageVoyagerFetch`` hands to ``page.evaluate`` and
-returns that page of invented people (``voyager_pages``). Nothing opens a
-socket; a linkedin.com url here is a string a fake tab records, never fetched.
+:class:`ConnectionsContext` is a :class:`flagship_site.FlagshipSite`: a fake
+connections page that "receives" its first screen when a tab navigates to it and
+"sends" each pagination request when the tab is scrolled, delivering every answer to
+the tab's ``response`` listeners (P2-17, ADR 0006). Nothing opens a socket; a
+linkedin.com url here is a string a fake tab records, never fetched.
 
 :func:`worker_extractor` builds the same ``ServeExtractor`` ``netkeeper serve``
 builds, on this fake instead of the attach provider, so a test drives the real
@@ -14,17 +14,15 @@ app lifespan, the real scheduler, and the real worker.
 from __future__ import annotations
 
 import asyncio
-import json
 import random
-import re
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
 
-from browser_fakes import FakeBrowser, FakeConnector, FakeContext, FakePage
+from browser_fakes import FakeBrowser, FakeConnector, FakeContext
+from flagship_site import CHECKPOINT_URL, FlagshipSite
 from sqlalchemy.orm import Session, sessionmaker
-from voyager_pages import CONNECTIONS_URL, PEOPLE, Person, page_body
+from voyager_pages import PEOPLE, Person
 
 from netkeeper.config import Settings
 from netkeeper.linkedin.browser import ActivityLocks, AttachBrowserProvider
@@ -35,41 +33,18 @@ from netkeeper.worker import BrowserWorker
 
 CDP_URL = "http://127.0.0.1:9222"
 
-_FETCH_URL = re.compile(r'fetch\("([^"]+)"')
 
+class ConnectionsContext(FlagshipSite):
+    """The connections page over ``people``. ``fetches`` is every pagination request it sent.
 
-class ConnectionsContext(FakeContext):
-    """Tabs whose in-page fetch pages through ``people`` like the connections endpoint."""
+    ``first`` is how many cards come with the page: a test that holds every sleep
+    shut passes a first screen as wide as the job's page (40), so the first unit
+    needs no scroll -- a scroll waits between wheel events, and a held sleep would
+    park the run there instead of in the wait between pages the test is about.
+    """
 
-    def __init__(self, people: Sequence[Person] = PEOPLE) -> None:
-        super().__init__()
-        self.people = list(people)
-        self.fetches: list[str] = []
-
-    def answer(self, expression: str) -> dict[str, Any]:
-        match = _FETCH_URL.search(expression)
-        assert match is not None, "not a PageVoyagerFetch script"
-        url = json.loads(f'"{match.group(1)}"')
-        self.fetches.append(url)
-        query = parse_qs(urlsplit(url).query)
-        start = int(query["start"][0])
-        count = int(query["count"][0])
-        body = page_body(
-            self.people[start : start + count], start=start, count=count, total=len(self.people)
-        )
-        return {"status": 200, "body": body, "url": CONNECTIONS_URL}
-
-    async def new_page(self) -> Any:
-        page = await super().new_page()
-        assert isinstance(page, FakePage)
-        context = self
-
-        async def evaluate(expression: str) -> Any:
-            page.evaluate_calls.append(expression)
-            return context.answer(expression)
-
-        page.evaluate = evaluate  # type: ignore[method-assign]
-        return page
+    def __init__(self, people: Sequence[Person] = PEOPLE, **kwargs: Any) -> None:
+        super().__init__(people, **kwargs)
 
 
 def fake_provider(
@@ -128,16 +103,7 @@ class Clock:
 class CheckpointContext(ConnectionsContext):
     """Every navigation lands on a checkpoint, the way LinkedIn redirects a flagged session."""
 
-    LANDING = "https://www.linkedin.com/checkpoint/challenge/AgFAKE?ctx=invented"
+    LANDING = CHECKPOINT_URL
 
-    async def new_page(self) -> Any:
-        page = await super().new_page()
-        real_goto = page.goto
-
-        async def goto(url: str) -> object:
-            await real_goto(url)
-            page._url = self.LANDING
-            return None
-
-        page.goto = goto
-        return page
+    def __init__(self, people: Sequence[Person] = PEOPLE) -> None:
+        super().__init__(people, landing=CHECKPOINT_URL)

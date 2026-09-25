@@ -30,6 +30,12 @@ from typing import Any, Protocol, cast, runtime_checkable
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin.activity_lock import LEGACY_SHARED_KEY
 from netkeeper.linkedin.activity_lock import SINGLE_ACCOUNT_KEY as SINGLE_ACCOUNT_KEY
+from netkeeper.linkedin.observe import (
+    ListenablePage,
+    Observation,
+    ObservationLimits,
+    ResponseMatch,
+)
 from netkeeper.linkedin.pacing import ScrollPlan
 
 log = logging.getLogger(__name__)
@@ -104,6 +110,16 @@ class _ScrollablePage(PageLike, Protocol):
 
     @property
     def mouse(self) -> _MouseLike: ...
+
+
+class _ObservablePage(PageLike, ListenablePage, Protocol):
+    """A tab that can also be listened to, for :meth:`BrowserRun.observe` alone.
+
+    Same reasoning as :class:`_ScrollablePage`: the listener methods are borrowed
+    here, by the one method that needs them, instead of widening :class:`PageLike`
+    for every caller. ``on`` and ``remove_listener`` only listen; nothing in either
+    protocol can hold, change, or answer a request (ADR 0006).
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +417,7 @@ class BrowserRun:
         self._last_url: str | None = None
         self._reattached = False
         self._closed = False
+        self._observations: list[Observation] = []
 
     @property
     def browser(self) -> BrowserLike:
@@ -485,6 +502,30 @@ class BrowserRun:
         await sleep(plan.dwell_s)
         return ScrollOutcome(page=page, cancelled=False)
 
+    async def observe(
+        self, match: ResponseMatch, *, limits: ObservationLimits | None = None
+    ) -> Observation:
+        """Start keeping the responses this run's tab receives that ``match`` names (ADR 0006).
+
+        Passive and read-only: the returned :class:`~netkeeper.linkedin.observe.Observation`
+        listens to the tab's ``response`` events and keeps the matching bodies, in
+        arrival order, within ``limits``. It cannot hold, change, answer, or cancel a
+        request; nothing in this package can (``tests/test_browser_safety.py``).
+
+        Start it *before* the navigation or scroll whose responses it should see: a
+        listener hears only what arrives after it. It listens to the tab that is open
+        now (reopened first if it was lost, like :meth:`ensure_page`); a tab reopened
+        *later* is a different tab, not listened to, so a caller compares
+        :attr:`~netkeeper.linkedin.observe.Observation.page` with the page a
+        :meth:`goto` or :meth:`scroll` returns and stops trusting the observation when
+        they differ. :meth:`close` closes every observation still open, before the tab.
+        """
+        page = cast(_ObservablePage, await self.ensure_page())
+        observation = Observation(match, page, limits)
+        observation.start()
+        self._observations.append(observation)
+        return observation
+
     async def goto(self, url: str) -> PageLike:
         """Navigate this run's tab, reopening it first, or again, if it was lost.
 
@@ -538,6 +579,9 @@ class BrowserRun:
         if self._closed:
             return
         self._closed = True
+        observations, self._observations = self._observations, []
+        for observation in observations:
+            await observation.close()
         page, self._page = self._page, None
         if page is not None and not page.is_closed():
             try:

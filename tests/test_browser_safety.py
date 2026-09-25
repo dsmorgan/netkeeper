@@ -97,11 +97,71 @@ CONTEXT_MUTATORS = frozenset(
         "grant_permissions",
         "route",
         "route_from_har",
+        "route_web_socket",
         "unroute",
+        "unroute_all",
         "set_extra_http_headers",
         "set_geolocation",
         "set_offline",
         "emulate_media",
+    }
+)
+
+# ADR 0006: netkeeper reads what the page loads and never touches a request. These are
+# Playwright's ways to hold one and answer it -- a routed request's `continue_`,
+# `fulfill`, and `abort` -- which only exist once something routes, and `route` is
+# refused above; they are named here too so a regression is caught at the call that
+# alters the request, not only at the one that intercepted it. (`fallback` is
+# Playwright's fourth, left off because FallbackConnectionsSource has an attribute of
+# that name; `route` and these three already cover every way to reach it.)
+REQUEST_MUTATORS = frozenset({"continue_", "fulfill", "abort"})
+
+# ADR 0006: no request of netkeeper's own through Playwright's API request context
+# either -- `page.request`, `context.request`, `playwright.request` -- which would send
+# with the profile's cookies from outside the page. The attribute `request` alone is
+# not refused: an observed response's `.request` is how the observation reads the
+# method and body the page sent. What is refused is sending through one.
+API_REQUEST_SENDS = frozenset({"fetch", "get", "post", "put", "patch", "delete", "head"})
+
+# ADR 0006: the modules that read the page's own answers only listen and scroll. Nothing
+# in them evaluates script in the page, types, clicks, or otherwise drives it: the
+# scroll is `BrowserRun.scroll`'s, and ADR 0006's one click, when enrichment adds it,
+# is a narrow BrowserRun method of its own, not a call made from these.
+OBSERVING_MODULES = (
+    LINKEDIN / "observe.py",
+    LINKEDIN / "page_connections.py",
+    LINKEDIN / "flagship.py",
+    LINKEDIN / "flight.py",
+)
+PAGE_DRIVERS = frozenset(
+    {
+        "evaluate",
+        "evaluate_handle",
+        "click",
+        "dblclick",
+        "tap",
+        "fill",
+        # `type` (Playwright's deprecated typing call) is left off: it is also the
+        # builtin, which every module calls. `fill`, `press`, and `press_sequentially`
+        # are the spellings that type into a page today.
+        "press",
+        "press_sequentially",
+        "check",
+        "uncheck",
+        "select_option",
+        "set_input_files",
+        "dispatch_event",
+        "hover",
+        "focus",
+        "keyboard",
+        "locator",
+        "query_selector",
+        "query_selector_all",
+        "wait_for_selector",
+        "add_script_tag",
+        "add_style_tag",
+        "set_content",
+        "fetch",
     }
 )
 
@@ -128,6 +188,8 @@ BROWSER_MODULES = (
     # The run worker (P2-10) attaches and runs a whole run. A route that imported
     # it could await it; routes submit runs to the task runner instead.
     "netkeeper.worker",
+    # #187: the connections source that scrolls a real tab and waits on its answers.
+    "netkeeper.linkedin.page_connections",
 )
 
 # The modules that may reach the provider at all, as paths from the repository root.
@@ -141,6 +203,7 @@ BROWSER_CALLERS = frozenset(
         Path("netkeeper/linkedin/rehearse.py"),  # the rehearsal, inside a run
         Path("netkeeper/linkedin/fetch.py"),  # PageVoyagerFetch, inside a run (#150)
         Path("netkeeper/linkedin/dom.py"),  # DomConnectionsSource/DomContactInfoSource (P2-08)
+        Path("netkeeper/linkedin/page_connections.py"),  # PageConnections, inside a run (#187)
         # The run worker (P2-10): takes the lock, attaches, runs a recorded run. Not
         # under web/ or services/, and nothing under either imports it: the app and
         # the runs API hold it only as services.runs.RunExecutor.
@@ -312,6 +375,33 @@ def context_mutations(source: str, path: Path = MEMORY) -> Iterator[Finding]:
             yield Finding(path, line, f"{name}() changes the user's browser context (spec 9.1)")
 
 
+def request_mutations(source: str, path: Path = MEMORY) -> Iterator[Finding]:
+    for line, name in reached_names(source, path):
+        if name in REQUEST_MUTATORS:
+            yield Finding(path, line, f"{name}() answers or alters a request (ADR 0006)")
+
+
+def api_request_sends(source: str, path: Path = MEMORY) -> Iterator[Finding]:
+    """``<anything>.request.<send>``: a request of netkeeper's own through an API context."""
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in API_REQUEST_SENDS
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "request"
+        ):
+            yield Finding(path, node.lineno, f"request.{node.attr} sends a request (ADR 0006)")
+    for line, name in reached_names(source, path):
+        if name == "APIRequestContext":
+            yield Finding(path, line, "an API request context sends requests (ADR 0006)")
+
+
+def page_drivers(source: str, path: Path = MEMORY) -> Iterator[Finding]:
+    for line, name in reached_names(source, path):
+        if name in PAGE_DRIVERS:
+            yield Finding(path, line, f"{name}() drives the page; this module only listens")
+
+
 def database_imports(source: str, path: Path = MEMORY) -> Iterator[Finding]:
     for line, name in imported_names(source, path):
         if is_forbidden(name):
@@ -353,6 +443,27 @@ def test_the_users_browser_context_is_never_mutated() -> None:
     """Spec 9.1: reuse contexts[0] as it is; no second context, no cookies, no UA."""
     findings = scan([PACKAGE], context_mutations)
     assert not findings, complain(findings, "the attached context is the user's:")
+
+
+def test_no_code_path_alters_or_answers_a_request() -> None:
+    """ADR 0006: the page's requests are read, never held, changed, or answered."""
+    findings = scan([PACKAGE], request_mutations)
+    assert not findings, complain(findings, "netkeeper reads the page's answers only:")
+
+
+def test_no_code_path_sends_through_an_api_request_context() -> None:
+    """ADR 0006: no request of netkeeper's own from outside the page either."""
+    findings = scan([PACKAGE], api_request_sends)
+    assert not findings, complain(findings, "netkeeper sends no requests of its own:")
+
+
+def test_the_observing_modules_only_listen_and_scroll() -> None:
+    """ADR 0006: the modules that read the page's answers never drive the page."""
+    findings: list[Finding] = []
+    for path in OBSERVING_MODULES:
+        assert path.exists(), f"{path} moved; point OBSERVING_MODULES at its new home"
+        findings.extend(page_drivers(path.read_text(encoding="utf-8"), path))
+    assert not findings, complain(findings, "an observing module drives the page:")
 
 
 def test_only_the_connector_opens_a_cdp_connection() -> None:
@@ -494,6 +605,39 @@ def test_context_scanner_catches_a_raw_cdp_session() -> None:
     assert list(context_mutations("session = await browser.new_browser_cdp_session()\n"))
     assert list(context_mutations("await context.route_from_har('x.har')\n"))
     assert list(context_mutations("await context.expose_function('f', f)\n"))
+
+
+def test_the_request_scanner_catches_an_interception() -> None:
+    """The ways a request is held or answered: each spelling a regression would use."""
+    assert list(context_mutations("await page.route('**/*', handler)\n"))
+    assert list(context_mutations("await context.route('**/pagination', handler)\n"))
+    assert list(context_mutations("await page.set_extra_http_headers({'x': 'y'})\n"))
+    assert list(context_mutations("await page.route_web_socket('wss://x', ws)\n"))
+    assert list(context_mutations("await page.unroute_all()\n"))
+    assert list(request_mutations("await route.continue_(post_data='{}')\n"))
+    assert list(request_mutations("await route.fulfill(body='x')\n"))
+    assert list(request_mutations("await route.abort()\n"))
+    assert list(request_mutations("go = route.continue_\nawait go()\n"))
+    assert list(request_mutations("getattr(route, 'fulfill')(body='x')\n"))
+    assert not list(request_mutations("method = response.request.method\n"))
+
+
+def test_the_api_request_scanner_catches_a_send() -> None:
+    assert list(api_request_sends("await page.request.post(url, data=body)\n"))
+    assert list(api_request_sends("await context.request.fetch(url)\n"))
+    assert list(api_request_sends("await self._page.request.get(url)\n"))
+    assert list(api_request_sends("from playwright.async_api import APIRequestContext\n"))
+    assert not list(api_request_sends("body = response.request.post_data\n"))
+    assert not list(api_request_sends("method = response.request.method\n"))
+
+
+def test_the_page_driver_scanner_catches_a_click_and_an_evaluate() -> None:
+    assert list(page_drivers("await page.click('text=Contact info')\n"))
+    assert list(page_drivers("await page.evaluate('fetch(u)')\n"))
+    assert list(page_drivers("await page.locator('a').click()\n"))
+    assert list(page_drivers("await page.keyboard.press('End')\n"))
+    assert not list(page_drivers("await run.scroll(plan)\n"))
+    assert not list(page_drivers("page.on('response', handler)\n"))
 
 
 def test_the_forbidden_matcher_reads_dotted_segments() -> None:
