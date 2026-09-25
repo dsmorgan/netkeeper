@@ -21,8 +21,10 @@ that brought nothing.
 
 **What ends the list.** Only the page's own answers do
 (:attr:`~netkeeper.linkedin.flagship.ConnectionsChunk.ends_list`): a connections
-answer with no cards, or a short answer that asks for no next page. A page that
-simply stops loading more is not an end: after :data:`MAX_IDLE_SCROLLS` scrolls that
+answer with no cards, or a short answer that asks for no next page -- and a full
+answer that asks for none once the run has seen as many distinct people as the first
+screen's total (a list whose length is a multiple of ten). A page that simply stops
+loading more is not an end: after :data:`MAX_IDLE_SCROLLS` scrolls that
 brought nothing, the call answers ``RouteChanged``, so the run stops and ages nobody.
 A short slice is returned only once the end is proven, which is what lets the job's
 short-page rule stand.
@@ -40,10 +42,16 @@ and the call answers ``RouteChanged``.
 **Classified before it is read** (spec 9.7). Where a navigation or a scroll left the tab
 is classified first: a checkpoint or a login wall stops the run as that, and a tab that
 has left the connections page answers ``RouteChanged``. A pagination answer that is not
-``200`` is classified from its status and url, a redirect from where it pointed. The
-first non-``Ok`` answer is sticky: every later call returns it, except that a unit
-already read whole from answers that arrived before it is still handed over. A unit is
-never handed over part-read.
+``200`` is classified from its status and url, a redirect from where it pointed. No
+HTML is ever searched for wall paths (#188 review, M1): every logged-in page links to
+``/uas/logout`` and ``/login``, so a document without a first screen is judged by the
+tab's url alone, and a wall served in place, which that cannot see, stops the run as
+``RouteChanged`` -- no session flag, no heat. The first non-``Ok`` answer is sticky:
+every later call returns it, except that a unit already read whole from answers that
+arrived before it is still handed over. A unit is never handed over part-read.
+:class:`~netkeeper.linkedin.observe.ObservationFailed` -- the mechanism failing, not
+LinkedIn answering -- is handled the same way, except that the run ends by that
+exception rather than an outcome: recorded failed, never complete.
 
 **Cancel** lands between units, at the gate's next check (spec 9.9): one call spends a
 few scrolls at most, and stopping partway through one would hand the job a short slice
@@ -158,6 +166,7 @@ class PageConnections:
         self._landed = False
         self._ended = False
         self._stopped: SourcePage | None = None
+        self._failed: ObservationFailed | None = None
         self._url = ""
 
     @property
@@ -170,11 +179,22 @@ class PageConnections:
         return f"{self._origin}{CONNECTIONS_PAGE_PATH}"
 
     async def fetch_page(self, *, start: int, count: int) -> SourcePage:
-        if self._stopped is None:
+        if self._failed is not None and len(self._cards) < start + count:
+            raise self._failed
+        if self._stopped is None and self._failed is None:
             try:
                 blocked = await self._read_until(start + count)
             except RouteChanged:
                 blocked = SourcePage(Outcome.ROUTE_CHANGED, self._url)
+            except ObservationFailed as exc:
+                # The mechanism failed, not LinkedIn: there is no outcome to report, so
+                # the run ends by this exception (recorded failed, never complete, ageing
+                # nobody). A unit already read whole before it is still handed over, the
+                # same as before a RouteChanged; the next call raises it.
+                self._failed = exc
+                blocked = None
+                if len(self._cards) < start + count:
+                    raise
             if blocked is not None:
                 self._stopped = blocked
         if self._stopped is not None and len(self._cards) < start + count:
@@ -256,16 +276,19 @@ class PageConnections:
                 return SourcePage(outcome, response.location or response.url)
             payload: bytes | None
             if response.method == "GET":
-                document = response.text() or ""
-                payload = rehydration_payload(document)
+                payload = rehydration_payload(response.text() or "")
                 if payload is None:
-                    # No first screen in the document: a wall served in place, or a page
-                    # that fetches its screen next. The body is HTML, so a checkpoint or
-                    # login page in it is read as one (spec 9.7), and otherwise the
-                    # screen request is waited for.
-                    walled = classify(200, response.url, document)
-                    if walled in (Outcome.CHECKPOINT, Outcome.LOGGED_OUT):
-                        return SourcePage(walled, response.url)
+                    # No first screen in the document: a page that fetches its screen
+                    # next, or a wall. Where the tab is decides which, by its url alone
+                    # (#188 review, M1): the HTML itself is never searched for wall
+                    # paths, because every logged-in page links to /uas/logout, and
+                    # reading that as a login wall would flag the session and end the
+                    # run with nothing. A wall served in place at the connections url
+                    # stays unrecognized: no first screen ever comes, and the run stops
+                    # as RouteChanged, ageing nobody and flagging nothing.
+                    blocked = self._where(page.url)
+                    if blocked is not None:
+                        return blocked
                     continue
             else:
                 payload = response.body
@@ -276,8 +299,8 @@ class PageConnections:
                 # list is empty; otherwise the cards come some other way now.
                 log.warning("connections: the first screen has no cards and no zero total")
                 return SourcePage(Outcome.ROUTE_CHANGED, self._url)
-            self._take(chunk)
             self._total = chunk.total or 0
+            self._take(chunk)
             if self._total == 0:
                 log.warning(
                     "connections: the first screen states no total; this run cannot complete"
@@ -360,6 +383,12 @@ class PageConnections:
         self._cards.extend(chunk.cards)
         if chunk.ends_list:
             self._ended = True
+        elif chunk.next_start is None and 0 < self._total <= self._distinct():
+            # A full answer that asks for no next page is the end of a list whose length
+            # is a multiple of ten -- but only once the run has seen as many distinct
+            # people as the first screen's total. Short of that it proves nothing, and
+            # the page stopping there still ends the run as RouteChanged.
+            self._ended = True
         self._next_start = (
             chunk.next_start if chunk.next_start is not None else chunk.start + len(chunk.cards)
         )
@@ -369,6 +398,9 @@ class PageConnections:
             chunk.start,
             ", the end of the list" if self._ended else "",
         )
+
+    def _distinct(self) -> int:
+        return len({card.urn for card in self._cards})
 
     # --- where the tab is -----------------------------------------------------------
 
@@ -406,7 +438,9 @@ def _outcome(response: ObservedResponse) -> Outcome:
 
     A redirect is classified by where it pointed. A ``200`` whose body could not be
     kept is the observation failing, not LinkedIn answering. Any other status is
-    classified from its status, url, and body the way a fetched response is.
+    classified from its status and url, never its body (#188 review, M1): an error
+    page is HTML with the site's own navigation in it, and its Sign-out link to
+    ``/uas/logout`` is not a login wall.
     """
     if response.failure == FAILURE_REDIRECT:
         target = response.location or ""
@@ -420,7 +454,7 @@ def _outcome(response: ObservedResponse) -> Outcome:
         if response.body is None:
             raise ObservationFailed(f"an answer of the page could not be kept: {response.failure}")
         return Outcome.OK
-    return classify(response.status, response.url, response.text() or "")
+    return classify(response.status, response.url, "")
 
 
 def _path(url: str) -> str:

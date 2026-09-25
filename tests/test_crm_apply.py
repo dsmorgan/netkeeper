@@ -646,17 +646,16 @@ def test_S6_a_garbled_dom_name_is_never_split_into_a_name(writer: Session, user:
     ("Priya Okafor\\n\\n  Data engineer at Fictional"). The extractor reports
     that name unknown rather than splitting it (#184), and the contact the card
     creates is named by its slug."""
-    from netkeeper.linkedin.dom import _parse_one_card
-
-    card = _parse_one_card(
-        {
-            "publicId": "priya-x",
-            "name": "Priya Okafor\n\n  Data engineer at Fictional",
-            "headline": None,
-        }
+    # The DOM reader that produced such a row went with #187's review; the row it
+    # reported for a garbled name -- both names empty -- is what apply must handle.
+    card = ConnectionSummary(
+        urn=None,
+        public_id="priya-x",
+        first_name="",
+        last_name="",
+        headline=None,
+        connected_at=None,
     )
-    assert card is not None
-    assert (card.first_name, card.last_name) == ("", "")
     page = ConnectionsPage(
         mode=SyncMode.FULL, number=0, start=0, total=0, connections=(card,), observed_at=NOW
     )

@@ -24,9 +24,9 @@ a :class:`~netkeeper.linkedin.voyager.VoyagerFetch`, never a
 ``tests/test_browser_safety.py``'s ``BROWSER_MODULES``.
 :mod:`netkeeper.linkedin.dom`'s ``DomContactInfoSource`` is the DOM
 implementation of the same protocol (spec 9.3: "linkedin/dom.py holds the
-fallback for the two paths that matter most"); it lives there, alongside
-``DomConnectionsSource``, because it is the one half of this seam that
-actually touches a browser.
+fallback for the two paths that matter most"); it lives there because it is
+the one half of this seam that actually touches a browser. (The connections
+half of that module went with #187's review.)
 
 **Before wiring ``FallbackContactInfoSource``/``DomContactInfoSource`` into
 enrichment (#173 review, F7):** the DOM half carries no URN of its own --

@@ -103,6 +103,7 @@ CONTEXT_MUTATORS = frozenset(
         "set_extra_http_headers",
         "set_geolocation",
         "set_offline",
+        "set_http_credentials",
         "emulate_media",
     }
 )
@@ -161,6 +162,12 @@ PAGE_DRIVERS = frozenset(
         "add_script_tag",
         "add_style_tag",
         "set_content",
+        # Script run in the page by other names: each can call `fetch` as easily as
+        # `evaluate` can.
+        "wait_for_function",
+        "eval_on_selector",
+        "eval_on_selector_all",
+        "evaluate_all",
         "fetch",
     }
 )
@@ -202,7 +209,7 @@ BROWSER_CALLERS = frozenset(
         Path("netkeeper/linkedin/preflight.py"),  # the report, inside a run
         Path("netkeeper/linkedin/rehearse.py"),  # the rehearsal, inside a run
         Path("netkeeper/linkedin/fetch.py"),  # PageVoyagerFetch, inside a run (#150)
-        Path("netkeeper/linkedin/dom.py"),  # DomConnectionsSource/DomContactInfoSource (P2-08)
+        Path("netkeeper/linkedin/dom.py"),  # DomContactInfoSource (P2-08)
         Path("netkeeper/linkedin/page_connections.py"),  # PageConnections, inside a run (#187)
         # The run worker (P2-10): takes the lock, attaches, runs a recorded run. Not
         # under web/ or services/, and nothing under either imports it: the app and
@@ -382,11 +389,27 @@ def request_mutations(source: str, path: Path = MEMORY) -> Iterator[Finding]:
 
 
 def api_request_sends(source: str, path: Path = MEMORY) -> Iterator[Finding]:
-    """``<anything>.request.<send>``: a request of netkeeper's own through an API context."""
+    """A request of netkeeper's own through an API request context.
+
+    Two readings, so holding the context in a variable is no way around it:
+
+    - any ``.request`` attribute read on something other than a name ``response``
+      (``page.request``, ``context.request``, ``playwright.request``). An observed
+      response's ``.request`` is how the observation reads what the page sent; every
+      other ``.request`` in Playwright is an API request context;
+    - ``<anything>.request.<send>``, whatever it is read on.
+
+    ``request.new_context`` is refused by the context rule (``new_context``).
+    """
     for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Attribute):
+            continue
+        if node.attr == "request" and not (
+            isinstance(node.value, ast.Name) and node.value.id == "response"
+        ):
+            yield Finding(path, node.lineno, "reads an API request context (ADR 0006)")
         if (
-            isinstance(node, ast.Attribute)
-            and node.attr in API_REQUEST_SENDS
+            node.attr in API_REQUEST_SENDS
             and isinstance(node.value, ast.Attribute)
             and node.value.attr == "request"
         ):
@@ -614,6 +637,7 @@ def test_the_request_scanner_catches_an_interception() -> None:
     assert list(context_mutations("await page.set_extra_http_headers({'x': 'y'})\n"))
     assert list(context_mutations("await page.route_web_socket('wss://x', ws)\n"))
     assert list(context_mutations("await page.unroute_all()\n"))
+    assert list(context_mutations("await ctx.set_http_credentials({'username': 'x'})\n"))
     assert list(request_mutations("await route.continue_(post_data='{}')\n"))
     assert list(request_mutations("await route.fulfill(body='x')\n"))
     assert list(request_mutations("await route.abort()\n"))
@@ -627,6 +651,10 @@ def test_the_api_request_scanner_catches_a_send() -> None:
     assert list(api_request_sends("await context.request.fetch(url)\n"))
     assert list(api_request_sends("await self._page.request.get(url)\n"))
     assert list(api_request_sends("from playwright.async_api import APIRequestContext\n"))
+    assert list(api_request_sends("api = page.context.request\nawait api.post(u)\n"))
+    assert list(api_request_sends("api = self._run.context.request\n"))
+    assert list(api_request_sends("rc = await playwright.request.new_context()\n"))
+    assert list(context_mutations("rc = await playwright.request.new_context()\n"))
     assert not list(api_request_sends("body = response.request.post_data\n"))
     assert not list(api_request_sends("method = response.request.method\n"))
 
@@ -636,6 +664,10 @@ def test_the_page_driver_scanner_catches_a_click_and_an_evaluate() -> None:
     assert list(page_drivers("await page.evaluate('fetch(u)')\n"))
     assert list(page_drivers("await page.locator('a').click()\n"))
     assert list(page_drivers("await page.keyboard.press('End')\n"))
+    assert list(page_drivers("await page.wait_for_function('fetch(u)')\n"))
+    assert list(page_drivers("await page.eval_on_selector('a', 'e => e.click()')\n"))
+    assert list(page_drivers("await page.eval_on_selector_all('a', 'es => 1')\n"))
+    assert list(page_drivers("await locator.evaluate_all('es => fetch(u)')\n"))
     assert not list(page_drivers("await run.scroll(plan)\n"))
     assert not list(page_drivers("page.on('response', handler)\n"))
 

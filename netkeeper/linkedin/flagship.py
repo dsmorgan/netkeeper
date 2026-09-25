@@ -140,7 +140,10 @@ _MONTHS: Final[dict[str, int]] = {
     "November": 11,
     "December": 12,
 }
-_CONNECTED_ON: Final = re.compile(r"Connected on ([A-Z][a-z]+) (\d{1,2}), (\d{4})")
+#: "Connected on September 3, 2024" (en-US, as captured) and "Connected on 3 September
+#: 2024" (en-GB); either with the month abbreviated ("Sep", "Sept.").
+_CONNECTED_ON_US: Final = re.compile(r"Connected on ([A-Za-z]+)\.? (\d{1,2}), (\d{4})")
+_CONNECTED_ON_GB: Final = re.compile(r"Connected on (\d{1,2}) ([A-Za-z]+)\.?,? (\d{4})")
 
 #: Unicode's own line and paragraph separators, which ``str.split`` would quietly fold.
 _LINE_SEPARATORS: Final = "\u2028\u2029"
@@ -426,15 +429,39 @@ def split_display_name(name: str, *, endpoint: str, where: str) -> tuple[str, st
     return first, last
 
 
-def _connected_on(text: str, endpoint: str, where: str) -> date:
-    match = _CONNECTED_ON.fullmatch(" ".join(text.split()))
-    month = _MONTHS.get(match.group(1)) if match else None
-    if match is None or month is None:
-        raise RouteChanged(endpoint, f"{where}: a connected-on date that is not the captured shape")
+def _connected_on(text: str, endpoint: str, where: str) -> date | None:
+    """The day a card's "Connected on" text names, or ``None`` for a phrasing not known.
+
+    The date is optional, so a phrasing this module does not recognize (another
+    interface language, a new format) leaves it unknown rather than refusing the
+    whole answer; the identity on the card is still whole. A phrasing it does
+    recognize that names a day that does not exist (February 30) is
+    :class:`RouteChanged`: that is a shape gone wrong, not a new language.
+    """
+    normalized = " ".join(text.split())
+    us = _CONNECTED_ON_US.fullmatch(normalized)
+    gb = _CONNECTED_ON_GB.fullmatch(normalized)
+    if us is not None:
+        month, day, year = _month(us.group(1)), us.group(2), us.group(3)
+    elif gb is not None:
+        month, day, year = _month(gb.group(2)), gb.group(1), gb.group(3)
+    else:
+        return None
+    if month is None:
+        return None
     try:
-        return date(int(match.group(3)), month, int(match.group(2)))
+        return date(int(year), month, int(day))
     except ValueError:
         raise RouteChanged(endpoint, f"{where}: a connected-on date that does not exist") from None
+
+
+def _month(name: str) -> int | None:
+    """A month's number from its English name or abbreviation ("Sep", "Sept")."""
+    lowered = name.lower()
+    for full, number in _MONTHS.items():
+        if lowered == full.lower() or (len(lowered) >= 3 and full.lower().startswith(lowered)):
+            return number
+    return None
 
 
 def _next_start(payload: FlightPayload, *, endpoint: str) -> int | None:

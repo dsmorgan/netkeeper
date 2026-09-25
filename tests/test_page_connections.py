@@ -16,6 +16,7 @@ import random
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from flagship_pages import CardOptions
@@ -23,14 +24,16 @@ from flagship_site import (
     CHECKPOINT_URL,
     LOGIN_URL,
     PAGE_URL,
+    SHELL,
     Answer,
     FlagshipSite,
+    ListeningTab,
 )
 from run_fakes import fake_provider
 from voyager_pages import PEOPLE, Person
 
 from netkeeper.linkedin import page_connections
-from netkeeper.linkedin.browser import BrowserUnavailable
+from netkeeper.linkedin.browser import BrowserRun, BrowserUnavailable, ScrollOutcome
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import (
     ConnectionsPage,
@@ -41,6 +44,7 @@ from netkeeper.linkedin.connections import (
     run_connections_sync,
 )
 from netkeeper.linkedin.observe import ObservationFailed, ObservationLimits
+from netkeeper.linkedin.pacing import ScrollPlan
 from netkeeper.linkedin.page_connections import PageConnections
 
 
@@ -93,10 +97,11 @@ async def sync(
     known: Sequence[str] = (),
     gate: Gate | None = None,
     page_budget: int = 100,
+    pages_sink: list[ConnectionsPage] | None = None,
     **source_kwargs: object,
 ) -> Outcomes:
     provider, _ = fake_provider(site)
-    pages: list[ConnectionsPage] = []
+    pages: list[ConnectionsPage] = [] if pages_sink is None else pages_sink
 
     async def on_page(page: ConnectionsPage) -> None:
         pages.append(page)
@@ -146,13 +151,75 @@ async def test_a_short_last_page_that_asks_for_nothing_ends_the_list() -> None:
     assert out.urns == [p.urn for p in people] and out.result.complete
 
 
-async def test_a_full_last_page_that_asks_for_nothing_proves_nothing() -> None:
-    """Forty people, and the fourth page is full and asks for no fifth: the list may go
-    on. The page stops loading, the source gives up after its idle scrolls, and the run
-    is not complete, so nobody ages."""
-    out = await sync(FlagshipSite(many(40), end="short"))
+async def test_a_full_last_page_that_asks_for_nothing_ends_a_list_the_run_has_all_of() -> None:
+    """A network of forty (a multiple of ten): the fourth page is full and asks for no
+    fifth. The run has seen as many distinct people as the stated total, so that answer
+    is the end, and the run is complete (#188 review, follow-up 1)."""
+    people = many(40)
+    out = await sync(FlagshipSite(people, end="short"))
+    assert out.result.reason is StopReason.END_OF_LIST and out.result.complete
+    assert out.urns == [p.urn for p in people]
+
+
+async def test_a_full_last_page_that_asks_for_nothing_proves_nothing_short_of_the_total() -> None:
+    """The same answer when the total says fifty: the list may go on. The page stops
+    loading, the source gives up after its idle scrolls, and nobody ages."""
+    out = await sync(FlagshipSite(many(40), end="short", total=50))
     assert out.result.reason is StopReason.RESPONSE
     assert out.result.outcome is Outcome.ROUTE_CHANGED and not out.result.complete
+
+
+async def test_seeing_the_total_does_not_make_a_stalled_page_the_end() -> None:
+    """The last answer asks for a next page the page never requests: however many
+    people the run has seen, that is a stall, never the end."""
+    out = await sync(FlagshipSite(many(40), end="stall"))
+    assert out.result.outcome is Outcome.ROUTE_CHANGED and not out.result.complete
+
+
+async def test_the_idle_scrolls_are_exactly_the_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#188 review, S3: pages 10 and 20 come on the first two scroll plans, then the
+    page stops asking. Exactly MAX_IDLE_SCROLLS more plans, then RouteChanged."""
+    site = FlagshipSite(many(30), end="stall", answer_plans=lambda n: True)
+    _count_plans(monkeypatch, site)
+    out = await sync(site)
+    assert out.result.outcome is Outcome.ROUTE_CHANGED
+    assert site.plans == 2 + page_connections.MAX_IDLE_SCROLLS
+
+
+async def test_idle_scrolls_add_up_across_a_unit_and_do_not_reset_on_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page that answers only every fourth scroll: three idle, a page, three idle --
+    six idle scrolls inside one unit, which is the bound, before the unit fills. A
+    counter that reset on each page would let this unit scroll on indefinitely."""
+    site = FlagshipSite(many(60), answer_plans=lambda n: n % 4 == 0)
+    _count_plans(monkeypatch, site)
+    out = await sync(site)
+    assert out.result.outcome is Outcome.ROUTE_CHANGED and out.urns == []
+    assert site.plans == 7  # plans 1-3 idle, 4 brought page 10, 5-7 idle: six in all
+
+
+async def test_idle_scrolls_start_over_with_each_unit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bound is per unit: a later unit gets its own six."""
+    site = FlagshipSite(many(80), answer_plans=lambda n: n % 2 == 0)
+    _count_plans(monkeypatch, site)
+    out = await sync(site)
+    # One idle scroll before each page: three or four in a unit, eight in the run.
+    assert out.result.complete and len(out.urns) == 80
+    assert site.plans - len(site.fetches) > page_connections.MAX_IDLE_SCROLLS
+
+
+def _count_plans(monkeypatch: pytest.MonkeyPatch, site: FlagshipSite) -> None:
+    """Tell ``site`` each time ``BrowserRun.scroll`` starts replaying a plan."""
+    real = BrowserRun.scroll
+
+    async def counted(self: BrowserRun, plan: ScrollPlan, **kwargs: Any) -> ScrollOutcome:
+        tab = site.pages[-1]
+        assert isinstance(tab, ListeningTab)
+        site.plan_started(tab)
+        return await real(self, plan, **kwargs)
+
+    monkeypatch.setattr(BrowserRun, "scroll", counted)
 
 
 async def test_a_page_that_stops_loading_is_not_the_end_and_the_scroll_is_bounded() -> None:
@@ -229,6 +296,10 @@ async def test_a_checkpoint_on_landing_stops_the_run_and_nothing_scrolls() -> No
             Outcome.ROUTE_CHANGED,
         ),
         (Answer(status=500, body=b"oops"), Outcome.ROUTE_CHANGED),
+        # M1: an error page's own sign-out and sign-in links are not a wall.
+        (Answer(status=500, body=SHELL), Outcome.ROUTE_CHANGED),
+        (Answer(status=403, body=SHELL), Outcome.ROUTE_CHANGED),
+        (Answer(status=401, body=SHELL), Outcome.LOGGED_OUT),
         (Answer(status=200, body=b"<html>not flight</html>"), Outcome.ROUTE_CHANGED),
         (Answer(status=200, body=b"0:{}\n", tab_url=CHECKPOINT_URL), Outcome.CHECKPOINT),
     ],
@@ -291,6 +362,37 @@ async def test_an_incremental_sync_refuses_a_list_not_sorted_newest_first() -> N
     assert full.result.complete  # a full sync reads the whole list in any order
 
 
+async def test_an_incremental_sync_refuses_a_list_with_no_sort_state() -> None:
+    """#188 review, S2: a request that carries no sort is not proof of newest first."""
+    out = await sync(FlagshipSite(many(60), sort=None), SyncMode.INCREMENTAL)
+    assert out.result.outcome is Outcome.ROUTE_CHANGED
+
+
+async def test_a_page_of_the_list_before_its_first_screen_is_route_changed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#188 review, S2: an answer for start 10 arriving before the first screen is
+    refused as out of order, before anything tries to read it as the first screen
+    (which its cards' keys would refuse too, but only as a second line)."""
+    out = await sync(FlagshipSite(many(30), early_pagination=True))
+    assert out.result.outcome is Outcome.ROUTE_CHANGED and out.urns == []
+    assert "a page of the list arrived before its first screen" in caplog.text
+
+
+async def test_a_mechanism_failure_hands_over_the_units_read_whole_then_ends_the_run() -> None:
+    """#188 review, follow-up 2: an answer too large to keep is the observation
+    failing, not LinkedIn answering. The unit already read whole (0-39) is handed
+    over, as before a RouteChanged; the next unit raises, so the run ends by exception:
+    recorded failed, never complete, ageing nobody."""
+    people = many(90)
+    huge = Answer(status=200, body=b"0:" + b"0" * 500_000)
+    site = FlagshipSite(people, answers={40: huge})
+    sink: list[ConnectionsPage] = []
+    with pytest.raises(ObservationFailed):
+        await sync(site, limits=ObservationLimits(max_body_bytes=300_000), pages_sink=sink)
+    assert [c.urn for page in sink for c in page.connections] == [p.urn for p in people[:40]]
+
+
 async def test_a_first_screen_that_never_comes_is_route_changed() -> None:
     site = FlagshipSite(many(20), landing="screen")
     site.people = site.people  # the screen request still arrives...
@@ -302,16 +404,34 @@ async def test_a_first_screen_that_never_comes_is_route_changed() -> None:
     assert answer.outcome is Outcome.ROUTE_CHANGED
 
 
-async def test_a_wall_served_in_place_of_the_document_is_read_as_one() -> None:
-    """No first screen in the document, and the document is a login page: logged out."""
+async def test_a_shell_that_links_to_sign_out_is_not_a_login_wall() -> None:
+    """#188 review, M1: every logged-in page links to /uas/logout, /login, and more.
+    A document with no first screen is judged by where the tab is, never by those
+    links in its HTML: the screen request that follows is read, and the run completes
+    without raising the session flag."""
+    people = many(25)
+    out = await sync(FlagshipSite(people, landing="screen"))
+    assert out.result.outcome is None and out.result.complete
+    assert out.urns == [p.urn for p in people]
 
-    class WalledSite(FlagshipSite):
+
+async def test_a_wall_served_in_place_of_the_document_stops_the_run_unflagged() -> None:
+    """A document with no first screen at the connections url, whatever its HTML
+    links to, and no screen after it: it cannot be told apart from a page LinkedIn
+    changed, so the run stops as RouteChanged -- never LoggedOut on the strength of a
+    link, which would flag the session and, for a checkpoint, raise heat."""
+
+    class ShellOnly(FlagshipSite):
         def navigated(self, tab, url):  # type: ignore[no-untyped-def]
-            self._send(
-                tab, "GET", url, 200, b"<html><a href='/login'>Sign in</a></html>", "document"
-            )
+            self._send(tab, "GET", url, 200, SHELL, "document")
 
-    out = await sync(WalledSite(many(20)))
+    out = await sync(ShellOnly(many(20)))
+    assert out.result.outcome is Outcome.ROUTE_CHANGED and out.urns == []
+
+
+async def test_a_wall_the_tab_lands_on_is_still_read_as_one() -> None:
+    """The real-wall case the fix keeps: the tab itself is at the login url."""
+    out = await sync(FlagshipSite(many(20), landing=LOGIN_URL))
     assert out.result.outcome is Outcome.LOGGED_OUT
 
 
