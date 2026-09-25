@@ -60,20 +60,13 @@ incomplete and ages nobody that week; the next one catches up.
 A live sync reads through
 :class:`~netkeeper.linkedin.page_connections.PageConnections` (P2-17, ADR 0006):
 the connections page, scrolled like a person, read from the answers the page
-itself loads. The rest of this paragraph is the P2-06/P2-08 design, kept because
-the offline tests of this loop's paging rules drive it and LinkedIn moves
-sessions between its clients gradually; the worker no longer wires either.
-:class:`VoyagerConnections` is the in-page API implementation (spec 9.3);
-:mod:`netkeeper.linkedin.dom`'s :class:`~netkeeper.linkedin.dom.DomConnectionsSource`
-implements the same protocol, so choosing the fallback after a ``RouteChanged``
-is a caller's decision about which source to pass, not a change to this loop.
-:class:`FallbackConnectionsSource` is that decision, made once: it wraps a
-primary and a fallback source behind the same :class:`ConnectionsSource`
-interface and switches, at most once per run, the first time the primary
-answers ``RouteChanged`` -- so this loop never learns there were two sources
-at all, and a caller that wants automatic DOM fallback constructs one composite
-source and passes it here exactly as it would pass :class:`VoyagerConnections`
-alone.
+itself loads. :class:`VoyagerConnections`, the in-page API source from P2-06, is
+no longer wired; it stays because the offline tests of this loop's paging and
+completeness rules drive it, and those rules are the same for every source.
+P2-08's DOM source and ``FallbackConnectionsSource`` are gone (#187's review):
+nothing wired them. The rule the fallback fed stays in this loop: a page a
+source marks :attr:`SourcePage.switched` (it came from a secondary source) makes
+the run incomplete, whatever the totals say.
 """
 
 from __future__ import annotations
@@ -81,7 +74,7 @@ from __future__ import annotations
 import enum
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Final, Protocol
 
@@ -200,8 +193,8 @@ class SyncResult:
     :attr:`StopReason.RESPONSE` (the core raises heat or the session flag from
     them), and are ``None`` otherwise. ``total`` is the last page's reported
     total and ``max_total`` the largest any page reported (0 before any page).
-    ``source_switched`` is true when :class:`FallbackConnectionsSource` ever
-    fell back to its secondary source during this run (folded from
+    ``source_switched`` is true when any page of this run came from a source that
+    had fallen back to a secondary one (folded from
     :attr:`SourcePage.switched`, spec 9.3/P2-08's #173 review, F5(a)) --
     :attr:`complete` refuses outright once it is true, regardless of what the
     totals below would otherwise allow.
@@ -249,10 +242,11 @@ class SourcePage:
 
     ``page`` is ``None`` for every outcome but ``Ok``, and for an ``Ok``
     response whose body did not parse (then ``outcome`` is ``RouteChanged``).
-    ``switched`` is true when the source that answered this call had already
-    fallen back from its primary to a secondary source (:class:`FallbackConnectionsSource`
-    sets it; a bare source never does, so it defaults false). :func:`run_connections_sync`
-    folds it into :class:`SyncResult.source_switched` (#173 review, F5(a)).
+    ``switched`` is true when the source that answered this call had fallen back
+    from its primary to a secondary source. No source in the package falls back
+    now (#187's review); the flag stays so one that does can never complete a run.
+    :func:`run_connections_sync` folds it into :class:`SyncResult.source_switched`
+    (#173 review, F5(a)).
     """
 
     outcome: Outcome
@@ -311,82 +305,6 @@ class VoyagerConnections:
         except RouteChanged:
             return SourcePage(outcome=Outcome.ROUTE_CHANGED, final_url=response.final_url)
         return SourcePage(outcome=Outcome.OK, final_url=response.final_url, page=page)
-
-
-@dataclass(slots=True)
-class FallbackConnectionsSource:
-    """A :class:`ConnectionsSource` over two others: Voyager first, DOM second (spec 9.3).
-
-    Every call goes to ``primary`` until ``primary`` answers ``RouteChanged``.
-    From that page on, every call -- including this one, for this same page --
-    goes to ``fallback`` instead, for the rest of this source's life. The switch
-    is one-way and happens at most once:
-
-    * **It cannot loop.** ``primary`` is never retried once ``_switched`` is
-      set, even if ``fallback`` itself later answers ``RouteChanged`` -- that
-      just ends the run the way any other non-``Ok`` answer does (spec 9.7),
-      through the normal :attr:`StopReason.RESPONSE` path. There is no third
-      source to bounce back to and no code path that clears ``_switched``.
-    * **It cannot double-spend budget.** :meth:`~ConnectionsSource.fetch_page`
-      is called once per page by :func:`run_connections_sync`, after the
-      gate's ``before_page`` has already spent one ``connection_pages`` unit
-      (spec 9.6) for that page. Trying ``primary`` and falling through to
-      ``fallback`` both happen *inside* that one call, so a page that needed
-      both attempts still costs exactly one budgeted unit, the same as a page
-      that needed only one.
-    * **Aging stays honest.** This class knows nothing about totals or
-      completeness -- it only decides which source answers a call. Whatever
-      ``fallback`` reports as each page's ``total`` (P2-08's DOM source always
-      reports ``0``: see its module docstring) flows straight through to
-      :class:`SyncResult`, whose own ``complete`` property is what actually
-      decides whether anyone can be aged.
-
-    A single instance is for one run. Building a fresh one per run is what
-    keeps the "at most once" promise meaningful: a shared instance would carry
-    ``_switched`` across runs and a primary that recovered between runs would
-    never be tried again.
-    """
-
-    primary: ConnectionsSource
-    fallback: ConnectionsSource
-    _switched: bool = field(default=False, init=False, repr=False)
-
-    @property
-    def endpoint(self) -> str:
-        """The endpoint currently answering: ``fallback``'s once switched, else ``primary``'s."""
-        return self.fallback.endpoint if self._switched else self.primary.endpoint
-
-    @property
-    def switched(self) -> bool:
-        """Whether this instance has ever fallen back to ``fallback``.
-
-        One-way and sticky for this instance's life (see the class docstring):
-        never ``True`` before the first ``RouteChanged``, never ``False`` again
-        after it. :func:`run_connections_sync` reads :attr:`SourcePage.switched`
-        (set from this on every fallback-answered page) into
-        :class:`SyncResult.source_switched`, which :attr:`SyncResult.complete`
-        refuses outright once true (#173 review, F5(a)).
-        """
-        return self._switched
-
-    async def fetch_page(self, *, start: int, count: int) -> SourcePage:
-        if not self._switched:
-            answer = await self.primary.fetch_page(start=start, count=count)
-            # Only RouteChanged switches -- never a checkpoint, a throttle, or a
-            # logged-out wall (#173 review, R5): those stop the run through the
-            # ordinary non-Ok path (spec 9.7) exactly as they would with no
-            # fallback at all, because none of them mean "this endpoint's shape
-            # changed", the one thing switching to DOM is for.
-            if answer.outcome is not Outcome.ROUTE_CHANGED:
-                return answer
-            log.warning(
-                "connections: %s route changed; falling back to %s for the rest of this run",
-                self.primary.endpoint,
-                self.fallback.endpoint,
-            )
-            self._switched = True
-        answer = await self.fallback.fetch_page(start=start, count=count)
-        return replace(answer, switched=True)
 
 
 # --- the gate ----------------------------------------------------------------

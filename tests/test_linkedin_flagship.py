@@ -122,7 +122,8 @@ def test_a_card_keyed_for_another_page_is_refused() -> None:
         (CardOptions(key_slug="someone-else-fake-0000"), "the slug does not match"),
         (CardOptions(key_start=20), "keyed for a different page"),
         (CardOptions(drop_name=True), "0 names, not one"),
-        (CardOptions(connected_on="Connected on Smarch 3, 2024"), "connected-on date"),
+        (CardOptions(second_name="Somebody Else"), "2 names, not one"),
+        (CardOptions(second_connected_on="Connected on May 1, 2020"), "2 connected-on dates"),
         (CardOptions(connected_on="Connected on February 30, 2024"), "does not exist"),
         (CardOptions(name="Priya\nOkafor"), "control character"),
         (CardOptions(name="   "), "empty or too long"),
@@ -136,6 +137,42 @@ def test_one_spoiled_card_refuses_the_whole_page(options: CardOptions, detail: s
         _chunk(body)
     assert detail in caught.value.detail
     assert "card 4" in caught.value.detail
+
+
+@pytest.mark.parametrize(
+    ("text", "day"),
+    [
+        ("Connected on September 3, 2024", date(2024, 9, 3)),
+        ("Connected on 3 September 2024", date(2024, 9, 3)),  # en-GB
+        ("Connected on Sep 3, 2024", date(2024, 9, 3)),
+        ("Connected on Sept. 3, 2024", date(2024, 9, 3)),
+        ("Connected on 4 Mar 2024", date(2024, 3, 4)),  # day <= 12: a swap would read April 3
+        ("Connected on 11 February, 2023", date(2023, 2, 11)),
+        ("Connected on March 4, 2024", date(2024, 3, 4)),
+    ],
+)
+def test_a_connected_on_date_is_read_in_the_phrasings_it_knows(text: str, day: date) -> None:
+    body = screen_payload(PEOPLE[:1], total=1, card_options={0: CardOptions(connected_on=text)})
+    assert _chunk(body).cards[0].connected_on == day
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Connected on Smarch 3, 2024",  # not a month
+        "Connected on 3.9.2024",
+        "Connected on 2024-09-03",
+        "Connected on Ma 3, 2024",  # too short to be a month
+        "Connected on",
+    ],
+)
+def test_a_connected_on_phrasing_it_does_not_know_leaves_the_date_unknown(text: str) -> None:
+    """#188 review, follow-up 3: the date is optional, so an unknown phrasing leaves it
+    None and keeps the card, rather than refusing the whole answer."""
+    body = screen_payload(PEOPLE[:2], total=2, card_options={0: CardOptions(connected_on=text)})
+    chunk = _chunk(body)
+    assert chunk.cards[0].connected_on is None and chunk.cards[0].urn == PEOPLE[0].urn
+    assert chunk.cards[1].connected_on is not None
 
 
 def test_a_profile_id_that_is_not_the_captured_shape_is_refused() -> None:

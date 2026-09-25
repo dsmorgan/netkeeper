@@ -218,6 +218,8 @@ class CardOptions:
     name: str | None = None  # a display name other than the person's
     connected_on: str | None = None  # a "Connected on" text other than the person's
     drop_name: bool = False
+    second_name: str | None = None  # the name link seeds a different name than the image
+    second_connected_on: str | None = None  # a second "Connected on" text in the card
 
 
 def _card_rows(
@@ -253,6 +255,10 @@ def _card_rows(
         )
     )
     name_click = json.loads(json.dumps(click))
+    if options.second_name is not None:
+        name_click["action"]["actions"][0] = _set_state(
+            NAME_STATE_ID, "stringValue", options.second_name
+        )
     if options.other_profile_id is not None:
         name_click["action"]["actions"][-1]["value"]["content"]["screen"]["requestedArguments"][
             "payload"
@@ -323,6 +329,10 @@ def _card_rows(
     text_children: list[Any] = [f"$L{name}"]
     if connected is not None:
         text_children.append(_el(f"$L{modules['text']}", {"textProps": {"children": [connected]}}))
+    if options.second_connected_on is not None:
+        text_children.append(
+            _el(f"$L{modules['text']}", {"textProps": {"children": [options.second_connected_on]}})
+        )
     return _el(
         f"$L{modules['client']}",
         {
@@ -432,10 +442,13 @@ def pagination_payload(
 
 
 def pagination_request(
-    start: int, *, sort: str = SORT_NEWEST_FIRST, pager: str = CONNECTIONS_PAGER_ID
+    start: int, *, sort: str | None = SORT_NEWEST_FIRST, pager: str = CONNECTIONS_PAGER_ID
 ) -> str:
-    """The JSON body the page sends to the pagination endpoint, as captured in shape."""
-    arguments = {
+    """The JSON body the page sends to the pagination endpoint, as captured in shape.
+
+    ``sort=None`` leaves the sort state out, as a page that never set one might.
+    """
+    arguments: dict[str, object] = {
         "$type": "proto.sdui.actions.requests.RequestedArguments",
         "requestedStateKeys": [
             {"key": {"value": {"$case": "id", "id": SORT_STATE_ID}}, "namespace": SORT_NAMESPACE}
@@ -456,6 +469,8 @@ def pagination_request(
         "screenId": CONNECTIONS_SCREEN_ID,
         "knownTemplateIds": [],
     }
+    if sort is None:
+        arguments["states"] = []
     if pager != CONNECTIONS_PAGER_ID:
         arguments = {"payload": {"pageSize": 6, "pageToken": "fake-token"}}
     return json.dumps(

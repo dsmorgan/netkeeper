@@ -90,7 +90,7 @@ Each card is an element (`$L<ClientComponent>`) whose props hold `componentKey: 
 
 ### The end of the list
 
-The capture never reached it. What an answer past the last connection looks like is **not known**; the maintainer's decision is that an answer with no cards ends the list. `flagship.py` accepts two signals as the end: a connections answer with no cards, or a short answer (fewer than ten) whose slot `[1]` carries no next request. A full answer without a next request proves nothing, and a page that stops asking proves nothing. The first supervised full sync should confirm which signal LinkedIn sends; the fixtures invent `"$undefined"` for the empty slot.
+The capture never reached it. What an answer past the last connection looks like is **not known**; the maintainer's decision is that an answer with no cards ends the list. netkeeper accepts three signals as the end: a connections answer with no cards; a short answer (fewer than ten) whose slot `[1]` carries no next request; or a full answer with no next request once the run has seen as many distinct people as the first screen's total. A full answer without a next request short of that total proves nothing, and a page that stops asking proves nothing. The first supervised full sync should confirm which signal LinkedIn sends; the fixtures invent `"$undefined"` for the empty slot.
 
 ## A profile
 

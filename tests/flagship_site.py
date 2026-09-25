@@ -45,6 +45,17 @@ PAGE_URL = f"{ORIGIN}{CONNECTIONS_PAGE_PATH}"
 CHECKPOINT_URL = "https://www.linkedin.com/checkpoint/challenge/AgFAKE?ctx=invented"
 LOGIN_URL = "https://www.linkedin.com/login?session_redirect=invented"
 
+#: A logged-in page's HTML shell with no first screen in it. Like every logged-in
+#: LinkedIn page it links to sign-out and sign-in paths (#188 review, M1): a
+#: classifier that searched the body for wall paths would read it as a login wall.
+SHELL = (
+    b"<!doctype html><html><body><nav>"
+    b'<a href="/uas/logout?session_full_logout=&csrfToken=fake">Sign out</a>'
+    b'<a href="/login?fromSignIn=true">Switch account</a>'
+    b'<a href="/checkpoint/lg/login-submit">Security</a>'
+    b"</nav><div id=root></div></body></html>"
+)
+
 
 class FakeRequest:
     """The request side of a response: method, resource type, and the body the page sent.
@@ -195,12 +206,14 @@ class FlagshipSite(FakeContext):
         end: str = "empty",
         total: int | str | None = "count",
         landing: str = "document",
-        sort: str = SORT_NEWEST_FIRST,
+        sort: str | None = SORT_NEWEST_FIRST,
         wheels_per_page: int = 1,
         answers: Mapping[int, Answer] | None = None,
         repeat: frozenset[int] = frozenset(),
         skip: frozenset[int] = frozenset(),
         other_pager: bool = False,
+        early_pagination: bool = False,
+        answer_plans: Callable[[int], bool] | None = None,
         card_options: Mapping[int, CardOptions] | None = None,
         origin: str = ORIGIN,
     ) -> None:
@@ -217,6 +230,11 @@ class FlagshipSite(FakeContext):
         self.repeat = repeat
         self.skip = skip
         self.other_pager = other_pager
+        self.early_pagination = early_pagination
+        #: When set, answers come per scroll plan (see :meth:`plan_started`), not per
+        #: wheel: plan ``n`` (from 1) brings the next page when ``answer_plans(n)``.
+        self.answer_plans = answer_plans
+        self.plans = 0
         self.card_options = dict(card_options or {})
         self.origin = origin
         #: Every request the page itself made: (method, path, body).
@@ -258,10 +276,20 @@ class FlagshipSite(FakeContext):
         )
         self._next = next_start
         self._ended = next_start is None
+        if self.early_pagination:
+            self._send(
+                tab,
+                "POST",
+                f"{self.origin}{PAGINATION_PATH}",
+                200,
+                pagination_payload(self.people[10:20], start=10, next_start=20),
+                "fetch",
+                pagination_request(10, sort=self.sort),
+            )
         if self.landing == "document":
             self._send(tab, "GET", url, 200, document_html(screen).encode("utf-8"), "document")
         else:
-            shell = b"<!doctype html><html><body><div id=root></div></body></html>"
+            shell = SHELL
             self._send(tab, "GET", url, 200, shell, "document")
             self._send(
                 tab, "POST", f"{self.origin}{CONNECTIONS_SCREEN_PATH}", 200, screen, "fetch", "{}"
@@ -272,11 +300,22 @@ class FlagshipSite(FakeContext):
                 tab, "POST", f"{self.origin}{PAGINATION_PATH}", 200, b"0:[]\n", "fetch", other
             )
 
+    def plan_started(self, tab: ListeningTab) -> None:
+        """One scroll plan began (a test wraps ``BrowserRun.scroll`` to call this)."""
+        self.plans += 1
+        if self.answer_plans is not None and self.answer_plans(self.plans):
+            self._answer(tab)
+
     def scrolled(self, tab: ListeningTab) -> None:
+        if self.answer_plans is not None:
+            return
         self._wheels += 1
         if self._wheels < self.wheels_per_page:
             return
         self._wheels = 0
+        self._answer(tab)
+
+    def _answer(self, tab: ListeningTab) -> None:
         if self._ended or self._next is None:
             return
         start = self._next
