@@ -15,8 +15,10 @@ unreadable cap be walked past? Can a body or a slug reach a log?
 
 from __future__ import annotations
 
+import json
 import logging
 import random
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -56,7 +58,7 @@ from netkeeper.linkedin.enrich import (
 )
 from netkeeper.linkedin.flagship import CONTACT_DETAILS_SCREEN_ID
 from netkeeper.linkedin.observe import ObservationFailed, ObservationLimits
-from netkeeper.linkedin.pacing import ScrollPlan, ScrollStep
+from netkeeper.linkedin.pacing import ScrollPlan, ScrollStep, human_delay, plan_enrichment
 from netkeeper.linkedin.page_profiles import PageProfiles
 
 NOW = datetime(2026, 9, 24, 15, 0, tzinfo=UTC)
@@ -99,6 +101,7 @@ async def visit(
     *,
     origin: str = ORIGIN,
     limits: ObservationLimits | None = None,
+    on_sleep: Callable[[float], None] | None = None,
 ) -> Visit:
     provider, _ = fake_provider(site)
     harvests: list[ProfileHarvest] = []
@@ -106,6 +109,8 @@ async def visit(
 
     async def sleep(seconds: float) -> None:
         sleeps.append(seconds)
+        if on_sleep is not None:
+            on_sleep(seconds)
 
     async def on_harvest(harvest: ProfileHarvest) -> None:
         harvests.append(harvest)
@@ -427,7 +432,12 @@ async def test_the_documents_404_is_the_contacts_not_found() -> None:
 
 @pytest.mark.parametrize(
     ("status", "outcome"),
-    [(429, Outcome.THROTTLED), (999, Outcome.THROTTLED), (500, Outcome.ROUTE_CHANGED)],
+    [
+        (429, Outcome.THROTTLED),
+        (999, Outcome.THROTTLED),
+        (500, Outcome.ROUTE_CHANGED),
+        (410, Outcome.ROUTE_CHANGED),  # only a 404 is NotFound
+    ],
 )
 async def test_a_document_that_answers_badly_stops_the_run(status: int, outcome: Outcome) -> None:
     site = ProfileSite([ProfilePage(PRIYA, landing=f"status:{status}")])
@@ -496,14 +506,20 @@ async def test_a_lazy_card_that_fails_is_skipped_not_the_profile() -> None:
 
 @pytest.mark.parametrize(
     ("after", "outcome"),
-    [(f"{ORIGIN}/feed/", Outcome.ROUTE_CHANGED), (CHECKPOINT_URL, Outcome.CHECKPOINT)],
+    [
+        (f"{ORIGIN}/feed/", Outcome.ROUTE_CHANGED),
+        (f"{ORIGIN}/in/{MATEO.slug}/", Outcome.ROUTE_CHANGED),  # another profile
+        (CHECKPOINT_URL, Outcome.CHECKPOINT),
+    ],
 )
 async def test_a_tab_that_leaves_the_profile_while_scrolling_gets_no_click(
     after: str, outcome: Outcome
 ) -> None:
     site = ProfileSite([ProfilePage(PRIYA, tab_after_scroll=after)])
     out = await visit(site, [target(PRIYA)])
-    assert site.clicks == []
+    assert site.clicks == [] and site.lookups == []
+    # The visit stopped where the tab left: no scroll back up, no reach for the control.
+    assert all(dy > 0 for _, dy in tab_of(site).mouse.wheels)
     if outcome is Outcome.CHECKPOINT:
         assert out.result.outcome is Outcome.CHECKPOINT and out.harvests == []
     else:
@@ -618,6 +634,8 @@ def test_a_scroll_step_type_is_what_the_back_up_uses() -> None:
         ({"controls": 2}, None, "more than one Contact info control"),
         ({"href": "/in/someone-else-fake/overlay/contact-info/"}, None, "opens something else"),
         ({"href": "/in/x/"}, None, "opens something else"),
+        # Protocol-relative: the same path on another host is not this profile's.
+        ({"href": f"//evil.example.test/in/{PRIYA.slug}/overlay/contact-info/"}, None, "else"),
         ({}, "/in/someone-else-fake/", "the tab is not on the profile"),
     ],
 )
@@ -673,3 +691,169 @@ async def test_the_click_method_never_reopens_a_lost_tab() -> None:
         with pytest.raises(BrowserUnavailable, match="went away"):
             await run.click_contact_info(f"/in/{PRIYA.slug}/", pause_s=0.0)
     assert site.clicks == [] and len(site.tabs) == 1
+
+
+# --- #193 review -------------------------------------------------------------------------------
+
+
+def _first_click_pause(visits: int) -> float:
+    """The pause the job draws before the first visit's click, from ``visit``'s seed."""
+    rng = random.Random(7)
+    plan_enrichment(rng, visits)
+    return human_delay(rng, median=1.5, sigma=0.5, tail_p=0.0, tail_range=(0, 0))
+
+
+async def test_a_wall_during_the_pause_before_the_click_stops_the_run() -> None:
+    """M1 (a): the tab moves to a checkpoint while the person pauses. The click is
+    refused, and the run stops as a checkpoint, not as one unreadable profile."""
+    site = ProfileSite([ProfilePage(PRIYA), ProfilePage(MATEO)])
+    pause = _first_click_pause(2)
+
+    def wall_arrives(seconds: float) -> None:
+        if seconds == pause:
+            tab_of(site)._url = CHECKPOINT_URL
+
+    out = await visit(site, [target(PRIYA), target(MATEO)], on_sleep=wall_arrives)
+    assert out.result.reason is StopReason.RESPONSE
+    assert out.result.outcome is Outcome.CHECKPOINT
+    assert out.result.final_url is not None and "/checkpoint/" in out.result.final_url
+    assert out.harvests == [] and out.result.visits == 1
+    assert site.clicks == [] and tab_of(site).goto_calls == [f"{ORIGIN}/in/{PRIYA.slug}/"]
+
+
+@pytest.mark.parametrize(
+    ("wall", "outcome"), [(CHECKPOINT_URL, Outcome.CHECKPOINT), (LOGIN_URL, Outcome.LOGGED_OUT)]
+)
+async def test_a_wall_after_the_click_stops_the_run(wall: str, outcome: Outcome) -> None:
+    """M1 (b): the click leads to a wall and no overlay answers."""
+    site = ProfileSite(
+        [ProfilePage(PRIYA, tab_after_click=wall, overlay_answers=0), ProfilePage(MATEO)]
+    )
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.result.reason is StopReason.RESPONSE and out.result.outcome is outcome
+    assert out.harvests == [] and out.result.visits == 1
+    assert [slug for slug, _, _ in site.clicks] == [PRIYA.slug]
+
+
+async def test_a_wall_after_the_click_stops_the_run_even_when_an_overlay_came() -> None:
+    """The overlay answered, but not readably, and the tab is on a checkpoint."""
+    overlay = contact_info_payload(PRIYA, email_urls=["https://example.test/not-mail"])
+    site = ProfileSite(
+        [ProfilePage(PRIYA, overlay=overlay, tab_after_click=CHECKPOINT_URL), ProfilePage(MATEO)]
+    )
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.result.outcome is Outcome.CHECKPOINT and out.harvests == []
+
+
+@pytest.mark.parametrize(
+    "request_body",
+    [
+        f'{{"profileUrn": "{MATEO.urn}"}}',
+        f'{{"vieweeProfileId": "{MATEO.urn.rsplit(":", 1)[1]}"}}',
+        f'{{"payload": {{"member": {{"profileUrn": "{MATEO.urn}"}}}}}}',
+    ],
+)
+async def test_a_lazy_card_that_names_another_member_by_id_is_skipped(request_body: str) -> None:
+    """Positions are never removed, so a wrong-person card must never be read."""
+    wrong = experience_payload([Role("Wrong Role", "Wrong Co", None, "2001 - 2002")])
+    right = experience_payload([Role("Right", "Right Co", None, "2020 - 2021")])
+    site = ProfileSite(
+        [
+            ProfilePage(
+                PRIYA,
+                screen=profile_payload(PRIYA, location=LOCATION, experience_inline=False),
+                components=(
+                    (wrong, request_body),
+                    (right, f'{{"profileUrn": "{PRIYA.urn}", "vanityName": "{PRIYA.slug}"}}'),
+                ),
+            )
+        ]
+    )
+    out = await visit(site, [target(PRIYA)])
+    (harvest,) = out.harvests
+    assert harvest.details is not None
+    assert [p.title for p in harvest.details.positions] == ["Right"]
+
+
+async def test_a_tab_that_ends_on_another_profile_with_no_redirect_is_unreadable() -> None:
+    """A stale tab, or a page that moved by itself: the profile the tab shows is not the
+    one asked for, and no redirect the page received led there."""
+    site = ProfileSite([ProfilePage(PRIYA, silently_to=MATEO.slug), ProfilePage(MATEO)])
+    out = await visit(site, [target(PRIYA, urn=MATEO.urn)])
+    assert out.outcomes == [Outcome.ROUTE_CHANGED] and site.clicks == []
+
+
+async def test_only_the_documents_404_is_not_found() -> None:
+    """The in-app screen request answering 404 is an unreadable visit, never NotFound."""
+    site = ProfileSite([ProfilePage(PRIYA, landing="screen", screen_status=404)])
+    out = await visit(site, [target(PRIYA)])
+    assert out.outcomes == [Outcome.ROUTE_CHANGED] and out.result.not_found == 0
+
+
+async def test_the_click_method_reads_a_percent_encoded_slug() -> None:
+    person = replace(PRIYA, public_id="pr\u00edya-fake")
+    site = ProfileSite([ProfilePage(person)])
+    provider, _ = fake_provider(site)
+    async with provider.run("account-1") as run:
+        await run.goto(f"{ORIGIN}/in/pr%C3%ADya-fake/")
+        click = await run.click_contact_info("/in/pr\u00edya-fake/", pause_s=0.0)
+    assert click.clicked, click.refusal
+
+
+async def test_the_click_method_rechecks_the_tab_after_the_pause() -> None:
+    site = ProfileSite([ProfilePage(PRIYA)])
+    provider, _ = fake_provider(site)
+
+    async def the_tab_goes_away(seconds: float) -> None:
+        tab_of(site).user_closed_it()
+
+    async with provider.run("account-1") as run:
+        await run.goto(f"{ORIGIN}/in/{PRIYA.slug}/")
+        with pytest.raises(BrowserUnavailable, match="before the Contact info click"):
+            await run.click_contact_info(f"/in/{PRIYA.slug}/", pause_s=1.0, sleep=the_tab_goes_away)
+    assert site.clicks == [] and site.lookups == []
+
+
+async def test_more_lazy_cards_than_a_profile_loads_is_unreadable() -> None:
+    card = experience_payload([Role("Right", "Right Co", None, "2020 - 2021")])
+    site = ProfileSite([ProfilePage(PRIYA, components=tuple((card, None) for _ in range(41)))])
+    out = await visit(site, [target(PRIYA)])
+    assert out.outcomes == [Outcome.ROUTE_CHANGED] and site.clicks == []
+
+
+async def test_an_overlay_request_that_names_no_profile_is_unreadable() -> None:
+    body = json.dumps({"clientArguments": {"screenId": CONTACT_DETAILS_SCREEN_ID, "payload": {}}})
+    site = ProfileSite([ProfilePage(PRIYA, overlay_request=body)])
+    out = await visit(site, [target(PRIYA)])
+    assert out.outcomes == [Outcome.ROUTE_CHANGED]
+
+
+async def test_a_lazy_card_naming_this_profile_in_another_case_is_kept() -> None:
+    card = experience_payload([Role("Right", "Right Co", None, "2020 - 2021")])
+    site = ProfileSite(
+        [
+            ProfilePage(
+                PRIYA,
+                screen=profile_payload(PRIYA, location=LOCATION, experience_inline=False),
+                components=((card, json.dumps({"vanityName": PRIYA.slug.upper()})),),
+            )
+        ]
+    )
+    out = await visit(site, [target(PRIYA)])
+    (harvest,) = out.harvests
+    assert harvest.details is not None and [p.title for p in harvest.details.positions] == ["Right"]
+
+
+async def test_a_click_on_a_tab_that_is_not_the_observed_one_ends_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    site = ProfileSite([ProfilePage(PRIYA)])
+    original = browser_module.BrowserRun.click_contact_info
+
+    async def click_elsewhere(self: Any, path: str, **kwargs: Any) -> Any:
+        click = await original(self, path, **kwargs)
+        return browser_module.ContactInfoClick(await site.new_page(), click.clicked)
+
+    monkeypatch.setattr(browser_module.BrowserRun, "click_contact_info", click_elsewhere)
+    with pytest.raises(BrowserUnavailable, match="replaced"):
+        await visit(site, [target(PRIYA)])

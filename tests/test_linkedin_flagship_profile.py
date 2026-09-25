@@ -104,6 +104,16 @@ def test_other_peoples_ids_beside_their_own_slugs_are_not_the_members() -> None:
     assert details.urn == PRIYA.urn
 
 
+def test_shared_connections_inside_the_top_card_are_not_the_member() -> None:
+    """M2 (#193 review): a mutual connection's ``{profileUrn, vanityName: other}`` sits in
+    the top card itself. Only an id beside this profile's slug, or beside no slug at all,
+    is the member's."""
+    details = parse_profile(_profile(mutuals=PEOPLE[3:5]), slug=PRIYA.slug)
+    assert details.urn == PRIYA.urn
+    with pytest.raises(RouteChanged, match="0 profile ids"):
+        parse_profile(_profile(identity="none", mutuals=PEOPLE[3:5]), slug=PRIYA.slug)
+
+
 def test_the_rail_alone_never_lends_the_profile_an_id() -> None:
     with pytest.raises(RouteChanged, match="0 profile ids"):
         parse_profile(_profile(identity="none", also_viewed=PEOPLE[3:7]), slug=PRIYA.slug)
@@ -445,3 +455,30 @@ def test_the_navigation_request_is_read_and_never_raises() -> None:
 
 def test_the_fixture_ids_are_invented() -> None:
     assert profile_id(PRIYA).startswith("ACoAAFAKE")
+
+
+def test_the_contact_info_links_url_must_open_this_profiles_overlay() -> None:
+    body = _profile(contact_url=f"/in/{PRIYA.slug}/details/experience/")
+    with pytest.raises(RouteChanged, match="does not open this profile's overlay"):
+        parse_profile(body, slug=PRIYA.slug)
+
+
+@pytest.mark.parametrize(
+    "urn", ["urn:li:fs_profile:ACoAAFAKE0000101", "urn:li:member:ACoAAFAKE0000101"]
+)
+def test_only_the_fsd_profile_scheme_is_an_id(urn: str) -> None:
+    with pytest.raises(RouteChanged, match="0 profile ids"):
+        parse_profile(_profile(raw_urn=urn), slug=PRIYA.slug)
+
+
+def test_one_extra_run_leaves_the_location_unknown_too() -> None:
+    details = parse_profile(_profile(extra_top_runs=["Some Short Run"]), slug=PRIYA.slug)
+    assert details.headline == PRIYA.headline and details.location is None
+
+
+def test_a_linkedin_link_with_a_url_parameter_is_not_the_wrapper() -> None:
+    body = contact_info_payload(
+        PRIYA, website_urls=["https://www.linkedin.com/feed/?url=https://x.example.test"]
+    )
+    with pytest.raises(RouteChanged, match="not a redirect"):
+        parse_contact_info(body, slug=PRIYA.slug)

@@ -259,7 +259,9 @@ class ProgressEvent:
     """One step of a run, for ``sync_run.progress_json`` and the SSE stream (spec 9.10).
 
     Counts only: no names, no slugs, nothing a log or a browser tab should not
-    hold. ``planned`` is how many visits the run set out to make.
+    hold. ``planned`` is how many visits the run set out to make. ``harvested``
+    counts the profiles read whole for their contact; a profile under another id is
+    ``mismatched`` instead, since nothing of it is written.
     """
 
     planned: int
@@ -268,6 +270,7 @@ class ProgressEvent:
     not_found: int
     stopped: StopReason | None = None
     unreadable: int = 0
+    mismatched: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,6 +463,7 @@ async def run_enrichment(
             not_found=not_found,
             stopped=stopped,
             unreadable=unreadable,
+            mismatched=mismatched,
         )
 
     async def stop(
@@ -550,7 +554,6 @@ async def run_enrichment(
             return await stop(StopReason.RESPONSE, failed.outcome, failed.final_url)
         elif mismatch:
             outcome = Outcome.OK
-            harvested += 1
             mismatched += 1
             unreadable_in_a_row += 1
         else:

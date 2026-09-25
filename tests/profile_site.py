@@ -109,6 +109,9 @@ class ProfilePage:
     click_error: Exception | None = None
     tab_after_scroll: str | None = None
     tab_after_click: str | None = None
+    silently_to: str | None = None  # a slug the tab ends on with no redirect answered
+    overlay_request: str | None = None  # the page's own overlay request body, verbatim
+    screen_status: int = 200
 
     def screen_body(self) -> bytes:
         if self.screen is not None:
@@ -286,7 +289,13 @@ class ProfileSite(FakeContext):
         if page is None:
             self._send(tab, "GET", url, 404, b"<html>gone</html>", "document")
             return
-        if page.redirect_to is not None:
+        if page.silently_to is not None:
+            target = f"{self.origin}/in/{page.silently_to}/"
+            tab._url = target
+            page = self.profiles[page.silently_to.casefold()]
+            tab.profile = page
+            url = target
+        elif page.redirect_to is not None:
             target = f"{self.origin}/in/{page.redirect_to}/"
             self._send(tab, "GET", url, 301, b"", "document", headers={"location": target})
             tab._url = target
@@ -311,7 +320,9 @@ class ProfileSite(FakeContext):
             self._send(tab, "GET", url, 200, SHELL, "document")
             if landing == "screen":
                 screen_url = f"{self.origin}/flagship-web{urlsplit(url).path}"
-                self._send(tab, "POST", screen_url, 200, page.screen_body(), "fetch", "{}")
+                self._send(
+                    tab, "POST", screen_url, page.screen_status, page.screen_body(), "fetch", "{}"
+                )
 
     def scrolled(self, tab: ProfileTab, delta_y: float) -> None:
         page = tab.profile
@@ -348,6 +359,8 @@ class ProfileSite(FakeContext):
                 "isModal": True,
             }
         )
+        if page.overlay_request is not None:
+            request = page.overlay_request
         for _ in range(page.overlay_answers):
             self._send(tab, "POST", url, page.overlay_status, page.overlay_body(), "fetch", request)
         if page.tab_after_click is not None:

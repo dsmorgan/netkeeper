@@ -184,10 +184,15 @@ PAGE_DRIVERS = frozenset(
 
 # ADR 0006's one exception to "navigation and the scroll are the only input": one click
 # on Contact info per profile visit (#190). Every way Playwright gives a page input --
-# a click, a key, a tap, a hover, typing, a checkbox, a select, a synthetic event, a drag
-# -- is refused anywhere in the extractor and the worker, except the single `click` call
-# inside `BrowserRun.click_contact_info`. `type` counts only as an attribute (Playwright's
-# `locator.type`); the builtin `type(x)` is a bare name and is not read.
+# a click, a key, a tap, a hover, typing, clearing a field, a blur, a checkbox, a select,
+# a synthetic event, a drag, a programmatic scroll into view -- is refused anywhere in the
+# package, except the single `click` call inside `BrowserRun.click_contact_info`. `type`
+# counts only as an attribute (Playwright's `locator.type`); the builtin `type(x)` is a
+# bare name and is not read.
+#
+# Like every rule here, this reads names, not meanings: deliberate obfuscation (a name
+# built at run time, a method read out of a namespace) is a limit of any static scan, and
+# is what review, the offline tests, and the smoke suite are for.
 INPUT_CALLS = frozenset(
     {
         "click",
@@ -214,11 +219,39 @@ INPUT_CALLS = frozenset(
         "down",
         "up",
         "move",
+        "clear",
+        "blur",
+        "scroll_into_view_if_needed",
     }
 )
-INPUT_ROOTS = [LINKEDIN, PACKAGE / "worker.py"]
+INPUT_ROOTS = [PACKAGE]
+#: Two names the core also uses for its own things -- an event's and a column's `type`,
+#: heat's `clear` -- read only where a page can be reached: the extractor and the worker.
+#: Nothing outside those may import the browser (the browser-callers rule below), so a
+#: page is never in reach there to type into or clear.
+BROWSER_ONLY_INPUTS = frozenset({"type", "clear"})
+BROWSER_ROOTS = (LINKEDIN, PACKAGE / "worker.py")
 #: The one place a page input is allowed: (file, enclosing function, name).
 ALLOWED_INPUTS = frozenset({(LINKEDIN / "browser.py", "BrowserRun.click_contact_info", "click")})
+
+# Script in the page, by any of Playwright's names for it. Each can call `fetch` or
+# `click()` as easily as a click can: refused anywhere in the package except preflight's
+# one read of the blank tab's `navigator` fingerprint (spec 9.1), which navigates nowhere.
+SCRIPT_CALLS = frozenset(
+    {
+        "evaluate",
+        "evaluate_handle",
+        "evaluate_all",
+        "eval_on_selector",
+        "eval_on_selector_all",
+        "wait_for_function",
+        "add_script_tag",
+        "add_init_script",
+        "expose_function",
+        "expose_binding",
+    }
+)
+ALLOWED_SCRIPTS = frozenset({(LINKEDIN / "preflight.py", "_read_fingerprint", "evaluate")})
 
 # The attach point. Everything else goes through AttachBrowserProvider.
 CONNECT_CALL = "connect_over_cdp"
@@ -481,7 +514,9 @@ class Input:
         return f"{self.path}:{self.line}: {self.name}() in {self.function or '<module>'}"
 
 
-def page_inputs(source: str, path: Path = MEMORY) -> Iterator[Input]:
+def page_inputs(
+    source: str, path: Path = MEMORY, names: frozenset[str] = INPUT_CALLS
+) -> Iterator[Input]:
     """Every reach of a page input: an attribute, an imported member, a getattr literal.
 
     Each carries its enclosing ``Class.method`` (or function) name, so the one allowed
@@ -504,17 +539,17 @@ def page_inputs(source: str, path: Path = MEMORY) -> Iterator[Input]:
     enclose(tree, "")
     for node in ast.walk(tree):
         where = scopes.get(node, "")
-        if isinstance(node, ast.Attribute) and node.attr in INPUT_CALLS:
+        if isinstance(node, ast.Attribute) and node.attr in names:
             yield Input(path, node.lineno, where, node.attr)
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
-                if alias.name in INPUT_CALLS:
+                if alias.name in names:
                     yield Input(path, node.lineno, where, alias.name)
         elif isinstance(node, ast.Call):
             for arg in _attribute_name_arguments(node):
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                     for part in arg.value.split("."):
-                        if part in INPUT_CALLS:
+                        if part in names:
                             yield Input(path, node.lineno, where, part)
 
 
@@ -582,16 +617,30 @@ def test_the_observing_modules_only_listen_and_scroll() -> None:
     assert not findings, complain(findings, "an observing module drives the page:")
 
 
-def test_the_one_page_input_is_the_contact_info_click() -> None:
-    """ADR 0006, #190: no click, key, tap, hover, typing, or synthetic event anywhere in the
-    extractor or the worker but the one ``click`` inside ``BrowserRun.click_contact_info``."""
+def _in_browser_roots(path: Path) -> bool:
+    return any(path == root or root in path.parents for root in BROWSER_ROOTS)
+
+
+def package_inputs(
+    names: frozenset[str] = INPUT_CALLS, roots: list[Path] = INPUT_ROOTS
+) -> list[Input]:
+    """Every page input (or script call, with ``names``) under ``roots``, with the
+    browser-only names read only in the extractor and the worker."""
     found: list[Input] = []
-    files = [
-        path for root in INPUT_ROOTS for path in ([root] if root.is_file() else python_files(root))
-    ]
+    files = [path for root in roots for path in python_files(root)]
     assert len(files) >= 20, "the scan found too few files; is the path right?"
     for path in files:
-        found.extend(page_inputs(path.read_text(encoding="utf-8"), path))
+        for item in page_inputs(path.read_text(encoding="utf-8"), path, names):
+            if item.name in BROWSER_ONLY_INPUTS and not _in_browser_roots(path):
+                continue
+            found.append(item)
+    return found
+
+
+def test_the_one_page_input_is_the_contact_info_click() -> None:
+    """ADR 0006, #190: no click, key, tap, hover, typing, or synthetic event anywhere in the
+    package but the one ``click`` inside ``BrowserRun.click_contact_info``."""
+    found = package_inputs()
     allowed = [i for i in found if (i.path, i.function, i.name) in ALLOWED_INPUTS]
     others = [i for i in found if (i.path, i.function, i.name) not in ALLOWED_INPUTS]
     assert len(allowed) == 1, (
@@ -599,6 +648,22 @@ def test_the_one_page_input_is_the_contact_info_click() -> None:
         f" ({len(allowed)} found); if it moved, point ALLOWED_INPUTS at its new home"
     )
     assert not others, "a page input outside ADR 0006's one click:\n" + "\n".join(
+        str(i) for i in others
+    )
+
+
+def test_script_runs_in_a_page_only_for_preflights_fingerprint() -> None:
+    """ADR 0006, #190 review: no ``evaluate`` (or any other way to run script in a page)
+    anywhere in the package -- ``browser.py`` and ``rehearse.py`` included -- but
+    preflight's one read of the blank tab's ``navigator`` properties."""
+    found = package_inputs(SCRIPT_CALLS)
+    allowed = [i for i in found if (i.path, i.function, i.name) in ALLOWED_SCRIPTS]
+    others = [i for i in found if (i.path, i.function, i.name) not in ALLOWED_SCRIPTS]
+    assert len(allowed) == 1, (
+        f"preflight no longer makes exactly one evaluate call ({len(allowed)} found);"
+        " if it moved, point ALLOWED_SCRIPTS at its new home"
+    )
+    assert not others, "script run in a page outside preflight's fingerprint:\n" + "\n".join(
         str(i) for i in others
     )
 
@@ -834,9 +899,55 @@ def test_the_input_scanner_catches_every_other_input() -> None:
         assert not {(i.function, i.name) for i in page_inputs(snippet)} & {
             ("BrowserRun.click_contact_info", "click")
         }
+    for snippet in (
+        "await locator.clear()\n",
+        "await locator.blur()\n",
+        "await locator.scroll_into_view_if_needed()\n",
+    ):
+        assert list(page_inputs(snippet)), snippet
     assert not list(page_inputs("kind = type(exc).__name__\n"))
     assert not list(page_inputs("await run.click_contact_info(path, pause_s=1.0)\n"))
     assert not list(page_inputs("await page.mouse.wheel(0, 300)\n"))
+
+
+def test_the_browser_only_names_are_read_where_a_page_can_be_reached() -> None:
+    """``type`` and ``clear`` are page inputs in the extractor and the worker, and the
+    core's own attributes elsewhere; every other input name counts everywhere."""
+    assert _in_browser_roots(LINKEDIN / "page_profiles.py")
+    assert _in_browser_roots(PACKAGE / "worker.py")
+    assert not _in_browser_roots(PACKAGE / "services" / "heat.py")
+    assert not _in_browser_roots(WEB / "api" / "events.py")
+    assert {"type", "clear"} == BROWSER_ONLY_INPUTS
+    assert [PACKAGE] == INPUT_ROOTS
+    # The core's own `type` and `clear` exist (so the narrowing is load-bearing), and
+    # nothing else the scan reads is exempt.
+    raw = [
+        i
+        for path in python_files(PACKAGE / "services")
+        for i in page_inputs(path.read_text(encoding="utf-8"), path)
+    ]
+    assert any(i.name == "clear" for i in raw)
+    assert all(i.name in BROWSER_ONLY_INPUTS for i in raw)
+
+
+def test_the_script_scanner_catches_every_spelling() -> None:
+    for snippet in (
+        "await page.evaluate('1')\n",
+        "await page.evaluate_handle('document')\n",
+        "await locator.evaluate_all('es => 1')\n",
+        "await page.eval_on_selector('a', 'e => e.click()')\n",
+        "await page.wait_for_function('fetch(u)')\n",
+        "await page.add_script_tag(content='x')\n",
+        "getattr(page, 'evaluate')('1')\n",
+    ):
+        assert list(page_inputs(snippet, names=SCRIPT_CALLS)), snippet
+    fingerprint = "async def _read_fingerprint(page):\n    return await page.evaluate(JS)\n"
+    (one,) = list(page_inputs(fingerprint, LINKEDIN / "preflight.py", SCRIPT_CALLS))
+    assert (one.path, one.function, one.name) in ALLOWED_SCRIPTS
+    elsewhere = "class BrowserRun:\n    async def peek(self):\n        await p.evaluate('1')\n"
+    (other,) = list(page_inputs(elsewhere, LINKEDIN / "browser.py", SCRIPT_CALLS))
+    assert (other.path, other.function, other.name) not in ALLOWED_SCRIPTS
+    assert not list(page_inputs("await run.scroll(plan)\n", names=SCRIPT_CALLS))
 
 
 def test_the_forbidden_matcher_reads_dotted_segments() -> None:
