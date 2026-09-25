@@ -291,6 +291,10 @@ def parse_connections_chunk(
     next_start = _next_start(payload, endpoint=endpoint)
     if next_start is not None and next_start <= expected_start:
         raise RouteChanged(endpoint, "the next page's start does not move past this page")
+    if next_start is not None and next_start > expected_start + max(FULL_PAGE, len(cards)):
+        # A next page further on than this one could have filled would skip people
+        # nobody was shown: a gap the page itself would be asking for.
+        raise RouteChanged(endpoint, "the next page's start skips past what this page held")
     return ConnectionsChunk(
         cards=cards,
         start=expected_start,

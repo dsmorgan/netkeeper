@@ -1,4 +1,11 @@
-"""``netkeeper rehearse``: the real request pattern, against a neutral site (P2-11, CP3).
+"""``netkeeper rehearse``: enrichment's real request pattern, against a neutral site (P2-11, CP3).
+
+What a rehearsal rehearses is enrichment's profile visit, which still reads through
+the in-page API. The connections sync no longer requests anything: since P2-17 it
+scrolls the connections page and reads the answers the page itself loads (ADR 0006),
+and ``tests/smoke/test_observe_smoke.py``'s loopback replica is where that pattern is
+driven against a real Chrome. When enrichment moves to the same approach, this
+module's replica and its two in-page fetches go with it.
 
 Before anyone points this tool at their own LinkedIn account, they get to watch
 it work without it. A rehearsal drives the genuine attach path

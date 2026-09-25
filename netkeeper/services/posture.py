@@ -558,6 +558,12 @@ GAPS: Final[tuple[str, ...]] = (
     " something only a real job learns, from the response classification in"
     " spec 9.7. This reports the cookie jar and the last flag raised, which is"
     " everything that can be known without sending a request.",
+    "the connections sync reads what LinkedIn's own connections page loads as it is"
+    " scrolled (ADR 0006); it sends no request of its own and alters none. Whether the"
+    " page still loads the list the way the 2026-09-24 capture showed is something"
+    " only a run learns: a page it cannot read stops the run as `route_changed`, and"
+    " a run that could not prove the end of the list ages nobody. Enrichment still"
+    " reads profiles through the in-page API until it moves to the same approach.",
 )
 
 

@@ -726,7 +726,7 @@ def rehearse_command(
         typer.Option(help="Also write the request log here.", show_default=False),
     ] = None,
 ) -> None:
-    """Run the real request pattern against a neutral loopback site, and print every request.
+    """Rehearse enrichment against a neutral loopback site, and print every request.
 
     Watch what netkeeper would do before it does it anywhere real. It attaches
     to your Chrome exactly as a job does, follows the genuine pacing plan --
@@ -735,6 +735,12 @@ def rehearse_command(
     and records every request the tab made: method, status, kind, timing, path.
     The pacing is the one in your config file, not a demo default, so what you
     watch is what a live run would do.
+
+    It rehearses enrichment's profile visits, which still read through the
+    in-page API. The connections sync sends no request of its own: it scrolls
+    your connections page and reads what the page loads (ADR 0006), so the
+    browser smoke suite's loopback replica, not a rehearsal, is where that is
+    watched.
 
     It never touches LinkedIn. The site must be a loopback url, a linkedin.com
     host is refused by name, and a rehearsal that somehow reached one raises
@@ -900,11 +906,12 @@ def linkedin_sync(
     """Run one connections sync now, in this terminal, and wait for it.
 
     This visits LinkedIn: it attaches to the Chrome you started, takes the same
-    per-account browser lock `netkeeper serve` takes, loads your connections
-    page, and reads it through LinkedIn's own in-page API, within today's page
-    budget and with the same pacing, heat, and session-flag rules a scheduled
-    run has. It works while scheduled runs are disarmed: this is how the first
-    supervised run is done. Ctrl-C stops it; what it read is kept.
+    per-account browser lock `netkeeper serve` takes, opens your connections
+    page, scrolls it, and reads the connections the page itself loads. It sends
+    no request of its own. It stays within today's page budget and follows the
+    same pacing, heat, and session-flag rules a scheduled run has. It works while
+    scheduled runs are disarmed: this is how the first supervised run is done.
+    Ctrl-C stops it; what it read is kept.
     """
     kind = SyncRunKind.CONNECTIONS_FULL if full else SyncRunKind.CONNECTIONS_INCREMENTAL
     _run_by_hand(ctx, kind)
