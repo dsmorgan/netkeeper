@@ -115,13 +115,13 @@ class _LocatorLike(Protocol):
     """The slice of a Playwright ``Locator`` :meth:`BrowserRun._rest_pointer_over_content`
     reads a box from (#192).
 
-    ``bounding_box`` computes this from Playwright's own isolated DOM query -- a CDP
-    call, not a script Playwright runs inside the page's own execution context the
-    way ``evaluate`` does. A page's own script cannot see, hook, or answer it, which
-    is why ADR 0006's amendment treats it as a read rather than an input: nothing
-    about it resembles the ``fetch`` a page's own bot-detection telemetry watches
-    for. ``first`` narrows a locator that could otherwise match more than one
-    element, the same way ``.first`` does on a real Playwright ``Locator``.
+    Playwright resolves the locator in its own isolated utility world and reads
+    the box over CDP -- never by running script in the page's own execution
+    context the way ``evaluate`` does -- so page script can't see or answer it,
+    which is why ADR 0006's amendment treats it as a read rather than an input:
+    nothing about it resembles the ``fetch`` a page's own bot-detection telemetry
+    watches for. ``first`` narrows a locator that could otherwise match more than
+    one element, the same way ``.first`` does on a real Playwright ``Locator``.
     """
 
     @property
@@ -198,6 +198,19 @@ REST_Y_FRACTION: Final = 0.5
 #: viewport fallback -- a box's coordinates are already real page pixels, in the
 #: same space this floor is measured in.
 REST_MIN_Y_PX: Final = 96
+
+#: How far below the top of a content box's *visible* part the rest point may aim
+#: (#192 review round 2, N1). A box read from an in-flow ``<main>`` whose ancestor
+#: -- not ``<main>`` itself -- is the scrolling element reports its own full
+#: content height here, which is the whole list and grows as more pages load, not
+#: the sliver of it the viewport actually shows. Centering on that box, or letting
+#: jitter roam across it, aims the pointer far below the real window -- reproduced
+#: with a real ~2300px ``<main>``, and exactly the #31 symptom again. Only a box's
+#: own top edge is anywhere near the visible viewport when this runs (right after
+#: landing, before anything has scrolled), so the target -- and every waypoint on
+#: the way to it -- stays within this many pixels of that top, never more than
+#: halfway into a short box either.
+REST_VISIBLE_SPAN_PX: Final = 250
 
 
 @dataclass(frozen=True, slots=True)
@@ -637,11 +650,17 @@ class BrowserRun:
 
         **The target, in order of preference (#192 review, F1):**
 
-        1. The center of :data:`CONTENT_LANDMARK_SELECTOR`'s box
-           (:func:`_content_box`), when the page has one. This is real, on-screen
-           geometry Playwright already computed from the page's actual layout --
-           correct at any window size, because it was never a guess. Jitter stays
-           inside the box.
+        1. A point near the top of :data:`CONTENT_LANDMARK_SELECTOR`'s box
+           (:func:`_content_box`), when the page has one -- within
+           :data:`REST_VISIBLE_SPAN_PX` of it, never past the box's own vertical
+           midpoint for a short box. This is real, on-screen geometry Playwright
+           already computed from the page's actual layout -- correct at any
+           window size, because it was never a guess. Not the box's *center*: a
+           box read from an in-flow ``<main>`` whose ancestor does the actual
+           scrolling reports the full list's height there, which keeps growing,
+           so its center can sit far below the real window (#192 review round 2,
+           N1). Jitter stays inside the box, and its upper bound is capped at the
+           tab's own known viewport height too, when that is known.
         2. Failing that, the center of the tab's own known ``viewport_size``
            (:func:`_viewport_size`), or :data:`DEFAULT_VIEWPORT_WIDTH` /
            :data:`DEFAULT_VIEWPORT_HEIGHT` when even that is unknown -- true for
@@ -659,10 +678,17 @@ class BrowserRun:
         mouse = cast(_ScrollablePage, page).mouse
         box = await _content_box(page)
         if box is not None:
-            target_x = box["x"] + box["width"] / 2
-            target_y = box["y"] + box["height"] / 2
-            jitter_x = (box["x"], box["x"] + box["width"])
-            jitter_y = (max(box["y"], REST_MIN_Y_PX), box["y"] + box["height"])
+            box_x, box_y = box["x"], box["y"]
+            box_w, box_h = box["width"], box["height"]
+            box_top = max(box_y, REST_MIN_Y_PX)
+            target_x = box_x + box_w / 2
+            target_y = box_top + min(box_h / 2, REST_VISIBLE_SPAN_PX)
+            jitter_x = (max(box_x, 0.0), box_x + box_w)
+            jitter_y_high = box_top + min(box_h, REST_VISIBLE_SPAN_PX * 2)
+            known_height = _known_viewport_height(page)
+            if known_height is not None:
+                jitter_y_high = min(jitter_y_high, known_height)
+            jitter_y = (box_top, jitter_y_high)
         else:
             width, height = _viewport_size(page)
             target_x = width / 2
@@ -929,6 +955,20 @@ def _viewport_size(page: PageLike) -> tuple[float, float]:
     if size is None:
         return float(DEFAULT_VIEWPORT_WIDTH), float(DEFAULT_VIEWPORT_HEIGHT)
     return float(size["width"]), float(size["height"])
+
+
+def _known_viewport_height(page: PageLike) -> float | None:
+    """This tab's real viewport height, only when Playwright actually knows it.
+
+    Unlike :func:`_viewport_size`, no default stands in here: a *guessed* height
+    used to cap a content box's jitter (#192 review round 2, N1) could clip a
+    real, taller window for no reason, which is exactly the class of bug this
+    round of the fix exists to get rid of. ``None`` when unknown -- the common
+    case for a tab this run attaches to -- means the caller's own box-derived
+    bound stands unchanged.
+    """
+    size = cast(_ScrollablePage, page).viewport_size
+    return float(size["height"]) if size is not None else None
 
 
 def _clamp(value: float, low: float, high: float) -> float:
