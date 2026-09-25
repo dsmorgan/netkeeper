@@ -172,6 +172,9 @@ class _Pending:
 #: How a lost answer the page moved past ends (#200): the run read on without it.
 MOVED_PAST: Final = "the page moved past it"
 
+#: How a lost answer ends when the run stops for another reason first (#201 review, L2).
+STOPPED_PENDING: Final = "the run stopped before it was read again"
+
 _LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
@@ -261,13 +264,17 @@ class PageConnections:
                 # the next call raises it.
                 if isinstance(exc, AnswerLost):
                     self._stop_lost = exc.lost
+                    if self._lost is not None and self._lost.start == exc.lost.start:
+                        self._lost = None  # the stop is that very answer
                 else:
                     self._failed = exc
+                self._settle_pending()
                 blocked = None
                 if len(self._cards) < start + count:
                     raise self._failure() from None
             if blocked is not None:
                 self._stopped = blocked
+                self._settle_pending()
         if self._stopped is not None and len(self._cards) < start + count:
             # The first non-Ok answer is sticky, and only a unit this source had already
             # read whole, before it, is still handed over: a stop never becomes a short
@@ -289,9 +296,26 @@ class PageConnections:
     def _failure(self) -> ObservationFailed | AnswerLost:
         """The sticky exception this source ended by, carrying any loss not yet reported."""
         if self._failed is not None:
+            unreported = self._report()
+            if unreported:
+                # An exception has nowhere to carry them, and a failed run is never
+                # complete anyway: say which answers were lost before it (#201 L2).
+                log.warning(
+                    "connections: the run failed with %d of the page's answers lost (starts %s)",
+                    len(unreported),
+                    ", ".join(str(lost.start) for lost in unreported),
+                )
             return self._failed
         assert self._stop_lost is not None
         return AnswerLost(self._stop_lost, earlier=self._report())
+
+    def _settle_pending(self) -> None:
+        """A stop while an answer is still lost: it will never be read now (#201 L2)."""
+        pending, self._lost = self._lost, None
+        if pending is not None:
+            self._unreported.append(
+                LostAnswer(start=pending.start, cause=pending.cause, ending=STOPPED_PENDING)
+            )
 
     def _report(self) -> tuple[LostAnswer, ...]:
         """The answers lost and read on past since the last report, once each (#200)."""

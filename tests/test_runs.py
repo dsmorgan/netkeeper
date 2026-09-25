@@ -9,6 +9,7 @@ refusal to record a scheduled run, and the worker's refusal to attach for one.
 
 from __future__ import annotations
 
+import dataclasses
 import random
 from collections.abc import Iterator
 from datetime import UTC, datetime, time, timedelta
@@ -55,6 +56,7 @@ def test_the_safety_constants_are_the_specs() -> None:
     assert scheduler.RETRY_MIN_MINUTES == 20.0
     assert scheduler.RETRY_MAX_MINUTES == 50.0
     assert timedelta(days=1) == scheduler.NOT_DONE_RETRY
+    assert timedelta(hours=3) == scheduler.NOT_DONE_JITTER
     assert enrich.MAX_UNREADABLE_PER_RUN == 3
     assert enrich.MAX_UNREADABLE_IN_A_ROW == 2
     assert connections_sync.CANCEL_SLICE_S == 5.0
@@ -491,9 +493,111 @@ async def test_a_not_done_answer_offers_the_fire_again_a_day_after_it_ended(
     )
 
     assert result is not None and result.fired
-    assert result.next_due == finished + timedelta(days=1)
+    assert finished + timedelta(days=1) <= result.next_due <= finished + timedelta(days=1, hours=3)
+    assert result.next_due != finished + timedelta(days=1)  # jittered, not exactly a day
     with session_scope(session_factory) as session:
         assert scheduler.stored_due(session, owner, 1, weekly.kind) == result.next_due
+
+
+async def _fire_weekly(
+    session_factory: sessionmaker[Session],
+    owner: User,
+    weekly: scheduler.JobSchedule,
+    at: datetime,
+    outcome: scheduler.JobOutcome | None,
+    *,
+    active: tuple[time, time] = ALL_DAY,
+) -> scheduler.FireResult:
+    async def handler(ctx: scheduler.JobContext) -> scheduler.JobOutcome | None:
+        return outcome
+
+    result = await scheduler.poll_and_fire(
+        session_factory,
+        owner,
+        1,
+        weekly.kind,
+        now=at,
+        schedule=weekly,
+        registry={weekly.kind: handler},
+        armed=scheduler.ARMING_NOT_REQUIRED,
+        heat_settings=scheduler.HEAT_SKIP_DISABLED,
+        tz="UTC",
+        active_start=active[0],
+        active_end=active[1],
+        rng=random.Random(5),
+    )
+    assert result is not None and result.fired
+    return result
+
+
+async def test_a_re_offer_is_offered_at_most_once_per_interval(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#201 review, M1: the fire was not done, so it is offered again about a day later;
+    that re-offer was not done either, so the kind goes back to its normal weekly due
+    time -- never a daily full sync for as long as answers keep being lost."""
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    weekly = scheduler.JobSchedule(scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7))
+    due = _establish(session_factory, owner, 1, weekly)
+    not_done = scheduler.JobOutcome.NOT_DONE
+
+    first = await _fire_weekly(session_factory, owner, weekly, due, not_done)
+    assert first.next_due < due + timedelta(days=2)
+    again = await _fire_weekly(session_factory, owner, weekly, first.next_due, not_done)
+    assert again.next_due == due + timedelta(days=7)
+    # The normal fire after that may be re-offered once again: one per interval.
+    third = await _fire_weekly(session_factory, owner, weekly, again.next_due, not_done)
+    assert third.next_due < again.next_due + timedelta(days=2)
+
+
+async def test_a_re_offer_that_is_done_goes_back_to_the_normal_cadence(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    weekly = scheduler.JobSchedule(scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7))
+    due = _establish(session_factory, owner, 1, weekly)
+    first = await _fire_weekly(session_factory, owner, weekly, due, scheduler.JobOutcome.NOT_DONE)
+    done = await _fire_weekly(session_factory, owner, weekly, first.next_due, None)
+    assert done.next_due == due + timedelta(days=7)
+
+
+async def test_a_re_offer_is_snapped_into_active_hours(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#201 review, M8: a re-offer a day plus jitter after a fire late in the window
+    would land after it closes; it moves to the next window's start."""
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    weekly = scheduler.JobSchedule(scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7))
+    window = (time(9, 0), time(17, 0))
+    with session_scope(session_factory, write=True) as session:
+        scheduler.establish_schedule(
+            session,
+            owner,
+            1,
+            weekly.kind,
+            now=NOW,
+            schedule=weekly,
+            rng=random.Random(1),
+            tz="UTC",
+            active_start=window[0],
+            active_end=window[1],
+        )
+        due = scheduler.stored_due(session, owner, 1, weekly.kind)
+    assert due is not None
+    late = due.replace(hour=16, minute=55)
+    with session_scope(session_factory, write=True) as session:
+        state = scheduler._load_state(session, owner, 1, weekly.kind)
+        assert state is not None
+        scheduler._store_state(session, owner, 1, weekly.kind, dataclasses.replace(state, due=late))
+    result = await _fire_weekly(
+        session_factory, owner, weekly, late, scheduler.JobOutcome.NOT_DONE, active=window
+    )
+    next_day = (late + timedelta(days=1)).date()
+    assert result.next_due.date() >= next_day
+    assert time(9, 0) <= result.next_due.time() <= time(17, 0)
 
 
 def test_offering_again_never_pushes_a_sooner_due_time_later(
@@ -509,6 +613,7 @@ def test_offering_again_never_pushes_a_sooner_due_time_later(
         SCHEDULE.kind,
         now=due - timedelta(hours=1),
         schedule=SCHEDULE,
+        rng=random.Random(0),
         tz="UTC",
         active_start=ALL_DAY[0],
         active_end=ALL_DAY[1],

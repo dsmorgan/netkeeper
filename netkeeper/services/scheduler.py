@@ -283,6 +283,10 @@ RETRY_MAX_MINUTES: Final = 50.0
 # account loads for no reason the next day does not also serve. Snapped into
 # active hours like every due time.
 NOT_DONE_RETRY: Final = timedelta(days=1)
+#: Up to this much is added to a not-done re-offer, so it never lands at exactly the
+#: same time of day as the fire that was not done (#201 review, M1). At most one
+#: re-offer per interval: a re-offer that is not done either waits for the normal one.
+NOT_DONE_JITTER: Final = timedelta(hours=3)
 
 #: The kinds ``netkeeper serve`` schedules: the ones with a runner (P2-06,
 #: P2-07). ``inbox`` is left out, not registered-but-inert: it has no runner
@@ -476,12 +480,17 @@ class ScheduleFingerprint:
 class _JobState:
     """What is persisted per ``(account_id, kind)``: the due time, the fingerprint
     that produced it, whether that due time is a pending catch-up fire, and
-    whether the kind has ever fired (:func:`record_fired` sets it)."""
+    whether the kind has ever fired (:func:`record_fired` sets it).
+
+    ``resume_due`` is set only while ``due`` is a not-done re-offer
+    (:func:`offer_again`, #200): the normal due time the re-offer stood in front of.
+    The re-offer's fire goes back to it, and a re-offer is never re-offered."""
 
     due: datetime
     fingerprint: ScheduleFingerprint
     is_catchup: bool = False
     fired_once: bool = False
+    resume_due: datetime | None = None
 
 
 def _key(account_id: int, kind: JobKind) -> str:
@@ -508,6 +517,11 @@ def _load_state(session: Session, user: User, account_id: int, kind: JobKind) ->
         # A row written before this flag existed counts as fired: the
         # conservative reading, which never adds a run nobody scheduled.
         fired_once=bool(raw.get("fired_once", True)),
+        resume_due=(
+            datetime.fromisoformat(str(raw["resume_due"]))
+            if raw.get("resume_due") is not None
+            else None
+        ),
     )
 
 
@@ -523,6 +537,7 @@ def _store_state(
             "due": state.due.isoformat(),
             "fingerprint": state.fingerprint.to_json(),
             "is_catchup": state.is_catchup,
+            "resume_due": None if state.resume_due is None else state.resume_due.isoformat(),
             "fired_once": state.fired_once,
         },
     )
@@ -745,6 +760,10 @@ def record_fired(
         )
     if not handler_ran and not state.fired_once and schedule.run_on_first_setup:
         next_due = max(due, now or due) + FIRST_SETUP_RETRY
+    elif state.resume_due is not None and state.resume_due > max(due, now or due):
+        # This fire was a not-done re-offer (#200): the cadence goes back to the
+        # normal due time it stood in front of, not a week past the re-offer.
+        next_due = state.resume_due
     else:
         next_due = due + schedule.interval
     next_due = _snap_to_active_hours(
@@ -759,7 +778,13 @@ def record_fired(
         user,
         account_id,
         kind,
-        replace(state, due=next_due, is_catchup=False, fired_once=state.fired_once or handler_ran),
+        replace(
+            state,
+            due=next_due,
+            is_catchup=False,
+            fired_once=state.fired_once or handler_ran,
+            resume_due=None,
+        ),
     )
     return next_due
 
@@ -883,6 +908,7 @@ async def poll_and_fire(
             return None
         due = state.due
         is_catchup = state.is_catchup
+        was_reoffer = state.resume_due is not None
         skipped_reason: str | None = None
         if not isinstance(armed, Arming) and not armed(session, user, account_id):
             skipped_reason = "disarmed"
@@ -919,7 +945,18 @@ async def poll_and_fire(
             user_id=user.id, account_id=account_id, kind=kind, due=due, catch_up=is_catchup
         )
         outcome = await handler(ctx)
-        if outcome is JobOutcome.NOT_DONE:
+        if outcome is JobOutcome.NOT_DONE and was_reoffer:
+            # One re-offer per interval (#201 review, M1): a re-offer that was not
+            # done either goes back to the normal cadence, so a loss rate that never
+            # clears -- or a wall that looks like unreadable bodies -- cannot turn the
+            # weekly full sync into a daily one.
+            log.info(
+                "scheduler: %s for account %d was not done on its re-offer either;"
+                " back to the normal interval",
+                kind.value,
+                account_id,
+            )
+        elif outcome is JobOutcome.NOT_DONE:
             next_due = offer_again(
                 session_factory,
                 user,
@@ -927,6 +964,7 @@ async def poll_and_fire(
                 kind,
                 now=clock() if clock is not None else now,
                 schedule=schedule,
+                rng=rng if rng is not None else random.Random(),  # noqa: S311 -- jitter
                 tz=tz,
                 active_start=active_start,
                 active_end=active_end,
@@ -1101,19 +1139,24 @@ def offer_again(
     *,
     now: datetime,
     schedule: JobSchedule,
+    rng: random.Random,
     tz: str,
     active_start: time = pacing.DEFAULT_ACTIVE_START,
     active_end: time = pacing.DEFAULT_ACTIVE_END,
 ) -> datetime:
-    """Offer ``kind`` again :data:`NOT_DONE_RETRY` after ``now``: its fire ran but was
-    not done (#200). Returns the due time now stored.
+    """Offer ``kind`` again :data:`NOT_DONE_RETRY` after ``now``, plus up to
+    :data:`NOT_DONE_JITTER` of jitter: its fire ran but was not done (#200). Returns
+    the due time now stored.
 
     A stored due time that is already sooner is kept, as :func:`park_retry` keeps
     one: this never pushes a fire later. The time goes through active hours and is
-    not a catch-up.
+    not a catch-up. The normal due time it stands in front of is kept as the state's
+    ``resume_due``: the re-offer's fire goes back to it, and :func:`poll_and_fire`
+    never re-offers a re-offer, so there is at most one per interval.
     """
+    jitter = timedelta(seconds=rng.uniform(0.0, NOT_DONE_JITTER.total_seconds()))
     again = _snap_to_active_hours(
-        now + NOT_DONE_RETRY,
+        now + NOT_DONE_RETRY + jitter,
         tz,
         start=active_start,
         end=active_end,
@@ -1127,7 +1170,13 @@ def offer_again(
             )
         if state.due <= again:
             return state.due
-        _store_state(session, user, account_id, kind, replace(state, due=again, is_catchup=False))
+        _store_state(
+            session,
+            user,
+            account_id,
+            kind,
+            replace(state, due=again, is_catchup=False, resume_due=state.due),
+        )
     log.info(
         "scheduler: %s for account %d ran but was not done; offering it again at %s",
         kind.value,
