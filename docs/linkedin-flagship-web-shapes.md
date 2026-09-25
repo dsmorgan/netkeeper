@@ -2,7 +2,7 @@
 
 This note records the structure of what LinkedIn's `flagship-web` client loads for the connections list, a profile, and the contact-info overlay, as the maintainer's capture of 2026-09-24 showed it (#149). It records **structure only**: row kinds, keys, `$type` names, identifiers the page uses for its own components, and counts. It holds no name, slug, profile id, email address, phone number, headline, or url of any person. The capture stays in the maintainer's private folder; nothing in this repository was copied from it.
 
-[ADR 0006](adr/0006-observe-dont-request.md) records why netkeeper reads these answers rather than requesting anything itself. The connections parser is `netkeeper/linkedin/flagship.py`; the hand-built fixtures that follow these shapes, with invented people, are `tests/flagship_pages.py`. The profile and contact-info fixtures there exist for the enrichment lane, which has no parser yet.
+[ADR 0006](adr/0006-observe-dont-request.md) records why netkeeper reads these answers rather than requesting anything itself. The connections parser is `netkeeper/linkedin/flagship.py`; the profile and contact-info parsers are `netkeeper/linkedin/flagship_profile.py` (#190). The hand-built fixtures that follow these shapes, with invented people, are `tests/flagship_pages.py`. Where the capture was silent and a parser reads by analogy, this note says so, and the section [What enrichment reads, and what it assumes](#what-enrichment-reads-and-what-it-assumes) lists what the first supervised enrichment must confirm.
 
 ## The flight grammar
 
@@ -133,6 +133,33 @@ The answer is small (about 36 KB, ten model rows). One row holds a `div` with a 
 After the sections, a `p` with `Connected since` and the date as text.
 
 Each value is a link element (`$L<n>`) whose `action` is one `Navigate` → `NavigateToUrl` (`urlValue.url`), with `openInNewTab`, `urlType`, and `presentation` fields, and whose `children` are the text shown. The captured profile shared a website and an email and no phone, so **the phone, address, birthday, and messaging sections are unverified**; by analogy they are probably `contact-phone` and so on, and the fixtures use `contact-phone` for that reason, marked invented.
+
+## What enrichment reads, and what it assumes
+
+Added by #190, from the structure above and nothing else. **Captured** means the #149 capture showed it; **assumed** means a parser reads it by analogy and fails soft or refuses, never guesses. The first supervised enrichment (CP4) should confirm every assumed row.
+
+| What | How enrichment reads it | Captured or assumed | When it does not read |
+|---|---|---|---|
+| Where the profile arrives | A full page load's document (`GET /in/<slug>/`, the screen in `rehydrate-data`), or the in-app screen request (`POST /flagship-web/in/<slug>/`) | The POST: captured. The document form: assumed, from the connections page | No screen within 20 s: the visit is unreadable |
+| A missing profile | The document answering `404` is spec 9.7's `NotFound` | Assumed (only the status is read) | A 200 "unavailable" page, or a redirect elsewhere: unreadable, never `NotFound` by guess |
+| The top card | The one element with `viewName: profile-top-card` | Captured | None, or two: unreadable |
+| The member's id | A `profileUrn` (`urn:li:fsd_profile:<id>`) or `vieweeProfileId` beside a `vanityName` equal to the profile's slug anywhere on the screen, or one with no `vanityName` inside the top card (the message and follow buttons). Exactly one id | **Assumed**: the capture saw `firstName`/`lastName` "sometimes with vanityName or profileUrn beside them" in those buttons' payloads, but not where the member's own id reliably sits | None, or two: unreadable. The "People also viewed" rail and the shared-connections line name other people beside their own slugs and are ignored |
+| The name and slug | The Contact info link's `requestedArguments.payload`: `vanityName`, `givenName`, `familyName`; its `url` must be `/in/<vanityName>/overlay/contact-info/` and its `vanityName` the tab's slug | Captured | Missing or naming another slug: unreadable |
+| Headline and location | The top card's text runs between the degree (`· 1st`) and the `·` before the Contact info link: the first is the headline; with exactly two, the second is the location | The order: captured. Which short runs are the company and school: not | More than two runs: location unknown. A second run that equals a company or school the page lists: location unknown |
+| Experience | `li` elements under `viewName: profile-card-experience`, inline or in a lazy `actions/component` answer; each role's title, `<Company> · <type>`, and `<Mon YYYY> - <Mon YYYY \| Present>` runs | Inline: captured. The lazy card's answer: assumed to be the same shape | A role that does not read is skipped, never the profile |
+| Grouped roles | An `li` holding `li`s: its first run is the company, each inner `li` a role | **Assumed** (described in words only) | Skipped |
+| Education | `li` elements under `viewName: profile-card-education` | **Assumed**; education was not in the capture | Skipped. Education is not stored (spec 8.1) |
+| The overlay's answer | `POST .../actions/navigation` whose own request names `screenId: ...ProfileContactDetailsOverlay` and the profile's `vanityName` | Captured | Not within 10 s of the click: unreadable, and nothing is clicked again |
+| Whose overlay | The `contact-your-profile` section's link must name the profile's slug | Captured | Missing or another slug: unreadable |
+| Email | `contact-email` links, `mailto:<address>` | Captured | Any other link there: unreadable |
+| Websites | `contact-website` links, unwrapped from `linkedin.com/redir/redirect?url=` | Captured | A LinkedIn link that is not the wrapper, or a wrapper without one site: unreadable |
+| Phone, Twitter, birthday, address | `contact-phone` (`tel:` links or number-shaped text), `contact-twitter`, `contact-birthday`, `contact-address` | **Assumed**; the captured profile shared none of them | A value that does not read is left out. The birthday and the address have no column and are not stored |
+| Connected since | The text after a `Connected since` run | Captured | An unknown phrasing leaves it unknown; it is not stored either way |
+| The Contact info control | A link whose accessible name is exactly `Contact info`, alone on the page, whose `href` is the profile's `overlay/contact-info/` | The link and its url: captured. That it renders as an `<a>` with that `href`: **assumed** | None, two, or pointing elsewhere: nothing is clicked, and the visit is unreadable |
+
+Two unreadable visits in a row, or three in a run, stop the run as `route_changed` (spec 9.7), so a shape that moved costs a handful of visits and writes nothing. A profile whose id is not the contact's URN gets no click and counts toward the same limits: one is a vanity url that changed hands, several are an id read from the wrong place.
+
+The smoke replicas and the rehearsal replica copy flagship-web's layout as #192 found it on the first live run: a fixed header at the top left, and the content scrolling inside its own container rather than the window.
 
 ## Elsewhere on these pages
 
