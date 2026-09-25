@@ -595,14 +595,15 @@ async def test_an_answer_that_breaks_off_and_is_moved_past_is_read_past_uncounte
 # --- #200: the page aborts a streamed answer after reading it ---------------------------------
 
 
-async def test_an_answer_the_page_aborts_after_reading_is_lost_as_no_data_and_read_past(
+async def test_an_answer_the_page_aborts_after_reading_is_read_from_its_streamed_copy(
     provider: AttachBrowserProvider, site: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The cause Part B reproduced: answer 20 is streamed and held open, and the page's
-    own client aborts it once it has read every byte. The page has 20-29 and asks for
-    30; Chrome has no body for anyone else ("No data found"), and the request failed
-    as aborted. The run records the loss with those diagnostics and reads on to the
-    end of the list, incomplete."""
+    """The cause Part B reproduced, and its fix. Answer 20 is streamed and held open,
+    and the page's own client aborts it once it has read every byte: the page has 20-29
+    and asks for 30, while Chrome keeps no body for anyone else ("No data found", the
+    request failed as aborted). The body tap's session received the answer as it
+    streamed, the copy agrees with what the page asked next, and the run reads the
+    whole list, complete. The tap changed nothing the replica received."""
     caplog.set_level(logging.INFO, logger="netkeeper")
     _Replica.abort_at = frozenset({20})
     pages: list[ConnectionsPage] = []
@@ -619,21 +620,23 @@ async def test_an_answer_the_page_aborts_after_reading_is_lost_as_no_data_and_re
                 _Gate(),
                 on_page=on_page,
             )
-            aborted = await (await run.ensure_page()).evaluate("window.__aborted")
+            tab = await run.ensure_page()
+            aborted = await tab.evaluate("window.__aborted")
+            sent = await tab.evaluate("window.__sent")
     except BrowserUnavailable as exc:
         pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
 
     assert aborted == 1 and _starts() == [10, 20, 30, 35]
-    assert result.reason is StopReason.END_OF_LIST and not result.complete
-    (lost,) = result.losses
-    assert (lost.start, lost.cause) == (20, "Error (no data)")
+    assert result.reason is StopReason.END_OF_LIST and result.complete and result.losses == ()
     people = _Replica.people
-    assert [c.urn for page in pages for c in page.connections] == [
-        p.urn for p in people[:20] + people[30:]
-    ]
+    assert [c.urn for page in pages for c in page.connections] == [p.urn for p in people]
     line = next(
         r.getMessage() for r in caplog.records if "start 20 could not be read" in r.getMessage()
     )
-    assert "request=failed (aborted)" in line and "transfer_encoding=chunked" in line
-    assert "content_type=x-component" in line and "service_worker=no" in line
+    assert "(Error (no data))" in line and "request=failed (aborted)" in line
+    assert "transfer_encoding=chunked" in line and "content_type=x-component" in line
+    assert "streamed_bytes=" in line and "streamed_bytes=none" not in line
+    assert "answer for start 20 was read from the copy streamed as it arrived" in caplog.text
     assert "127.0.0.1" not in caplog.text
+    received = [(r["body"], r["marker"]) for r in _Replica.received]
+    assert received == [(s["body"], s["marker"]) for s in sent]

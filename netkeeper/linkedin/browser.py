@@ -32,6 +32,7 @@ from urllib.parse import unquote, urljoin, urlsplit
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin.activity_lock import LEGACY_SHARED_KEY
 from netkeeper.linkedin.activity_lock import SINGLE_ACCOUNT_KEY as SINGLE_ACCOUNT_KEY
+from netkeeper.linkedin.body_tap import BodyTap
 from netkeeper.linkedin.observe import (
     ListenablePage,
     Observation,
@@ -151,6 +152,38 @@ class _ScrollablePage(PageLike, Protocol):
         ...
 
     def locator(self, selector: str) -> _LocatorLike: ...
+
+
+class _CdpSessionLike(Protocol):
+    """The slice of a Playwright ``CDPSession`` the body tap uses, and nothing more (#200).
+
+    ``send`` is called in exactly one method, with two read-only methods named as
+    literals (``tests/test_browser_safety.py``); ``on`` only listens.
+    """
+
+    async def send(self, method: str, params: Mapping[str, Any] | None = None) -> Any: ...
+
+    def on(self, event: str, handler: Callable[[Any], None]) -> None: ...
+
+    async def detach(self) -> None: ...
+
+
+class _TapContext(Protocol):
+    """``new_cdp_session``, borrowed by :meth:`BrowserRun._open_body_tap` alone (#200).
+
+    :class:`ContextLike` leaves every context mutator out so that reaching for one is
+    a type error; this protocol hands the one method the body tap needs to that one
+    method, the way :class:`_ObservablePage` borrows the listener methods.
+    """
+
+    async def new_cdp_session(self, page: Any) -> Any: ...
+
+
+#: The Network buffers the body tap's own session asks Chrome for (#200): one answer
+#: up to the observation's body limit, and a few of them at once. Chrome needs a
+#: buffer to stream from; it is the tap's session's own, not the one Playwright reads.
+TAP_RESOURCE_BUFFER_BYTES: Final = 8 * 1024 * 1024
+TAP_TOTAL_BUFFER_BYTES: Final = 32 * 1024 * 1024
 
 
 class _ObservablePage(PageLike, ListenablePage, Protocol):
@@ -765,7 +798,11 @@ class BrowserRun:
         self._pointer_rested = True
 
     async def observe(
-        self, match: ResponseMatch, *, limits: ObservationLimits | None = None
+        self,
+        match: ResponseMatch,
+        *,
+        limits: ObservationLimits | None = None,
+        tap: bool = False,
     ) -> Observation:
         """Start keeping the responses this run's tab receives that ``match`` names (ADR 0006).
 
@@ -781,12 +818,70 @@ class BrowserRun:
         :attr:`~netkeeper.linkedin.observe.Observation.page` with the page a
         :meth:`goto` or :meth:`scroll` returns and stops trusting the observation when
         they differ. :meth:`close` closes every observation still open, before the tab.
+
+        ``tap`` also opens the read-only body tap for this observation (#200,
+        :meth:`_open_body_tap`), so an answer whose body Chrome could not keep can
+        still come with the copy streamed as it arrived. Without a tap, or when one
+        cannot start, the observation reads exactly as before.
         """
         page = cast(_ObservablePage, await self.ensure_page())
-        observation = Observation(match, page, limits)
+        body_tap = None
+        if tap:
+            body_tap = await self._open_body_tap(
+                page, match, (limits or ObservationLimits()).max_body_bytes
+            )
+        observation = Observation(match, page, limits, body_tap)
         observation.start()
         self._observations.append(observation)
         return observation
+
+    async def _open_body_tap(
+        self, page: PageLike, match: ResponseMatch, max_body_bytes: int
+    ) -> BodyTap | None:
+        """One read-only CDP session on this run's tab, for :class:`BodyTap` (#200).
+
+        The only CDP session in the package, and the only two things it ever sends
+        (ADR 0006's amendment for #200; ``tests/test_browser_safety.py`` pins both):
+
+        - ``Network.enable``, with its own bounded buffers: this session hears the
+          tab's network events. It changes no request, and nothing the page can see.
+        - ``Network.streamResourceContent``, for an answer the tap's match names, when
+          its response arrives: Chrome then forwards that answer's data to this session
+          as it arrives. It changes nothing about the request or what the page gets.
+
+        No request is held, changed, answered, delayed, or added. ``None`` when the
+        session cannot start (a browser without the method, a fake tab): the
+        observation then reads the way it always has.
+        """
+        context = cast(_TapContext, self._attachment.context)
+        try:
+            session = cast(_CdpSessionLike, await context.new_cdp_session(page))
+        except Exception as exc:
+            log.info("observation: no body tap on this tab (%s)", type(exc).__name__)
+            return None
+        tap = BodyTap(
+            match,
+            stream=lambda request_id: session.send(
+                "Network.streamResourceContent", {"requestId": request_id}
+            ),
+            detach=session.detach,
+            max_body_bytes=max_body_bytes,
+        )
+        for event, handler in tap.handlers():
+            session.on(event, handler)
+        try:
+            await session.send(
+                "Network.enable",
+                {
+                    "maxTotalBufferSize": TAP_TOTAL_BUFFER_BYTES,
+                    "maxResourceBufferSize": TAP_RESOURCE_BUFFER_BYTES,
+                },
+            )
+        except Exception as exc:
+            log.info("observation: the body tap could not start (%s)", type(exc).__name__)
+            await tap.close()
+            return None
+        return tap
 
     async def click_contact_info(
         self,

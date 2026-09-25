@@ -76,6 +76,15 @@ scroll goes on:
   again or moved past within :data:`MAX_IDLE_SCROLLS` scrolls (a stall after a loss).
   None of these is ``RouteChanged``, so none counts toward the route-changed breaker.
 
+**The streamed copy** (#200, ADR 0006's amendment). This source observes with the
+body tap (:mod:`netkeeper.linkedin.body_tap`), so a lost answer may come with the copy
+Chrome streamed to netkeeper's read-only CDP session as the answer arrived. Before a
+loss is recorded, that copy stands in for the answer only if it parses whole as the
+page for the lost start and agrees with what the page did next: when the page moved
+on, it must ask for the start the page asked for and hold exactly the cards in
+between; when the page went quiet, it must prove the end of the list. Otherwise the
+answer is lost, as above.
+
 The list's end is still proven only by the page's own answers; the cards of a lost
 answer (the gap between its start and the next one) count toward the first screen's
 total when a full last answer that asks for nothing is weighed as the end. A body
@@ -167,6 +176,9 @@ class _Pending:
     start: int
     cause: str
     diagnostics: ReadDiagnostics | None
+    #: The body tap's streamed copy of the answer (#200), unchecked until the page
+    #: says what it asked for next.
+    streamed: bytes | None = None
 
 
 #: How a lost answer the page moved past ends (#200): the run read on without it.
@@ -236,6 +248,8 @@ class PageConnections:
         self._lost_cards = 0
         #: The body size of the last pagination answer that read, for the diagnostics.
         self._last_bytes: int | None = None
+        #: Answers read from the body tap's streamed copy instead (#200).
+        self._rescued = 0
         self._url = ""
 
     @property
@@ -339,6 +353,8 @@ class PageConnections:
         idle = 0
         while len(self._cards) < needed and not self._ended:
             if idle >= self._max_idle and self._lost is not None:
+                if self._rescue(next_start=None):
+                    continue
                 raise self._give_up(f"it was not read again within {idle} scrolls")
             if idle >= self._max_idle:
                 log.warning(
@@ -376,7 +392,7 @@ class PageConnections:
                 ResponseRule("POST", PAGINATION_PATH),
             ),
         )
-        self._observation = await self._run.observe(match, limits=self._limits)
+        self._observation = await self._run.observe(match, limits=self._limits, tap=True)
         page = await self._run.goto(self.page_url)
         self._require_observed(page)
         blocked = self._where(page.url)
@@ -512,9 +528,11 @@ class PageConnections:
                 )
                 return SourcePage(Outcome.ROUTE_CHANGED, self._url)
             # The page moved on past the answer it lost (#197): it read its own copy,
-            # only the browser's is gone. Not a changed route: record it and read on
-            # (#200), unless that is one loss too many.
-            self._move_past(request.start_index, response)
+            # only the browser's is gone. The streamed copy stands in for it if it
+            # agrees with what the page asked for next (#200); otherwise the loss is
+            # recorded and the run reads on, unless that is one loss too many.
+            if not self._rescue(next_start=request.start_index):
+                self._move_past(request.start_index, response)
         if response.body is None:
             if response.failure != FAILURE_UNREADABLE:
                 raise _not_kept(response)
@@ -530,7 +548,9 @@ class PageConnections:
                     cause,
                 )
                 return None
-            self._lost = _Pending(request.start_index, cause, response.diagnostics)
+            self._lost = _Pending(
+                request.start_index, cause, response.diagnostics, response.streamed
+            )
             log.info(
                 "connections: the page's answer for start %d could not be read (%s); %s;"
                 " previous_answer_bytes=%s",
@@ -576,6 +596,56 @@ class PageConnections:
             chunk.start,
             ", the end of the list" if self._ended else "",
         )
+
+    def _rescue(self, *, next_start: int | None) -> bool:
+        """Read the pending lost answer from the body tap's streamed copy, if it checks out.
+
+        The copy is what Chrome streamed as the answer arrived (#200). It stands in
+        for the answer only when it parses whole as the page for the lost start and
+        agrees with what the page itself did next: when the page asked for
+        ``next_start``, the copy must ask for that start too and hold exactly the
+        cards in between; when the page went quiet (``None``), the copy must prove
+        the end of the list. Anything else -- no copy, a copy cut short, a copy that
+        does not parse -- leaves the answer lost.
+        """
+        pending = self._lost
+        assert pending is not None
+        if pending.streamed is None:
+            return False
+        try:
+            chunk = parse_connections_chunk(
+                pending.streamed, endpoint=self.endpoint, expected_start=pending.start
+            )
+        except RouteChanged:
+            log.info(
+                "connections: the streamed copy of the answer for start %d did not parse; not used",
+                pending.start,
+            )
+            return False
+        if next_start is None:
+            agrees = chunk.ends_list
+        else:
+            agrees = (
+                chunk.next_start == next_start and len(chunk.cards) == next_start - pending.start
+            )
+        if not agrees:
+            log.info(
+                "connections: the streamed copy of the answer for start %d does not agree"
+                " with what the page asked for next; not used",
+                pending.start,
+            )
+            return False
+        self._lost = None
+        self._rescued += 1
+        log.info(
+            "connections: the page's answer for start %d was read from the copy streamed"
+            " as it arrived (%d bytes); nothing was lost",
+            pending.start,
+            len(pending.streamed),
+        )
+        self._last_bytes = len(pending.streamed)
+        self._take(chunk)
+        return True
 
     def _move_past(self, next_start: int, response: ObservedResponse) -> None:
         """The page asked past the lost answer: record the loss and read on (#200).

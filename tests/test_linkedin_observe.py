@@ -389,7 +389,7 @@ async def test_close_logs_one_summary_in_fixed_words(caplog: pytest.LogCaptureFi
     assert summary == (
         "observation: answers_kept=2 bodies_unreadable=1"
         " unreadable_requests=[failed (aborted): 1] unreadable_chunked=1"
-        " unreadable_from_service_worker=0"
+        " unreadable_from_service_worker=0 unreadable_with_streamed_copy=0"
     )
     assert "fake-slug" not in caplog.text
     for event in (
@@ -407,6 +407,63 @@ async def test_an_observation_that_kept_nothing_logs_no_summary(
     observation = await _started(_tab())
     await observation.close()
     assert "answers_kept" not in caplog.text
+
+
+# --- #200 Part B: the body tap's streamed copy -----------------------------------------------
+
+
+class _Tap:
+    """Stands in for BodyTap: records takes and discards, hands out given copies."""
+
+    def __init__(self, copies: list[bytes | None]) -> None:
+        self.copies = copies
+        self.calls: list[tuple[str, str, str | None]] = []
+        self.closed = False
+
+    async def take(
+        self, method: str, url: str, post_data: str | None, *, wait_s: float
+    ) -> bytes | None:
+        self.calls.append(("take", method, post_data))
+        assert wait_s == observe.STREAMED_WAIT_S
+        return self.copies.pop(0) if self.copies else None
+
+    def discard(self, method: str, url: str, post_data: str | None) -> None:
+        self.calls.append(("discard", method, post_data))
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def test_a_failed_read_hands_over_the_streamed_copy_never_as_the_body() -> None:
+    tab = _tab()
+    tap = _Tap([b"the copy"])
+    observation = Observation(MATCH, tab, None, tap)  # type: ignore[arg-type]
+    observation.start()
+    tab.emit(_response(body=b"read fine"))
+    tab.emit(_response(body_error=ProtocolError("No data found")))
+    first = await observation.next(1.0)
+    second = await observation.next(1.0)
+    assert first is not None and first.body == b"read fine" and first.streamed is None
+    assert second is not None and second.body is None and second.streamed == b"the copy"
+    assert second.diagnostics is not None and second.diagnostics.streamed_bytes == 8
+    assert "streamed_bytes=8" in second.diagnostics.describe()
+    assert "the copy" not in repr(second)
+    assert tap.calls == [
+        ("discard", "POST", '{"startIndex":10}'),
+        ("take", "POST", '{"startIndex":10}'),
+    ]
+    await observation.close()
+    assert tap.closed
+
+
+async def test_without_a_copy_the_diagnostics_say_none() -> None:
+    tab = _tab()
+    observation = Observation(MATCH, tab, None, _Tap([]))  # type: ignore[arg-type]
+    observation.start()
+    tab.emit(_response(body_error=ProtocolError("No data found")))
+    kept = await observation.next(1.0)
+    assert kept is not None and kept.streamed is None and kept.diagnostics is not None
+    assert "streamed_bytes=none" in kept.diagnostics.describe()
 
 
 async def test_a_redirect_keeps_its_location_and_reads_no_body() -> None:
@@ -502,6 +559,7 @@ def test_the_limits_are_pinned() -> None:
     assert observe.REQUEST_FINISHED_EVENT == "requestfinished"
     assert observe.REQUEST_FAILED_EVENT == "requestfailed"
     assert observe.MAX_REMEMBERED_ENDS == 256
+    assert observe.STREAMED_WAIT_S == 2.0
     with pytest.raises(ValueError):
         ObservationLimits(max_pending=0)
 

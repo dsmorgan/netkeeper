@@ -108,6 +108,23 @@ CONTEXT_MUTATORS = frozenset(
     }
 )
 
+# ADR 0006's amendment for #200: the one CDP session in the package. `new_cdp_session`
+# stays on the list above -- a raw session can reach every mutator there is -- and is
+# allowed at exactly one site, the body tap's, whose session may send exactly the
+# read-only methods below and nothing else (`test_the_one_cdp_session_is_read_only`).
+ALLOWED_CONTEXT_MUTATIONS = frozenset(
+    {(LINKEDIN / "browser.py", "BrowserRun._open_body_tap", "new_cdp_session")}
+)
+#: What the body tap's session may send, each named as a literal at its one call:
+#:
+#: - ``Network.enable``: the session hears the tab's network events. It alters no
+#:   request and nothing the page can see; Playwright's own session already sends it.
+#: - ``Network.streamResourceContent``: Chrome forwards an answer's data to this
+#:   session as it arrives. It alters, blocks, delays, and adds no request.
+READ_ONLY_CDP_METHODS = frozenset({"Network.enable", "Network.streamResourceContent"})
+#: The one function whose ``send`` calls reach a CDP session, and how many it makes.
+CDP_SENDERS = {(LINKEDIN / "browser.py", "BrowserRun._open_body_tap"): 2}
+
 # ADR 0006: netkeeper reads what the page loads and never touches a request. These are
 # Playwright's ways to hold one and answer it -- a routed request's `continue_`,
 # `fulfill`, and `abort` -- which only exist once something routes, and `route` is
@@ -131,6 +148,7 @@ API_REQUEST_SENDS = frozenset({"fetch", "get", "post", "put", "patch", "delete",
 # that name and nothing else.
 OBSERVING_MODULES = (
     LINKEDIN / "observe.py",
+    LINKEDIN / "body_tap.py",
     LINKEDIN / "page_connections.py",
     LINKEDIN / "flagship.py",
     LINKEDIN / "flight.py",
@@ -606,9 +624,92 @@ def test_no_code_path_starts_a_process() -> None:
 
 
 def test_the_users_browser_context_is_never_mutated() -> None:
-    """Spec 9.1: reuse contexts[0] as it is; no second context, no cookies, no UA."""
+    """Spec 9.1: reuse contexts[0] as it is; no second context, no cookies, no UA.
+
+    The one exception is the body tap's CDP session (#200), opened at exactly one
+    site; what that session may send is pinned by the next test."""
     findings = scan([PACKAGE], context_mutations)
-    assert not findings, complain(findings, "the attached context is the user's:")
+    assert findings, "the scanner no longer sees the body tap's session; is it gone?"
+    found = package_inputs(CONTEXT_MUTATORS)
+    others = [i for i in found if (i.path, i.function, i.name) not in ALLOWED_CONTEXT_MUTATIONS]
+    for entry in sorted(ALLOWED_CONTEXT_MUTATIONS):
+        hits = [i for i in found if (i.path, i.function, i.name) == entry]
+        assert len(hits) == 1, (
+            f"{entry[1]} no longer makes exactly one {entry[2]}() call ({len(hits)} found);"
+            " if it moved, point ALLOWED_CONTEXT_MUTATIONS at its new home"
+        )
+    assert not others, "the attached context is the user's:\n" + "\n".join(str(i) for i in others)
+
+
+def cdp_sends(source: str, path: Path = MEMORY) -> Iterator[tuple[Input, str | None]]:
+    """Every reach of ``send`` with its enclosing function, and the method it names.
+
+    The method is the first argument of the call when that is a string literal, and
+    ``None`` otherwise (a variable, or ``send`` held without a call): a method nobody
+    can read off the line is refused like a forbidden one.
+    """
+    tree = ast.parse(source)
+    named: dict[int, str | None] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            first = node.args[0] if node.args else None
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                named[id(node.func)] = first.value
+    scopes: dict[int, str] = {}
+
+    def enclose(node: ast.AST, name: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = name
+            if isinstance(child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+                inner = f"{name}.{child.name}" if name else child.name
+            scopes[id(child)] = inner
+            enclose(child, inner)
+
+    enclose(tree, "")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "send":
+            where = Input(path, node.lineno, scopes.get(id(node), ""), "send")
+            yield where, named.get(id(node))
+
+
+def test_the_one_cdp_session_is_read_only() -> None:
+    """ADR 0006's amendment for #200: in the extractor and the worker, ``send`` is
+    reached only inside the body tap's one function, and only to send a read-only
+    method named as a literal: ``Network.enable`` and ``Network.streamResourceContent``."""
+    found = [
+        item
+        for root in BROWSER_ROOTS
+        for path in ([root] if root.is_file() else python_files(root))
+        for item in cdp_sends(path.read_text(encoding="utf-8"), path)
+    ]
+    outside = [i for i, _ in found if (i.path, i.function) not in CDP_SENDERS]
+    assert not outside, "a CDP send outside the body tap:\n" + "\n".join(str(i) for i in outside)
+    methods = [method for _, method in found]
+    assert all(method in READ_ONLY_CDP_METHODS for method in methods), methods
+    assert sorted(m for m in methods if m is not None) == sorted(READ_ONLY_CDP_METHODS)
+    for site, count in CDP_SENDERS.items():
+        hits = [i for i, _ in found if (i.path, i.function) == site]
+        assert len(hits) == count, (
+            f"{site[1]} makes {len(hits)} send calls, not {count}; if it moved, point"
+            " CDP_SENDERS at its new home"
+        )
+
+
+def test_the_cdp_send_scanner_catches_a_mutating_method_or_a_hidden_one() -> None:
+    source = (
+        "class BrowserRun:\n"
+        "    async def _open_body_tap(self, session, name):\n"
+        "        await session.send('Network.setUserAgentOverride', {})\n"
+        "        await session.send(name)\n"
+        "        send = session.send\n"
+    )
+    found = list(cdp_sends(source))
+    assert sorted(str(method) for _, method in found) == [
+        "Network.setUserAgentOverride",
+        "None",
+        "None",
+    ]
+    assert {i.function for i, _ in found} == {"BrowserRun._open_body_tap"}
 
 
 def test_no_code_path_alters_or_answers_a_request() -> None:

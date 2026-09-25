@@ -27,6 +27,7 @@ from flagship_site import (
     PAGE_URL,
     SHELL,
     Answer,
+    FakeCdpSession,
     FlagshipSite,
     ListeningTab,
     Lost,
@@ -901,6 +902,111 @@ async def test_the_same_start_lost_again_on_a_re_ask_is_logged_as_such(
     out = await sync(FlagshipSite(many(45), lost={30: Lost("reask", times=2)}))
     assert out.result.complete and out.result.losses == ()
     assert "the page asked again for start 30, and it could not be read again" in caplog.text
+
+
+# --- #200 Part B: the streamed copy of an answer Chrome kept no body for -------------------
+
+
+async def test_a_lost_answer_is_read_from_its_streamed_copy_and_nothing_is_lost(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The cause Part B found: the page read answer 40 and aborted its stream, so
+    Chrome kept no body. The body tap's copy agrees with what the page asked next
+    (50, ten cards in between), so it stands in: nothing is lost, the run completes."""
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    people = many(90)
+    site = FlagshipSite(people, tap=True, lost={40: Lost("move_on", streamed="whole")})
+    out = await sync(site)
+    assert out.result.reason is StopReason.END_OF_LIST and out.result.complete
+    assert out.result.losses == () and out.urns == [p.urn for p in people]
+    assert "answer for start 40 was read from the copy streamed as it arrived" in caplog.text
+    assert "streamed_bytes=" in caplog.text
+    cdp = site.cdp
+    assert cdp is not None and cdp.detached
+    assert {method for method, _ in cdp.sent} == {
+        "Network.enable",
+        "Network.streamResourceContent",
+    }
+    assert cdp.sent[0] == (
+        "Network.enable",
+        {"maxTotalBufferSize": 32 * 1024 * 1024, "maxResourceBufferSize": 8 * 1024 * 1024},
+    )
+
+
+@pytest.mark.parametrize("streamed", ["half", "none", "short"])
+async def test_a_streamed_copy_cut_short_or_refused_leaves_the_answer_lost(streamed: str) -> None:
+    people = many(90)
+    site = FlagshipSite(people, tap=True, lost={40: Lost("move_on", streamed=streamed)})
+    out = await sync(site)
+    assert out.result.reason is StopReason.END_OF_LIST and not out.result.complete
+    assert [x.start for x in out.result.losses] == [40]
+
+
+async def test_a_streamed_copy_that_disagrees_with_the_page_is_not_used(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The copy of 40 asks for 50, but the page asked for 60: it does not stand in, and
+    the jump past the lost start stops the run safely."""
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    site = FlagshipSite(
+        many(90),
+        tap=True,
+        lost={40: Lost("move_on", streamed="whole")},
+        skip=frozenset({50}),
+    )
+    out = await sync(site)
+    assert out.result.reason is StopReason.ANSWER_LOST
+    assert out.result.lost is not None and out.result.lost.start == 40
+    assert "does not agree with what the page asked for next; not used" in caplog.text
+
+
+async def test_a_streamed_last_answer_that_proves_the_end_stands_in_after_a_stall() -> None:
+    """The last answer (20-24, short, asking for nothing) is lost and the page goes
+    quiet. Its streamed copy proves the end of the list, so the run ends there."""
+    people = many(25)
+    site = FlagshipSite(people, end="short", tap=True, lost={20: Lost("silent", streamed="whole")})
+    out = await sync(site)
+    assert out.result.reason is StopReason.END_OF_LIST and out.result.complete
+    assert out.urns == [p.urn for p in people]
+
+
+async def test_a_streamed_copy_that_proves_nothing_after_a_stall_is_not_used() -> None:
+    site = FlagshipSite(many(60), tap=True, lost={30: Lost("silent", streamed="whole")})
+    out = await sync(site)
+    assert out.result.reason is StopReason.ANSWER_LOST
+    assert out.result.lost is not None and out.result.lost.start == 30
+
+
+async def test_a_browser_without_cdp_sessions_reads_as_before(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    out = await sync(FlagshipSite(many(45)))
+    assert out.result.complete
+    assert "no body tap on this tab (RuntimeError)" in caplog.text
+
+
+async def test_a_tap_whose_session_cannot_enable_the_network_is_closed_and_unused(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="netkeeper")
+
+    class Refusing(FakeCdpSession):
+        async def send(self, method: str, params: Any = None) -> Any:
+            await super().send(method, params)
+            raise RuntimeError("'Network.enable' wasn't found")
+
+    class Site(FlagshipSite):
+        async def new_cdp_session(self, page: object) -> FakeCdpSession:
+            self.cdp = Refusing()
+            return self.cdp
+
+    site = Site(many(45), tap=True)
+    out = await sync(site)
+    assert out.result.complete
+    assert "the body tap could not start (RuntimeError)" in caplog.text
+    assert site.cdp is not None and site.cdp.detached
+    assert [method for method, _ in site.cdp.sent] == ["Network.enable"]
 
 
 async def test_a_connections_page_navigation_timeout_still_ends_the_run() -> None:
