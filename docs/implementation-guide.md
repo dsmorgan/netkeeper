@@ -133,7 +133,7 @@ Drift signals to watch for at every checkpoint:
 
 ### CP4: a week of scheduled runs
 
-- **First:** one supervised live incremental sync with `profile_visits_per_day = 5`, watching the tab. Before it, verify the Voyager endpoint constants against a DevTools capture from your own session (#149), and confirm only one browser client per account across processes (#153). Moved here from CP3. Scheduled runs ship disarmed (P2-10), so this run is by hand: `netkeeper linkedin sync` (incremental), then `netkeeper linkedin enrich --max-visits 5`. Arm scheduled runs with `netkeeper linkedin schedule arm` only after it.
+- **First:** one supervised live incremental sync with `profile_visits_per_day = 5`, watching the tab. Before it, confirm only one browser client per account across processes (#153). The capture #149 asked for is done: it showed the connections list moved to `flagship-web`, and P2-17 (#187) reads it from what the page loads. During this run, check the three things the capture could not: which answer ends the list (P2-17 reads an empty answer, or a short one that asks for no next page), whether the first screen's total counts anyone the list never shows (then no full sync completes, and nobody ages), and whether the page answers a wall in place of the document. Enrichment still reads through the in-page Voyager fetch until it moves to the same seam. Moved here from CP3. Scheduled runs ship disarmed (P2-10), so this run is by hand: `netkeeper linkedin sync` (incremental), then `netkeeper linkedin enrich --max-visits 5`. Arm scheduled runs with `netkeeper linkedin schedule arm` only after it.
 - **Demo:** Runs page for the week: every run, its counts, budget spend per day, heat history, any `Throttled` or `Checkpoint`.
 - **Questions:** Any throttle at all? If so, on which endpoint, and did the probes pass? Did the warm-up ramp as designed? Did contacts you pinned get enriched first? Did any contact get a wrong email (spot-check ten against the overlay by hand)?
 - **Re-read:** spec section 9.8, the igtracker lesson about 429s that are not rate limits.
@@ -459,6 +459,12 @@ Deferred (maintainer, 2026-09-23): manual archive import already works, and auto
 Goal: netkeeper asks LinkedIn for the data export in the attached session, then waits — the export takes 1 to 24 hours and arrives as a notification. The run records which step it is on, the dashboard shows it, and when the file is ready netkeeper downloads and imports it. Manual mode stays first-class — request it yourself, download it yourself, drop the zip in — and one status list covers both.
 Depends on: P2-01, P1-20.
 Done when: both modes reach an imported archive from the same screen, the automated one survives a restart mid-wait, and a changed LinkedIn page stops the run with `RouteChanged` rather than a guess.
+
+**P2-17 Read what the page loads** · lane extractor · L · `safety`
+Goal: the connections sync reads the answers LinkedIn's own connections page loads as it is scrolled, instead of requesting anything itself ([ADR 0006](adr/0006-observe-dont-request.md)). The #149 capture showed the list moved from Voyager to `flagship-web`. Delivers the observation seam (`BrowserRun.observe`), the flight parser, the connections parser and source, sanitized fixtures and a shape note for connections, profiles, and contact info (`docs/linkedin-flagship-web-shapes.md`). Issue #187.
+Depends on: P2-01, P2-06, #149's capture.
+Done when: an offline fixture-driven sync creates contacts with the URN from `vieweeProfileId`, the slug, name, headline, and connected-on date; incremental mode stops at the first page of known URNs; an empty page ends the list and completeness is honest for aging; a changed payload stops the run with `RouteChanged` and writes no partial data; the smoke suite drives the seam against a loopback replica; no test or tool touches linkedin.com.
+Next: enrichment on the same seam, profile and contact-info parsers from the fixtures and the shape note, and ADR 0006's one Contact info click as a narrow `BrowserRun` method.
 
 **CP3** · checkpoint · after P2-01 to P2-05, P2-11.
 **CP4** · checkpoint · closes phase 2, after one week of scheduled runs. P2-15 and P2-16 are deferred and are not part of it.

@@ -13,3 +13,4 @@ An ADR records one decision, the context that forced it, and its consequences. T
 | [0003](0003-gmail-api-over-smtp.md) | Gmail API with OAuth instead of SMTP | Accepted |
 | [0004](0004-manual-linkedin-sends-by-default.md) | LinkedIn messages are prefilled, not sent, by default | Accepted |
 | [0005](0005-user-boundary-from-the-first-migration.md) | Carry a user boundary from the first migration | Accepted |
+| [0006](0006-observe-dont-request.md) | Observe, don't request | Accepted |

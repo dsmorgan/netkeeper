@@ -315,6 +315,31 @@ async def test_a_wall_served_in_place_of_the_document_is_read_as_one() -> None:
     assert out.result.outcome is Outcome.LOGGED_OUT
 
 
+async def test_a_first_screen_without_cards_is_the_end_only_when_it_says_the_list_is_empty() -> (
+    None
+):
+    empty = await sync(FlagshipSite([], total=0))
+    assert empty.result.reason is StopReason.END_OF_LIST and not empty.result.complete
+    cardless = FlagshipSite(many(20), first=0)
+    out = await sync(cardless)
+    assert out.result.outcome is Outcome.ROUTE_CHANGED and out.urns == []
+
+
+async def test_a_page_that_never_sends_its_first_screen_is_given_up_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Document after document without the first screen: bounded, then RouteChanged."""
+
+    class ShellsOnly(FlagshipSite):
+        def navigated(self, tab, url):  # type: ignore[no-untyped-def]
+            for _ in range(page_connections.MAX_LANDING_ANSWERS + 5):
+                self._send(tab, "GET", url, 200, b"<html><body>loading</body></html>", "document")
+
+    out = await sync(ShellsOnly(many(20)))
+    assert out.result.outcome is Outcome.ROUTE_CHANGED and out.urns == []
+    assert "8 answers arrived, none the first screen" in caplog.text
+
+
 # --- the tab and the observation ------------------------------------------------------------
 
 
@@ -349,6 +374,7 @@ def test_the_source_bounds_are_pinned() -> None:
     assert page_connections.MAX_IDLE_SCROLLS == 6
     assert page_connections.RESPONSE_WAIT_S == 5.0
     assert page_connections.LANDING_WAIT_S == 20.0
+    assert page_connections.MAX_LANDING_ANSWERS == 8
 
 
 async def test_no_name_slug_or_urn_reaches_a_log(caplog: pytest.LogCaptureFixture) -> None:

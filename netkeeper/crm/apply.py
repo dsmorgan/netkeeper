@@ -11,18 +11,19 @@ maps an extractor result onto a table. The harvest half is
 :func:`apply_harvest`; see its docstring for how a profile is matched to the
 contact it was visited for, and why a harvest never takes a value away.
 
-**Each Voyager-sourced connection** (a real URN: spec 9.3's in-page API)
-becomes an :class:`~netkeeper.crm.identity.IncomingContact` with source
-``sync`` and goes through identity resolution, exactly as the archive
-importer's rows do (:mod:`netkeeper.crm.archive`) one rank lower: ``sync``
-beats ``archive`` beats ``csv`` and a person's own edit beats them all
+**Each connection with a URN** (the connections page's own answers since P2-17,
+spec 9.3; Voyager's in-page API before it) becomes an
+:class:`~netkeeper.crm.identity.IncomingContact` with source ``sync`` and goes
+through identity resolution, exactly as the archive importer's rows do
+(:mod:`netkeeper.crm.archive`) one rank lower: ``sync`` beats ``archive`` beats
+``csv`` and a person's own edit beats them all
 (:mod:`netkeeper.crm.provenance`), so a sync refreshes what an import wrote and
 never what a person typed. A headline change writes a ``contact_snapshot`` of
-the values before it (:func:`netkeeper.crm.identity.apply`). A row that
-resolves to a :class:`~netkeeper.crm.identity.Candidate` is counted and left
-for a person, as the archive importer does; guessing would merge two people.
-A row whose URN or slug another contact already holds is counted and skipped
-rather than failing the page.
+the values before it (:func:`netkeeper.crm.identity.apply`). A row that resolves
+to a :class:`~netkeeper.crm.identity.Candidate` is counted and left for a
+person, as the archive importer does; guessing would merge two people. A row
+whose URN or slug another contact already holds is counted and skipped rather
+than failing the page.
 
 **A DOM-sourced connection (P2-08's fallback, no URN) never reaches identity
 resolution** -- see :func:`apply_page`'s docstring for the full reasoning (a

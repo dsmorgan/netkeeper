@@ -57,6 +57,12 @@ one short. The price is that a sync during which the list changed at all is
 incomplete and ages nobody that week; the next one catches up.
 
 **The source seam.** The job reads pages through a :class:`ConnectionsSource`.
+A live sync reads through
+:class:`~netkeeper.linkedin.page_connections.PageConnections` (P2-17, ADR 0006):
+the connections page, scrolled like a person, read from the answers the page
+itself loads. The rest of this paragraph is the P2-06/P2-08 design, kept because
+the offline tests of this loop's paging rules drive it and LinkedIn moves
+sessions between its clients gradually; the worker no longer wires either.
 :class:`VoyagerConnections` is the in-page API implementation (spec 9.3);
 :mod:`netkeeper.linkedin.dom`'s :class:`~netkeeper.linkedin.dom.DomConnectionsSource`
 implements the same protocol, so choosing the fallback after a ``RouteChanged``
@@ -270,7 +276,12 @@ class ConnectionsSource(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class VoyagerConnections:
-    """The in-page API as a :class:`ConnectionsSource` (spec 9.3).
+    """The in-page API as a :class:`ConnectionsSource` (spec 9.3). Not wired since P2-17.
+
+    The #149 capture showed no ``relationships/dash/connections`` call any more; a
+    live sync reads through :class:`~netkeeper.linkedin.page_connections.PageConnections`.
+    This stays for the offline tests of :func:`run_connections_sync`'s paging and
+    completeness rules, which are the same for every source.
 
     ``fetch`` is the ``VoyagerFetch`` the browser side provides (#150).
     ``headers`` are sent on every request; the fetch helper merges what it reads

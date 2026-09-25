@@ -167,6 +167,15 @@ def test_a_next_page_that_does_not_move_forward_is_refused() -> None:
         _chunk(body, start=40)
 
 
+def test_a_next_page_that_skips_people_is_refused() -> None:
+    """Ten cards asking for the page twenty on: ten people nobody would be shown."""
+    body = pagination_payload(PEOPLE[:10], start=40, next_start=60)
+    with pytest.raises(RouteChanged, match="skips past"):
+        _chunk(body, start=40)
+    under_filled = pagination_payload(PEOPLE[:9], start=40, next_start=50)
+    assert _chunk(under_filled, start=40).next_start == 50  # nine of ten, then on: fine
+
+
 def test_two_next_pages_are_refused() -> None:
     body = pagination_payload(PEOPLE[:2], start=40, next_start=42)
     another = json.dumps(json.dumps(_pagination_request_value(52))).encode()

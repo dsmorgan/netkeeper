@@ -109,6 +109,10 @@ LANDING_WAIT_S: Final = 20.0
 #: ``RouteChanged``: the page stopped loading without proving the list's end.
 MAX_IDLE_SCROLLS: Final = 6
 
+#: Answers the landing reads looking for the first screen before it gives up: a page
+#: that keeps answering with documents that carry none is not the connections page.
+MAX_LANDING_ANSWERS: Final = 8
+
 _LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
@@ -239,7 +243,7 @@ class PageConnections:
         if blocked is not None:
             return blocked
         observation = self._observation
-        while True:
+        for _answer in range(MAX_LANDING_ANSWERS):
             response = await observation.next(self._landing_wait_s)
             if response is None:
                 log.warning("connections: the page loaded, but no first screen arrived")
@@ -267,6 +271,11 @@ class PageConnections:
                 payload = response.body
             assert payload is not None  # _outcome refused a response without a body
             chunk = parse_connections_chunk(payload, endpoint=self.endpoint, expected_start=0)
+            if not chunk.cards and chunk.total != 0:
+                # A first screen with no cards is an empty list only when it says the
+                # list is empty; otherwise the cards come some other way now.
+                log.warning("connections: the first screen has no cards and no zero total")
+                return SourcePage(Outcome.ROUTE_CHANGED, self._url)
             self._take(chunk)
             self._total = chunk.total or 0
             if self._total == 0:
@@ -274,6 +283,8 @@ class PageConnections:
                     "connections: the first screen states no total; this run cannot complete"
                 )
             return None
+        log.warning("connections: %d answers arrived, none the first screen", MAX_LANDING_ANSWERS)
+        return SourcePage(Outcome.ROUTE_CHANGED, self._url)
 
     # --- the scroll, and the answers it brought ------------------------------------
 
