@@ -62,6 +62,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 from collections.abc import Awaitable, Callable
 from typing import Final, cast
 from urllib.parse import quote, urljoin, urlsplit
@@ -131,8 +132,9 @@ class PageProfiles:
     """The profile visits of one run, from the page's own answers. One instance per run.
 
     ``origin`` is LinkedIn's, and a loopback origin only for the smoke suite and the
-    rehearsal replica: anything else is refused. ``sleep`` waits out the scroll's pauses
-    and the pause before the click; the tests pass a fast one.
+    rehearsal replica: anything else is refused. ``sleep`` waits out the scroll's pauses,
+    the pointer's rest before the first scroll (#192), and the pause before the click;
+    the tests pass a fast one. ``rng`` shapes that pointer rest.
     """
 
     def __init__(
@@ -145,8 +147,12 @@ class PageProfiles:
         lazy_wait_s: float = LAZY_WAIT_S,
         overlay_wait_s: float = OVERLAY_WAIT_S,
         limits: ObservationLimits = PROFILE_OBSERVATION_LIMITS,
+        rng: random.Random | None = None,
     ) -> None:
         self._run = run
+        # Shapes BrowserRun.scroll's one pointer-rest walk per tab (#192); a caller
+        # that passes a seeded one gets a visit that replays from that seed.
+        self._rng = rng
         self._origin = _require_origin(origin)
         self._sleep = sleep
         self._landing_wait_s = landing_wait_s
@@ -441,9 +447,9 @@ class PageProfiles:
 
     async def _scroll(self, plan: ScrollPlan) -> Answer[None] | None:
         if self._sleep is None:
-            outcome = await self._run.scroll(plan)
+            outcome = await self._run.scroll(plan, rng=self._rng)
         else:
-            outcome = await self._run.scroll(plan, sleep=self._sleep)
+            outcome = await self._run.scroll(plan, sleep=self._sleep, rng=self._rng)
         self._require_observed(outcome.page)
         return self._still_here(outcome.page.url)
 

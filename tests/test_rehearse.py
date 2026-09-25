@@ -61,6 +61,7 @@ from netkeeper.linkedin.pacing import (
     depth_after,
     human_delay,
     plan_enrichment,
+    rest_pointer_like_a_person,
     scroll_back_to_top,
 )
 from netkeeper.linkedin.rehearse import (
@@ -742,6 +743,9 @@ async def test_every_wait_is_one_the_plan_asked_for() -> None:
         planned += human_delay(rng, median=1.5, sigma=0.5, tail_p=0.0, tail_range=(0, 0))
         back = scroll_back_to_top(rng, depth_after(step.scroll))
         planned += sum(s.pause_s for s in back.steps) + back.dwell_s
+    # And #192's one pointer rest before the run's first scroll: the rehearsal's own
+    # `Random(seed)`, so it draws the walk `rest_pointer_like_a_person` would here.
+    planned += sum(step.pause_s for step in rest_pointer_like_a_person(Random(SEED)).steps)
     assert all(visit.click_pause_s is not None for visit in rehearsal.visits)
     assert math.isclose(sleeper.total, planned, rel_tol=1e-9)
 

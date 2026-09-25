@@ -287,11 +287,9 @@ async def test_one_click_brings_the_overlay_and_the_visit_reads_whole(
     (harvest,) = harvests
     assert harvest.outcome is Outcome.OK and harvest.details is not None
     assert harvest.details.urn == PRIYA.urn and harvest.details.location == LOCATION
-    # The lazy card comes only if the wheel really scrolled the content container; the
-    # page's layout puts the pointer's default spot over its fixed header (#192).
-    asked_card = any(r["path"] == COMPONENT_PATH for r in _Replica.received)
-    titles = [p.title for p in harvest.details.positions]
-    assert titles == (["Staff Engineer"] if asked_card else [])
+    # The lazy card comes only if the wheel really scrolled the content container, not
+    # the fixed header over the pointer's default spot (#192): it must have.
+    assert [p.title for p in harvest.details.positions] == ["Staff Engineer"]
     assert harvest.contact_info is not None
     assert harvest.contact_info.emails == (f"{PRIYA.slug}@example.test",)
 
@@ -302,9 +300,7 @@ async def test_one_click_brings_the_overlay_and_the_visit_reads_whole(
     # lazy card on the scroll and the overlay on the click, and nothing of netkeeper's.
     received = [(r["path"], r["body"], r["marker"]) for r in _Replica.received]
     assert received == [(urlsplit(s["path"]).path, s["body"], s["marker"]) for s in sent]
-    assert [path for path, _, _ in received] == (
-        [COMPONENT_PATH, NAVIGATION_PATH] if asked_card else [NAVIGATION_PATH]
-    )
+    assert [path for path, _, _ in received] == [COMPONENT_PATH, NAVIGATION_PATH]
 
 
 async def test_two_visits_click_once_each(provider: AttachBrowserProvider, site: str) -> None:

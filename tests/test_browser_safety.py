@@ -231,8 +231,23 @@ INPUT_ROOTS = [PACKAGE]
 #: page is never in reach there to type into or clear.
 BROWSER_ONLY_INPUTS = frozenset({"type", "clear"})
 BROWSER_ROOTS = (LINKEDIN, PACKAGE / "worker.py")
-#: The one place a page input is allowed: (file, enclosing function, name).
-ALLOWED_INPUTS = frozenset({(LINKEDIN / "browser.py", "BrowserRun.click_contact_info", "click")})
+#: The only places a page input is allowed: (file, enclosing function, name). Each must
+#: be reached exactly once.
+#:
+#: - ADR 0006's one click on Contact info (#190).
+#: - #192's pointer rest: ``mouse.move`` to a bare point over the content before the
+#:   first wheel replay on a tab, never a click or a hover resolved against an element.
+#:   This one rule replaces #192's separate ``mouse_move_sites`` scanner, which checked
+#:   the same thing (``move`` only inside that method) with a narrower reading; this
+#:   one reads every ``.move`` reference in the package, not only one on a ``mouse``.
+#:   The geometry read that method makes (``_content_box``'s ``bounding_box``) is not a
+#:   page input and is not listed.
+ALLOWED_INPUTS = frozenset(
+    {
+        (LINKEDIN / "browser.py", "BrowserRun.click_contact_info", "click"),
+        (LINKEDIN / "browser.py", "BrowserRun._rest_pointer_over_content", "move"),
+    }
+)
 
 # Script in the page, by any of Playwright's names for it. Each can call `fetch` or
 # `click()` as easily as a click can: refused anywhere in the package except preflight's
@@ -641,12 +656,13 @@ def test_the_one_page_input_is_the_contact_info_click() -> None:
     """ADR 0006, #190: no click, key, tap, hover, typing, or synthetic event anywhere in the
     package but the one ``click`` inside ``BrowserRun.click_contact_info``."""
     found = package_inputs()
-    allowed = [i for i in found if (i.path, i.function, i.name) in ALLOWED_INPUTS]
     others = [i for i in found if (i.path, i.function, i.name) not in ALLOWED_INPUTS]
-    assert len(allowed) == 1, (
-        "BrowserRun.click_contact_info no longer makes exactly one click call"
-        f" ({len(allowed)} found); if it moved, point ALLOWED_INPUTS at its new home"
-    )
+    for entry in sorted(ALLOWED_INPUTS):
+        hits = [i for i in found if (i.path, i.function, i.name) == entry]
+        assert len(hits) == 1, (
+            f"{entry[1]} no longer makes exactly one {entry[2]}() call ({len(hits)} found);"
+            " if it moved, point ALLOWED_INPUTS at its new home"
+        )
     assert not others, "a page input outside ADR 0006's one click:\n" + "\n".join(
         str(i) for i in others
     )
@@ -905,6 +921,27 @@ def test_the_input_scanner_catches_every_other_input() -> None:
         "await locator.scroll_into_view_if_needed()\n",
     ):
         assert list(page_inputs(snippet)), snippet
+    # #192's pointer rest, as its own scanner used to check it: the allowed method,
+    # a sibling method, and module level read differently.
+    rest = (
+        "class BrowserRun:\n"
+        "    async def _rest_pointer_over_content(self, page):\n"
+        "        await page.mouse.move(1, 2)\n"
+    )
+    assert [(i.function, i.name) for i in page_inputs(rest)] == [
+        ("BrowserRun._rest_pointer_over_content", "move")
+    ]
+    sibling = (
+        "class BrowserRun:\n"
+        "    async def scroll(self, page):\n"
+        "        await page.mouse.move(1, 2)\n"
+    )
+    assert [(i.function, i.name) for i in page_inputs(sibling)] == [("BrowserRun.scroll", "move")]
+    assert [(i.function, i.name) for i in page_inputs("await page.mouse.move(1, 2)\n")] == [
+        ("", "move")
+    ]
+    assert list(page_inputs("mouse = page.mouse\nawait mouse.move(x, y)\n"))
+    assert not list(page_inputs("box = await locator.bounding_box()\n"))
     assert not list(page_inputs("kind = type(exc).__name__\n"))
     assert not list(page_inputs("await run.click_contact_info(path, pause_s=1.0)\n"))
     assert not list(page_inputs("await page.mouse.wheel(0, 300)\n"))
