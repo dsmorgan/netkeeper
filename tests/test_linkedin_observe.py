@@ -1,0 +1,275 @@
+"""The observation seam: read what the page loads, alter nothing, log no body (ADR 0006).
+
+:class:`netkeeper.linkedin.observe.Observation` against :mod:`flagship_site`'s
+listening tab, whose responses have a request side that can only be read. Nothing
+here opens a socket.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable, Mapping
+from typing import cast
+
+import pytest
+from flagship_site import FakeRequest, FakeResponse, FlagshipSite, ListeningTab
+from run_fakes import fake_provider
+
+from netkeeper.linkedin import observe
+from netkeeper.linkedin.observe import (
+    FAILURE_REDIRECT,
+    FAILURE_TIMEOUT,
+    FAILURE_TOO_LARGE,
+    FAILURE_UNREADABLE,
+    Observation,
+    ObservationFailed,
+    ObservationLimits,
+    ResponseMatch,
+    ResponseRule,
+)
+
+ORIGIN = "https://www.linkedin.com"
+PAGINATION = f"{ORIGIN}/flagship-web/rsc-action/actions/pagination?sduiid=fake"
+SECRET = b"Priya Okafor, priya.okafor@example.test"
+MATCH = ResponseMatch(
+    origin=ORIGIN,
+    rules=(
+        ResponseRule("POST", "/flagship-web/rsc-action/actions/pagination"),
+        ResponseRule("get", "/mynetwork/invite-connect/connections/"),
+    ),
+)
+
+
+def _tab() -> ListeningTab:
+    return ListeningTab(FlagshipSite())
+
+
+def _response(
+    url: str = PAGINATION,
+    *,
+    method: str = "POST",
+    status: int = 200,
+    body: bytes = SECRET,
+    headers: Mapping[str, str] | None = None,
+    body_error: Exception | None = None,
+    body_delay: Callable[[], Awaitable[None]] | None = None,
+) -> FakeResponse:
+    return FakeResponse(
+        url,
+        status,
+        body,
+        FakeRequest(method, "fetch", '{"startIndex":10}'),
+        headers=headers,
+        body_error=body_error,
+        body_delay=body_delay,
+    )
+
+
+async def _started(tab: ListeningTab, limits: ObservationLimits | None = None) -> Observation:
+    observation = Observation(MATCH, tab, limits)
+    observation.start()
+    return observation
+
+
+# --- what is kept ---------------------------------------------------------------------------
+
+
+async def test_only_matching_responses_are_kept_in_arrival_order() -> None:
+    tab = _tab()
+    observation = await _started(tab)
+    tab.emit(_response(body=b"one"))
+    tab.emit(_response(f"{ORIGIN}/voyager/api/graphql"))  # another path
+    tab.emit(_response(method="GET"))  # another method
+    tab.emit(
+        _response(
+            "https://www.linkedin.com.evil.example.test/flagship-web/rsc-action/actions/pagination"
+        )
+    )
+    tab.emit(_response("http://www.linkedin.com/flagship-web/rsc-action/actions/pagination"))
+    tab.emit(_response(f"{ORIGIN}/mynetwork/invite-connect/connections", method="GET", body=b"two"))
+    first = await observation.next(1.0)
+    second = await observation.next(1.0)
+    assert first is not None and first.body == b"one" and first.request_body == '{"startIndex":10}'
+    assert second is not None and second.body == b"two"
+    assert await observation.next(0.0) is None
+    assert observation.kept == 2
+
+
+async def test_a_slow_body_is_never_overtaken_by_a_later_one() -> None:
+    tab = _tab()
+    observation = await _started(tab)
+    release = asyncio.Event()
+
+    async def slow() -> None:
+        await release.wait()
+
+    tab.emit(_response(body=b"first", body_delay=slow))
+    tab.emit(_response(body=b"second"))
+    waiting = asyncio.create_task(observation.next(5.0))
+    await asyncio.sleep(0.01)
+    assert not waiting.done()
+    release.set()
+    assert (await waiting).body == b"first"  # type: ignore[union-attr]
+    assert (await observation.next(1.0)).body == b"second"  # type: ignore[union-attr]
+
+
+async def test_nothing_arriving_is_none_after_the_timeout() -> None:
+    observation = await _started(_tab())
+    assert await observation.next(0.01) is None
+
+
+# --- bounded ---------------------------------------------------------------------------------
+
+
+async def test_too_many_unread_responses_fail_the_observation_rather_than_drop_silently(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tab = _tab()
+    observation = await _started(tab, ObservationLimits(max_pending=2))
+    for _ in range(3):
+        tab.emit(_response())
+    assert observation.overflowed
+    with pytest.raises(ObservationFailed, match="dropped"):
+        await observation.next(1.0)
+    assert SECRET.decode() not in caplog.text
+
+
+async def test_a_body_past_the_limit_is_not_kept() -> None:
+    tab = _tab()
+    observation = await _started(tab, ObservationLimits(max_body_bytes=8))
+    tab.emit(_response(body=b"x" * 9))
+    kept = await observation.next(1.0)
+    assert kept is not None and kept.body is None and kept.failure == FAILURE_TOO_LARGE
+
+
+async def test_a_body_that_never_arrives_times_out() -> None:
+    tab = _tab()
+    observation = await _started(tab, ObservationLimits(body_timeout_s=0.02))
+
+    async def never() -> None:
+        await asyncio.Event().wait()
+
+    tab.emit(_response(body_delay=never))
+    kept = await observation.next(1.0)
+    assert kept is not None and kept.body is None and kept.failure == FAILURE_TIMEOUT
+
+
+async def test_a_body_that_fails_is_a_fixed_phrase_never_the_error_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    tab = _tab()
+    observation = await _started(tab)
+    tab.emit(_response(body_error=RuntimeError(f"failed for {PAGINATION} {SECRET!r}")))
+    kept = await observation.next(1.0)
+    assert kept is not None and kept.failure == FAILURE_UNREADABLE
+    assert "example.test" not in caplog.text and "sduiid" not in caplog.text
+
+
+async def test_a_redirect_keeps_its_location_and_reads_no_body() -> None:
+    tab = _tab()
+    observation = await _started(tab)
+    response = _response(
+        status=302,
+        headers={"location": "https://www.linkedin.com/login"},
+        body_error=AssertionError("a redirect's body was read"),
+    )
+    tab.emit(response)
+    kept = await observation.next(1.0)
+    assert kept is not None and (kept.status, kept.body, kept.failure) == (
+        302,
+        None,
+        FAILURE_REDIRECT,
+    )
+    assert kept.location == "https://www.linkedin.com/login"
+
+
+# --- read-only, and quiet ------------------------------------------------------------------
+
+
+async def test_the_request_side_is_only_read() -> None:
+    """The observation reads the method, the resource type, and the body the page sent.
+    ``FakeRequest`` has nothing else -- no method at all -- and the reads are counted."""
+    tab = _tab()
+    observation = await _started(tab)
+    response = _response()
+    tab.emit(response)
+    await observation.next(1.0)
+    assert set(response.request.reads) <= {"method", "resource_type", "post_data"}
+    assert not [
+        name
+        for name in dir(FakeRequest)
+        if not name.startswith("_") and callable(getattr(FakeRequest, name))
+    ]
+
+
+async def test_a_kept_response_never_shows_its_body_in_a_repr_or_a_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    tab = _tab()
+    observation = await _started(tab)
+    tab.emit(_response())
+    kept = await observation.next(1.0)
+    assert kept is not None
+    assert SECRET.decode() not in repr(kept) and "startIndex" not in repr(kept)
+    assert "sduiid" not in repr(kept)  # the url is left out too: a profile url names a person
+    assert SECRET.decode() not in caplog.text
+
+
+async def test_close_stops_listening_and_drops_what_is_still_being_read() -> None:
+    tab = _tab()
+    observation = await _started(tab)
+
+    async def never() -> None:
+        await asyncio.Event().wait()
+
+    tab.emit(_response(body_delay=never))
+    assert tab.listeners["response"]
+    await observation.close()
+    assert tab.listeners["response"] == []
+    tab.emit(_response())
+    assert await observation.next(0.0) is None
+    await observation.close()  # idempotent
+    with pytest.raises(ObservationFailed):
+        observation.start()
+
+
+def test_a_match_refuses_what_it_could_not_compare() -> None:
+    with pytest.raises(ValueError):
+        ResponseMatch(origin="https://www.linkedin.com/path", rules=(ResponseRule("GET", "/"),))
+    with pytest.raises(ValueError):
+        ResponseMatch(origin="https://user@www.linkedin.com", rules=(ResponseRule("GET", "/"),))
+    with pytest.raises(ValueError):
+        ResponseMatch(origin=ORIGIN, rules=())
+    with pytest.raises(ValueError):
+        ResponseRule("GET", "no-slash")
+    assert not MATCH.matches("POST", "not a url at all")
+    assert not MATCH.matches("POST", "http://[::1")  # urlsplit refuses it
+
+
+def test_the_limits_are_pinned() -> None:
+    limits = ObservationLimits()
+    assert (limits.max_pending, limits.max_body_bytes, limits.body_timeout_s) == (
+        16,
+        8 * 1024 * 1024,
+        30.0,
+    )
+    assert observe.RESPONSE_EVENT == "response"
+    with pytest.raises(ValueError):
+        ObservationLimits(max_pending=0)
+
+
+# --- through BrowserRun -----------------------------------------------------------------
+
+
+async def test_a_run_observes_its_own_tab_and_closes_the_observation_with_the_tab() -> None:
+    site = FlagshipSite()
+    provider, _ = fake_provider(site)
+    async with provider.run("account-1") as run:
+        observation = await run.observe(MATCH)
+        (tab,) = site.pages
+        assert isinstance(tab, ListeningTab)
+        assert observation.page is cast(object, tab) and tab.listeners["response"]
+    assert tab.listeners["response"] == [] and tab.is_closed()

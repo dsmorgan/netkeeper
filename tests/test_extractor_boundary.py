@@ -20,7 +20,7 @@ import enum
 import inspect
 import types
 import typing
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import boundary
@@ -45,8 +45,9 @@ INTERFACE = (
     enrich.EnrichResult,
 )
 
-#: The leaf types an interface field may hold.
-PLAIN = (str, int, float, bool, datetime, type(None))
+#: The leaf types an interface field may hold. ``date`` joined for the flagship-web
+#: card's "Connected on" day (#187): immutable, and a day, not an instant.
+PLAIN = (str, int, float, bool, date, datetime, type(None))
 
 
 def _leaves(annotation: object, seen: set[type]) -> list[str]:

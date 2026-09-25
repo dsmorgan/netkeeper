@@ -409,7 +409,7 @@ async def test_the_ui_can_start_a_run_watch_it_and_stop_it(
     The wait between pages is held shut until the cancel is in, so the cancel lands
     inside the wait (spec 9.9's sliced cooldown), after the first page was written.
     """
-    context = ConnectionsContext(_many(120))
+    context = ConnectionsContext(_many(120), first=40)  # the first unit needs no scroll
     provider, connector = fake_provider(context)
     gate = Gate()
     clock = Clock(START + timedelta(hours=8))
@@ -464,7 +464,9 @@ async def test_the_ui_can_start_a_run_watch_it_and_stop_it(
     )
     assert done["counts"]["pages"] == 1 and done["counts"]["aging"] is None
     assert too_late.status_code == 409
-    assert connector.attaches == 1 and len(context.fetches) == 1
+    # One page load and no pagination: the run was cancelled in the wait between units.
+    assert connector.attaches == 1 and context.fetches == []
+    assert [method for method, _, _ in context.requests] == ["GET"]
 
 
 def _many(count: int) -> list[Any]:
@@ -616,7 +618,7 @@ async def test_shutting_down_mid_run_records_it_interrupted(
 ) -> None:
     """The lifespan cancels running tasks; the run keeps what it wrote and says why it
     stopped, and the next start has nothing left running to sweep up."""
-    provider, _ = fake_provider(ConnectionsContext(_many(120)))
+    provider, _ = fake_provider(ConnectionsContext(_many(120), first=40))
     gate = Gate()  # never opened: the run is parked in its wait between pages
     extractor = worker_extractor(provider, settings, clock=Clock(START), sleep=gate)
     async with serving(bare_engine, settings, extractor) as app:
@@ -639,22 +641,22 @@ async def test_shutting_down_mid_run_records_it_interrupted(
     assert run.progress_json is not None and run.progress_json["pages"] == 1
 
 
-async def test_a_live_sync_reads_the_api_first_and_the_dom_after_a_route_change() -> None:
-    """P2-08's fallback is what the worker hands the connections runner: one per run,
-    the in-page API behind the connections page load first, the DOM scroll second."""
-    from netkeeper.linkedin.connections import FallbackConnectionsSource
-    from netkeeper.linkedin.dom import DomConnectionsSource
-    from netkeeper.worker import CONNECTIONS_PAGE_URL, _LandFirst, connections_source
+async def test_a_live_sync_reads_what_the_connections_page_loads() -> None:
+    """#187: the worker hands the connections runner one PageConnections per run, on
+    LinkedIn's own connections page, with no fallback behind it; building one loads
+    nothing. An incremental sync requires the list newest first; a full sync does not."""
+    from netkeeper.linkedin.connections import SyncMode
+    from netkeeper.linkedin.page_connections import PageConnections
+    from netkeeper.worker import connections_source
 
     provider, connector = fake_provider()
     async with provider.run("account-9") as run:
-        first, second = connections_source(run), connections_source(run)
-    assert isinstance(first, FallbackConnectionsSource) and first is not second
-    assert isinstance(first.primary, _LandFirst) and isinstance(
-        first.fallback, DomConnectionsSource
-    )
-    assert first.primary.url == CONNECTIONS_PAGE_URL
-    assert CONNECTIONS_PAGE_URL == "https://www.linkedin.com/mynetwork/invite-connect/connections/"
+        first = connections_source(run, mode=SyncMode.INCREMENTAL)
+        second = connections_source(run, mode=SyncMode.FULL)
+    assert isinstance(first, PageConnections) and isinstance(second, PageConnections)
+    assert first is not second
+    assert first.page_url == "https://www.linkedin.com/mynetwork/invite-connect/connections/"
+    assert first._require_newest_first and not second._require_newest_first
     assert connector.attaches == 1  # building the sources loaded no page
     assert all(page.goto_calls == [] for page in connector.browsers[0].context_list[0].pages)
 
@@ -676,8 +678,9 @@ def _manual_run(factory: Any, kind: SyncRunKind) -> tuple[int, int]:
 async def test_a_connections_page_that_lands_on_a_checkpoint_fetches_nothing(
     session_factory: Any, settings: Settings
 ) -> None:
-    """The first page load is classified before any in-page fetch: a checkpoint stops
-    the run as one, raises the session flag, and nothing is evaluated in the page."""
+    """The page load is classified before anything is read: a checkpoint stops the run
+    as one, raises the session flag, nothing is evaluated in the page, and the page is
+    never scrolled, so it asks for nothing."""
     from run_fakes import CheckpointContext
 
     from netkeeper.services.linkedin_session import session_flag
@@ -691,6 +694,7 @@ async def test_a_connections_page_that_lands_on_a_checkpoint_fetches_nothing(
 
     assert connector.attaches == 1
     assert all(page.evaluate_calls == [] for page in context.pages)
+    assert all(page.mouse.wheels == [] for page in context.pages)
     assert context.fetches == []
     with session_scope(session_factory) as session:
         user = session.get(User, user_id)

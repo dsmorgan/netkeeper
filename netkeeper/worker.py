@@ -22,8 +22,8 @@ the worker re-checks, from the database, the three things that would make the
 run refuse anyway: a scheduled run on a disarmed account (the third check,
 after the scheduler's arm gate and ``runs.create_run``), the session flag, and
 heat over its skip threshold. A refused run is recorded ``failed`` and the
-browser is never touched. And the first page a connections sync loads is
-loaded by its first fetch, after the runner's own checks, not before them.
+browser is never touched. And the connections page a sync reads is loaded by
+its source's first ``fetch_page``, after the runner's own checks, not before them.
 
 **When the browser is not there.** ``BrowserUnavailable`` (Chrome is not
 running, or went away twice in one run) and ``BrowserBusy`` (another run, or
@@ -64,18 +64,11 @@ from netkeeper.linkedin.browser import (
     BrowserRun,
     BrowserUnavailable,
 )
-from netkeeper.linkedin.classify import Outcome, classify
-from netkeeper.linkedin.connections import (
-    ConnectionsSource,
-    FallbackConnectionsSource,
-    SourcePage,
-    SyncMode,
-    VoyagerConnections,
-)
-from netkeeper.linkedin.dom import CONNECTIONS_LIST_PATH, DomConnectionsSource
+from netkeeper.linkedin.connections import ConnectionsSource, SyncMode
 from netkeeper.linkedin.enrich import BrowserProfiles
-from netkeeper.linkedin.fetch import LINKEDIN_ORIGIN, PageVoyagerFetch
+from netkeeper.linkedin.fetch import PageVoyagerFetch
 from netkeeper.linkedin.pacing import ScrollPlan
+from netkeeper.linkedin.page_connections import PageConnections
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.services import runs
@@ -88,12 +81,6 @@ from netkeeper.web.app import create_app
 
 log = logging.getLogger(__name__)
 
-#: Where a connections sync puts its tab before the first in-page fetch: the
-#: connections page a person opens, on LinkedIn's own origin, which the in-page
-#: fetch requires (``PageVoyagerFetch``) -- the same page P2-08's DOM fallback
-#: reads. A string navigated to by a live run only; no test fetches it.
-CONNECTIONS_PAGE_URL: Final = f"{LINKEDIN_ORIGIN}{CONNECTIONS_LIST_PATH}"
-
 Clock = Callable[[], datetime]
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -102,45 +89,26 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-@dataclass(slots=True)
-class _LandFirst:
-    """A connections source that loads the connections page before its first fetch.
+def connections_source(
+    run: BrowserRun, *, mode: SyncMode, sleep: Sleep = asyncio.sleep
+) -> ConnectionsSource:
+    """The source a live connections sync reads through (spec 9.3, ADR 0006).
 
-    The page load is a real page view, the one a person makes, and it is what
-    puts the tab on LinkedIn's origin for the in-page API. It happens inside the
-    first :meth:`fetch_page`, which the job calls only after the runner's
-    refusals and the gate's budget, so a refused run never loads a page. Where
-    the page landed is classified (spec 9.7): a redirect to a checkpoint or a
-    login wall stops the run as that, with no fetch after it.
+    :class:`~netkeeper.linkedin.page_connections.PageConnections`: the connections
+    page, loaded and scrolled like a person, read from the answers the page itself
+    fetches. It loads the page inside its first ``fetch_page``, which the job calls
+    only after the runner's refusals and the gate's budget, so a refused run never
+    loads a page. An incremental sync requires the list sorted newest first, since it
+    stops at the first page of connections it knows.
+
+    There is no second source behind it (#187). The in-page Voyager fetch has no
+    connections endpoint to call any more (the #149 capture), and P2-08's DOM scroll
+    reads selectors nobody has seen on the live page, which found nothing on the first
+    supervised run; a run whose page answers are unreadable stops as ``RouteChanged``
+    and ages nobody. One of these per run. ``sleep`` waits out the scroll's pauses and
+    dwell.
     """
-
-    run: BrowserRun
-    inner: ConnectionsSource
-    url: str = CONNECTIONS_PAGE_URL
-    landed: bool = False
-
-    @property
-    def endpoint(self) -> str:
-        return self.inner.endpoint
-
-    async def fetch_page(self, *, start: int, count: int) -> SourcePage:
-        if not self.landed:
-            page = await self.run.goto(self.url)
-            self.landed = True
-            outcome = classify(200, page.url, "{}")
-            if outcome is not Outcome.OK:
-                return SourcePage(outcome=outcome, final_url=page.url)
-        return await self.inner.fetch_page(start=start, count=count)
-
-
-def connections_source(run: BrowserRun, *, sleep: Sleep = asyncio.sleep) -> ConnectionsSource:
-    """The source a live connections sync reads through (spec 9.3): the in-page API
-    behind the connections page load, and P2-08's DOM scroll once the API answers
-    ``RouteChanged`` (``FallbackConnectionsSource``, one switch, never back). A run
-    that switched is never complete, so it ages nobody (``SyncResult.complete``).
-    One of these per run. ``sleep`` waits out the DOM scroll's pauses and dwell."""
-    primary = _LandFirst(run=run, inner=VoyagerConnections(fetch=PageVoyagerFetch(run)))
-    return FallbackConnectionsSource(primary, DomConnectionsSource(run, sleep=sleep))
+    return PageConnections(run, require_newest_first=mode is SyncMode.INCREMENTAL, sleep=sleep)
 
 
 def profile_source(run: BrowserRun, *, sleep: Sleep = asyncio.sleep) -> BrowserProfiles:
@@ -247,7 +215,7 @@ class BrowserWorker:
             self._factory,
             user_id,
             _MODE[facts.kind],
-            connections_source(browser, sleep=self._sleep),
+            connections_source(browser, mode=_MODE[facts.kind], sleep=self._sleep),
             settings=self._settings,
             run_id=run_id,
             on_progress=progress,
