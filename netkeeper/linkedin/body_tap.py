@@ -49,6 +49,11 @@ DATA_EVENT: Final = "Network.dataReceived"
 FINISHED_EVENT: Final = "Network.loadingFinished"
 FAILED_EVENT: Final = "Network.loadingFailed"
 
+#: The one way a failed answer may still have a whole copy (#202 review): the page's
+#: own client cancelled it after reading it. Any other failure (a connection reset, a
+#: length mismatch, a failure Chrome did not mark as a cancel) may have cut it short.
+ABORTED_BY_PAGE: Final = "net::ERR_ABORTED"
+
 #: The most answers a tap holds at once; the oldest is dropped past it.
 MAX_STREAMS: Final = 32
 
@@ -72,6 +77,18 @@ class _Stream:
     started: asyncio.Event = field(default_factory=asyncio.Event)
     ended: asyncio.Event = field(default_factory=asyncio.Event)
     how: str | None = None
+    #: ``loadingFailed``'s ``canceled`` and ``errorText``; a fixed Chrome error code,
+    #: never logged.
+    canceled: bool = False
+    error: str | None = None
+
+    @property
+    def whole(self) -> bool:
+        """Whether the stream ended in a way that leaves the copy whole: it finished,
+        or the page's own client cancelled it (``net::ERR_ABORTED``)."""
+        if self.how == "finished":
+            return True
+        return self.how == "failed" and self.canceled and self.error == ABORTED_BY_PAGE
 
 
 class BodyTap:
@@ -169,6 +186,11 @@ class BodyTap:
         self._end(params, "finished")
 
     def on_failed(self, params: Mapping[str, Any]) -> None:
+        entry, _ = self._entry(params)
+        if entry is not None:
+            entry.canceled = params.get("canceled") is True
+            error = params.get("errorText")
+            entry.error = error if isinstance(error, str) else None
         self._end(params, "failed")
 
     def _end(self, params: Mapping[str, Any], how: str) -> None:
@@ -202,7 +224,8 @@ class BodyTap:
         Waits up to ``wait_s`` for Chrome to say whether it streamed the answer and
         for the answer to end. The copy is handed over once and forgotten. ``None``
         when the tap never matched the request, Chrome did not stream it, the answer
-        had not ended in time, or it grew past the body limit.
+        had not ended in time, it ended by any failure but the page's own cancel
+        (``canceled`` with ``net::ERR_ABORTED``), or it grew past the body limit.
         """
         request_id = self._oldest((method.upper(), url, post_data))
         if request_id is None:
@@ -212,7 +235,7 @@ class BodyTap:
             async with asyncio.timeout(wait_s):
                 await entry.started.wait()
                 await entry.ended.wait()
-        if not (entry.streaming and entry.ended.is_set()) or entry.too_large:
+        if not (entry.streaming and entry.ended.is_set() and entry.whole) or entry.too_large:
             return None
         self.handed += 1
         return bytes(entry.data)

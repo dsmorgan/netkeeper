@@ -849,7 +849,9 @@ class BrowserRun:
           its response arrives: Chrome then forwards that answer's data to this session
           as it arrives. It changes nothing about the request or what the page gets.
 
-        No request is held, changed, answered, delayed, or added. ``None`` when the
+        No request is held, changed, answered, blocked, or added, and the added delay
+        is negligible (each session has its own agent; there is no backpressure on the
+        page's loader). ``None`` when the
         session cannot start (a browser without the method, a fake tab): the
         observation then reads the way it always has.
         """
@@ -867,9 +869,9 @@ class BrowserRun:
             detach=session.detach,
             max_body_bytes=max_body_bytes,
         )
-        for event, handler in tap.handlers():
-            session.on(event, handler)
         try:
+            for event, handler in tap.handlers():
+                session.on(event, handler)
             await session.send(
                 "Network.enable",
                 {
@@ -877,9 +879,14 @@ class BrowserRun:
                     "maxResourceBufferSize": TAP_RESOURCE_BUFFER_BYTES,
                 },
             )
-        except Exception as exc:
-            log.info("observation: the body tap could not start (%s)", type(exc).__name__)
+        except BaseException as exc:
+            # Whatever stopped the start -- a refusal, a listener that raised, or a
+            # cancellation -- the session is detached before anything else happens,
+            # so no half-started tap stays attached to the user's tab (#202 review).
             await tap.close()
+            if not isinstance(exc, Exception):
+                raise
+            log.info("observation: the body tap could not start (%s)", type(exc).__name__)
             return None
         return tap
 
