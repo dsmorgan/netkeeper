@@ -36,6 +36,7 @@ from netkeeper.linkedin.flagship_profile import (
     profile_slug,
     same_slug,
 )
+from netkeeper.linkedin.flight import parse_flight
 from netkeeper.linkedin.voyager import (
     ContactInfo,
     EducationEntry,
@@ -549,6 +550,33 @@ def test_a_linkedin_website_is_a_site_and_the_members_own_profile_is_skipped(
         (logging.INFO, "enrichment: skipped 3 website link(s) to LinkedIn itself")
     ]
     assert PRIYA.slug not in caplog.text
+
+
+def test_one_skipped_linkedin_website_is_counted(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    body = contact_info_payload(PRIYA, website_urls=[f"https://www.linkedin.com/in/{PRIYA.slug}"])
+    assert parse_contact_info(body, slug=PRIYA.slug).websites == ()
+    assert "skipped 1 website link(s) to LinkedIn itself" in caplog.text
+
+
+def test_an_element_is_never_read_as_runs() -> None:
+    """A ``p`` or a text component whose ``children`` is one element, not a list of
+    them, holds no run of its own: the element's ``$`` and tag are not text."""
+    strong = ["$", "strong", None, {"children": ["Staff Data Engineer"]}]
+    item = [
+        "$",
+        "li",
+        None,
+        {
+            "children": [
+                ["$", "p", None, {"children": strong}],
+                ["$", "$L1", None, {"textProps": {"children": strong}}],
+            ]
+        },
+    ]
+    payload = parse_flight(b"0:" + json.dumps(item).encode() + b"\n", endpoint="test")
+    runs, nested = flagship_profile._item_runs(payload, payload.rows["0"], endpoint="test")
+    assert (runs, nested) == ([], [])
 
 
 def test_no_linkedin_website_logs_no_count(caplog: pytest.LogCaptureFixture) -> None:

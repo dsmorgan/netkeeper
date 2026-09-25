@@ -549,9 +549,10 @@ def _item_runs(
         if props is None:
             continue
         text = props.get("textProps")
-        children = text.get("children") if isinstance(text, dict) else None
-        if not isinstance(children, list) and _is_plain_text(node):
+        if _is_plain_text(node):
             children = props.get("children")
+        else:
+            children = text.get("children") if isinstance(text, dict) else None
         if isinstance(children, list) and not is_element(children):
             own.extend(child for child in children if isinstance(child, str))
     return own, nested
@@ -829,9 +830,10 @@ def _websites(
 
     A link on LinkedIn's own host that is not one of the wrappers is a site a person
     listed (a company page, a newsletter, their own profile): LinkedIn does not wrap its
-    own links. One to this member's own profile is skipped, since the contact holds that
-    already; so is one that carries a ``url`` parameter on a path that is not a known
-    wrapper, since which parameter is the site is unknown. Any other is kept as a site.
+    own links. One that carries a ``url`` parameter on a path that is not a known wrapper
+    is skipped, since which parameter is the site is unknown. A site, wrapped or not, that
+    is this member's own profile is skipped too: the contact holds that already. Any
+    other is kept.
     """
     found: list[str] = []
     skipped = 0
@@ -844,7 +846,7 @@ def _websites(
                 if split.path.rstrip("/") in REDIRECT_PATHS:
                     values = query.get(REDIRECT_PARAM, [])
                     site = values[0] if len(values) == 1 else None
-                elif REDIRECT_PARAM in query or _is_own_profile(split.path, slug):
+                elif REDIRECT_PARAM in query:
                     skipped += 1
                     continue
             if site is None or not site.strip() or _has_control(site) or len(site) > MAX_TEXT:
