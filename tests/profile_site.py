@@ -78,6 +78,13 @@ class SiteRequest:
         return self._post_data
 
 
+def navigation_timeout(url: str = "http://127.0.0.1/in/fake-lost-slug/") -> Exception:
+    """Playwright's own ``TimeoutError``, as ``page.goto`` raises it (message quotes the url)."""
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    return PlaywrightTimeoutError(f"Page.goto: Timeout 30000ms exceeded. navigating to {url}")
+
+
 @dataclass(slots=True)
 class ProfilePage:
     """How one profile's page behaves. Default: a faithful profile with one control.
@@ -120,6 +127,13 @@ class ProfilePage:
     #: #197: the same for the overlay's answer, and for every lazy card.
     overlay_error: Exception | None = None
     component_error: Exception | None = None
+    #: #197: the navigation to this profile raises this after the page's answers
+    #: arrived (Playwright's ``TimeoutError``: the document broke off and ``load`` never
+    #: fired). ``tab_after_goto``, when set, is where the tab is by then; the first
+    #: ``goto_closes_tab`` such navigations also close the tab.
+    goto_error: Exception | None = None
+    tab_after_goto: str | None = None
+    goto_closes_tab: int = 0
 
     def screen_body(self) -> bytes:
         if self.screen is not None:
@@ -215,6 +229,16 @@ class ProfileTab(FakePage):
     async def goto(self, url: str) -> object:
         result = await super().goto(url)
         self.site.navigated(self, url)
+        path = urlsplit(url).path
+        slug = unquote(path[len("/in/") :].strip("/")) if path.startswith("/in/") else ""
+        page = self.site.profiles.get(slug.casefold())
+        if page is not None and page.goto_error is not None:
+            if page.tab_after_goto is not None:
+                self._url = page.tab_after_goto
+            if page.goto_closes_tab > 0:
+                page.goto_closes_tab -= 1
+                self._closed = True
+            raise page.goto_error
         return result
 
 

@@ -630,6 +630,22 @@ async def test_a_lost_first_screen_is_still_the_observation_failing() -> None:
         await sync(LostScreen(many(20)))
 
 
+async def test_a_connections_page_navigation_timeout_still_ends_the_run() -> None:
+    """#197's enrichment fix forgives a profile navigation that times out; the
+    connections page's does not change: the run still ends by that exception."""
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    class SlowToLoad(FlagshipSite):
+        async def new_page(self):  # type: ignore[no-untyped-def]
+            tab = await super().new_page()
+            assert isinstance(tab, ListeningTab)
+            tab.fail_next_goto(PlaywrightTimeoutError("Page.goto: Timeout"), closes=False)
+            return tab
+
+    with pytest.raises(PlaywrightTimeoutError):
+        await sync(SlowToLoad(many(20)))
+
+
 # --- the tab and the observation ------------------------------------------------------------
 
 

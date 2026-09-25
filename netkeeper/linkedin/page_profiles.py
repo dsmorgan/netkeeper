@@ -52,7 +52,11 @@ cause (:func:`~netkeeper.linkedin.observe.unreadable_cause`) in
 :attr:`~netkeeper.linkedin.enrich.Answer.lost`. For the Contact info overlay, the visit
 is unreadable -- no contact info for that person this visit, and nothing is clicked
 again. A lazy card is skipped, as a card that failed is. Where the tab is still decides
-first: a checkpoint or a login wall there stops the run.
+first: a checkpoint or a login wall there stops the run. A profile navigation that times
+out (Playwright's ``TimeoutError``: the document broke off, and the page never loaded) is
+an unreadable visit the same way, with the cause :data:`NAVIGATION_TIMED_OUT`, after the
+same wall check; any other navigation error still ends the run, and a lost tab is still
+:class:`~netkeeper.linkedin.browser.BrowserUnavailable`.
 
 **The click.** Only after the profile read whole, and only when the job has found its id
 to be the contact's (:mod:`netkeeper.linkedin.enrich`). If the control is missing, not
@@ -76,7 +80,12 @@ from collections.abc import Awaitable, Callable
 from typing import Final, cast
 from urllib.parse import quote, urljoin, urlsplit
 
-from netkeeper.linkedin.browser import BrowserRun, BrowserUnavailable, PageLike
+from netkeeper.linkedin.browser import (
+    BrowserRun,
+    BrowserUnavailable,
+    PageLike,
+    is_navigation_timeout,
+)
 from netkeeper.linkedin.classify import Outcome, classify
 from netkeeper.linkedin.enrich import LINKEDIN_ORIGIN, Answer, masked
 from netkeeper.linkedin.flagship import (
@@ -133,6 +142,9 @@ MAX_COMPONENTS: Final = 40
 #: A profile page loads a dozen lazy cards as it renders; the observation must hold them
 #: all while the scroll runs without a drop (which would fail the run).
 PROFILE_OBSERVATION_LIMITS: Final = ObservationLimits(max_pending=64)
+
+#: The fixed cause of a profile navigation that timed out (#197).
+NAVIGATION_TIMED_OUT: Final = "navigation timed out"
 
 _LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1", "localhost"})
 _STOPPING: Final = frozenset({Outcome.CHECKPOINT, Outcome.LOGGED_OUT, Outcome.THROTTLED})
@@ -211,7 +223,12 @@ class PageProfiles:
             ),
         )
         self._observation = await self._run.observe(match, limits=self._limits)
-        page = await self._run.goto(self.profile_url(public_id))
+        try:
+            page = await self._run.goto(self.profile_url(public_id))
+        except Exception as exc:
+            if not is_navigation_timeout(exc):
+                raise
+            return self._navigation_timed_out()
         self._require_observed(page)
         self._page = page
         blocked = self._land_where(page.url)
@@ -368,6 +385,28 @@ class PageProfiles:
             return self._screen_lost()
         log.warning("enrichment: %d answers arrived, none the profile screen", answers)
         return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
+
+    def _navigation_timed_out(self) -> Answer[None]:
+        """The profile's navigation never finished loading (#197): an unreadable visit.
+
+        Seen when the document breaks off mid-body: Chrome never fires ``load``. The tab
+        is still the one being listened to (``BrowserRun.goto`` raises a lost tab as a
+        loss, not a timeout), so where it is decides first: a wall stops the run. Any
+        other page is one unreadable visit. The visit is not tried again.
+        """
+        observation = self._observation
+        assert observation is not None
+        page = cast(PageLike, observation.page)
+        if page.is_closed():
+            raise BrowserUnavailable(
+                "the run's tab went away while a profile loaded; aborting the run"
+            )
+        wall = self._wall(page.url)
+        if wall is not None:
+            return wall
+        lost = f"the profile could not be opened ({NAVIGATION_TIMED_OUT})"
+        log.info("enrichment: %s", lost)
+        return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True, lost=lost)
 
     def _screen_lost(self) -> Answer[None]:
         """The visit is unreadable: its screen's body was lost and none read after it.

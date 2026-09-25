@@ -41,6 +41,7 @@ from profile_site import (
     ProfileSite,
     ProfileTab,
     Stale,
+    navigation_timeout,
 )
 from run_fakes import fake_provider
 from voyager_pages import PEOPLE, Person
@@ -667,6 +668,88 @@ async def test_an_overlay_too_large_to_keep_still_ends_the_run() -> None:
     with pytest.raises(ObservationFailed):
         await visit(site, [target(PRIYA)], limits=ObservationLimits(max_body_bytes=4000))
     assert [slug for slug, _, _ in site.clicks] == [PRIYA.slug]  # it failed at the overlay
+
+
+# --- a profile navigation that times out (#197) ------------------------------------------------
+
+TIMED_OUT = "the profile could not be opened (navigation timed out)"
+
+
+async def test_a_profile_navigation_that_times_out_is_an_unreadable_visit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The document broke off and the page never loaded: one unreadable visit, not
+    tried again, and the next person is visited and clicked."""
+    caplog.set_level(logging.DEBUG, logger="netkeeper")
+    site = ProfileSite([ProfilePage(PRIYA, goto_error=navigation_timeout()), ProfilePage(MATEO)])
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.result.reason is StopReason.END_OF_PLAN
+    assert out.outcomes == [Outcome.ROUTE_CHANGED, Outcome.OK]
+    assert out.result.unreadable == 1 and out.result.lost == (f"visit 1: {TIMED_OUT}",)
+    assert site.navigations == [f"/in/{PRIYA.slug}/", f"/in/{MATEO.slug}/"]  # no retry
+    assert [slug for slug, _, _ in site.clicks] == [MATEO.slug]
+    assert "Timeout 30000ms" not in caplog.text and "fake-lost-slug" not in caplog.text
+
+
+async def test_navigation_timeouts_count_toward_the_unreadable_limit() -> None:
+    people = [PRIYA, MATEO, HANA]
+    site = ProfileSite([ProfilePage(p, goto_error=navigation_timeout()) for p in people])
+    out = await visit(site, [target(p) for p in people])
+    assert out.outcomes == [Outcome.ROUTE_CHANGED] * MAX_UNREADABLE_IN_A_ROW
+    assert out.result.reason is StopReason.RESPONSE
+    assert out.result.outcome is Outcome.ROUTE_CHANGED
+    assert len(site.navigations) == MAX_UNREADABLE_IN_A_ROW
+
+
+@pytest.mark.parametrize(
+    ("wall", "outcome"), [(CHECKPOINT_URL, Outcome.CHECKPOINT), (LOGIN_URL, Outcome.LOGGED_OUT)]
+)
+async def test_a_navigation_that_times_out_on_a_wall_stops_the_run(
+    wall: str, outcome: Outcome
+) -> None:
+    page = ProfilePage(PRIYA, goto_error=navigation_timeout(), tab_after_goto=wall)
+    site = ProfileSite([page, ProfilePage(MATEO)])
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.result.reason is StopReason.RESPONSE and out.result.outcome is outcome
+    assert out.harvests == [] and out.result.lost == ()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("net::ERR_CONNECTION_REFUSED"),
+        TimeoutError("not Playwright's"),
+    ],
+    ids=["another-error", "builtin-timeout"],
+)
+async def test_any_other_navigation_error_still_ends_the_run(error: Exception) -> None:
+    site = ProfileSite([ProfilePage(PRIYA, goto_error=error), ProfilePage(MATEO)])
+    with pytest.raises(type(error)):
+        await visit(site, [target(PRIYA), target(MATEO)])
+
+
+async def test_another_playwright_error_still_ends_the_run() -> None:
+    from playwright.async_api import Error as PlaywrightError
+
+    site = ProfileSite([ProfilePage(PRIYA, goto_error=PlaywrightError("net::ERR_ABORTED"))])
+    with pytest.raises(PlaywrightError):
+        await visit(site, [target(PRIYA)])
+
+
+async def test_a_navigation_timeout_after_the_tab_was_lost_is_browser_unavailable() -> None:
+    """The tab closed with the first navigation; BrowserRun reopened it and navigated
+    once more, which timed out. The tab being listened to is gone: that is the
+    browser failing, never an unreadable visit."""
+    page = ProfilePage(PRIYA, goto_error=navigation_timeout(), goto_closes_tab=1)
+    site = ProfileSite([page, ProfilePage(MATEO)])
+    with pytest.raises(BrowserUnavailable):
+        await visit(site, [target(PRIYA), target(MATEO)])
+
+
+def test_the_navigation_timeout_cause_is_pinned() -> None:
+    from netkeeper.linkedin import page_profiles
+
+    assert page_profiles.NAVIGATION_TIMED_OUT == "navigation timed out"
 
 
 # --- the mechanism failing ----------------------------------------------------------------------
