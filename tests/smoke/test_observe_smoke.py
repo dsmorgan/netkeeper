@@ -13,18 +13,25 @@ any request -- the replica records every request it received, the page records
 every request it sent, and the two lists are the same, headers included.
 
 **The layout is deliberately not a flat scrolling document (#192).** A fixed header
-sits across the top of the viewport, and the list scrolls inside its own
-``overflow: auto`` container below it -- the ``html``/``body`` do not scroll at all.
-That is what the #149 capture showed the real connections page does, and it is why
-the bug in #192 went uncaught here before: Playwright's ``mouse.wheel`` fires at the
-virtual pointer's position, which starts at (0, 0) and sits under the fixed header,
-not over the scrolling container, so a wheel replay that never moved the pointer
-first scrolled nothing. ``BrowserRun.scroll`` rests the pointer over the content
-before its first wheel event now (``_rest_pointer_over_content``); without that,
+sits across the top of the viewport; below it, a ``<main>`` column scrolls (capped
+at 800px, centered) with non-scrolling left and right rails flanking it -- the
+``html``/``body`` do not scroll at all, and neither do the rails. That is what the
+#149 capture showed the real connections page does (a centered column, not a
+full-bleed one), and it is why the bug in #192 went uncaught here before:
+Playwright's ``mouse.wheel`` fires at the virtual pointer's position, which starts
+at (0, 0) and sits under the fixed header, not over the scrolling column, so a
+wheel replay that never moved the pointer first scrolled nothing.
+``BrowserRun.scroll`` rests the pointer over the content before its first wheel
+event now (``_rest_pointer_over_content``), reading ``<main>``'s own on-screen box
+rather than guessing at the viewport (#192 review, F1) -- a guess that missed the
+centered column entirely on a wide window, and had nowhere reliable to land on a
+narrow one. Without that fix,
 ``test_a_real_page_loads_its_own_pages_and_the_run_reads_them_all`` below stalls
 and ends ``RouteChanged`` instead of ``END_OF_LIST`` -- checked by hand against the
 pre-#192 code, and recorded in that PR's description rather than as a test of the
-old code, which no longer exists to run.
+old code, which no longer exists to run. Run at several window sizes
+(560, 740, 1280, 2200px wide) to cover a phone-width netkeeper Chrome window, the
+maintainer's MacBook Air split-screen width, an ordinary laptop, and an ultrawide.
 
 Start Chrome first with the command ``netkeeper browser launch`` prints, and point
 ``NETKEEPER_CDP_URL`` at it.
@@ -86,23 +93,36 @@ def _people(count: int) -> list[Person]:
     return [*PEOPLE, *extra][:count]
 
 
-#: The real layout (#192): a fixed header across the top, covering (0, 0) -- where
-#: Playwright's virtual pointer starts -- and the list inside its own
-#: ``overflow: auto`` container below it. ``html``/``body`` do not scroll at all,
-#: so a wheel event that lands on the header (old code, pointer never moved) has
-#: no scrollable ancestor to reach and scrolls nothing.
+#: The real layout (#192, and the #192 review's F1): a fixed header across the top,
+#: covering (0, 0) -- where Playwright's virtual pointer starts -- flagship-web's
+#: own centered ~1128px column (``<main>``, capped here at 800px so it shows up at
+#: ordinary laptop widths too, not just an ultrawide), and non-scrolling left and
+#: right rails flanking it wide enough to fill whatever room the viewport has left.
+#: ``html``/``body`` do not scroll at all; neither do the rails -- only ``<main>``
+#: does, so a target that landed on a rail or the header, not on ``<main>``, has no
+#: scrollable ancestor to reach and scrolls nothing. This is what a plain fraction
+#: of a *guessed* viewport size misses on a wide monitor (a centered column, not a
+#: full-bleed one) and on a narrow one (too little width left for a fixed-pixel
+#: guess to land inside); reading ``<main>``'s own real box does not.
 _LAYOUT_CSS = """
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; }
   #nav { position: fixed; top: 0; left: 0; right: 0; height: 56px;
          background: #0a66c2; z-index: 10; }
-  #scroll { position: fixed; top: 0; left: 0; right: 0; bottom: 0; overflow-y: auto; }
+  #rail-left, #rail-right { position: fixed; top: 56px; bottom: 0; width: 50%;
+         background: #f3f2ef; overflow: hidden; }
+  #rail-left { left: 0; }
+  #rail-right { right: 0; }
+  main { position: fixed; top: 56px; bottom: 0; left: 50%; transform: translateX(-50%);
+         width: min(800px, 100vw); background: #fff; overflow-y: auto; z-index: 5; }
 </style>
 <div id="nav"></div>
-<div id="scroll">
+<div id="rail-left"></div>
+<div id="rail-right"></div>
+<main id="scroll">
   <div id="list"></div>
   <div style="height:900px"></div>
-</div>
+</main>
 """
 
 #: The page's own script: render cards, and when the *container* (not the document)

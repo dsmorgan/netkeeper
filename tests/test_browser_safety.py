@@ -25,6 +25,7 @@ import ast
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 import boundary
 import pytest
@@ -176,13 +177,18 @@ PAGE_DRIVERS = frozenset(
 # bare point, never a locator -- it is not a click, and not a hover resolved
 # against any particular element the way `hover()` (which *is* refused) would be --
 # so it needs no exception to "this module only listens" the way ADR 0006's Contact
-# info click needs one for `click()`. `mouse_moves` below is this reading's own
-# test: the one place it may be called is BrowserRun.scroll's pointer-rest step, in
-# CONNECTOR_MODULE (defined below), never an observing module or anywhere else.
+# info click needs one for `click()`. `mouse_move_sites`/`mouse_moves` below are
+# this reading's own test: the one place it may be called is the pointer-rest
+# method itself, not just its file -- see ALLOWED_MOUSE_MOVE_METHOD.
 
 # The attach point. Everything else goes through AttachBrowserProvider.
 CONNECT_CALL = "connect_over_cdp"
 CONNECTOR_MODULE = LINKEDIN / "browser.py"
+
+# #192: the one method `mouse.move` may be called from -- not just "somewhere in
+# CONNECTOR_MODULE" (#192 review, F2). #193's rebase adds its own entries to its
+# own ALLOWED_INPUTS the same way; see this PR's body for exactly what that needs.
+ALLOWED_MOUSE_MOVE_METHOD: Final = "_rest_pointer_over_content"
 
 # Spec 5 and 9.9: a request handler that awaits browser work deadlocks on the tab
 # waiting for its own response, so routes enqueue work on the task runner instead.
@@ -434,32 +440,56 @@ def page_drivers(source: str, path: Path = MEMORY) -> Iterator[Finding]:
             yield Finding(path, line, f"{name}() drives the page; this module only listens")
 
 
-def mouse_moves(source: str, path: Path = MEMORY) -> Iterator[Finding]:
-    """Every ``<mouse>.move(...)`` call: #192's pointer-rest step, and the one place
-    that walk may be spent. Reads a call whose function is a ``move`` attribute on
-    something itself named or attributed ``mouse`` (``page.mouse.move``,
-    ``self.mouse.move``, a local ``mouse = ...mouse`` held first) -- narrower than
-    :func:`reached_names`'s deny-list matchers above, because unlike a launch or a
-    route, a stray ``.move()`` on some unrelated object is not itself a finding
-    anywhere else in this codebase, and a scanner that flagged every ``.move`` call
-    -- ``shutil.move``, a queue's ``move_to_end`` -- would eventually be
-    disbelieved and ignored (this module's own opening docstring: a scanner reads
-    names, not meanings). It cannot see a `mouse` reference held under another
-    name, which is why this rule is also a review rule, not only a test, same as
-    every deny-list rule in this file already is.
+def mouse_move_sites(source: str, path: Path = MEMORY) -> Iterator[tuple[int, str | None]]:
+    """Every ``<mouse>.move(...)`` call, paired with the name of the ``def`` that
+    directly encloses it (``None`` at module level).
+
+    Reads a call whose function is a ``move`` attribute on something itself named
+    or attributed ``mouse`` (``page.mouse.move``, ``self.mouse.move``, a local
+    ``mouse = ...mouse`` held first) -- narrower than :func:`reached_names`'s
+    deny-list matchers above, because unlike a launch or a route, a stray
+    ``.move()`` on some unrelated object is not itself a finding anywhere else in
+    this codebase, and a scanner that flagged every ``.move`` call -- ``shutil.move``,
+    a queue's ``move_to_end`` -- would eventually be disbelieved and ignored (this
+    module's own opening docstring: a scanner reads names, not meanings).
+
+    Unlike every other scanner above, this one also carries *where* -- the
+    enclosing function, not only the file -- because "somewhere in
+    ``browser.py``" is not the rule (#192 review, F2): a call moved from
+    ``BrowserRun._rest_pointer_over_content`` to a sibling method, or dropped a
+    level up into ``scroll`` itself, leaves the file unchanged and must still be
+    caught. Walking the tree with the current ``def`` name in hand is what tells
+    those apart; it cannot see a ``mouse`` reference held under another name or a
+    call relayed through a helper, which is why this rule is also a review rule,
+    not only a test, same as every deny-list rule in this file already is.
     """
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if not (isinstance(func, ast.Attribute) and func.attr == "move"):
-            continue
-        target = func.value
-        on_mouse = (isinstance(target, ast.Name) and target.id == "mouse") or (
-            isinstance(target, ast.Attribute) and target.attr == "mouse"
-        )
-        if on_mouse:
-            yield Finding(path, node.lineno, "mouse.move(): the pointer-rest step (#192)")
+    tree = ast.parse(source)
+
+    def walk(node: ast.AST, enclosing: str | None) -> Iterator[tuple[int, str | None]]:
+        for child in ast.iter_child_nodes(node):
+            child_enclosing = enclosing
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                child_enclosing = child.name
+            if isinstance(child, ast.Call):
+                func = child.func
+                if isinstance(func, ast.Attribute) and func.attr == "move":
+                    target = func.value
+                    on_mouse = (isinstance(target, ast.Name) and target.id == "mouse") or (
+                        isinstance(target, ast.Attribute) and target.attr == "mouse"
+                    )
+                    if on_mouse:
+                        yield child.lineno, enclosing
+            yield from walk(child, child_enclosing)
+
+    yield from walk(tree, None)
+
+
+def mouse_moves(source: str, path: Path = MEMORY) -> Iterator[Finding]:
+    """:func:`mouse_move_sites`, as :class:`Finding`\\ s -- for the scanner
+    self-tests and ``complain``'s formatting below, which every other scanner in
+    this file already shares that shape with."""
+    for line, enclosing in mouse_move_sites(source, path):
+        yield Finding(path, line, f"mouse.move() inside {enclosing!r} (#192)")
 
 
 def database_imports(source: str, path: Path = MEMORY) -> Iterator[Finding]:
@@ -526,20 +556,33 @@ def test_the_observing_modules_only_listen_and_scroll() -> None:
     assert not findings, complain(findings, "an observing module drives the page:")
 
 
-def test_mouse_move_is_called_only_in_the_scroll_path() -> None:
-    """#192: the pointer-rest step is the one place ``mouse.move`` may appear.
+def test_mouse_move_is_called_only_inside_the_allowed_method() -> None:
+    """#192: the pointer-rest method is the one place ``mouse.move`` may appear --
+    scoped to the enclosing ``def``, not just the file (#192 review, F2).
 
-    A future caller elsewhere -- an observing module, a fetch helper, anything but
-    ``BrowserRun.scroll`` itself -- is a review question this pins rather than
-    leaves to be true by accident.
+    A mutation that moved the call to a sibling method of
+    :data:`CONNECTOR_MODULE`, or dropped it a level up into ``scroll`` itself,
+    leaves the file this rule used to check unchanged, and must still fail this
+    one.
     """
-    findings = scan([PACKAGE], mouse_moves)
-    outside = [finding for finding in findings if finding.path != CONNECTOR_MODULE]
-    assert findings, (
+    sites: list[tuple[Path, int, str | None]] = []
+    for path in python_files(PACKAGE):
+        for line, enclosing in mouse_move_sites(path.read_text(encoding="utf-8"), path):
+            sites.append((path, line, enclosing))
+    assert sites, (
         f"nothing calls mouse.move() any more; is {CONNECTOR_MODULE.name}'s"
-        " BrowserRun.scroll still resting the pointer before a wheel replay (#192)?"
+        f" {ALLOWED_MOUSE_MOVE_METHOD}() still resting the pointer before a wheel replay (#192)?"
     )
-    assert not outside, complain(outside, f"mouse.move() belongs only in {CONNECTOR_MODULE.name}:")
+    outside = [
+        (path, line, enclosing)
+        for path, line, enclosing in sites
+        if not (path == CONNECTOR_MODULE and enclosing == ALLOWED_MOUSE_MOVE_METHOD)
+    ]
+    assert not outside, (
+        f"mouse.move() belongs only inside {CONNECTOR_MODULE.name}'s"
+        f" {ALLOWED_MOUSE_MOVE_METHOD}():\n"
+        + "\n".join(f"{path}:{line}: inside {enclosing!r}" for path, line, enclosing in outside)
+    )
 
 
 def test_only_the_connector_opens_a_cdp_connection() -> None:
@@ -732,6 +775,26 @@ def test_the_mouse_move_scanner_catches_a_call() -> None:
     assert not list(mouse_moves("await page.mouse.wheel(0, 1)\n"))
     assert not list(mouse_moves("shutil.move('a', 'b')\n"))
     assert not list(mouse_moves("queue.move_to_end('k')\n"))
+
+
+def test_the_mouse_move_scanner_names_the_enclosing_method() -> None:
+    """#192 review, F2: the scanner's whole point is telling *where* apart, not
+    just *whether* -- a call in the allowed method and one moved to a sibling (or
+    dropped to module level) must read differently."""
+    allowed = (
+        "class BrowserRun:\n"
+        "    async def _rest_pointer_over_content(self, page):\n"
+        "        await page.mouse.move(1, 2)\n"
+    )
+    assert list(mouse_move_sites(allowed)) == [(3, "_rest_pointer_over_content")]
+
+    sibling = "class C:\n    async def scroll(self, page):\n        await page.mouse.move(1, 2)\n"
+    assert list(mouse_move_sites(sibling)) == [(3, "scroll")]
+
+    module_level = "await page.mouse.move(1, 2)\n"
+    assert list(mouse_move_sites(module_level)) == [(1, None)]
+
+    assert not list(mouse_move_sites("await page.mouse.wheel(0, 1)\n"))
 
 
 def test_the_forbidden_matcher_reads_dotted_segments() -> None:
