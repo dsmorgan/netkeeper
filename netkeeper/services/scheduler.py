@@ -96,7 +96,11 @@ runs (every account starts disarmed) a due fire is skipped as ``"disarmed"``
 exactly the way heat skips one, cadence and first-setup standing included. The
 gate is on by default at every entry point (:data:`DEFAULT_ARM_GATE`); only
 :data:`ARMING_NOT_REQUIRED`, which ``netkeeper simulate``'s scratch schedule
-passes, turns it off. A handler that could not reach the browser answers
+passes, turns it off. For the two connections kinds, :func:`poll_and_fire`
+also asks :mod:`netkeeper.services.route_breaker` (#189 item 1): once two
+connections runs in a row have ended ``route_changed``, a due fire is skipped
+as ``"route_changed_breaker"`` the same way, with no off switch at all. A
+handler that could not reach the browser answers
 :attr:`JobOutcome.RETRY_LATER`, and :func:`park_retry` parks one retry 20 to 50
 minutes out (spec 9.9).
 
@@ -141,6 +145,7 @@ from netkeeper.linkedin import pacing
 from netkeeper.models import JsonValue, User
 from netkeeper.models.base import utcnow
 from netkeeper.services import heat as heat_service
+from netkeeper.services import route_breaker
 from netkeeper.services.linkedin_accounts import scheduled_runs_armed
 from netkeeper.services.linkedin_session import session_flag
 from netkeeper.services.settings_kv import get_setting, set_setting
@@ -316,6 +321,18 @@ ArmGate = ArmCheck | Arming
 #: armed the account's scheduled runs (``linkedin_accounts.scheduled_runs_armed_at``).
 #: Every account starts disarmed, so a scheduler that nobody armed fires nothing.
 DEFAULT_ARM_GATE: Final[ArmCheck] = scheduled_runs_armed
+
+
+# --- the route-changed breaker gate: connections kinds only (#189 item 1) ----
+
+#: The kinds :mod:`netkeeper.services.route_breaker` governs. Not ``enrich``:
+#: spec 9.6 already caps enrichment's own unreadable-profile streak on a
+#: different endpoint, and the two stay independent (see that module's
+#: docstring). Unlike the heat and arm gates this one has no "disabled"
+#: escape hatch -- it is unconditional, the same as the session flag below --
+#: because nothing (``netkeeper simulate`` included) should be able to arm a
+#: scheduler that skips this check.
+_ROUTE_BREAKER_KINDS: Final = frozenset({JobKind.CONNECTIONS_FULL, JobKind.CONNECTIONS_INCREMENTAL})
 
 
 # --- active hours: delegates to netkeeper.linkedin.pacing, never reimplements it ---
@@ -800,7 +817,12 @@ async def poll_and_fire(
     is skipped as ``"disarmed"``; while the session flag is set (a checkpoint
     or a login wall, spec 9.7) it is skipped as ``"session_flagged"``. Above
     the configured heat threshold (spec 9.7) the browser job is skipped as
-    ``"heat"``. Either way the cadence still
+    ``"heat"``. For a connections kind (``CONNECTIONS_FULL``,
+    ``CONNECTIONS_INCREMENTAL``) whose route-changed breaker is tripped
+    (:mod:`netkeeper.services.route_breaker`, #189 item 1 -- two connections
+    runs in a row ended ``route_changed``) it is skipped as
+    ``"route_changed_breaker"``; that check is unconditional, with no
+    "disabled" escape hatch. Either way the cadence still
     advances, so the scheduler does not spin retrying the same fire on every
     heartbeat, and a skipped fire has not *run*: a ``run_on_first_setup`` kind
     keeps its first-setup standing and is offered again
@@ -857,6 +879,11 @@ async def poll_and_fire(
             session, user, account_id, now=now, settings=heat_settings
         ):
             skipped_reason = "heat"
+        elif kind in _ROUTE_BREAKER_KINDS and route_breaker.tripped(session, user, account_id):
+            # Two connections runs in a row ended route_changed (#189 item 1): a wall
+            # served in place raises no heat and sets no flag, so this is what stops
+            # a scheduled sync from loading it again at every interval.
+            skipped_reason = "route_changed_breaker"
         next_due = record_fired(
             session,
             user,

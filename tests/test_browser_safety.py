@@ -113,7 +113,7 @@ CONTEXT_MUTATORS = frozenset(
 # `fulfill`, and `abort` -- which only exist once something routes, and `route` is
 # refused above; they are named here too so a regression is caught at the call that
 # alters the request, not only at the one that intercepted it. (`fallback` is
-# Playwright's fourth, left off because FallbackConnectionsSource has an attribute of
+# Playwright's fourth, left off because FallbackContactInfoSource has an attribute of
 # that name; `route` and these three already cover every way to reach it.)
 REQUEST_MUTATORS = frozenset({"continue_", "fulfill", "abort"})
 
@@ -189,8 +189,9 @@ BROWSER_MODULES = (
     # The in-page Voyager fetch (#150) awaits a real `page.evaluate` fetch --
     # exactly the deadlock risk the other three exist to keep out of a handler.
     "netkeeper.linkedin.fetch",
-    # P2-08's DOM fallback: a scroll replay's dwell and a page.evaluate read
-    # are exactly as long-running as the in-page Voyager fetch above.
+    # dom.py's contact-info overlay reader (P2-08, unwired since #187's review
+    # removed its connections-list half): a page.evaluate read is exactly as
+    # long-running as the in-page Voyager fetch above.
     "netkeeper.linkedin.dom",
     # The run worker (P2-10) attaches and runs a whole run. A route that imported
     # it could await it; routes submit runs to the task runner instead.

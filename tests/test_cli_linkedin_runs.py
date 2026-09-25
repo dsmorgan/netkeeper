@@ -26,7 +26,7 @@ from netkeeper.db import database_url, make_engine, make_session_factory, sessio
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.scoping import install_scope_guard
-from netkeeper.services import runs
+from netkeeper.services import route_breaker, runs
 from netkeeper.services.linkedin_accounts import ensure_account, scheduled_runs_armed
 from netkeeper.services.linkedin_session import flag_session
 from netkeeper.services.users import ensure_local_user
@@ -85,6 +85,52 @@ def test_arming_asks_first_and_no_leaves_it_disarmed(cli_db: sessionmaker[Sessio
     assert not _armed(cli_db)
     assert runner.invoke(cli, ["linkedin", "schedule", "arm", "--yes"]).exit_code == 0
     assert _armed(cli_db)
+
+
+def _trip_breaker(factory: sessionmaker[Session]) -> int:
+    with session_scope(factory, write=True) as session:
+        user = _user(session)
+        account_id = ensure_account(session, user).id
+        for _ in range(route_breaker.THRESHOLD):
+            route_breaker.record(
+                session, user, account_id, route_changed=True, succeeded=False, now=NOW
+            )
+        return account_id
+
+
+def _breaker_tripped(factory: sessionmaker[Session], account_id: int) -> bool:
+    with session_scope(factory) as session:
+        return route_breaker.tripped(session, _user(session), account_id)
+
+
+def test_reset_breaker_asks_first_and_no_leaves_it_tripped(
+    cli_db: sessionmaker[Session],
+) -> None:
+    account_id = _trip_breaker(cli_db)
+    runner = CliRunner()
+
+    declined = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="n\n")
+    assert declined.exit_code == 1 and "stays as it is" in declined.output
+    assert _breaker_tripped(cli_db, account_id)
+
+    confirmed = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="y\n")
+    assert confirmed.exit_code == 0, confirmed.output
+    assert not _breaker_tripped(cli_db, account_id)
+
+
+def test_reset_breaker_yes_skips_the_prompt(cli_db: sessionmaker[Session]) -> None:
+    account_id = _trip_breaker(cli_db)
+    result = CliRunner().invoke(cli, ["linkedin", "schedule", "reset-breaker", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert not _breaker_tripped(cli_db, account_id)
+
+
+def test_reset_breaker_on_a_clear_account_says_so_and_asks_nothing(
+    cli_db: sessionmaker[Session],
+) -> None:
+    result = CliRunner().invoke(cli, ["linkedin", "schedule", "reset-breaker"])
+    assert result.exit_code == 0
+    assert "nothing to reset" in result.output
 
 
 def test_a_sync_by_hand_runs_while_disarmed_and_reports_itself(

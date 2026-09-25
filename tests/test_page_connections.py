@@ -161,6 +161,21 @@ async def test_a_full_last_page_that_asks_for_nothing_ends_a_list_the_run_has_al
     assert out.urns == [p.urn for p in people]
 
 
+async def test_a_list_of_exactly_ten_completes_on_the_first_screen() -> None:
+    """The whole network is the first screen: ten cards, a total of ten, and no next
+    request (#189 item 2). ``_land`` must end the list on its own, without ever
+    scrolling -- the same "a full answer with no next request ends a list the run
+    has all of" rule as the case above, but here the full answer *is* the first
+    screen, so ``_land`` has to apply it directly rather than ``_take_answer``
+    applying it to a later pagination answer."""
+    people = many(10)
+    site = FlagshipSite(people, end="short")
+    out = await sync(site)
+    assert out.result.reason is StopReason.END_OF_LIST and out.result.complete
+    assert out.urns == [p.urn for p in people]
+    assert site.fetches == []  # the first screen was the whole list; nothing was scrolled
+
+
 async def test_a_full_last_page_that_asks_for_nothing_proves_nothing_short_of_the_total() -> None:
     """The same answer when the total says fifty: the list may go on. The page stops
     loading, the source gives up after its idle scrolls, and nobody ages."""

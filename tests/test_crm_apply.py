@@ -474,9 +474,9 @@ def test_a_dom_sighting_of_a_reused_slug_during_a_voyager_outage_never_reconnect
     row's own slug, fixed by keeping it out of _mark_seen's public_ids match
     at all), this is the DOM path *after* that restriction already applies.
     B is genuinely removed. LinkedIn later hands B's old slug to a different
-    person, A. Voyager is down for this run -- ``FallbackConnectionsSource``
-    has switched, so every page is DOM-sourced (``urn=None``), and every
-    sighting can only ever travel by slug. The DOM fallback reads A's card
+    person, A. Voyager is down for this run -- the source has fallen back to
+    DOM, so every page is DOM-sourced (``urn=None``), and every sighting can
+    only ever travel by slug. The DOM fallback reads A's card
     under B's old slug and marks it seen. Before #174 item 4, a DOM sighting
     alone was enough to clear B's disconnect -- the same wrong reconnection
     S1 fixed for a Voyager row's slug, but reachable here purely through DOM,

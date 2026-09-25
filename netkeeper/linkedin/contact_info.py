@@ -98,9 +98,7 @@ class ApiContactInfoSource:
     """The in-page Voyager API as a :class:`ContactInfoSource` (spec 9.3, 9.4 step 3).
 
     ``fetch`` is the :class:`~netkeeper.linkedin.voyager.VoyagerFetch` the
-    browser side provides, exactly as
-    :class:`~netkeeper.linkedin.connections.VoyagerConnections` takes one for
-    the connections list -- this class needs no ``BrowserRun`` of its own.
+    browser side provides -- this class needs no ``BrowserRun`` of its own.
     """
 
     fetch: VoyagerFetch
@@ -115,7 +113,7 @@ class ApiContactInfoSource:
         outcome = classify(response.status, response.final_url, response.body)
         if outcome is not Outcome.OK:
             # Never parsed: a checkpoint or login-wall body is not contact info
-            # (mirrors VoyagerConnections.fetch_page's own gate, spec 9.7).
+            # (classify before parse, spec 9.7).
             return ContactInfoResult(outcome=outcome, final_url=response.final_url)
         try:
             info = parse_contact_info(response.body)
@@ -128,20 +126,16 @@ class ApiContactInfoSource:
 class FallbackContactInfoSource:
     """A :class:`ContactInfoSource` over two others: the API first, DOM second (spec 9.3).
 
-    The contact-info counterpart of
-    :class:`~netkeeper.linkedin.connections.FallbackConnectionsSource`, with
-    the identical one-way switch and the identical reasoning for why it
-    cannot loop or double-spend budget -- see that class's docstring; nothing
-    here differs except that a "unit of work" is one profile's contact info
-    rather than one page of the connections list, so there is no page-level
-    ``count``/``start`` to keep consistent across the switch, only a
-    ``public_id`` per call.
+    A one-way switch: once ``primary`` answers ``RouteChanged`` for any
+    profile, it cannot loop or double-spend budget, because it never switches
+    back. A "unit of work" here is one profile's contact info rather than one
+    page of the connections list, so there is no page-level ``count``/``start``
+    to keep consistent across the switch, only a ``public_id`` per call.
 
     Once ``primary`` answers ``RouteChanged`` for any profile, every
     subsequent call -- for that profile and every later one -- goes to
     ``fallback`` instead, for the rest of this source's life. A single
-    instance is for one enrichment run, the same as
-    ``FallbackConnectionsSource`` is for one sync run.
+    instance is for one enrichment run.
     """
 
     primary: ContactInfoSource
@@ -156,9 +150,7 @@ class FallbackContactInfoSource:
     def switched(self) -> bool:
         """Whether this instance has ever fallen back to ``fallback``.
 
-        One-way and sticky, the same as
-        :class:`~netkeeper.linkedin.connections.FallbackConnectionsSource`'s
-        own ``switched``.
+        One-way and sticky: once true, it never goes back to ``primary``.
         """
         return self._switched
 

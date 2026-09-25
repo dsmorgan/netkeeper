@@ -23,6 +23,13 @@ logic; it decides what the job may do and what happens after it stops:
 * **The stopping response.** ``Throttled`` or ``Checkpoint`` raises heat;
   ``Checkpoint`` or ``LoggedOut`` sets the session flag (spec 9.7). Nothing is
   retried here or in the job.
+* **The route-changed breaker** (:mod:`netkeeper.services.route_breaker`,
+  #189 item 1). Every connections run, whatever its kind or trigger, records
+  whether it ended ``route_changed`` or reached a natural end; two
+  ``route_changed`` runs in a row trip it, and the scheduler then skips every
+  scheduled connections fire until a person clears it or a run (manual or
+  scheduled) succeeds. A cancel moves neither way: it says nothing about
+  whether the route is readable.
 * **Mapping.** Each page is written in its own writer session as it arrives,
   so the write lock is never held across a fetch or a pause. After a
   *complete* full sync, and only then, contacts it did not see are aged
@@ -69,7 +76,7 @@ from netkeeper.linkedin.connections import (
 )
 from netkeeper.linkedin.pacing import human_delay
 from netkeeper.models import JsonValue, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
-from netkeeper.services import budgets, runs
+from netkeeper.services import budgets, route_breaker, runs
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass, BudgetExceeded
 from netkeeper.services.linkedin_session import flag_session
@@ -336,6 +343,20 @@ async def sync_connections(
                 if result.outcome in _FLAG_OUTCOMES:
                     flag_session(session, user, result.outcome, url=result.final_url or "")
                     flagged = True
+            # #189 item 1: neither a budget stop nor a cancel (both StopReason.BUDGET
+            # or PAGE_BUDGET) is route_changed or a natural end, so record() leaves
+            # the streak exactly where it was for either -- there is no separate
+            # cancelled/gate.cancelled case to special-case here.
+            route_breaker.record(
+                session,
+                user,
+                account_id,
+                route_changed=(
+                    result.reason is StopReason.RESPONSE and result.outcome is Outcome.ROUTE_CHANGED
+                ),
+                succeeded=result.reason in _NATURAL_ENDS,
+                now=clock(),
+            )
             if result.complete:
                 aging = mapping.age_unseen(
                     session,
