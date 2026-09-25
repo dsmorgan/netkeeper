@@ -78,6 +78,7 @@ from netkeeper.linkedin.pacing import (
 )
 from netkeeper.models import SyncRunKind, SyncRunStatus, User
 from netkeeper.services import heat as heat_rows
+from netkeeper.services import route_breaker
 from netkeeper.services.budgets import (
     HARD_MAX_PER_DAY,
     HARD_MAX_PER_WEEK,
@@ -416,6 +417,7 @@ def posture(
         _heat_skip_gate(gate),
         _scheduled_jobs(scheduler),
         _scheduled_runs_armed(session, user, account_id),
+        _route_changed_breaker(session, user, account_id),
         _network_aging(session, user),
     ]
     return PostureReport(
@@ -1160,6 +1162,47 @@ def _scheduled_runs_armed(session: Session, user: User, account_id: int) -> Prot
         value=(
             f"armed since {account.scheduled_runs_armed_at:%Y-%m-%d %H:%M UTC}: due jobs fire"
             " within the budgets and active hours (`netkeeper linkedin schedule disarm`)"
+        ),
+    )
+
+
+def _route_changed_breaker(session: Session, user: User, account_id: int) -> Protection:
+    """The route-changed breaker's count (#189 item 1): consecutive connections runs
+    (full or incremental, by hand or by schedule) that ended ``route_changed``.
+
+    A wall served in place at the connections url raises no heat and sets no
+    session flag (ADR 0006), so this breaker is the only thing that stops a
+    scheduled sync from loading it again at every interval once it reaches
+    :data:`~netkeeper.services.route_breaker.THRESHOLD`. Tripped is the
+    protection *firing*, the same as heat over its skip threshold: still ``ON``,
+    still worth saying out loud.
+    """
+    current = route_breaker.state(session, user, account_id)
+    since = f" (since {current.since:%Y-%m-%d %H:%M UTC})" if current.since is not None else ""
+    if current.count == 0:
+        return Protection(
+            name="route-changed breaker",
+            status=Status.ON,
+            value="clear: no consecutive connections runs have ended route_changed",
+        )
+    if not current.tripped:
+        return Protection(
+            name="route-changed breaker",
+            status=Status.ON,
+            value=(
+                f"{current.count} of {route_breaker.THRESHOLD} route_changed connections"
+                f" runs in a row{since}"
+            ),
+        )
+    return Protection(
+        name="route-changed breaker",
+        status=Status.ON,
+        value=f"tripped: {current.count} route_changed connections runs in a row{since}",
+        warnings=(
+            f"{current.count} connections runs in a row ended route_changed{since}:"
+            " scheduled connections runs are skipped until this clears. Run one by hand"
+            " (`netkeeper linkedin sync`) to check whether the wall is still there, or"
+            " clear it directly with `netkeeper linkedin schedule reset-breaker`",
         ),
     )
 

@@ -24,7 +24,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import count
-from typing import Any
+from typing import Any, Final
 
 from voyager_pages import Person
 
@@ -410,21 +410,35 @@ def _chunk(
     return rows.payload()
 
 
+class _Unset:
+    """Sentinel: :func:`screen_payload`'s ``next_start`` was not given at all, distinct
+    from an explicit ``None`` (#189 item 2)."""
+
+
+_UNSET: Final = _Unset()
+
+
 def screen_payload(
     people: Sequence[Person],
     *,
     total: int | None,
-    next_start: int | None = None,
+    next_start: int | _Unset | None = _UNSET,
     card_options: dict[int, CardOptions] | None = None,
 ) -> bytes:
     """The first screen: up to ten cards keyed ``ConnectionCard_0-``, the total, the next request.
 
-    ``next_start`` defaults to the number of cards, as the captured first screen's did.
+    ``next_start`` left unset defaults to the number of cards, as the captured
+    first screen's did (``None`` for an empty screen). Pass ``next_start=None``
+    explicitly instead for a first screen that asks for *nothing* -- a list
+    that ends within its own first screen (#189 item 2): before the ``_Unset``
+    sentinel, ``None`` meant "not given" too, so a first screen could never
+    "ask for nothing" on purpose.
     """
+    resolved = (len(people) if people else None) if isinstance(next_start, _Unset) else next_start
     return _chunk(
         people,
         start=0,
-        next_start=len(people) if next_start is None and people else next_start,
+        next_start=resolved,
         total=total,
         card_options=card_options,
     )

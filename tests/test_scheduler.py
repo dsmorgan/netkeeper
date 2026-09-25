@@ -24,7 +24,7 @@ from netkeeper.config import HeatSettings
 from netkeeper.db import session_scope
 from netkeeper.models import User
 from netkeeper.models.base import utcnow
-from netkeeper.services import heat, scheduler
+from netkeeper.services import heat, route_breaker, scheduler
 from netkeeper.services.scheduler import DEFAULT_SCHEDULES
 from netkeeper.services.settings_kv import get_setting, set_setting
 
@@ -598,6 +598,159 @@ async def test_cold_account_is_not_skipped(session_factory: sessionmaker[Session
     assert result is not None
     assert result.fired is True
     assert result.is_catchup is False
+
+
+# --- route-changed breaker skip: connections kinds only (#189 item 1) -------
+
+
+def _tripped(session_factory: sessionmaker[Session], owner: User) -> None:
+    """Two consecutive route_changed connections runs: exactly :data:`route_breaker.THRESHOLD`."""
+    with session_scope(session_factory, write=True) as session:
+        for _ in range(route_breaker.THRESHOLD):
+            route_breaker.record(
+                session, owner, ACCOUNT, route_changed=True, succeeded=False, now=NOW
+            )
+
+
+async def test_the_route_changed_breaker_skips_a_connections_fire_when_tripped(
+    session_factory: sessionmaker[Session],
+) -> None:
+    calls: list[scheduler.JobContext] = []
+
+    async def recording_handler(ctx: scheduler.JobContext) -> None:
+        calls.append(ctx)
+
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+        scheduler.establish_schedule(
+            session,
+            owner,
+            ACCOUNT,
+            SCHEDULE.kind,
+            now=NOW,
+            schedule=SCHEDULE,
+            rng=Random(0),
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        )
+    _tripped(session_factory, owner)
+
+    result = await scheduler.poll_and_fire(
+        session_factory,
+        owner,
+        ACCOUNT,
+        SCHEDULE.kind,
+        now=NOW + SCHEDULE.interval,
+        schedule=SCHEDULE,
+        registry={SCHEDULE.kind: recording_handler},
+        tz="UTC",
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+        armed=scheduler.ARMING_NOT_REQUIRED,
+        heat_settings=scheduler.HEAT_SKIP_DISABLED,
+    )
+
+    assert calls == []
+    assert result is not None
+    assert result.fired is False
+    assert result.skipped_reason == "route_changed_breaker"
+    # the cadence still advances -- a skip is not a stall
+    assert result.next_due == NOW + SCHEDULE.interval * 2
+
+
+async def test_a_route_changed_streak_below_threshold_does_not_skip(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Mutation check: one route_changed run (below THRESHOLD == 2) fires normally,
+    proving the skip above is caused by crossing the threshold, not by any
+    route_changed streak at all."""
+    calls: list[scheduler.JobContext] = []
+
+    async def recording_handler(ctx: scheduler.JobContext) -> None:
+        calls.append(ctx)
+
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+        scheduler.establish_schedule(
+            session,
+            owner,
+            ACCOUNT,
+            SCHEDULE.kind,
+            now=NOW,
+            schedule=SCHEDULE,
+            rng=Random(0),
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        )
+        route_breaker.record(session, owner, ACCOUNT, route_changed=True, succeeded=False, now=NOW)
+
+    result = await scheduler.poll_and_fire(
+        session_factory,
+        owner,
+        ACCOUNT,
+        SCHEDULE.kind,
+        now=NOW + SCHEDULE.interval,
+        schedule=SCHEDULE,
+        registry={SCHEDULE.kind: recording_handler},
+        tz="UTC",
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+        armed=scheduler.ARMING_NOT_REQUIRED,
+        heat_settings=scheduler.HEAT_SKIP_DISABLED,
+    )
+
+    assert len(calls) == 1
+    assert result is not None
+    assert result.fired is True
+
+
+async def test_the_route_changed_breaker_does_not_skip_enrichment(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#189 item 1's decision: enrichment has its own, separate unreadable-profile
+    cap (spec 9.6) and does not share this counter."""
+    enrich = DEFAULT_SCHEDULES[scheduler.JobKind.ENRICH]
+    calls: list[scheduler.JobContext] = []
+
+    async def recording_handler(ctx: scheduler.JobContext) -> None:
+        calls.append(ctx)
+
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+        scheduler.establish_schedule(
+            session,
+            owner,
+            ACCOUNT,
+            enrich.kind,
+            now=NOW,
+            schedule=enrich,
+            rng=Random(0),
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        )
+    _tripped(session_factory, owner)
+
+    result = await scheduler.poll_and_fire(
+        session_factory,
+        owner,
+        ACCOUNT,
+        enrich.kind,
+        now=NOW + enrich.interval,
+        schedule=enrich,
+        registry={enrich.kind: recording_handler},
+        tz="UTC",
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+        armed=scheduler.ARMING_NOT_REQUIRED,
+        heat_settings=scheduler.HEAT_SKIP_DISABLED,
+    )
+
+    assert len(calls) == 1
+    assert result is not None
+    assert result.fired is True
 
 
 # --- poll_and_fire: not-yet-due and never-established are both no-ops -------
@@ -1191,6 +1344,59 @@ async def test_a_heat_skipped_first_full_sync_is_offered_again_soon(
     assert result is not None
     assert result.skipped_reason == "heat"
     assert result.next_due == first.due + late + timedelta(hours=1)
+    with session_scope(session_factory) as session:
+        state = scheduler._load_state(session, owner, ACCOUNT, FULL.kind)
+    assert state is not None
+    assert state.fired_once is False
+
+
+async def test_a_route_changed_breaker_skipped_first_full_sync_is_offered_again_soon(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#189 item 1: a tripped breaker's skip must not consume first-setup standing
+    either -- the same mechanism the heat skip test above pins, driven through the
+    real ``route_changed_breaker`` gate this time (spec: "same as disarmed/flagged
+    skips")."""
+    calls: list[scheduler.JobContext] = []
+
+    async def recording_handler(ctx: scheduler.JobContext) -> None:
+        calls.append(ctx)
+
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+        first = scheduler.establish_schedule(
+            session,
+            owner,
+            ACCOUNT,
+            FULL.kind,
+            now=NOW,
+            schedule=FULL,
+            rng=Random(0),
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        )
+    _tripped(session_factory, owner)
+
+    result = await scheduler.poll_and_fire(
+        session_factory,
+        owner,
+        ACCOUNT,
+        FULL.kind,
+        now=first.due,
+        schedule=FULL,
+        registry={FULL.kind: recording_handler},
+        tz="UTC",
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+        armed=scheduler.ARMING_NOT_REQUIRED,
+        heat_settings=scheduler.HEAT_SKIP_DISABLED,
+    )
+
+    assert calls == []
+    assert result is not None
+    assert result.skipped_reason == "route_changed_breaker"
+    assert result.next_due == first.due + timedelta(hours=1)
     with session_scope(session_factory) as session:
         state = scheduler._load_state(session, owner, ACCOUNT, FULL.kind)
     assert state is not None

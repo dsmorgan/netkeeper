@@ -59,7 +59,7 @@ from netkeeper.models import (
 )
 from netkeeper.paths import CONFIG_ENV, data_dir
 from netkeeper.scoping import install_scope_guard
-from netkeeper.services import enrich_plan, runs
+from netkeeper.services import enrich_plan, route_breaker, runs
 from netkeeper.services.backup import (
     BACKUPS_DIRNAME,
     BackupError,
@@ -1225,6 +1225,45 @@ def linkedin_schedule_disarm() -> None:
     finally:
         engine.dispose()
     typer.echo("scheduled LinkedIn runs disarmed")
+
+
+@schedule_app.command("reset-breaker")
+def linkedin_schedule_reset_breaker(
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    """Clear the route-changed breaker so scheduled connections runs can fire again.
+
+    Two connections runs in a row (full or incremental, by hand or by
+    schedule) ending `route_changed` trip it (#189 item 1): a wall served in
+    place at the connections url raises no heat and sets no session flag, so
+    this breaker is the only thing that stops a scheduled sync from loading it
+    again at every interval. `netkeeper posture` shows the count. A manual run
+    (`netkeeper linkedin sync`) that reaches a natural end clears it the same
+    way, without this command -- that is how you check whether the wall is
+    still there.
+    """
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            account_id = account_id_for(session, user)
+            current = route_breaker.state(session, user, account_id)
+        if current.count == 0:
+            typer.echo("the route-changed breaker is not tripped; nothing to reset")
+            return
+        if not yes and not typer.confirm(
+            f"reset the route-changed breaker ({current.count} `route_changed` connections"
+            " run(s) in a row)? scheduled connections runs will be allowed to fire again"
+        ):
+            typer.echo("cancelled: the breaker stays as it is")
+            raise typer.Exit(code=1)
+        with session_scope(factory, write=True) as session:
+            route_breaker.reset(session, _local_user_or_exit(session), account_id)
+    finally:
+        engine.dispose()
+    typer.echo("route-changed breaker reset; scheduled connections runs may fire again when due")
 
 
 @backup_app.callback()

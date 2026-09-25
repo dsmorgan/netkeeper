@@ -2,13 +2,12 @@
 
 ``ApiContactInfoSource`` is a thin wrapper around
 :func:`netkeeper.linkedin.voyager.parse_contact_info` and
-:func:`~netkeeper.linkedin.classify.classify`, exercised here the same way
-``tests/test_linkedin_connections.py`` exercises ``VoyagerConnections``: an
+:func:`~netkeeper.linkedin.classify.classify`, exercised here against a local
 in-memory fake ``VoyagerFetch``, no socket, nothing that reaches
 linkedin.com. ``FallbackContactInfoSource`` is tested with plain scripted
-fakes, mirroring ``test_linkedin_connections.py``'s ``FallbackConnectionsSource``
-tests -- the two composites share the same switching logic and the same tests
-for "cannot loop" and "cannot double-spend a fetch".
+fakes for "cannot loop" and "cannot double-spend a fetch" -- the connections
+list's matching composite, ``FallbackConnectionsSource``, and its tests went
+with #187's review, so these are what is left of that one-way-switch shape.
 """
 
 from __future__ import annotations

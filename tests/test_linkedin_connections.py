@@ -1,10 +1,19 @@
 """netkeeper.linkedin.connections: the connections sync job, with no database (spec 9.4, 9.10).
 
-Every test drives the job against :class:`voyager_pages.FakeVoyagerFetch`, an
-in-memory list of invented people paged the way the real endpoint pages. No
-socket is opened and nothing reaches linkedin.com. Page sizes are small (3 or
-4) so that page boundaries fall inside the ten-person list, which is what the
-incremental-stop and completeness tests need to mean anything.
+Every test drives the job against :class:`voyager_pages.FakeConnectionsSource`, a
+neutral, in-memory ``ConnectionsSource`` over a list of invented people: no request
+shape, no classifier, no parser in the way, so these tests exercise
+``run_connections_sync``'s own paging, stopping, and completeness rules -- the same
+for every source -- rather than one source's translation into and out of its
+transport. (Before #189, this drove ``VoyagerConnections`` over a fake Voyager
+transport instead; that wrapper is retired along with the in-page connections
+endpoint it read, unused since P2-17 moved a live sync onto
+:class:`~netkeeper.linkedin.page_connections.PageConnections`. Its own
+request/response shape is what ``test_linkedin_voyager.py`` and
+``test_classify.py`` still test.) No socket is opened and nothing reaches
+linkedin.com. Page sizes are small (3 or 4) so that page boundaries fall inside
+the ten-person list, which is what the incremental-stop and completeness tests
+need to mean anything.
 """
 
 from __future__ import annotations
@@ -16,18 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from voyager_pages import (
-    CHECKPOINT,
-    CONNECTIONS_URL,
-    LOGGED_OUT,
-    PEOPLE,
-    THROTTLED,
-    UNRECOGNIZED,
-    FakeVoyagerFetch,
-    Person,
-    Scripted,
-    page_body,
-)
+from voyager_pages import CONNECTIONS_URL, PEOPLE, FakeConnectionsSource, Person, page_body
 
 from netkeeper.linkedin import connections as job
 from netkeeper.linkedin.classify import Outcome
@@ -38,15 +36,9 @@ from netkeeper.linkedin.connections import (
     StopReason,
     SyncJobSpec,
     SyncMode,
-    VoyagerConnections,
     run_connections_sync,
 )
-from netkeeper.linkedin.voyager import (
-    CONNECTIONS_PATH,
-    ConnectionsPageResult,
-    ConnectionSummary,
-    parse_connections_page,
-)
+from netkeeper.linkedin.voyager import ConnectionsPageResult, ConnectionSummary
 
 FIXTURES = Path(__file__).parent / "fixtures" / "voyager"
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
@@ -85,7 +77,7 @@ class Sink:
 
 
 async def _run(
-    fetch: FakeVoyagerFetch,
+    source: FakeConnectionsSource,
     *,
     mode: SyncMode = SyncMode.FULL,
     page_size: int = 3,
@@ -98,13 +90,37 @@ async def _run(
     spec = SyncJobSpec(mode=mode, page_budget=page_budget, known_urns=known, page_size=page_size)
     result = await run_connections_sync(
         spec,
-        VoyagerConnections(fetch),
+        source,
         gate,
         on_page=sink.page,
         on_progress=sink.progress,
         clock=lambda: NOW,
     )
     return result, sink, gate
+
+
+def _page(people: Sequence[Person], *, start: int, total: int) -> SourcePage:
+    """A scripted ``Ok`` answer: exactly ``people``, at ``start``, reporting ``total`` -- for a
+    page shaped differently than :class:`~voyager_pages.FakeConnectionsSource`'s default honest
+    slice (a short page mid-list, an empty page, one reporting a specific total)."""
+    connections = tuple(
+        ConnectionSummary(
+            urn=person.urn,
+            public_id=person.slug,
+            first_name=person.first,
+            last_name=person.last,
+            headline=person.headline,
+            connected_at=None,
+        )
+        for person in people
+    )
+    return SourcePage(
+        outcome=Outcome.OK,
+        final_url=CONNECTIONS_URL,
+        page=ConnectionsPageResult(
+            connections=connections, start=start, count=len(connections), total=total
+        ),
+    )
 
 
 # --- the fixture builder is the fixture ------------------------------------------
@@ -126,11 +142,11 @@ def test_the_page_builder_rebuilds_the_committed_fixture() -> None:
 
 
 async def test_a_full_sync_pages_to_the_end_and_is_complete() -> None:
-    fetch = FakeVoyagerFetch(list(PEOPLE))
+    source = FakeConnectionsSource(list(PEOPLE))
 
-    result, sink, gate = await _run(fetch)
+    result, sink, gate = await _run(source)
 
-    assert fetch.starts == [0, 3, 6, 9]
+    assert source.starts == [0, 3, 6, 9]
     assert sink.urns == [person.urn for person in PEOPLE]
     assert [page.number for page in sink.pages] == [0, 1, 2, 3]
     assert result.reason is StopReason.END_OF_LIST
@@ -142,19 +158,18 @@ async def test_a_full_sync_pages_to_the_end_and_is_complete() -> None:
     assert all(page.observed_at == NOW for page in sink.pages)
 
 
-async def test_every_request_is_the_connections_endpoint_at_the_asked_size() -> None:
-    fetch = FakeVoyagerFetch(list(PEOPLE))
-    await _run(fetch, page_size=4)
-    assert {request.path for request in fetch.requests} == {CONNECTIONS_PATH}
-    assert [request.query["count"] for request in fetch.requests] == ["4", "4", "4"]
-    assert fetch.starts == [0, 4, 8]
+async def test_every_page_is_requested_at_the_configured_size() -> None:
+    source = FakeConnectionsSource(list(PEOPLE))
+    await _run(source, page_size=4)
+    assert [count for _, count in source.requests] == [4, 4, 4]
+    assert source.starts == [0, 4, 8]
 
 
 async def test_a_list_that_ends_on_a_page_boundary_is_confirmed_by_an_empty_page() -> None:
     """A full last page is not the end: only a short page is, so one empty page follows."""
-    fetch = FakeVoyagerFetch(list(PEOPLE[:9]))
-    result, _, _ = await _run(fetch)
-    assert fetch.starts == [0, 3, 6, 9]
+    source = FakeConnectionsSource(list(PEOPLE[:9]))
+    result, _, _ = await _run(source)
+    assert source.starts == [0, 3, 6, 9]
     assert result.complete
 
 
@@ -164,10 +179,10 @@ async def test_a_full_sync_ignores_known_urns_by_refusing_them() -> None:
 
 
 async def test_an_empty_list_is_the_end_of_the_list() -> None:
-    fetch = FakeVoyagerFetch([])
-    result, sink, _ = await _run(fetch)
+    source = FakeConnectionsSource([])
+    result, sink, _ = await _run(source)
     assert result.reason is StopReason.END_OF_LIST
-    assert fetch.starts == [0]
+    assert source.starts == [0]
     assert sink.urns == []
 
 
@@ -175,54 +190,56 @@ async def test_an_empty_list_is_the_end_of_the_list() -> None:
 
 
 async def test_the_page_budget_stops_a_full_sync_and_it_is_not_complete() -> None:
-    fetch = FakeVoyagerFetch(list(PEOPLE))
-    result, sink, _ = await _run(fetch, page_budget=2)
-    assert fetch.starts == [0, 3]
+    source = FakeConnectionsSource(list(PEOPLE))
+    result, sink, _ = await _run(source, page_budget=2)
+    assert source.starts == [0, 3]
     assert result.reason is StopReason.PAGE_BUDGET
     assert not result.complete
     assert len(sink.pages) == 2
 
 
 async def test_a_zero_page_budget_fetches_nothing() -> None:
-    fetch = FakeVoyagerFetch(list(PEOPLE))
-    result, _, gate = await _run(fetch, page_budget=0)
-    assert fetch.requests == []
+    source = FakeConnectionsSource(list(PEOPLE))
+    result, _, gate = await _run(source, page_budget=0)
+    assert source.requests == []
     assert gate.asked == []
     assert result.reason is StopReason.PAGE_BUDGET
 
 
 async def test_the_gate_is_asked_before_each_page_and_its_refusal_fetches_nothing() -> None:
-    fetch = FakeVoyagerFetch(list(PEOPLE))
-    result, sink, gate = await _run(fetch, gate=Gate(allow=2))
+    source = FakeConnectionsSource(list(PEOPLE))
+    result, sink, gate = await _run(source, gate=Gate(allow=2))
     assert gate.asked == [0, 1, 2]
-    assert fetch.starts == [0, 3]  # the refused third page was never requested
+    assert source.starts == [0, 3]  # the refused third page was never requested
     assert result.reason is StopReason.BUDGET
     assert not result.complete
     assert len(sink.pages) == 2
 
 
 @pytest.mark.parametrize(
-    ("scripted", "outcome"),
+    "outcome",
     [
-        pytest.param(THROTTLED, Outcome.THROTTLED, id="throttled"),
-        pytest.param(CHECKPOINT, Outcome.CHECKPOINT, id="checkpoint"),
-        pytest.param(LOGGED_OUT, Outcome.LOGGED_OUT, id="logged-out"),
-        pytest.param(UNRECOGNIZED, Outcome.ROUTE_CHANGED, id="route-changed"),
-        pytest.param(Scripted(404, "{}"), Outcome.NOT_FOUND, id="not-found"),
-        pytest.param(Scripted(500, "oops"), Outcome.ROUTE_CHANGED, id="server-error"),
+        pytest.param(Outcome.THROTTLED, id="throttled"),
+        pytest.param(Outcome.CHECKPOINT, id="checkpoint"),
+        pytest.param(Outcome.LOGGED_OUT, id="logged-out"),
+        pytest.param(Outcome.ROUTE_CHANGED, id="route-changed"),
+        pytest.param(Outcome.NOT_FOUND, id="not-found"),
     ],
 )
-async def test_the_first_non_ok_response_stops_the_run_with_no_retry(
-    scripted: Scripted, outcome: Outcome
-) -> None:
-    fetch = FakeVoyagerFetch(list(PEOPLE), script={2: scripted})
+async def test_the_first_non_ok_response_stops_the_run_with_no_retry(outcome: Outcome) -> None:
+    """A source's classification (spec 9.7) is tested on its own in ``test_classify.py``;
+    this only needs the run's reaction to whatever a source answers."""
+    final_url = "https://www.linkedin.com/x"
+    source = FakeConnectionsSource(
+        list(PEOPLE), script={2: SourcePage(outcome=outcome, final_url=final_url)}
+    )
 
-    result, sink, gate = await _run(fetch)
+    result, sink, gate = await _run(source)
 
-    assert fetch.starts == [0, 3, 6]  # the third page failed and nothing was asked again
+    assert source.starts == [0, 3, 6]  # the third page failed and nothing was asked again
     assert result.reason is StopReason.RESPONSE
     assert result.outcome is outcome
-    assert result.final_url == scripted.final_url
+    assert result.final_url == final_url
     assert not result.complete
     assert len(sink.pages) == 2
     assert result.seen_urns == {person.urn for person in PEOPLE[:6]}
@@ -230,46 +247,31 @@ async def test_the_first_non_ok_response_stops_the_run_with_no_retry(
 
 
 async def test_a_checkpoint_on_the_first_page_is_never_retried() -> None:
-    fetch = FakeVoyagerFetch(list(PEOPLE), script={0: CHECKPOINT})
-    result, sink, _ = await _run(fetch)
-    assert len(fetch.requests) == 1
+    source = FakeConnectionsSource(
+        list(PEOPLE),
+        script={0: SourcePage(outcome=Outcome.CHECKPOINT, final_url=CONNECTIONS_URL)},
+    )
+    result, sink, _ = await _run(source)
+    assert len(source.requests) == 1
     assert result.outcome is Outcome.CHECKPOINT
     assert sink.pages == []
 
 
-async def test_a_non_ok_response_never_reaches_the_parser(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A checkpoint page is classified, not parsed (#150's done-when, spec 9.7)."""
-    parsed: list[str] = []
-
-    def spy(body: str) -> object:
-        parsed.append(body)
-        return parse_connections_page(body)
-
-    monkeypatch.setattr(job, "parse_connections_page", spy)
-    for scripted in (THROTTLED, CHECKPOINT, LOGGED_OUT):
-        source = VoyagerConnections(FakeVoyagerFetch(list(PEOPLE), script={0: scripted}))
-        answer = await source.fetch_page(start=0, count=3)
-        assert answer.page is None
-    assert parsed == []
-    answer = await VoyagerConnections(FakeVoyagerFetch(list(PEOPLE))).fetch_page(start=0, count=3)
-    assert answer.page is not None and len(parsed) == 1
-
-
 async def test_a_page_at_an_offset_nobody_asked_for_is_a_changed_route() -> None:
-    fetch = FakeVoyagerFetch(list(PEOPLE), start_offset=1)
-    result, sink, _ = await _run(fetch)
+    source = FakeConnectionsSource(list(PEOPLE), start_offset=1)
+    result, sink, _ = await _run(source)
     assert result.outcome is Outcome.ROUTE_CHANGED
     assert sink.pages == []
 
 
 async def test_an_empty_page_before_the_total_is_not_complete() -> None:
     """A list that stops paging short of its own total ends the run but ages nobody."""
-    empty_early = Scripted(200, page_body([], start=6, count=3, total=10))
-    fetch = FakeVoyagerFetch(list(PEOPLE), script={2: empty_early})
+    empty_early = _page([], start=6, total=10)
+    source = FakeConnectionsSource(list(PEOPLE), script={2: empty_early})
 
-    result, _, _ = await _run(fetch)
+    result, _, _ = await _run(source)
 
-    assert fetch.starts == [0, 3, 6]
+    assert source.starts == [0, 3, 6]
     assert result.reason is StopReason.END_OF_LIST
     assert len(result.seen_urns) == 6 and result.total == 10
     assert not result.complete
@@ -278,7 +280,7 @@ async def test_an_empty_page_before_the_total_is_not_complete() -> None:
 async def test_a_list_that_grew_during_the_run_is_not_complete() -> None:
     """A connection accepted mid-run lands at the top, behind the run: seen 10 of 11."""
     people = list(PEOPLE)
-    fetch = FakeVoyagerFetch(people)
+    source = FakeConnectionsSource(people)
     newcomer = Person(111, "Zanele", "Oyelaran", "Analyst at Pretend Freight", 1_701_000_000_000)
 
     async def grow(page: ConnectionsPage) -> None:
@@ -287,7 +289,7 @@ async def test_a_list_that_grew_during_the_run_is_not_complete() -> None:
 
     result = await run_connections_sync(
         SyncJobSpec(mode=SyncMode.FULL, page_budget=50, page_size=3),
-        VoyagerConnections(fetch),
+        source,
         Gate(),
         on_page=grow,
         clock=lambda: NOW,
@@ -303,7 +305,7 @@ async def test_a_list_that_grew_during_the_run_is_not_complete() -> None:
 async def test_a_removal_during_the_run_is_caught_by_the_largest_total() -> None:
     """A removal skips a row at a page boundary; the first page's total still counts it."""
     people = list(PEOPLE)
-    fetch = FakeVoyagerFetch(people)
+    source = FakeConnectionsSource(people)
 
     async def remove_a_seen_one(page: ConnectionsPage) -> None:
         if page.number == 0:
@@ -311,7 +313,7 @@ async def test_a_removal_during_the_run_is_caught_by_the_largest_total() -> None
 
     result = await run_connections_sync(
         SyncJobSpec(mode=SyncMode.FULL, page_budget=50, page_size=3),
-        VoyagerConnections(fetch),
+        source,
         Gate(),
         on_page=remove_a_seen_one,
         clock=lambda: NOW,
@@ -336,12 +338,12 @@ async def test_incremental_stops_at_the_first_page_that_is_all_known() -> None:
     Page 0 holds the three newest, all unknown; page 1 holds three known ones,
     so the run reads it and stops before page 2.
     """
-    fetch = FakeVoyagerFetch(list(PEOPLE))
+    source = FakeConnectionsSource(list(PEOPLE))
     known = _known(*PEOPLE[3:])  # everyone but the three newest
 
-    result, sink, _ = await _run(fetch, mode=SyncMode.INCREMENTAL, known=known)
+    result, sink, _ = await _run(source, mode=SyncMode.INCREMENTAL, known=known)
 
-    assert fetch.starts == [0, 3]
+    assert source.starts == [0, 3]
     assert result.reason is StopReason.CAUGHT_UP
     assert not result.complete
     assert sink.urns == [person.urn for person in PEOPLE[:6]]
@@ -349,28 +351,28 @@ async def test_incremental_stops_at_the_first_page_that_is_all_known() -> None:
 
 async def test_incremental_keeps_going_past_a_page_with_one_unknown_urn() -> None:
     """One unknown person in the middle of page 1 keeps page 2 coming."""
-    fetch = FakeVoyagerFetch(list(PEOPLE))
+    source = FakeConnectionsSource(list(PEOPLE))
     known = _known(*PEOPLE[1:4], *PEOPLE[5:])  # PEOPLE[0] (page 0) and PEOPLE[4] (page 1) are new
 
-    result, _, _ = await _run(fetch, mode=SyncMode.INCREMENTAL, known=known)
+    result, _, _ = await _run(source, mode=SyncMode.INCREMENTAL, known=known)
 
-    assert fetch.starts == [0, 3, 6]
+    assert source.starts == [0, 3, 6]
     assert result.reason is StopReason.CAUGHT_UP
 
 
 async def test_incremental_with_nothing_known_reads_to_the_end_and_is_still_not_complete() -> None:
     """Reading every page in incremental mode ages nobody: only a full sync may."""
-    fetch = FakeVoyagerFetch(list(PEOPLE))
-    result, _, _ = await _run(fetch, mode=SyncMode.INCREMENTAL, known=frozenset())
-    assert fetch.starts == [0, 3, 6, 9]
+    source = FakeConnectionsSource(list(PEOPLE))
+    result, _, _ = await _run(source, mode=SyncMode.INCREMENTAL, known=frozenset())
+    assert source.starts == [0, 3, 6, 9]
     assert result.reason is StopReason.END_OF_LIST
     assert not result.complete
 
 
 async def test_incremental_with_everything_known_reads_one_page() -> None:
-    fetch = FakeVoyagerFetch(list(PEOPLE))
-    result, sink, _ = await _run(fetch, mode=SyncMode.INCREMENTAL, known=_known(*PEOPLE))
-    assert fetch.starts == [0]
+    source = FakeConnectionsSource(list(PEOPLE))
+    result, sink, _ = await _run(source, mode=SyncMode.INCREMENTAL, known=_known(*PEOPLE))
+    assert source.starts == [0]
     assert result.reason is StopReason.CAUGHT_UP
     assert len(sink.pages) == 1  # the page is still handed over: headlines refresh
 
@@ -379,8 +381,11 @@ async def test_incremental_with_everything_known_reads_one_page() -> None:
 
 
 async def test_progress_counts_pages_and_says_why_it_stopped() -> None:
-    fetch = FakeVoyagerFetch(list(PEOPLE), script={2: THROTTLED})
-    _, sink, _ = await _run(fetch)
+    source = FakeConnectionsSource(
+        list(PEOPLE),
+        script={2: SourcePage(outcome=Outcome.THROTTLED, final_url=CONNECTIONS_URL)},
+    )
+    _, sink, _ = await _run(source)
     assert [(e.pages, e.connections, e.stopped) for e in sink.events] == [
         (1, 3, None),
         (2, 6, None),
@@ -444,13 +449,13 @@ def _hundred() -> list[Person]:
 
 
 async def test_a_total_of_zero_neither_ends_the_run_nor_completes_it() -> None:
-    fetch = FakeVoyagerFetch(_hundred(), total=0)
+    source = FakeConnectionsSource(_hundred(), total=0)
 
-    result, sink, _ = await _run(fetch, page_size=40)
+    result, sink, _ = await _run(source, page_size=40)
 
     # The short page at 80 reaches no reported total (there is none), so one more
     # request confirms the end with an empty page.
-    assert fetch.starts == [0, 40, 80, 100]
+    assert source.starts == [0, 40, 80, 100]
     assert len(sink.urns) == 100
     assert result.reason is StopReason.END_OF_LIST
     assert not result.complete
@@ -458,23 +463,23 @@ async def test_a_total_of_zero_neither_ends_the_run_nor_completes_it() -> None:
 
 async def test_a_total_that_lies_low_cannot_cut_the_run_short() -> None:
     """Total 40 of 100: the run still reads all 100, so it is complete about what it saw."""
-    fetch = FakeVoyagerFetch(_hundred(), total=40)
+    source = FakeConnectionsSource(_hundred(), total=40)
 
-    result, _, _ = await _run(fetch, page_size=40)
+    result, _, _ = await _run(source, page_size=40)
 
-    assert fetch.starts == [0, 40, 80]
+    assert source.starts == [0, 40, 80]
     assert len(result.seen_urns) == 100
     assert result.complete
 
 
 async def test_a_trailing_empty_page_cannot_lower_the_bar() -> None:
     """Page 0 says 100; page 1 comes back empty and says 0. Forty seen is not the list."""
-    empty_says_zero = Scripted(200, page_body([], start=40, count=40, total=0))
-    fetch = FakeVoyagerFetch(_hundred(), script={1: empty_says_zero})
+    empty_says_zero = _page([], start=40, total=0)
+    source = FakeConnectionsSource(_hundred(), script={1: empty_says_zero})
 
-    result, _, _ = await _run(fetch, page_size=40)
+    result, _, _ = await _run(source, page_size=40)
 
-    assert fetch.starts == [0, 40]
+    assert source.starts == [0, 40]
     assert result.reason is StopReason.END_OF_LIST
     assert (result.total, result.max_total) == (0, 100)
     assert not result.complete
@@ -482,9 +487,9 @@ async def test_a_trailing_empty_page_cannot_lower_the_bar() -> None:
 
 async def test_an_honest_trailing_empty_page_reporting_zero_still_completes() -> None:
     """80 people, total 80 until the empty page at 80 says 0: all 80 were seen."""
-    fetch = FakeVoyagerFetch(_hundred()[:80], total=lambda start: 0 if start >= 80 else 80)
-    result, _, _ = await _run(fetch, page_size=40)
-    assert fetch.starts == [0, 40, 80]
+    source = FakeConnectionsSource(_hundred()[:80], total=lambda start: 0 if start >= 80 else 80)
+    result, _, _ = await _run(source, page_size=40)
+    assert source.starts == [0, 40, 80]
     assert result.complete
 
 
@@ -494,39 +499,39 @@ async def test_an_honest_trailing_empty_page_reporting_zero_still_completes() ->
 async def test_a_short_page_before_the_total_is_read_past_not_the_end() -> None:
     """Offset 40 serves 39 of 40; the run carries on from 79 and completes."""
     people = _hundred()
-    under_filled = Scripted(200, page_body(people[40:79], start=40, count=40, total=100))
-    fetch = FakeVoyagerFetch(people, script={1: under_filled})
+    under_filled = _page(people[40:79], start=40, total=100)
+    source = FakeConnectionsSource(people, script={1: under_filled})
 
-    result, _, _ = await _run(fetch, page_size=40)
+    result, _, _ = await _run(source, page_size=40)
 
-    assert fetch.starts == [0, 40, 79]
+    assert source.starts == [0, 40, 79]
     assert result.reason is StopReason.END_OF_LIST
     assert len(result.seen_urns) == 100
     assert result.complete
 
 
 async def test_a_short_page_that_reaches_the_total_is_the_end() -> None:
-    fetch = FakeVoyagerFetch(_hundred())
-    result, _, _ = await _run(fetch, page_size=40)
-    assert fetch.starts == [0, 40, 80]  # 80 + 20 reaches 100: no extra request
+    source = FakeConnectionsSource(_hundred())
+    result, _, _ = await _run(source, page_size=40)
+    assert source.starts == [0, 40, 80]  # 80 + 20 reaches 100: no extra request
     assert result.complete
 
 
 async def test_endless_full_pages_stop_at_the_page_budget() -> None:
     """A source that never runs out (or a total that never arrives) is bounded."""
     endless = [Person(1000 + i, f"Given{i}", f"Family{i}", None) for i in range(1000)]
-    fetch = FakeVoyagerFetch(endless, total=0)
+    source = FakeConnectionsSource(endless, total=0)
 
-    result, _, _ = await _run(fetch, page_size=40, page_budget=5)
+    result, _, _ = await _run(source, page_size=40, page_budget=5)
 
-    assert len(fetch.requests) == 5
+    assert len(source.requests) == 5
     assert result.reason is StopReason.PAGE_BUDGET
     assert not result.complete
 
 
 async def test_every_slug_on_every_page_is_reported() -> None:
-    fetch = FakeVoyagerFetch(list(PEOPLE))
-    result, _, _ = await _run(fetch)
+    source = FakeConnectionsSource(list(PEOPLE))
+    result, _, _ = await _run(source)
     assert result.seen_public_ids == {person.slug for person in PEOPLE}
 
 

@@ -974,9 +974,9 @@ def _mark_seen(session: Session, user: User, *, urns: set[str], public_ids: set[
     (spec 9.6), and #173's review already restricted which slugs ever reach
     ``public_ids`` in the first place (see below) -- but even a genuine DOM
     sighting's own slug is weaker evidence than a URN. The scenario that
-    requires this: during a Voyager outage, a fallback run sees nothing but
-    DOM pages (``FallbackConnectionsSource`` has switched, and stays switched
-    for the run). If LinkedIn has since handed a removed contact's old slug to
+    requires this: during a Voyager outage, a source that falls back to DOM
+    sees nothing but DOM pages for the rest of the run (a one-way switch,
+    spec 9.3). If LinkedIn has since handed a removed contact's old slug to
     a different person, that new person's DOM card would otherwise let this
     function wrongly clear the *old*, actually-disconnected contact's
     ``li_disconnected_at`` -- the same wrong reconnection F1/S1 fixed for a

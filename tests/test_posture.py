@@ -229,6 +229,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "heat skip gate",
         "scheduled jobs",
         "scheduled runs",
+        "route-changed breaker",
         "network aging",
     ]
 

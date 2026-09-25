@@ -12,7 +12,21 @@ never sends.
 connections list by the request's ``start`` and ``count``, the way the real
 endpoint pages, and can be told to answer one call with something else (a
 throttle, a checkpoint page, an unrecognized body). It records every request
-and never opens a socket.
+and never opens a socket. It backs ``tests/test_linkedin_fetch.py`` and
+``tests/smoke/test_fetch_smoke.py``'s exercise of the in-page Voyager
+transport, still live for enrichment.
+
+:class:`FakeConnectionsSource` is a step above it: a neutral, in-memory
+:class:`~netkeeper.linkedin.connections.ConnectionsSource` with no request
+shape of its own, for tests that drive ``run_connections_sync`` or
+``services.connections_sync.sync_connections`` and only need pages, not a
+transport (``tests/test_linkedin_connections.py``,
+``tests/test_connections_sync.py``). It reuses :func:`classify` and
+:func:`~netkeeper.linkedin.voyager.parse_connections_page` to interpret a
+scripted :class:`Scripted` answer, so the fixtures below (``THROTTLED``,
+``CHECKPOINT``, ...) drive it exactly as they drove ``VoyagerConnections``
+before #189 retired that wrapper along with the in-page connections endpoint
+it read (unused since P2-17's move onto what the page loads).
 """
 
 from __future__ import annotations
@@ -20,9 +34,19 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
-from netkeeper.linkedin.voyager import VoyagerRequest, VoyagerResponse
+from netkeeper.linkedin.classify import Outcome, classify
+from netkeeper.linkedin.connections import SourcePage
+from netkeeper.linkedin.voyager import (
+    ConnectionsPageResult,
+    ConnectionSummary,
+    RouteChanged,
+    VoyagerRequest,
+    VoyagerResponse,
+    parse_connections_page,
+)
 
 CONNECTIONS_URL = "https://www.linkedin.com/voyager/api/relationships/dash/connections"
 
@@ -151,3 +175,99 @@ class FakeVoyagerFetch:
     @property
     def starts(self) -> list[int]:
         return [int(request.query["start"]) for request in self.requests]
+
+
+def _from_person(person: Person) -> ConnectionSummary:
+    """One invented person as the row a live source would report."""
+    return ConnectionSummary(
+        urn=person.urn,
+        public_id=person.slug,
+        first_name=person.first,
+        last_name=person.last,
+        headline=person.headline,
+        connected_at=(
+            None
+            if person.created_ms is None
+            else datetime.fromtimestamp(person.created_ms / 1000, tz=UTC)
+        ),
+    )
+
+
+@dataclass(slots=True)
+class FakeConnectionsSource:
+    """A neutral ``ConnectionsSource`` over an in-memory people list (#189 item 4).
+
+    Answers page ``start:start+count`` from ``people`` directly -- no request
+    shape, no transport -- so a test that drives ``run_connections_sync`` or
+    ``services.connections_sync.sync_connections`` through this exercises
+    those loops' own paging, budget, heat, and aging rules, the same for every
+    source, rather than one source's translation into and out of its
+    transport. This is what replaced driving those tests through
+    ``VoyagerConnections`` over :class:`FakeVoyagerFetch`: the fixtures below
+    (``THROTTLED``, ``CHECKPOINT``, ...) still work unchanged, because
+    ``script[i]`` still classifies a :class:`Scripted` answer the ordinary way
+    (spec 9.7) and parses an ``Ok`` one the ordinary way
+    (:func:`~netkeeper.linkedin.voyager.parse_connections_page`) -- only the
+    honest, unscripted path skips both, building the page straight from
+    ``people``. ``script[i]`` also accepts a hand-built ``SourcePage``
+    directly, for a page shaped differently than the default honest slice (a
+    short page mid-list, an empty page, one reporting the wrong start).
+
+    ``total`` is what an honest page reports: ``None`` tells the truth
+    (``len(people)``); an int, or a function of the requested ``start``, lies,
+    the way spec 9.8's "a total that lies" tests need. ``start_offset``
+    reports every honest page's own ``start`` shifted from what was asked, the
+    way a route that skipped or repeated an offset would.
+    """
+
+    people: list[Person]
+    script: dict[int, Scripted | SourcePage] = field(default_factory=dict)
+    start_offset: int = 0
+    total: int | Callable[[int], int] | None = None
+    requests: list[tuple[int, int]] = field(default_factory=list, init=False)
+
+    @property
+    def endpoint(self) -> str:
+        return "fake-connections"
+
+    @property
+    def starts(self) -> list[int]:
+        return [start for start, _ in self.requests]
+
+    async def fetch_page(self, *, start: int, count: int) -> SourcePage:
+        index = len(self.requests)
+        self.requests.append((start, count))
+        scripted = self.script.get(index)
+        if scripted is not None:
+            return scripted if isinstance(scripted, SourcePage) else _classify_scripted(scripted)
+        people = self.people[start : start + count]
+        return SourcePage(
+            outcome=Outcome.OK,
+            final_url=CONNECTIONS_URL,
+            page=ConnectionsPageResult(
+                connections=tuple(_from_person(p) for p in people),
+                start=start + self.start_offset,
+                count=count,
+                total=self._total(start),
+            ),
+        )
+
+    def _total(self, start: int) -> int:
+        if self.total is None:
+            return len(self.people)
+        if isinstance(self.total, int):
+            return self.total
+        return self.total(start)
+
+
+def _classify_scripted(scripted: Scripted) -> SourcePage:
+    """A :class:`Scripted` answer, read the way ``VoyagerConnections`` used to: classify
+    first (spec 9.7), and only an ``Ok`` status is ever handed to the parser."""
+    outcome = classify(scripted.status, scripted.final_url, scripted.body)
+    if outcome is not Outcome.OK:
+        return SourcePage(outcome=outcome, final_url=scripted.final_url)
+    try:
+        page = parse_connections_page(scripted.body)
+    except RouteChanged:
+        return SourcePage(outcome=Outcome.ROUTE_CHANGED, final_url=scripted.final_url)
+    return SourcePage(outcome=Outcome.OK, final_url=scripted.final_url, page=page)

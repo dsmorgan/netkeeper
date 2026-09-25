@@ -60,11 +60,12 @@ incomplete and ages nobody that week; the next one catches up.
 A live sync reads through
 :class:`~netkeeper.linkedin.page_connections.PageConnections` (P2-17, ADR 0006):
 the connections page, scrolled like a person, read from the answers the page
-itself loads. :class:`VoyagerConnections`, the in-page API source from P2-06, is
-no longer wired; it stays because the offline tests of this loop's paging and
-completeness rules drive it, and those rules are the same for every source.
-P2-08's DOM source and ``FallbackConnectionsSource`` are gone (#187's review):
-nothing wired them. The rule the fallback fed stays in this loop: a page a
+itself loads. The in-page API source (P2-06) and P2-08's DOM source and
+``FallbackConnectionsSource`` are gone (#187's review, #189 item 4): nothing
+wired them, and the offline tests of this loop's paging and completeness
+rules now drive it through a neutral fake source instead (``tests/test_linkedin_connections.py``,
+``tests/voyager_pages.py``'s ``FakeConnectionsSource``) -- those rules are the
+same for every source. The rule the fallback fed stays in this loop: a page a
 source marks :attr:`SourcePage.switched` (it came from a secondary source) makes
 the run incomplete, whatever the totals say.
 """
@@ -73,23 +74,16 @@ from __future__ import annotations
 
 import enum
 import logging
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final, Protocol
 
-from netkeeper.linkedin.classify import Outcome, classify
+from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.voyager import (
     CONNECTIONS_DEFAULT_COUNT,
-    CONNECTIONS_ENDPOINT,
-    CONNECTIONS_PATH,
     ConnectionsPageResult,
     ConnectionSummary,
-    RouteChanged,
-    VoyagerFetch,
-    VoyagerRequest,
-    connections_query,
-    parse_connections_page,
 )
 
 log = logging.getLogger(__name__)
@@ -256,7 +250,12 @@ class SourcePage:
 
 
 class ConnectionsSource(Protocol):
-    """Where pages of the connections list come from. P2-08's DOM fallback implements this too."""
+    """Where pages of the connections list come from.
+
+    :class:`~netkeeper.linkedin.page_connections.PageConnections` is the only
+    one a live sync reads through (P2-17, ADR 0006); the offline tests drive
+    this protocol through a neutral in-memory fake instead (#189 item 4).
+    """
 
     @property
     def endpoint(self) -> str:
@@ -266,45 +265,6 @@ class ConnectionsSource(Protocol):
     async def fetch_page(self, *, start: int, count: int) -> SourcePage:
         """One page starting at offset ``start``: classified, and parsed only when ``Ok``."""
         ...
-
-
-@dataclass(frozen=True, slots=True)
-class VoyagerConnections:
-    """The in-page API as a :class:`ConnectionsSource` (spec 9.3). Not wired since P2-17.
-
-    The #149 capture showed no ``relationships/dash/connections`` call any more; a
-    live sync reads through :class:`~netkeeper.linkedin.page_connections.PageConnections`.
-    This stays for the offline tests of :func:`run_connections_sync`'s paging and
-    completeness rules, which are the same for every source.
-
-    ``fetch`` is the ``VoyagerFetch`` the browser side provides (#150).
-    ``headers`` are sent on every request; the fetch helper merges what it reads
-    from the live page (``csrf-token``, ``x-li-track``) on its side.
-    """
-
-    fetch: VoyagerFetch
-    headers: Mapping[str, str] = field(default_factory=dict)
-
-    @property
-    def endpoint(self) -> str:
-        return CONNECTIONS_ENDPOINT
-
-    async def fetch_page(self, *, start: int, count: int) -> SourcePage:
-        request = VoyagerRequest(
-            path=CONNECTIONS_PATH,
-            query=connections_query(start=start, count=count),
-            headers=self.headers,
-        )
-        response = await self.fetch(request)
-        outcome = classify(response.status, response.final_url, response.body)
-        if outcome is not Outcome.OK:
-            # Never parsed: a checkpoint page is not a connections page (#150's done-when).
-            return SourcePage(outcome=outcome, final_url=response.final_url)
-        try:
-            page = parse_connections_page(response.body)
-        except RouteChanged:
-            return SourcePage(outcome=Outcome.ROUTE_CHANGED, final_url=response.final_url)
-        return SourcePage(outcome=Outcome.OK, final_url=response.final_url, page=page)
 
 
 # --- the gate ----------------------------------------------------------------
@@ -440,17 +400,17 @@ async def run_connections_sync(
         connections += len(result.connections)
         total = result.total
         max_total = max(max_total, result.total)
-        # A DOM-sourced page (P2-08) reports urn=None for every connection -- see
-        # ConnectionSummary's docstring -- so it is filtered out here rather than
-        # joining seen_urns as a literal `None`. slugs is unaffected: public_id is
-        # required from either source, so it is the identity signal a fallback run
-        # actually has. One consequence worth naming: SyncJobSpec.known_urns is
-        # URN-keyed, so an incremental sync that falls back mid-run sees an *empty*
-        # urns set on every DOM page, which is trivially "<= known_urns" and stops
-        # the run the moment DOM takes over (StopReason.CAUGHT_UP). That is a real
-        # loss of thoroughness, not a safety issue -- an incremental sync never ages
-        # anyone (SyncResult.complete requires SyncMode.FULL) -- and the next
-        # incremental or weekly full sync catches up.
+        # A connection with no URN (spec 9.8's #184 path -- see ConnectionSummary's
+        # docstring) is filtered out here rather than joining seen_urns as a literal
+        # `None`. slugs is unaffected: public_id is required from every source. No
+        # source wired in today ever leaves urn unset -- this is defensive, not a
+        # description of live behavior -- but if a future source did: SyncJobSpec.known_urns
+        # is URN-keyed, so an incremental sync would see an *empty* urns set on such a
+        # page, which is trivially "<= known_urns" and stops the run at once
+        # (StopReason.CAUGHT_UP). That would be a real loss of thoroughness, not a
+        # safety issue -- an incremental sync never ages anyone (SyncResult.complete
+        # requires SyncMode.FULL) -- and the next incremental or weekly full sync
+        # would catch up.
         urns = {connection.urn for connection in result.connections if connection.urn is not None}
         seen.update(urns)
         slugs.update(connection.public_id for connection in result.connections)
