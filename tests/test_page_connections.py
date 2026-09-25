@@ -11,6 +11,7 @@ unit? Can a body reach a log?
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 from collections.abc import Sequence
@@ -47,7 +48,12 @@ from netkeeper.linkedin.connections import (
     SyncResult,
     run_connections_sync,
 )
-from netkeeper.linkedin.observe import ObservationFailed, ObservationLimits
+from netkeeper.linkedin.observe import (
+    ObservationFailed,
+    ObservationLimits,
+    ResponseMatch,
+    ResponseRule,
+)
 from netkeeper.linkedin.pacing import ScrollPlan
 from netkeeper.linkedin.page_connections import PageConnections
 
@@ -970,6 +976,46 @@ async def test_a_streamed_last_answer_that_proves_the_end_stands_in_after_a_stal
     assert out.urns == [p.urn for p in people]
 
 
+async def test_a_lost_full_last_answer_is_rescued_when_the_copy_and_the_total_prove_the_end() -> (
+    None
+):
+    """#202 review, item 3: a list of 30, whose last answer (20-29) is full and asks for
+    nothing, is lost, and the page goes quiet. The copy asks for nothing, and with it
+    the run has all 30 places the first screen names: that proves the end."""
+    people = many(30)
+    site = FlagshipSite(people, end="short", tap=True, lost={20: Lost("silent", streamed="whole")})
+    out = await sync(site)
+    assert out.result.reason is StopReason.END_OF_LIST and out.result.complete
+    assert out.urns == [p.urn for p in people]
+
+
+async def test_the_places_of_an_answer_read_past_count_toward_a_stall_rescue() -> None:
+    """10 was lost with no copy and read past; the last answer (30-39) is lost too and
+    the page goes quiet. Its copy proves the end once the 10 lost places are counted:
+    30 read plus 10 lost is the first screen's 40. The run ends, incomplete."""
+    site = FlagshipSite(
+        many(40),
+        end="short",
+        tap=True,
+        lost={10: Lost("move_on"), 30: Lost("silent", streamed="whole")},
+    )
+    out = await sync(site)
+    assert out.result.reason is StopReason.END_OF_LIST and not out.result.complete
+    assert [x.start for x in out.result.losses] == [10]
+
+
+async def test_a_copy_that_ends_the_list_short_of_the_total_is_not_used_after_a_stall() -> None:
+    """#202 review, item 2: the copy of the last answer (20-24) ends the list, but the
+    first screen says 40: the run cannot account for every place, so the answer stays
+    lost."""
+    site = FlagshipSite(
+        many(25), end="short", total=40, tap=True, lost={20: Lost("silent", streamed="whole")}
+    )
+    out = await sync(site)
+    assert out.result.reason is StopReason.ANSWER_LOST
+    assert out.result.lost is not None and out.result.lost.start == 20
+
+
 async def test_a_streamed_copy_that_proves_nothing_after_a_stall_is_not_used() -> None:
     site = FlagshipSite(many(60), tap=True, lost={30: Lost("silent", streamed="whole")})
     out = await sync(site)
@@ -1007,6 +1053,58 @@ async def test_a_tap_whose_session_cannot_enable_the_network_is_closed_and_unuse
     assert "the body tap could not start (RuntimeError)" in caplog.text
     assert site.cdp is not None and site.cdp.detached
     assert [method for method, _ in site.cdp.sent] == ["Network.enable"]
+
+
+class _TapStartFails(FlagshipSite):
+    """A site whose tap session fails while starting: ``on`` raises, or ``Network.enable``
+    is cancelled mid-send (#202 review, item 4)."""
+
+    def __init__(self, how: str) -> None:
+        super().__init__(many(20), tap=True)
+        self.how = how
+
+    async def new_cdp_session(self, page: object) -> FakeCdpSession:
+        how = self.how
+
+        class Failing(FakeCdpSession):
+            def on(self, event: str, handler: Any) -> None:
+                if how == "on":
+                    raise RuntimeError("listener refused")
+                super().on(event, handler)
+
+            async def send(self, method: str, params: Any = None) -> Any:
+                await super().send(method, params)
+                if how == "cancel":
+                    raise asyncio.CancelledError
+                return {}
+
+        self.cdp = Failing()
+        return self.cdp
+
+
+async def test_a_listener_that_raises_detaches_the_tap_session() -> None:
+    site = _TapStartFails("on")
+    provider, _ = fake_provider(site)
+    async with provider.run("account-1") as run:
+        observation = await run.observe(_MATCH, tap=True)
+        assert observation._tap is None
+    assert site.cdp is not None and site.cdp.detached and site.cdp.sent == []
+
+
+async def test_a_cancellation_while_enabling_detaches_the_session_and_propagates() -> None:
+    site = _TapStartFails("cancel")
+    provider, _ = fake_provider(site)
+    async with provider.run("account-1") as run:
+        with pytest.raises(asyncio.CancelledError):
+            await run.observe(_MATCH, tap=True)
+    assert site.cdp is not None and site.cdp.detached
+    assert [method for method, _ in site.cdp.sent] == ["Network.enable"]
+
+
+_MATCH = ResponseMatch(
+    origin="https://www.linkedin.com",
+    rules=(ResponseRule("POST", "/flagship-web/rsc-action/actions/pagination"),),
+)
 
 
 async def test_a_connections_page_navigation_timeout_still_ends_the_run() -> None:

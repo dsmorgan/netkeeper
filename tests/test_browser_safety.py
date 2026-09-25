@@ -115,13 +115,17 @@ CONTEXT_MUTATORS = frozenset(
 ALLOWED_CONTEXT_MUTATIONS = frozenset(
     {(LINKEDIN / "browser.py", "BrowserRun._open_body_tap", "new_cdp_session")}
 )
-#: What the body tap's session may send, each named as a literal at its one call:
+#: What the body tap's session may send, each named as a literal at its one call,
+#: with the only params keys it may pass (a dict literal):
 #:
 #: - ``Network.enable``: the session hears the tab's network events. It alters no
 #:   request and nothing the page can see; Playwright's own session already sends it.
 #: - ``Network.streamResourceContent``: Chrome forwards an answer's data to this
 #:   session as it arrives. It alters, blocks, delays, and adds no request.
-READ_ONLY_CDP_METHODS = frozenset({"Network.enable", "Network.streamResourceContent"})
+READ_ONLY_CDP_METHODS: dict[str, frozenset[str]] = {
+    "Network.enable": frozenset({"maxTotalBufferSize", "maxResourceBufferSize"}),
+    "Network.streamResourceContent": frozenset({"requestId"}),
+}
 #: The one function whose ``send`` calls reach a CDP session, and how many it makes.
 CDP_SENDERS = {(LINKEDIN / "browser.py", "BrowserRun._open_body_tap"): 2}
 
@@ -641,20 +645,32 @@ def test_the_users_browser_context_is_never_mutated() -> None:
     assert not others, "the attached context is the user's:\n" + "\n".join(str(i) for i in others)
 
 
-def cdp_sends(source: str, path: Path = MEMORY) -> Iterator[tuple[Input, str | None]]:
-    """Every reach of ``send`` with its enclosing function, and the method it names.
+@dataclass(frozen=True, slots=True)
+class CdpSend:
+    """One reach of ``send``: where, the method it names, and the keys of its params.
 
-    The method is the first argument of the call when that is a string literal, and
-    ``None`` otherwise (a variable, or ``send`` held without a call): a method nobody
-    can read off the line is refused like a forbidden one.
+    ``method`` is the call's first argument when that is a string literal, else
+    ``None``. ``params`` is the set of keys of a dict literal second argument,
+    ``frozenset()`` for none, and ``None`` when it is not a dict literal with string
+    keys. A reach nobody can read off the line -- ``send`` held without a call, a
+    method in a variable, ``getattr(session, "send")``, ``operator.methodcaller``
+    or ``attrgetter`` with ``"send"`` -- has ``method`` ``None`` and is refused.
     """
+
+    where: Input
+    method: str | None
+    params: frozenset[str] | None
+
+
+def cdp_sends(source: str, path: Path = MEMORY) -> Iterator[CdpSend]:
+    """Every reach of ``send`` in ``source``, the way :func:`reached_names` reads a name:
+    an attribute, called or not, and a literal handed to ``getattr``, ``attrgetter``,
+    or ``methodcaller``."""
     tree = ast.parse(source)
-    named: dict[int, str | None] = {}
+    calls: dict[int, ast.Call] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            first = node.args[0] if node.args else None
-            if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                named[id(node.func)] = first.value
+            calls[id(node.func)] = node
     scopes: dict[int, str] = {}
 
     def enclose(node: ast.AST, name: str) -> None:
@@ -667,28 +683,67 @@ def cdp_sends(source: str, path: Path = MEMORY) -> Iterator[tuple[Input, str | N
 
     enclose(tree, "")
     for node in ast.walk(tree):
+        where = Input(path, getattr(node, "lineno", 0), scopes.get(id(node), ""), "send")
         if isinstance(node, ast.Attribute) and node.attr == "send":
-            where = Input(path, node.lineno, scopes.get(id(node), ""), "send")
-            yield where, named.get(id(node))
+            call = calls.get(id(node))
+            if call is None:
+                yield CdpSend(where, None, None)
+                continue
+            first = call.args[0] if call.args else None
+            method = (
+                first.value
+                if isinstance(first, ast.Constant) and isinstance(first.value, str)
+                else None
+            )
+            yield CdpSend(where, method, _param_keys(call.args[1:2]))
+        elif isinstance(node, ast.Call):
+            for arg in _attribute_name_arguments(node):
+                if (
+                    isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, str)
+                    and "send" in arg.value.split(".")
+                ):
+                    yield CdpSend(where, None, None)
+
+
+def _param_keys(args: list[ast.expr]) -> frozenset[str] | None:
+    if not args:
+        return frozenset()
+    params = args[0]
+    if not isinstance(params, ast.Dict):
+        return None
+    keys = [key.value for key in params.keys if isinstance(key, ast.Constant)]
+    if len(keys) != len(params.keys) or not all(isinstance(key, str) for key in keys):
+        return None
+    return frozenset(str(key) for key in keys)
 
 
 def test_the_one_cdp_session_is_read_only() -> None:
     """ADR 0006's amendment for #200: in the extractor and the worker, ``send`` is
-    reached only inside the body tap's one function, and only to send a read-only
-    method named as a literal: ``Network.enable`` and ``Network.streamResourceContent``."""
+    reached only inside the body tap's one function, only to send a read-only method
+    named as a literal, and only with the params that method is allowed
+    (``READ_ONLY_CDP_METHODS``). ``Network.enable`` may set its two buffer sizes and
+    nothing else -- none of its other options (post data, direct socket traffic,
+    durable messages) -- and ``Network.streamResourceContent`` names a request and
+    nothing else. The buffer *values* are module constants, pinned by
+    ``tests/test_body_tap.py``: a scanner reads names, and the numbers live one
+    import away."""
     found = [
         item
         for root in BROWSER_ROOTS
         for path in ([root] if root.is_file() else python_files(root))
         for item in cdp_sends(path.read_text(encoding="utf-8"), path)
     ]
-    outside = [i for i, _ in found if (i.path, i.function) not in CDP_SENDERS]
+    outside = [i.where for i in found if (i.where.path, i.where.function) not in CDP_SENDERS]
     assert not outside, "a CDP send outside the body tap:\n" + "\n".join(str(i) for i in outside)
-    methods = [method for _, method in found]
-    assert all(method in READ_ONLY_CDP_METHODS for method in methods), methods
-    assert sorted(m for m in methods if m is not None) == sorted(READ_ONLY_CDP_METHODS)
+    for item in found:
+        assert item.method in READ_ONLY_CDP_METHODS, f"{item.where}: sends {item.method!r}"
+        assert item.params == READ_ONLY_CDP_METHODS[item.method], (
+            f"{item.where}: {item.method} with params {item.params}"
+        )
+    assert sorted(str(i.method) for i in found) == sorted(READ_ONLY_CDP_METHODS)
     for site, count in CDP_SENDERS.items():
-        hits = [i for i, _ in found if (i.path, i.function) == site]
+        hits = [i for i in found if (i.where.path, i.where.function) == site]
         assert len(hits) == count, (
             f"{site[1]} makes {len(hits)} send calls, not {count}; if it moved, point"
             " CDP_SENDERS at its new home"
@@ -697,19 +752,36 @@ def test_the_one_cdp_session_is_read_only() -> None:
 
 def test_the_cdp_send_scanner_catches_a_mutating_method_or_a_hidden_one() -> None:
     source = (
+        "import operator\n"
         "class BrowserRun:\n"
         "    async def _open_body_tap(self, session, name):\n"
         "        await session.send('Network.setUserAgentOverride', {})\n"
         "        await session.send(name)\n"
         "        send = session.send\n"
+        "        await getattr(session, 'send')('Network.setCookie', {})\n"
+        "        await operator.methodcaller('send', 'Network.setCookie')(session)\n"
+        "        await operator.attrgetter('send')(session)('Network.setCookie')\n"
+        "        await session.send('Network.enable', {'maxPostDataSize': 1})\n"
+        "        await session.send('Network.enable', options)\n"
     )
     found = list(cdp_sends(source))
-    assert sorted(str(method) for _, method in found) == [
-        "Network.setUserAgentOverride",
-        "None",
-        "None",
-    ]
-    assert {i.function for i, _ in found} == {"BrowserRun._open_body_tap"}
+    assert sorted(str(i.method) for i in found) == sorted(
+        [
+            "Network.setUserAgentOverride",
+            "None",
+            "None",
+            "None",
+            "None",
+            "None",
+            "Network.enable",
+            "Network.enable",
+        ]
+    )
+    assert {i.where.function for i in found} == {"BrowserRun._open_body_tap"}
+    enables = [i.params for i in found if i.method == "Network.enable"]
+    assert frozenset({"maxPostDataSize"}) in enables and None in enables
+    for params in enables:
+        assert params != READ_ONLY_CDP_METHODS["Network.enable"]
 
 
 def test_no_code_path_alters_or_answers_a_request() -> None:

@@ -199,3 +199,37 @@ def test_the_tap_session_buffers_are_pinned() -> None:
 
     assert browser.TAP_RESOURCE_BUFFER_BYTES == 8 * 1024 * 1024
     assert browser.TAP_TOTAL_BUFFER_BYTES == 32 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    ("failed", "whole"),
+    [
+        ({"canceled": True, "errorText": "net::ERR_ABORTED"}, True),
+        ({"canceled": False, "errorText": "net::ERR_ABORTED"}, False),
+        ({"canceled": True, "errorText": "net::ERR_CONNECTION_RESET"}, False),
+        ({"errorText": "net::ERR_CONTENT_LENGTH_MISMATCH"}, False),
+        ({}, False),
+    ],
+    ids=["page-cancel", "not-canceled", "reset", "length-mismatch", "no-reason"],
+)
+async def test_a_failed_stream_is_a_copy_only_when_the_page_cancelled_it(
+    failed: dict[str, Any], whole: bool
+) -> None:
+    """#202 review: only a cancel by the page's own client (``canceled`` and
+    ``net::ERR_ABORTED``) leaves a failed stream whole; any other failure may have
+    cut it short."""
+    tap = _tap(Stream(buffered=b"all of it"))
+    _answer(tap, "1", end=None)
+    tap.on_failed({"requestId": "1", **failed})
+    got = await tap.take("POST", PAGINATION, ASK, wait_s=1.0)
+    assert (got == b"all of it") is whole and (got is None) is not whole
+
+
+async def test_a_finished_stream_is_a_copy() -> None:
+    tap = _tap(Stream(buffered=b"whole"))
+    _answer(tap, "1", end="finished")
+    assert await tap.take("POST", PAGINATION, ASK, wait_s=1.0) == b"whole"
+
+
+def test_the_one_whole_failure_is_pinned() -> None:
+    assert body_tap.ABORTED_BY_PAGE == "net::ERR_ABORTED"

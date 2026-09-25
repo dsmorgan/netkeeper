@@ -568,5 +568,11 @@ class FlagshipSite(FakeContext):
                 cdp.bodies[request_id] = streamed
         tab.emit(FakeResponse(url, status, body, request, headers=headers, body_error=body_error))
         if cdp is not None:
-            ended = "Network.loadingFailed" if body_error is not None else "Network.loadingFinished"
-            cdp.emit(ended, {"requestId": request_id})
+            if body_error is None:
+                cdp.emit("Network.loadingFinished", {"requestId": request_id})
+            else:
+                # The page's own client cancelled it after reading it (#200).
+                cdp.emit(
+                    "Network.loadingFailed",
+                    {"requestId": request_id, "canceled": True, "errorText": "net::ERR_ABORTED"},
+                )

@@ -623,7 +623,16 @@ class PageConnections:
             )
             return False
         if next_start is None:
-            agrees = chunk.ends_list
+            # The page went quiet: the copy must prove the end of the list on its own
+            # -- an answer that ends it, or a full last answer that asks for nothing --
+            # and the run must then account for every place the first screen's total
+            # names (#202 review). This rests on the parser's strictness: a copy cut
+            # short does not parse, so it cannot pass for a short last answer.
+            places = (
+                len({card.urn for card in self._cards} | {card.urn for card in chunk.cards})
+                + self._lost_cards
+            )
+            agrees = (chunk.ends_list or chunk.next_start is None) and 0 < self._total <= places
         else:
             agrees = (
                 chunk.next_start == next_start and len(chunk.cards) == next_start - pending.start
