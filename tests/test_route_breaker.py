@@ -246,8 +246,20 @@ def test_recording_after_a_corrupt_row_heals_it(writer: Session, user: User) -> 
     """The next record() (or reset()) overwrites the row with a well-formed one --
     corruption never persists past one call."""
     set_setting(writer, user, _key(ACCOUNT), "not an object")
+    route_breaker.record(writer, user, ACCOUNT, route_changed=False, succeeded=True, now=NOW)
+    state = route_breaker.state(writer, user, ACCOUNT)
+    assert (state.readable, state.count, state.tripped) == (True, 0, False)
+
+
+def test_a_route_changed_run_after_a_corrupt_row_keeps_it_tripped(
+    writer: Session, user: User
+) -> None:
+    """#191 review N2: a corrupt row reads as tripped. One more wall run must not
+    rewrite it as count=1, which would read as clear."""
+    set_setting(writer, user, _key(ACCOUNT), "not an object")
     updated = route_breaker.record(
         writer, user, ACCOUNT, route_changed=True, succeeded=False, now=NOW
     )
-    assert (updated.readable, updated.count) == (True, 1)
-    assert route_breaker.state(writer, user, ACCOUNT).readable is True
+    assert updated.readable is True
+    assert updated.count == 2
+    assert route_breaker.tripped(writer, user, ACCOUNT)

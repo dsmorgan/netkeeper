@@ -27,8 +27,13 @@ from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.scoping import install_scope_guard
 from netkeeper.services import route_breaker, runs
-from netkeeper.services.linkedin_accounts import ensure_account, scheduled_runs_armed
+from netkeeper.services.linkedin_accounts import (
+    account_id_for,
+    ensure_account,
+    scheduled_runs_armed,
+)
 from netkeeper.services.linkedin_session import flag_session
+from netkeeper.services.settings_kv import set_setting
 from netkeeper.services.users import ensure_local_user
 
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
@@ -149,6 +154,24 @@ def test_reset_breaker_asks_before_it_takes_the_write_lock(
 
     assert result.exit_code == 0, result.output
     assert wrote == [True]
+
+
+def test_reset_breaker_clears_a_corrupt_row(cli_db: sessionmaker[Session]) -> None:
+    """#191 review N1: a corrupt row reads as tripped, and posture tells the person
+    to run reset-breaker, so reset-breaker has to clear it rather than saying there
+    is nothing to reset."""
+    with session_scope(cli_db, write=True) as session:
+        user = _user(session)
+        account_id = account_id_for(session, user)
+        set_setting(session, user, f"linkedin.route_changed_breaker.{account_id}", "garbage")
+    assert _breaker_tripped(cli_db, account_id)
+
+    result = CliRunner().invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="y\n")
+
+    assert result.exit_code == 0, result.output
+    assert "unreadable" in result.output
+    assert "nothing to reset" not in result.output
+    assert not _breaker_tripped(cli_db, account_id)
 
 
 def test_reset_breaker_on_a_clear_account_says_so_and_asks_nothing(

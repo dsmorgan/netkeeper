@@ -1250,13 +1250,20 @@ def linkedin_schedule_reset_breaker(
             user = _local_user_or_exit(session)
             account_id = account_id_for(session, user)
             current = route_breaker.state(session, user, account_id)
-        if current.count == 0:
+        if current.readable and current.count == 0:
             typer.echo("the route-changed breaker is not tripped; nothing to reset")
             return
-        if not yes and not typer.confirm(
+        # A corrupt row reads as tripped (fail closed), and posture tells the
+        # person to run this command, so this command must be able to clear it
+        # (#191 review N1).
+        question = (
             f"reset the route-changed breaker ({current.count} `route_changed` connections"
             " run(s) in a row)? scheduled connections runs will be allowed to fire again"
-        ):
+            if current.readable
+            else "the route-changed breaker's stored state is unreadable, so it reads as"
+            " tripped. reset it? scheduled connections runs will be allowed to fire again"
+        )
+        if not yes and not typer.confirm(question):
             typer.echo("cancelled: the breaker stays as it is")
             raise typer.Exit(code=1)
         with session_scope(factory, write=True) as session:

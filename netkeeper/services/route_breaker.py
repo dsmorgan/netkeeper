@@ -134,7 +134,11 @@ def record(
     if succeeded:
         updated = BreakerState(count=0, since=None)
     elif route_changed:
-        updated = BreakerState(count=current.count + 1, since=current.since or now)
+        # A corrupt row reads as tripped (fail closed). Another route_changed run
+        # must not turn that into count=1, which would read as clear: keep it
+        # tripped until a success or a reset says otherwise (#191 review N2).
+        count = current.count + 1 if current.readable else THRESHOLD
+        updated = BreakerState(count=count, since=current.since or now)
     else:
         return current
     _store(session, user, account_id, updated)
