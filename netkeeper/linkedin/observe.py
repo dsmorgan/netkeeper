@@ -179,7 +179,10 @@ class ObservedResponse:
     past the size limit is not kept, a read that failed or timed out has none --
     and ``failure`` then says which, in a fixed phrase. ``location`` is a redirect's
     ``Location`` header. ``request_body`` is what the page sent (the pagination
-    request's JSON), read from the request, never changed.
+    request's JSON), read from the request, never changed. ``cause`` is set only
+    for :data:`FAILURE_UNREADABLE`: what the read raised, as its class name and a
+    fixed category (:func:`unreadable_cause`, e.g. ``"Error (no resource)"``), never
+    its message.
 
     Both bodies are left out of ``repr``: a response body is a person's data, and a
     ``repr`` ends up in tracebacks and log lines.
@@ -193,6 +196,7 @@ class ObservedResponse:
     body: bytes | None = field(repr=False)
     location: str | None = field(default=None, repr=False)
     failure: str | None = None
+    cause: str | None = None
 
     def text(self) -> str | None:
         """The body as text (UTF-8, replacing what does not decode), or ``None``."""
@@ -217,6 +221,20 @@ FAILURE_REDIRECT: Final = "redirect: no body"
 FAILURE_TOO_LARGE: Final = "body larger than the observation limit"
 FAILURE_TIMEOUT: Final = "body did not arrive in time"
 FAILURE_UNREADABLE: Final = "body could not be read"
+
+#: The fixed categories :func:`unreadable_cause` sorts a failed body read into, each
+#: with the lowercase fragments of an exception message that place it there, checked
+#: in this order. Only the category is ever kept or logged, never the message.
+UNREADABLE_CATEGORIES: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
+    ("evicted", ("evicted",)),
+    ("no resource", ("no resource", "no data found")),
+    ("aborted", ("aborted", "canceled", "cancelled")),
+    ("closed", ("target closed", "has been closed", "target page")),
+    ("network error", ("net::err_", "failed")),
+)
+
+#: The category of a failed body read that matches none of :data:`UNREADABLE_CATEGORIES`.
+UNREADABLE_OTHER: Final = "unclassified"
 
 
 class Observation:
@@ -304,6 +322,7 @@ class Observation:
             )
         body: bytes | None = None
         failure: str | None = None
+        cause: str | None = None
         try:
             body = await asyncio.wait_for(response.body(), self.limits.body_timeout_s)
         except TimeoutError:
@@ -311,7 +330,8 @@ class Observation:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.debug("observation: a response body could not be read (%s)", _kind(exc))
+            cause = unreadable_cause(exc)
+            log.debug("observation: a response body could not be read (%s)", cause)
             failure = FAILURE_UNREADABLE
         if body is not None and len(body) > self.limits.max_body_bytes:
             body, failure = None, FAILURE_TOO_LARGE
@@ -323,6 +343,7 @@ class Observation:
             request_body=request_body,
             body=body,
             failure=failure,
+            cause=cause,
         )
 
     async def next(self, timeout_s: float) -> ObservedResponse | None:
@@ -406,6 +427,24 @@ def _safe[T](read: Callable[[], T]) -> T | None:
         return read()
     except Exception:
         return None
+
+
+def unreadable_cause(exc: BaseException) -> str:
+    """Why a body read failed, as ``"<class name> (<category>)"``: fixed words only.
+
+    The category is matched from the exception's message against
+    :data:`UNREADABLE_CATEGORIES`; the message itself is never returned, because
+    Playwright's can quote the url, and a profile url names a person.
+    """
+    try:
+        message = str(exc).lower()
+    except Exception:
+        message = ""
+    category = next(
+        (name for name, fragments in UNREADABLE_CATEGORIES if any(f in message for f in fragments)),
+        UNREADABLE_OTHER,
+    )
+    return f"{_kind(exc)} ({category})"
 
 
 def _kind(exc: BaseException) -> str:

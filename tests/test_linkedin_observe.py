@@ -165,6 +165,56 @@ async def test_a_body_that_fails_is_a_fixed_phrase_never_the_error_text(
     kept = await observation.next(1.0)
     assert kept is not None and kept.failure == FAILURE_UNREADABLE
     assert "example.test" not in caplog.text and "sduiid" not in caplog.text
+    # #197: the cause is the class and a fixed category, never the message.
+    assert kept.cause == "RuntimeError (network error)"
+    assert "RuntimeError (network error)" in caplog.text
+
+
+async def test_only_an_unreadable_body_carries_a_cause() -> None:
+    tab = _tab()
+    observation = await _started(tab, ObservationLimits(max_body_bytes=8))
+    tab.emit(_response(body=b"short"))
+    tab.emit(_response(body=b"x" * 9))
+    read, too_large = await observation.next(1.0), await observation.next(1.0)
+    assert read is not None and read.cause is None
+    assert too_large is not None and too_large.cause is None
+
+
+class ProtocolError(Exception):
+    """Stands in for a Playwright error class: only its name is ever kept."""
+
+
+@pytest.mark.parametrize(
+    ("message", "category"),
+    [
+        (
+            "Protocol error (Network.getResponseBody): No resource with given identifier"
+            " found for https://www.linkedin.com/in/fake-slug/",
+            "no resource",
+        ),
+        ("No data found for resource with given identifier", "no resource"),
+        ("Request content was evicted from inspector cache", "evicted"),
+        ("net::ERR_ABORTED; https://www.linkedin.com/in/fake-slug/", "aborted"),
+        ("The request was canceled", "aborted"),
+        ("Target page, context or browser has been closed", "closed"),
+        ("Target closed", "closed"),
+        ("net::ERR_CONTENT_LENGTH_MISMATCH", "network error"),
+        ("Response body is unavailable", "unclassified"),
+        ("", "unclassified"),
+    ],
+)
+def test_an_unreadable_cause_is_a_class_and_a_fixed_category(message: str, category: str) -> None:
+    cause = observe.unreadable_cause(ProtocolError(message))
+    assert cause == f"ProtocolError ({category})"
+    assert "linkedin" not in cause and "fake-slug" not in cause
+
+
+def test_an_unreadable_cause_survives_an_exception_that_cannot_be_printed() -> None:
+    class Unprintable(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("no")
+
+    assert observe.unreadable_cause(Unprintable()) == "Unprintable (unclassified)"
 
 
 async def test_a_redirect_keeps_its_location_and_reads_no_body() -> None:

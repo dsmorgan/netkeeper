@@ -53,6 +53,20 @@ arrived before it is still handed over. A unit is never handed over part-read.
 LinkedIn answering -- is handled the same way, except that the run ends by that
 exception rather than an outcome: recorded failed, never complete.
 
+**An answer whose body cannot be read** (#197). Chrome can receive a pagination
+answer and still have no body to hand over: the page's own client aborted or
+superseded the fetch, or the body was evicted. The answer's start is compared with
+the expected one first, so a stale or repeated answer without a body is skipped like
+any other. One for the expected start is logged at INFO, with the exception's class
+and a fixed category but never its message, and the scroll goes on so the page can
+ask again: if it does and the answer reads, the run goes on. If the page moves past
+that start instead, or does not ask again within :data:`MAX_IDLE_SCROLLS` scrolls,
+the call raises :class:`~netkeeper.linkedin.connections.AnswerLost`, which ends the
+run as a safe incomplete stop (:attr:`~netkeeper.linkedin.connections.StopReason.ANSWER_LOST`):
+not ``RouteChanged``, so it never counts toward the route-changed breaker, and never
+complete, so it ages nobody. A body that could not be kept for any other reason (too
+large, too slow) is still :class:`~netkeeper.linkedin.observe.ObservationFailed`.
+
 **Cancel** lands between units, at the gate's next check (spec 9.9): one call spends a
 few scrolls at most, and stopping partway through one would hand the job a short slice
 it could mistake for the end of the list.
@@ -72,7 +86,7 @@ from urllib.parse import urlsplit
 
 from netkeeper.linkedin.browser import BrowserRun, BrowserUnavailable, PageLike
 from netkeeper.linkedin.classify import Outcome, classify
-from netkeeper.linkedin.connections import SourcePage
+from netkeeper.linkedin.connections import AnswerLost, LostAnswer, SourcePage
 from netkeeper.linkedin.flagship import (
     CONNECTIONS_PAGE_PATH,
     CONNECTIONS_SCREEN_PATH,
@@ -86,6 +100,7 @@ from netkeeper.linkedin.flagship import (
 )
 from netkeeper.linkedin.observe import (
     FAILURE_REDIRECT,
+    FAILURE_UNREADABLE,
     Observation,
     ObservationFailed,
     ObservationLimits,
@@ -166,7 +181,10 @@ class PageConnections:
         self._landed = False
         self._ended = False
         self._stopped: SourcePage | None = None
-        self._failed: ObservationFailed | None = None
+        self._failed: ObservationFailed | AnswerLost | None = None
+        #: The start of a pagination answer that arrived unreadable and has not been
+        #: read since (#197), with its fixed cause; ``None`` while nothing is lost.
+        self._lost: tuple[int, str] | None = None
         self._url = ""
 
     @property
@@ -186,11 +204,12 @@ class PageConnections:
                 blocked = await self._read_until(start + count)
             except RouteChanged:
                 blocked = SourcePage(Outcome.ROUTE_CHANGED, self._url)
-            except ObservationFailed as exc:
-                # The mechanism failed, not LinkedIn: there is no outcome to report, so
-                # the run ends by this exception (recorded failed, never complete, ageing
-                # nobody). A unit already read whole before it is still handed over, the
-                # same as before a RouteChanged; the next call raises it.
+            except (ObservationFailed, AnswerLost) as exc:
+                # The mechanism failed, or an answer was lost (#197), not LinkedIn
+                # answering: there is no outcome to report, so the run ends by this
+                # exception (never complete, ageing nobody). A unit already read whole
+                # before it is still handed over, the same as before a RouteChanged;
+                # the next call raises it.
                 self._failed = exc
                 blocked = None
                 if len(self._cards) < start + count:
@@ -227,6 +246,8 @@ class PageConnections:
             return blocked
         idle = 0
         while len(self._cards) < needed and not self._ended:
+            if idle >= self._max_idle and self._lost is not None:
+                raise self._answer_lost(f"the page did not ask for it again within {idle} scrolls")
             if idle >= self._max_idle:
                 log.warning(
                     "connections: %d scrolls brought no new answer before the list"
@@ -235,12 +256,17 @@ class PageConnections:
                 )
                 return SourcePage(Outcome.ROUTE_CHANGED, self._url)
             before = (len(self._cards), self._ended)
+            lost_before = self._lost
             blocked = await self._scroll()
             if blocked is None:
                 blocked = await self._absorb(wait_s=self._response_wait_s)
             if blocked is not None:
                 return blocked
-            if (len(self._cards), self._ended) == before:
+            if lost_before is None and self._lost is not None:
+                # An answer was just lost (#197): the page gets MAX_IDLE_SCROLLS
+                # scrolls, from here, to ask for it again.
+                idle = 0
+            elif (len(self._cards), self._ended) == before:
                 idle += 1
         return None
 
@@ -274,6 +300,8 @@ class PageConnections:
             outcome = _outcome(response)
             if outcome is not Outcome.OK:
                 return SourcePage(outcome, response.location or response.url)
+            if response.body is None:
+                raise _not_kept(response)
             payload: bytes | None
             if response.method == "GET":
                 payload = rehydration_payload(response.text() or "")
@@ -292,7 +320,7 @@ class PageConnections:
                     continue
             else:
                 payload = response.body
-            assert payload is not None  # _outcome refused a response without a body
+            assert payload is not None  # a response without a body was refused above
             chunk = parse_connections_chunk(payload, endpoint=self.endpoint, expected_start=0)
             if not chunk.cards and chunk.total != 0:
                 # A first screen with no cards is an empty list only when it says the
@@ -364,6 +392,9 @@ class PageConnections:
         request = parse_pagination_request(response.request_body)
         if request is None:
             return None  # another pager on the same path: not the connections list
+        # A status or a redirect is classified whatever start it answered: a
+        # checkpoint on a duplicate is still a checkpoint. Only a 200 whose body
+        # could not be kept waits for the start comparison below (#197).
         outcome = _outcome(response)
         if outcome is not Outcome.OK:
             return SourcePage(outcome, response.location or response.url)
@@ -375,16 +406,42 @@ class PageConnections:
         expected = self._next_start
         assert expected is not None  # set by every chunk taken before this one
         if request.start_index < expected:
+            # Stale or retried, with or without a body: already read, never fatal.
             log.info("connections: the page asked for a page it already had; skipped")
             return None
         if request.start_index > expected:
+            if self._lost is not None:
+                # The page moved on past the answer it lost (#197): not a changed
+                # route, a page this run could not read.
+                raise self._answer_lost("the page moved past it")
             log.warning(
                 "connections: a page of the list went unseen (asked from %d, expected %d)",
                 request.start_index,
                 expected,
             )
             return SourcePage(Outcome.ROUTE_CHANGED, self._url)
-        assert response.body is not None
+        if response.body is None:
+            if response.failure != FAILURE_UNREADABLE:
+                raise _not_kept(response)
+            # #197: the browser received the answer but could not hand its body
+            # over -- the page's own client aborted or superseded the fetch, or the
+            # body was evicted. Not LinkedIn answering: keep scrolling so the page
+            # can ask for it again, and give up safely if it does not.
+            cause = response.cause or "unknown"
+            self._lost = (request.start_index, cause)
+            log.info(
+                "connections: the page's answer for start %d could not be read (%s);"
+                " scrolling on for the page to ask again",
+                request.start_index,
+                cause,
+            )
+            return None
+        if self._lost is not None:
+            log.info(
+                "connections: the page asked again for start %d, and it read",
+                request.start_index,
+            )
+            self._lost = None
         self._take(
             parse_connections_chunk(
                 response.body, endpoint=self.endpoint, expected_start=request.start_index
@@ -411,6 +468,12 @@ class PageConnections:
             chunk.start,
             ", the end of the list" if self._ended else "",
         )
+
+    def _answer_lost(self, ending: str) -> AnswerLost:
+        """The lost answer as the exception that ends the run incomplete (#197)."""
+        assert self._lost is not None
+        start, cause = self._lost
+        return AnswerLost(LostAnswer(start=start, cause=cause, ending=ending))
 
     def _distinct(self) -> int:
         return len({card.urn for card in self._cards})
@@ -449,8 +512,10 @@ class PageConnections:
 def _outcome(response: ObservedResponse) -> Outcome:
     """What one observed answer means (spec 9.7), before anything parses it.
 
-    A redirect is classified by where it pointed. A ``200`` whose body could not be
-    kept is the observation failing, not LinkedIn answering. Any other status is
+    A redirect is classified by where it pointed. A ``200`` is ``Ok``, whether or not
+    its body could be kept: which answer it was decides what a missing body means
+    (a duplicate's is skipped, a lost one's is waited out, #197), so the caller
+    checks the body after that, never here. Any other status is
     classified from its status and url, never its body (#188 review, M1): an error
     page is HTML with the site's own navigation in it, and its Sign-out link to
     ``/uas/logout`` is not a login wall.
@@ -464,10 +529,13 @@ def _outcome(response: ObservedResponse) -> Outcome:
             else (Outcome.ROUTE_CHANGED)
         )
     if response.status == 200:
-        if response.body is None:
-            raise ObservationFailed(f"an answer of the page could not be kept: {response.failure}")
         return Outcome.OK
     return classify(response.status, response.url, "")
+
+
+def _not_kept(response: ObservedResponse) -> ObservationFailed:
+    """A ``200`` answer the run needed whose body the observation could not keep."""
+    return ObservationFailed(f"an answer of the page could not be kept: {response.failure}")
 
 
 def _path(url: str) -> str:

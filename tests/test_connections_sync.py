@@ -40,8 +40,10 @@ from netkeeper.db import session_scope
 from netkeeper.linkedin.browser import BrowserUnavailable
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import (
+    AnswerLost,
     ConnectionsPage,
     ConnectionsSource,
+    LostAnswer,
     SourcePage,
     StopReason,
     SyncMode,
@@ -1288,3 +1290,94 @@ def test_a_runs_counts_carry_the_cards_it_created() -> None:
     counts = report.counts()
     assert (counts["cards_created"], counts["confirmed_by_urn"]) == (3, 1)
     assert counts["complete"] is False
+
+
+# --- #197: a lost answer is a safe incomplete stop ------------------------------------------
+
+_LOST_CAUSE = "Error (no resource)"
+
+
+@dataclass
+class _LosingSource(FakeConnectionsSource):
+    """Honest pages until page ``lose_at``, which raises ``AnswerLost`` for its start."""
+
+    lose_at: int = 2
+
+    async def fetch_page(self, *, start: int, count: int) -> SourcePage:
+        if len(self.requests) == self.lose_at:
+            self.requests.append((start, count))
+            raise AnswerLost(
+                LostAnswer(start=start, cause=_LOST_CAUSE, ending="the page moved past it")
+            )
+        return await super().fetch_page(start=start, count=count)
+
+
+async def test_a_lost_answer_ends_the_run_aborted_and_says_which_start(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    gone = await _one_miss_already(session_factory, user_id)
+    people = _many(99)
+    fetch = _LosingSource(people, lose_at=2)
+
+    report = await _sync(session_factory, user_id, fetch, at=NOW + timedelta(days=14))
+
+    assert fetch.starts == [0, 40, 80]
+    assert report.result.reason is StopReason.ANSWER_LOST and not report.result.complete
+    assert report.aging is None and not report.heat_raised and not report.session_flagged
+    contacts = _contacts(session_factory, user_id)
+    assert (contacts[gone.urn].li_missing_count, contacts[gone.urn].li_disconnected_at) == (1, None)
+    assert all(contacts[p.urn].li_missing_count == 0 for p in people[:80])
+
+    run = _run_row(session_factory, user_id, report.run_id)
+    assert (run.status, run.stop_reason, run.error) == (
+        SyncRunStatus.ABORTED,
+        "answer_lost",
+        None,
+    )
+    assert run.notes == (
+        "stopped incomplete: the page's answer for start 80 could not be read"
+        " (Error (no resource)); the page moved past it."
+    )
+    assert run.counts_json is not None
+    assert run.counts_json["lost"] == {"start": 80, "cause": _LOST_CAUSE}
+    assert run.counts_json["complete"] is False and run.counts_json["outcome"] is None
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        assert session_flag(session, user) is None
+        assert heat_service.state(session, user, report.account_id) is None
+
+
+async def test_a_lost_answer_never_moves_the_breaker(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """A lost answer is not a changed route: it neither extends the streak (however
+    many in a row) nor clears it (it is not a natural end either)."""
+    first = await _sync(session_factory, user_id, _LosingSource(_many(99), lose_at=0))
+    assert _breaker_count(session_factory, user_id, first.account_id) == 0
+
+    await _sync(
+        session_factory,
+        user_id,
+        FakeConnectionsSource(list(PEOPLE), script={0: UNRECOGNIZED}),
+        at=NOW + timedelta(days=1),
+    )
+    for day in (2, 3, 4):
+        report = await _sync(
+            session_factory,
+            user_id,
+            _LosingSource(_many(99), lose_at=1),
+            at=NOW + timedelta(days=day),
+        )
+        assert report.result.reason is StopReason.ANSWER_LOST
+    assert _breaker_count(session_factory, user_id, first.account_id) == 1
+    assert not _breaker_tripped(session_factory, user_id, first.account_id)
+
+
+async def test_a_run_without_a_lost_answer_records_none(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    report = await _sync(session_factory, user_id, FakeConnectionsSource(list(PEOPLE)))
+    run = _run_row(session_factory, user_id, report.run_id)
+    assert run.counts_json is not None and run.counts_json["lost"] is None
+    assert run.notes is None

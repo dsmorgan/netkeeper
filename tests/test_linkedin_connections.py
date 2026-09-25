@@ -30,7 +30,9 @@ from voyager_pages import CONNECTIONS_URL, PEOPLE, FakeConnectionsSource, Person
 from netkeeper.linkedin import connections as job
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import (
+    AnswerLost,
     ConnectionsPage,
+    LostAnswer,
     ProgressEvent,
     SourcePage,
     StopReason,
@@ -605,3 +607,49 @@ async def test_a_page_from_a_source_that_fell_back_makes_the_run_incomplete() ->
 
     assert result.reason is StopReason.END_OF_LIST
     assert result.source_switched and not result.complete
+
+
+# --- a lost answer (#197) ----------------------------------------------------------
+
+
+@dataclass
+class LosingSource(FakeConnectionsSource):
+    """Answers honestly until page ``lose_at``, then raises ``AnswerLost`` for it."""
+
+    lose_at: int = 1
+
+    async def fetch_page(self, *, start: int, count: int) -> SourcePage:
+        if len(self.requests) == self.lose_at:
+            self.requests.append((start, count))
+            raise AnswerLost(LostAnswer(start=start, cause="Error (aborted)", ending="gone"))
+        return await super().fetch_page(start=start, count=count)
+
+
+async def test_a_lost_answer_is_a_safe_incomplete_stop() -> None:
+    """Not a response, so no outcome: neither route_changed (the breaker) nor heat nor
+    the flag can read anything from it; not the end of the list, so never complete."""
+    source = LosingSource(list(PEOPLE[:9]), lose_at=1)
+    result, sink, _ = await _run(source)
+    assert result.reason is StopReason.ANSWER_LOST
+    assert result.outcome is None and result.final_url is None
+    assert result.lost == LostAnswer(start=3, cause="Error (aborted)", ending="gone")
+    assert not result.complete
+    assert sink.urns == [p.urn for p in PEOPLE[:3]] and result.pages == 1
+    assert sink.events[-1].stopped is StopReason.ANSWER_LOST
+
+
+async def test_a_lost_answer_on_the_last_page_still_never_completes() -> None:
+    source = LosingSource(list(PEOPLE[:6]), lose_at=2)
+    result, _, _ = await _run(source)
+    assert result.reason is StopReason.ANSWER_LOST and not result.complete
+    assert len(result.seen_urns) == 6 and result.max_total == 6  # the totals alone would pass
+
+
+def test_a_lost_answer_describes_itself_in_fixed_words() -> None:
+    lost = LostAnswer(start=20, cause="Error (no resource)", ending="the page moved past it")
+    assert lost.describe() == (
+        "the page's answer for start 20 could not be read (Error (no resource));"
+        " the page moved past it"
+    )
+    assert str(AnswerLost(lost)) == lost.describe() and AnswerLost(lost).lost is lost
+    assert StopReason.ANSWER_LOST.value == "answer_lost"
