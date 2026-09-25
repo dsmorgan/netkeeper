@@ -845,3 +845,73 @@ async def test_the_worker_refuses_heat_before_it_attaches(
         user = session.get(User, user_id)
         assert user is not None
         assert runs.get_run(session, user, run_id).stop_reason == "heat_skip"
+
+
+# --- #197: a lost answer through the real worker, and the double end ----------------------
+
+
+def _the_run(factory: Any, user_id: int, run_id: int) -> SyncRun:
+    with session_scope(factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        run = runs.get_run(session, user, run_id)
+        session.expunge(run)
+        return run
+
+
+async def test_a_lost_answer_the_page_moves_past_is_an_aborted_run_the_breaker_ignores(
+    session_factory: Any, settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Supervised run 5 on #31, with the page moving past the answer it lost: the run
+    ends aborted as answer_lost, naming the start, and the breaker does not move."""
+    from flagship_site import Lost
+
+    from netkeeper.worker import BrowserWorker
+
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    context = ConnectionsContext(_many(90), lost={40: Lost("move_on")})
+    provider, _ = fake_provider(context)
+    run_id, user_id = _manual_run(session_factory, SyncRunKind.CONNECTIONS_FULL)
+
+    outcome = await BrowserWorker(
+        provider, session_factory, settings.linkedin, sleep=_no_wait
+    ).execute(run_id, user_id)
+
+    assert outcome is runs.RunOutcome.DONE
+    run = _the_run(session_factory, user_id, run_id)
+    assert (run.status, run.stop_reason, run.error) == (SyncRunStatus.ABORTED, "answer_lost", None)
+    assert run.notes is not None and "answer for start 40 could not be read" in run.notes
+    assert "fake-lost-slug" not in run.notes
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        assert route_breaker.state(session, user, run.linkedin_account_id).count == 0
+    assert "already ended" not in caplog.text
+
+
+async def test_a_run_that_fails_inside_its_runner_is_recorded_once(
+    session_factory: Any, settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#197's double end: the runner records the failure and re-raises; the worker
+    must not try to record it again ("run 5 already ended failed; not recording
+    failed")."""
+    from flagship_site import Answer
+
+    from netkeeper.worker import BrowserWorker
+
+    huge = Answer(status=200, body=b"0" * (8 * 1024 * 1024 + 1))
+    provider, _ = fake_provider(ConnectionsContext(_many(90), answers={20: huge}))
+    run_id, user_id = _manual_run(session_factory, SyncRunKind.CONNECTIONS_FULL)
+
+    await BrowserWorker(provider, session_factory, settings.linkedin, sleep=_no_wait).execute(
+        run_id, user_id
+    )
+
+    run = _the_run(session_factory, user_id, run_id)
+    assert (run.status, run.stop_reason) == (SyncRunStatus.FAILED, "error")
+    assert run.error is not None and run.error.startswith("ObservationFailed")
+    assert "already ended" not in caplog.text
+
+
+async def _no_wait(seconds: float) -> None:
+    await asyncio.sleep(0)

@@ -36,7 +36,11 @@ logic; it decides what the job may do and what happens after it stops:
   the observation mechanism itself failing to read the page, never LinkedIn
   answering -- counts as ``route_changed`` too (#191 review, F1): the run
   never reaches this block on its own, so that case is recorded from its own
-  ``except`` clause instead, then re-raised.
+  ``except`` clause instead, then re-raised. A run that ends
+  :attr:`~netkeeper.linkedin.connections.StopReason.ANSWER_LOST` (#197: one of
+  the page's answers arrived with no body the browser could hand over, and the
+  page did not ask for it again) moves the breaker neither way: a lost answer is
+  not a changed route, and it is not a natural end either.
 * **Mapping.** Each page is written in its own writer session as it arrives,
   so the write lock is never held across a fetch or a pause. After a
   *complete* full sync, and only then, contacts it did not see are aged
@@ -152,6 +156,9 @@ class SyncRunReport:
             "outcome": None if self.result.outcome is None else self.result.outcome.value,
             "heat_raised": self.heat_raised,
             "session_flagged": self.session_flagged,
+            "lost": None
+            if self.result.lost is None
+            else {"start": self.result.lost.start, "cause": self.result.lost.cause},
         }
 
 
@@ -255,7 +262,8 @@ async def sync_connections(
     nothing is spent, and the run is recorded ``failed`` with that reason.
     Every other stop is a :class:`SyncRunReport`, recorded ``completed`` (the
     end of the list, or an incremental sync caught up) or ``aborted`` (the
-    budget, a cancel, a stopping response). An exception from the mapping
+    budget, a cancel, a stopping response, a lost answer -- the last with a note
+    naming its start and cause). An exception from the mapping
     propagates after the pages before it were committed, is recorded
     ``failed``, and never ages anyone.
     """
@@ -442,7 +450,7 @@ async def sync_connections(
                     else stop_reason_of(result.reason.value, result.outcome)
                 ),
                 counts=report.counts(),
-                notes=_aging_notes(aging),
+                notes=(*_lost_notes(result), *_aging_notes(aging)),
             )
     return report
 
@@ -456,6 +464,13 @@ _KIND_OF: dict[SyncMode, SyncRunKind] = {
     SyncMode.FULL: SyncRunKind.CONNECTIONS_FULL,
     SyncMode.INCREMENTAL: SyncRunKind.CONNECTIONS_INCREMENTAL,
 }
+
+
+def _lost_notes(result: SyncResult) -> tuple[str, ...]:
+    """#197: a run that lost one of the page's answers says which, and why, on the run."""
+    if result.lost is None:
+        return ()
+    return (f"stopped incomplete: {result.lost.describe()}.",)
 
 
 def _aging_notes(aging: mapping.AgingCounts | None) -> tuple[str, ...]:

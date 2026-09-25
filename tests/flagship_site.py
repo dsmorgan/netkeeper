@@ -183,6 +183,32 @@ class Answer:
     tab_url: str | None = None
 
 
+#: What Chrome says when the body of a response it received is gone (#197), with an
+#: invented profile url in it the way Playwright's messages quote urls: a test can
+#: assert the message never reaches a log or a run.
+LOST_BODY_MESSAGE = (
+    "Protocol error (Network.getResponseBody): No resource with given identifier found"
+    " for https://www.linkedin.com/in/fake-lost-slug-0000/"
+)
+
+
+@dataclass(slots=True)
+class Lost:
+    """A pagination answer the browser receives but cannot hand the body of over (#197).
+
+    ``then`` is what the page does next: ``"reask"`` (its fetch failed, so the next
+    scroll asks for the same start again), ``"move_on"`` (the page itself read the
+    answer -- only the browser's copy is gone -- so the next scroll asks for the page
+    after), ``"silent"`` (the page asks for nothing more), or ``"duplicate"`` (the
+    answer reads, then the page's retried copy of the same request arrives without a
+    body). ``times`` is how many asks in a row are lost, for ``"reask"``.
+    """
+
+    then: str = "reask"
+    error: Exception = field(default_factory=lambda: Exception(LOST_BODY_MESSAGE))
+    times: int = 1
+
+
 class FlagshipSite(FakeContext):
     """The connections page, answering its own scrolls. One list of people per site.
 
@@ -195,6 +221,7 @@ class FlagshipSite(FakeContext):
     on instead (a wall). ``answers`` replaces the answer for a pagination ``startIndex``;
     ``repeat`` sends a page's request twice; ``skip`` makes the page ask for the page
     after instead; ``other_pager`` also sends another pager's request on landing.
+    ``lost`` makes the answer for a ``startIndex`` arrive without a readable body.
     """
 
     def __init__(
@@ -216,6 +243,7 @@ class FlagshipSite(FakeContext):
         answer_plans: Callable[[int], bool] | None = None,
         card_options: Mapping[int, CardOptions] | None = None,
         origin: str = ORIGIN,
+        lost: Mapping[int, Lost] | None = None,
     ) -> None:
         super().__init__()
         self.people = list(people)
@@ -237,6 +265,7 @@ class FlagshipSite(FakeContext):
         self.plans = 0
         self.card_options = dict(card_options or {})
         self.origin = origin
+        self.lost = dict(lost or {})
         #: Every request the page itself made: (method, path, body).
         self.requests: list[tuple[str, str, str | None]] = []
         self._next: int | None = None
@@ -323,6 +352,8 @@ class FlagshipSite(FakeContext):
             return
         asked = start + self.size if start in self.skip else start
         request = pagination_request(asked, sort=self.sort)
+        if self._lose(tab, start, request):
+            return
         times = 2 if start in self.repeat else 1
         answer = self.answers.get(start)
         for _ in range(times):
@@ -351,6 +382,25 @@ class FlagshipSite(FakeContext):
             )
         if answer is not None:
             self._ended = True  # the page does not ask again after a failed answer
+
+    def _lose(self, tab: ListeningTab, start: int, request: str) -> bool:
+        """Send ``start``'s answer without a readable body, if ``lost`` says to."""
+        lost = self.lost.get(start)
+        if lost is None or lost.times <= 0:
+            return False
+        url = f"{self.origin}{PAGINATION_PATH}"
+        if lost.then == "duplicate":
+            lost.times = 0
+            self._send(tab, "POST", url, 200, self._page(start), "fetch", request)
+            self._send(tab, "POST", url, 200, b"", "fetch", request, body_error=lost.error)
+            return True
+        lost.times -= 1
+        # The page's own copy: what it goes on to ask for depends on whether it read it.
+        body = self._page(start) if lost.then == "move_on" else b""
+        self._send(tab, "POST", url, 200, body, "fetch", request, body_error=lost.error)
+        if lost.then == "silent":
+            self._ended = True
+        return True
 
     def _page(self, start: int) -> bytes:
         people = self.people[start : start + self.size]
@@ -382,7 +432,8 @@ class FlagshipSite(FakeContext):
         post_data: str | None = None,
         *,
         headers: Mapping[str, str] | None = None,
+        body_error: Exception | None = None,
     ) -> None:
         self.requests.append((method, urlsplit(url).path, post_data))
         request = FakeRequest(method, resource_type, post_data)
-        tab.emit(FakeResponse(url, status, body, request, headers=headers))
+        tab.emit(FakeResponse(url, status, body, request, headers=headers, body_error=body_error))

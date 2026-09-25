@@ -194,7 +194,9 @@ class BrowserWorker:
         except (runs.HeatSkipped, runs.SessionFlagged) as exc:
             log.info("run %d refused: %s", run_id, exc)  # recorded by the runner
         except Exception as exc:
-            # The runner recorded it; this only stops it from taking the caller down.
+            # The runner usually recorded it already; this records only what it did
+            # not (a failure before the runner started), and stops it from taking the
+            # caller down.
             log.exception("run %d failed", run_id)
             self._finish(run_id, user_id, SyncRunStatus.FAILED, "error", runs.describe(exc))
         self._publish("run.finished", run_id, user_id, {"status": self._status(run_id, user_id)})
@@ -301,9 +303,19 @@ class BrowserWorker:
     def _finish(
         self, run_id: int, user_id: int, status: SyncRunStatus, reason: str, error: str
     ) -> None:
+        """Record how the run ended, unless the runner already did (#197).
+
+        The runners record their own endings, a failure included
+        (``runs.recording``), then re-raise; the worker's handlers see the same
+        exception afterwards. Finishing an ended run again was a second, refused
+        write that logged "already ended", so an ended run is left alone here.
+        """
         with session_scope(self._factory, write=True) as session:
             user = session.get(User, user_id)
             if user is None:
+                return
+            if runs.get_run(session, user, run_id).status is not SyncRunStatus.RUNNING:
+                log.debug("run %d was already recorded as ended by its runner", run_id)
                 return
             runs.finish_run(
                 session,

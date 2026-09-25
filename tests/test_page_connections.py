@@ -23,11 +23,13 @@ from flagship_pages import CardOptions
 from flagship_site import (
     CHECKPOINT_URL,
     LOGIN_URL,
+    LOST_BODY_MESSAGE,
     PAGE_URL,
     SHELL,
     Answer,
     FlagshipSite,
     ListeningTab,
+    Lost,
 )
 from run_fakes import fake_provider
 from voyager_pages import PEOPLE, Person
@@ -36,6 +38,7 @@ from netkeeper.linkedin import page_connections
 from netkeeper.linkedin.browser import BrowserRun, BrowserUnavailable, ScrollOutcome
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import (
+    AnswerLost,
     ConnectionsPage,
     StopReason,
     SyncJobSpec,
@@ -482,6 +485,149 @@ async def test_a_page_that_never_sends_its_first_screen_is_given_up_on(
     out = await sync(ShellsOnly(many(20)))
     assert out.result.outcome is Outcome.ROUTE_CHANGED and out.urns == []
     assert "8 answers arrived, none the first screen" in caplog.text
+
+
+# --- an answer whose body cannot be read (#197) ---------------------------------------------
+
+
+async def test_a_lost_answer_the_page_asks_for_again_is_read_and_the_run_completes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Run 5 on #31: the answer for start 20 arrives, its body cannot be read. The page
+    asks for 20 again on the next scroll, that one reads, and the run completes."""
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    people = many(55)
+    site = FlagshipSite(people, lost={20: Lost("reask")})
+    out = await sync(site)
+    assert out.result.reason is StopReason.END_OF_LIST and out.result.complete
+    assert out.urns == [p.urn for p in people] and out.result.lost is None
+    assert "answer for start 20 could not be read (Exception (no resource))" in caplog.text
+    assert "the page asked again for start 20, and it read" in caplog.text
+    lost = [r for r in caplog.records if "could not be read" in r.getMessage()]
+    assert [r.levelno for r in lost] == [logging.INFO]
+
+
+async def test_a_lost_answer_read_on_the_retry_is_forgotten() -> None:
+    """Once the page's second ask for 20 reads, the loss is over: a gap later in the
+    same run is RouteChanged, as any gap is, not blamed on the answer already read."""
+    out = await sync(FlagshipSite(many(80), lost={20: Lost("reask")}, skip=frozenset({40})))
+    assert out.result.reason is StopReason.RESPONSE
+    assert out.result.outcome is Outcome.ROUTE_CHANGED and out.result.lost is None
+
+
+async def test_a_lost_answer_lost_again_on_the_retry_is_still_waited_out() -> None:
+    people = many(45)
+    out = await sync(FlagshipSite(people, lost={30: Lost("reask", times=2)}))
+    assert out.result.complete and out.urns == [p.urn for p in people]
+
+
+async def test_a_page_that_moves_past_a_lost_answer_stops_the_run_incomplete() -> None:
+    """The page read its own copy of 40-49 and asks for 50; netkeeper never saw 40-49.
+    The unit read whole before it (0-39) is handed over; the run stops ANSWER_LOST,
+    never RouteChanged, never complete."""
+    people = many(90)
+    out = await sync(FlagshipSite(people, lost={40: Lost("move_on")}))
+    result = out.result
+    assert result.reason is StopReason.ANSWER_LOST and result.outcome is None
+    assert not result.complete
+    assert result.lost is not None
+    assert (result.lost.start, result.lost.cause, result.lost.ending) == (
+        40,
+        "Exception (no resource)",
+        "the page moved past it",
+    )
+    assert out.urns == [p.urn for p in people[:40]]
+
+
+async def test_a_lost_answer_the_page_never_asks_for_again_stops_after_the_idle_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page answers every other scroll plan, then loses 30 and asks for nothing
+    more. Three idle plans came before the loss; the page still gets the full
+    MAX_IDLE_SCROLLS after it to ask again, then the run stops ANSWER_LOST."""
+    site = FlagshipSite(many(60), answer_plans=lambda n: n % 2 == 0, lost={30: Lost("silent")})
+    _count_plans(monkeypatch, site)
+    out = await sync(site)
+    assert out.result.reason is StopReason.ANSWER_LOST and out.urns == []
+    assert out.result.lost is not None and out.result.lost.start == 30
+    assert out.result.lost.ending == (
+        f"the page did not ask for it again within {page_connections.MAX_IDLE_SCROLLS} scrolls"
+    )
+    # Plans 2, 4, and 6 brought 10, 20, and the lost 30; six idle plans after it.
+    assert site.plans == 6 + page_connections.MAX_IDLE_SCROLLS
+
+
+async def test_a_retried_answer_without_a_body_for_a_page_already_read_is_skipped() -> None:
+    """The duplicate is compared with the expected start before its missing body is
+    looked at: already read, so skipped, never fatal."""
+    people = many(45)
+    out = await sync(FlagshipSite(people, lost={20: Lost("duplicate")}))
+    assert out.result.complete and out.urns == [p.urn for p in people]
+
+
+async def test_a_lost_answer_is_sticky_and_hands_over_only_whole_units() -> None:
+    site = FlagshipSite(many(90), lost={40: Lost("move_on")})
+    provider, _ = fake_provider(site)
+    async with provider.run("account-1") as run:
+        source = PageConnections(run, sleep=no_sleep, response_wait_s=0.01, landing_wait_s=0.05)
+        first = await source.fetch_page(start=0, count=40)
+        with pytest.raises(AnswerLost) as raised:
+            await source.fetch_page(start=40, count=40)
+        again = await source.fetch_page(start=0, count=40)
+        with pytest.raises(AnswerLost) as twice:
+            await source.fetch_page(start=40, count=40)
+    assert first.page is not None and len(first.page.connections) == 40
+    assert again.page is not None and again.page.connections == first.page.connections
+    assert twice.value is raised.value
+
+
+async def test_a_lost_answer_never_puts_the_exception_message_in_a_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Playwright's messages quote urls; only the class and a fixed category are kept."""
+    caplog.set_level(logging.DEBUG, logger="netkeeper")
+    out = await sync(FlagshipSite(many(60), lost={20: Lost("move_on")}))
+    assert out.result.lost is not None
+    assert "fake-lost-slug" in LOST_BODY_MESSAGE
+    assert "fake-lost-slug" not in caplog.text and "identifier" not in caplog.text
+    assert "fake-lost-slug" not in out.result.lost.describe()
+
+
+@pytest.mark.parametrize(
+    ("error", "cause"),
+    [
+        (RuntimeError("net::ERR_ABORTED at https://x.test/in/a"), "RuntimeError (aborted)"),
+        (Exception("Request content was evicted from inspector cache"), "Exception (evicted)"),
+        (ValueError("something else entirely"), "ValueError (unclassified)"),
+    ],
+)
+async def test_a_lost_answer_names_its_cause_in_fixed_words(error: Exception, cause: str) -> None:
+    out = await sync(FlagshipSite(many(60), lost={20: Lost("move_on", error=error)}))
+    assert out.result.lost is not None and out.result.lost.cause == cause
+
+
+async def test_a_gap_without_a_lost_answer_is_still_route_changed() -> None:
+    """The stall and gap rules are unchanged: only a lost answer turns either into
+    ANSWER_LOST."""
+    gap = await sync(FlagshipSite(many(60), skip=frozenset({20})))
+    stall = await sync(FlagshipSite(many(40), end="stall"))
+    for out in (gap, stall):
+        assert out.result.reason is StopReason.RESPONSE
+        assert out.result.outcome is Outcome.ROUTE_CHANGED and out.result.lost is None
+
+
+async def test_a_lost_first_screen_is_still_the_observation_failing() -> None:
+    """Only a pagination answer can be waited out: without the first screen there is no
+    list to scroll, so a landing whose body cannot be read fails as before."""
+
+    class LostScreen(FlagshipSite):
+        def _send(self, tab, method, url, status, body, resource_type, post_data=None, **kw):  # type: ignore[no-untyped-def]
+            if method == "GET":
+                kw["body_error"] = Exception(LOST_BODY_MESSAGE)
+            super()._send(tab, method, url, status, body, resource_type, post_data, **kw)
+
+    with pytest.raises(ObservationFailed):
+        await sync(LostScreen(many(20)))
 
 
 # --- the tab and the observation ------------------------------------------------------------

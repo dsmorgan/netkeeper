@@ -46,20 +46,26 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
+import factories
 import pytest
 from flagship_pages import document_html, pagination_payload, pagination_request, screen_payload
+from sqlalchemy.orm import Session, sessionmaker
 from voyager_pages import PEOPLE, Person
 
+from netkeeper.config import LinkedInSettings
+from netkeeper.db import session_scope
 from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserUnavailable
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import (
     ConnectionsPage,
+    LostAnswer,
     StopReason,
     SyncJobSpec,
     SyncMode,
@@ -68,6 +74,9 @@ from netkeeper.linkedin.connections import (
 from netkeeper.linkedin.flagship import CONNECTIONS_PAGE_PATH, PAGINATION_PATH
 from netkeeper.linkedin.pacing import ScrollProfile
 from netkeeper.linkedin.page_connections import PageConnections
+from netkeeper.models import SyncRunStatus, User
+from netkeeper.services import route_breaker, runs
+from netkeeper.services.connections_sync import sync_connections
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("NETKEEPER_BROWSER_TESTS") != "1",
@@ -183,26 +192,46 @@ _SCRIPT = """
     }
   }
   render(__FIRST_CARDS__);
+  // What the page does when an answer breaks off mid-body (#197): "reask" asks for
+  // the same start again on the next wheel, "move_on" gives up on it and asks for the
+  // page after.
+  const ON_FAIL = __ON_FAIL__;
+  let retry = false;
   async function more() {
     if (busy || next === null) { return; }
     busy = true;
     const body = TEMPLATE.split('"startIndex": 0').join('"startIndex": ' + next);
     const marker = 'page-' + (window.__sent.length + 1);
     window.__sent.push({body: body, marker: marker});
-    const answer = await fetch('/flagship-web/rsc-action/actions/pagination?sduiid=replica', {
-      method: 'POST',
-      headers: {'content-type': 'application/json', 'x-replica-marker': marker},
-      body: body,
-    });
-    const cards = parseInt(answer.headers.get('x-replica-cards'), 10);
-    const after = answer.headers.get('x-replica-next');
-    await answer.arrayBuffer();
-    next = after === 'none' ? null : parseInt(after, 10);
-    render(cards);
+    try {
+      const answer = await fetch('/flagship-web/rsc-action/actions/pagination?sduiid=replica', {
+        method: 'POST',
+        headers: {'content-type': 'application/json', 'x-replica-marker': marker},
+        body: body,
+      });
+      const cards = parseInt(answer.headers.get('x-replica-cards'), 10);
+      const after = answer.headers.get('x-replica-next');
+      await answer.arrayBuffer();
+      next = after === 'none' ? null : parseInt(after, 10);
+      render(cards);
+    } catch (error) {
+      if (ON_FAIL === 'move_on') {
+        next = next + 10;
+        render(10);
+      } else {
+        retry = true;
+      }
+    }
     busy = false;
   }
-  container.addEventListener('scroll', () => {
-    if (container.scrollTop + container.clientHeight > container.scrollHeight - 600) { more(); }
+  function nearBottom() {
+    return container.scrollTop + container.clientHeight > container.scrollHeight - 600;
+  }
+  container.addEventListener('scroll', () => { if (nearBottom()) { more(); } });
+  // After a failed answer the list did not grow, so the container may already sit at
+  // its bottom, where a wheel scrolls nothing and fires no scroll event.
+  container.addEventListener('wheel', () => {
+    if (retry && nearBottom()) { retry = false; more(); }
   });
 </script>
 """
@@ -212,6 +241,10 @@ class _Replica(BaseHTTPRequestHandler):
     people: ClassVar[list[Person]] = []
     stall_after: ClassVar[int | None] = None
     land_on_checkpoint: ClassVar[bool] = False
+    #: The pagination start whose answer breaks off mid-body, once (#197).
+    drop_at: ClassVar[int | None] = None
+    #: What the page does after that: ``"reask"`` or ``"move_on"``.
+    on_fail: ClassVar[str] = "reask"
     received: ClassVar[list[dict[str, Any]]] = []
     #: Which of :data:`_LAYOUTS` to serve. Both are pinned (#192 review round 2,
     #: N1, point 5): set by the ``site`` fixture's ``layout`` parameter.
@@ -231,6 +264,7 @@ class _Replica(BaseHTTPRequestHandler):
                 _LAYOUTS[self.layout]
                 + _SCRIPT.replace("__TEMPLATE__", json.dumps(pagination_request(0)))
                 .replace("__FIRST_NEXT__", first_next)
+                .replace("__ON_FAIL__", json.dumps(self.on_fail))
                 .replace("__FIRST_CARDS__", str(len(first)))
                 + "</body>",
             )
@@ -259,7 +293,28 @@ class _Replica(BaseHTTPRequestHandler):
             self._send(200, payload, "application/octet-stream", cards=len(people), next_=None)
             return
         payload = pagination_payload(people, start=start, next_start=next_start)
+        if start == self.drop_at:
+            type(self).drop_at = None
+            self._break_off(payload, cards=len(people), next_=next_start)
+            return
         self._send(200, payload, "application/octet-stream", cards=len(people), next_=next_start)
+
+    def _break_off(self, body: bytes, *, cards: int, next_: int | None) -> None:
+        """Send every header and half the body, then drop the connection (#197).
+
+        The browser has the answer's status and headers -- so the page's ``response``
+        event fires -- but never a whole body it could hand over.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("x-replica-cards", str(cards))
+        self.send_header("x-replica-next", "none" if next_ is None else str(next_))
+        self.end_headers()
+        self.wfile.write(body[: len(body) // 2])
+        self.wfile.flush()
+        self.close_connection = True
+        self.connection.shutdown(socket.SHUT_RDWR)
 
     def _redirect(self, location: str) -> None:
         self.send_response(302)
@@ -293,6 +348,8 @@ def site(request: pytest.FixtureRequest) -> Iterator[str]:
     _Replica.people = _people(35)
     _Replica.stall_after = None
     _Replica.land_on_checkpoint = False
+    _Replica.drop_at = None
+    _Replica.on_fail = "reask"
     _Replica.received = []
     _Replica.layout = request.param
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Replica)
@@ -392,3 +449,91 @@ async def test_a_landing_on_a_checkpoint_is_read_as_one_and_nothing_scrolls(
         pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
     assert answer.outcome is Outcome.CHECKPOINT
     assert _Replica.received == []
+
+
+# --- #197: an answer that breaks off mid-body ------------------------------------------------
+
+
+def result_cause_is_fixed(lost: LostAnswer | None) -> bool:
+    """The cause is a class name and a fixed category: nothing of the message."""
+    return lost is not None and lost.cause.endswith(")") and "127.0.0.1" not in lost.cause
+
+
+def _starts() -> list[int]:
+    return [
+        json.loads(r["body"])["clientArguments"]["payload"]["startIndex"] for r in _Replica.received
+    ]
+
+
+async def test_an_answer_that_breaks_off_is_asked_for_again_and_the_run_completes(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """The replica sends start 20's headers, half its body, and drops the connection.
+    The page asks for 20 again; that answer reads, and the run reads the whole list."""
+    _Replica.drop_at = 20
+    _Replica.on_fail = "reask"
+    pages: list[ConnectionsPage] = []
+
+    async def on_page(page: ConnectionsPage) -> None:
+        pages.append(page)
+
+    try:
+        async with provider.run() as run:
+            source = PageConnections(run, origin=site, scroll_profile=_FAST_SCROLL)
+            result = await run_connections_sync(
+                SyncJobSpec(mode=SyncMode.FULL, page_budget=20),
+                source,
+                _Gate(),
+                on_page=on_page,
+            )
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert _starts() == [10, 20, 20, 30, 35]
+    assert result.reason is StopReason.END_OF_LIST and result.complete
+    assert [c.urn for page in pages for c in page.connections] == [p.urn for p in _Replica.people]
+
+
+async def test_an_answer_that_breaks_off_and_is_moved_past_stops_safely_uncounted(
+    provider: AttachBrowserProvider, site: str, session_factory: sessionmaker[Session]
+) -> None:
+    """The page gives up on start 20 and asks for 30. The whole runner: the run ends
+    aborted as answer_lost, naming start 20; nothing is aged; the route-changed
+    breaker does not move."""
+    _Replica.drop_at = 20
+    _Replica.on_fail = "move_on"
+    with session_scope(session_factory, write=True) as session:
+        user_id = factories.make_user(session).id
+
+    async def no_wait(seconds: float) -> None:
+        return None
+
+    try:
+        async with provider.run() as run:
+            source = PageConnections(run, origin=site, scroll_profile=_FAST_SCROLL)
+            report = await sync_connections(
+                session_factory,
+                user_id,
+                SyncMode.FULL,
+                source,
+                settings=LinkedInSettings(),
+                sleep=no_wait,
+            )
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    # The page may ask for 35 in the same scroll that asked for 30; nothing after 30 is read.
+    assert _starts()[:3] == [10, 20, 30]
+    assert result_cause_is_fixed(report.result.lost)
+    result = report.result
+    assert result.reason is StopReason.ANSWER_LOST and not result.complete
+    assert result.lost is not None and result.lost.start == 20
+    assert result.lost.ending == "the page moved past it"
+    assert report.aging is None
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        row = runs.get_run(session, user, report.run_id)
+        assert (row.status, row.stop_reason) == (SyncRunStatus.ABORTED, "answer_lost")
+        assert row.notes is not None and "answer for start 20 could not be read" in row.notes
+        assert route_breaker.state(session, user, report.account_id).count == 0
