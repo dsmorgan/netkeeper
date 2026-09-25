@@ -10,6 +10,7 @@ soft (a value that does not read is left out).
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import replace
 from datetime import date
 
@@ -31,6 +32,7 @@ from netkeeper.linkedin.flagship_profile import (
     parse_contact_info,
     parse_navigation_request,
     parse_profile,
+    parse_profile_urn,
     profile_slug,
     same_slug,
 )
@@ -68,6 +70,9 @@ def test_the_captured_anchors_are_the_shape_notes() -> None:
     assert flagship_profile.SECTION_EMAIL == "contact-email"
     assert flagship_profile.SECTION_WEBSITE == "contact-website"
     assert flagship_profile.SECTION_PROFILE == "contact-your-profile"
+    assert flagship_profile.SECTION_INSTANT_MESSAGE == "contact-instant-message"
+    assert frozenset({"/safety/go", "/redir/redirect"}) == flagship_profile.REDIRECT_PATHS
+    assert flagship_profile.REDIRECT_PARAM == "url"
 
 
 # --- the profile -------------------------------------------------------------------------
@@ -370,7 +375,8 @@ def test_an_email_section_in_another_shape_is_refused(urls: list[str]) -> None:
 @pytest.mark.parametrize(
     "urls",
     [
-        ["https://www.linkedin.com/feed/"],  # LinkedIn, but not the redirect wrapper
+        ["https://www.linkedin.com/safety/go/?nope=1"],  # the wrapper, without a site
+        ["https://www.linkedin.com/safety/go/?url=a&url=b"],  # two sites in one link
         ["https://www.linkedin.com/redir/redirect?nope=1"],  # the wrapper, without a site
         ["https://www.linkedin.com/redir/redirect?url=a&url=b"],  # two sites in one link
         ["https://www.linkedin.com/redir/redirect?url=two%20words"],
@@ -476,9 +482,168 @@ def test_one_extra_run_leaves_the_location_unknown_too() -> None:
     assert details.headline == PRIYA.headline and details.location is None
 
 
-def test_a_linkedin_link_with_a_url_parameter_is_not_the_wrapper() -> None:
+def test_a_linkedin_link_with_a_url_parameter_is_skipped_not_guessed() -> None:
+    """A wrapper this reader does not know: which parameter is the site is unknown."""
     body = contact_info_payload(
-        PRIYA, website_urls=["https://www.linkedin.com/feed/?url=https://x.example.test"]
+        PRIYA,
+        emails=["priya.fake@example.test"],
+        website_urls=["https://www.linkedin.com/feed/?url=https://x.example.test"],
     )
-    with pytest.raises(RouteChanged, match="not a redirect"):
-        parse_contact_info(body, slug=PRIYA.slug)
+    info = parse_contact_info(body, slug=PRIYA.slug)
+    assert info.websites == () and info.emails == ("priya.fake@example.test",)
+
+
+# --- #203: what the first live run showed --------------------------------------------------
+
+
+def test_the_captured_wrapper_is_unwrapped() -> None:
+    body = contact_info_payload(
+        PRIYA,
+        websites=[Website("https://priya-fake.example.test/"), Website("http://blog.example.test")],
+    )
+    info = parse_contact_info(body, slug=PRIYA.slug)
+    assert info.websites == ("https://priya-fake.example.test/", "http://blog.example.test")
+
+
+def test_the_older_wrapper_still_unwraps() -> None:
+    body = contact_info_payload(
+        PRIYA,
+        website_urls=["https://www.linkedin.com/redir/redirect?url=https%3A%2F%2Fa.example.test"],
+    )
+    assert parse_contact_info(body, slug=PRIYA.slug).websites == ("https://a.example.test",)
+
+
+def test_a_linkedin_website_is_a_site_and_the_members_own_profile_is_skipped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """People list LinkedIn pages as websites; LinkedIn does not wrap its own links."""
+    caplog.set_level(logging.DEBUG, logger="netkeeper")
+    company = "https://www.linkedin.com/company/fictional-robotics-co/"
+    newsletter = "https://www.linkedin.com/newsletters/fake-notes-0000000000000000000/"
+    body = contact_info_payload(
+        PRIYA,
+        emails=["priya.fake@example.test"],
+        website_urls=[
+            f"https://www.linkedin.com/in/{PRIYA.slug}/",
+            f"https://linkedin.com/in/{PRIYA.slug.upper()}",
+            company,
+            "https://www.linkedin.com/safety/go/?url="
+            f"https%3A%2F%2Fwww.linkedin.com%2Fin%2F{PRIYA.slug}%2F&urlhash=FAKE",
+            newsletter,
+            f"https://www.linkedin.com/in/{MATEO.slug}/",
+            "https://priya-fake.example.test/",
+        ],
+        connected_since="Oct 3, 2023",
+    )
+    info = parse_contact_info(body, slug=PRIYA.slug)
+    assert info.websites == (
+        company,
+        newsletter,
+        f"https://www.linkedin.com/in/{MATEO.slug}/",
+        "https://priya-fake.example.test/",
+    )
+    assert info.emails == ("priya.fake@example.test",)
+    assert info.connected_on == date(2023, 10, 3)
+    counted = [r for r in caplog.records if "website link(s) to LinkedIn" in r.getMessage()]
+    assert [(r.levelno, r.getMessage()) for r in counted] == [
+        (logging.INFO, "enrichment: skipped 3 website link(s) to LinkedIn itself")
+    ]
+    assert PRIYA.slug not in caplog.text
+
+
+def test_no_linkedin_website_logs_no_count(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG, logger="netkeeper")
+    body = contact_info_payload(PRIYA, websites=[Website("https://priya-fake.example.test/")])
+    parse_contact_info(body, slug=PRIYA.slug)
+    assert "website link" not in caplog.text
+
+
+def test_the_instant_message_section_is_ignored_quietly(caplog: pytest.LogCaptureFixture) -> None:
+    """The CRM has no field for a messaging handle (spec 8.1): known, and not read."""
+    caplog.set_level(logging.DEBUG, logger="netkeeper")
+    body = contact_info_payload(
+        PRIYA,
+        emails=["priya.fake@example.test"],
+        extra_sections=["contact-instant-message", "contact-carrier-pigeon"],
+    )
+    info = parse_contact_info(body, slug=PRIYA.slug)
+    assert info == ContactInfo(emails=("priya.fake@example.test",))
+    by_level = {r.getMessage(): r.levelno for r in caplog.records}
+    assert by_level == {
+        "enrichment: the overlay has a messaging section; not stored": logging.DEBUG,
+        "enrichment: the overlay has a section this reader does not know:"
+        " contact-carrier-pigeon": logging.INFO,
+    }
+
+
+def test_the_degree_rendered_twice_is_not_the_headline() -> None:
+    """The captured top card renders the degree twice, one run after the other."""
+    for runs in (1, 2, 3):
+        details = parse_profile(_profile(degree_runs=runs), slug=PRIYA.slug)
+        assert (details.headline, details.location) == (PRIYA.headline, LOCATION)
+
+
+def test_the_top_card_is_read_once_per_profile(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG, logger="netkeeper")
+    body = _profile(extra_top_runs=["Some Short Run"])
+    assert parse_profile_urn(body, slug=PRIYA.slug) == PRIYA.urn
+    assert caplog.records == []  # the id alone reads nothing it would log
+    parse_profile(body, slug=PRIYA.slug)
+    assert [r.getMessage() for r in caplog.records] == [
+        "enrichment: the top card has 3 runs before its link; location unknown"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("options", "match"),
+    [
+        ({"top_cards": 0}, "0 profile-top-card"),
+        ({"contact_links": 0}, "0 Contact info links"),
+        ({"identity": "none"}, "0 profile ids"),
+    ],
+)
+def test_the_id_alone_is_refused_as_the_profile_is(options: dict[str, object], match: str) -> None:
+    with pytest.raises(RouteChanged, match=match):
+        parse_profile_urn(_profile(**options), slug=PRIYA.slug)
+    with pytest.raises(RouteChanged, match="another profile"):
+        parse_profile_urn(_profile(), slug=MATEO.slug)
+
+
+def test_a_title_in_a_plain_paragraph_reads() -> None:
+    """The captured entry: the title in a ``p``, then the company line and the dates as
+    text runs, inside a link to the company's page."""
+    roles = (
+        Role("Staff Data Engineer", "Fictional Robotics Co", "Full-time", "Aug 2021 - Present"),
+        Role("Data Engineer", "Placeholder Partners", None, "Jan 2019 - Jul 2021", "Remote"),
+        Role("Analyst", None, "Part-time", "2017 - 2018 · 1 yr", "Faketown, Exampleland"),
+        Role("Intern", None, None, "Jun 2016 - Aug 2016 · 3 mos", "Faketown, Exampleland"),
+    )
+    details = parse_profile(_profile(roles=roles), slug=PRIYA.slug)
+    assert details.positions == (
+        PositionEntry("Staff Data Engineer", "Fictional Robotics Co", 2021, 8, None, None),
+        PositionEntry("Data Engineer", "Placeholder Partners", 2019, 1, 2021, 7),
+        PositionEntry("Analyst", None, 2017, None, 2018, None),
+        PositionEntry("Intern", None, 2016, 6, 2016, 8),
+    )
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+def test_titles_as_text_runs_still_read(lazy: bool) -> None:
+    if lazy:
+        body = _profile(experience_inline=False)
+        details = parse_profile(
+            body, [experience_payload(ROLES, legacy_titles=True)], slug=PRIYA.slug
+        )
+    else:
+        details = parse_profile(_profile(legacy_titles=True), slug=PRIYA.slug)
+    assert [(p.title, p.company) for p in details.positions] == [
+        ("Staff Data Engineer", "Fictional Robotics Co"),
+        ("Data Engineer", "Placeholder Partners"),
+    ]
+
+
+def test_every_captured_entry_reads_and_none_is_skipped(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG, logger="netkeeper")
+    details = parse_profile(_profile(), slug=PRIYA.slug)
+    assert len(details.positions) == 2
+    assert "did not read" not in caplog.text
