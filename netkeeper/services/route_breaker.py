@@ -42,6 +42,7 @@ side of the line.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
@@ -51,6 +52,8 @@ from sqlalchemy.orm import Session
 from netkeeper.db import is_writer
 from netkeeper.models import User
 from netkeeper.services.settings_kv import get_setting, set_setting
+
+log = logging.getLogger(__name__)
 
 _KEY_PREFIX: Final = "linkedin.route_changed_breaker"
 
@@ -68,14 +71,24 @@ THRESHOLD: Final = 2
 class BreakerState:
     """The stored state, as it is. ``count`` of 0 (``since`` ``None``) is never
     stored (see :func:`record`, :func:`reset`); a caller reads that as "never
-    tripped, or just cleared"."""
+    tripped, or just cleared".
+
+    ``readable`` is false when the stored row exists but could not be parsed
+    (#191 review, F7). ``count`` and ``since`` are then placeholders (0,
+    ``None``), and :attr:`tripped` reads true regardless -- fail closed, the
+    direction every other gate in this module points: a safety gate this
+    account depends on that cannot be read is treated as firing, not as
+    clear. The next :func:`record` or :func:`reset` overwrites it with a
+    well-formed row either way, so corruption never persists past one call.
+    """
 
     count: int
     since: datetime | None
+    readable: bool = True
 
     @property
     def tripped(self) -> bool:
-        return self.count >= THRESHOLD
+        return (not self.readable) or self.count >= THRESHOLD
 
 
 def state(session: Session, user: User, account_id: int) -> BreakerState:
@@ -129,8 +142,8 @@ def record(
 
 
 def reset(session: Session, user: User, account_id: int) -> BreakerState:
-    """Clear the breaker directly (``netkeeper linkedin schedule reset-breaker``, or
-    the API). Needs a writer session. Idempotent."""
+    """Clear the breaker directly (``netkeeper linkedin schedule reset-breaker``).
+    Needs a writer session. Idempotent."""
     _require_writer(session, "route_breaker.reset")
     cleared = BreakerState(count=0, since=None)
     _store(session, user, account_id, cleared)
@@ -145,15 +158,21 @@ def _load(session: Session, user: User, account_id: int) -> BreakerState:
     raw = get_setting(session, user, _key(account_id))
     if raw is None:
         return BreakerState(count=0, since=None)
-    if not isinstance(raw, dict):
-        raise TypeError(
-            f"route-changed breaker state for account {account_id} is not an object: {raw!r}"
+    try:
+        if not isinstance(raw, dict):
+            raise TypeError(f"not an object: {raw!r}")
+        since_raw = raw.get("since")
+        return BreakerState(
+            count=int(_field(raw, "count")),
+            since=None if since_raw is None else datetime.fromisoformat(str(since_raw)),
         )
-    since_raw = raw.get("since")
-    return BreakerState(
-        count=int(_field(raw, "count")),
-        since=None if since_raw is None else datetime.fromisoformat(str(since_raw)),
-    )
+    except (TypeError, ValueError) as exc:
+        # #191 review F7: a posture report, or the scheduler's gate, is the last
+        # thing that should crash on a corrupt row -- fail closed instead
+        # (BreakerState.tripped reads true when unreadable) and say so in the log;
+        # `posture()` turns this into a warning a person actually sees.
+        log.error("route-changed breaker state for account %d is corrupt: %s", account_id, exc)
+        return BreakerState(count=0, since=None, readable=False)
 
 
 def _field(raw: dict[str, Any], name: str) -> Any:

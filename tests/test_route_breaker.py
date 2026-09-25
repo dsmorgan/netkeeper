@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.db import session_scope
 from netkeeper.models import User
 from netkeeper.services import route_breaker
+from netkeeper.services.settings_kv import set_setting
 
 NOW = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
 ACCOUNT = 1
@@ -199,3 +200,54 @@ def test_the_breaker_is_scoped_by_user(writer: Session) -> None:
     route_breaker.record(writer, owner, ACCOUNT, route_changed=True, succeeded=False, now=NOW)
     assert route_breaker.tripped(writer, owner, ACCOUNT)
     assert not route_breaker.tripped(writer, other, ACCOUNT)
+
+
+# --- fail closed: a corrupt row reads as tripped, never a crash (#191 review, F7) --
+
+
+def _key(account_id: int) -> str:
+    return f"linkedin.route_changed_breaker.{account_id}"
+
+
+def test_a_row_that_is_not_an_object_reads_as_tripped_not_a_crash(
+    writer: Session, user: User
+) -> None:
+    """A posture report, or the scheduler's gate, is the last thing that should
+    crash on a corrupt row: fail closed instead."""
+    set_setting(writer, user, _key(ACCOUNT), "not an object")
+    state = route_breaker.state(writer, user, ACCOUNT)
+    assert (state.readable, state.tripped) == (False, True)
+    assert route_breaker.tripped(writer, user, ACCOUNT)
+
+
+def test_a_row_missing_count_reads_as_tripped_not_a_crash(writer: Session, user: User) -> None:
+    set_setting(writer, user, _key(ACCOUNT), {"since": None})
+    assert route_breaker.tripped(writer, user, ACCOUNT)
+    assert route_breaker.state(writer, user, ACCOUNT).readable is False
+
+
+def test_a_row_whose_count_is_not_a_number_reads_as_tripped_not_a_crash(
+    writer: Session, user: User
+) -> None:
+    set_setting(writer, user, _key(ACCOUNT), {"count": "two", "since": None})
+    assert route_breaker.tripped(writer, user, ACCOUNT)
+    assert route_breaker.state(writer, user, ACCOUNT).readable is False
+
+
+def test_a_row_whose_since_does_not_parse_reads_as_tripped_not_a_crash(
+    writer: Session, user: User
+) -> None:
+    set_setting(writer, user, _key(ACCOUNT), {"count": 1, "since": "not-a-date"})
+    assert route_breaker.tripped(writer, user, ACCOUNT)
+    assert route_breaker.state(writer, user, ACCOUNT).readable is False
+
+
+def test_recording_after_a_corrupt_row_heals_it(writer: Session, user: User) -> None:
+    """The next record() (or reset()) overwrites the row with a well-formed one --
+    corruption never persists past one call."""
+    set_setting(writer, user, _key(ACCOUNT), "not an object")
+    updated = route_breaker.record(
+        writer, user, ACCOUNT, route_changed=True, succeeded=False, now=NOW
+    )
+    assert (updated.readable, updated.count) == (True, 1)
+    assert route_breaker.state(writer, user, ACCOUNT).readable is True

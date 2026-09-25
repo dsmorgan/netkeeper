@@ -40,7 +40,7 @@ from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserUnavailable
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import SyncRun, SyncRunKind, SyncRunStatus, SyncRunTrigger, User, UserKind
 from netkeeper.scoping import install_scope_guard, scoped
-from netkeeper.services import heat, runs, scheduler
+from netkeeper.services import heat, route_breaker, runs, scheduler
 from netkeeper.services.linkedin_accounts import (
     arm_scheduled_runs,
     ensure_account,
@@ -584,6 +584,97 @@ async def test_the_worker_refuses_a_scheduled_run_on_a_disarmed_account(
         assert owner is not None
         stored = runs.get_run(session, owner, run_id)
         assert (stored.status, stored.stop_reason) == (SyncRunStatus.FAILED, "disarmed")
+
+
+async def test_the_worker_refuses_a_scheduled_connections_run_with_the_breaker_tripped(
+    session_factory: Any, settings: Settings
+) -> None:
+    """#191 review F6: a second, independent check for the route-changed breaker,
+    matching the arming design above -- even a scheduled run someone recorded by
+    going around the scheduler's own gate (``services.scheduler.poll_and_fire``)
+    never attaches."""
+    import factories
+
+    from netkeeper.worker import BrowserWorker
+
+    provider, connector = fake_provider()
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        account = ensure_account(session, user)
+        arm_scheduled_runs(session, user, now=START)
+        for _ in range(route_breaker.THRESHOLD):
+            route_breaker.record(
+                session, user, account.id, route_changed=True, succeeded=False, now=START
+            )
+        run = SyncRun(
+            user_id=user.id,
+            linkedin_account_id=account.id,
+            kind=SyncRunKind.CONNECTIONS_FULL,
+            trigger=SyncRunTrigger.SCHEDULED,
+            started_at=START,
+        )
+        session.add(run)
+        session.flush()
+        run_id, user_id = run.id, user.id
+    worker = BrowserWorker(provider, session_factory, settings.linkedin)
+
+    outcome = await worker.execute(run_id, user_id)
+
+    assert outcome is runs.RunOutcome.DONE
+    assert connector.attaches == 0
+    with session_scope(session_factory) as session:
+        owner = session.get(User, user_id)
+        assert owner is not None
+        stored = runs.get_run(session, owner, run_id)
+        assert (stored.status, stored.stop_reason) == (
+            SyncRunStatus.FAILED,
+            "route_changed_breaker",
+        )
+
+
+async def test_the_worker_does_not_refuse_a_tripped_breaker_for_enrichment(
+    session_factory: Any, settings: Settings
+) -> None:
+    """#191 review F6's decision, at the worker too: enrichment does not share the
+    connections breaker's counter, so a tripped breaker never stops a scheduled
+    enrichment run from attaching."""
+    import factories
+
+    from netkeeper.linkedin.browser import BrowserUnavailable
+    from netkeeper.worker import BrowserWorker
+
+    provider, connector = fake_provider(error=BrowserUnavailable("Chrome is not running"))
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        account = ensure_account(session, user)
+        arm_scheduled_runs(session, user, now=START)
+        for _ in range(route_breaker.THRESHOLD):
+            route_breaker.record(
+                session, user, account.id, route_changed=True, succeeded=False, now=START
+            )
+        run = SyncRun(
+            user_id=user.id,
+            linkedin_account_id=account.id,
+            kind=SyncRunKind.ENRICH,
+            trigger=SyncRunTrigger.SCHEDULED,
+            started_at=START,
+        )
+        session.add(run)
+        session.flush()
+        run_id, user_id = run.id, user.id
+    worker = BrowserWorker(provider, session_factory, settings.linkedin)
+
+    outcome = await worker.execute(run_id, user_id)
+
+    # It reached the attach (and failed there, for the unrelated reason this fake
+    # provider is rigged with) rather than being refused by the breaker check.
+    assert connector.attaches == 1
+    assert outcome is runs.RunOutcome.RETRY_LATER
+    with session_scope(session_factory) as session:
+        owner = session.get(User, user_id)
+        assert owner is not None
+        stored = runs.get_run(session, owner, run_id)
+        assert stored.stop_reason == "browser_unavailable"
 
 
 def test_the_real_serve_builds_its_extractor_on_the_attach_provider(

@@ -125,6 +125,32 @@ def test_reset_breaker_yes_skips_the_prompt(cli_db: sessionmaker[Session]) -> No
     assert not _breaker_tripped(cli_db, account_id)
 
 
+def test_reset_breaker_asks_before_it_takes_the_write_lock(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#191 review F4: while the prompt waits on a person, another writer is not
+    locked out, the same as arm (#175 review F4; see
+    ``test_arming_asks_before_it_takes_the_write_lock``). The concurrent write
+    inside the prompt would wait out the busy timeout and fail if the command
+    held a writer session across it."""
+    _trip_breaker(cli_db)
+    wrote: list[bool] = []
+
+    def confirm_while_serve_writes(text: str) -> bool:
+        with session_scope(cli_db, write=True) as session:
+            flag_session(session, _user(session), Outcome.LOGGED_OUT, url="/authwall")
+        wrote.append(True)
+        return True
+
+    monkeypatch.setattr("typer.confirm", confirm_while_serve_writes)
+    monkeypatch.setattr("netkeeper.db.SQLITE_BUSY_TIMEOUT_MS", 100)
+
+    result = CliRunner().invoke(cli, ["linkedin", "schedule", "reset-breaker"])
+
+    assert result.exit_code == 0, result.output
+    assert wrote == [True]
+
+
 def test_reset_breaker_on_a_clear_account_says_so_and_asks_nothing(
     cli_db: sessionmaker[Session],
 ) -> None:
