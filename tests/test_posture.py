@@ -87,7 +87,7 @@ from netkeeper.services.scheduler import (
     JobKind,
     sync_account_schedule,
 )
-from netkeeper.services.settings_kv import delete_setting
+from netkeeper.services.settings_kv import delete_setting, set_setting
 
 #: A Wednesday, 14:00 in New York (the default configured zone), inside the
 #: default 08:30-21:30 window. Deliberately not a weekend and deliberately
@@ -1619,6 +1619,20 @@ def test_an_unreadable_activity_lock_warns(
     monkeypatch.setattr(activity_lock, "inspect", unreadable)
     report = _report(writer, user)
     row = _row(report, "one browser client")
+
+    assert row.status is Status.UNKNOWN
+    assert row.warnings
+    assert not report.ok
+
+
+def test_a_corrupt_route_changed_breaker_row_warns_unknown(writer: Session, user: User) -> None:
+    """#191 review F7: a stored row that could not be parsed is UNKNOWN, the same
+    status a cookie jar or an activity lock that could not be read gets -- never a
+    crashed report."""
+    set_setting(writer, user, f"linkedin.route_changed_breaker.{ACCOUNT}", "not an object")
+
+    report = _report(writer, user)
+    row = _row(report, "route-changed breaker")
 
     assert row.status is Status.UNKNOWN
     assert row.warnings

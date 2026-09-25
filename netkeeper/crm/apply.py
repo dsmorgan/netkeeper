@@ -968,23 +968,25 @@ def _mark_seen(session: Session, user: User, *, urns: set[str], public_ids: set[
     after the page's rows are written, so a Voyager connection the page just
     matched by slug has its URN by now, already covered by the ``urns`` branch.
 
-    **A ``public_ids``-only match (P2-08's DOM sighting) resets
-    ``li_missing_count`` only, and never clears ``li_disconnected_at`` or the
-    NotFound streak (#174 item 4).** A slug is not owned by one person forever
-    (spec 9.6), and #173's review already restricted which slugs ever reach
-    ``public_ids`` in the first place (see below) -- but even a genuine DOM
-    sighting's own slug is weaker evidence than a URN. The scenario that
-    requires this: during a Voyager outage, a source that falls back to DOM
-    sees nothing but DOM pages for the rest of the run (a one-way switch,
-    spec 9.3). If LinkedIn has since handed a removed contact's old slug to
-    a different person, that new person's DOM card would otherwise let this
-    function wrongly clear the *old*, actually-disconnected contact's
-    ``li_disconnected_at`` -- the same wrong reconnection F1/S1 fixed for a
-    Voyager row's own slug, but reachable here even without one, because DOM
-    never has a URN to prefer instead. Resetting the miss count is still safe
-    in the one direction this module allows (it can only delay a disconnect
-    that has not happened yet, never undo one that already has); clearing an
-    established disconnect is not, so only a URN sighting does that.
+    **A ``public_ids``-only match (a connection observed with no URN -- spec
+    9.8's #184 path, see :class:`~netkeeper.linkedin.voyager.ConnectionSummary`'s
+    docstring) resets ``li_missing_count`` only, and never clears
+    ``li_disconnected_at`` or the NotFound streak (#174 item 4).** A slug is
+    not owned by one person forever (spec 9.6), and #173's review already
+    restricted which slugs ever reach ``public_ids`` in the first place (see
+    below) -- but even a genuine URN-less sighting's own slug is weaker
+    evidence than a URN. The scenario that requires this: during an API
+    outage, a connection can show up with only a slug for identity, no URN
+    (#184). If LinkedIn has since handed a removed contact's old slug to a
+    different person, a later URN-less sighting of that person's card would
+    otherwise let this function wrongly clear the *old*, actually-disconnected
+    contact's ``li_disconnected_at`` -- the same wrong reconnection F1/S1
+    fixed for a Voyager row's own slug, but reachable here even without one,
+    because a URN-less row never has a URN to prefer instead. Resetting the
+    miss count is still safe in the one direction this module allows (it can
+    only delay a disconnect that has not happened yet, never undo one that
+    already has); clearing an established disconnect is not, so only a URN
+    sighting does that.
 
     **``public_ids`` is normalized-slug evidence from DOM sightings only (#173
     review, F1) -- ``apply_page`` never includes a Voyager row's own slug here.**

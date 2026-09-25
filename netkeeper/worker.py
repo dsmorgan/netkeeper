@@ -18,12 +18,14 @@ so no request handler imports the browser (``tests/test_browser_safety.py``
 lists this module among the browser's few callers on purpose).
 
 **Nothing is attached before it has to be.** Before the lock and the attach
-the worker re-checks, from the database, the three things that would make the
-run refuse anyway: a scheduled run on a disarmed account (the third check,
-after the scheduler's arm gate and ``runs.create_run``), the session flag, and
-heat over its skip threshold. A refused run is recorded ``failed`` and the
-browser is never touched. And the connections page a sync reads is loaded by
-its source's first ``fetch_page``, after the runner's own checks, not before them.
+the worker re-checks, from the database, the things that would make the run
+refuse anyway: a scheduled run on a disarmed account (the third check, after
+the scheduler's arm gate and ``runs.create_run``), a scheduled connections run
+whose route-changed breaker is tripped (the second independent check for that
+gate, matching the arming design; #191 review F6), the session flag, and heat
+over its skip threshold. A refused run is recorded ``failed`` and the browser
+is never touched. And the connections page a sync reads is loaded by its
+source's first ``fetch_page``, after the runner's own checks, not before them.
 
 **When the browser is not there.** ``BrowserUnavailable`` (Chrome is not
 running, or went away twice in one run) and ``BrowserBusy`` (another run, or
@@ -71,7 +73,7 @@ from netkeeper.linkedin.pacing import ScrollPlan
 from netkeeper.linkedin.page_connections import PageConnections
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
-from netkeeper.services import runs
+from netkeeper.services import route_breaker, runs
 from netkeeper.services.connections_sync import sync_connections
 from netkeeper.services.enrichment import enrich_contacts
 from netkeeper.services.events import Event, EventBus
@@ -126,6 +128,13 @@ _MODE: Final[dict[SyncRunKind, SyncMode]] = {
     SyncRunKind.CONNECTIONS_FULL: SyncMode.FULL,
     SyncRunKind.CONNECTIONS_INCREMENTAL: SyncMode.INCREMENTAL,
 }
+
+#: The kinds the route-changed breaker governs (#189 item 1, #191 review F6): not
+#: ``enrich``, which has its own separate unreadable-profile cap. Matches
+#: ``services.scheduler``'s own ``_ROUTE_BREAKER_KINDS``.
+_ROUTE_BREAKER_KINDS: Final = frozenset(
+    {SyncRunKind.CONNECTIONS_FULL, SyncRunKind.CONNECTIONS_INCREMENTAL}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +270,25 @@ class BrowserWorker:
             ):
                 log.error("scheduled run %d reached the worker on a disarmed account", run_id)
                 return "disarmed", "scheduled runs are disarmed for this account"
+            if (
+                facts.trigger is SyncRunTrigger.SCHEDULED
+                and facts.kind in _ROUTE_BREAKER_KINDS
+                and route_breaker.tripped(session, user, facts.account_id)
+            ):
+                # #191 review F6: a second, independent check, matching the arming
+                # design above -- the scheduler's own gate (services.scheduler's
+                # poll_and_fire) already skips a tripped account's due fire, so
+                # reaching this refusal means something bypassed that gate.
+                log.error(
+                    "scheduled run %d reached the worker with the route-changed"
+                    " breaker tripped for account %d",
+                    run_id,
+                    facts.account_id,
+                )
+                return (
+                    "route_changed_breaker",
+                    "the route-changed breaker is tripped for this account",
+                )
             try:
                 runs.refuse_if_flagged_or_hot(
                     session, user, facts.account_id, now=self._clock(), settings=self._settings

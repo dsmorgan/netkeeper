@@ -17,7 +17,7 @@ padded out where a page boundary has to fall inside it (``_many``).
 from __future__ import annotations
 
 import random
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import factories
@@ -37,13 +37,17 @@ from voyager_pages import (
 from netkeeper.config import BudgetSettings, LinkedInSettings, Settings
 from netkeeper.crm import apply as mapping
 from netkeeper.db import session_scope
+from netkeeper.linkedin.browser import BrowserUnavailable
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import (
     ConnectionsPage,
+    ConnectionsSource,
+    SourcePage,
     StopReason,
     SyncMode,
     SyncResult,
 )
+from netkeeper.linkedin.observe import ObservationFailed
 from netkeeper.linkedin.pacing import human_delay
 from netkeeper.linkedin.voyager import ConnectionSummary
 from netkeeper.models import (
@@ -132,7 +136,7 @@ class Sleeps:
 async def _sync(
     factory: sessionmaker[Session],
     user_id: int,
-    fetch: FakeConnectionsSource,
+    fetch: ConnectionsSource,
     mode: SyncMode = SyncMode.FULL,
     *,
     settings: LinkedInSettings = SETTINGS,
@@ -1080,6 +1084,128 @@ async def test_a_clear_breaker_shows_no_warning_in_posture(
         found = posture(session, user, report.account_id, now=NOW, settings=Settings())
     (breaker,) = [p for p in found.protections if p.name == "route-changed breaker"]
     assert breaker.warnings == ()
+
+
+@dataclass(slots=True)
+class _RaisingSource:
+    """A ``ConnectionsSource`` whose first page raises ``error`` instead of answering."""
+
+    error: Exception
+    endpoint: str = "raising"
+
+    async def fetch_page(self, *, start: int, count: int) -> SourcePage:
+        raise self.error
+
+
+async def test_two_observation_failed_runs_in_a_row_trip_the_breaker(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """#191 review F1: the observation mechanism failing to read the page (a body too
+    large to keep, too many responses left unread) is the same signal as
+    route_changed for the breaker. The run ends by exception, never reaching
+    sync_connections's own record() call, so this must be recorded from a
+    dedicated except clause or a wall whose body cannot be kept would let a
+    scheduled sync retry it forever uncounted."""
+    account_id = 0
+    for day in range(route_breaker.THRESHOLD):
+        with pytest.raises(ObservationFailed):
+            await _sync(
+                session_factory,
+                user_id,
+                _RaisingSource(ObservationFailed("an answer of the page could not be kept")),
+                at=NOW + timedelta(days=day),
+            )
+        with session_scope(session_factory, write=True) as session:
+            user = session.get(User, user_id)
+            assert user is not None
+            account_id = ensure_account(session, user).id
+
+    assert _breaker_tripped(session_factory, user_id, account_id)
+
+
+async def test_a_browser_unavailable_run_does_not_move_the_breaker(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """#191 review F1's decision: BrowserUnavailable ("the tab was replaced mid-read")
+    is the local browser breaking, not a signal about whether the connections
+    route is readable -- it already gets its own RETRY_LATER handling at the
+    worker (spec 9.9). It never counts toward the breaker, not even repeated,
+    because a repeat says nothing more about the route than the first one did."""
+    report = await _sync(
+        session_factory, user_id, FakeConnectionsSource(list(PEOPLE), script={0: UNRECOGNIZED})
+    )
+    assert _breaker_count(session_factory, user_id, report.account_id) == 1
+
+    for day in (1, 2, 3):
+        with pytest.raises(BrowserUnavailable):
+            await _sync(
+                session_factory,
+                user_id,
+                _RaisingSource(BrowserUnavailable("the run's tab was replaced mid-read")),
+                at=NOW + timedelta(days=day),
+            )
+
+    assert _breaker_count(session_factory, user_id, report.account_id) == 1
+    assert not _breaker_tripped(session_factory, user_id, report.account_id)
+
+
+@pytest.mark.parametrize(
+    "scripted", [THROTTLED, CHECKPOINT, LOGGED_OUT], ids=["throttled", "checkpoint", "logged-out"]
+)
+async def test_a_non_route_changed_stop_does_not_move_the_breaker(
+    session_factory: sessionmaker[Session], user_id: int, scripted: Scripted
+) -> None:
+    """#191 review F2: throttled, checkpoint, and logged-out are different signals
+    (they already raise heat / flag the session) and must not also count here."""
+    report = await _sync(
+        session_factory, user_id, FakeConnectionsSource(list(PEOPLE), script={0: scripted})
+    )
+    assert _breaker_count(session_factory, user_id, report.account_id) == 0
+
+
+async def test_a_route_changed_stop_after_some_pages_still_trips_the_breaker(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """#191 review F3: route_changed counts wherever in the run it happens, not only
+    when it is the very first page (``result.pages == 0``)."""
+    report = await _sync(
+        session_factory, user_id, FakeConnectionsSource(_many(100), script={1: UNRECOGNIZED})
+    )
+    assert report.result.pages == 1  # one page read before the route_changed stop
+    assert report.result.outcome is Outcome.ROUTE_CHANGED
+    assert _breaker_count(session_factory, user_id, report.account_id) == 1
+
+
+async def test_a_caught_up_incremental_success_clears_the_breaker(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """#191 review F5: CAUGHT_UP is a natural end too -- an incremental sync stopping
+    because every URN on its first page is already known -- and must reset the
+    streak the same as END_OF_LIST. Fifty people (more than one page) so the first
+    page is full: a short first page would end the list before CAUGHT_UP is even
+    checked, proving nothing about this specific natural end."""
+    people = _many(50)
+    first = await _sync(session_factory, user_id, FakeConnectionsSource(people))
+    for day in range(route_breaker.THRESHOLD):
+        await _sync(
+            session_factory,
+            user_id,
+            FakeConnectionsSource(people, script={0: UNRECOGNIZED}),
+            at=NOW + timedelta(days=day + 1),
+        )
+    assert _breaker_tripped(session_factory, user_id, first.account_id)
+
+    report = await _sync(
+        session_factory,
+        user_id,
+        FakeConnectionsSource(people),
+        SyncMode.INCREMENTAL,
+        at=NOW + timedelta(days=10),
+    )
+
+    assert report.result.reason is StopReason.CAUGHT_UP
+    assert not _breaker_tripped(session_factory, user_id, first.account_id)
+    assert _breaker_count(session_factory, user_id, first.account_id) == 0
 
 
 # --- #184: contacts read off connections-page cards ----------------------------------

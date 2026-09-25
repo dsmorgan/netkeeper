@@ -1176,9 +1176,28 @@ def _route_changed_breaker(session: Session, user: User, account_id: int) -> Pro
     :data:`~netkeeper.services.route_breaker.THRESHOLD`. Tripped is the
     protection *firing*, the same as heat over its skip threshold: still ``ON``,
     still worth saying out loud.
+
+    A stored row that could not be read (#191 review, F7) is ``UNKNOWN``, the
+    same status a cookie jar or a browser probe that could not be read gets
+    above -- the honest answer is "unknown", even though
+    :meth:`~netkeeper.services.route_breaker.BreakerState.tripped` treats it
+    as tripped for the scheduler's own sake (fail closed).
     """
     current = route_breaker.state(session, user, account_id)
     since = f" (since {current.since:%Y-%m-%d %H:%M UTC})" if current.since is not None else ""
+    if not current.readable:
+        return Protection(
+            name="route-changed breaker",
+            status=Status.UNKNOWN,
+            value="stored state unreadable; treated as tripped",
+            warnings=(
+                "the route-changed breaker's stored state is corrupt and could not be"
+                " read. Scheduled connections runs are skipped until it is next written"
+                " (fail closed) -- run one by hand (`netkeeper linkedin sync`) to check"
+                " and repair it, or clear it directly with"
+                " `netkeeper linkedin schedule reset-breaker`",
+            ),
+        )
     if current.count == 0:
         return Protection(
             name="route-changed breaker",

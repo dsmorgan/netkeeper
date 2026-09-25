@@ -29,7 +29,14 @@ logic; it decides what the job may do and what happens after it stops:
   ``route_changed`` runs in a row trip it, and the scheduler then skips every
   scheduled connections fire until a person clears it or a run (manual or
   scheduled) succeeds. A cancel moves neither way: it says nothing about
-  whether the route is readable.
+  whether the route is readable. Recorded in its own writer session, after
+  heat and the session flag have already committed (#191 review, F7), so a
+  problem writing the breaker's row can never roll either of those back. A
+  run that ends by :class:`~netkeeper.linkedin.observe.ObservationFailed` --
+  the observation mechanism itself failing to read the page, never LinkedIn
+  answering -- counts as ``route_changed`` too (#191 review, F1): the run
+  never reaches this block on its own, so that case is recorded from its own
+  ``except`` clause instead, then re-raised.
 * **Mapping.** Each page is written in its own writer session as it arrives,
   so the write lock is never held across a fetch or a pause. After a
   *complete* full sync, and only then, contacts it did not see are aged
@@ -74,6 +81,7 @@ from netkeeper.linkedin.connections import (
     SyncResult,
     run_connections_sync,
 )
+from netkeeper.linkedin.observe import ObservationFailed
 from netkeeper.linkedin.pacing import human_delay
 from netkeeper.models import JsonValue, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.services import budgets, route_breaker, runs
@@ -321,16 +329,46 @@ async def sync_connections(
             if on_progress is not None:
                 await on_progress(event)
 
-        result = await run_connections_sync(
-            spec,
-            source,
-            gate,
-            on_page=on_page,
-            on_progress=progress,
-            clock=clock,
-        )
+        try:
+            result = await run_connections_sync(
+                spec,
+                source,
+                gate,
+                on_page=on_page,
+                on_progress=progress,
+                clock=clock,
+            )
+        except ObservationFailed:
+            # #191 review F1: the observation mechanism failing to read the page (a
+            # body too large to keep, too many responses left unread) is a source-
+            # side signal that the connections list's own route could not be read --
+            # the same thing a wall with no first screen means -- so a run that ends
+            # by this exception must count toward the breaker too. Without this, a
+            # wall whose body cannot even be kept would let a scheduled sync retry it
+            # forever uncounted, exactly what #189 item 1 exists to stop: the run
+            # never reaches the block below on its own, so this is recorded here,
+            # in its own writer session, before re-raising for ``runs_recording`` to
+            # finish the run ``failed``/``"error"`` as it already does.
+            #
+            # BrowserUnavailable (the tab replaced mid-read) is deliberately *not*
+            # caught here, even repeated: it is the local browser/tab breaking, not a
+            # signal about whether LinkedIn's own route is readable, and it already
+            # gets its own handling at the worker (spec 9.9's ``RETRY_LATER``).
+            # Counting it toward this breaker would let an unrelated tab hiccup trip
+            # a gate whose whole point is "the connections route is broken", and
+            # would make ``reset-breaker``'s own messaging ("run one by hand to check
+            # whether the wall is still there") actively misleading for it.
+            with session_scope(factory, write=True) as session:
+                route_breaker.record(
+                    session,
+                    _load_user(session, user_id),
+                    account_id,
+                    route_changed=True,
+                    succeeded=False,
+                    now=clock(),
+                )
+            raise
 
-        aging: mapping.AgingCounts | None = None
         heat_raised = flagged = False
         with session_scope(factory, write=True) as session:
             user = _load_user(session, user_id)
@@ -343,13 +381,19 @@ async def sync_connections(
                 if result.outcome in _FLAG_OUTCOMES:
                     flag_session(session, user, result.outcome, url=result.final_url or "")
                     flagged = True
-            # #189 item 1: neither a budget stop nor a cancel (both StopReason.BUDGET
-            # or PAGE_BUDGET) is route_changed or a natural end, so record() leaves
-            # the streak exactly where it was for either -- there is no separate
-            # cancelled/gate.cancelled case to special-case here.
+
+        # #191 review F7: its own writer session, after heat and the session flag
+        # have already committed above, so a problem writing the breaker's row (a
+        # corrupt one is fail-closed in route_breaker.py and never raises for it,
+        # but nothing guarantees the write itself always succeeds) can never roll
+        # either of those back. Neither a budget stop nor a cancel (both
+        # StopReason.BUDGET or PAGE_BUDGET) is route_changed or a natural end, so
+        # record() leaves the streak exactly where it was for either -- there is no
+        # separate cancelled/gate.cancelled case to special-case here.
+        with session_scope(factory, write=True) as session:
             route_breaker.record(
                 session,
-                user,
+                _load_user(session, user_id),
                 account_id,
                 route_changed=(
                     result.reason is StopReason.RESPONSE and result.outcome is Outcome.ROUTE_CHANGED
@@ -357,6 +401,10 @@ async def sync_connections(
                 succeeded=result.reason in _NATURAL_ENDS,
                 now=clock(),
             )
+
+        aging: mapping.AgingCounts | None = None
+        with session_scope(factory, write=True) as session:
+            user = _load_user(session, user_id)
             if result.complete:
                 aging = mapping.age_unseen(
                     session,
