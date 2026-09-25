@@ -276,9 +276,8 @@ class VoyagerFetch(Protocol):
     Nothing in production implements this any more. P2-01's in-page fetch
     (``linkedin/fetch.py``) did, until ADR 0006 retired it: #187 for the
     connections list and #190 for enrichment, since netkeeper now sends no
-    request of its own. It stays because :class:`~netkeeper.linkedin.connections.VoyagerConnections`
-    (not wired) and the offline tests of the connections job's paging rules take
-    one; the parsers below only ever see the :class:`VoyagerResponse`, never a
+    request of its own. It stays as the shape the parsers below were written
+    against: they only ever see a :class:`VoyagerResponse`'s body, never a
     ``Page`` or any other Playwright/CDP type (spec 9.10).
     """
 

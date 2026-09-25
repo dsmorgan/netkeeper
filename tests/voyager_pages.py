@@ -1,4 +1,4 @@
-"""Connections-list pages for sync tests: hand-built people, Voyager's page shape, a fake fetch.
+"""Connections-list pages for sync tests: hand-built people, Voyager's page shape, a fake source.
 
 Everyone here is invented: fake names, fake ``ACoAAFAKE`` URNs, fake slugs,
 companies that do not exist, no email addresses or phone numbers. The page
@@ -8,15 +8,7 @@ that fixture byte for byte (as parsed JSON), so a builder that drifted from the
 fixture would fail there rather than test the sync against a shape LinkedIn
 never sends.
 
-:class:`FakeVoyagerFetch` answers a ``VoyagerRequest`` from an in-memory
-connections list by the request's ``start`` and ``count``, the way the real
-endpoint pages, and can be told to answer one call with something else (a
-throttle, a checkpoint page, an unrecognized body). It records every request
-and never opens a socket. It backs ``tests/test_linkedin_fetch.py`` and
-``tests/smoke/test_fetch_smoke.py``'s exercise of the in-page Voyager
-transport, still live for enrichment.
-
-:class:`FakeConnectionsSource` is a step above it: a neutral, in-memory
+:class:`FakeConnectionsSource` is a neutral, in-memory
 :class:`~netkeeper.linkedin.connections.ConnectionsSource` with no request
 shape of its own, for tests that drive ``run_connections_sync`` or
 ``services.connections_sync.sync_connections`` and only need pages, not a
@@ -43,8 +35,6 @@ from netkeeper.linkedin.voyager import (
     ConnectionsPageResult,
     ConnectionSummary,
     RouteChanged,
-    VoyagerRequest,
-    VoyagerResponse,
     parse_connections_page,
 )
 
@@ -135,46 +125,6 @@ CHECKPOINT = Scripted(
 )
 LOGGED_OUT = Scripted(200, "<html>Sign in</html>", "https://www.linkedin.com/authwall?trk=x")
 UNRECOGNIZED = Scripted(200, json.dumps({"data": {"somethingElse": []}}))
-
-
-@dataclass(slots=True)
-class FakeVoyagerFetch:
-    """A ``VoyagerFetch`` over an in-memory list. ``script[i]`` replaces call ``i``'s answer."""
-
-    people: list[Person]
-    script: dict[int, Scripted] = field(default_factory=dict)
-    requests: list[VoyagerRequest] = field(default_factory=list)
-    start_offset: int = 0  # added to the answered ``start``, to fake a page LinkedIn misnumbers
-    #: What ``paging.total`` says: None tells the truth; an int, or a function of the
-    #: requested ``start``, lies. Every page's ``elements`` stay honest either way.
-    total: int | Callable[[int], int] | None = None
-
-    async def __call__(self, request: VoyagerRequest) -> VoyagerResponse:
-        call = len(self.requests)
-        self.requests.append(request)
-        scripted = self.script.get(call)
-        if scripted is not None:
-            return VoyagerResponse(scripted.status, scripted.body, scripted.final_url)
-        start = int(request.query["start"])
-        count = int(request.query["count"])
-        body = page_body(
-            self.people[start : start + count],
-            start=start + self.start_offset,
-            count=count,
-            total=self._total(start),
-        )
-        return VoyagerResponse(200, body, CONNECTIONS_URL)
-
-    def _total(self, start: int) -> int:
-        if self.total is None:
-            return len(self.people)
-        if isinstance(self.total, int):
-            return self.total
-        return self.total(start)
-
-    @property
-    def starts(self) -> list[int]:
-        return [int(request.query["start"]) for request in self.requests]
 
 
 def _from_person(person: Person) -> ConnectionSummary:
