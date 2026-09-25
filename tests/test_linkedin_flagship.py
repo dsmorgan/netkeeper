@@ -352,7 +352,9 @@ def test_the_profile_fixture_carries_the_anchors_the_shape_note_names() -> None:
     screens = [
         node["value"]["content"]["screen"]
         for node in nodes
-        if isinstance(node, dict) and node.get("$type") == "proto.sdui.actions.core.Navigate"
+        if isinstance(node, dict)
+        and node.get("$type") == "proto.sdui.actions.core.Navigate"
+        and node["value"]["content"]["$case"] == "screen"
     ]
     (contact,) = [s for s in screens if s["screenId"] == flagship.CONTACT_DETAILS_SCREEN_ID]
     assert set(contact["requestedArguments"]["payload"]) == {

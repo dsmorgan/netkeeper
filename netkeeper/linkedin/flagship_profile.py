@@ -25,13 +25,15 @@ somebody else, is refused rather than read.
 **What fails soft, and what does not.** What the capture showed (the top card, the
 Contact info link and its payload, the email and website sections, the profile link in
 the overlay) is read strictly: a shape that moved is ``RouteChanged``, and the job
-counts the profile unreadable. What the capture did not show -- the phone, address,
-birthday, and Twitter sections, education, grouped roles -- is read by analogy and fails
-soft: a value that does not read is left out, never guessed and never a run stop. An
-experience entry that does not read is skipped, not the profile: positions are upserted
-and never removed, so a skipped entry costs nothing it could take away. The headline and
-location are read from the top card's text runs by position; when the runs are not the
-captured layout they are left unknown, which ``crm/apply.py`` reads as "not provided".
+counts the profile unreadable. A website a person listed on LinkedIn's own host is not a
+shape that moved (#203): one to their own profile is skipped, and any other is kept.
+What the capture did not show -- the phone, address, birthday, Twitter, and messaging
+sections, education, grouped roles -- is read by analogy and fails soft: a value that
+does not read is left out, never guessed and never a run stop. An experience entry that
+does not read is skipped, not the profile: positions are upserted and never removed, so
+a skipped entry costs nothing it could take away. The headline and location are read
+from the top card's text runs by position; when the runs are not the captured layout
+they are left unknown, which ``crm/apply.py`` reads as "not provided".
 
 Pure: no browser, no database (spec 9.10). Values never reach a log or an exception:
 errors describe the shape, never a name, a slug, or an address.
@@ -99,13 +101,18 @@ SECTION_PHONE: Final = "contact-phone"
 SECTION_TWITTER: Final = "contact-twitter"
 SECTION_BIRTHDAY: Final = "contact-birthday"
 SECTION_ADDRESS: Final = "contact-address"
+#: Seen on the first live run (#203), not in the capture: a messaging handle. The CRM has
+#: no field for one (spec 8.1), so the section is recognized and read no further.
+SECTION_INSTANT_MESSAGE: Final = "contact-instant-message"
 SECTION_PREFIX: Final = "contact-"
 
 #: The overlay's last line: ``Connected since`` and the day, as text.
 CONNECTED_SINCE: Final = "Connected since"  # captured 2026-09-24
 
-#: The redirect wrapper a website link goes through, and the parameter holding the site.
-REDIRECT_PATH: Final = "/redir/redirect"  # captured 2026-09-24
+#: The wrappers a website link goes through on LinkedIn's host, and the parameter that
+#: holds the site. The #149 capture's overlay used ``/safety/go`` (with ``isSdui``,
+#: ``mt``, and ``urlhash`` beside ``url``); ``/redir/redirect`` is the older client's.
+REDIRECT_PATHS: Final = frozenset({"/safety/go", "/redir/redirect"})  # captured 2026-09-24
 REDIRECT_PARAM: Final = "url"
 
 PROFILE_ENDPOINT: Final = "flagship-web/profile"
@@ -262,6 +269,21 @@ def parse_profile(
         positions=tuple(dict.fromkeys(positions)),
         education=tuple(dict.fromkeys(education)),
     )
+
+
+def parse_profile_urn(screen: bytes | str, *, slug: str) -> str:
+    """The member's URN from the screen alone, checked as :func:`parse_profile` checks it.
+
+    What the browser half reads first, before it decides which lazy cards are this
+    member's. It reads nothing else, so nothing it logs repeats when the whole profile
+    is read after it. Raises :class:`~netkeeper.linkedin.voyager.RouteChanged` as
+    :func:`parse_profile` does for the top card, the Contact info link, and the id.
+    """
+    endpoint = PROFILE_ENDPOINT
+    payload = parse_flight(screen, endpoint=endpoint)
+    top = _one_view(payload, TOP_CARD_VIEW, endpoint=endpoint)
+    _contact_link(payload, top, slug=slug, endpoint=endpoint)
+    return _identity(payload, top, slug=slug, endpoint=endpoint)
 
 
 def _component_payloads(components: Sequence[bytes]) -> Iterator[FlightPayload]:
@@ -431,17 +453,19 @@ def _top_card_text(
         return None, None
     end = runs.index(_LINK)
     start = next(
-        (
-            i + 1
-            for i, run in enumerate(runs[:end])
-            if isinstance(run, str) and _DEGREE.fullmatch(run.strip())
-        ),
+        (i + 1 for i, run in enumerate(runs[:end]) if _is_degree(run)),
         None,
     )
     if start is None:
         log.warning("enrichment: the top card has no degree run; headline and location unknown")
         return None, None
-    between = [run for run in runs[start:end] if isinstance(run, str) and run.strip() != "·"]
+    # The captured top card renders the degree twice (#203), one run after the other:
+    # every degree run is the degree, never the headline.
+    between = [
+        run
+        for run in runs[start:end]
+        if isinstance(run, str) and run.strip() != "·" and not _is_degree(run)
+    ]
     if not between:
         return None, None
     headline = _text(between[0])
@@ -454,6 +478,10 @@ def _top_card_text(
         return headline, None
     location = _text(between[1]) if len(between) == 2 else None
     return headline, location
+
+
+def _is_degree(run: object) -> bool:
+    return isinstance(run, str) and _DEGREE.fullmatch(run.strip()) is not None
 
 
 def _text(value: str) -> str | None:
@@ -499,20 +527,38 @@ def _items(payload: FlightPayload, root: object, *, endpoint: str) -> list[objec
     return items
 
 
+#: Plain HTML elements whose own strings are an entry's runs too. The captured experience
+#: entry renders its title as a ``p`` whose ``children`` are the text, ahead of the
+#: ``textProps`` runs that hold the company line and the dates (#203).
+_PLAIN_TEXT_TAGS: Final = frozenset({"p"})
+
+
 def _item_runs(
     payload: FlightPayload, item: object, *, endpoint: str
 ) -> tuple[list[str], list[object]]:
-    """An ``li``'s own text runs, and the ``li`` elements nested in it."""
+    """An ``li``'s own text runs, in page order, and the ``li`` elements nested in it.
+
+    A run is a string in a text component's ``textProps.children``, or a string among a
+    plain ``p`` element's ``children``.
+    """
     assert isinstance(item, list)
     nested = _items(payload, item[3], endpoint=endpoint)
     own: list[str] = []
     for node in _without(payload, item[3], nested, endpoint=endpoint):
         props = element_props(node)
-        text = props.get("textProps") if props is not None else None
+        if props is None:
+            continue
+        text = props.get("textProps")
         children = text.get("children") if isinstance(text, dict) else None
-        if isinstance(children, list):
+        if not isinstance(children, list) and _is_plain_text(node):
+            children = props.get("children")
+        if isinstance(children, list) and not is_element(children):
             own.extend(child for child in children if isinstance(child, str))
     return own, nested
+
+
+def _is_plain_text(node: object) -> bool:
+    return isinstance(node, list) and node[1] in _PLAIN_TEXT_TAGS
 
 
 def _without(
@@ -697,7 +743,7 @@ def parse_contact_info(body: bytes | str, *, slug: str) -> ContactInfo:
         if linked is None or not same_slug(linked, slug):
             raise RouteChanged(endpoint, "an overlay for another profile than the tab's")
     emails = _emails(payload, sections.get(SECTION_EMAIL, []), endpoint=endpoint)
-    websites = _websites(payload, sections.get(SECTION_WEBSITE, []), endpoint=endpoint)
+    websites = _websites(payload, sections.get(SECTION_WEBSITE, []), slug=slug, endpoint=endpoint)
     phones = _soft_phones(payload, sections.get(SECTION_PHONE, []), endpoint=endpoint)
     handles = _soft_handles(payload, sections.get(SECTION_TWITTER, []), endpoint=endpoint)
     birthday = _soft_value(payload, sections.get(SECTION_BIRTHDAY, []), endpoint=endpoint)
@@ -711,7 +757,10 @@ def parse_contact_info(body: bytes | str, *, slug: str) -> ContactInfo:
         SECTION_BIRTHDAY,
         SECTION_ADDRESS,
     }
-    for view in sorted(set(sections) - known):
+    if SECTION_INSTANT_MESSAGE in sections:
+        # Nowhere to put it (spec 8.1): known, and read no further.
+        log.debug("enrichment: the overlay has a messaging section; not stored")
+    for view in sorted(set(sections) - known - {SECTION_INSTANT_MESSAGE}):
         log.info("enrichment: the overlay has a section this reader does not know: %s", view)
     return ContactInfo(
         emails=emails,
@@ -773,27 +822,53 @@ def _emails(payload: FlightPayload, nodes: list[object], *, endpoint: str) -> tu
     return tuple(dict.fromkeys(found))
 
 
-def _websites(payload: FlightPayload, nodes: list[object], *, endpoint: str) -> tuple[str, ...]:
-    """Each website link's site, unwrapped from LinkedIn's redirect."""
+def _websites(
+    payload: FlightPayload, nodes: list[object], *, slug: str, endpoint: str
+) -> tuple[str, ...]:
+    """Each website link's site, unwrapped from LinkedIn's redirect.
+
+    A link on LinkedIn's own host that is not one of the wrappers is a site a person
+    listed (a company page, a newsletter, their own profile): LinkedIn does not wrap its
+    own links. One to this member's own profile is skipped, since the contact holds that
+    already; so is one that carries a ``url`` parameter on a path that is not a known
+    wrapper, since which parameter is the site is unknown. Any other is kept as a site.
+    """
     found: list[str] = []
+    skipped = 0
     for node in nodes:
         for url, _ in _links(payload, node, endpoint=endpoint):
             split = urlsplit(url)
-            host = (split.hostname or "").lower()
             site: str | None = url
-            if host == "linkedin.com" or host.endswith(".linkedin.com"):
-                if split.path.rstrip("/") != REDIRECT_PATH:
-                    raise RouteChanged(
-                        endpoint, "a website link to LinkedIn that is not a redirect"
-                    )
-                values = parse_qs(split.query).get(REDIRECT_PARAM, [])
-                site = values[0] if len(values) == 1 else None
+            if _on_linkedin(split.hostname):
+                query = parse_qs(split.query)
+                if split.path.rstrip("/") in REDIRECT_PATHS:
+                    values = query.get(REDIRECT_PARAM, [])
+                    site = values[0] if len(values) == 1 else None
+                elif REDIRECT_PARAM in query or _is_own_profile(split.path, slug):
+                    skipped += 1
+                    continue
             if site is None or not site.strip() or _has_control(site) or len(site) > MAX_TEXT:
                 raise RouteChanged(endpoint, "a website link without a site in it")
             if any(ch.isspace() for ch in site.strip()):
                 raise RouteChanged(endpoint, "a website that is not one url")
+            inner = urlsplit(site.strip())
+            if _on_linkedin(inner.hostname) and _is_own_profile(inner.path, slug):
+                skipped += 1
+                continue
             found.append(site.strip())
+    if skipped:
+        log.info("enrichment: skipped %d website link(s) to LinkedIn itself", skipped)
     return tuple(dict.fromkeys(found))
+
+
+def _on_linkedin(hostname: str | None) -> bool:
+    host = (hostname or "").lower()
+    return host == "linkedin.com" or host.endswith(".linkedin.com")
+
+
+def _is_own_profile(path: str, slug: str) -> bool:
+    linked = profile_slug(path)
+    return linked is not None and same_slug(linked, slug)
 
 
 def _section_texts(payload: FlightPayload, node: object, *, endpoint: str) -> list[str]:

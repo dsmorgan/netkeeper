@@ -102,6 +102,7 @@ from netkeeper.linkedin.flagship_profile import (
     parse_contact_info,
     parse_navigation_request,
     parse_profile,
+    parse_profile_urn,
     profile_slug,
     same_slug,
 )
@@ -250,7 +251,7 @@ class PageProfiles:
         try:
             # The member's id first, from the screen alone: a lazy card whose request
             # names another member, by slug or by id, is never read as this one's.
-            urn = parse_profile(self._screen, (), slug=self._slug).urn
+            urn = parse_profile_urn(self._screen, slug=self._slug)
             kept = [
                 body for body, request in self._components if _names_only(request, self._slug, urn)
             ]

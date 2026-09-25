@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import count
 from typing import Any, Final
+from urllib.parse import urlencode
 
 from voyager_pages import Person
 
@@ -528,10 +529,15 @@ def pages_of(
 
 @dataclass(frozen=True, slots=True)
 class Role:
-    """One experience entry, as the card renders it: text, not structured data."""
+    """One experience entry, as the card renders it: text, not structured data.
+
+    As the capture showed it (#203): the title in a plain ``p``, then text runs for
+    ``<Company> · <type>`` (or the company alone, or the type alone, or neither), the
+    dates, and the location, all inside a link to the company's page.
+    """
 
     title: str
-    company: str
+    company: str | None
     employment: str | None  # "Full-time", "Part-time", ...
     dates: str  # "Aug 2021 - Present · 3 yrs 2 mos"
     location: str | None = None
@@ -562,22 +568,78 @@ def _text_el(module: str, text: str, **extra: Any) -> list[Any]:
     return _el(f"$L{module}", {"textProps": {"children": [text], **extra}})
 
 
+def _company_line(role: Role) -> str | None:
+    if role.company and role.employment:
+        return f"{role.company} · {role.employment}"
+    return role.company or role.employment
+
+
+def _company_link(module: str, children: list[Any]) -> list[Any]:
+    """The link to the company's page an entry renders inside (captured: a trigger
+    button whose click navigates to a ``/company/`` url)."""
+    click = {
+        "$type": "proto.sdui.triggers.Trigger",
+        "type": {"$case": "click", "click": {"$type": "proto.sdui.triggers.ClickTrigger"}},
+        "action": {
+            "actions": [
+                {
+                    "$type": "proto.sdui.actions.core.Navigate",
+                    "value": {
+                        "content": {
+                            "$case": "url",
+                            "url": {
+                                "$type": _TO_URL,
+                                "urlValue": {
+                                    "$case": "url",
+                                    "url": "https://www.linkedin.com/company/fake-co/",
+                                },
+                            },
+                        }
+                    },
+                }
+            ],
+            "actionLabel": "View Fake Co",
+        },
+    }
+    return _el(
+        f"$L{module}", {"triggers": [click], "children": [_el("div", {"children": children})]}
+    )
+
+
+def _title_el(text: str, title: str, *, legacy: bool) -> list[Any]:
+    """A role's title: a plain ``p`` as captured, or a text run (``legacy``)."""
+    return _text_el(text, title) if legacy else _el("p", {"children": [title]})
+
+
 def _experience_card(
-    rows: _Rows, text: str, client: str, roles: Sequence[Role], groups: Sequence[RoleGroup]
+    rows: _Rows,
+    text: str,
+    client: str,
+    roles: Sequence[Role],
+    groups: Sequence[RoleGroup],
+    *,
+    legacy_titles: bool = False,
 ) -> str:
+    button = rows.module("TriggerButton")
     entries: list[Any] = []
     for role in roles:
-        runs = [
-            role.title,
-            f"{role.company} · {role.employment}" if role.employment else role.company,
-            role.dates,
+        runs = [run for run in (_company_line(role), role.dates, role.location) if run is not None]
+        body = [
+            _title_el(text, role.title, legacy=legacy_titles),
+            *[_text_el(text, run) for run in runs],
         ]
-        if role.location:
-            runs.append(role.location)
-        entries.append(_el("li", {"children": [_text_el(text, run) for run in runs]}))
+        entries.append(_el("li", {"children": [_company_link(button, body)]}))
     for group in groups:
         inner = [
-            _el("li", {"children": [_text_el(text, title), _text_el(text, dates)]})
+            _el(
+                "li",
+                {
+                    "children": [
+                        _title_el(text, title, legacy=legacy_titles),
+                        _text_el(text, dates),
+                    ]
+                },
+            )
             for title, dates in group.roles
         ]
         entries.append(
@@ -673,6 +735,8 @@ def profile_payload(
     mutuals: Sequence[Person] = (),
     contact_url: str | None = None,
     raw_urn: str | None = None,
+    degree_runs: int = 2,
+    legacy_titles: bool = False,
 ) -> bytes:
     """A profile screen (``POST /flagship-web/in/<slug>/``), trimmed to the anchors.
 
@@ -694,6 +758,9 @@ def profile_payload(
     their own ``vanityName`` (**invented** shape: the capture saw the shared-connections
     line in the top card, not its payloads). The other options spoil the page for the
     parser's refusals. ``schools`` adds an education card (**invented** shape).
+    ``degree_runs`` is how many times the degree renders: twice, one run after the
+    other, as captured (#203). ``legacy_titles`` renders each role's title as a text run
+    rather than the captured ``p``.
     """
     rows = _Rows()
     text = rows.module("default")
@@ -746,7 +813,7 @@ def profile_payload(
 
     pid = profile_id_override or profile_id(person)
     top_texts: list[Any] = [
-        _text_el(text, f"· {degree}"),
+        *[_text_el(text, f"· {degree}") for _ in range(degree_runs)],
         _text_el(text, person.headline or ""),
         *[_text_el(text, run) for run in extra_top_runs],
     ]
@@ -788,7 +855,8 @@ def profile_payload(
     ]
     main: list[str] = [f"$L{top}" for top in tops]
     if experience_inline and (roles or groups):
-        main.append(f"$L{_experience_card(rows, text, client, roles, groups)}")
+        card = _experience_card(rows, text, client, roles, groups, legacy_titles=legacy_titles)
+        main.append(f"$L{card}")
     if schools:
         entries = [
             _el(
@@ -846,7 +914,9 @@ def profile_payload(
     return rows.payload()
 
 
-def experience_payload(roles: Sequence[Role], groups: Sequence[RoleGroup] = ()) -> bytes:
+def experience_payload(
+    roles: Sequence[Role], groups: Sequence[RoleGroup] = (), *, legacy_titles: bool = False
+) -> bytes:
     """A lazy experience card (``actions/component?componentId=...profileCardsExperienceOnly``).
 
     The capture saw experience load this way on one profile but did not keep the answer,
@@ -855,9 +925,16 @@ def experience_payload(roles: Sequence[Role], groups: Sequence[RoleGroup] = ()) 
     rows = _Rows()
     text = rows.module("default")
     client = rows.module("ClientComponent")
-    card = _experience_card(rows, text, client, roles, groups)
+    card = _experience_card(rows, text, client, roles, groups, legacy_titles=legacy_titles)
     rows.model([f"$L{card}"], row="0")
     return rows.payload()
+
+
+def _wrapped(site: str) -> str:
+    """A site behind LinkedIn's wrapper, as the capture's overlay linked it: ``/safety/go``
+    with the site in ``url`` and ``isSdui``, ``mt``, and ``urlhash`` beside it."""
+    query = urlencode({"url": site, "urlhash": "FAKE", "isSdui": "true", "mt": "fake"})
+    return f"https://www.linkedin.com/safety/go/?{query}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -890,7 +967,7 @@ def contact_info_payload(
     (**invented**: the capture's profile shared none of them, so the names are guesses
     by analogy), a ``p`` heading, and one link per value whose action is a
     ``NavigateToUrl`` (or, for the birthday and the address, a text). Websites point
-    through a ``linkedin.com`` redirect wrapper in the capture, and so do these. Use
+    through a ``linkedin.com`` wrapper (``/safety/go``) in the capture, and so do these. Use
     example.test addresses only. ``profile_slug`` makes the profile link name another
     slug; ``email_urls``/``website_urls`` replace the links' urls to spoil the shape.
     """
@@ -965,7 +1042,7 @@ def contact_info_payload(
         urls = (
             list(website_urls)
             if website_urls is not None
-            else [f"https://www.linkedin.com/redir/redirect?url={site.url}" for site in websites]
+            else [_wrapped(site.url) for site in websites]
         )
         shown = [f"{site.url} {site.label}" if site.label else site.url for site in websites]
         shown += [""] * (len(urls) - len(shown))

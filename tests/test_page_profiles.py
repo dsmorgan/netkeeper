@@ -664,9 +664,9 @@ async def test_a_lazy_card_that_cannot_be_read_is_skipped_not_the_profile() -> N
 async def test_an_overlay_too_large_to_keep_still_ends_the_run() -> None:
     """Only a body the browser could not hand over is lost; one too large to keep is
     the observation failing, as before."""
-    site = ProfileSite([ProfilePage(PRIYA, overlay=b"0:" + b"0" * 5000)])
+    site = ProfileSite([ProfilePage(PRIYA, overlay=b"0:" + b"0" * 9000)])
     with pytest.raises(ObservationFailed):
-        await visit(site, [target(PRIYA)], limits=ObservationLimits(max_body_bytes=4000))
+        await visit(site, [target(PRIYA)], limits=ObservationLimits(max_body_bytes=8000))
     assert [slug for slug, _, _ in site.clicks] == [PRIYA.slug]  # it failed at the overlay
 
 
@@ -1142,3 +1142,38 @@ async def test_a_click_on_a_tab_that_is_not_the_observed_one_ends_the_run(
     monkeypatch.setattr(browser_module.BrowserRun, "click_contact_info", click_elsewhere)
     with pytest.raises(BrowserUnavailable, match="replaced"):
         await visit(site, [target(PRIYA)])
+
+
+# --- #203: what the first live run showed ------------------------------------------------------
+
+
+async def test_the_top_card_logs_once_per_visit(caplog: pytest.LogCaptureFixture) -> None:
+    """The id is read before the lazy cards are sorted; the top card is read once."""
+    caplog.set_level(logging.DEBUG, logger="netkeeper")
+    screen = profile_payload(PRIYA, location=LOCATION, extra_top_runs=["Some Short Run"])
+    site = ProfileSite([ProfilePage(PRIYA, screen=screen)])
+    out = await visit(site, [target(PRIYA)])
+    assert out.outcomes == [Outcome.OK]
+    lines = [r for r in caplog.records if "runs before its link" in r.getMessage()]
+    assert len(lines) == 1
+
+
+async def test_a_linkedin_website_keeps_the_visit_and_the_rest_of_the_overlay() -> None:
+    """Run 9 on #31: a website on LinkedIn's own host made three of five visits
+    unreadable. It is a site a person listed, or their own profile, never a new shape."""
+    overlay = contact_info_payload(
+        PRIYA,
+        emails=[f"{PRIYA.slug}@example.test"],
+        website_urls=[
+            f"https://www.linkedin.com/in/{PRIYA.slug}/",
+            "https://www.linkedin.com/company/fictional-robotics-co/",
+        ],
+    )
+    site = ProfileSite([ProfilePage(PRIYA, overlay=overlay)])
+    out = await visit(site, [target(PRIYA)])
+    (harvest,) = out.harvests
+    assert harvest.outcome is Outcome.OK and harvest.contact_info is not None
+    assert harvest.contact_info.emails == (f"{PRIYA.slug}@example.test",)
+    assert harvest.contact_info.websites == (
+        "https://www.linkedin.com/company/fictional-robotics-co/",
+    )
