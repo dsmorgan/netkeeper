@@ -297,6 +297,9 @@ async def test_a_checkpoint_on_landing_stops_the_run_and_nothing_scrolls() -> No
     out = await sync(site)
     assert out.result.outcome is Outcome.CHECKPOINT and out.urns == []
     assert all(page.mouse.wheels == [] for page in site.pages)
+    # #192: a landing that never scrolls must never rest the pointer either -- there
+    # is no scroll plan for it to prepare.
+    assert all(page.mouse.moves == [] for page in site.pages)
 
 
 @pytest.mark.parametrize(

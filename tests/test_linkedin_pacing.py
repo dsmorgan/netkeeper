@@ -256,6 +256,80 @@ def test_scroll_plan_total_delta_px_sums_the_steps() -> None:
     assert plan.total_delta_px == 450
 
 
+# --- rest_pointer_like_a_person (#192) --------------------------------------
+
+
+def test_rest_pointer_like_a_person_same_seed_is_identical() -> None:
+    plan1 = pacing.rest_pointer_like_a_person(random.Random(11))
+    plan2 = pacing.rest_pointer_like_a_person(random.Random(11))
+    assert plan1 == plan2
+
+
+def test_rest_pointer_like_a_person_different_seed_differs() -> None:
+    plan1 = pacing.rest_pointer_like_a_person(random.Random(1))
+    plan2 = pacing.rest_pointer_like_a_person(random.Random(2))
+    assert plan1 != plan2
+
+
+def test_rest_pointer_like_a_person_step_count_within_configured_range() -> None:
+    rng = random.Random(4)
+    for _ in range(500):
+        plan = pacing.rest_pointer_like_a_person(rng, steps_range=(2, 4))
+        assert 2 <= len(plan.steps) <= 4
+
+
+def test_rest_pointer_like_a_person_jitter_within_configured_magnitude() -> None:
+    rng = random.Random(5)
+    for _ in range(500):
+        plan = pacing.rest_pointer_like_a_person(rng, jitter_px=40)
+        for step in plan.steps:
+            assert -40 <= step.dx <= 40
+            assert -40 <= step.dy <= 40
+
+
+def test_rest_pointer_like_a_person_last_step_always_lands_exactly_on_target() -> None:
+    """A hand's final resting point is precise; the wobble is only on the way there
+    (#192) -- this is what lets a caller compute the exact resting point without
+    replaying the whole walk."""
+    rng = random.Random(6)
+    for _ in range(500):
+        plan = pacing.rest_pointer_like_a_person(rng)
+        assert (plan.steps[-1].dx, plan.steps[-1].dy) == (0, 0)
+
+
+def test_rest_pointer_like_a_person_earlier_steps_are_not_all_on_target() -> None:
+    """The last step is exact by design; an earlier one usually is not -- this is
+    what tells a "the walk never jitters" regression from a legitimate rare draw of
+    ``dx == dy == 0`` apart."""
+    rng = random.Random(7)
+    earlier_on_target = 0
+    earlier_total = 0
+    for _ in range(500):
+        plan = pacing.rest_pointer_like_a_person(rng)
+        for step in plan.steps[:-1]:
+            earlier_total += 1
+            if (step.dx, step.dy) == (0, 0):
+                earlier_on_target += 1
+    assert earlier_total > 0
+    assert earlier_on_target < earlier_total
+
+
+def test_rest_pointer_like_a_person_pauses_within_configured_range() -> None:
+    rng = random.Random(9)
+    for _ in range(500):
+        plan = pacing.rest_pointer_like_a_person(rng, pause_range_s=(0.05, 0.2))
+        for step in plan.steps:
+            assert 0.05 <= step.pause_s <= 0.2
+
+
+def test_rest_pointer_like_a_person_step_count_out_of_range_raises() -> None:
+    """A user-facing config knob (or a config mistake) must fail loudly rather than
+    silently produce an empty or wrong-shaped walk, the same as
+    :func:`pacing.plan_burst_sizes`'s ``size_range`` guard."""
+    with pytest.raises(ValueError):
+        pacing.rest_pointer_like_a_person(random.Random(1), steps_range=(0, 3))
+
+
 # --- bursts ----------------------------------------------------------------
 
 

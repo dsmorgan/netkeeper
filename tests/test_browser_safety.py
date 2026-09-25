@@ -172,6 +172,14 @@ PAGE_DRIVERS = frozenset(
     }
 )
 
+# #192: `mouse.move` is deliberately absent from PAGE_DRIVERS above. It targets a
+# bare point, never a locator -- it is not a click, and not a hover resolved
+# against any particular element the way `hover()` (which *is* refused) would be --
+# so it needs no exception to "this module only listens" the way ADR 0006's Contact
+# info click needs one for `click()`. `mouse_moves` below is this reading's own
+# test: the one place it may be called is BrowserRun.scroll's pointer-rest step, in
+# CONNECTOR_MODULE (defined below), never an observing module or anywhere else.
+
 # The attach point. Everything else goes through AttachBrowserProvider.
 CONNECT_CALL = "connect_over_cdp"
 CONNECTOR_MODULE = LINKEDIN / "browser.py"
@@ -426,6 +434,34 @@ def page_drivers(source: str, path: Path = MEMORY) -> Iterator[Finding]:
             yield Finding(path, line, f"{name}() drives the page; this module only listens")
 
 
+def mouse_moves(source: str, path: Path = MEMORY) -> Iterator[Finding]:
+    """Every ``<mouse>.move(...)`` call: #192's pointer-rest step, and the one place
+    that walk may be spent. Reads a call whose function is a ``move`` attribute on
+    something itself named or attributed ``mouse`` (``page.mouse.move``,
+    ``self.mouse.move``, a local ``mouse = ...mouse`` held first) -- narrower than
+    :func:`reached_names`'s deny-list matchers above, because unlike a launch or a
+    route, a stray ``.move()`` on some unrelated object is not itself a finding
+    anywhere else in this codebase, and a scanner that flagged every ``.move`` call
+    -- ``shutil.move``, a queue's ``move_to_end`` -- would eventually be
+    disbelieved and ignored (this module's own opening docstring: a scanner reads
+    names, not meanings). It cannot see a `mouse` reference held under another
+    name, which is why this rule is also a review rule, not only a test, same as
+    every deny-list rule in this file already is.
+    """
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "move"):
+            continue
+        target = func.value
+        on_mouse = (isinstance(target, ast.Name) and target.id == "mouse") or (
+            isinstance(target, ast.Attribute) and target.attr == "mouse"
+        )
+        if on_mouse:
+            yield Finding(path, node.lineno, "mouse.move(): the pointer-rest step (#192)")
+
+
 def database_imports(source: str, path: Path = MEMORY) -> Iterator[Finding]:
     for line, name in imported_names(source, path):
         if is_forbidden(name):
@@ -488,6 +524,22 @@ def test_the_observing_modules_only_listen_and_scroll() -> None:
         assert path.exists(), f"{path} moved; point OBSERVING_MODULES at its new home"
         findings.extend(page_drivers(path.read_text(encoding="utf-8"), path))
     assert not findings, complain(findings, "an observing module drives the page:")
+
+
+def test_mouse_move_is_called_only_in_the_scroll_path() -> None:
+    """#192: the pointer-rest step is the one place ``mouse.move`` may appear.
+
+    A future caller elsewhere -- an observing module, a fetch helper, anything but
+    ``BrowserRun.scroll`` itself -- is a review question this pins rather than
+    leaves to be true by accident.
+    """
+    findings = scan([PACKAGE], mouse_moves)
+    outside = [finding for finding in findings if finding.path != CONNECTOR_MODULE]
+    assert findings, (
+        f"nothing calls mouse.move() any more; is {CONNECTOR_MODULE.name}'s"
+        " BrowserRun.scroll still resting the pointer before a wheel replay (#192)?"
+    )
+    assert not outside, complain(outside, f"mouse.move() belongs only in {CONNECTOR_MODULE.name}:")
 
 
 def test_only_the_connector_opens_a_cdp_connection() -> None:
@@ -671,6 +723,15 @@ def test_the_page_driver_scanner_catches_a_click_and_an_evaluate() -> None:
     assert list(page_drivers("await locator.evaluate_all('es => fetch(u)')\n"))
     assert not list(page_drivers("await run.scroll(plan)\n"))
     assert not list(page_drivers("page.on('response', handler)\n"))
+
+
+def test_the_mouse_move_scanner_catches_a_call() -> None:
+    assert list(mouse_moves("await page.mouse.move(1, 2)\n"))
+    assert list(mouse_moves("await self._page.mouse.move(x, y)\n"))
+    assert list(mouse_moves("mouse = page.mouse\nawait mouse.move(x, y)\n"))
+    assert not list(mouse_moves("await page.mouse.wheel(0, 1)\n"))
+    assert not list(mouse_moves("shutil.move('a', 'b')\n"))
+    assert not list(mouse_moves("queue.move_to_end('k')\n"))
 
 
 def test_the_forbidden_matcher_reads_dotted_segments() -> None:

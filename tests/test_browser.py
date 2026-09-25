@@ -8,10 +8,13 @@ smoke suite in ``tests/smoke/`` drives the same code against a real Chrome, and
 from __future__ import annotations
 
 import asyncio
+import random
+from typing import cast
 
 import pytest
 from browser_fakes import FakeBrowser, FakeConnector, FakeContext, FakePage
 
+from netkeeper.linkedin import browser
 from netkeeper.linkedin.browser import (
     ATTACH,
     SINGLE_ACCOUNT_KEY,
@@ -19,6 +22,7 @@ from netkeeper.linkedin.browser import (
     AttachBrowserProvider,
     BrowserBusy,
     BrowserProvider,
+    BrowserRun,
     BrowserUnavailable,
 )
 from netkeeper.linkedin.pacing import ScrollPlan, ScrollStep
@@ -430,6 +434,24 @@ def make_plan(*steps: tuple[int, float], dwell_s: float = 2.5) -> ScrollPlan:
     )
 
 
+async def _no_sleep(seconds: float) -> None:
+    return None
+
+
+async def _prime_pointer(run: BrowserRun) -> None:
+    """Spend this tab's one-time pointer rest (#192) so a test can isolate the wheel
+    replay that follows it.
+
+    ``BrowserRun.scroll`` moves the pointer to rest over the content once per tab,
+    before its first wheel event (see the dedicated ``test_scroll_rests_the_pointer_*``
+    tests below), and does not repeat it on a later call against the same tab. Priming
+    it here first, on a throwaway empty plan with its own no-op sleep, keeps every
+    other scroll test's wheel and sleep assertions exactly what they were before #192
+    without needing to hand-compute a pointer-rest walk's random jitter and pauses.
+    """
+    await run.scroll(make_plan(dwell_s=0.0), sleep=_no_sleep)
+
+
 async def test_scroll_sends_one_wheel_per_step_then_sleeps_each_pause_and_the_dwell() -> None:
     connector = FakeConnector()
     provider = make_provider(connector)
@@ -438,6 +460,7 @@ async def test_scroll_sends_one_wheel_per_step_then_sleeps_each_pause_and_the_dw
     sleeper = Sleeper()
 
     async with provider.run() as run:
+        await _prime_pointer(run)
         outcome = await run.scroll(plan, sleep=sleeper)
 
     page = only_page(context)
@@ -469,6 +492,7 @@ async def test_scroll_sends_each_steps_wheel_event_before_its_own_sleep() -> Non
         page = await run.ensure_page()
         real_page = connector.browsers[0].context_list[0].pages[0]
         assert page is real_page
+        await _prime_pointer(run)
         real_wheel = real_page.mouse.wheel
 
         async def logging_wheel(delta_x: float, delta_y: float) -> None:
@@ -487,6 +511,7 @@ async def test_scroll_with_no_steps_still_sleeps_the_dwell() -> None:
     sleeper = Sleeper()
 
     async with provider.run() as run:
+        await _prime_pointer(run)
         await run.scroll(plan, sleep=sleeper)
 
     assert sleeper.waits == [1.5]
@@ -522,6 +547,12 @@ async def test_scroll_reopens_a_lost_tab_and_scrolls_the_recovered_one() -> None
         assert recovered.mouse.wheels == [(0, 100)]
         assert lost.mouse.wheels == [], "the closed tab's own mouse recorded nothing"
         assert context.new_page_calls == 2
+        # #192: the recovered tab is a *new* tab as far as the pointer goes -- it
+        # must be rested again, not treated as already resting because the run's
+        # earlier (lost) tab once was.
+        assert recovered.mouse.moves, "the recovered tab's pointer must be rested too"
+        assert recovered.mouse.moves[-1] != (0.0, 0.0), "never teleport back to (0, 0)"
+        assert lost.mouse.moves == [], "the closed tab's own mouse recorded no movement either"
 
 
 async def test_a_cancelled_scroll_stops_before_its_next_wheel_event() -> None:
@@ -538,6 +569,7 @@ async def test_a_cancelled_scroll_stops_before_its_next_wheel_event() -> None:
         return calls > 1  # let the first wheel event through, then stop
 
     async with provider.run() as run:
+        await _prime_pointer(run)
         outcome = await run.scroll(plan, sleep=sleeper, cancelled=cancelled)
 
     page = only_page(context)
@@ -558,6 +590,7 @@ async def test_a_scroll_cancelled_only_before_the_dwell_still_sends_every_wheel_
         return len(sleeper.waits) >= 2  # both steps have paused; only the dwell is left
 
     async with provider.run() as run:
+        await _prime_pointer(run)
         outcome = await run.scroll(plan, sleep=sleeper, cancelled=cancelled_after_steps)
 
     page = only_page(context)
@@ -572,10 +605,157 @@ async def test_an_uncancelled_scroll_ignores_a_cancelled_callback_that_says_no()
     sleeper = Sleeper()
 
     async with provider.run() as run:
+        await _prime_pointer(run)
         outcome = await run.scroll(plan, sleep=sleeper, cancelled=lambda: False)
 
     assert outcome.cancelled is False
     assert sleeper.waits == [0.05, 0.25]
+
+
+# --- resting the pointer over content before a scroll (#192) --------------------------
+
+
+async def test_scroll_moves_the_pointer_before_any_wheel_event_lands() -> None:
+    """Playwright's virtual pointer starts at (0, 0), over a fixed header on the real
+    page (#192). Pin the order, not just that both a move and a wheel happened -- a
+    rest that landed *after* the first wheel event would not have fixed anything."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    plan = make_plan((100, 0.05), (50, 0.05), dwell_s=0.0)
+    events: list[str] = []
+
+    async with provider.run() as run:
+        await run.ensure_page()
+        real_page = only_page(connector.browsers[0].context_list[0])
+        real_move = real_page.mouse.move
+        real_wheel = real_page.mouse.wheel
+
+        async def logging_move(x: float, y: float) -> None:
+            events.append("move")
+            await real_move(x, y)
+
+        async def logging_wheel(delta_x: float, delta_y: float) -> None:
+            events.append("wheel")
+            await real_wheel(delta_x, delta_y)
+
+        real_page.mouse.move = logging_move  # type: ignore[method-assign]
+        real_page.mouse.wheel = logging_wheel  # type: ignore[method-assign]
+        await run.scroll(plan, sleep=Sleeper(), rng=random.Random(3))
+
+    first_wheel = events.index("wheel")
+    assert first_wheel > 0, "the pointer must move at least once before the first wheel event"
+    assert set(events[:first_wheel]) == {"move"}, events
+    assert events[first_wheel:] == ["wheel", "wheel"], events
+
+
+async def test_scroll_does_not_rest_the_pointer_again_on_the_same_tab() -> None:
+    """Once per run/tab, not once per call -- a caller that scrolls the same tab
+    repeatedly (one call per page of the connections list) must not see the pointer
+    walk back across the screen before every step (#192)."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(1))
+        page = only_page(context)
+        first_moves = list(page.mouse.moves)
+        assert first_moves
+
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(2))
+
+    assert page.mouse.moves == first_moves, "the pointer rests once per tab, not once per call"
+
+
+async def test_scroll_rests_the_pointer_again_after_the_tab_is_lost_and_reopened() -> None:
+    """The once-per-tab rule is keyed to the tab, not the run: a tab that was already
+    rested and is then lost must have its *replacement* rested too, not skipped as if
+    the new tab already had it (#192)."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(1))
+        first = only_page(context)
+        assert first.mouse.moves, "the first tab must have been rested"
+
+        first.user_closed_it()
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(2))
+
+    recovered = context.pages[-1]
+    assert recovered is not first
+    assert recovered.mouse.moves, "the recovered tab must be rested again, not skipped"
+
+
+async def test_scroll_rests_the_pointer_clear_of_a_fixed_header_with_no_known_viewport() -> None:
+    """The common case for an attached tab: Playwright does not know the viewport
+    (#192), so a conservative default stands in, and the pointer still lands well
+    below where a fixed top nav would be -- never at (0, 0), which is where
+    Playwright's virtual pointer starts and exactly the bug this fixes."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        assert page.viewport_size is None, "an attached tab commonly reports none (#192)"
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(9))
+
+    x, y = only_page(context).mouse.moves[-1]
+    assert (x, y) != (0.0, 0.0)
+    assert x == browser.DEFAULT_VIEWPORT_WIDTH / 2
+    assert y == browser.DEFAULT_VIEWPORT_HEIGHT * browser.REST_Y_FRACTION
+    assert y >= browser.DEFAULT_VIEWPORT_HEIGHT * 0.25, "must clear a real page's top nav"
+
+
+async def test_scroll_rests_the_pointer_using_the_tabs_own_viewport_when_known() -> None:
+    """A passive read, used when Playwright does have it -- not always the default."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        page.viewport_size = {"width": 400, "height": 300}
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(2))
+
+    x, y = only_page(context).mouse.moves[-1]
+    assert x == 200.0
+    assert y == 150.0  # max(300 * REST_Y_FRACTION, 300 * REST_MIN_Y_FRACTION)
+
+
+async def test_scroll_never_jitters_the_pointer_above_the_minimum_header_clearance() -> None:
+    """Every waypoint on the way to rest, not just the last one, across many seeds."""
+    for seed in range(30):
+        connector = FakeConnector()
+        provider = make_provider(connector)
+        context = connector.browsers[0].context_list[0]
+        async with provider.run() as run:
+            await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(seed))
+        moves = only_page(context).mouse.moves
+        assert moves, (seed, "the pointer must move at least once before a scroll (#192)")
+        for x, y in moves:
+            assert 0 <= x <= browser.DEFAULT_VIEWPORT_WIDTH, (seed, x, y)
+            min_y = browser.DEFAULT_VIEWPORT_HEIGHT * browser.REST_MIN_Y_FRACTION
+            assert min_y <= y <= browser.DEFAULT_VIEWPORT_HEIGHT, (seed, x, y)
+
+
+async def test_scroll_rests_the_pointer_identically_for_the_same_seed() -> None:
+    """Same determinism guarantee as :func:`~netkeeper.linkedin.pacing.scroll_like_a_person`
+    itself (spec P2-04 done-when): same seed, same walk, in this process or another."""
+
+    async def moves_for(seed: int) -> list[tuple[float, float]]:
+        connector = FakeConnector()
+        provider = make_provider(connector)
+        context = connector.browsers[0].context_list[0]
+        async with provider.run() as run:
+            await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(seed))
+        return only_page(context).mouse.moves
+
+    first = await moves_for(7)
+    assert first, "the pointer must move at least once before a scroll (#192)"
+    assert first == await moves_for(7)
 
 
 # --- #169 F: keyed by the account row, and never alongside an older process ------------

@@ -12,6 +12,20 @@ observation a real body, in order; and that the observation changed nothing abou
 any request -- the replica records every request it received, the page records
 every request it sent, and the two lists are the same, headers included.
 
+**The layout is deliberately not a flat scrolling document (#192).** A fixed header
+sits across the top of the viewport, and the list scrolls inside its own
+``overflow: auto`` container below it -- the ``html``/``body`` do not scroll at all.
+That is what the #149 capture showed the real connections page does, and it is why
+the bug in #192 went uncaught here before: Playwright's ``mouse.wheel`` fires at the
+virtual pointer's position, which starts at (0, 0) and sits under the fixed header,
+not over the scrolling container, so a wheel replay that never moved the pointer
+first scrolled nothing. ``BrowserRun.scroll`` rests the pointer over the content
+before its first wheel event now (``_rest_pointer_over_content``); without that,
+``test_a_real_page_loads_its_own_pages_and_the_run_reads_them_all`` below stalls
+and ends ``RouteChanged`` instead of ``END_OF_LIST`` -- checked by hand against the
+pre-#192 code, and recorded in that PR's description rather than as a test of the
+old code, which no longer exists to run.
+
 Start Chrome first with the command ``netkeeper browser launch`` prints, and point
 ``NETKEEPER_CDP_URL`` at it.
 """
@@ -72,10 +86,30 @@ def _people(count: int) -> list[Person]:
     return [*PEOPLE, *extra][:count]
 
 
-#: The page's own script: render cards, and when a scroll nears the bottom, ask the
-#: pagination endpoint for the next page -- the way the real page does -- recording
-#: each request it sends in ``window.__sent`` so the test can compare it with what
-#: the replica received.
+#: The real layout (#192): a fixed header across the top, covering (0, 0) -- where
+#: Playwright's virtual pointer starts -- and the list inside its own
+#: ``overflow: auto`` container below it. ``html``/``body`` do not scroll at all,
+#: so a wheel event that lands on the header (old code, pointer never moved) has
+#: no scrollable ancestor to reach and scrolls nothing.
+_LAYOUT_CSS = """
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  #nav { position: fixed; top: 0; left: 0; right: 0; height: 56px;
+         background: #0a66c2; z-index: 10; }
+  #scroll { position: fixed; top: 0; left: 0; right: 0; bottom: 0; overflow-y: auto; }
+</style>
+<div id="nav"></div>
+<div id="scroll">
+  <div id="list"></div>
+  <div style="height:900px"></div>
+</div>
+"""
+
+#: The page's own script: render cards, and when the *container* (not the document)
+#: scrolls near the bottom, ask the pagination endpoint for the next page -- the way
+#: the real page does, inside its own scroll container -- recording each request it
+#: sends in ``window.__sent`` so the test can compare it with what the replica
+#: received.
 _SCRIPT = """
 <script>
   const TEMPLATE = __TEMPLATE__;
@@ -83,6 +117,7 @@ _SCRIPT = """
   let busy = false;
   window.__sent = [];
   const list = document.getElementById('list');
+  const container = document.getElementById('scroll');
   function render(n) {
     for (let i = 0; i < n; i++) {
       const card = document.createElement('div');
@@ -110,8 +145,8 @@ _SCRIPT = """
     render(cards);
     busy = false;
   }
-  window.addEventListener('scroll', () => {
-    if (window.scrollY + window.innerHeight > document.body.scrollHeight - 600) { more(); }
+  container.addEventListener('scroll', () => {
+    if (container.scrollTop + container.clientHeight > container.scrollHeight - 600) { more(); }
   });
 </script>
 """
@@ -134,7 +169,7 @@ class _Replica(BaseHTTPRequestHandler):
             first_next = "null" if len(first) >= len(self.people) else str(len(first))
             page = document_html(screen).replace(
                 "</body>",
-                '<div id="list"></div><div style="height:900px"></div>'
+                _LAYOUT_CSS
                 + _SCRIPT.replace("__TEMPLATE__", json.dumps(pagination_request(0)))
                 .replace("__FIRST_NEXT__", first_next)
                 .replace("__FIRST_CARDS__", str(len(first)))

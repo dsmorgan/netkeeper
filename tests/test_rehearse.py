@@ -51,6 +51,7 @@ from netkeeper.linkedin.pacing import (
     BurstProfile,
     DelayProfile,
     plan_enrichment,
+    rest_pointer_like_a_person,
 )
 from netkeeper.linkedin.rehearse import (
     LINKEDIN_HOST,
@@ -658,15 +659,24 @@ async def test_the_rehearsal_follows_the_burst_profile_it_is_given() -> None:
 
 
 async def test_every_wait_is_one_the_plan_asked_for() -> None:
+    """Every wait is one the pacing plan asked for, or #192's one-time pointer rest
+    before the run's first scroll -- ``rehearse``'s own ``rest_rng`` is a fresh
+    ``Random(seed)``, so it draws the identical walk :func:`rest_pointer_like_a_person`
+    would here, given the same seed (see ``rehearse.py``'s ``scroll`` closure)."""
     expected = plan_enrichment(Random(SEED), 4)
+    rest = rest_pointer_like_a_person(Random(SEED))
     rehearsal, _, _, sleeper = await _rehearse(visits=4)
 
-    planned = sum(
-        sum(step.pause_s for step in visit.scroll.steps)
-        + visit.scroll.dwell_s
-        + (visit.delay_after_s or 0.0)
-        for visit in expected.steps
-    ) + sum(visit.fetch_gap_s or 0.0 for visit in rehearsal.visits)
+    planned = (
+        sum(
+            sum(step.pause_s for step in visit.scroll.steps)
+            + visit.scroll.dwell_s
+            + (visit.delay_after_s or 0.0)
+            for visit in expected.steps
+        )
+        + sum(visit.fetch_gap_s or 0.0 for visit in rehearsal.visits)
+        + sum(step.pause_s for step in rest.steps)
+    )
     assert all(visit.fetch_gap_s is not None for visit in rehearsal.visits)
     assert math.isclose(sleeper.total, planned, rel_tol=1e-9)
 
