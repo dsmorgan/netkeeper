@@ -273,3 +273,19 @@ async def test_a_run_observes_its_own_tab_and_closes_the_observation_with_the_ta
         assert isinstance(tab, ListeningTab)
         assert observation.page is cast(object, tab) and tab.listeners["response"]
     assert tab.listeners["response"] == [] and tab.is_closed()
+
+
+def test_a_prefix_rule_keeps_every_path_under_it_and_nothing_beside_it() -> None:
+    """#190: a profile a slug redirects to has a path nobody knew before navigating."""
+    match = ResponseMatch(origin=ORIGIN, rules=(ResponseRule("GET", "/in/", prefix=True),))
+    assert match.matches("GET", f"{ORIGIN}/in/someone-fake/")
+    assert match.matches("GET", f"{ORIGIN}/in/renamed-fake/?trk=x")
+    assert not match.matches("GET", f"{ORIGIN}/in/")  # the prefix alone is no profile
+    assert not match.matches("GET", f"{ORIGIN}/inbox/")
+    assert not match.matches("GET", f"{ORIGIN}/feed/in/x/")
+    assert not match.matches("POST", f"{ORIGIN}/in/someone-fake/")
+    assert not match.matches("GET", "https://evil.example.test/in/someone-fake/")
+    with pytest.raises(ValueError, match="ends with '/'"):
+        ResponseRule("GET", "/in", prefix=True)
+    exact = ResponseRule("GET", "/in/")
+    assert not exact.matches("GET", "/in/someone-fake/")

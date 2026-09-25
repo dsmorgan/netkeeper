@@ -27,6 +27,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Protocol, cast, runtime_checkable
+from urllib.parse import unquote, urljoin, urlsplit
 
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin.activity_lock import LEGACY_SHARED_KEY
@@ -211,6 +212,64 @@ REST_MIN_Y_PX: Final = 96
 #: the way to it -- stays within this many pixels of that top, never more than
 #: halfway into a short box either.
 REST_VISIBLE_SPAN_PX: Final = 250
+
+
+class _ControlLike(Protocol):
+    """The slice of a Playwright ``Locator`` :meth:`BrowserRun.click_contact_info` uses.
+
+    Local to that one method, like :class:`_MouseLike` is to :meth:`BrowserRun.scroll`:
+    counting the matches, reading one attribute, and the one click ADR 0006 allows.
+    Nothing here types, hovers, presses a key, or runs script.
+    """
+
+    async def count(self) -> int: ...
+
+    # Playwright's own signatures, timeout in milliseconds included.
+    async def get_attribute(
+        self,
+        name: str,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> str | None: ...
+
+    async def click(
+        self,
+        *,
+        delay: float | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> None: ...
+
+
+class _ClickablePage(PageLike, Protocol):
+    """A tab whose controls can be found by accessible role and name. See :class:`_ControlLike`."""
+
+    def get_by_role(self, role: str, *, name: str, exact: bool) -> _ControlLike: ...
+
+
+#: The control ADR 0006 allows one click on, by accessible role and name (#190).
+CONTACT_INFO_ROLE = "link"
+CONTACT_INFO_NAME = "Contact info"
+#: What the Contact info link's href adds to the profile's own path.
+CONTACT_INFO_HREF_SUFFIX = "overlay/contact-info/"
+#: How long Playwright may wait for the control to be clickable, in milliseconds. It
+#: clicks once when it is; a control that never becomes clickable is not clicked.
+CONTACT_INFO_CLICK_TIMEOUT_MS = 10_000.0
+#: Time between the press and the release, as a person's click takes, in milliseconds.
+CONTACT_INFO_PRESS_MS = 90.0
+
+
+@dataclass(frozen=True, slots=True)
+class ContactInfoClick:
+    """What :meth:`BrowserRun.click_contact_info` did.
+
+    ``clicked`` is ``True`` only when the one click was sent. Otherwise ``refusal`` is
+    a fixed phrase saying why nothing was clicked: never a url, a name, or a selector's
+    text.
+    """
+
+    page: PageLike
+    clicked: bool
+    refusal: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -729,6 +788,80 @@ class BrowserRun:
         self._observations.append(observation)
         return observation
 
+    async def click_contact_info(
+        self,
+        profile_path: str,
+        *,
+        pause_s: float,
+        sleep: Callable[[float], Awaitable[None]] = _real_sleep,
+    ) -> ContactInfoClick:
+        """ADR 0006's one click: **Contact info**, once, on the profile the tab is on (#190).
+
+        The only input netkeeper gives a LinkedIn page other than navigation and
+        :meth:`scroll`'s wheel replay, and the only method in the package that clicks
+        (``tests/test_browser_safety.py`` allows this one call and no other). It:
+
+        1. refuses when the run's tab is gone -- it never reopens one here, because a
+           reopened tab would have to navigate, and a navigation is a page view nobody
+           planned (:class:`BrowserUnavailable`);
+        2. refuses when the tab is not on ``profile_path`` (``/in/<slug>/``), so a
+           redirect or a stale tab never gets a click meant for another profile;
+        3. waits ``pause_s``, the pause a person takes before reaching for the link;
+        4. finds the control by its accessible role and name (a link named exactly
+           "Contact info") and refuses unless there is exactly one, and unless its
+           href is this profile's ``overlay/contact-info/``;
+        5. clicks it once, at the control's own box, with a press as long as a
+           person's. Playwright waits for the control to be clickable, up to
+           :data:`CONTACT_INFO_CLICK_TIMEOUT_MS`, moves the pointer to the control's
+           center, and sends one press and one release there -- never at a pointer
+           position nothing placed; its strict mode refuses the click outright if a
+           second match appeared meanwhile. A click that fails is not tried again.
+
+        Refusals come back as :class:`ContactInfoClick` with ``clicked`` false; the
+        caller counts the profile unreadable. Nothing here reads the answer: the
+        caller's :meth:`observe` does. The overlay is left open: the next step of a
+        run is a navigation, which leaves the page the way a person's next click on
+        a link would, so there is nothing to close.
+        """
+        page = self._page
+        if page is None or page.is_closed():
+            raise BrowserUnavailable(
+                "the run's tab went away before the Contact info click; aborting the run"
+                " rather than reopen it, which would be a page view nobody planned"
+            )
+        if not _on_path(page.url, profile_path):
+            return ContactInfoClick(page, False, "the tab is not on the profile")
+        await sleep(pause_s)
+        if page.is_closed():
+            raise BrowserUnavailable("the run's tab went away before the Contact info click")
+        if not _on_path(page.url, profile_path):
+            return ContactInfoClick(page, False, "the tab left the profile before the click")
+        control = cast(_ClickablePage, page).get_by_role(
+            CONTACT_INFO_ROLE, name=CONTACT_INFO_NAME, exact=True
+        )
+        try:
+            matches = await control.count()
+            href = await control.get_attribute("href", timeout=1_000) if matches == 1 else None
+        except Exception as exc:
+            if self._lost(page):
+                raise BrowserUnavailable("lost the tab while finding Contact info") from exc
+            return ContactInfoClick(page, False, "the control could not be read")
+        if matches == 0:
+            return ContactInfoClick(page, False, "no Contact info control on the page")
+        if matches > 1:
+            return ContactInfoClick(page, False, "more than one Contact info control")
+        expected = f"{_trim_path(profile_path)}/{CONTACT_INFO_HREF_SUFFIX}"
+        if href is None or not _on_path(href, expected, base=page.url):
+            return ContactInfoClick(page, False, "the control opens something else")
+        try:
+            await control.click(delay=CONTACT_INFO_PRESS_MS, timeout=CONTACT_INFO_CLICK_TIMEOUT_MS)
+        except Exception as exc:
+            if self._lost(page):
+                raise BrowserUnavailable("lost the tab during the Contact info click") from exc
+            log.warning("the Contact info control could not be clicked (%s)", type(exc).__name__)
+            return ContactInfoClick(page, False, "the control could not be clicked")
+        return ContactInfoClick(page, True)
+
     async def goto(self, url: str) -> PageLike:
         """Navigate this run's tab, reopening it first, or again, if it was lost.
 
@@ -974,6 +1107,32 @@ def _known_viewport_height(page: PageLike) -> float | None:
 def _clamp(value: float, low: float, high: float) -> float:
     """``value``, pinned inside ``[low, high]``."""
     return max(low, min(value, high))
+
+
+def _trim_path(path: str) -> str:
+    return path[:-1] if len(path) > 1 and path.endswith("/") else path
+
+
+def _on_path(url: str, path: str, *, base: str | None = None) -> bool:
+    """Whether ``url`` (absolute, or relative to ``base``) is at ``path``, same origin.
+
+    Compared after percent-decoding and case-folding, as LinkedIn's routing reads a
+    slug, and after dropping one trailing ``/``. A relative ``url`` takes ``base``'s
+    origin; an absolute one must have it.
+    """
+    try:
+        split = urlsplit(urljoin(base, url) if base is not None else url)
+        if base is not None:
+            want = urlsplit(base)
+            if (split.scheme, split.hostname, split.port) != (
+                want.scheme,
+                want.hostname,
+                want.port,
+            ):
+                return False
+    except ValueError:
+        return False
+    return _trim_path(unquote(split.path)).casefold() == _trim_path(unquote(path)).casefold()
 
 
 def _reason(exc: BaseException) -> str:

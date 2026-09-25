@@ -24,6 +24,8 @@ from collections.abc import Iterator
 import pytest
 
 from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserUnavailable
+from netkeeper.linkedin.flagship import NAVIGATION_PATH
+from netkeeper.linkedin.flagship_profile import COMPONENT_PATH
 from netkeeper.linkedin.rehearse import (
     REDACTED,
     NotANeutralSite,
@@ -66,9 +68,10 @@ async def test_a_rehearsal_logs_what_a_real_page_load_asked_for(
     assert rehearsal.hosts == ("127.0.0.1",)
     assert not rehearsal.touched_linkedin
     kinds = {record.resource_type for record in rehearsal.requests}
-    # A real load fetches the document and the two sub-resources the replica names.
+    # A real load fetches the document and the two sub-resources the replica names,
+    # and the page's own script fetches its lazy card and the overlay.
     assert "document" in kinds
-    assert {"stylesheet", "image"} <= kinds
+    assert {"stylesheet", "image", "fetch"} <= kinds
     for record in rehearsal.requests:
         assert record.status == 200, record
         assert record.duration_ms is not None
@@ -78,21 +81,20 @@ async def test_a_rehearsal_logs_what_a_real_page_load_asked_for(
 async def test_a_rehearsal_is_the_enrichment_jobs_pattern_in_a_real_tab(
     provider: AttachBrowserProvider, site: str
 ) -> None:
-    """P2-07: each visit is the page, then two in-page fetches the job parsed.
-
-    The fetch reads its csrf token from the cookie the replica's page set, inside
-    the page, the way it would on the real site; a rehearsal that harvested both
-    visits proves that path works in a real Chrome.
-    """
+    """#190: each visit is the page, the lazy card its scroll made it ask for, and the
+    overlay its one Contact info click made it ask for -- the page's requests, read by
+    the real source, in a real Chrome. netkeeper sends none of them."""
     rehearsal = await rehearse(provider, site=site, visits=2, seed=SEED, time_scale=200.0)
 
-    assert (rehearsal.harvested, rehearsal.stopped) == (2, None)
+    assert (rehearsal.harvested, rehearsal.stopped, rehearsal.clicks) == (2, None, 2)
     for visit in rehearsal.visits:
-        fetches = [r.path for r in visit.requests if r.resource_type == "fetch"]
-        slug = visit.url.rstrip("/").rsplit("/", 1)[1]
-        assert len(fetches) == 2, visit.requests
-        assert fetches[0].startswith("/voyager/api/identity/dash/profiles?")
-        assert fetches[1] == f"/voyager/api/identity/profiles/{slug}/profileContactInfo"
+        posts = [r.path for r in visit.requests if r.method == "POST"]
+        # The lazy card comes only if the wheel really scrolled the content container
+        # (#192); the overlay comes from the one click, last, exactly once.
+        assert posts[-1].startswith(f"{NAVIGATION_PATH}?screenId="), visit.requests
+        assert sum(p.startswith(NAVIGATION_PATH) for p in posts) == 1
+        assert all(p.startswith(f"{COMPONENT_PATH}?") for p in posts[:-1]) and len(posts) <= 2
+        assert visit.click_pause_s is not None
     assert not rehearsal.touched_linkedin
 
 
@@ -108,7 +110,7 @@ async def test_the_rehearsal_scrolls_the_real_page(
 
     async with provider.run() as run:
         page = await run.goto(f"{site}/in/rehearsal-alex-doe/")
-        height = await page.evaluate("() => document.body.scrollHeight")
+        height = await page.evaluate("() => document.getElementById('content').scrollHeight")
     assert height > 1000, "the replica is too short to scroll like a person"
 
 

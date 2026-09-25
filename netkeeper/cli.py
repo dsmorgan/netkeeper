@@ -736,11 +736,12 @@ def rehearse_command(
     The pacing is the one in your config file, not a demo default, so what you
     watch is what a live run would do.
 
-    It rehearses enrichment's profile visits, which still read through the
-    in-page API. The connections sync sends no request of its own: it scrolls
-    your connections page and reads what the page loads (ADR 0006), so the
-    browser smoke suite's loopback replica, not a rehearsal, is where that is
-    watched.
+    Each visit is enrichment's: open the profile, scroll it, scroll back to the
+    top, pause, and click Contact info once. The requests in the log are the
+    page's own -- the profile page, a card it loads as it is scrolled, the
+    overlay it loads when Contact info is clicked. netkeeper sends none of them;
+    it reads their answers (ADR 0006). The connections sync, which only scrolls,
+    is watched in the browser smoke suite's loopback replica.
 
     It never touches LinkedIn. The site must be a loopback url, a linkedin.com
     host is refused by name, and a rehearsal that somehow reached one raises
@@ -942,7 +943,8 @@ def linkedin_enrich(
     """Run one enrichment now, in this terminal, and wait for it.
 
     This visits LinkedIn profiles: each visit is a real page view, a scroll, and
-    two in-page API reads, paced like a person, within today's warm-up-ramped,
+    one click on Contact info, read from what the page loads and sends nothing of
+    its own (ADR 0006), paced like a person, within today's warm-up-ramped,
     weekend-damped, heat-shrunk budget (`netkeeper posture` shows it). Pinned
     contacts go first. It works while scheduled runs are disarmed. Ctrl-C stops
     it between profiles; `--resume <run id>` picks up what it left.

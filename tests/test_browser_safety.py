@@ -25,7 +25,6 @@ import ast
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
 
 import boundary
 import pytest
@@ -126,14 +125,17 @@ REQUEST_MUTATORS = frozenset({"continue_", "fulfill", "abort"})
 API_REQUEST_SENDS = frozenset({"fetch", "get", "post", "put", "patch", "delete", "head"})
 
 # ADR 0006: the modules that read the page's own answers only listen and scroll. Nothing
-# in them evaluates script in the page, types, clicks, or otherwise drives it: the
-# scroll is `BrowserRun.scroll`'s, and ADR 0006's one click, when enrichment adds it,
-# is a narrow BrowserRun method of its own, not a call made from these.
+# in them evaluates script in the page, types, clicks, locates, or otherwise drives it:
+# the scroll is `BrowserRun.scroll`'s, and ADR 0006's one click is
+# `BrowserRun.click_contact_info`'s (#190), a narrow method of its own that these call by
+# that name and nothing else.
 OBSERVING_MODULES = (
     LINKEDIN / "observe.py",
     LINKEDIN / "page_connections.py",
     LINKEDIN / "flagship.py",
     LINKEDIN / "flight.py",
+    LINKEDIN / "page_profiles.py",
+    LINKEDIN / "flagship_profile.py",
 )
 PAGE_DRIVERS = frozenset(
     {
@@ -157,6 +159,13 @@ PAGE_DRIVERS = frozenset(
         "focus",
         "keyboard",
         "locator",
+        "get_by_role",
+        "get_by_text",
+        "get_by_label",
+        "get_by_placeholder",
+        "get_by_alt_text",
+        "get_by_title",
+        "get_by_test_id",
         "query_selector",
         "query_selector_all",
         "wait_for_selector",
@@ -173,22 +182,47 @@ PAGE_DRIVERS = frozenset(
     }
 )
 
-# #192: `mouse.move` is deliberately absent from PAGE_DRIVERS above. It targets a
-# bare point, never a locator -- it is not a click, and not a hover resolved
-# against any particular element the way `hover()` (which *is* refused) would be --
-# so it needs no exception to "this module only listens" the way ADR 0006's Contact
-# info click needs one for `click()`. `mouse_move_sites`/`mouse_moves` below are
-# this reading's own test: the one place it may be called is the pointer-rest
-# method itself, not just its file -- see ALLOWED_MOUSE_MOVE_METHOD.
+# ADR 0006's one exception to "navigation and the scroll are the only input": one click
+# on Contact info per profile visit (#190). Every way Playwright gives a page input --
+# a click, a key, a tap, a hover, typing, a checkbox, a select, a synthetic event, a drag
+# -- is refused anywhere in the extractor and the worker, except the single `click` call
+# inside `BrowserRun.click_contact_info`. `type` counts only as an attribute (Playwright's
+# `locator.type`); the builtin `type(x)` is a bare name and is not read.
+INPUT_CALLS = frozenset(
+    {
+        "click",
+        "dblclick",
+        "tap",
+        "fill",
+        "type",
+        "press",
+        "press_sequentially",
+        "insert_text",
+        "check",
+        "uncheck",
+        "set_checked",
+        "select_option",
+        "select_text",
+        "set_input_files",
+        "dispatch_event",
+        "hover",
+        "focus",
+        "drag_to",
+        "drag_and_drop",
+        "keyboard",
+        "touchscreen",
+        "down",
+        "up",
+        "move",
+    }
+)
+INPUT_ROOTS = [LINKEDIN, PACKAGE / "worker.py"]
+#: The one place a page input is allowed: (file, enclosing function, name).
+ALLOWED_INPUTS = frozenset({(LINKEDIN / "browser.py", "BrowserRun.click_contact_info", "click")})
 
 # The attach point. Everything else goes through AttachBrowserProvider.
 CONNECT_CALL = "connect_over_cdp"
 CONNECTOR_MODULE = LINKEDIN / "browser.py"
-
-# #192: the one method `mouse.move` may be called from -- not just "somewhere in
-# CONNECTOR_MODULE" (#192 review, F2). #193's rebase adds its own entries to its
-# own ALLOWED_INPUTS the same way; see this PR's body for exactly what that needs.
-ALLOWED_MOUSE_MOVE_METHOD: Final = "_rest_pointer_over_content"
 
 # Spec 5 and 9.9: a request handler that awaits browser work deadlocks on the tab
 # waiting for its own response, so routes enqueue work on the task runner instead.
@@ -200,18 +234,13 @@ BROWSER_MODULES = (
     # handler exactly as importing the provider would, so it is a browser
     # module here and not only a caller of one below.
     "netkeeper.linkedin.rehearse",
-    # The in-page Voyager fetch (#150) awaits a real `page.evaluate` fetch --
-    # exactly the deadlock risk the other three exist to keep out of a handler.
-    "netkeeper.linkedin.fetch",
-    # dom.py's contact-info overlay reader (P2-08, unwired since #187's review
-    # removed its connections-list half): a page.evaluate read is exactly as
-    # long-running as the in-page Voyager fetch above.
-    "netkeeper.linkedin.dom",
     # The run worker (P2-10) attaches and runs a whole run. A route that imported
     # it could await it; routes submit runs to the task runner instead.
     "netkeeper.worker",
     # #187: the connections source that scrolls a real tab and waits on its answers.
     "netkeeper.linkedin.page_connections",
+    # #190: the profile source that scrolls, clicks Contact info, and waits on answers.
+    "netkeeper.linkedin.page_profiles",
 )
 
 # The modules that may reach the provider at all, as paths from the repository root.
@@ -223,9 +252,8 @@ BROWSER_CALLERS = frozenset(
         Path("netkeeper/cli.py"),  # `netkeeper preflight` and `rehearse`, on their own loops
         Path("netkeeper/linkedin/preflight.py"),  # the report, inside a run
         Path("netkeeper/linkedin/rehearse.py"),  # the rehearsal, inside a run
-        Path("netkeeper/linkedin/fetch.py"),  # PageVoyagerFetch, inside a run (#150)
-        Path("netkeeper/linkedin/dom.py"),  # DomContactInfoSource (P2-08)
         Path("netkeeper/linkedin/page_connections.py"),  # PageConnections, inside a run (#187)
+        Path("netkeeper/linkedin/page_profiles.py"),  # PageProfiles, inside a run (#190)
         # The run worker (P2-10): takes the lock, attaches, runs a recorded run. Not
         # under web/ or services/, and nothing under either imports it: the app and
         # the runs API hold it only as services.runs.RunExecutor.
@@ -440,56 +468,54 @@ def page_drivers(source: str, path: Path = MEMORY) -> Iterator[Finding]:
             yield Finding(path, line, f"{name}() drives the page; this module only listens")
 
 
-def mouse_move_sites(source: str, path: Path = MEMORY) -> Iterator[tuple[int, str | None]]:
-    """Every ``<mouse>.move(...)`` call, paired with the name of the ``def`` that
-    directly encloses it (``None`` at module level).
+@dataclass(frozen=True, slots=True)
+class Input:
+    """A page input a scanner found: where, inside which function, and which."""
 
-    Reads a call whose function is a ``move`` attribute on something itself named
-    or attributed ``mouse`` (``page.mouse.move``, ``self.mouse.move``, a local
-    ``mouse = ...mouse`` held first) -- narrower than :func:`reached_names`'s
-    deny-list matchers above, because unlike a launch or a route, a stray
-    ``.move()`` on some unrelated object is not itself a finding anywhere else in
-    this codebase, and a scanner that flagged every ``.move`` call -- ``shutil.move``,
-    a queue's ``move_to_end`` -- would eventually be disbelieved and ignored (this
-    module's own opening docstring: a scanner reads names, not meanings).
+    path: Path
+    line: int
+    function: str
+    name: str
 
-    Unlike every other scanner above, this one also carries *where* -- the
-    enclosing function, not only the file -- because "somewhere in
-    ``browser.py``" is not the rule (#192 review, F2): a call moved from
-    ``BrowserRun._rest_pointer_over_content`` to a sibling method, or dropped a
-    level up into ``scroll`` itself, leaves the file unchanged and must still be
-    caught. Walking the tree with the current ``def`` name in hand is what tells
-    those apart; it cannot see a ``mouse`` reference held under another name or a
-    call relayed through a helper, which is why this rule is also a review rule,
-    not only a test, same as every deny-list rule in this file already is.
+    def __str__(self) -> str:
+        return f"{self.path}:{self.line}: {self.name}() in {self.function or '<module>'}"
+
+
+def page_inputs(source: str, path: Path = MEMORY) -> Iterator[Input]:
+    """Every reach of a page input: an attribute, an imported member, a getattr literal.
+
+    Each carries its enclosing ``Class.method`` (or function) name, so the one allowed
+    click can be told apart from the same call anywhere else, including elsewhere in
+    ``browser.py``. A bare name (``type(x)``, ``check()``) is not a page input.
     """
     tree = ast.parse(source)
+    scopes: dict[ast.AST, str] = {}
 
-    def walk(node: ast.AST, enclosing: str | None) -> Iterator[tuple[int, str | None]]:
+    def enclose(node: ast.AST, name: str) -> None:
         for child in ast.iter_child_nodes(node):
-            child_enclosing = enclosing
-            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
-                child_enclosing = child.name
-            if isinstance(child, ast.Call):
-                func = child.func
-                if isinstance(func, ast.Attribute) and func.attr == "move":
-                    target = func.value
-                    on_mouse = (isinstance(target, ast.Name) and target.id == "mouse") or (
-                        isinstance(target, ast.Attribute) and target.attr == "mouse"
-                    )
-                    if on_mouse:
-                        yield child.lineno, enclosing
-            yield from walk(child, child_enclosing)
+            if isinstance(child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+                inner = f"{name}.{child.name}" if name else child.name
+                scopes[child] = inner
+                enclose(child, inner)
+            else:
+                scopes[child] = name
+                enclose(child, name)
 
-    yield from walk(tree, None)
-
-
-def mouse_moves(source: str, path: Path = MEMORY) -> Iterator[Finding]:
-    """:func:`mouse_move_sites`, as :class:`Finding`\\ s -- for the scanner
-    self-tests and ``complain``'s formatting below, which every other scanner in
-    this file already shares that shape with."""
-    for line, enclosing in mouse_move_sites(source, path):
-        yield Finding(path, line, f"mouse.move() inside {enclosing!r} (#192)")
+    enclose(tree, "")
+    for node in ast.walk(tree):
+        where = scopes.get(node, "")
+        if isinstance(node, ast.Attribute) and node.attr in INPUT_CALLS:
+            yield Input(path, node.lineno, where, node.attr)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in INPUT_CALLS:
+                    yield Input(path, node.lineno, where, alias.name)
+        elif isinstance(node, ast.Call):
+            for arg in _attribute_name_arguments(node):
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    for part in arg.value.split("."):
+                        if part in INPUT_CALLS:
+                            yield Input(path, node.lineno, where, part)
 
 
 def database_imports(source: str, path: Path = MEMORY) -> Iterator[Finding]:
@@ -556,32 +582,24 @@ def test_the_observing_modules_only_listen_and_scroll() -> None:
     assert not findings, complain(findings, "an observing module drives the page:")
 
 
-def test_mouse_move_is_called_only_inside_the_allowed_method() -> None:
-    """#192: the pointer-rest method is the one place ``mouse.move`` may appear --
-    scoped to the enclosing ``def``, not just the file (#192 review, F2).
-
-    A mutation that moved the call to a sibling method of
-    :data:`CONNECTOR_MODULE`, or dropped it a level up into ``scroll`` itself,
-    leaves the file this rule used to check unchanged, and must still fail this
-    one.
-    """
-    sites: list[tuple[Path, int, str | None]] = []
-    for path in python_files(PACKAGE):
-        for line, enclosing in mouse_move_sites(path.read_text(encoding="utf-8"), path):
-            sites.append((path, line, enclosing))
-    assert sites, (
-        f"nothing calls mouse.move() any more; is {CONNECTOR_MODULE.name}'s"
-        f" {ALLOWED_MOUSE_MOVE_METHOD}() still resting the pointer before a wheel replay (#192)?"
-    )
-    outside = [
-        (path, line, enclosing)
-        for path, line, enclosing in sites
-        if not (path == CONNECTOR_MODULE and enclosing == ALLOWED_MOUSE_MOVE_METHOD)
+def test_the_one_page_input_is_the_contact_info_click() -> None:
+    """ADR 0006, #190: no click, key, tap, hover, typing, or synthetic event anywhere in the
+    extractor or the worker but the one ``click`` inside ``BrowserRun.click_contact_info``."""
+    found: list[Input] = []
+    files = [
+        path for root in INPUT_ROOTS for path in ([root] if root.is_file() else python_files(root))
     ]
-    assert not outside, (
-        f"mouse.move() belongs only inside {CONNECTOR_MODULE.name}'s"
-        f" {ALLOWED_MOUSE_MOVE_METHOD}():\n"
-        + "\n".join(f"{path}:{line}: inside {enclosing!r}" for path, line, enclosing in outside)
+    assert len(files) >= 20, "the scan found too few files; is the path right?"
+    for path in files:
+        found.extend(page_inputs(path.read_text(encoding="utf-8"), path))
+    allowed = [i for i in found if (i.path, i.function, i.name) in ALLOWED_INPUTS]
+    others = [i for i in found if (i.path, i.function, i.name) not in ALLOWED_INPUTS]
+    assert len(allowed) == 1, (
+        "BrowserRun.click_contact_info no longer makes exactly one click call"
+        f" ({len(allowed)} found); if it moved, point ALLOWED_INPUTS at its new home"
+    )
+    assert not others, "a page input outside ADR 0006's one click:\n" + "\n".join(
+        str(i) for i in others
     )
 
 
@@ -764,37 +782,61 @@ def test_the_page_driver_scanner_catches_a_click_and_an_evaluate() -> None:
     assert list(page_drivers("await page.eval_on_selector('a', 'e => e.click()')\n"))
     assert list(page_drivers("await page.eval_on_selector_all('a', 'es => 1')\n"))
     assert list(page_drivers("await locator.evaluate_all('es => fetch(u)')\n"))
+    assert list(page_drivers("await page.get_by_role('link', name='Contact info').click()\n"))
+    assert list(page_drivers("control = page.get_by_text('Contact info')\n"))
     assert not list(page_drivers("await run.scroll(plan)\n"))
+    assert not list(page_drivers("await run.click_contact_info(path, pause_s=1.0)\n"))
     assert not list(page_drivers("page.on('response', handler)\n"))
 
 
-def test_the_mouse_move_scanner_catches_a_call() -> None:
-    assert list(mouse_moves("await page.mouse.move(1, 2)\n"))
-    assert list(mouse_moves("await self._page.mouse.move(x, y)\n"))
-    assert list(mouse_moves("mouse = page.mouse\nawait mouse.move(x, y)\n"))
-    assert not list(mouse_moves("await page.mouse.wheel(0, 1)\n"))
-    assert not list(mouse_moves("shutil.move('a', 'b')\n"))
-    assert not list(mouse_moves("queue.move_to_end('k')\n"))
-
-
-def test_the_mouse_move_scanner_names_the_enclosing_method() -> None:
-    """#192 review, F2: the scanner's whole point is telling *where* apart, not
-    just *whether* -- a call in the allowed method and one moved to a sibling (or
-    dropped to module level) must read differently."""
+def test_the_input_scanner_catches_every_other_input() -> None:
+    """Each spelling a regression would use, and the one place a click is allowed."""
     allowed = (
         "class BrowserRun:\n"
-        "    async def _rest_pointer_over_content(self, page):\n"
-        "        await page.mouse.move(1, 2)\n"
+        "    async def click_contact_info(self, path):\n"
+        "        await control.click(delay=90)\n"
     )
-    assert list(mouse_move_sites(allowed)) == [(3, "_rest_pointer_over_content")]
-
-    sibling = "class C:\n    async def scroll(self, page):\n        await page.mouse.move(1, 2)\n"
-    assert list(mouse_move_sites(sibling)) == [(3, "scroll")]
-
-    module_level = "await page.mouse.move(1, 2)\n"
-    assert list(mouse_move_sites(module_level)) == [(1, None)]
-
-    assert not list(mouse_move_sites("await page.mouse.wheel(0, 1)\n"))
+    (one,) = page_inputs(allowed)
+    assert (one.function, one.name) == ("BrowserRun.click_contact_info", "click")
+    elsewhere = (
+        "class BrowserRun:\n"
+        "    async def scroll(self, plan):\n"
+        "        await page.mouse.click(1, 2)\n"
+        "async def click_contact_info():\n"  # the right name, the wrong owner
+        "    await page.click('a')\n"
+    )
+    assert sorted((i.function, i.name) for i in page_inputs(elsewhere)) == [
+        ("BrowserRun.scroll", "click"),
+        ("click_contact_info", "click"),
+    ]
+    for snippet in (
+        "await page.keyboard.press('Escape')\n",
+        "await locator.fill('x')\n",
+        "await locator.type('x')\n",
+        "await locator.hover()\n",
+        "await locator.tap()\n",
+        "await locator.dblclick()\n",
+        "await locator.check()\n",
+        "await locator.set_checked(True)\n",
+        "await locator.select_option('a')\n",
+        "await locator.dispatch_event('click')\n",
+        "await locator.focus()\n",
+        "await locator.drag_to(other)\n",
+        "await page.mouse.down()\n",
+        "await page.mouse.move(1, 2)\n",
+        "await page.touchscreen.tap(1, 2)\n",
+        "go = locator.click\n",
+        "getattr(locator, 'click')()\n",
+        "operator.methodcaller('press', 'Enter')(locator)\n",
+        "from somewhere import click as go\n",
+    ):
+        assert list(page_inputs(snippet)), snippet
+        assert not {(i.function, i.name) for i in page_inputs(snippet)} & {
+            ("BrowserRun.click_contact_info", "click")
+        }
+    assert not list(page_inputs("kind = type(exc).__name__\n"))
+    assert not list(page_inputs("await run.click_contact_info(path, pause_s=1.0)\n"))
+    assert not list(page_inputs("await page.mouse.wheel(0, 300)\n"))
 
 
 def test_the_forbidden_matcher_reads_dotted_segments() -> None:
@@ -820,11 +862,15 @@ def test_database_scanner_catches_an_import() -> None:
 def test_the_scanners_resolve_a_relative_import() -> None:
     """A dot is not a way out of the rules."""
     assert list(database_imports("from ..models import User\n", LINKEDIN / "browser.py"))
-    assert list(database_imports("from ..crm.tags import list_tags\n", LINKEDIN / "dom.py"))
+    assert list(
+        database_imports("from ..crm.tags import list_tags\n", LINKEDIN / "page_profiles.py")
+    )
     assert list(
         browser_imports("from ...linkedin.browser import Attach\n", WEB / "api" / "__init__.py")
     )
-    assert not list(database_imports("from .browser import BrowserRun\n", LINKEDIN / "dom.py"))
+    assert not list(
+        database_imports("from .browser import BrowserRun\n", LINKEDIN / "page_profiles.py")
+    )
     assert not list(database_imports("from . import archive\n", LINKEDIN / "conversations.py"))
 
 

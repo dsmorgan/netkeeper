@@ -248,6 +248,50 @@ def rest_pointer_like_a_person(
     return RestPlan(steps=tuple(steps))
 
 
+def depth_after(plan: ScrollPlan) -> int:
+    """How far down the page ``plan`` leaves it: the steps summed, never above the top.
+
+    A page cannot scroll above its top, so a scroll back up past it is clamped there
+    at each step rather than carried as a debt the next step down would pay off.
+    """
+    depth = 0
+    for step in plan.steps:
+        depth = max(0, depth + step.delta_px)
+    return depth
+
+
+#: The wheel steps and pauses of a scroll back to the top, and the short look after it.
+BACK_TO_TOP_DELTA_RANGE_PX: Final = (300, 900)
+BACK_TO_TOP_PAUSE_RANGE_S: Final = (0.2, 0.9)
+BACK_TO_TOP_DWELL_MEDIAN_S: Final = 1.0
+BACK_TO_TOP_DWELL_SIGMA: Final = 0.4
+
+
+def scroll_back_to_top(rng: random.Random, depth_px: int) -> ScrollPlan:
+    """A person scrolling back up to the top of a page ``depth_px`` down, then a look.
+
+    Upward wheel steps until they have covered ``depth_px``, and one more: a person
+    overshoots, and the page stops at its top. A page that was never scrolled needs no
+    steps, only the look. Enrichment replays this before the Contact info click (#190),
+    so the link in the top card is on screen when it is clicked, the way a person
+    would find it, instead of the page jumping to it.
+    """
+    steps: list[ScrollStep] = []
+    covered = 0
+    while depth_px > 0 and covered <= depth_px:
+        delta = rng.randint(*BACK_TO_TOP_DELTA_RANGE_PX)
+        covered += delta
+        steps.append(ScrollStep(delta_px=-delta, pause_s=rng.uniform(*BACK_TO_TOP_PAUSE_RANGE_S)))
+    dwell = human_delay(
+        rng,
+        median=BACK_TO_TOP_DWELL_MEDIAN_S,
+        sigma=BACK_TO_TOP_DWELL_SIGMA,
+        tail_p=0.0,
+        tail_range=(0.0, 0.0),
+    )
+    return ScrollPlan(steps=tuple(steps), dwell_s=dwell)
+
+
 # --- bursts -----------------------------------------------------------------
 
 # Appendix C: "Burst ... Sessions, not streams."

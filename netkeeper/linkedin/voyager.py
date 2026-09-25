@@ -17,8 +17,8 @@ degrades the run (:class:`RouteChanged`) instead of crashing it.
 ``decorationId`` values, and header names in this module were authored on the
 date in their comment from the general, publicly documented shape of
 Voyager's REST API (the rest.li 2.0.0 collection envelope of ``elements`` +
-``paging``, LinkedIn's normalized ``data``/``included`` cross-referencing, and
-the well-known ``profileContactInfo`` resource) rather than copied from a live
+``paging``, and LinkedIn's normalized ``data``/``included`` cross-referencing)
+rather than copied from a live
 DevTools capture — this task has no access to a logged-in LinkedIn session and
 must not fetch anything from linkedin.com (see "Capturing and sanitizing
 fixtures" below). Treat every constant here as a starting point that the first
@@ -53,8 +53,9 @@ the live site.
    human at the keyboard, not the sidecar). Open DevTools, Network tab,
    filter on ``voyager``.
 2. Trigger the request: scroll the connections list for a connections page,
-   open a profile's "Contact info" panel for contact info, open a profile for
-   profile details, open the messaging inbox for conversations.
+   open the messaging inbox for conversations. (Profiles and contact info are
+   read from what the page loads since #190; see
+   ``docs/linkedin-flagship-web-shapes.md``.)
 3. Copy the request as cURL or inspect it directly to record: the path, the
    query string (note the ``decorationId`` value), and the request headers.
    Update the matching constant in this module with today's date in its
@@ -457,7 +458,7 @@ class ConnectionSummary:
     parser, :func:`parse_connections_page`, always fills it from
     ``entityUrn`` and never produces ``None`` -- but LinkedIn's internal URN
     is not printed anywhere in the connections list page's rendered HTML, so
-    :mod:`netkeeper.linkedin.dom`'s scroll-driven fallback has no honest way
+    P2-08's scroll-driven DOM fallback (since removed) had no honest way
     to read one. ``None`` there is not "unknown, guess"; it is "this source
     cannot supply a URN". :func:`netkeeper.crm.apply.apply_page` never sends
     such a row through identity resolution: it marks the contact holding the
@@ -549,101 +550,36 @@ def parse_connections_page(body: str) -> ConnectionsPageResult:
 
 
 # =============================================================================
-# Contact info overlay (spec 9.2 "Profile visit"; 9.4 "Enrichment" step 3)
+# Profile visit results (spec 9.2 "Profile visit"; 9.4 "Enrichment"; 9.10)
+#
+# Since #190 enrichment reads the profile and its contact-info overlay from the
+# answers the page loads (ADR 0006): ``netkeeper.linkedin.flagship_profile``
+# parses them into these types. They stay here, beside ``ConnectionSummary``,
+# because they are what the extractor hands the core (spec 9.10's "Out" column);
+# the Voyager profile and contact-info requests they were first parsed from are
+# retired.
 # =============================================================================
-
-CONTACT_INFO_ENDPOINT: Final = "identity/profiles/{public_id}/profileContactInfo"
-#: captured 2026-09-22. Legacy (non-"dash") identity resource; still the one
-#: the "Contact info" overlay itself calls as of this capture.
-CONTACT_INFO_PATH_TEMPLATE: Final = "/voyager/api/identity/profiles/{public_id}/profileContactInfo"
-
-
-def contact_info_path(public_id: str) -> str:
-    """The contact-info path for one profile's public id."""
-    if not public_id.strip():
-        raise ValueError("public_id is empty")
-    return CONTACT_INFO_PATH_TEMPLATE.format(public_id=public_id)
 
 
 @dataclass(frozen=True, slots=True)
 class ContactInfo:
     """The "Contact info" overlay's contents for one profile.
 
-    Every field is optional at the value level (a person may share none of
-    these), but a field that *is* present must have the right shape — a
-    ``phoneNumbers`` entry that is not an object with a string ``number``, for
-    example, is :class:`RouteChanged`, not a silently dropped phone number.
+    Every field is optional at the value level: a person may share none of them.
+    ``emails`` lists the addresses in the order the overlay shows them. ``birthday``
+    and ``address`` are the overlay's own text, unparsed, and have no column to land
+    in (spec 8.1); ``connected_on`` is the overlay's "Connected since" day. The
+    phone, address, birthday, and Twitter sections were not in the #149 capture, so
+    their readers fail soft: a value they cannot read is left out, never guessed.
     """
 
-    email: str | None
-    phones: tuple[str, ...]
-    websites: tuple[str, ...]
-    twitter_handles: tuple[str, ...]
-
-
-def _optional_string_list(
-    endpoint: str, obj: Mapping[str, object], key: str, *, item_key: str
-) -> tuple[str, ...]:
-    """Extract ``obj[key]``, an optional list of ``{item_key: <str>}`` objects.
-
-    Absent entirely: an empty tuple (the person did not share this). Present
-    but not a list, or containing an entry that is not an object with a
-    string ``item_key``: ``RouteChanged`` — LinkedIn changed the shape of a
-    field this module knows how to read, which is different from the person
-    simply not filling it in.
-    """
-    raw = obj.get(key)
-    if raw is None:
-        return ()
-    items = _expect(endpoint, f"'{key}'", raw, list)
-    values: list[str] = []
-    for i, raw_item in enumerate(items):
-        item = _expect(endpoint, f"'{key}'[{i}]", raw_item, dict)
-        values.append(_field(endpoint, item, item_key, str))
-    return tuple(values)
-
-
-def parse_contact_info(body: str) -> ContactInfo:
-    """Parse a ``profileContactInfo`` response.
-
-    Unlike the connections and conversations endpoints, this one answers a
-    single flat resource, not a paginated collection: no ``data``/``included``
-    envelope to unwrap.
-    """
-    endpoint = CONTACT_INFO_ENDPOINT
-    payload = _load_json(endpoint, body)
-    root = _expect(endpoint, "<root>", payload, dict)
-    return ContactInfo(
-        email=_optional_field(endpoint, root, "emailAddress", str),
-        phones=_optional_string_list(endpoint, root, "phoneNumbers", item_key="number"),
-        websites=_optional_string_list(endpoint, root, "websites", item_key="url"),
-        twitter_handles=_optional_string_list(endpoint, root, "twitterHandles", item_key="name"),
-    )
-
-
-# =============================================================================
-# Profile details (spec 9.2 "Profile visit"; 9.4 "Enrichment" steps 3-4)
-# =============================================================================
-
-PROFILE_ENDPOINT: Final = "identity/dash/profiles"
-PROFILE_PATH: Final = "/voyager/api/identity/dash/profiles"  # captured 2026-09-22
-
-#: captured 2026-09-22. Selects location, positions, and education alongside
-#: the top card (spec 9.2's "location, positions, education").
-PROFILE_DECORATION_ID: Final = (
-    "com.linkedin.voyager.dash.deco.identity.profile.FullProfileWithEntities-25"
-)
-
-
-def profile_query(public_id: str) -> dict[str, str]:
-    """Query parameters for a profile-details fetch by public id."""
-    if not public_id.strip():
-        raise ValueError("public_id is empty")
-    return {
-        "q": "memberIdentity",
-        "memberIdentity": public_id,
-        "decorationId": PROFILE_DECORATION_ID,
-    }
+    emails: tuple[str, ...] = ()
+    phones: tuple[str, ...] = ()
+    websites: tuple[str, ...] = ()
+    twitter_handles: tuple[str, ...] = ()
+    birthday: str | None = None
+    address: str | None = None
+    connected_on: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -652,8 +588,7 @@ class PositionEntry:
 
     ``company`` and every date are optional: a person can list a role with no
     company name or no dates, and one such entry must not make a whole profile
-    unreadable (#171 review). Which of these LinkedIn really omits is for the
-    first live capture to confirm (#149).
+    unreadable (#171 review).
     """
 
     title: str
@@ -687,112 +622,6 @@ class ProfileDetails:
     location: str | None
     positions: tuple[PositionEntry, ...]
     education: tuple[EducationEntry, ...]
-
-
-def _optional_month_year(
-    endpoint: str, where: str, obj: Mapping[str, object], key: str
-) -> tuple[int | None, int | None]:
-    """Read an optional ``{"month": int, "year": int}`` object as ``(year, month)``.
-
-    Both fields are individually optional inside the object even when the
-    object itself is present (LinkedIn sometimes has a year with no month);
-    absent as a whole, both come back ``None`` — an ongoing position has no
-    ``end``, and that is not a shape problem. ``where`` locates the field in
-    any :class:`RouteChanged` this raises, without altering ``endpoint``.
-    """
-    raw = obj.get(key)
-    if raw is None:
-        return None, None
-    date_obj = _expect(endpoint, f"{where}.{key}", raw, dict)
-    year = _optional_field(endpoint, date_obj, "year", int)
-    month = _optional_field(endpoint, date_obj, "month", int)
-    return year, month
-
-
-def _optional_date_range(
-    endpoint: str, where: str, entity: Mapping[str, object]
-) -> tuple[int | None, int | None, int | None, int | None]:
-    """``(start_year, start_month, end_year, end_month)`` from an optional ``dateRange``.
-
-    Absent or ``null`` is a stint with no dates, which people do list (a school
-    with no years, most often); present, it must be an object.
-    """
-    date_range = _optional_field(endpoint, entity, "dateRange", dict)
-    if date_range is None:
-        return None, None, None, None
-    start_year, start_month = _optional_month_year(endpoint, where, date_range, "start")
-    end_year, end_month = _optional_month_year(endpoint, where, date_range, "end")
-    return start_year, start_month, end_year, end_month
-
-
-def _position_from_entity(endpoint: str, index: int, entity: Mapping[str, object]) -> PositionEntry:
-    where = f"included[{index}].dateRange"
-    start_year, start_month, end_year, end_month = _optional_date_range(endpoint, where, entity)
-    return PositionEntry(
-        title=_field(endpoint, entity, "title", str),
-        company=_optional_field(endpoint, entity, "companyName", str),
-        start_year=start_year,
-        start_month=start_month,
-        end_year=end_year,
-        end_month=end_month,
-    )
-
-
-def _education_from_entity(
-    endpoint: str, index: int, entity: Mapping[str, object]
-) -> EducationEntry:
-    where = f"included[{index}].dateRange"
-    start_year, _, end_year, _ = _optional_date_range(endpoint, where, entity)
-    return EducationEntry(
-        school=_field(endpoint, entity, "schoolName", str),
-        degree=_optional_field(endpoint, entity, "degreeName", str),
-        field_of_study=_optional_field(endpoint, entity, "fieldOfStudy", str),
-        start_year=start_year,
-        end_year=end_year,
-    )
-
-
-def parse_profile_details(body: str) -> ProfileDetails:
-    """Parse a profile-details (``identity/dash/profiles``) response.
-
-    ``data`` is the top-card profile itself (not a list: this endpoint
-    answers one profile). ``included`` carries the position and education
-    entries, each tagged with a ``$type`` naming its kind
-    (``com.linkedin.voyager.dash.identity.profile.Position``, ``...Education``);
-    entries of any other ``$type`` are ignored rather than rejected, since a
-    full profile response's ``included`` also carries entities (skills,
-    certifications) this parser does not need yet, and rejecting the whole
-    response over a section nobody asked for would make every future addition
-    to LinkedIn's profile page a false :class:`RouteChanged`.
-    """
-    endpoint = PROFILE_ENDPOINT
-    payload = _load_json(endpoint, body)
-    root = _expect(endpoint, "<root>", payload, dict)
-    data = _field(endpoint, root, "data", dict)
-    included_raw = _field(endpoint, root, "included", list)
-
-    location = _optional_field(endpoint, data, "geoLocationName", str)
-
-    positions: list[PositionEntry] = []
-    education: list[EducationEntry] = []
-    for i, raw_entity in enumerate(included_raw):
-        entity = _expect(endpoint, f"included[{i}]", raw_entity, dict)
-        entity_type = _field(endpoint, entity, "$type", str)
-        if entity_type.endswith(".Position"):
-            positions.append(_position_from_entity(endpoint, i, entity))
-        elif entity_type.endswith(".Education"):
-            education.append(_education_from_entity(endpoint, i, entity))
-
-    return ProfileDetails(
-        urn=_field(endpoint, data, "entityUrn", str),
-        public_id=_field(endpoint, data, "publicIdentifier", str),
-        first_name=_field(endpoint, data, "firstName", str),
-        last_name=_field(endpoint, data, "lastName", str),
-        headline=_optional_field(endpoint, data, "headline", str),
-        location=location,
-        positions=tuple(positions),
-        education=tuple(education),
-    )
 
 
 # =============================================================================

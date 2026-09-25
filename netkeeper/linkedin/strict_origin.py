@@ -1,12 +1,13 @@
 """A url origin, parsed so a browser cannot read it a second, different way.
 
-Two places in this package decide whether a url is safe to navigate a real Chrome to,
-or to `fetch()` from inside one, and both get it wrong in the same way if they trust
+A few places in this package decide whether a url is safe to navigate a real Chrome
+to, and each would get it wrong in the same way if it trusted
 :func:`urllib.parse.urlsplit` alone: :mod:`netkeeper.linkedin.rehearse` refuses
-LinkedIn and requires this machine's loopback; :mod:`netkeeper.linkedin.fetch`
-refuses everything but LinkedIn (or, for a test, loopback). Both checks were built on
-``urlsplit``, and ``urlsplit`` disagrees with a real browser on a case that matters
-here.
+LinkedIn and requires this machine's loopback; :mod:`netkeeper.linkedin.page_profiles`
+and :mod:`netkeeper.linkedin.page_connections` refuse everything but LinkedIn (or, for a
+test, loopback). (The in-page fetch this was first written for is gone, #190.) The
+first checks were built on ``urlsplit``, and ``urlsplit`` disagrees with a real browser on a
+case that matters here.
 
 **The differential.** WHATWG's URL Standard, which every browser implements, treats a
 backslash exactly like a forward slash for a "special" scheme (``http``, ``https``

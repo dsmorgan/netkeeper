@@ -67,10 +67,8 @@ from netkeeper.linkedin.browser import (
     BrowserUnavailable,
 )
 from netkeeper.linkedin.connections import ConnectionsSource, SyncMode
-from netkeeper.linkedin.enrich import BrowserProfiles
-from netkeeper.linkedin.fetch import PageVoyagerFetch
-from netkeeper.linkedin.pacing import ScrollPlan
 from netkeeper.linkedin.page_connections import PageConnections
+from netkeeper.linkedin.page_profiles import PageProfiles
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.services import route_breaker, runs
@@ -113,15 +111,16 @@ def connections_source(
     return PageConnections(run, require_newest_first=mode is SyncMode.INCREMENTAL, sleep=sleep)
 
 
-def profile_source(run: BrowserRun, *, sleep: Sleep = asyncio.sleep) -> BrowserProfiles:
-    """The source a live enrichment reads through: the tab's navigation, its scroll,
-    and the in-page API, all from this one run (P2-07). ``sleep`` waits out the
-    scroll's pauses and dwell, the same sleeper the run's other waits use."""
+def profile_source(run: BrowserRun, *, sleep: Sleep = asyncio.sleep) -> PageProfiles:
+    """The source a live enrichment reads through (spec 9.4, ADR 0006, #190).
 
-    async def scroll(plan: ScrollPlan) -> object:
-        return await run.scroll(plan, sleep=sleep)
-
-    return BrowserProfiles(navigate=run.goto, scroll_page=scroll, fetch=PageVoyagerFetch(run))
+    :class:`~netkeeper.linkedin.page_profiles.PageProfiles`: each profile opened and
+    scrolled like a person, read from the answers the page itself loads, with ADR
+    0006's one click on **Contact info** per visit. The in-page Voyager fetch it
+    replaced is gone. ``sleep`` waits out the scroll's pauses and the pause before the
+    click, the same sleeper the run's other waits use.
+    """
+    return PageProfiles(run, sleep=sleep)
 
 
 _MODE: Final[dict[SyncRunKind, SyncMode]] = {
