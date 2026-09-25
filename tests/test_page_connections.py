@@ -50,6 +50,24 @@ from netkeeper.linkedin.observe import ObservationFailed, ObservationLimits
 from netkeeper.linkedin.pacing import ScrollPlan
 from netkeeper.linkedin.page_connections import PageConnections
 
+#: No test here needs more scroll plans than this; a scroll loop that never stops
+#: fails at this bound instead of hanging the suite (#198 review, L4).
+MAX_PLANS_PER_TEST = 300
+
+
+@pytest.fixture(autouse=True)
+def _bounded_scrolls(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = BrowserRun.scroll
+    plans = 0
+
+    async def bounded(self: BrowserRun, plan: ScrollPlan, **kwargs: Any) -> ScrollOutcome:
+        nonlocal plans
+        plans += 1
+        assert plans <= MAX_PLANS_PER_TEST, "the scroll never stopped"
+        return await real(self, plan, **kwargs)
+
+    monkeypatch.setattr(BrowserRun, "scroll", bounded)
+
 
 def many(count: int) -> list[Person]:
     """``count`` invented people: the named ten, then numbered ones."""
@@ -551,7 +569,7 @@ async def test_a_lost_answer_the_page_never_asks_for_again_stops_after_the_idle_
     assert out.result.reason is StopReason.ANSWER_LOST and out.urns == []
     assert out.result.lost is not None and out.result.lost.start == 30
     assert out.result.lost.ending == (
-        f"the page did not ask for it again within {page_connections.MAX_IDLE_SCROLLS} scrolls"
+        f"it was not read again within {page_connections.MAX_IDLE_SCROLLS} scrolls"
     )
     # Plans 2, 4, and 6 brought 10, 20, and the lost 30; six idle plans after it.
     assert site.plans == 6 + page_connections.MAX_IDLE_SCROLLS
@@ -628,6 +646,63 @@ async def test_a_lost_first_screen_is_still_the_observation_failing() -> None:
 
     with pytest.raises(ObservationFailed):
         await sync(LostScreen(many(20)))
+
+
+@pytest.mark.parametrize(
+    ("duplicate", "outcome"),
+    [
+        (Answer(status=429, body=b"Too many requests"), Outcome.THROTTLED),
+        (Answer(status=999), Outcome.THROTTLED),
+        (Answer(status=302, headers={"location": CHECKPOINT_URL}), Outcome.CHECKPOINT),
+        (Answer(status=302, headers={"location": LOGIN_URL}), Outcome.LOGGED_OUT),
+    ],
+    ids=["429", "999", "checkpoint", "login"],
+)
+async def test_a_wall_or_throttle_on_a_stale_start_still_stops_the_run(
+    duplicate: Answer, outcome: Outcome
+) -> None:
+    """#198 review, M2: the start comparison skips a stale answer's missing body, never
+    its status. A retried request for a page already read that comes back throttled
+    or walled is still that throttle or that wall."""
+    out = await sync(FlagshipSite(many(60), duplicate_answers={20: duplicate}))
+    assert out.result.reason is StopReason.RESPONSE and out.result.outcome is outcome
+    assert out.result.lost is None
+
+
+async def test_a_stale_answer_without_a_body_leaves_nothing_lost() -> None:
+    """#198 review, L1: a retried copy of page 20, already read, arrives without a body;
+    then the page stops. That is a stall, route_changed as any stall is, never a lost
+    answer: the stale copy was skipped before its body was looked at."""
+    out = await sync(FlagshipSite(many(30), end="stall", lost={20: Lost("duplicate")}))
+    assert out.result.reason is StopReason.RESPONSE
+    assert out.result.outcome is Outcome.ROUTE_CHANGED and out.result.lost is None
+
+
+async def test_an_answer_lost_on_every_ask_stops_within_the_idle_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#198 review, L4: the page asks for 20 on every scroll and every copy is lost. The
+    idle count restarts at the first loss only, so exactly MAX_IDLE_SCROLLS more scrolls
+    are spent. A count that restarted on every loss would scroll for ever; the hard
+    bound below turns that into a failed assertion instead of a hang."""
+    site = FlagshipSite(
+        many(60), answer_plans=lambda n: True, lost={20: Lost("reask", times=10_000)}
+    )
+    real = BrowserRun.scroll
+
+    async def bounded(self: BrowserRun, plan: ScrollPlan, **kwargs: Any) -> ScrollOutcome:
+        tab = site.pages[-1]
+        assert isinstance(tab, ListeningTab)
+        site.plan_started(tab)
+        assert site.plans <= 50, "the idle bound never stopped the scroll"
+        return await real(self, plan, **kwargs)
+
+    monkeypatch.setattr(BrowserRun, "scroll", bounded)
+    out = await sync(site)
+    assert out.result.reason is StopReason.ANSWER_LOST and out.result.lost is not None
+    assert out.result.lost.start == 20
+    # Plan 1 brought page 10, plan 2 the first lost 20; then the bound, from the loss.
+    assert site.plans == 2 + page_connections.MAX_IDLE_SCROLLS
 
 
 async def test_a_connections_page_navigation_timeout_still_ends_the_run() -> None:

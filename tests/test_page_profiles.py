@@ -746,6 +746,72 @@ async def test_a_navigation_timeout_after_the_tab_was_lost_is_browser_unavailabl
         await visit(site, [target(PRIYA), target(MATEO)])
 
 
+@pytest.mark.parametrize(
+    ("page_kwargs", "outcome"),
+    [
+        ({"landing": "status:429"}, Outcome.THROTTLED),
+        ({"landing": "status:999"}, Outcome.THROTTLED),
+        ({"redirect_location": CHECKPOINT_URL}, Outcome.CHECKPOINT),
+        ({"redirect_location": LOGIN_URL}, Outcome.LOGGED_OUT),
+    ],
+    ids=["429", "999", "redirect-to-checkpoint", "redirect-to-login"],
+)
+async def test_what_the_page_already_answered_decides_before_a_timeout(
+    page_kwargs: dict[str, Any], outcome: Outcome
+) -> None:
+    """#198 review, H1: the document answered a throttle, or a redirect to a wall the
+    tab never followed, and then the navigation hung. The queued answer is read before
+    the timeout is called an unreadable visit: the run stops as what LinkedIn said,
+    and the next person is never visited."""
+    page = ProfilePage(PRIYA, goto_error=navigation_timeout(), **page_kwargs)
+    site = ProfileSite([page, ProfilePage(MATEO)])
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.result.reason is StopReason.RESPONSE and out.result.outcome is outcome
+    assert out.harvests == [] and out.result.lost == ()
+    assert site.navigations == [f"/in/{PRIYA.slug}/"]
+
+
+async def test_a_screen_request_404_before_a_timeout_is_only_unreadable() -> None:
+    """As the landing reads it: the screen request's 404 is one unreadable visit, never
+    NotFound and never a stop, so the next person is still visited."""
+    page = ProfilePage(PRIYA, goto_error=navigation_timeout(), landing="screen", screen_status=404)
+    site = ProfileSite([page, ProfilePage(MATEO)])
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.outcomes == [Outcome.ROUTE_CHANGED, Outcome.OK]
+    assert out.result.reason is StopReason.END_OF_PLAN and out.result.lost == ()
+
+
+async def test_a_document_404_before_a_timeout_is_not_found() -> None:
+    page = ProfilePage(PRIYA, goto_error=navigation_timeout(), landing="404")
+    out = await visit(ProfileSite([page]), [target(PRIYA)])
+    assert out.outcomes == [Outcome.NOT_FOUND]
+
+
+async def test_a_timeout_records_where_the_visit_went_never_an_empty_url() -> None:
+    """#198 review, L3: two timed-out visits stop the run at the limit, and the run's
+    final url is the profile asked for, masked -- even when the tab never left
+    ``about:blank``."""
+    people = [PRIYA, MATEO]
+    site = ProfileSite(
+        [
+            ProfilePage(p, goto_error=navigation_timeout(), tab_after_goto="about:blank")
+            for p in people
+        ]
+    )
+    out = await visit(site, [target(p) for p in people])
+    assert out.result.outcome is Outcome.ROUTE_CHANGED
+    assert out.result.final_url == f"{ORIGIN}/in/_/"
+
+
+async def test_a_later_visit_never_inherits_an_earlier_lost_screen() -> None:
+    """#198 review, L2: Priya's screen was lost; Mateo's page never sends one at all.
+    Only Priya's visit is a lost answer: Mateo's is unreadable for its own reason."""
+    site = ProfileSite([ProfilePage(PRIYA, screen_error=LOST), ProfilePage(MATEO, landing="shell")])
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.outcomes == [Outcome.ROUTE_CHANGED, Outcome.ROUTE_CHANGED]
+    assert out.result.lost == (f"visit 1: the profile screen could not be read ({LOST_CAUSE})",)
+
+
 def test_the_navigation_timeout_cause_is_pinned() -> None:
     from netkeeper.linkedin import page_profiles
 

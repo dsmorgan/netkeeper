@@ -428,7 +428,7 @@ async def run_connections_sync(
             answer = await source.fetch_page(start=start, count=spec.page_size)
         except AnswerLost as exc:
             # #197: an answer the page asked for arrived with no body the browser
-            # could hand over, and the page did not ask for it again. A safe
+            # could hand over, and it was never read again. A safe
             # incomplete stop: what was read stays written, nothing is aged.
             log.warning("connections: %s; stopping incomplete", exc.lost.describe())
             return await stopped(finish(StopReason.ANSWER_LOST, lost=exc.lost))

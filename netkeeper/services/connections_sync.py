@@ -39,7 +39,7 @@ logic; it decides what the job may do and what happens after it stops:
   ``except`` clause instead, then re-raised. A run that ends
   :attr:`~netkeeper.linkedin.connections.StopReason.ANSWER_LOST` (#197: one of
   the page's answers arrived with no body the browser could hand over, and the
-  page did not ask for it again) moves the breaker neither way: a lost answer is
+  answer was never read again) moves the breaker neither way: a lost answer is
   not a changed route, and it is not a natural end either.
 * **Mapping.** Each page is written in its own writer session as it arrives,
   so the write lock is never held across a fetch or a pause. After a
