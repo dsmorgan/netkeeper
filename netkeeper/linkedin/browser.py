@@ -1151,3 +1151,15 @@ async def _detach_quietly(detach: Callable[[], Awaitable[None]]) -> None:
         await detach()
     except Exception as exc:
         log.debug("detaching from Chrome failed: %s", exc)
+
+
+def is_navigation_timeout(exc: BaseException) -> bool:
+    """Whether ``exc`` is Playwright's own ``TimeoutError`` (a navigation that never loaded).
+
+    Not the builtin ``TimeoutError`` (Playwright's does not derive from it), and not
+    any other Playwright error: a caller that forgives a slow page must not forgive a
+    refused one. Imported here, lazily, like the rest of Playwright in this module.
+    """
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    return isinstance(exc, PlaywrightTimeoutError)

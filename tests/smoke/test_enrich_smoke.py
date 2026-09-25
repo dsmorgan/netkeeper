@@ -139,8 +139,9 @@ class _Replica(BaseHTTPRequestHandler):
     people: ClassVar[dict[str, Person]] = {}
     controls: ClassVar[int] = 1
     received: ClassVar[list[dict[str, Any]]] = []
-    #: #197: answers that break off mid-body, once each: ``"screen:<slug>"`` for the
-    #: profile's screen request, ``"overlay:<slug>"`` for its Contact info answer.
+    #: #197: answers that break off mid-body, once each: ``"profile:<slug>"`` for the
+    #: profile's document, ``"screen:<slug>"`` for its screen request, and
+    #: ``"overlay:<slug>"`` for its Contact info answer.
     drop: ClassVar[set[str]] = set()
     #: Serve an HTML shell and let the page fetch the profile screen itself, the way an
     #: in-app navigation does, instead of carrying the screen in the document.
@@ -188,6 +189,9 @@ class _Replica(BaseHTTPRequestHandler):
             + _SCRIPT.replace("__CONFIG__", config)
             + "</body>",
         )
+        if self._dropping(f"profile:{person.slug}"):
+            self._break_off(page.encode("utf-8"), "text/html; charset=utf-8")
+            return
         self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
     def _dropping(self, key: str) -> bool:
@@ -288,6 +292,7 @@ async def _visit(
     targets: list[EnrichTarget],
     *,
     landing_wait_s: float = 20.0,
+    navigation_timeout_ms: float | None = None,
 ) -> tuple[EnrichResult, list[ProfileHarvest], list[dict[str, Any]], dict[str, Any]]:
     harvests: list[ProfileHarvest] = []
 
@@ -296,6 +301,11 @@ async def _visit(
 
     try:
         async with provider.run() as run:
+            if navigation_timeout_ms is not None:
+                # Test code on a loopback page: shorten Playwright's 30 s wait for a
+                # page that never loads, so the case fits the smoke suite's limit.
+                tab: Any = await run.ensure_page()
+                tab.set_default_navigation_timeout(navigation_timeout_ms)
             source = PageProfiles(
                 run, origin=site, sleep=_fast, overlay_wait_s=5.0, landing_wait_s=landing_wait_s
             )
@@ -422,3 +432,20 @@ async def test_a_contact_info_answer_that_breaks_off_is_not_clicked_for_again(
     navigations = [r for r in _Replica.received if r["path"] == NAVIGATION_PATH]
     slugs = [json.loads(r["body"])["clientArguments"]["payload"]["vanityName"] for r in navigations]
     assert slugs == [PRIYA.slug, MATEO.slug]  # one overlay request each: never asked again
+
+
+async def test_a_profile_document_that_breaks_off_is_one_unreadable_visit(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """Priya's document breaks off mid-body: Chrome never fires ``load`` and the
+    navigation times out. Her visit is unreadable ("navigation timed out"), it is not
+    tried again, nothing is clicked for her, and Mateo reads whole."""
+    _Replica.drop = {f"profile:{PRIYA.slug}"}
+    result, harvests, _, log = await _visit(
+        provider, site, [_target(PRIYA), _target(MATEO)], navigation_timeout_ms=4000
+    )
+    assert [h.outcome for h in harvests] == [Outcome.ROUTE_CHANGED, Outcome.OK]
+    assert result.reason is StopReason.END_OF_PLAN and result.unreadable == 1
+    assert result.lost == ("visit 1: the profile could not be opened (navigation timed out)",)
+    assert log["clicks"] == [{"trusted": True, "text": "Contact info"}]  # Mateo's only
+    assert harvests[1].contact_info is not None
