@@ -447,6 +447,7 @@ Endpoint paths, query shapes, and the `decorationId` values are undocumented and
 All jobs take the activity lock, hold one tab, and write progress to `sync_run.progress_json` for the SSE stream.
 
 **Connections full sync.** Paginate the connections list to the end. Apply the edge lifecycle in 9.8. Runs on first setup and weekly.
+*As built (#200):* a full sync that lost any of the page's answers (Chrome kept no body for them) reads on past them, but is incomplete: it ages nobody, is recorded `aborted` with `stop_reason = answer_lost`, and the scheduler offers the week's full sync again a day later instead of a week later.
 
 **Connections incremental sync.** Newest-first pages; stop after a full page of already-known URNs. Runs daily. Cheap enough that it is the default keep-fresh mechanism.
 

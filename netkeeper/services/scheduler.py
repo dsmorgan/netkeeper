@@ -183,9 +183,14 @@ class JobOutcome(enum.Enum):
     """The browser was unreachable or busy (spec 9.9): park one retry
     :data:`RETRY_MIN_MINUTES` to :data:`RETRY_MAX_MINUTES` out."""
 
+    NOT_DONE = "not_done"
+    """The fire ran, but did not do its job (#200: a full sync that lost some of the
+    page's answers, so it could not age anyone): offer it again
+    :data:`NOT_DONE_RETRY` later instead of a whole interval out."""
+
 
 #: A handler returns ``None`` when the fire ran (whatever the run made of it),
-#: or :attr:`JobOutcome.RETRY_LATER`.
+#: :attr:`JobOutcome.RETRY_LATER`, or :attr:`JobOutcome.NOT_DONE`.
 JobHandler = Callable[[JobContext], Awaitable[JobOutcome | None]]
 JobRegistry = Mapping[JobKind, JobHandler]
 
@@ -270,6 +275,14 @@ MIN_JOB_KIND_GAP: Final = timedelta(minutes=2)
 # attach attempts is noise), never much later (the day's run should still land).
 RETRY_MIN_MINUTES: Final = 20.0
 RETRY_MAX_MINUTES: Final = 50.0
+
+# #200: a fire that ran but was not done -- a weekly full sync that lost some of the
+# page's answers, so it is incomplete and aged nobody -- is offered again this long
+# after it ended, not a week later. A day, not minutes: a full sync is the longest
+# read of the list there is, and running it twice in one day doubles what the
+# account loads for no reason the next day does not also serve. Snapped into
+# active hours like every due time.
+NOT_DONE_RETRY: Final = timedelta(days=1)
 
 #: The kinds ``netkeeper serve`` schedules: the ones with a runner (P2-06,
 #: P2-07). ``inbox`` is left out, not registered-but-inert: it has no runner
@@ -833,7 +846,9 @@ async def poll_and_fire(
     A handler that answers :attr:`JobOutcome.RETRY_LATER` (the browser was
     unreachable or busy) has one retry parked :data:`RETRY_MIN_MINUTES` to
     :data:`RETRY_MAX_MINUTES` after ``clock()`` (spec 9.9), unless the next
-    due time is already sooner. ``clock`` defaults to returning ``now``.
+    due time is already sooner. One that answers :attr:`JobOutcome.NOT_DONE` (#200)
+    is offered again :data:`NOT_DONE_RETRY` after ``clock()``, the same way.
+    ``clock`` defaults to returning ``now``.
 
     The writer session that reads and advances the due time is closed *before*
     the (possibly long-running) handler is awaited, so a real job never holds
@@ -904,7 +919,19 @@ async def poll_and_fire(
             user_id=user.id, account_id=account_id, kind=kind, due=due, catch_up=is_catchup
         )
         outcome = await handler(ctx)
-        if outcome is JobOutcome.RETRY_LATER:
+        if outcome is JobOutcome.NOT_DONE:
+            next_due = offer_again(
+                session_factory,
+                user,
+                account_id,
+                kind,
+                now=clock() if clock is not None else now,
+                schedule=schedule,
+                tz=tz,
+                active_start=active_start,
+                active_end=active_end,
+            )
+        elif outcome is JobOutcome.RETRY_LATER:
             next_due = park_retry(
                 session_factory,
                 user,
@@ -1064,6 +1091,50 @@ def park_retry(
         retry.isoformat(),
     )
     return retry
+
+
+def offer_again(
+    session_factory: sessionmaker[Session],
+    user: User,
+    account_id: int,
+    kind: JobKind,
+    *,
+    now: datetime,
+    schedule: JobSchedule,
+    tz: str,
+    active_start: time = pacing.DEFAULT_ACTIVE_START,
+    active_end: time = pacing.DEFAULT_ACTIVE_END,
+) -> datetime:
+    """Offer ``kind`` again :data:`NOT_DONE_RETRY` after ``now``: its fire ran but was
+    not done (#200). Returns the due time now stored.
+
+    A stored due time that is already sooner is kept, as :func:`park_retry` keeps
+    one: this never pushes a fire later. The time goes through active hours and is
+    not a catch-up.
+    """
+    again = _snap_to_active_hours(
+        now + NOT_DONE_RETRY,
+        tz,
+        start=active_start,
+        end=active_end,
+        respect_active_hours=schedule.respect_active_hours,
+    )
+    with session_scope(session_factory, write=True) as session:
+        state = _load_state(session, user, account_id, kind)
+        if state is None:
+            raise RuntimeError(
+                f"offer_again: no established schedule for account {account_id}/{kind.value}"
+            )
+        if state.due <= again:
+            return state.due
+        _store_state(session, user, account_id, kind, replace(state, due=again, is_catchup=False))
+    log.info(
+        "scheduler: %s for account %d ran but was not done; offering it again at %s",
+        kind.value,
+        account_id,
+        again.isoformat(),
+    )
+    return again
 
 
 # --- production wiring: build, never start -----------------------------------

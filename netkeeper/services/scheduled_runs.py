@@ -14,7 +14,12 @@ and enrichment). A handler:
    because the scheduler's heartbeat runs one fire at a time on purpose;
 3. answers :attr:`~netkeeper.services.scheduler.JobOutcome.RETRY_LATER` when
    the worker could not reach the browser, and the scheduler parks a retry 20
-   to 50 minutes out (spec 9.9).
+   to 50 minutes out (spec 9.9);
+4. answers :attr:`~netkeeper.services.scheduler.JobOutcome.NOT_DONE` when a full
+   sync ran but lost some of the page's answers (#200,
+   :func:`netkeeper.services.runs.lost_answers`): it is incomplete and aged
+   nobody, so the week's full sync is not done, and the scheduler offers it again
+   a day later instead of a week later.
 
 Nothing here imports the browser: the worker arrives as a
 :class:`~netkeeper.services.runs.RunExecutor` (``tests/test_browser_safety.py``).
@@ -125,9 +130,24 @@ def _handler(
         await tasks.wait(task_id)
         if result() is runs.RunOutcome.RETRY_LATER:
             return JobOutcome.RETRY_LATER
+        if run_kind is SyncRunKind.CONNECTIONS_FULL and _lost_answers(factory, ctx.user_id, run_id):
+            log.info("scheduled full sync run %d lost answers; it is not done", run_id)
+            return JobOutcome.NOT_DONE
         return None
 
     return handle
+
+
+def _lost_answers(factory: sessionmaker[Session], user_id: int, run_id: int) -> int:
+    """How many answers run ``run_id`` lost (#200); 0 for a run or user that is gone."""
+    with session_scope(factory) as session:
+        user = session.get(User, user_id)
+        if user is None:
+            return 0
+        try:
+            return runs.lost_answers(runs.get_run(session, user, run_id))
+        except runs.RunNotFound:
+            return 0
 
 
 # --- what `netkeeper serve` hands the app --------------------------------------

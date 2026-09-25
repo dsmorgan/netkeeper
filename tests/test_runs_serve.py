@@ -863,7 +863,8 @@ async def test_a_lost_answer_the_page_moves_past_is_an_aborted_run_the_breaker_i
     session_factory: Any, settings: Settings, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Supervised run 5 on #31, with the page moving past the answer it lost: the run
-    ends aborted as answer_lost, naming the start, and the breaker does not move."""
+    reads on (#200), then ends aborted as answer_lost, naming the start, and the
+    breaker does not move."""
     from flagship_site import Lost
 
     from netkeeper.worker import BrowserWorker
@@ -880,7 +881,8 @@ async def test_a_lost_answer_the_page_moves_past_is_an_aborted_run_the_breaker_i
     assert outcome is runs.RunOutcome.DONE
     run = _the_run(session_factory, user_id, run_id)
     assert (run.status, run.stop_reason, run.error) == (SyncRunStatus.ABORTED, "answer_lost", None)
-    assert run.notes is not None and "answer for start 40 could not be read" in run.notes
+    assert run.notes is not None and "start 40 (Exception (no resource))" in run.notes
+    assert runs.lost_answers(run) == 1
     assert "fake-lost-slug" not in run.notes
     with session_scope(session_factory) as session:
         user = session.get(User, user_id)

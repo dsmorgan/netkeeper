@@ -54,6 +54,7 @@ def test_the_safety_constants_are_the_specs() -> None:
     """Spec 9.9's retry window, #172's unreadable cap, the cancel slices, what serve runs."""
     assert scheduler.RETRY_MIN_MINUTES == 20.0
     assert scheduler.RETRY_MAX_MINUTES == 50.0
+    assert timedelta(days=1) == scheduler.NOT_DONE_RETRY
     assert enrich.MAX_UNREADABLE_PER_RUN == 3
     assert enrich.MAX_UNREADABLE_IN_A_ROW == 2
     assert connections_sync.CANCEL_SLICE_S == 5.0
@@ -455,6 +456,128 @@ def test_many_draws_stay_inside_the_retry_window(session_factory: sessionmaker[S
             active_end=ALL_DAY[1],
         )
         assert NOW + timedelta(minutes=20) <= parked <= NOW + timedelta(minutes=50)
+
+
+# --- a fire that ran but was not done (#200) ------------------------------------------------
+
+
+async def test_a_not_done_answer_offers_the_fire_again_a_day_after_it_ended(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    weekly = scheduler.JobSchedule(scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7))
+    due = _establish(session_factory, owner, 1, weekly)
+
+    async def incomplete(ctx: scheduler.JobContext) -> scheduler.JobOutcome:
+        return scheduler.JobOutcome.NOT_DONE
+
+    finished = due + timedelta(minutes=40)
+    result = await scheduler.poll_and_fire(
+        session_factory,
+        owner,
+        1,
+        weekly.kind,
+        now=due,
+        schedule=weekly,
+        registry={weekly.kind: incomplete},
+        armed=scheduler.ARMING_NOT_REQUIRED,
+        heat_settings=scheduler.HEAT_SKIP_DISABLED,
+        tz="UTC",
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+        rng=random.Random(3),
+        clock=lambda: finished,
+    )
+
+    assert result is not None and result.fired
+    assert result.next_due == finished + timedelta(days=1)
+    with session_scope(session_factory) as session:
+        assert scheduler.stored_due(session, owner, 1, weekly.kind) == result.next_due
+
+
+def test_offering_again_never_pushes_a_sooner_due_time_later(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    due = _establish(session_factory, owner, 1, SCHEDULE)
+    kept = scheduler.offer_again(
+        session_factory,
+        owner,
+        1,
+        SCHEDULE.kind,
+        now=due - timedelta(hours=1),
+        schedule=SCHEDULE,
+        tz="UTC",
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+    )
+    assert kept == due
+
+
+@pytest.mark.parametrize(
+    ("kind", "lost", "expected"),
+    [
+        (scheduler.JobKind.CONNECTIONS_FULL, [{"start": 40, "cause": "Error (no data)"}], True),
+        (scheduler.JobKind.CONNECTIONS_FULL, [], False),
+        (
+            scheduler.JobKind.CONNECTIONS_INCREMENTAL,
+            [{"start": 40, "cause": "Error (no data)"}],
+            False,
+        ),
+    ],
+    ids=["full-with-losses", "full-without", "incremental-with-losses"],
+)
+async def test_a_scheduled_full_sync_that_lost_answers_is_not_done(
+    session_factory: sessionmaker[Session],
+    kind: scheduler.JobKind,
+    lost: list[dict[str, object]],
+    expected: bool,
+) -> None:
+    """#200: the weekly full sync is not done while its run lost any answers; an
+    incremental sync, which never ages anyone, keeps its cadence."""
+    from netkeeper.services.events import EventBus
+    from netkeeper.services.scheduled_runs import serve_registry
+    from netkeeper.services.tasks import TaskRunner
+
+    class Finishes:
+        async def execute(self, run_id: int, user_id: int) -> runs.RunOutcome:
+            with session_scope(session_factory, write=True) as session:
+                found = session.get(User, user_id)
+                assert found is not None
+                runs.finish_run(
+                    session,
+                    found,
+                    run_id,
+                    status=SyncRunStatus.ABORTED if lost else SyncRunStatus.COMPLETED,
+                    now=NOW,
+                    stop_reason="answer_lost" if lost else "end_of_list",
+                    counts={"lost": lost},
+                )
+            return runs.RunOutcome.DONE
+
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session)
+        account = ensure_account(session, owner).id
+        arm_scheduled_runs(session, owner, now=NOW)
+    registry = serve_registry(
+        session_factory, Finishes(), TaskRunner(EventBus()), clock=lambda: NOW
+    )
+    context = scheduler.JobContext(
+        user_id=owner.id, account_id=account, kind=kind, due=NOW, catch_up=False
+    )
+    outcome = await registry[kind](context)
+    assert (outcome is scheduler.JobOutcome.NOT_DONE) is expected
+    if not expected:
+        assert outcome is None
+
+
+def test_lost_answers_reads_only_a_list() -> None:
+    run = SyncRun(counts_json={"lost": [{"start": 40}, {"start": 90}]})
+    assert runs.lost_answers(run) == 2
+    for counts in (None, {}, {"lost": None}, {"lost": {"start": 40}}, {"lost": 3}):
+        assert runs.lost_answers(SyncRun(counts_json=counts)) == 0
 
 
 def test_only_the_busy_heartbeat_warning_is_dropped() -> None:

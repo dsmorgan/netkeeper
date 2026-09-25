@@ -25,9 +25,12 @@ the gate refuses the next page.
   line and leaves the retry to the next scheduled run, with heat raised);
 * a body the parser does not recognize is ``RouteChanged``: the run gives up on
   the endpoint for this run (spec 9.3);
-* a source that lost one of the page's answers (:class:`AnswerLost`, #197) ends
-  the run :attr:`StopReason.ANSWER_LOST`: incomplete, but neither a response to
-  classify nor a changed route.
+* a source that lost one of the page's answers and could not go on past it
+  (:class:`AnswerLost`, #197, #200) ends the run :attr:`StopReason.ANSWER_LOST`:
+  incomplete, but neither a response to classify nor a changed route. A source
+  that lost an answer and read on past it reports the loss with the page it hands
+  over (:attr:`SourcePage.lost`); the run goes on, and is never complete
+  (:attr:`SyncResult.losses`).
 
 **The end of the list** is an empty page, or a *short* page (fewer
 connections than asked for) that reaches the largest total any page has
@@ -40,7 +43,8 @@ cut a sync short, and a total of 0 means a short page is followed by one more
 request that comes back empty. The page budget bounds all of it.
 
 **Completion.** :attr:`SyncResult.complete` is true only for a full sync that
-ended on a short page with every page ``Ok``, whose pages reported a total
+ended on a short page with every page ``Ok``, that lost none of the page's
+answers (#200), whose pages reported a total
 above zero, and that saw at least as many distinct connections as the
 *largest* total any page reported. Only a complete full sync may age contacts
 it did not see (spec 9.8); an aborted one saw part of the list, and treating
@@ -122,10 +126,12 @@ class StopReason(enum.StrEnum):
     """A response classified as something other than ``Ok``; see ``SyncResult.outcome``."""
 
     ANSWER_LOST = "answer_lost"
-    """The source lost one of the page's answers (:class:`AnswerLost`); see ``SyncResult.lost``.
+    """The source lost one of the page's answers and could not go on (:class:`AnswerLost`).
 
-    A safe incomplete stop: not a response LinkedIn gave, so no heat, no flag, and
-    not ``route_changed``; not the end of the list, so never complete and never aging.
+    See ``SyncResult.lost`` for the one that stopped the run, and ``SyncResult.losses``
+    for every one. A safe incomplete stop: not a response LinkedIn gave, so no heat,
+    no flag, and not ``route_changed``; not the end of the list, so never complete
+    and never aging.
     """
 
 
@@ -136,8 +142,8 @@ class LostAnswer:
     ``start`` is the list offset the lost answer was for. ``cause`` is what the
     body read raised, as a class name and a fixed category
     (:func:`netkeeper.linkedin.observe.unreadable_cause`), never its message.
-    ``ending`` is how the source gave up on it: the page moved past that start,
-    or never asked for it again.
+    ``ending`` is how the source gave up on it: the page moved past that start
+    (and the run read on), or never asked for it again, or one loss too many.
     """
 
     start: int
@@ -153,7 +159,7 @@ class LostAnswer:
 
 
 class AnswerLost(Exception):
-    """A source lost one of the page's answers and could not get it again (#197).
+    """A source lost one of the page's answers and could not go on (#197, #200).
 
     Raised by :meth:`ConnectionsSource.fetch_page` instead of returning a
     :class:`SourcePage`, because there is no response to classify: the page asked,
@@ -161,11 +167,16 @@ class AnswerLost(Exception):
     answering, and not the route changing -- so :func:`run_connections_sync` ends
     the run :attr:`StopReason.ANSWER_LOST`, never complete, rather than letting it
     count as ``route_changed`` or fail as an error.
+
+    ``lost`` is the answer that stopped the run. ``earlier`` holds the answers the
+    source lost and read on past since it last handed a page over, so none of them
+    goes unreported (:attr:`SourcePage.lost` carries the rest).
     """
 
-    def __init__(self, lost: LostAnswer) -> None:
+    def __init__(self, lost: LostAnswer, *, earlier: tuple[LostAnswer, ...] = ()) -> None:
         super().__init__(lost.describe())
         self.lost = lost
+        self.earlier = earlier
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,8 +251,11 @@ class SyncResult:
     had fallen back to a secondary one (folded from
     :attr:`SourcePage.switched`, spec 9.3/P2-08's #173 review, F5(a)) --
     :attr:`complete` refuses outright once it is true, regardless of what the
-    totals below would otherwise allow. ``lost`` says which answer was lost when
-    ``reason`` is :attr:`StopReason.ANSWER_LOST`, and is ``None`` otherwise.
+    totals below would otherwise allow. ``lost`` says which answer stopped the run
+    when ``reason`` is :attr:`StopReason.ANSWER_LOST`, and is ``None`` otherwise.
+    ``losses`` is every answer the source lost in this run, in order, that one
+    included (#200): the run read on past the others. A run with any loss is never
+    :attr:`complete`.
     """
 
     mode: SyncMode
@@ -256,6 +270,7 @@ class SyncResult:
     seen_public_ids: frozenset[str] = frozenset()
     source_switched: bool = False
     lost: LostAnswer | None = None
+    losses: tuple[LostAnswer, ...] = ()
 
     @property
     def complete(self) -> bool:
@@ -267,7 +282,8 @@ class SyncResult:
         the simple invariant #173's review asks for, on top of (not instead of) the
         totals check: once DOM has ever answered for this run, nothing it reported
         can be trusted enough to call the run complete, whatever the totals math
-        alone would say.
+        alone would say. A run that lost any of the page's answers (#200) is never
+        complete either: it read on past them, and whoever was on them went unseen.
         """
         return (
             self.mode is SyncMode.FULL
@@ -275,6 +291,7 @@ class SyncResult:
             and self.max_total > 0
             and len(self.seen_urns) >= self.max_total
             and not self.source_switched
+            and not self.losses
         )
 
 
@@ -291,13 +308,15 @@ class SourcePage:
     from its primary to a secondary source. No source in the package falls back
     now (#187's review); the flag stays so one that does can never complete a run.
     :func:`run_connections_sync` folds it into :class:`SyncResult.source_switched`
-    (#173 review, F5(a)).
+    (#173 review, F5(a)). ``lost`` is every answer the source lost and read on past
+    since the last page it answered (#200), whatever this one's outcome.
     """
 
     outcome: Outcome
     final_url: str
     page: ConnectionsPageResult | None = None
     switched: bool = False
+    lost: tuple[LostAnswer, ...] = ()
 
 
 class ConnectionsSource(Protocol):
@@ -374,6 +393,7 @@ async def run_connections_sync(
     max_total = 0
     start = 0
     source_switched = False
+    losses: list[LostAnswer] = []
 
     def finish(
         reason: StopReason,
@@ -394,6 +414,7 @@ async def run_connections_sync(
             seen_public_ids=frozenset(slugs),
             source_switched=source_switched,
             lost=lost,
+            losses=tuple(losses),
         )
 
     async def stopped(result: SyncResult) -> SyncResult:
@@ -414,6 +435,13 @@ async def run_connections_sync(
             connections,
             f", {result.outcome.value}" if result.outcome is not None else "",
         )
+        if result.losses:
+            log.info(
+                "connections: %d of the page's answers were lost in this run (starts %s);"
+                " the run is incomplete",
+                len(result.losses),
+                ", ".join(str(lost.start) for lost in result.losses),
+            )
         return result
 
     while True:
@@ -427,11 +455,14 @@ async def run_connections_sync(
         try:
             answer = await source.fetch_page(start=start, count=spec.page_size)
         except AnswerLost as exc:
-            # #197: an answer the page asked for arrived with no body the browser
-            # could hand over, and it was never read again. A safe
-            # incomplete stop: what was read stays written, nothing is aged.
+            # #197, #200: an answer the page asked for arrived with no body the
+            # browser could hand over, and the source could not go on past it. A
+            # safe incomplete stop: what was read stays written, nothing is aged.
+            losses.extend(exc.earlier)
+            losses.append(exc.lost)
             log.warning("connections: %s; stopping incomplete", exc.lost.describe())
             return await stopped(finish(StopReason.ANSWER_LOST, lost=exc.lost))
+        losses.extend(answer.lost)
         source_switched = source_switched or answer.switched
         if answer.outcome is not Outcome.OK or answer.page is None:
             outcome = Outcome.ROUTE_CHANGED if answer.outcome is Outcome.OK else answer.outcome

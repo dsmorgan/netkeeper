@@ -39,8 +39,16 @@ logic; it decides what the job may do and what happens after it stops:
   ``except`` clause instead, then re-raised. A run that ends
   :attr:`~netkeeper.linkedin.connections.StopReason.ANSWER_LOST` (#197: one of
   the page's answers arrived with no body the browser could hand over, and the
-  answer was never read again) moves the breaker neither way: a lost answer is
-  not a changed route, and it is not a natural end either.
+  source could not go on past it) moves the breaker neither way: a lost answer is
+  not a changed route, and it is not a natural end either. A loss the run read
+  on past (#200) never bumps it either; how the run *ended* is judged as before, so
+  a run that reached the end of the list clears the streak, and a stall or a gap
+  with no answer pending still counts as ``route_changed``.
+* **Lost answers** (#200). A run that lost any of the page's answers is never
+  complete, so it ages nobody; it is recorded ``aborted`` with ``stop_reason =
+  "answer_lost"`` even when it read on to the end of the list, every lost start
+  is in ``counts_json.lost`` and in its note, and the weekly full sync's scheduler
+  treats it as not done (:mod:`netkeeper.services.scheduled_runs`).
 * **Mapping.** Each page is written in its own writer session as it arrives,
   so the write lock is never held across a fetch or a pause. After a
   *complete* full sync, and only then, contacts it did not see are aged
@@ -156,9 +164,7 @@ class SyncRunReport:
             "outcome": None if self.result.outcome is None else self.result.outcome.value,
             "heat_raised": self.heat_raised,
             "session_flagged": self.session_flagged,
-            "lost": None
-            if self.result.lost is None
-            else {"start": self.result.lost.start, "cause": self.result.lost.cause},
+            "lost": [{"start": lost.start, "cause": lost.cause} for lost in self.result.losses],
         }
 
 
@@ -440,15 +446,11 @@ async def sync_connections(
                 run_id,
                 status=(
                     SyncRunStatus.COMPLETED
-                    if result.reason in _NATURAL_ENDS and not gate.cancelled
+                    if result.reason in _NATURAL_ENDS and not gate.cancelled and not result.losses
                     else SyncRunStatus.ABORTED
                 ),
                 now=clock(),
-                stop_reason=(
-                    "cancelled"
-                    if gate.cancelled
-                    else stop_reason_of(result.reason.value, result.outcome)
-                ),
+                stop_reason=_stop_reason(result, cancelled=gate.cancelled),
                 counts=report.counts(),
                 notes=(*_lost_notes(result), *_aging_notes(aging)),
             )
@@ -466,11 +468,28 @@ _KIND_OF: dict[SyncMode, SyncRunKind] = {
 }
 
 
+def _stop_reason(result: SyncResult, *, cancelled: bool) -> str:
+    """The run's ``stop_reason``. A natural end that lost answers is ``answer_lost`` (#200):
+    the run read to the end without them, so it did not do what a natural end means."""
+    if cancelled:
+        return "cancelled"
+    if result.losses and result.reason in _NATURAL_ENDS:
+        return StopReason.ANSWER_LOST.value
+    return stop_reason_of(result.reason.value, result.outcome)
+
+
 def _lost_notes(result: SyncResult) -> tuple[str, ...]:
-    """#197: a run that lost one of the page's answers says which, and why, on the run."""
-    if result.lost is None:
-        return ()
-    return (f"stopped incomplete: {result.lost.describe()}.",)
+    """#197, #200: a run that lost the page's answers says which, and why, on the run."""
+    notes: list[str] = []
+    if result.lost is not None:
+        notes.append(f"stopped incomplete: {result.lost.describe()}.")
+    if result.losses and (result.lost is None or len(result.losses) > 1):
+        starts = ", ".join(f"start {lost.start} ({lost.cause})" for lost in result.losses)
+        notes.append(
+            f"lost {len(result.losses)} of the page's answers, so this run is incomplete"
+            f" and aged nobody: {starts}."
+        )
+    return tuple(notes)
 
 
 def _aging_notes(aging: mapping.AgingCounts | None) -> tuple[str, ...]:
