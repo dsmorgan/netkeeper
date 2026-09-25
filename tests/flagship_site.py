@@ -221,7 +221,9 @@ class FlagshipSite(FakeContext):
     on instead (a wall). ``answers`` replaces the answer for a pagination ``startIndex``;
     ``repeat`` sends a page's request twice; ``skip`` makes the page ask for the page
     after instead; ``other_pager`` also sends another pager's request on landing.
-    ``lost`` makes the answer for a ``startIndex`` arrive without a readable body.
+    ``lost`` makes the answer for a ``startIndex`` arrive without a readable body;
+    ``duplicate_answers`` follows a page's answer with the page's retried copy of the
+    same request, answered as given (a stale start answered with a wall or a throttle).
     """
 
     def __init__(
@@ -244,6 +246,7 @@ class FlagshipSite(FakeContext):
         card_options: Mapping[int, CardOptions] | None = None,
         origin: str = ORIGIN,
         lost: Mapping[int, Lost] | None = None,
+        duplicate_answers: Mapping[int, Answer] | None = None,
     ) -> None:
         super().__init__()
         self.people = list(people)
@@ -266,6 +269,7 @@ class FlagshipSite(FakeContext):
         self.card_options = dict(card_options or {})
         self.origin = origin
         self.lost = dict(lost or {})
+        self.duplicate_answers = dict(duplicate_answers or {})
         #: Every request the page itself made: (method, path, body).
         self.requests: list[tuple[str, str, str | None]] = []
         self._next: int | None = None
@@ -379,6 +383,18 @@ class FlagshipSite(FakeContext):
                 self._page(asked),
                 "fetch",
                 request,
+            )
+        duplicate = self.duplicate_answers.get(start)
+        if answer is None and duplicate is not None:
+            self._send(
+                tab,
+                "POST",
+                f"{self.origin}{PAGINATION_PATH}",
+                duplicate.status,
+                duplicate.body,
+                "fetch",
+                request,
+                headers=duplicate.headers,
             )
         if answer is not None:
             self._ended = True  # the page does not ask again after a failed answer

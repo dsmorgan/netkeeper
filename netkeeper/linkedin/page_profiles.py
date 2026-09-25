@@ -228,7 +228,7 @@ class PageProfiles:
         except Exception as exc:
             if not is_navigation_timeout(exc):
                 raise
-            return self._navigation_timed_out()
+            return await self._navigation_timed_out()
         self._require_observed(page)
         self._page = page
         blocked = self._land_where(page.url)
@@ -386,13 +386,16 @@ class PageProfiles:
         log.warning("enrichment: %d answers arrived, none the profile screen", answers)
         return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
 
-    def _navigation_timed_out(self) -> Answer[None]:
+    async def _navigation_timed_out(self) -> Answer[None]:
         """The profile's navigation never finished loading (#197): an unreadable visit.
 
         Seen when the document breaks off mid-body: Chrome never fires ``load``. The tab
         is still the one being listened to (``BrowserRun.goto`` raises a lost tab as a
-        loss, not a timeout), so where it is decides first: a wall stops the run. Any
-        other page is one unreadable visit. The visit is not tried again.
+        loss, not a timeout). Before the visit is called unreadable, what LinkedIn
+        already said decides (#198 review, H1): where the tab is (a wall stops the run),
+        then every answer already queued for this visit, read without waiting and
+        classified as the landing classifies it -- a throttle, a wall, or a redirect to
+        one stops the run. Only then is it one unreadable visit. It is not tried again.
         """
         observation = self._observation
         assert observation is not None
@@ -404,9 +407,57 @@ class PageProfiles:
         wall = self._wall(page.url)
         if wall is not None:
             return wall
+        if not self._on_origin(page.url):
+            # The tab never committed to the profile (#198 review, L3): record the
+            # profile asked for, masked, rather than wherever the tab still is.
+            self._url = masked(self.profile_url(self._requested))
+        said = await self._queued_answers()
+        if said is not None:
+            return said
         lost = f"the profile could not be opened ({NAVIGATION_TIMED_OUT})"
         log.info("enrichment: %s", lost)
         return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True, lost=lost)
+
+    async def _queued_answers(self) -> Answer[None] | None:
+        """What the answers already queued for this visit say, read without waiting.
+
+        The same classification as :meth:`_read_screen` (#198 review, H1): a lazy card
+        or overlay's throttle or wall stops the run; a redirect is judged by
+        :meth:`_redirect`; this profile's document answering ``404`` is ``NotFound``
+        (its screen request's, unreadable), and any other status that is not ``200`` is
+        that outcome. Answers for another
+        profile, and ``200`` answers, say nothing here: the page never loaded.
+        """
+        observation = self._observation
+        assert observation is not None
+        response = await observation.next(0.0)
+        while response is not None:
+            path = _path(response.url)
+            blocked: Answer[None] | None
+            if path in (_path(COMPONENT_PATH), _path(NAVIGATION_PATH)):
+                blocked = self._take_other(response, keep=False)
+            elif response.failure == FAILURE_REDIRECT:
+                blocked = self._redirect(response)
+            else:
+                blocked = None
+                slug = _answer_slug(response)
+                if slug is not None and same_slug(slug, self._requested):
+                    if response.status == 404:
+                        # As the landing reads it: the document's 404 is NotFound,
+                        # the screen request's only an unreadable visit.
+                        blocked = (
+                            Answer(Outcome.NOT_FOUND, masked(response.url))
+                            if response.method == "GET"
+                            else Answer(Outcome.ROUTE_CHANGED, masked(response.url), unparsed=True)
+                        )
+                    else:
+                        outcome = _status_outcome(response)
+                        if outcome is not Outcome.OK:
+                            blocked = Answer(outcome, masked(response.url))
+            if blocked is not None:
+                return blocked
+            response = await observation.next(0.0)
+        return None
 
     def _screen_lost(self) -> Answer[None]:
         """The visit is unreadable: its screen's body was lost and none read after it.

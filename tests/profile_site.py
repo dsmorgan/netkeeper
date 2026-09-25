@@ -134,6 +134,9 @@ class ProfilePage:
     goto_error: Exception | None = None
     tab_after_goto: str | None = None
     goto_closes_tab: int = 0
+    #: A url the document answers a redirect to that the tab never follows (#198
+    #: review, H1: a 3xx to a wall, then the navigation hangs).
+    redirect_location: str | None = None
 
     def screen_body(self) -> bytes:
         if self.screen is not None:
@@ -334,6 +337,10 @@ class ProfileSite(FakeContext):
             page = self.profiles[page.redirect_to.casefold()]
             tab.profile = page
             url = target
+        if page.redirect_location is not None:
+            location = {"location": page.redirect_location}
+            self._send(tab, "GET", url, 302, b"", "document", headers=location)
+            return
         landing = page.landing
         if landing not in ("document", "screen", "shell", "404") and not landing.startswith(
             "status:"

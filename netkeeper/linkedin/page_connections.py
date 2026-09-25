@@ -60,7 +60,7 @@ the expected one first, so a stale or repeated answer without a body is skipped 
 any other. One for the expected start is logged at INFO, with the exception's class
 and a fixed category but never its message, and the scroll goes on so the page can
 ask again: if it does and the answer reads, the run goes on. If the page moves past
-that start instead, or does not ask again within :data:`MAX_IDLE_SCROLLS` scrolls,
+that start instead, or it is not read again within :data:`MAX_IDLE_SCROLLS` scrolls,
 the call raises :class:`~netkeeper.linkedin.connections.AnswerLost`, which ends the
 run as a safe incomplete stop (:attr:`~netkeeper.linkedin.connections.StopReason.ANSWER_LOST`):
 not ``RouteChanged``, so it never counts toward the route-changed breaker, and never
@@ -247,7 +247,7 @@ class PageConnections:
         idle = 0
         while len(self._cards) < needed and not self._ended:
             if idle >= self._max_idle and self._lost is not None:
-                raise self._answer_lost(f"the page did not ask for it again within {idle} scrolls")
+                raise self._answer_lost(f"it was not read again within {idle} scrolls")
             if idle >= self._max_idle:
                 log.warning(
                     "connections: %d scrolls brought no new answer before the list"
