@@ -16,6 +16,7 @@ tab reports, never fetched.
 
 from __future__ import annotations
 
+import base64
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -239,6 +240,45 @@ class Lost:
     then: str = "reask"
     error: Exception = field(default_factory=lambda: Exception(LOST_BODY_MESSAGE))
     times: int = 1
+    #: What the body tap's session receives as the answer streams in (#200), when the
+    #: site has one: ``"whole"`` (the page's own copy), ``"half"`` (cut short),
+    #: ``"short"`` (a whole payload with half the cards, still asking for the next
+    #: page), or ``"none"`` (Chrome refuses to stream it).
+    streamed: str = "none"
+
+
+class FakeCdpSession:
+    """The body tap's CDP session (#200): records every ``send``; the site emits events.
+
+    ``streamResourceContent`` answers with what the site says arrived for that request,
+    or refuses (an answer that already finished, as Chrome does). Nothing here can hold
+    or change a request: there is nothing to hold.
+    """
+
+    def __init__(self) -> None:
+        self.handlers: dict[str, list[Callable[[Any], None]]] = defaultdict(list)
+        self.sent: list[tuple[str, dict[str, Any]]] = []
+        self.bodies: dict[str, bytes] = {}
+        self.detached = False
+
+    def on(self, event: str, handler: Callable[[Any], None]) -> None:
+        self.handlers[event].append(handler)
+
+    async def send(self, method: str, params: Mapping[str, Any] | None = None) -> Any:
+        self.sent.append((method, dict(params or {})))
+        if method == "Network.streamResourceContent":
+            request_id = str((params or {})["requestId"])
+            if request_id not in self.bodies:
+                raise RuntimeError("Request with the provided ID has already finished loading")
+            return {"bufferedData": base64.b64encode(self.bodies[request_id]).decode()}
+        return {}
+
+    async def detach(self) -> None:
+        self.detached = True
+
+    def emit(self, event: str, params: Mapping[str, Any]) -> None:
+        for handler in list(self.handlers[event]):
+            handler(params)
 
 
 class FlagshipSite(FakeContext):
@@ -279,6 +319,7 @@ class FlagshipSite(FakeContext):
         origin: str = ORIGIN,
         lost: Mapping[int, Lost] | None = None,
         duplicate_answers: Mapping[int, Answer] | None = None,
+        tap: bool = False,
     ) -> None:
         super().__init__()
         self.people = list(people)
@@ -302,6 +343,10 @@ class FlagshipSite(FakeContext):
         self.origin = origin
         self.lost = dict(lost or {})
         self.duplicate_answers = dict(duplicate_answers or {})
+        #: Whether a body tap's CDP session can be opened here (#200), and the one that was.
+        self.tap = tap
+        self.cdp: FakeCdpSession | None = None
+        self._request_ids = 0
         #: Every request the page itself made: (method, path, body).
         self.requests: list[tuple[str, str, str | None]] = []
         self._next: int | None = None
@@ -312,6 +357,13 @@ class FlagshipSite(FakeContext):
     def fetches(self) -> list[str | None]:
         """The pagination request bodies the page sent, in order."""
         return [body for method, path, body in self.requests if path == PAGINATION_PATH]
+
+    async def new_cdp_session(self, page: object) -> FakeCdpSession:
+        """Only when the site was built with ``tap``: otherwise, like a browser without it."""
+        if not self.tap:
+            raise RuntimeError("this fake browser has no CDP sessions")
+        self.cdp = FakeCdpSession()
+        return self.cdp
 
     async def new_page(self) -> PageLike:
         self.new_page_calls += 1
@@ -444,8 +496,25 @@ class FlagshipSite(FakeContext):
             return True
         lost.times -= 1
         # The page's own copy: what it goes on to ask for depends on whether it read it.
-        body = self._page(start) if lost.then == "move_on" else b""
-        self._send(tab, "POST", url, 200, body, "fetch", request, body_error=lost.error)
+        copy = self._page(start) if lost.then == "move_on" or lost.streamed != "none" else b""
+        body = copy if lost.then == "move_on" else b""
+        short = pagination_payload(
+            self.people[start : start + self.size // 2], start=start, next_start=start + self.size
+        )
+        streamed = {"whole": copy, "half": copy[: len(copy) // 2], "short": short}.get(
+            lost.streamed
+        )
+        self._send(
+            tab,
+            "POST",
+            url,
+            200,
+            body,
+            "fetch",
+            request,
+            body_error=lost.error,
+            streamed=streamed,
+        )
         if lost.then == "silent":
             self._ended = True
         return True
@@ -481,7 +550,23 @@ class FlagshipSite(FakeContext):
         *,
         headers: Mapping[str, str] | None = None,
         body_error: Exception | None = None,
+        streamed: bytes | None = None,
     ) -> None:
         self.requests.append((method, urlsplit(url).path, post_data))
         request = FakeRequest(method, resource_type, post_data)
+        cdp = self.cdp
+        request_id = ""
+        if cdp is not None:
+            self._request_ids += 1
+            request_id = f"fake.{self._request_ids}"
+            asked: dict[str, Any] = {"url": url, "method": method}
+            if post_data is not None:
+                asked["postData"] = post_data
+            cdp.emit("Network.requestWillBeSent", {"requestId": request_id, "request": asked})
+            cdp.emit("Network.responseReceived", {"requestId": request_id})
+            if streamed is not None:
+                cdp.bodies[request_id] = streamed
         tab.emit(FakeResponse(url, status, body, request, headers=headers, body_error=body_error))
+        if cdp is not None:
+            ended = "Network.loadingFailed" if body_error is not None else "Network.loadingFinished"
+            cdp.emit(ended, {"requestId": request_id})

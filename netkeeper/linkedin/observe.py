@@ -26,6 +26,12 @@ request finished or failed from the tab's ``requestfinished`` and ``requestfaile
 events, which it only listens to, like ``response``. :meth:`Observation.close` logs
 one summary line of these per observation.
 
+**A streamed second copy** (#200). An observation may be given a
+:class:`~netkeeper.linkedin.body_tap.BodyTap`: when its own read of an answer fails,
+it asks the tap for the copy Chrome streamed to it as the answer arrived, and hands
+that over as :attr:`ObservedResponse.streamed`, never as the body. The caller decides
+whether to trust it.
+
 **Bodies never reach a log.** A response body is somebody's data: a name, a headline,
 an email address. :class:`ObservedResponse` leaves both bodies out of its ``repr``, and
 the only strings this module logs or raises are fixed phrases and counts, never a url
@@ -51,10 +57,13 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 from urllib.parse import urlsplit
 
 from netkeeper.linkedin.strict_origin import NotAStrictOrigin, parse_strict_origin
+
+if TYPE_CHECKING:
+    from netkeeper.linkedin.body_tap import BodyTap
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +77,9 @@ REQUEST_FAILED_EVENT: Final = "requestfailed"
 
 #: How many ended requests an observation remembers at once; the oldest is forgotten.
 MAX_REMEMBERED_ENDS: Final = 256
+
+#: How long a failed read waits for the body tap's streamed copy to end (#200).
+STREAMED_WAIT_S: Final = 2.0
 
 
 class ObservationFailed(RuntimeError):
@@ -214,6 +226,9 @@ class ObservedResponse:
     for :data:`FAILURE_UNREADABLE`: what the read raised, as its class name and a
     fixed category (:func:`unreadable_cause`, e.g. ``"Error (no resource)"``), never
     its message, and ``diagnostics`` the fixed facts about the failed read (#200).
+    ``streamed`` is, for such a read only, the copy of the body the observation's
+    :class:`~netkeeper.linkedin.body_tap.BodyTap` received as it streamed in, or
+    ``None``: a second copy the caller checks before trusting, never ``body``.
 
     Both bodies are left out of ``repr``: a response body is a person's data, and a
     ``repr`` ends up in tracebacks and log lines.
@@ -229,6 +244,7 @@ class ObservedResponse:
     failure: str | None = None
     cause: str | None = None
     diagnostics: ReadDiagnostics | None = None
+    streamed: bytes | None = field(default=None, repr=False)
 
     def text(self) -> str | None:
         """The body as text (UTF-8, replacing what does not decode), or ``None``."""
@@ -250,6 +266,7 @@ class ReadDiagnostics:
     ``read_after_ms`` is the time from the ``response`` event to the start of the
     read, ``failed_after_ms`` to its failure. ``reads_in_flight`` is how many other
     body reads of this observation were under way when this one started.
+    ``streamed_bytes`` is the size of the tap's streamed copy, ``None`` without one.
     """
 
     from_service_worker: bool | None
@@ -262,6 +279,7 @@ class ReadDiagnostics:
     read_after_ms: int
     failed_after_ms: int
     reads_in_flight: int
+    streamed_bytes: int | None = None
 
     def describe(self) -> str:
         """One line of ``key=value`` pairs: fixed words and numbers only."""
@@ -276,6 +294,7 @@ class ReadDiagnostics:
             f" transfer_encoding={self.transfer_encoding} request={end}"
             f" read_after_ms={self.read_after_ms} failed_after_ms={self.failed_after_ms}"
             f" reads_in_flight={self.reads_in_flight}"
+            f" streamed_bytes={'none' if self.streamed_bytes is None else self.streamed_bytes}"
         )
 
 
@@ -344,10 +363,12 @@ class Observation:
         match: ResponseMatch,
         page: ListenablePage,
         limits: ObservationLimits | None = None,
+        tap: BodyTap | None = None,
     ) -> None:
         self.match = match
         self.limits = ObservationLimits() if limits is None else limits
         self._page = page
+        self._tap = tap
         self._pending: collections.deque[asyncio.Task[ObservedResponse]] = collections.deque()
         self._arrived = asyncio.Event()
         self._overflowed = False
@@ -450,6 +471,7 @@ class Observation:
         failure: str | None = None
         cause: str | None = None
         diagnostics: ReadDiagnostics | None = None
+        streamed: bytes | None = None
         loop = asyncio.get_running_loop()
         started = loop.time()
         in_flight = self._reading
@@ -464,14 +486,23 @@ class Observation:
             cause = unreadable_cause(exc)
             log.debug("observation: a response body could not be read (%s)", cause)
             failure = FAILURE_UNREADABLE
+            failed = loop.time()
+            if self._tap is not None:
+                streamed = await self._tap.take(
+                    method, response.url, request_body, wait_s=STREAMED_WAIT_S
+                )
             diagnostics = self._diagnose(
                 response,
                 status,
                 read_after_ms=_ms(started - arrived),
-                failed_after_ms=_ms(loop.time() - arrived),
+                failed_after_ms=_ms(failed - arrived),
                 reads_in_flight=in_flight,
+                streamed_bytes=None if streamed is None else len(streamed),
             )
             self.unreadable.append(diagnostics)
+        else:
+            if self._tap is not None:
+                self._tap.discard(method, response.url, request_body)
         finally:
             self._reading -= 1
         self._ends.pop(request, None)
@@ -487,6 +518,7 @@ class Observation:
             failure=failure,
             cause=cause,
             diagnostics=diagnostics,
+            streamed=streamed,
         )
 
     def _diagnose(
@@ -497,6 +529,7 @@ class Observation:
         read_after_ms: int,
         failed_after_ms: int,
         reads_in_flight: int,
+        streamed_bytes: int | None = None,
     ) -> ReadDiagnostics:
         """The fixed facts about a read that failed (#200). Reads only; fixed words out."""
         headers = _safe(lambda: response.headers)
@@ -515,6 +548,7 @@ class Observation:
             read_after_ms=read_after_ms,
             failed_after_ms=failed_after_ms,
             reads_in_flight=reads_in_flight,
+            streamed_bytes=streamed_bytes,
         )
 
     def summary(self) -> str:
@@ -530,11 +564,13 @@ class Observation:
             ends[key] = ends.get(key, 0) + 1
         chunked = sum(1 for item in self.unreadable if item.transfer_encoding == "chunked")
         worker = sum(1 for item in self.unreadable if item.from_service_worker)
+        streamed = sum(1 for item in self.unreadable if item.streamed_bytes is not None)
         how = ", ".join(f"{key}: {count}" for key, count in sorted(ends.items()))
         return (
             f"answers_kept={self.kept} bodies_unreadable={len(self.unreadable)}"
             f" unreadable_requests=[{how}] unreadable_chunked={chunked}"
             f" unreadable_from_service_worker={worker}"
+            f" unreadable_with_streamed_copy={streamed}"
         )
 
     async def next(self, timeout_s: float) -> ObservedResponse | None:
@@ -600,6 +636,8 @@ class Observation:
             # A cancelled or failed read is being discarded either way.
             with contextlib.suppress(BaseException):
                 await task
+        if self._tap is not None:
+            await self._tap.close()
         self._arrived.set()
 
     async def __aenter__(self) -> Observation:
