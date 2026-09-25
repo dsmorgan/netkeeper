@@ -653,3 +653,60 @@ def test_a_lost_answer_describes_itself_in_fixed_words() -> None:
     )
     assert str(AnswerLost(lost)) == lost.describe() and AnswerLost(lost).lost is lost
     assert StopReason.ANSWER_LOST.value == "answer_lost"
+
+
+# --- #200: losses a source read on past ------------------------------------------------------
+
+
+def _gone(start: int) -> LostAnswer:
+    return LostAnswer(start=start, cause="Error (no data)", ending="the page moved past it")
+
+
+@dataclass
+class ReadOnSource(FakeConnectionsSource):
+    """Honest pages; page ``i`` of ``losses`` also carries the losses read on past."""
+
+    losses: dict[int, tuple[LostAnswer, ...]] = field(default_factory=dict)
+    stop_at: int | None = None
+    earlier: tuple[LostAnswer, ...] = ()
+
+    async def fetch_page(self, *, start: int, count: int) -> SourcePage:
+        index = len(self.requests)
+        if index == self.stop_at:
+            self.requests.append((start, count))
+            raise AnswerLost(_gone(start), earlier=self.earlier)
+        page = await super().fetch_page(start=start, count=count)
+        return replace(page, lost=self.losses.get(index, ()))
+
+
+async def test_a_run_that_read_on_past_a_loss_reaches_the_end_but_never_completes() -> None:
+    source = ReadOnSource(list(PEOPLE[:9]), losses={1: (_gone(3),)})
+    result, _, _ = await _run(source)
+    assert result.reason is StopReason.END_OF_LIST and result.lost is None
+    assert result.losses == (_gone(3),)
+    assert len(result.seen_urns) == 9 and result.max_total == 9  # the totals alone would pass
+    assert not result.complete
+
+
+async def test_losses_are_gathered_from_every_page_and_from_the_stop_in_order() -> None:
+    source = ReadOnSource(
+        list(PEOPLE[:9]),
+        losses={0: (_gone(1),), 1: (_gone(4), _gone(5))},
+        stop_at=2,
+        earlier=(_gone(7),),
+    )
+    result, _, _ = await _run(source)
+    assert result.reason is StopReason.ANSWER_LOST and result.lost == _gone(6)
+    assert [lost.start for lost in result.losses] == [1, 4, 5, 7, 6]
+
+
+async def test_a_loss_reported_with_a_stopping_response_is_kept() -> None:
+    stop = SourcePage(Outcome.THROTTLED, "https://example.test/x", lost=(_gone(3),))
+    source = FakeConnectionsSource(list(PEOPLE[:9]), script={1: stop})
+    result, _, _ = await _run(source)
+    assert result.reason is StopReason.RESPONSE and result.losses == (_gone(3),)
+
+
+def test_an_answer_lost_carries_the_earlier_losses() -> None:
+    raised = AnswerLost(_gone(6), earlier=(_gone(1),))
+    assert raised.earlier == (_gone(1),) and AnswerLost(_gone(6)).earlier == ()

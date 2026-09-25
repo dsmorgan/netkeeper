@@ -64,12 +64,22 @@ class FakeRequest:
     so a test can assert what an observation looked at.
     """
 
-    __slots__ = ("_method", "_post_data", "_resource_type", "reads")
+    __slots__ = ("_failure", "_method", "_post_data", "_resource_type", "_url", "reads")
 
-    def __init__(self, method: str, resource_type: str, post_data: str | None) -> None:
+    def __init__(
+        self,
+        method: str,
+        resource_type: str,
+        post_data: str | None,
+        *,
+        url: str = "",
+        failure: str | None = None,
+    ) -> None:
         self._method = method
         self._resource_type = resource_type
         self._post_data = post_data
+        self._url = url
+        self._failure = failure
         self.reads: list[str] = []
 
     @property
@@ -87,6 +97,17 @@ class FakeRequest:
         self.reads.append("post_data")
         return self._post_data
 
+    @property
+    def url(self) -> str:
+        """What a ``requestfinished``/``requestfailed`` event's request says (#200)."""
+        self.reads.append("url")
+        return self._url
+
+    @property
+    def failure(self) -> str | None:
+        self.reads.append("failure")
+        return self._failure
+
 
 class FakeResponse:
     """One answer the page received. ``body()`` can be made slow or failing."""
@@ -101,8 +122,10 @@ class FakeResponse:
         headers: Mapping[str, str] | None = None,
         body_error: Exception | None = None,
         body_delay: Callable[[], Any] | None = None,
+        from_service_worker: bool = False,
     ) -> None:
         self._url = url
+        self._from_service_worker = from_service_worker
         self._status = status
         self._body = body
         self._request = request
@@ -125,6 +148,10 @@ class FakeResponse:
     @property
     def request(self) -> FakeRequest:
         return self._request
+
+    @property
+    def from_service_worker(self) -> bool:
+        return self._from_service_worker
 
     async def body(self) -> bytes:
         if self._body_delay is not None:
@@ -151,6 +178,11 @@ class ListeningTab(FakePage):
     def emit(self, response: FakeResponse) -> None:
         for handler in list(self.listeners["response"]):
             handler(response)
+
+    def emit_request_end(self, event: str, request: FakeRequest) -> None:
+        """``requestfinished`` or ``requestfailed`` for ``request`` (#200)."""
+        for handler in list(self.listeners[event]):
+            handler(request)
 
     async def goto(self, url: str) -> object:
         result = await super().goto(url)

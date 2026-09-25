@@ -519,6 +519,17 @@ def _finish_quietly(
         log.exception("could not record how run %d ended", run_id)
 
 
+def lost_answers(run: SyncRun) -> int:
+    """How many of the page's answers a connections run lost (#200), from its counts.
+
+    A connections run's ``counts_json.lost`` lists every lost start; a run with any
+    is incomplete, whatever its ``stop_reason``. Any other shape reads as none.
+    """
+    counts = run.counts_json if isinstance(run.counts_json, dict) else {}
+    lost = counts.get("lost")
+    return len(lost) if isinstance(lost, list) else 0
+
+
 # --- the worker seam ----------------------------------------------------------
 
 

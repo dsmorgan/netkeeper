@@ -539,22 +539,19 @@ async def test_a_lost_answer_lost_again_on_the_retry_is_still_waited_out() -> No
     assert out.result.complete and out.urns == [p.urn for p in people]
 
 
-async def test_a_page_that_moves_past_a_lost_answer_stops_the_run_incomplete() -> None:
-    """The page read its own copy of 40-49 and asks for 50; netkeeper never saw 40-49.
-    The unit read whole before it (0-39) is handed over; the run stops ANSWER_LOST,
-    never RouteChanged, never complete."""
+async def test_a_page_that_moves_past_a_lost_answer_reads_on_and_the_run_is_incomplete() -> None:
+    """#200: the page read its own copy of 40-49 and asks for 50; netkeeper never saw
+    40-49. The loss is recorded and the run reads on to the end of the list, never
+    RouteChanged, never complete."""
     people = many(90)
     out = await sync(FlagshipSite(people, lost={40: Lost("move_on")}))
     result = out.result
-    assert result.reason is StopReason.ANSWER_LOST and result.outcome is None
-    assert not result.complete
-    assert result.lost is not None
-    assert (result.lost.start, result.lost.cause, result.lost.ending) == (
-        40,
-        "Exception (no resource)",
-        "the page moved past it",
-    )
-    assert out.urns == [p.urn for p in people[:40]]
+    assert result.reason is StopReason.END_OF_LIST and result.outcome is None
+    assert not result.complete and result.lost is None
+    assert [(lost.start, lost.cause, lost.ending) for lost in result.losses] == [
+        (40, "Exception (no resource)", "the page moved past it")
+    ]
+    assert out.urns == [p.urn for p in people[:40] + people[50:]]
 
 
 async def test_a_lost_answer_the_page_never_asks_for_again_stops_after_the_idle_bound(
@@ -584,10 +581,14 @@ async def test_a_retried_answer_without_a_body_for_a_page_already_read_is_skippe
 
 
 async def test_a_lost_answer_is_sticky_and_hands_over_only_whole_units() -> None:
+    """With no loss allowed, moving past one stops the source: the unit read whole
+    before it is still handed over, and every later call raises the same loss."""
     site = FlagshipSite(many(90), lost={40: Lost("move_on")})
     provider, _ = fake_provider(site)
     async with provider.run("account-1") as run:
-        source = PageConnections(run, sleep=no_sleep, response_wait_s=0.01, landing_wait_s=0.05)
+        source = PageConnections(
+            run, sleep=no_sleep, response_wait_s=0.01, landing_wait_s=0.05, max_lost=0
+        )
         first = await source.fetch_page(start=0, count=40)
         with pytest.raises(AnswerLost) as raised:
             await source.fetch_page(start=40, count=40)
@@ -596,7 +597,8 @@ async def test_a_lost_answer_is_sticky_and_hands_over_only_whole_units() -> None
             await source.fetch_page(start=40, count=40)
     assert first.page is not None and len(first.page.connections) == 40
     assert again.page is not None and again.page.connections == first.page.connections
-    assert twice.value is raised.value
+    assert twice.value.lost is raised.value.lost and raised.value.lost.start == 40
+    assert raised.value.earlier == () and twice.value.earlier == ()
 
 
 async def test_a_lost_answer_never_puts_the_exception_message_in_a_log(
@@ -605,10 +607,10 @@ async def test_a_lost_answer_never_puts_the_exception_message_in_a_log(
     """Playwright's messages quote urls; only the class and a fixed category are kept."""
     caplog.set_level(logging.DEBUG, logger="netkeeper")
     out = await sync(FlagshipSite(many(60), lost={20: Lost("move_on")}))
-    assert out.result.lost is not None
+    (lost,) = out.result.losses
     assert "fake-lost-slug" in LOST_BODY_MESSAGE
     assert "fake-lost-slug" not in caplog.text and "identifier" not in caplog.text
-    assert "fake-lost-slug" not in out.result.lost.describe()
+    assert "fake-lost-slug" not in lost.describe()
 
 
 @pytest.mark.parametrize(
@@ -621,7 +623,7 @@ async def test_a_lost_answer_never_puts_the_exception_message_in_a_log(
 )
 async def test_a_lost_answer_names_its_cause_in_fixed_words(error: Exception, cause: str) -> None:
     out = await sync(FlagshipSite(many(60), lost={20: Lost("move_on", error=error)}))
-    assert out.result.lost is not None and out.result.lost.cause == cause
+    assert [lost.cause for lost in out.result.losses] == [cause]
 
 
 async def test_a_gap_without_a_lost_answer_is_still_route_changed() -> None:
@@ -705,6 +707,143 @@ async def test_an_answer_lost_on_every_ask_stops_within_the_idle_bound(
     assert site.plans == 2 + page_connections.MAX_IDLE_SCROLLS
 
 
+# --- #200: reading on past a lost answer --------------------------------------------------
+
+
+async def test_several_lost_answers_are_each_read_past_and_recorded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Run 7 on #31, several times over: every answer the page moved past is recorded,
+    in order, and the run reads on to the end of the list, incomplete."""
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    people = many(120)
+    out = await sync(FlagshipSite(people, lost={20: Lost("move_on"), 70: Lost("move_on")}))
+    result = out.result
+    assert result.reason is StopReason.END_OF_LIST and not result.complete
+    assert [lost.start for lost in result.losses] == [20, 70]
+    assert out.urns == [p.urn for p in people[:20] + people[30:70] + people[80:]]
+    assert "reading on, 1 lost in this run" in caplog.text
+    assert "reading on, 2 lost in this run" in caplog.text
+    assert "lost in this run (starts 20, 70); the run is incomplete" in caplog.text
+
+
+async def test_as_many_losses_as_the_cap_still_read_to_the_end() -> None:
+    people = many(160)
+    lost = {start: Lost("move_on") for start in (20, 40, 60, 80, 100)}
+    out = await sync(FlagshipSite(people, lost=lost))
+    assert out.result.reason is StopReason.END_OF_LIST and not out.result.complete
+    assert [x.start for x in out.result.losses] == [20, 40, 60, 80, 100]
+
+
+async def test_one_loss_more_than_the_cap_stops_the_run_as_answer_lost(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    people = many(200)
+    lost = {start: Lost("move_on") for start in (20, 40, 60, 80, 100, 120)}
+    out = await sync(FlagshipSite(people, lost=lost))
+    result = out.result
+    assert result.reason is StopReason.ANSWER_LOST and not result.complete
+    assert result.lost is not None and result.lost.start == 120
+    assert result.lost.ending == (
+        "the page moved past it, and that is 6 answers lost in this run,"
+        " more than the 5 a run may lose"
+    )
+    assert [x.start for x in result.losses] == [20, 40, 60, 80, 100, 120]
+    # Only whole units read before the stop were handed over: 0-39, 40-79 (less the
+    # lost places), and so on; nothing after the stop.
+    assert len(out.urns) % 40 == 0 and len(out.urns) <= 200 - 60
+
+
+async def test_losses_read_past_before_a_stall_are_reported_with_the_stop() -> None:
+    """20 is moved past (recorded, read on); 50 is lost and the page asks for nothing
+    more. The stall after that loss stops the run, and the earlier loss rides along
+    with the stopping one, so neither goes unreported."""
+    out = await sync(FlagshipSite(many(90), lost={20: Lost("move_on"), 50: Lost("silent")}))
+    result = out.result
+    assert result.reason is StopReason.ANSWER_LOST
+    assert result.lost is not None and result.lost.start == 50
+    assert result.lost.ending.startswith("it was not read again within")
+    assert [x.start for x in result.losses] == [20, 50]
+
+
+async def test_a_page_that_jumps_further_than_one_answer_past_a_loss_stops_the_run() -> None:
+    """Lost 40, then the page asks for 60: 50-59 went unseen as well as 40-49. The run
+    stops safely as answer_lost rather than read on over a gap it cannot account for."""
+    out = await sync(FlagshipSite(many(90), lost={40: Lost("move_on")}, skip=frozenset({50})))
+    result = out.result
+    assert result.reason is StopReason.ANSWER_LOST and result.outcome is None
+    assert result.lost is not None and result.lost.start == 40
+    assert result.lost.ending == "the page moved more than one answer past it"
+
+
+async def test_a_lost_answers_places_count_toward_a_full_last_page_ending_the_list() -> None:
+    """A list of 60, whose full last answer asks for nothing: that proves the end only
+    once the run has accounted for all 60 places. 50 were read and 10 were lost."""
+    out = await sync(FlagshipSite(many(60), end="short", lost={30: Lost("move_on")}))
+    assert out.result.reason is StopReason.END_OF_LIST and not out.result.complete
+    assert [x.start for x in out.result.losses] == [30]
+
+
+async def test_a_new_loss_after_reading_on_gets_its_own_idle_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """20 is lost, three scrolls bring nothing, then the page moves past 20 and loses
+    30, and asks for nothing more: the page still gets MAX_IDLE_SCROLLS scrolls from
+    30's loss, not what was left of 20's."""
+    site = FlagshipSite(
+        many(60),
+        answer_plans=lambda n: n in (1, 2, 6),
+        lost={20: Lost("move_on"), 30: Lost("silent")},
+    )
+    _count_plans(monkeypatch, site)
+    out = await sync(site)
+    assert out.result.reason is StopReason.ANSWER_LOST and out.result.lost is not None
+    assert out.result.lost.start == 30 and [x.start for x in out.result.losses] == [20, 30]
+    # Plan 1 brought 10, 2 the lost 20, 3-5 nothing, 6 moved past 20 with the lost 30.
+    assert site.plans == 6 + page_connections.MAX_IDLE_SCROLLS
+
+
+async def test_the_loss_log_carries_the_fixed_diagnostics_and_no_promise(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#200 items 2 and 3: the loss line names fixed facts only, and no line promises a
+    scroll that a stop then contradicts."""
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    await sync(FlagshipSite(many(60), lost={20: Lost("move_on")}), max_lost=0)
+    (loss,) = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == page_connections.__name__ and "could not be read (" in r.getMessage()
+    ]
+    for key in (
+        "service_worker=",
+        "status=200",
+        "content_type=",
+        "content_length=",
+        "transfer_encoding=",
+        "request=",
+        "read_after_ms=",
+        "failed_after_ms=",
+        "reads_in_flight=",
+        "previous_answer_bytes=",
+    ):
+        assert key in loss
+    assert "scrolling on" not in caplog.text
+    stops = [r for r in caplog.records if "stopping incomplete" in r.getMessage()]
+    assert [r.levelno for r in stops] == [logging.WARNING]
+    assert "observation: answers_kept=" in caplog.text
+
+
+async def test_the_same_start_lost_again_on_a_re_ask_is_logged_as_such(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    out = await sync(FlagshipSite(many(45), lost={30: Lost("reask", times=2)}))
+    assert out.result.complete and out.result.losses == ()
+    assert "the page asked again for start 30, and it could not be read again" in caplog.text
+
+
 async def test_a_connections_page_navigation_timeout_still_ends_the_run() -> None:
     """#197's enrichment fix forgives a profile navigation that times out; the
     connections page's does not change: the run still ends by that exception."""
@@ -756,6 +895,7 @@ def test_the_source_bounds_are_pinned() -> None:
     assert page_connections.RESPONSE_WAIT_S == 5.0
     assert page_connections.LANDING_WAIT_S == 20.0
     assert page_connections.MAX_LANDING_ANSWERS == 8
+    assert page_connections.MAX_LOST_PER_RUN == 5
 
 
 async def test_no_name_slug_or_urn_reaches_a_log(caplog: pytest.LogCaptureFixture) -> None:

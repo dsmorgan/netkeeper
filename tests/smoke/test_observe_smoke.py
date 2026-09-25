@@ -45,9 +45,11 @@ Start Chrome first with the command ``netkeeper browser launch`` prints, and poi
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar
@@ -211,7 +213,23 @@ _SCRIPT = """
       });
       const cards = parseInt(answer.headers.get('x-replica-cards'), 10);
       const after = answer.headers.get('x-replica-next');
-      await answer.arrayBuffer();
+      const keep = answer.headers.get('x-replica-abort-after');
+      if (keep !== null) {
+        // #200: a streamed answer the page reads what it needs from, then aborts
+        // while the stream is still open -- the page has its data, and Chrome keeps
+        // no body for anyone else.
+        const reader = answer.body.getReader();
+        let read = 0;
+        while (read < parseInt(keep, 10)) {
+          const part = await reader.read();
+          if (part.done) { break; }
+          read += part.value.length;
+        }
+        window.__aborted = (window.__aborted || 0) + 1;
+        await reader.cancel();
+      } else {
+        await answer.arrayBuffer();
+      }
       next = after === 'none' ? null : parseInt(after, 10);
       render(cards);
     } catch (error) {
@@ -245,6 +263,9 @@ class _Replica(BaseHTTPRequestHandler):
     drop_at: ClassVar[int | None] = None
     #: What the page does after that: ``"reask"`` or ``"move_on"``.
     on_fail: ClassVar[str] = "reask"
+    #: Pagination starts whose answer is streamed and held open after its data, and
+    #: which the page aborts once it has read the data (#200).
+    abort_at: ClassVar[frozenset[int]] = frozenset()
     received: ClassVar[list[dict[str, Any]]] = []
     #: Which of :data:`_LAYOUTS` to serve. Both are pinned (#192 review round 2,
     #: N1, point 5): set by the ``site`` fixture's ``layout`` parameter.
@@ -297,6 +318,9 @@ class _Replica(BaseHTTPRequestHandler):
             type(self).drop_at = None
             self._break_off(payload, cards=len(people), next_=next_start)
             return
+        if start in self.abort_at:
+            self._stream_then_hold(payload, cards=len(people), next_=next_start)
+            return
         self._send(200, payload, "application/octet-stream", cards=len(people), next_=next_start)
 
     def _break_off(self, body: bytes, *, cards: int, next_: int | None) -> None:
@@ -315,6 +339,34 @@ class _Replica(BaseHTTPRequestHandler):
         self.wfile.flush()
         self.close_connection = True
         self.connection.shutdown(socket.SHUT_RDWR)
+
+    def _stream_then_hold(self, body: bytes, *, cards: int, next_: int | None) -> None:
+        """Stream the whole answer in chunks, then keep the stream open (#200).
+
+        The page reads every byte, then aborts the fetch while the stream is still
+        open: the page has its data, the request ends ``net::ERR_ABORTED``, and Chrome
+        answers ``Network.getResponseBody`` with "No data found". Chunked framing needs
+        HTTP/1.1 (the replica's other answers are HTTP/1.0, the handler's default).
+        """
+        self.protocol_version = "HTTP/1.1"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/x-component")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("x-replica-cards", str(cards))
+        self.send_header("x-replica-next", "none" if next_ is None else str(next_))
+        self.send_header("x-replica-abort-after", str(len(body)))
+        self.end_headers()
+        try:
+            for index in range(0, len(body), 4096):
+                part = body[index : index + 4096]
+                self.wfile.write(f"{len(part):x}\r\n".encode() + part + b"\r\n")
+                self.wfile.flush()
+            time.sleep(1.0)
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        self.close_connection = True
 
     def _redirect(self, location: str) -> None:
         self.send_response(302)
@@ -350,6 +402,7 @@ def site(request: pytest.FixtureRequest) -> Iterator[str]:
     _Replica.land_on_checkpoint = False
     _Replica.drop_at = None
     _Replica.on_fail = "reask"
+    _Replica.abort_at = frozenset()
     _Replica.received = []
     _Replica.layout = request.param
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Replica)
@@ -494,12 +547,12 @@ async def test_an_answer_that_breaks_off_is_asked_for_again_and_the_run_complete
     assert [c.urn for page in pages for c in page.connections] == [p.urn for p in _Replica.people]
 
 
-async def test_an_answer_that_breaks_off_and_is_moved_past_stops_safely_uncounted(
+async def test_an_answer_that_breaks_off_and_is_moved_past_is_read_past_uncounted(
     provider: AttachBrowserProvider, site: str, session_factory: sessionmaker[Session]
 ) -> None:
-    """The page gives up on start 20 and asks for 30. The whole runner: the run ends
-    aborted as answer_lost, naming start 20; nothing is aged; the route-changed
-    breaker does not move."""
+    """The page gives up on start 20 and asks for 30. The whole runner: the run reads
+    on to the end of the list (#200), then ends aborted as answer_lost, naming start
+    20; nothing is aged; the route-changed breaker does not move."""
     _Replica.drop_at = 20
     _Replica.on_fail = "move_on"
     with session_scope(session_factory, write=True) as session:
@@ -522,18 +575,65 @@ async def test_an_answer_that_breaks_off_and_is_moved_past_stops_safely_uncounte
     except BrowserUnavailable as exc:
         pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
 
-    # The page may ask for 35 in the same scroll that asked for 30; nothing after 30 is read.
-    assert _starts()[:3] == [10, 20, 30]
-    assert result_cause_is_fixed(report.result.lost)
+    assert _starts() == [10, 20, 30, 35]
     result = report.result
-    assert result.reason is StopReason.ANSWER_LOST and not result.complete
-    assert result.lost is not None and result.lost.start == 20
-    assert result.lost.ending == "the page moved past it"
+    (lost,) = result.losses
+    assert result_cause_is_fixed(lost)
+    assert result.reason is StopReason.END_OF_LIST and not result.complete
+    assert (lost.start, lost.ending) == (20, "the page moved past it")
     assert report.aging is None
     with session_scope(session_factory) as session:
         user = session.get(User, user_id)
         assert user is not None
         row = runs.get_run(session, user, report.run_id)
         assert (row.status, row.stop_reason) == (SyncRunStatus.ABORTED, "answer_lost")
-        assert row.notes is not None and "answer for start 20 could not be read" in row.notes
+        assert row.notes is not None and "start 20 (" in row.notes
+        assert runs.lost_answers(row) == 1
         assert route_breaker.state(session, user, report.account_id).count == 0
+
+
+# --- #200: the page aborts a streamed answer after reading it ---------------------------------
+
+
+async def test_an_answer_the_page_aborts_after_reading_is_lost_as_no_data_and_read_past(
+    provider: AttachBrowserProvider, site: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The cause Part B reproduced: answer 20 is streamed and held open, and the page's
+    own client aborts it once it has read every byte. The page has 20-29 and asks for
+    30; Chrome has no body for anyone else ("No data found"), and the request failed
+    as aborted. The run records the loss with those diagnostics and reads on to the
+    end of the list, incomplete."""
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    _Replica.abort_at = frozenset({20})
+    pages: list[ConnectionsPage] = []
+
+    async def on_page(page: ConnectionsPage) -> None:
+        pages.append(page)
+
+    try:
+        async with provider.run() as run:
+            source = PageConnections(run, origin=site, scroll_profile=_FAST_SCROLL)
+            result = await run_connections_sync(
+                SyncJobSpec(mode=SyncMode.FULL, page_budget=20),
+                source,
+                _Gate(),
+                on_page=on_page,
+            )
+            aborted = await (await run.ensure_page()).evaluate("window.__aborted")
+    except BrowserUnavailable as exc:
+        pytest.fail(f"{exc}\nStart Chrome with the command `netkeeper browser launch` prints.")
+
+    assert aborted == 1 and _starts() == [10, 20, 30, 35]
+    assert result.reason is StopReason.END_OF_LIST and not result.complete
+    (lost,) = result.losses
+    assert (lost.start, lost.cause) == (20, "Error (no data)")
+    people = _Replica.people
+    assert [c.urn for page in pages for c in page.connections] == [
+        p.urn for p in people[:20] + people[30:]
+    ]
+    line = next(
+        r.getMessage() for r in caplog.records if "start 20 could not be read" in r.getMessage()
+    )
+    assert "request=failed (aborted)" in line and "transfer_encoding=chunked" in line
+    assert "content_type=x-component" in line and "service_worker=no" in line
+    assert "127.0.0.1" not in caplog.text

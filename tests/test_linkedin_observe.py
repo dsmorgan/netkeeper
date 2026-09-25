@@ -192,7 +192,7 @@ class ProtocolError(Exception):
             " found for https://www.linkedin.com/in/fake-slug/",
             "no resource",
         ),
-        ("No data found for resource with given identifier", "no resource"),
+        ("No data found for resource with given identifier", "no data"),
         ("Request content was evicted from inspector cache", "evicted"),
         ("net::ERR_ABORTED; https://www.linkedin.com/in/fake-slug/", "aborted"),
         ("The request was canceled", "aborted"),
@@ -215,6 +215,198 @@ def test_an_unreadable_cause_survives_an_exception_that_cannot_be_printed() -> N
             raise RuntimeError("no")
 
     assert observe.unreadable_cause(Unprintable()) == "Unprintable (unclassified)"
+
+
+# --- #200: fixed diagnostics for a body that could not be read ------------------------------
+
+
+def _ended(url: str = PAGINATION, failure: str | None = None) -> FakeRequest:
+    return FakeRequest("POST", "fetch", '{"startIndex":10}', url=url, failure=failure)
+
+
+async def test_a_body_lost_after_its_request_failed_says_so_in_fixed_words() -> None:
+    """What the lab reproduced: the page's client aborted a streamed answer after
+    reading it; Chrome says "No data found", and the request failed as aborted."""
+    tab = _tab()
+    observation = await _started(tab)
+    request = _ended(failure="net::ERR_ABORTED https://www.linkedin.com/in/fake-slug/")
+
+    async def aborted_first() -> None:
+        tab.emit_request_end(observe.REQUEST_FAILED_EVENT, request)
+
+    response = FakeResponse(
+        PAGINATION,
+        200,
+        b"",
+        request,
+        headers={
+            "content-type": "text/x-component; charset=utf-8",
+            "transfer-encoding": "chunked",
+        },
+        body_error=ProtocolError("No data found for resource with given identifier"),
+        body_delay=aborted_first,
+        from_service_worker=False,
+    )
+    tab.emit(response)
+    kept = await observation.next(1.0)
+    assert kept is not None and kept.failure == FAILURE_UNREADABLE
+    assert kept.cause == "ProtocolError (no data)"
+    diagnostics = kept.diagnostics
+    assert diagnostics is not None
+    assert (
+        diagnostics.from_service_worker,
+        diagnostics.status,
+        diagnostics.content_type,
+        diagnostics.content_length,
+        diagnostics.transfer_encoding,
+        diagnostics.request_end,
+        diagnostics.request_failure,
+        diagnostics.reads_in_flight,
+    ) == (False, 200, "x-component", None, "chunked", "failed", "aborted", 0)
+    assert 0 <= diagnostics.read_after_ms <= diagnostics.failed_after_ms
+    line = diagnostics.describe()
+    assert "request=failed (aborted)" in line and "service_worker=no" in line
+    assert "fake-slug" not in line and "linkedin" not in line
+    assert observation.unreadable == [diagnostics]
+
+
+async def test_a_finished_request_and_one_with_no_event_are_told_apart() -> None:
+    tab = _tab()
+    observation = await _started(tab)
+    finished = _ended()
+    tab.emit_request_end(observe.REQUEST_FINISHED_EVENT, finished)
+    tab.emit(
+        FakeResponse(
+            PAGINATION,
+            200,
+            b"",
+            finished,
+            headers={"content-type": "application/x-invented-type", "content-length": "1234"},
+            body_error=ProtocolError("No resource with given identifier found"),
+            from_service_worker=True,
+        )
+    )
+    tab.emit(
+        FakeResponse(
+            PAGINATION,
+            200,
+            b"",
+            _ended(),
+            headers={"content-length": "not a number"},
+            body_error=ProtocolError("gone"),
+        )
+    )
+    first = await observation.next(1.0)
+    second = await observation.next(1.0)
+    assert first is not None and first.diagnostics is not None
+    assert (
+        first.diagnostics.request_end,
+        first.diagnostics.request_failure,
+        first.diagnostics.content_type,
+        first.diagnostics.content_length,
+        first.diagnostics.from_service_worker,
+    ) == ("finished", None, "other", 1234, True)
+    assert second is not None and second.diagnostics is not None
+    assert (
+        second.diagnostics.request_end,
+        second.diagnostics.content_type,
+        second.diagnostics.content_length,
+        second.diagnostics.transfer_encoding,
+    ) == ("neither", "none", None, "none")
+
+
+async def test_reads_in_flight_counts_the_other_reads_under_way() -> None:
+    tab = _tab()
+    observation = await _started(tab)
+    release = asyncio.Event()
+
+    async def slow() -> None:
+        await release.wait()
+
+    tab.emit(_response(body=b"one", body_delay=slow))
+    tab.emit(_response(body=b"two", body_delay=slow))
+    tab.emit(_response(body_error=ProtocolError("No data found")))
+    await asyncio.sleep(0.01)
+    release.set()
+    kept = [await observation.next(1.0) for _ in range(3)]
+    lost = kept[2]
+    assert lost is not None and lost.diagnostics is not None
+    assert lost.diagnostics.reads_in_flight == 2
+
+
+async def test_a_request_event_for_another_url_or_a_broken_request_is_ignored() -> None:
+    tab = _tab()
+    observation = await _started(tab)
+    other = _ended(url=f"{ORIGIN}/voyager/api/graphql", failure="net::ERR_ABORTED")
+    tab.emit_request_end(observe.REQUEST_FAILED_EVENT, other)
+
+    class Broken:
+        @property
+        def method(self) -> str:
+            raise RuntimeError("gone")
+
+    tab.emit_request_end(observe.REQUEST_FAILED_EVENT, Broken())  # type: ignore[arg-type]
+    tab.emit(FakeResponse(PAGINATION, 200, b"", other, body_error=ProtocolError("x")))
+    kept = await observation.next(1.0)
+    assert kept is not None and kept.diagnostics is not None
+    assert kept.diagnostics.request_end == "neither"
+
+
+async def test_the_remembered_request_ends_are_bounded() -> None:
+    tab = _tab()
+    observation = await _started(tab)
+    requests = [_ended() for _ in range(observe.MAX_REMEMBERED_ENDS + 10)]
+    for request in requests:
+        tab.emit_request_end(observe.REQUEST_FINISHED_EVENT, request)
+    assert len(observation._ends) == observe.MAX_REMEMBERED_ENDS
+    assert requests[0] not in observation._ends and requests[-1] in observation._ends
+    tab.emit(FakeResponse(PAGINATION, 200, b"ok", requests[-1]))
+    await observation.next(1.0)
+    assert requests[-1] not in observation._ends  # forgotten once its body was read
+
+
+async def test_close_logs_one_summary_in_fixed_words(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    tab = _tab()
+    observation = await _started(tab)
+    request = _ended(failure="net::ERR_ABORTED https://www.linkedin.com/in/fake-slug/")
+    tab.emit_request_end(observe.REQUEST_FAILED_EVENT, request)
+    tab.emit(
+        FakeResponse(
+            PAGINATION,
+            200,
+            b"",
+            request,
+            headers={"transfer-encoding": "chunked"},
+            body_error=ProtocolError("No data found for https://www.linkedin.com/in/fake-slug/"),
+        )
+    )
+    tab.emit(_response(body=b"fine"))
+    await observation.next(1.0)
+    await observation.next(1.0)
+    await observation.close()
+    (summary,) = [r.getMessage() for r in caplog.records if "answers_kept=" in r.getMessage()]
+    assert summary == (
+        "observation: answers_kept=2 bodies_unreadable=1"
+        " unreadable_requests=[failed (aborted): 1] unreadable_chunked=1"
+        " unreadable_from_service_worker=0"
+    )
+    assert "fake-slug" not in caplog.text
+    for event in (
+        observe.RESPONSE_EVENT,
+        observe.REQUEST_FINISHED_EVENT,
+        observe.REQUEST_FAILED_EVENT,
+    ):
+        assert tab.listeners[event] == []
+
+
+async def test_an_observation_that_kept_nothing_logs_no_summary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    observation = await _started(_tab())
+    await observation.close()
+    assert "answers_kept" not in caplog.text
 
 
 async def test_a_redirect_keeps_its_location_and_reads_no_body() -> None:
@@ -307,6 +499,9 @@ def test_the_limits_are_pinned() -> None:
         30.0,
     )
     assert observe.RESPONSE_EVENT == "response"
+    assert observe.REQUEST_FINISHED_EVENT == "requestfinished"
+    assert observe.REQUEST_FAILED_EVENT == "requestfailed"
+    assert observe.MAX_REMEMBERED_ENDS == 256
     with pytest.raises(ValueError):
         ObservationLimits(max_pending=0)
 

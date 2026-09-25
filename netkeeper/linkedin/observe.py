@@ -16,6 +16,16 @@ it reads from the request side is what the page already sent: the method, the ur
 the request body (the pagination request's ``startIndex`` lives there). Nothing here
 fetches anything; the requests are the page's own.
 
+**Why a body could not be read** (#200). When a body read fails, the observation
+keeps fixed, non-identifying facts about it in :class:`ReadDiagnostics`: whether a
+service worker answered, the status, the content type and transfer encoding as
+fixed categories, the content length, whether the request finished or failed (and a
+fixed category for the failure), how long after the ``response`` event the read
+started and failed, and how many other reads were in flight. It learns whether the
+request finished or failed from the tab's ``requestfinished`` and ``requestfailed``
+events, which it only listens to, like ``response``. :meth:`Observation.close` logs
+one summary line of these per observation.
+
 **Bodies never reach a log.** A response body is somebody's data: a name, a headline,
 an email address. :class:`ObservedResponse` leaves both bodies out of its ``repr``, and
 the only strings this module logs or raises are fixed phrases and counts, never a url
@@ -51,6 +61,14 @@ log = logging.getLogger(__name__)
 #: The Playwright event a listener subscribes to. One name, so a test can pin it.
 RESPONSE_EVENT: Final = "response"
 
+#: The two request events an observation also listens to, only to learn whether a
+#: request whose body could not be read had finished or failed (#200).
+REQUEST_FINISHED_EVENT: Final = "requestfinished"
+REQUEST_FAILED_EVENT: Final = "requestfailed"
+
+#: How many ended requests an observation remembers at once; the oldest is forgotten.
+MAX_REMEMBERED_ENDS: Final = 256
+
 
 class ObservationFailed(RuntimeError):
     """The observation itself broke: a response was dropped, or the tab it listened to went away.
@@ -73,6 +91,19 @@ class RequestLike(Protocol):
 
     @property
     def post_data(self) -> str | None: ...
+
+
+class EndedRequestLike(Protocol):
+    """The read-only slice of a Playwright ``Request`` a request event hands over."""
+
+    @property
+    def method(self) -> str: ...
+
+    @property
+    def url(self) -> str: ...
+
+    @property
+    def failure(self) -> str | None: ...
 
 
 class ResponseLike(Protocol):
@@ -182,7 +213,7 @@ class ObservedResponse:
     request's JSON), read from the request, never changed. ``cause`` is set only
     for :data:`FAILURE_UNREADABLE`: what the read raised, as its class name and a
     fixed category (:func:`unreadable_cause`, e.g. ``"Error (no resource)"``), never
-    its message.
+    its message, and ``diagnostics`` the fixed facts about the failed read (#200).
 
     Both bodies are left out of ``repr``: a response body is a person's data, and a
     ``repr`` ends up in tracebacks and log lines.
@@ -197,10 +228,55 @@ class ObservedResponse:
     location: str | None = field(default=None, repr=False)
     failure: str | None = None
     cause: str | None = None
+    diagnostics: ReadDiagnostics | None = None
 
     def text(self) -> str | None:
         """The body as text (UTF-8, replacing what does not decode), or ``None``."""
         return None if self.body is None else self.body.decode("utf-8", errors="replace")
+
+
+@dataclass(frozen=True, slots=True)
+class ReadDiagnostics:
+    """Fixed, non-identifying facts about one body read that failed (#200).
+
+    Numbers and fixed words only: never a url, a header's own value (except the
+    content length, a number), a body, or an exception's message.
+
+    ``content_type`` and ``transfer_encoding`` are categories
+    (:data:`CONTENT_TYPES`, ``"chunked"``, ``"none"``, ``"other"``). ``request_end``
+    is ``"finished"``, ``"failed"``, or ``"neither"`` (no request event had arrived
+    when the read failed); ``request_failure`` is the failed request's error as a
+    category of :data:`UNREADABLE_CATEGORIES`, and ``None`` unless it failed.
+    ``read_after_ms`` is the time from the ``response`` event to the start of the
+    read, ``failed_after_ms`` to its failure. ``reads_in_flight`` is how many other
+    body reads of this observation were under way when this one started.
+    """
+
+    from_service_worker: bool | None
+    status: int
+    content_type: str
+    content_length: int | None
+    transfer_encoding: str
+    request_end: str
+    request_failure: str | None
+    read_after_ms: int
+    failed_after_ms: int
+    reads_in_flight: int
+
+    def describe(self) -> str:
+        """One line of ``key=value`` pairs: fixed words and numbers only."""
+        worker = {True: "yes", False: "no", None: "unknown"}[self.from_service_worker]
+        end = self.request_end
+        if self.request_failure is not None:
+            end = f"{end} ({self.request_failure})"
+        length = "none" if self.content_length is None else str(self.content_length)
+        return (
+            f"service_worker={worker} status={self.status}"
+            f" content_type={self.content_type} content_length={length}"
+            f" transfer_encoding={self.transfer_encoding} request={end}"
+            f" read_after_ms={self.read_after_ms} failed_after_ms={self.failed_after_ms}"
+            f" reads_in_flight={self.reads_in_flight}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,9 +301,16 @@ FAILURE_UNREADABLE: Final = "body could not be read"
 #: The fixed categories :func:`unreadable_cause` sorts a failed body read into, each
 #: with the lowercase fragments of an exception message that place it there, checked
 #: in this order. Only the category is ever kept or logged, never the message.
+#:
+#: ``"no data"`` and ``"no resource"`` are Chrome's two different answers (#200):
+#: "No data found for resource with given identifier" is a request Chrome knows but
+#: kept no body for -- what it says for a streamed answer the page's own client
+#: aborted after reading it -- and "No resource with given identifier found" is a
+#: request it no longer knows at all.
 UNREADABLE_CATEGORIES: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
     ("evicted", ("evicted",)),
-    ("no resource", ("no resource", "no data found")),
+    ("no data", ("no data found",)),
+    ("no resource", ("no resource",)),
     ("aborted", ("aborted", "canceled", "cancelled")),
     ("closed", ("target closed", "has been closed", "target page")),
     ("network error", ("net::err_", "failed")),
@@ -235,6 +318,16 @@ UNREADABLE_CATEGORIES: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
 
 #: The category of a failed body read that matches none of :data:`UNREADABLE_CATEGORIES`.
 UNREADABLE_OTHER: Final = "unclassified"
+
+#: The content types :class:`ReadDiagnostics` names, by their media type; any other is
+#: ``"other"``, and a response without one ``"none"``.
+CONTENT_TYPES: Final[Mapping[str, str]] = {
+    "text/x-component": "x-component",
+    "application/octet-stream": "octet-stream",
+    "application/json": "json",
+    "text/html": "html",
+    "text/plain": "plain",
+}
 
 
 class Observation:
@@ -261,6 +354,10 @@ class Observation:
         self._listening = False
         self._closed = False
         self.kept = 0
+        #: How each matching request ended, by request, as a request event said (#200).
+        self._ends: dict[object, tuple[str, str | None]] = {}
+        self._reading = 0
+        self.unreadable: list[ReadDiagnostics] = []
 
     @property
     def page(self) -> ListenablePage:
@@ -278,6 +375,8 @@ class Observation:
             raise ObservationFailed("this observation is closed")
         if not self._listening:
             self._page.on(RESPONSE_EVENT, self._on_response)
+            self._page.on(REQUEST_FINISHED_EVENT, self._on_request_finished)
+            self._page.on(REQUEST_FAILED_EVENT, self._on_request_failed)
             self._listening = True
 
     def _on_response(self, response: ResponseLike) -> None:
@@ -299,10 +398,37 @@ class Observation:
             )
             return
         self.kept += 1
-        self._pending.append(asyncio.get_running_loop().create_task(self._read(response, method)))
+        loop = asyncio.get_running_loop()
+        self._pending.append(loop.create_task(self._read(response, method, loop.time())))
         self._arrived.set()
 
-    async def _read(self, response: ResponseLike, method: str) -> ObservedResponse:
+    def _on_request_finished(self, request: EndedRequestLike) -> None:
+        self._request_ended(request, "finished")
+
+    def _on_request_failed(self, request: EndedRequestLike) -> None:
+        self._request_ended(request, "failed")
+
+    def _request_ended(self, request: EndedRequestLike, how: str) -> None:
+        """A listener: remember how a matching request ended. Reads, never touches it."""
+        if self._closed:
+            return
+        try:
+            if not self.match.matches(request.method, request.url):
+                return
+            failure = request.failure if how == "failed" else None
+        except Exception as exc:
+            log.debug(
+                "observation: skipped a request event that could not be read (%s)", _kind(exc)
+            )
+            return
+        category = None if failure is None else _category(failure)
+        if how == "failed" and category is None:
+            category = UNREADABLE_OTHER
+        self._ends[request] = (how, category)
+        while len(self._ends) > MAX_REMEMBERED_ENDS:
+            del self._ends[next(iter(self._ends))]
+
+    async def _read(self, response: ResponseLike, method: str, arrived: float) -> ObservedResponse:
         request = response.request
         status = response.status
         resource_type = _safe(lambda: request.resource_type) or "other"
@@ -323,6 +449,11 @@ class Observation:
         body: bytes | None = None
         failure: str | None = None
         cause: str | None = None
+        diagnostics: ReadDiagnostics | None = None
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        in_flight = self._reading
+        self._reading += 1
         try:
             body = await asyncio.wait_for(response.body(), self.limits.body_timeout_s)
         except TimeoutError:
@@ -333,6 +464,17 @@ class Observation:
             cause = unreadable_cause(exc)
             log.debug("observation: a response body could not be read (%s)", cause)
             failure = FAILURE_UNREADABLE
+            diagnostics = self._diagnose(
+                response,
+                status,
+                read_after_ms=_ms(started - arrived),
+                failed_after_ms=_ms(loop.time() - arrived),
+                reads_in_flight=in_flight,
+            )
+            self.unreadable.append(diagnostics)
+        finally:
+            self._reading -= 1
+        self._ends.pop(request, None)
         if body is not None and len(body) > self.limits.max_body_bytes:
             body, failure = None, FAILURE_TOO_LARGE
         return ObservedResponse(
@@ -344,6 +486,55 @@ class Observation:
             body=body,
             failure=failure,
             cause=cause,
+            diagnostics=diagnostics,
+        )
+
+    def _diagnose(
+        self,
+        response: ResponseLike,
+        status: int,
+        *,
+        read_after_ms: int,
+        failed_after_ms: int,
+        reads_in_flight: int,
+    ) -> ReadDiagnostics:
+        """The fixed facts about a read that failed (#200). Reads only; fixed words out."""
+        headers = _safe(lambda: response.headers)
+        if not isinstance(headers, Mapping):
+            headers = {}
+        worker = _safe(lambda: getattr(response, "from_service_worker", None))
+        how, request_failure = self._ends.get(response.request, ("neither", None))
+        return ReadDiagnostics(
+            from_service_worker=worker if isinstance(worker, bool) else None,
+            status=status,
+            content_type=_content_type(headers.get("content-type")),
+            content_length=_content_length(headers.get("content-length")),
+            transfer_encoding=_transfer_encoding(headers.get("transfer-encoding")),
+            request_end=how,
+            request_failure=request_failure,
+            read_after_ms=read_after_ms,
+            failed_after_ms=failed_after_ms,
+            reads_in_flight=reads_in_flight,
+        )
+
+    def summary(self) -> str:
+        """One line for the log: how many answers were kept, and how the unreadable ones
+        ended, in fixed words and counts (#200)."""
+        ends: dict[str, int] = {}
+        for item in self.unreadable:
+            key = (
+                item.request_end
+                if item.request_failure is None
+                else (f"{item.request_end} ({item.request_failure})")
+            )
+            ends[key] = ends.get(key, 0) + 1
+        chunked = sum(1 for item in self.unreadable if item.transfer_encoding == "chunked")
+        worker = sum(1 for item in self.unreadable if item.from_service_worker)
+        how = ", ".join(f"{key}: {count}" for key, count in sorted(ends.items()))
+        return (
+            f"answers_kept={self.kept} bodies_unreadable={len(self.unreadable)}"
+            f" unreadable_requests=[{how}] unreadable_chunked={chunked}"
+            f" unreadable_from_service_worker={worker}"
         )
 
     async def next(self, timeout_s: float) -> ObservedResponse | None:
@@ -390,11 +581,18 @@ class Observation:
             return
         self._closed = True
         if self._listening:
-            try:
-                self._page.remove_listener(RESPONSE_EVENT, self._on_response)
-            except Exception as exc:
-                log.debug("observation: removing the listener failed (%s)", _kind(exc))
+            for event, handler in (
+                (RESPONSE_EVENT, self._on_response),
+                (REQUEST_FINISHED_EVENT, self._on_request_finished),
+                (REQUEST_FAILED_EVENT, self._on_request_failed),
+            ):
+                try:
+                    self._page.remove_listener(event, handler)
+                except Exception as exc:
+                    log.debug("observation: removing a listener failed (%s)", _kind(exc))
             self._listening = False
+            if self.kept:
+                log.info("observation: %s", self.summary())
         pending, self._pending = list(self._pending), collections.deque()
         for task in pending:
             task.cancel()
@@ -437,14 +635,41 @@ def unreadable_cause(exc: BaseException) -> str:
     Playwright's can quote the url, and a profile url names a person.
     """
     try:
-        message = str(exc).lower()
+        message = str(exc)
     except Exception:
         message = ""
-    category = next(
-        (name for name, fragments in UNREADABLE_CATEGORIES if any(f in message for f in fragments)),
-        UNREADABLE_OTHER,
+    return f"{_kind(exc)} ({_category(message) or UNREADABLE_OTHER})"
+
+
+def _category(message: str) -> str | None:
+    """The :data:`UNREADABLE_CATEGORIES` name ``message`` falls in, or ``None``."""
+    lowered = message.lower()
+    return next(
+        (name for name, fragments in UNREADABLE_CATEGORIES if any(f in lowered for f in fragments)),
+        None,
     )
-    return f"{_kind(exc)} ({category})"
+
+
+def _content_type(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return "none"
+    return CONTENT_TYPES.get(value.split(";", 1)[0].strip().lower(), "other")
+
+
+def _content_length(value: object) -> int | None:
+    if not isinstance(value, str) or not value.strip().isdigit():
+        return None
+    return int(value.strip())
+
+
+def _transfer_encoding(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return "none"
+    return "chunked" if value.strip().lower() == "chunked" else "other"
+
+
+def _ms(seconds: float) -> int:
+    return max(round(seconds * 1000), 0)
 
 
 def _kind(exc: BaseException) -> str:

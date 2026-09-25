@@ -53,19 +53,34 @@ arrived before it is still handed over. A unit is never handed over part-read.
 LinkedIn answering -- is handled the same way, except that the run ends by that
 exception rather than an outcome: recorded failed, never complete.
 
-**An answer whose body cannot be read** (#197). Chrome can receive a pagination
-answer and still have no body to hand over: the page's own client aborted or
-superseded the fetch, or the body was evicted. The answer's start is compared with
-the expected one first, so a stale or repeated answer without a body is skipped like
-any other. One for the expected start is logged at INFO, with the exception's class
-and a fixed category but never its message, and the scroll goes on so the page can
-ask again: if it does and the answer reads, the run goes on. If the page moves past
-that start instead, or it is not read again within :data:`MAX_IDLE_SCROLLS` scrolls,
-the call raises :class:`~netkeeper.linkedin.connections.AnswerLost`, which ends the
-run as a safe incomplete stop (:attr:`~netkeeper.linkedin.connections.StopReason.ANSWER_LOST`):
-not ``RouteChanged``, so it never counts toward the route-changed breaker, and never
-complete, so it ages nobody. A body that could not be kept for any other reason (too
-large, too slow) is still :class:`~netkeeper.linkedin.observe.ObservationFailed`.
+**An answer whose body cannot be read** (#197, #200). Chrome can receive a
+pagination answer and still have no body to hand over: the page's own client aborted
+the stream after reading it, or the body was evicted. The answer's start is compared
+with the expected one first, so a stale or repeated answer without a body is skipped
+like any other. One for the expected start is logged at INFO, with the exception's
+class, a fixed category, and the observation's fixed diagnostics
+(:class:`~netkeeper.linkedin.observe.ReadDiagnostics`), never its message, and the
+scroll goes on:
+
+* If the page asks for that start again and the answer reads, the run goes on as if
+  nothing was lost.
+* If the page moves on to the next answer (at most :data:`~netkeeper.linkedin.flagship.FULL_PAGE`
+  past the lost start), the loss is recorded and the run **reads on** (#200): the
+  page itself read that answer, only Chrome's copy is gone. The loss travels with
+  the next slice handed over (:attr:`~netkeeper.linkedin.connections.SourcePage.lost`),
+  and a run with any loss is never complete, so it ages nobody.
+* The call raises :class:`~netkeeper.linkedin.connections.AnswerLost`, a safe
+  incomplete stop (:attr:`~netkeeper.linkedin.connections.StopReason.ANSWER_LOST`),
+  when more than :data:`MAX_LOST_PER_RUN` answers are lost in one run, when the page
+  jumps further past a lost start than one answer, or when a lost answer is not read
+  again or moved past within :data:`MAX_IDLE_SCROLLS` scrolls (a stall after a loss).
+  None of these is ``RouteChanged``, so none counts toward the route-changed breaker.
+
+The list's end is still proven only by the page's own answers; the cards of a lost
+answer (the gap between its start and the next one) count toward the first screen's
+total when a full last answer that asks for nothing is weighed as the end. A body
+that could not be kept for any other reason (too large, too slow) is still
+:class:`~netkeeper.linkedin.observe.ObservationFailed`.
 
 **Cancel** lands between units, at the gate's next check (spec 9.9): one call spends a
 few scrolls at most, and stopping partway through one would hand the job a short slice
@@ -78,9 +93,11 @@ module, never imported from a request handler (spec 9.9).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import random
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Final, cast
 from urllib.parse import urlsplit
 
@@ -90,6 +107,7 @@ from netkeeper.linkedin.connections import AnswerLost, LostAnswer, SourcePage
 from netkeeper.linkedin.flagship import (
     CONNECTIONS_PAGE_PATH,
     CONNECTIONS_SCREEN_PATH,
+    FULL_PAGE,
     LINKEDIN_ORIGIN,
     PAGINATION_PATH,
     SORT_NEWEST_FIRST,
@@ -105,6 +123,7 @@ from netkeeper.linkedin.observe import (
     ObservationFailed,
     ObservationLimits,
     ObservedResponse,
+    ReadDiagnostics,
     ResponseMatch,
     ResponseRule,
 )
@@ -136,6 +155,23 @@ MAX_IDLE_SCROLLS: Final = 6
 #: that keeps answering with documents that carry none is not the connections page.
 MAX_LANDING_ANSWERS: Final = 8
 
+#: Answers one run may lose and read on past (#200). One more stops the run as
+#: ``answer_lost``: a run losing that many is not reading the list.
+MAX_LOST_PER_RUN: Final = 5
+
+
+@dataclass(frozen=True, slots=True)
+class _Pending:
+    """An answer for the expected start that arrived unreadable and is not settled yet."""
+
+    start: int
+    cause: str
+    diagnostics: ReadDiagnostics | None
+
+
+#: How a lost answer the page moved past ends (#200): the run read on without it.
+MOVED_PAST: Final = "the page moved past it"
+
 _LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
@@ -162,6 +198,7 @@ class PageConnections:
         response_wait_s: float = RESPONSE_WAIT_S,
         landing_wait_s: float = LANDING_WAIT_S,
         max_idle_scrolls: int = MAX_IDLE_SCROLLS,
+        max_lost: int = MAX_LOST_PER_RUN,
         limits: ObservationLimits | None = None,
     ) -> None:
         self._run = run
@@ -173,6 +210,7 @@ class PageConnections:
         self._response_wait_s = response_wait_s
         self._landing_wait_s = landing_wait_s
         self._max_idle = max_idle_scrolls
+        self._max_lost = max_lost
         self._limits = limits
         self._observation: Observation | None = None
         self._cards: list[ConnectionSummary] = []
@@ -181,10 +219,20 @@ class PageConnections:
         self._landed = False
         self._ended = False
         self._stopped: SourcePage | None = None
-        self._failed: ObservationFailed | AnswerLost | None = None
-        #: The start of a pagination answer that arrived unreadable and has not been
-        #: read since (#197), with its fixed cause; ``None`` while nothing is lost.
-        self._lost: tuple[int, str] | None = None
+        self._failed: ObservationFailed | None = None
+        #: The lost answer that stopped this source (#197, #200); sticky like ``_failed``.
+        self._stop_lost: LostAnswer | None = None
+        #: The pagination answer for the expected start that arrived unreadable and is
+        #: not settled yet (#197): read again, moved past, or given up on.
+        self._lost: _Pending | None = None
+        #: Answers lost and read on past in this run (#200), and those not yet
+        #: handed to the job with a slice.
+        self._lost_count = 0
+        self._unreported: list[LostAnswer] = []
+        #: The cards the lost answers held: the gap each left in the list's indexes.
+        self._lost_cards = 0
+        #: The body size of the last pagination answer that read, for the diagnostics.
+        self._last_bytes: int | None = None
         self._url = ""
 
     @property
@@ -197,9 +245,10 @@ class PageConnections:
         return f"{self._origin}{CONNECTIONS_PAGE_PATH}"
 
     async def fetch_page(self, *, start: int, count: int) -> SourcePage:
-        if self._failed is not None and len(self._cards) < start + count:
-            raise self._failed
-        if self._stopped is None and self._failed is None:
+        ended = self._failed is not None or self._stop_lost is not None
+        if ended and len(self._cards) < start + count:
+            raise self._failure()
+        if self._stopped is None and not ended:
             try:
                 blocked = await self._read_until(start + count)
             except RouteChanged:
@@ -210,17 +259,23 @@ class PageConnections:
                 # exception (never complete, ageing nobody). A unit already read whole
                 # before it is still handed over, the same as before a RouteChanged;
                 # the next call raises it.
-                self._failed = exc
+                if isinstance(exc, AnswerLost):
+                    self._stop_lost = exc.lost
+                else:
+                    self._failed = exc
                 blocked = None
                 if len(self._cards) < start + count:
-                    raise
+                    raise self._failure() from None
             if blocked is not None:
                 self._stopped = blocked
         if self._stopped is not None and len(self._cards) < start + count:
             # The first non-Ok answer is sticky, and only a unit this source had already
             # read whole, before it, is still handed over: a stop never becomes a short
             # slice the job could mistake for the end of the list.
-            return self._stopped
+            unreported = self._report()
+            return (
+                dataclasses.replace(self._stopped, lost=unreported) if unreported else self._stopped
+            )
         selected = tuple(self._cards[start : start + count])
         return SourcePage(
             outcome=Outcome.OK,
@@ -228,7 +283,20 @@ class PageConnections:
             page=ConnectionsPageResult(
                 connections=selected, start=start, count=count, total=self._total
             ),
+            lost=self._report(),
         )
+
+    def _failure(self) -> ObservationFailed | AnswerLost:
+        """The sticky exception this source ended by, carrying any loss not yet reported."""
+        if self._failed is not None:
+            return self._failed
+        assert self._stop_lost is not None
+        return AnswerLost(self._stop_lost, earlier=self._report())
+
+    def _report(self) -> tuple[LostAnswer, ...]:
+        """The answers lost and read on past since the last report, once each (#200)."""
+        unreported, self._unreported = tuple(self._unreported), []
+        return unreported
 
     async def _read_until(self, needed: int) -> SourcePage | None:
         """Land, then scroll until ``needed`` cards are read or the list's end is proven.
@@ -247,7 +315,7 @@ class PageConnections:
         idle = 0
         while len(self._cards) < needed and not self._ended:
             if idle >= self._max_idle and self._lost is not None:
-                raise self._answer_lost(f"it was not read again within {idle} scrolls")
+                raise self._give_up(f"it was not read again within {idle} scrolls")
             if idle >= self._max_idle:
                 log.warning(
                     "connections: %d scrolls brought no new answer before the list"
@@ -256,15 +324,17 @@ class PageConnections:
                 )
                 return SourcePage(Outcome.ROUTE_CHANGED, self._url)
             before = (len(self._cards), self._ended)
-            lost_before = self._lost
+            lost_before = None if self._lost is None else self._lost.start
             blocked = await self._scroll()
             if blocked is None:
                 blocked = await self._absorb(wait_s=self._response_wait_s)
             if blocked is not None:
                 return blocked
-            if lost_before is None and self._lost is not None:
+            if self._lost is not None and self._lost.start != lost_before:
                 # An answer was just lost (#197): the page gets MAX_IDLE_SCROLLS
-                # scrolls, from here, to ask for it again.
+                # scrolls, from here, to ask for it again or move past it. The same
+                # start lost again on a re-ask is not a new loss, and does not
+                # restart the count (#198 review, L4).
                 idle = 0
             elif (len(self._cards), self._ended) == before:
                 idle += 1
@@ -410,30 +480,42 @@ class PageConnections:
             log.info("connections: the page asked for a page it already had; skipped")
             return None
         if request.start_index > expected:
-            if self._lost is not None:
-                # The page moved on past the answer it lost (#197): not a changed
-                # route, a page this run could not read.
-                raise self._answer_lost("the page moved past it")
-            log.warning(
-                "connections: a page of the list went unseen (asked from %d, expected %d)",
-                request.start_index,
-                expected,
-            )
-            return SourcePage(Outcome.ROUTE_CHANGED, self._url)
+            if self._lost is None:
+                log.warning(
+                    "connections: a page of the list went unseen (asked from %d, expected %d)",
+                    request.start_index,
+                    expected,
+                )
+                return SourcePage(Outcome.ROUTE_CHANGED, self._url)
+            # The page moved on past the answer it lost (#197): it read its own copy,
+            # only the browser's is gone. Not a changed route: record it and read on
+            # (#200), unless that is one loss too many.
+            self._move_past(request.start_index, response)
         if response.body is None:
             if response.failure != FAILURE_UNREADABLE:
                 raise _not_kept(response)
             # #197: the browser received the answer but could not hand its body
-            # over -- the page's own client aborted or superseded the fetch, or the
-            # body was evicted. Not LinkedIn answering: keep scrolling so the page
-            # can ask for it again, and give up safely if it does not.
+            # over. Not LinkedIn answering: the scroll goes on, and what the page
+            # does next settles it (asks again, moves past, or goes quiet).
             cause = response.cause or "unknown"
-            self._lost = (request.start_index, cause)
+            if self._lost is not None and self._lost.start == request.start_index:
+                log.info(
+                    "connections: the page asked again for start %d, and it could not be"
+                    " read again (%s)",
+                    request.start_index,
+                    cause,
+                )
+                return None
+            self._lost = _Pending(request.start_index, cause, response.diagnostics)
             log.info(
-                "connections: the page's answer for start %d could not be read (%s);"
-                " scrolling on for the page to ask again",
+                "connections: the page's answer for start %d could not be read (%s); %s;"
+                " previous_answer_bytes=%s",
                 request.start_index,
                 cause,
+                "no diagnostics"
+                if response.diagnostics is None
+                else response.diagnostics.describe(),
+                "none" if self._last_bytes is None else self._last_bytes,
             )
             return None
         if self._lost is not None:
@@ -442,6 +524,7 @@ class PageConnections:
                 request.start_index,
             )
             self._lost = None
+        self._last_bytes = len(response.body)
         self._take(
             parse_connections_chunk(
                 response.body, endpoint=self.endpoint, expected_start=request.start_index
@@ -453,11 +536,12 @@ class PageConnections:
         self._cards.extend(chunk.cards)
         if chunk.ends_list:
             self._ended = True
-        elif chunk.next_start is None and 0 < self._total <= self._distinct():
+        elif chunk.next_start is None and 0 < self._total <= self._distinct() + self._lost_cards:
             # A full answer that asks for no next page is the end of a list whose length
             # is a multiple of ten -- but only once the run has seen as many distinct
-            # people as the first screen's total. Short of that it proves nothing, and
-            # the page stopping there still ends the run as RouteChanged.
+            # people as the first screen's total, counting the places of the answers it
+            # lost (#200). Short of that it proves nothing, and the page stopping there
+            # still ends the run as RouteChanged.
             self._ended = True
         self._next_start = (
             chunk.next_start if chunk.next_start is not None else chunk.start + len(chunk.cards)
@@ -469,11 +553,47 @@ class PageConnections:
             ", the end of the list" if self._ended else "",
         )
 
-    def _answer_lost(self, ending: str) -> AnswerLost:
-        """The lost answer as the exception that ends the run incomplete (#197)."""
-        assert self._lost is not None
-        start, cause = self._lost
-        return AnswerLost(LostAnswer(start=start, cause=cause, ending=ending))
+    def _move_past(self, next_start: int, response: ObservedResponse) -> None:
+        """The page asked past the lost answer: record the loss and read on (#200).
+
+        Raises :class:`AnswerLost` instead when the page jumped further than one answer
+        past the lost start (a gap on top of the loss), or when this loss is one more
+        than :data:`MAX_LOST_PER_RUN`.
+        """
+        pending = self._lost
+        assert pending is not None
+        if next_start > pending.start + FULL_PAGE:
+            raise self._give_up("the page moved more than one answer past it")
+        self._lost = None
+        self._lost_count += 1
+        self._lost_cards += next_start - pending.start
+        self._next_start = next_start
+        lost = LostAnswer(start=pending.start, cause=pending.cause, ending=MOVED_PAST)
+        next_bytes = "unreadable" if response.body is None else str(len(response.body))
+        if self._lost_count > self._max_lost:
+            raise AnswerLost(
+                dataclasses.replace(
+                    lost,
+                    ending=(
+                        f"{MOVED_PAST}, and that is {self._lost_count} answers lost in this"
+                        f" run, more than the {self._max_lost} a run may lose"
+                    ),
+                )
+            )
+        self._unreported.append(lost)
+        log.info(
+            "connections: the page moved past its answer for start %d (next_answer_bytes=%s);"
+            " reading on, %d lost in this run",
+            pending.start,
+            next_bytes,
+            self._lost_count,
+        )
+
+    def _give_up(self, ending: str) -> AnswerLost:
+        """The pending lost answer as the exception that ends the run incomplete (#197)."""
+        pending = self._lost
+        assert pending is not None
+        return AnswerLost(LostAnswer(start=pending.start, cause=pending.cause, ending=ending))
 
     def _distinct(self) -> int:
         return len({card.urn for card in self._cards})

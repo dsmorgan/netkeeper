@@ -17,7 +17,7 @@ padded out where a page boundary has to fall inside it (``_many``).
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 import factories
@@ -1339,7 +1339,7 @@ async def test_a_lost_answer_ends_the_run_aborted_and_says_which_start(
         " (Error (no resource)); the page moved past it."
     )
     assert run.counts_json is not None
-    assert run.counts_json["lost"] == {"start": 80, "cause": _LOST_CAUSE}
+    assert run.counts_json["lost"] == [{"start": 80, "cause": _LOST_CAUSE}]
     assert run.counts_json["complete"] is False and run.counts_json["outcome"] is None
     with session_scope(session_factory) as session:
         user = session.get(User, user_id)
@@ -1379,5 +1379,122 @@ async def test_a_run_without_a_lost_answer_records_none(
 ) -> None:
     report = await _sync(session_factory, user_id, FakeConnectionsSource(list(PEOPLE)))
     run = _run_row(session_factory, user_id, report.run_id)
-    assert run.counts_json is not None and run.counts_json["lost"] is None
+    assert run.counts_json is not None and run.counts_json["lost"] == []
     assert run.notes is None
+    assert runs.lost_answers(run) == 0
+
+
+# --- #200: a lost answer the run read on past ----------------------------------------------
+
+
+def _lost(start: int) -> LostAnswer:
+    return LostAnswer(start=start, cause=_LOST_CAUSE, ending="the page moved past it")
+
+
+@dataclass
+class _ReadOnSource(FakeConnectionsSource):
+    """Honest pages, but page ``i`` of ``losses`` also reports the answers the source
+    lost and read on past before it (``SourcePage.lost``). ``stop_at`` raises
+    ``AnswerLost`` for that page instead, carrying ``earlier`` losses."""
+
+    losses: dict[int, tuple[LostAnswer, ...]] = field(default_factory=dict)
+    stop_at: int | None = None
+    earlier: tuple[LostAnswer, ...] = ()
+
+    async def fetch_page(self, *, start: int, count: int) -> SourcePage:
+        index = len(self.requests)
+        if index == self.stop_at:
+            self.requests.append((start, count))
+            raise AnswerLost(_lost(start), earlier=self.earlier)
+        page = await super().fetch_page(start=start, count=count)
+        return replace(page, lost=self.losses.get(index, ()))
+
+
+async def test_a_run_that_read_on_past_lost_answers_is_incomplete_and_ages_nobody(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """#200: the source lost 40 and 90 and read on to the end of the list. Every page
+    is Ok and the end is reached, but the run is aborted as answer_lost, names both
+    starts, and ages nobody."""
+    gone = await _one_miss_already(session_factory, user_id)
+    people = _many(99)
+    fetch = _ReadOnSource(people, losses={1: (_lost(40),), 2: (_lost(90),)})
+
+    report = await _sync(session_factory, user_id, fetch, at=NOW + timedelta(days=14))
+
+    result = report.result
+    assert result.reason is StopReason.END_OF_LIST and result.lost is None
+    assert [lost.start for lost in result.losses] == [40, 90] and not result.complete
+    assert report.aging is None and not report.heat_raised and not report.session_flagged
+    assert _contacts(session_factory, user_id)[gone.urn].li_missing_count == 1
+    run = _run_row(session_factory, user_id, report.run_id)
+    assert (run.status, run.stop_reason) == (SyncRunStatus.ABORTED, "answer_lost")
+    assert run.counts_json is not None and run.counts_json["lost"] == [
+        {"start": 40, "cause": _LOST_CAUSE},
+        {"start": 90, "cause": _LOST_CAUSE},
+    ]
+    assert run.notes == (
+        "lost 2 of the page's answers, so this run is incomplete and aged nobody:"
+        " start 40 (Error (no resource)), start 90 (Error (no resource))."
+    )
+    assert runs.lost_answers(run) == 2
+
+
+async def test_a_stop_after_earlier_losses_names_them_all(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    fetch = _ReadOnSource(_many(99), losses={1: (_lost(40),)}, stop_at=2, earlier=(_lost(60),))
+    report = await _sync(session_factory, user_id, fetch)
+    assert report.result.reason is StopReason.ANSWER_LOST
+    assert [lost.start for lost in report.result.losses] == [40, 60, 80]
+    run = _run_row(session_factory, user_id, report.run_id)
+    assert run.notes == (
+        "stopped incomplete: the page's answer for start 80 could not be read"
+        " (Error (no resource)); the page moved past it."
+        " lost 3 of the page's answers, so this run is incomplete and aged nobody:"
+        " start 40 (Error (no resource)), start 60 (Error (no resource)),"
+        " start 80 (Error (no resource))."
+    )
+    assert run.counts_json is not None and [x["start"] for x in run.counts_json["lost"]] == [
+        40,
+        60,
+        80,
+    ]
+
+
+async def test_an_incremental_run_that_lost_an_answer_is_not_completed(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    await _sync(session_factory, user_id, FakeConnectionsSource(_many(99)))
+    fetch = _ReadOnSource(_many(99), losses={0: (_lost(40),)})
+    report = await _sync(
+        session_factory, user_id, fetch, SyncMode.INCREMENTAL, at=NOW + timedelta(days=1)
+    )
+    assert report.result.reason is StopReason.CAUGHT_UP
+    run = _run_row(session_factory, user_id, report.run_id)
+    assert (run.status, run.stop_reason) == (SyncRunStatus.ABORTED, "answer_lost")
+
+
+async def test_a_loss_the_run_read_on_past_never_bumps_the_breaker(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """A loss is not a changed route. A run that read on past one to the end of the
+    list clears the streak (the route was readable to its end); one that then ended
+    by a changed route in its own right still counts that ending."""
+    await _sync(
+        session_factory, user_id, FakeConnectionsSource(list(PEOPLE), script={0: UNRECOGNIZED})
+    )
+    report = await _sync(
+        session_factory,
+        user_id,
+        _ReadOnSource(_many(99), losses={1: (_lost(40),)}),
+        at=NOW + timedelta(days=1),
+    )
+    assert _breaker_count(session_factory, user_id, report.account_id) == 0
+    await _sync(
+        session_factory,
+        user_id,
+        _ReadOnSource(_many(99), losses={1: (_lost(40),)}, script={2: UNRECOGNIZED}),
+        at=NOW + timedelta(days=2),
+    )
+    assert _breaker_count(session_factory, user_id, report.account_id) == 1
