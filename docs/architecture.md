@@ -236,8 +236,9 @@ netkeeper/
 │   │   ├── flight.py         # React Server Components flight payloads, parsed defensively
 │   │   ├── flagship.py       # flagship-web constants and the connections parser (P2-17)
 │   │   ├── page_connections.py  # the connections source: navigate, scroll, read the page's answers
-│   │   ├── voyager.py        # endpoint constants, header builder, in-page fetch, response parsers (enrichment)
-│   │   ├── dom.py            # DOM contact-info overlay reader (unwired; connections half removed)
+│   │   ├── flagship_profile.py  # profile and contact-info parsers from flagship-web answers (#190)
+│   │   ├── page_profiles.py  # the profile source: navigate, scroll, one Contact info click, read answers
+│   │   ├── voyager.py        # result types, headers, and parsers for the Voyager API (messaging; connections unwired)
 │   │   ├── connections.py    # full + incremental sync job (pure; crm/apply.py maps its pages)
 │   │   ├── enrich.py         # profile visit, harvest everything, snapshot diff
 │   │   ├── inbox.py          # conversation polling for reply detection
@@ -431,15 +432,15 @@ Invariants inherited from igtracker: reuse `browser.contexts[0]`; open one tab p
 
 ### 9.3 Read what the page loads
 
-*As built (P2-17, [ADR 0006](adr/0006-observe-dont-request.md)).* The capture in #149 showed that LinkedIn serves the connections list and profiles through `flagship-web`, a React Server Components client, not Voyager, and that PerimeterX and reCAPTCHA Enterprise watch those pages. So netkeeper no longer requests anything for the connections list. It navigates its tab to the connections page and scrolls it like a person; the page itself asks for each next page of ten (`POST /flagship-web/rsc-action/actions/pagination`); and netkeeper reads those answers from the tab's own `response` events (`BrowserRun.observe`). Nothing is intercepted, routed, altered, or sent by netkeeper: the requests LinkedIn sees on the tab are the ones its page decided to send, at its own pace. `linkedin/flight.py` parses the flight payloads; `linkedin/flagship.py` holds the captured constants and the connections parser, each constant dated; `linkedin/page_connections.py` is the source the sync reads through. A payload the parser does not recognize is `RouteChanged` for the run, and a page of connections is handed on only when every card on it parsed, so a shape change stops a run and never writes part of a page. `docs/linkedin-flagship-web-shapes.md` records the shapes, structure only. Enrichment still uses the in-page Voyager fetch below until it moves onto the same seam; that move adds ADR 0006's one exception to "scroll only": one click on **Contact info** per profile visit, paced and budgeted as part of the visit.
+*As built (P2-17, [ADR 0006](adr/0006-observe-dont-request.md)).* The capture in #149 showed that LinkedIn serves the connections list and profiles through `flagship-web`, a React Server Components client, not Voyager, and that PerimeterX and reCAPTCHA Enterprise watch those pages. So netkeeper no longer requests anything for the connections list. It navigates its tab to the connections page and scrolls it like a person; the page itself asks for each next page of ten (`POST /flagship-web/rsc-action/actions/pagination`); and netkeeper reads those answers from the tab's own `response` events (`BrowserRun.observe`). Nothing is intercepted, routed, altered, or sent by netkeeper: the requests LinkedIn sees on the tab are the ones its page decided to send, at its own pace. `linkedin/flight.py` parses the flight payloads; `linkedin/flagship.py` holds the captured constants and the connections parser, each constant dated; `linkedin/page_connections.py` is the source the sync reads through. A payload the parser does not recognize is `RouteChanged` for the run, and a page of connections is handed on only when every card on it parsed, so a shape change stops a run and never writes part of a page. `docs/linkedin-flagship-web-shapes.md` records the shapes, structure only. *As built (P2-18, #190).* Enrichment reads profiles the same way: it navigates to the profile, scrolls it, and reads the profile screen the page loads with it and the lazy cards it loads as it is scrolled; then it scrolls back to the top and makes ADR 0006's one exception to "scroll only", one click on **Contact info**, and reads the overlay's `actions/navigation` answer the click made the page ask for. `linkedin/flagship_profile.py` parses both; `linkedin/page_profiles.py` is the source; `BrowserRun.click_contact_info` is the only method in the package that clicks (`tests/test_browser_safety.py`). The in-page Voyager fetch (`linkedin/fetch.py`) is removed.
 
-The DOM reader for the connections list is removed (#187 review), with `FallbackConnectionsSource`. Its selectors were authored and never seen on the live page, and the first supervised run found nothing with them; reading the page's own answers replaces it rather than falling back to it. `dom.py` keeps only the contact-info overlay reader, unwired, until the enrichment lane decides its fate.
+The DOM reader for the connections list is removed (#187 review), with `FallbackConnectionsSource`. Its selectors were authored and never seen on the live page, and the first supervised run found nothing with them; reading the page's own answers replaces it rather than falling back to it. Its contact-info half, and the `contact_info.py` seam it implemented, were never wired and are removed too (#190): the overlay is read from its own answer, which names the profile it is for, where the DOM reader could not say whose overlay it was.
 
-*Before P2-17*, and still for enrichment: LinkedIn's web client talks to an internal REST API under `/voyager/api/`. From a tab on `linkedin.com`, a `fetch` carries the session cookies and Chrome's real client hints. The request needs the `csrf-token` header (the `JSESSIONID` cookie value without its quotes) and `x-restli-protocol-version: 2.0.0`, plus the `accept` and `x-li-*` headers the real client sends.
+*Before P2-17 and P2-18*: LinkedIn's web client talks to an internal REST API under `/voyager/api/`. From a tab on `linkedin.com`, a `fetch` carries the session cookies and Chrome's real client hints. The request needs the `csrf-token` header (the `JSESSIONID` cookie value without its quotes) and `x-restli-protocol-version: 2.0.0`, plus the `accept` and `x-li-*` headers the real client sends.
 
 Endpoint paths, query shapes, and the `decorationId` values are undocumented and change. They live in one module, `linkedin/voyager.py`, each constant annotated with its capture date, and every parser is tested against sanitized fixtures captured from DevTools. When a request answers with a shape the parser does not recognize, the run records `RouteChanged` and gives up on that endpoint for the run rather than retrying (igtracker's withdrawn-route lesson).
 
-`linkedin/dom.py` holds the fallback for the two paths that matter most, the connections page infinite scroll and the contact-info overlay, so a Voyager change degrades the tool rather than stopping it.
+*Superseded (#187, #190):* `linkedin/dom.py` held a DOM fallback for the connections page and the contact-info overlay. Both halves are removed; a shape change now stops the run as `RouteChanged` rather than falling back to a reader nobody has seen work.
 
 ### 9.4 Jobs
 
@@ -458,6 +459,8 @@ All jobs take the activity lock, hold one tab, and write progress to `sync_run.p
 3. Fetch contact info and profile details through the in-page API, falling back to the overlay DOM.
 4. Upsert emails, phones, links, positions, location. Write a snapshot if headline, title, company, or location changed.
 5. Pause with `human_delay` before the next profile.
+
+*As built (P2-18, #190, ADR 0006).* Step 3 is now: read the profile from the screen and lazy cards the page loaded; if the profile's own id is the contact's URN (the job holds it, `EnrichTarget.li_urn`), scroll back to the top with the wheel, pause as a person does (median 1.5 s), click **Contact info** once (`BrowserRun.click_contact_info`: found by its accessible role and name, refused unless it is alone on the page and its `href` is this profile's `overlay/contact-info/`), and read the overlay's answer, which must name the same profile. A profile under another id gets no click; its harvest carries the details and no contact info, and `crm/apply.py` records the mismatch and writes nothing. The click is part of the visit: the one `profile_visits` unit spent before the navigation covers it, and nothing is clicked twice or retried. The overlay is left open; the next navigation leaves the page. A visit whose profile or overlay does not read, whose control is missing or not alone, or whose overlay never answers is unreadable (the per-run cap below), never partly written; a profile under another id counts toward the same cap, since several in a run mean the id is being read from the wrong place. `docs/linkedin-flagship-web-shapes.md` lists which of these shapes the capture showed and which the first supervised enrichment must confirm.
 
 **Inbox poll.** Fetch recent conversations, match participants to contacts by URN, and hand new inbound messages to `campaigns/replies.py`. Runs every few hours while any LinkedIn step is active.
 
@@ -487,7 +490,7 @@ Counters live in `settings_kv`, keyed by local day and week, per action class:
 |---|---|---|---|
 | `connection_pages` | 150 | 400 | About 6,000 contacts per day at 40 per page (a page is a unit of 40 read from the page's own ten-card answers, 9.4) |
 | `profile_visits` | 60 | 100 | The number that matters. The reference workflow's guidance for scraping tools is 100 |
-| `contact_info_fetches` | tied to `profile_visits` | | One per visit |
+| `contact_info_fetches` | tied to `profile_visits` | | One per visit. *As built (#190):* the one Contact info click, covered by the visit's `profile_visits` unit; no separate counter |
 | `inbox_polls` | 8 | 24 | |
 | `li_messages_auto` | 15 | 30 | Only when auto-send is enabled |
 | `profile_visits` per week | 300 | 500 | |
@@ -902,7 +905,7 @@ Each phase ends with a usable tool. Estimates assume evenings and weekends with 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | LinkedIn restricts the account | Medium | High | Attach-only, conservative budgets, warm-up, heat, no retries on checkpoints, manual LinkedIn sends by default, clear docs |
-| LinkedIn changes what its pages load (it moved from Voyager to flagship-web in 2026) | High over a year | Medium | One module per client (`flagship.py`, `voyager.py`), dated constants, sanitized fixtures and a shape note, `RouteChanged` stops the run and never writes part of a page, completeness proven by the page itself |
+| LinkedIn changes what its pages load (it moved from Voyager to flagship-web in 2026) | High over a year | Medium | One module per client and page (`flagship.py`, `flagship_profile.py`, `voyager.py`), dated constants, sanitized fixtures and a shape note, `RouteChanged` stops the run and never writes part of a page, completeness proven by the page itself |
 | Chrome changes CDP or profile rules again | Low | Medium | Attach is the only dependency; `preflight` catches it; docs pin the launch flags |
 | Gmail flags outbound as bulk | Low at 80 per day with personalization | Medium | Lint for missing merge fields, cap, spacing, same-thread follow-ups, no tracking pixels or link wrappers |
 | OAuth token expiry every 7 days in Testing mode | Certain if not published | Low | Detect, pause, banner; docs recommend publishing |
