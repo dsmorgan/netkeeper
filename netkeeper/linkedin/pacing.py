@@ -168,6 +168,86 @@ def scroll_like_a_person(
     return ScrollPlan(steps=tuple(steps), dwell_s=dwell)
 
 
+# --- resting the pointer over content ---------------------------------------
+
+# #192: Playwright's `mouse.wheel` fires at the virtual pointer's position, which
+# starts at (0, 0) and never moves until something moves it. On a page with a fixed
+# header at (0, 0) -- not over the scrolling content -- a wheel replay that never
+# moved the pointer first scrolls nothing. `BrowserRun.scroll` moves it to rest over
+# the content once per tab before its first wheel event; the *decision* of how it
+# gets there is pure and lives here, the same way `scroll_like_a_person` keeps a
+# wheel replay's own decision separate from driving a real tab with it (module
+# docstring above). Only the walk's shape is decided here -- small jittered hops,
+# paced, ending precisely on a target -- never the target itself, which depends on
+# the tab's viewport and is `BrowserRun`'s to know (see its `_rest_pointer_over_content`).
+DEFAULT_REST_STEPS_RANGE: Final = (2, 4)
+DEFAULT_REST_JITTER_PX: Final = 40
+DEFAULT_REST_PAUSE_RANGE_S: Final = (0.05, 0.2)
+
+
+@dataclass(frozen=True, slots=True)
+class RestStep:
+    """One hop on the way to resting the pointer: an (x, y) offset from the target
+    point, and the pause after it. The last step of a :class:`RestPlan` always has
+    ``dx == dy == 0`` -- a hand's final resting point is precise; the wobble is only
+    on the way there.
+    """
+
+    dx: int
+    dy: int
+    pause_s: float
+
+
+@dataclass(frozen=True, slots=True)
+class RestPlan:
+    """The pointer's walk to a resting point before a scroll replay (#192): a
+    handful of jittered waypoints around the target, then a stop exactly on it.
+
+    This is the *plan* :meth:`~netkeeper.linkedin.browser.BrowserRun._rest_pointer_over_content`
+    replays against a real tab -- one ``page.mouse.move`` per :class:`RestStep`, at
+    the target point plus its offset, sleeping ``pause_s`` after each. Building it
+    is pure and lives here, for the same reason :class:`ScrollPlan` does: it can be
+    asserted on, and reproduced from a seed, without a real tab or a real minute.
+    """
+
+    steps: tuple[RestStep, ...]
+
+
+def rest_pointer_like_a_person(
+    rng: random.Random,
+    *,
+    steps_range: tuple[int, int] = DEFAULT_REST_STEPS_RANGE,
+    jitter_px: int = DEFAULT_REST_JITTER_PX,
+    pause_range_s: tuple[float, float] = DEFAULT_REST_PAUSE_RANGE_S,
+) -> RestPlan:
+    """A pointer-rest walk: a few jittered hops, paced, ending exactly on the target.
+
+    #192's "a few intermediate ``mouse.move`` steps, the way a hand comes to rest."
+    Every hop but the last offsets the target by up to ``jitter_px`` in either axis;
+    the last is ``(0, 0)`` -- squarely on it.
+
+    ``steps_range`` must have a low end of at least 1, the same guard
+    :func:`plan_burst_sizes` has for the same reason: a low end of 0 would not
+    merely produce an odd walk sometimes, it would silently produce an *empty*
+    one -- no ``mouse.move`` at all, and the pointer never leaves wherever it
+    was, which is exactly the failure #192 exists to fix.
+    """
+    low, high = steps_range
+    if low < 1 or high < low:
+        raise ValueError(f"steps_range must have 1 <= low <= high, got {steps_range!r}")
+    step_count = rng.randint(*steps_range)
+    steps: list[RestStep] = []
+    for index in range(step_count):
+        if index == step_count - 1:
+            dx, dy = 0, 0
+        else:
+            dx = rng.randint(-jitter_px, jitter_px)
+            dy = rng.randint(-jitter_px, jitter_px)
+        pause = rng.uniform(*pause_range_s)
+        steps.append(RestStep(dx=dx, dy=dy, pause_s=pause))
+    return RestPlan(steps=tuple(steps))
+
+
 # --- bursts -----------------------------------------------------------------
 
 # Appendix C: "Burst ... Sessions, not streams."

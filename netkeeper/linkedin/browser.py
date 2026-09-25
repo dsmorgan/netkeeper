@@ -21,11 +21,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Any, Final, Protocol, cast, runtime_checkable
 
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin.activity_lock import LEGACY_SHARED_KEY
@@ -36,7 +37,7 @@ from netkeeper.linkedin.observe import (
     ObservationLimits,
     ResponseMatch,
 )
-from netkeeper.linkedin.pacing import ScrollPlan
+from netkeeper.linkedin.pacing import ScrollPlan, rest_pointer_like_a_person
 
 log = logging.getLogger(__name__)
 
@@ -92,17 +93,22 @@ class PageLike(Protocol):
 
 class _MouseLike(Protocol):
     """The slice of a Playwright ``Mouse`` a :class:`~netkeeper.linkedin.pacing.ScrollPlan`
-    is replayed through.
+    is replayed through, and the pointer rested over content before one (#192).
 
     Not part of :class:`PageLike`: #152 kept that protocol to exactly what every
     other caller needs, and :meth:`BrowserRun.scroll` is the only thing in this
     package that reaches for a page's mouse. Declaring the wider slice here, local to
     the one method that uses it, is the point -- widening the shared protocol would
     hand every other caller the whole Playwright mouse API for a replay that has
-    exactly one shape.
+    exactly one shape. ``move`` is not a click or a hover on any element -- it only
+    ever targets a bare point, never a locator -- so it needs nothing from the wider
+    :data:`PAGE_DRIVERS` refusal in ``tests/test_browser_safety.py``, which pins that
+    reading (#192).
     """
 
     async def wheel(self, delta_x: float, delta_y: float) -> None: ...
+
+    async def move(self, x: float, y: float) -> None: ...
 
 
 class _ScrollablePage(PageLike, Protocol):
@@ -110,6 +116,15 @@ class _ScrollablePage(PageLike, Protocol):
 
     @property
     def mouse(self) -> _MouseLike: ...
+
+    @property
+    def viewport_size(self) -> Mapping[str, int] | None:
+        """This tab's viewport, when Playwright knows it -- a passive, already-cached
+        read, not an ``evaluate`` call. Attach mode never calls ``set_viewport_size``
+        (spec 9.1: never mutate the user's context), so this is commonly ``None`` for
+        every tab a real run opens; :func:`_viewport_size` is where that is handled.
+        """
+        ...
 
 
 class _ObservablePage(PageLike, ListenablePage, Protocol):
@@ -120,6 +135,26 @@ class _ObservablePage(PageLike, ListenablePage, Protocol):
     for every caller. ``on`` and ``remove_listener`` only listen; nothing in either
     protocol can hold, change, or answer a request (ADR 0006).
     """
+
+
+#: A conservative fallback viewport for :meth:`BrowserRun.scroll`'s pointer-rest step
+#: (#192), used only when the tab's own ``viewport_size`` is unknown -- true of every
+#: tab a real run attaches to, since attach mode never sets one (spec 9.1: never
+#: mutate the context) and Playwright reports ``None`` for a viewport it did not set
+#: itself. Sized like an ordinary laptop browser window, so a guessed point still
+#: lands well inside a real one and well clear of a fixed header.
+DEFAULT_VIEWPORT_WIDTH: Final = 1280
+DEFAULT_VIEWPORT_HEIGHT: Final = 800
+
+#: Where the pointer comes to rest before a scroll replay, as a fraction of the
+#: viewport's height: centered, but never above :data:`REST_MIN_Y_FRACTION` -- clear
+#: of a fixed top nav (#192: LinkedIn's connections page has one, and Playwright's
+#: virtual pointer starts at (0, 0), which sits under it, not over the scrolling
+#: list -- that is the whole bug). The walk that gets the pointer there is pure and
+#: lives in :func:`~netkeeper.linkedin.pacing.rest_pointer_like_a_person`; this is
+#: the one part of it that depends on the tab's own geometry, so it stays here.
+REST_Y_FRACTION: Final = 0.5
+REST_MIN_Y_FRACTION: Final = 0.3
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,6 +453,11 @@ class BrowserRun:
         self._reattached = False
         self._closed = False
         self._observations: list[Observation] = []
+        #: Whether :meth:`scroll` has already moved the pointer to rest over this
+        #: tab's content (#192). Cleared by :meth:`_ensure_page` whenever the tab
+        #: itself is reopened, so a recovered tab gets its pointer rested again
+        #: rather than inheriting a stale reading from the one that was lost.
+        self._pointer_rested = False
 
     @property
     def browser(self) -> BrowserLike:
@@ -456,8 +496,10 @@ class BrowserRun:
         *,
         sleep: Callable[[float], Awaitable[None]] = _real_sleep,
         cancelled: Callable[[], bool] | None = None,
+        rng: random.Random | None = None,
     ) -> ScrollOutcome:
-        """Replay ``plan`` on this run's tab: one ``mouse.wheel`` per step, then the dwell.
+        """Rest the pointer over the content, then replay ``plan``: one ``mouse.wheel``
+        per step, then the dwell.
 
         #152's decision: :mod:`netkeeper.linkedin.pacing` builds the plan as plain
         data, with no browser in sight, and this is where it is spent, on the one tab
@@ -476,10 +518,27 @@ class BrowserRun:
         caller tracking the previous one (a request listener, say) should re-attach
         to it if it differs.
 
-        ``sleep`` stands in for the wait after each step and the final dwell; inject a
-        fake in an offline test so it takes zero real time and records what it was
-        asked to wait, or a scaled one to divide every wait for a sped-up demo. Real
-        time (``asyncio.sleep``) is the default.
+        **The pointer rests over the content first (#192).** Playwright's
+        ``mouse.wheel`` fires at the virtual pointer's position, which starts at
+        (0, 0) and never moves until something moves it -- and on a page whose
+        fixed header sits at (0, 0), a wheel replay that never moved the pointer
+        scrolls the header, not the list beneath it, which is exactly the bug: a
+        supervised run whose tab never scrolled at all. :meth:`_rest_pointer_over_content`
+        moves it there once per open tab (see :meth:`_ensure_page`, which clears the
+        flag whenever the tab is reopened) before the first wheel event of the first
+        call on that tab; a later call on the same tab does not repeat it.
+
+        ``sleep`` stands in for the wait after each step and the final dwell, and
+        the pause after each hop of the pointer-rest walk; inject a fake in an
+        offline test so it takes zero real time and records what it was asked to
+        wait, or a scaled one to divide every wait for a sped-up demo. Real time
+        (``asyncio.sleep``) is the default.
+
+        ``rng`` shapes the pointer-rest walk's jitter and pacing the same way a
+        caller's own :class:`random.Random` shapes ``plan``
+        (:func:`~netkeeper.linkedin.pacing.scroll_like_a_person`) -- pass the same
+        instance for a run that should replay identically from one seed. Defaults to
+        a fresh, unseeded one, spent only if this tab's pointer still needs resting.
 
         ``cancelled``, when given, is polled before every wheel event and again before
         the final dwell, so a caller wired to spec 9.9's cooperative cancel ("checked
@@ -490,8 +549,13 @@ class BrowserRun:
         out the dwell, and :attr:`ScrollOutcome.cancelled` says so -- the caller does
         not have to re-poll its own ``cancelled`` callback, or compare how many wheel
         events landed against how many the plan had, to find out (#168 review, F8).
+        It is not polled during the pointer-rest walk: that walk is not part of the
+        plan being replayed, and letting it finish once started keeps the pointer
+        from being left mid-hop.
         """
         page = cast(_ScrollablePage, await self.ensure_page())
+        rest_rng = rng if rng is not None else random.Random()  # noqa: S311 -- pacing, not crypto
+        await self._rest_pointer_over_content(page, sleep=sleep, rng=rest_rng)
         for step in plan.steps:
             if cancelled is not None and cancelled():
                 return ScrollOutcome(page=page, cancelled=True)
@@ -501,6 +565,56 @@ class BrowserRun:
             return ScrollOutcome(page=page, cancelled=True)
         await sleep(plan.dwell_s)
         return ScrollOutcome(page=page, cancelled=False)
+
+    async def _rest_pointer_over_content(
+        self,
+        page: PageLike,
+        *,
+        sleep: Callable[[float], Awaitable[None]],
+        rng: random.Random,
+    ) -> None:
+        """Move the pointer to rest over the page's content, once per tab (#192).
+
+        A few short hops with small jitter, paced like a hand coming to rest,
+        landing centered low enough in the viewport to clear any fixed header
+        (:data:`REST_MIN_Y_FRACTION`) and nowhere near (0, 0), where the virtual
+        pointer starts. This is ``mouse.move`` alone, to a bare point over the
+        list's own background -- not a click, and not a hover resolved against any
+        particular element the way ``locator.hover()`` would be -- so it needs no
+        exception to spec 9.1's "scroll is the only automation" the way ADR 0006's
+        Contact info click does: a person's hand rests somewhere over the content
+        before it scrolls, and nothing on the connections list is wired to react to
+        the pointer merely passing over its background. Resting the pointer before
+        scrolling is part of what "scroll like a person" (spec 9.5) already means;
+        ADR 0006 records that reading as built.
+
+        ``page.viewport_size`` is a client-side value Playwright already holds for
+        this tab -- a passive read, not ``evaluate`` -- but it is commonly ``None``
+        for a tab this run attaches to (attach mode never calls
+        ``set_viewport_size``; spec 9.1 forbids mutating the context to do so), so
+        :func:`_viewport_size` falls back to a conservative default rather than
+        guessing at the real page's layout.
+
+        The walk itself -- how many hops, how jittered, how paced -- is
+        :func:`~netkeeper.linkedin.pacing.rest_pointer_like_a_person`'s pure
+        decision, replayed here the same way :meth:`scroll` replays a
+        :class:`~netkeeper.linkedin.pacing.ScrollPlan`; only the target point
+        depends on this tab's own geometry, which is this method's to know.
+        """
+        if self._pointer_rested:
+            return
+        mouse = cast(_ScrollablePage, page).mouse
+        width, height = _viewport_size(page)
+        min_y = height * REST_MIN_Y_FRACTION
+        target_x = width / 2
+        target_y = max(height * REST_Y_FRACTION, min_y)
+        plan = rest_pointer_like_a_person(rng)
+        for step in plan.steps:
+            x = _clamp(target_x + step.dx, 0, width)
+            y = _clamp(target_y + step.dy, min_y, height)
+            await mouse.move(x, y)
+            await sleep(step.pause_s)
+        self._pointer_rested = True
 
     async def observe(
         self, match: ResponseMatch, *, limits: ObservationLimits | None = None
@@ -604,6 +718,9 @@ class BrowserRun:
         except Exception as exc:
             page = await self._reopen_after_reattach(exc)
         self._page = page
+        # A new tab's pointer is wherever Playwright's virtual one starts -- not
+        # wherever the lost tab's happened to be rested (#192).
+        self._pointer_rested = False
         if restore and self._last_url is not None:
             log.info("restoring the reopened tab to where the run was")
             await page.goto(self._last_url)
@@ -716,6 +833,24 @@ class AttachBrowserProvider:
                 yield run
             finally:
                 await run.close()
+
+
+def _viewport_size(page: PageLike) -> tuple[float, float]:
+    """This tab's viewport, or a conservative default when Playwright does not know it.
+
+    See :attr:`_ScrollablePage.viewport_size`: a passive read, commonly ``None`` for
+    a tab this run attaches to, in which case :data:`DEFAULT_VIEWPORT_WIDTH` and
+    :data:`DEFAULT_VIEWPORT_HEIGHT` stand in.
+    """
+    size = cast(_ScrollablePage, page).viewport_size
+    if size is None:
+        return float(DEFAULT_VIEWPORT_WIDTH), float(DEFAULT_VIEWPORT_HEIGHT)
+    return float(size["width"]), float(size["height"])
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    """``value``, pinned inside ``[low, high]``."""
+    return max(low, min(value, high))
 
 
 def _reason(exc: BaseException) -> str:

@@ -363,8 +363,16 @@ async def rehearse(
                 )
             return page
 
+        # A separate Random from run_enrichment's own (below): resting the pointer
+        # (#192) is not part of the pacing plan, and drawing it from the same
+        # stream would shift which deltas and dwells that plan draws next. Seeded
+        # from the same `seed` so a rehearsal's *total* wait -- pointer rest
+        # included -- still reproduces line for line, and so time_scale still
+        # divides it exactly (see `test_time_scale_divides_the_waits_and_not_the_plan`).
+        rest_rng = Random(seed)  # noqa: S311 -- reproducibility is the point, not secrecy
+
         async def scroll(plan: ScrollPlan) -> object:
-            scrolled = await run.scroll(plan, sleep=_scaled_sleep(sleep, time_scale))
+            scrolled = await run.scroll(plan, sleep=_scaled_sleep(sleep, time_scale), rng=rest_rng)
             if recorder.follow(_as_rehearsal_page(scrolled.page)):
                 notes.append(
                     f"the tab had already been lost before visit {len(urls)} could be"

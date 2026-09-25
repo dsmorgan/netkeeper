@@ -20,13 +20,18 @@ from netkeeper.linkedin.browser import Connection, ContextLike, PageLike
 
 
 class FakeMouse:
-    """Records the wheel events a scroll plan (or an in-page fetch's caller) sends."""
+    """Records the wheel events a scroll plan sends, and the moves that rest the
+    pointer over content before one (#192)."""
 
     def __init__(self) -> None:
         self.wheels: list[tuple[float, float]] = []
+        self.moves: list[tuple[float, float]] = []
 
     async def wheel(self, delta_x: float, delta_y: float) -> None:
         self.wheels.append((delta_x, delta_y))
+
+    async def move(self, x: float, y: float) -> None:
+        self.moves.append((x, y))
 
 
 class FakePage:
@@ -43,6 +48,9 @@ class FakePage:
         self._goto_error: Exception | None = None
         self._goto_error_closes = True
         self._evaluate_error: Exception | None = None
+        #: ``None`` unless a test sets it: the common case for a tab this run
+        #: attaches to, since attach mode never calls ``set_viewport_size`` (#192).
+        self.viewport_size: Mapping[str, int] | None = None
 
     @property
     def url(self) -> str:
