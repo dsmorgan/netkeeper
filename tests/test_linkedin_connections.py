@@ -710,3 +710,16 @@ async def test_a_loss_reported_with_a_stopping_response_is_kept() -> None:
 def test_an_answer_lost_carries_the_earlier_losses() -> None:
     raised = AnswerLost(_gone(6), earlier=(_gone(1),))
     assert raised.earlier == (_gone(1),) and AnswerLost(_gone(6)).earlier == ()
+
+
+async def test_an_incremental_sync_is_not_caught_up_by_a_slice_next_to_a_loss() -> None:
+    """#201 review, L1: slice 3-5 carried a loss, so the lost people sat just before
+    it and may be new. Neither it nor the slice right after it may prove the run
+    caught up, so the run reads on (here to the end of the list)."""
+    people = list(PEOPLE[:10])
+    known = frozenset(p.urn for p in people[3:])
+    source = ReadOnSource(people, losses={1: (_gone(2),)})
+    result, _, _ = await _run(source, mode=SyncMode.INCREMENTAL, known=known)
+    assert result.reason is StopReason.END_OF_LIST
+    assert source.starts == [0, 3, 6, 9]
+    assert result.losses == (_gone(2),)

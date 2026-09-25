@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from flagship_pages import CardOptions
+from flagship_pages import CardOptions, pagination_payload
 from flagship_site import (
     CHECKPOINT_URL,
     LOGIN_URL,
@@ -725,6 +725,65 @@ async def test_several_lost_answers_are_each_read_past_and_recorded(
     assert "reading on, 1 lost in this run" in caplog.text
     assert "reading on, 2 lost in this run" in caplog.text
     assert "lost in this run (starts 20, 70); the run is incomplete" in caplog.text
+
+
+async def test_an_incremental_sync_reads_past_the_slice_after_a_loss() -> None:
+    """#201 review, L1: 0-44 are new, 45-119 known. Answer 40 is lost and read past;
+    the slice after it (50-89) is all known, but it follows the loss, so it cannot
+    prove the run caught up. The run reads on, and records the loss."""
+    people = many(120)
+    known = [p.urn for p in people[45:]]
+    out = await sync(
+        FlagshipSite(people, lost={40: Lost("move_on")}), SyncMode.INCREMENTAL, known=known
+    )
+    assert out.result.pages >= 3  # a stop at the slice after the loss would be 2
+    assert [x.start for x in out.result.losses] == [40]
+
+
+async def test_a_pending_loss_is_reported_when_a_wall_stops_the_run() -> None:
+    """#201 review, L2: 40 is lost and the page's next answer, for 50, is a checkpoint.
+    The loss was never settled by the page, but it is still reported with the stop."""
+    people = many(90)
+    wall = Answer(status=302, headers={"location": CHECKPOINT_URL})
+    out = await sync(FlagshipSite(people, lost={40: Lost("move_on")}, answers={50: wall}))
+    assert out.result.reason is StopReason.RESPONSE
+    assert out.result.outcome is Outcome.CHECKPOINT
+    assert [(x.start, x.ending) for x in out.result.losses] == [
+        (40, "the run stopped before it was read again")
+    ]
+
+
+async def test_a_loss_read_past_is_reported_with_a_stop_in_the_same_unit() -> None:
+    """#201 review, L3 (M3): 70 is lost and read past, then 80 is throttled, both while
+    the source reads the unit 40-79, which is still short. The stop comes back instead
+    of that unit, and carries the loss."""
+    out = await sync(
+        FlagshipSite(many(120), lost={70: Lost("move_on")}, answers={80: Answer(status=429)})
+    )
+    assert out.result.reason is StopReason.RESPONSE
+    assert out.result.outcome is Outcome.THROTTLED and out.result.pages == 1
+    assert [x.start for x in out.result.losses] == [70]
+
+
+async def test_lost_places_cannot_prove_an_early_end() -> None:
+    """#201 review, L3 (M5): 20 is lost and read past; the page's answer for 40 is full
+    and asks for nothing, though the first screen says 60. 40 read plus 10 lost is 50,
+    short of 60, so that is no end: the page stops, and the run is RouteChanged."""
+    people = many(60)
+    early = Answer(body=pagination_payload(people[40:50], start=40, next_start=None))
+    out = await sync(FlagshipSite(people, lost={20: Lost("move_on")}, answers={40: early}))
+    assert out.result.reason is StopReason.RESPONSE
+    assert out.result.outcome is Outcome.ROUTE_CHANGED
+
+
+async def test_a_failure_after_a_loss_names_the_loss_in_the_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    huge = Answer(status=200, body=b"0" * (8 * 1024 * 1024 + 1))
+    with pytest.raises(ObservationFailed):
+        await sync(FlagshipSite(many(90), lost={20: Lost("move_on")}, answers={30: huge}))
+    assert "the run failed with 1 of the page's answers lost (starts 20)" in caplog.text
 
 
 async def test_as_many_losses_as_the_cap_still_read_to_the_end() -> None:

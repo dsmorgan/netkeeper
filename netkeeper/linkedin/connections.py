@@ -394,6 +394,8 @@ async def run_connections_sync(
     start = 0
     source_switched = False
     losses: list[LostAnswer] = []
+    #: Whether the slice before this one carried a loss (#201 review, L1).
+    loss_before = False
 
     def finish(
         reason: StopReason,
@@ -529,5 +531,11 @@ async def run_connections_sync(
                 result.start,
                 max_total,
             )
-        if spec.mode is SyncMode.INCREMENTAL and urns <= spec.known_urns:
+        # A slice that carried a loss, or follows one that did, cannot prove the run
+        # caught up (#201 review, L1): the lost answer's people sat between the last
+        # slice read whole and this one, and may be new. Only a slice with no loss
+        # just before it that is all known ends an incremental sync.
+        near_loss = bool(answer.lost) or loss_before
+        loss_before = bool(answer.lost)
+        if spec.mode is SyncMode.INCREMENTAL and urns <= spec.known_urns and not near_loss:
             return await stopped(finish(StopReason.CAUGHT_UP))
