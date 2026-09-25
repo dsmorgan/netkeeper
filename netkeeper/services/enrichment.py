@@ -144,6 +144,7 @@ class EnrichRunReport:
             "not_found": self.result.not_found,
             "unreadable": self.result.unreadable,
             "mismatched": self.result.mismatched,
+            "lost": len(self.result.lost),
             "skipped": self.skipped,
             "visit_budget": self.visit_budget,
             "harvests": dataclasses.asdict(self.harvests),
@@ -394,6 +395,7 @@ async def enrich_contacts(
                 now=clock(),
                 stop_reason=stop_reason_of(result.reason.value, result.outcome),
                 counts=report.counts(),
+                notes=_lost_notes(result),
             )
     return report
 
@@ -434,3 +436,10 @@ async def resume_enrichment(
         sleep=sleep,
         rng=rng,
     )
+
+
+def _lost_notes(result: EnrichResult) -> tuple[str, ...]:
+    """#197: each unreadable visit whose answer's body was lost, in fixed words."""
+    if not result.lost:
+        return ()
+    return (f"unreadable answers: {'; '.join(result.lost)}.",)

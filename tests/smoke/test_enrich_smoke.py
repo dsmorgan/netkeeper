@@ -25,6 +25,7 @@ import asyncio
 import json
 import os
 import random
+import socket
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -108,6 +109,7 @@ _SCRIPT = """
       body: body,
     }).then((answer) => answer.arrayBuffer());
   }
+  if (CONFIG.screen) { send(CONFIG.screen, '{}').catch(() => {}); }
   let asked = false;
   const content = document.getElementById('content');
   content.addEventListener('scroll', () => {
@@ -137,6 +139,12 @@ class _Replica(BaseHTTPRequestHandler):
     people: ClassVar[dict[str, Person]] = {}
     controls: ClassVar[int] = 1
     received: ClassVar[list[dict[str, Any]]] = []
+    #: #197: answers that break off mid-body, once each: ``"screen:<slug>"`` for the
+    #: profile's screen request, ``"overlay:<slug>"`` for its Contact info answer.
+    drop: ClassVar[set[str]] = set()
+    #: Serve an HTML shell and let the page fetch the profile screen itself, the way an
+    #: in-app navigation does, instead of carrying the screen in the document.
+    screen_by_request: ClassVar[bool] = False
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
@@ -154,6 +162,7 @@ class _Replica(BaseHTTPRequestHandler):
                 "screenId": CONTACT_DETAILS_SCREEN_ID,
                 "navigation": f"{NAVIGATION_PATH}?screenId={CONTACT_DETAILS_SCREEN_ID}",
                 "component": f"{COMPONENT_PATH}?componentId=fake.profileCardsExperienceOnly",
+                "screen": f"/flagship-web/in/{person.slug}/" if self.screen_by_request else None,
             }
         )
         links = "".join(
@@ -163,7 +172,12 @@ class _Replica(BaseHTTPRequestHandler):
         )
         # flagship-web's layout (#192): a fixed header at the top left, and the content
         # scrolling inside its own container, not the window.
-        page = document_html(screen).replace(
+        document = (
+            "<!doctype html><html><body></body></html>"
+            if self.screen_by_request
+            else document_html(screen)
+        )
+        page = document.replace(
             "</body>",
             "<style>body{margin:0}"
             "#hdr{position:fixed;top:0;left:0;right:0;height:52px;background:#eee;z-index:2}"
@@ -176,12 +190,36 @@ class _Replica(BaseHTTPRequestHandler):
         )
         self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
+    def _dropping(self, key: str) -> bool:
+        if key not in self.drop:
+            return False
+        self.drop.discard(key)
+        return True
+
+    def _break_off(self, body: bytes, content_type: str) -> None:
+        """Every header, most of the body, then the connection dropped (#197)."""
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body[: len(body) * 9 // 10])
+        self.wfile.flush()
+        self.close_connection = True
+        self.connection.shutdown(socket.SHUT_RDWR)
+
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode("utf-8")
         type(self).received.append({"path": path, "body": body, "marker": self.headers.get(MARKER)})
-        if path == COMPONENT_PATH:
+        if path.startswith("/flagship-web/in/"):
+            slug = path.removeprefix("/flagship-web/in/").strip("/")
+            screen = profile_payload(self.people[slug], location=LOCATION, experience_inline=False)
+            if self._dropping(f"screen:{slug}"):
+                self._break_off(screen, "application/octet-stream")
+                return
+            self._send(200, screen, "application/octet-stream")
+        elif path == COMPONENT_PATH:
             self._send(200, experience_payload(ROLES), "application/octet-stream")
         elif path == NAVIGATION_PATH:
             slug = json.loads(body)["clientArguments"]["payload"]["vanityName"]
@@ -191,6 +229,9 @@ class _Replica(BaseHTTPRequestHandler):
                 emails=[f"{person.slug}@example.test"],
                 websites=[Website(f"https://{person.slug}.example.test")],
             )
+            if self._dropping(f"overlay:{slug}"):
+                self._break_off(answer, "application/octet-stream")
+                return
             self._send(200, answer, "application/octet-stream")
         else:
             self._send(404, b"", "text/plain")
@@ -211,6 +252,8 @@ def site() -> Iterator[str]:
     _Replica.people = {p.slug: p for p in (PRIYA, MATEO)}
     _Replica.controls = 1
     _Replica.received = []
+    _Replica.drop = set()
+    _Replica.screen_by_request = False
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Replica)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -240,7 +283,11 @@ async def _fast(seconds: float) -> None:
 
 
 async def _visit(
-    provider: AttachBrowserProvider, site: str, targets: list[EnrichTarget]
+    provider: AttachBrowserProvider,
+    site: str,
+    targets: list[EnrichTarget],
+    *,
+    landing_wait_s: float = 20.0,
 ) -> tuple[EnrichResult, list[ProfileHarvest], list[dict[str, Any]], dict[str, Any]]:
     harvests: list[ProfileHarvest] = []
 
@@ -249,7 +296,9 @@ async def _visit(
 
     try:
         async with provider.run() as run:
-            source = PageProfiles(run, origin=site, sleep=_fast, overlay_wait_s=5.0)
+            source = PageProfiles(
+                run, origin=site, sleep=_fast, overlay_wait_s=5.0, landing_wait_s=landing_wait_s
+            )
             result = await run_enrichment(
                 EnrichJobSpec(targets=tuple(targets), visit_budget=len(targets), pacing=_FAST),
                 source,
@@ -333,3 +382,43 @@ async def test_a_profile_under_another_urn_gets_no_click(
     assert harvest.outcome is Outcome.OK and harvest.contact_info is None
     assert log["clicks"] == []
     assert all(r["path"] != NAVIGATION_PATH for r in _Replica.received)
+
+
+# --- #197: an answer that breaks off mid-body ------------------------------------------------
+
+
+async def test_a_profile_whose_answer_breaks_off_is_one_unreadable_visit(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """Priya's profile screen, which the page fetches for itself, breaks off mid-body.
+    Her visit is unreadable, with a fixed cause; nothing is clicked for her; Mateo's
+    visit reads whole."""
+    _Replica.screen_by_request = True
+    _Replica.drop = {f"screen:{PRIYA.slug}"}
+    result, harvests, _, log = await _visit(
+        provider, site, [_target(PRIYA), _target(MATEO)], landing_wait_s=3.0
+    )
+    assert [h.outcome for h in harvests] == [Outcome.ROUTE_CHANGED, Outcome.OK]
+    assert result.reason is StopReason.END_OF_PLAN and result.unreadable == 1
+    (lost,) = result.lost
+    assert lost.startswith("visit 1: the profile screen could not be read (")
+    assert "127.0.0.1" not in lost
+    assert log["clicks"] == [{"trusted": True, "text": "Contact info"}]  # Mateo's only
+    assert harvests[1].contact_info is not None
+
+
+async def test_a_contact_info_answer_that_breaks_off_is_not_clicked_for_again(
+    provider: AttachBrowserProvider, site: str
+) -> None:
+    """The overlay's answer breaks off after the one click: no contact info for
+    Priya this visit, no second click, and the run goes on to Mateo."""
+    _Replica.drop = {f"overlay:{PRIYA.slug}"}
+    result, harvests, _, _ = await _visit(provider, site, [_target(PRIYA), _target(MATEO)])
+    assert [h.outcome for h in harvests] == [Outcome.ROUTE_CHANGED, Outcome.OK]
+    assert harvests[0].contact_info is None and harvests[1].contact_info is not None
+    assert result.reason is StopReason.END_OF_PLAN and result.clicks == 2
+    (lost,) = result.lost
+    assert lost.startswith("visit 1: the Contact info answer could not be read (")
+    navigations = [r for r in _Replica.received if r["path"] == NAVIGATION_PATH]
+    slugs = [json.loads(r["body"])["clientArguments"]["payload"]["vanityName"] for r in navigations]
+    assert slugs == [PRIYA.slug, MATEO.slug]  # one overlay request each: never asked again

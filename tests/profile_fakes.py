@@ -182,6 +182,7 @@ class Scripted:
     outcome: Outcome
     final_url: str = f"{ORIGIN}/in/_/"
     unparsed: bool = False
+    lost: str | None = None  # #197: the answer's body could not be read
 
 
 THROTTLED = Scripted(Outcome.THROTTLED)
@@ -250,7 +251,12 @@ class FakeBrowser:
         landed = self.redirect.get(public_id, url)
         scripted = self.landing.get(visit)
         if scripted is not None:
-            return Answer(scripted.outcome, masked(scripted.final_url), unparsed=scripted.unparsed)
+            return Answer(
+                scripted.outcome,
+                masked(scripted.final_url),
+                unparsed=scripted.unparsed,
+                lost=scripted.lost,
+            )
         self._slug = unquote(urlsplit(landed).path.split("/")[2])
         if self._slug not in self.profiles:
             return Answer(Outcome.NOT_FOUND, masked(landed))
@@ -265,7 +271,12 @@ class FakeBrowser:
         self.fetches += 1
         scripted = self.script.get(call)
         if scripted is not None:
-            return Answer(scripted.outcome, masked(scripted.final_url), unparsed=scripted.unparsed)
+            return Answer(
+                scripted.outcome,
+                masked(scripted.final_url),
+                unparsed=scripted.unparsed,
+                lost=scripted.lost,
+            )
         details = details_of(self.profiles[self._slug])
         if self._slug in self.urns:
             details = ProfileDetails(
@@ -290,7 +301,12 @@ class FakeBrowser:
         self.fetches += 1
         scripted = self.script.get(call)
         if scripted is not None:
-            return Answer(scripted.outcome, masked(scripted.final_url), unparsed=scripted.unparsed)
+            return Answer(
+                scripted.outcome,
+                masked(scripted.final_url),
+                unparsed=scripted.unparsed,
+                lost=scripted.lost,
+            )
         return Answer(Outcome.OK, f"{ORIGIN}/in/_/", contact_info_of(self.profiles[self._slug]))
 
     def kinds(self) -> list[str]:
