@@ -566,7 +566,10 @@ async def test_a_cancelled_scroll_stops_before_its_next_wheel_event() -> None:
     def cancelled() -> bool:
         nonlocal calls
         calls += 1
-        return calls > 1  # let the first wheel event through, then stop
+        # #192 review, F6: `scroll` now polls once before the pointer-rest walk
+        # too, ahead of the loop's own first check -- 2 calls happen before the
+        # first wheel event now, not 1.
+        return calls > 2  # let the first wheel event through, then stop
 
     async with provider.run() as run:
         await _prime_pointer(run)
@@ -688,29 +691,92 @@ async def test_scroll_rests_the_pointer_again_after_the_tab_is_lost_and_reopened
     assert recovered.mouse.moves, "the recovered tab must be rested again, not skipped"
 
 
-async def test_scroll_rests_the_pointer_clear_of_a_fixed_header_with_no_known_viewport() -> None:
-    """The common case for an attached tab: Playwright does not know the viewport
-    (#192), so a conservative default stands in, and the pointer still lands well
-    below where a fixed top nav would be -- never at (0, 0), which is where
-    Playwright's virtual pointer starts and exactly the bug this fixes."""
+async def test_scroll_rests_the_pointer_at_the_center_of_the_content_box_when_found() -> None:
+    """#192 review, F1: real, on-screen geometry from a passive ``bounding_box``
+    read -- not a guess at the viewport -- is what the pointer actually targets.
+    A centered 800px column on an otherwise much wider window (the reviewer's
+    2200px-ultrawide reproduction) is exactly the case a viewport-center guess
+    missed: the old code aimed at (640, 400) regardless of where the content
+    actually was."""
     connector = FakeConnector()
     provider = make_provider(connector)
     context = connector.browsers[0].context_list[0]
 
     async with provider.run() as run:
         page = cast(FakePage, await run.ensure_page())
-        assert page.viewport_size is None, "an attached tab commonly reports none (#192)"
+        page.content_boxes[browser.CONTENT_LANDMARK_SELECTOR] = {
+            "x": 700.0,
+            "y": 300.0,
+            "width": 800.0,
+            "height": 1200.0,
+        }
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(4))
+
+    x, y = only_page(context).mouse.moves[-1]
+    assert (x, y) == (1100.0, 900.0)  # the box's own center, not a viewport guess
+    assert only_page(context).locator_calls == [browser.CONTENT_LANDMARK_SELECTOR]
+
+
+async def test_scroll_keeps_jitter_inside_the_content_box() -> None:
+    """Every waypoint, not just the final one, across many seeds."""
+    box = {"x": 100.0, "y": 200.0, "width": 300.0, "height": 400.0}
+    for seed in range(30):
+        connector = FakeConnector()
+        provider = make_provider(connector)
+        context = connector.browsers[0].context_list[0]
+        async with provider.run() as run:
+            page = cast(FakePage, await run.ensure_page())
+            page.content_boxes[browser.CONTENT_LANDMARK_SELECTOR] = box
+            await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(seed))
+        moves = only_page(context).mouse.moves
+        assert moves, seed
+        for x, y in moves:
+            assert box["x"] <= x <= box["x"] + box["width"], (seed, x, y)
+            assert box["y"] <= y <= box["y"] + box["height"], (seed, x, y)
+
+
+async def test_scroll_falls_back_to_the_viewport_guess_with_no_content_box() -> None:
+    """No ``<main>`` landmark (an empty ``content_boxes``, the fake's default): the
+    pointer still rests somewhere sane, from the viewport guess -- never at
+    (0, 0), which is where Playwright's virtual pointer starts and exactly the
+    bug this fixes."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        assert page.content_boxes == {}
+        assert page.viewport_size is None, "an attached tab commonly reports neither (#192)"
         await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(9))
 
     x, y = only_page(context).mouse.moves[-1]
     assert (x, y) != (0.0, 0.0)
     assert x == browser.DEFAULT_VIEWPORT_WIDTH / 2
     assert y == browser.DEFAULT_VIEWPORT_HEIGHT * browser.REST_Y_FRACTION
-    assert y >= browser.DEFAULT_VIEWPORT_HEIGHT * 0.25, "must clear a real page's top nav"
+    assert y >= browser.REST_MIN_Y_PX
 
 
-async def test_scroll_rests_the_pointer_using_the_tabs_own_viewport_when_known() -> None:
-    """A passive read, used when Playwright does have it -- not always the default."""
+async def test_scroll_falls_back_to_the_viewport_guess_when_bounding_box_fails() -> None:
+    """A ``bounding_box`` read that raises (a timeout, say) is treated the same as
+    no box at all -- a best-effort read, never something a run fails over."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        page.locator_error = TimeoutError("no main landmark within 1000ms")
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(9))
+
+    x, y = only_page(context).mouse.moves[-1]
+    assert x == browser.DEFAULT_VIEWPORT_WIDTH / 2
+    assert y == browser.DEFAULT_VIEWPORT_HEIGHT * browser.REST_Y_FRACTION
+
+
+async def test_scroll_rests_the_pointer_using_the_tabs_own_viewport_when_known_and_no_box() -> None:
+    """A passive read, used when Playwright does have it and there is no box --
+    not always the default."""
     connector = FakeConnector()
     provider = make_provider(connector)
     context = connector.browsers[0].context_list[0]
@@ -722,11 +788,53 @@ async def test_scroll_rests_the_pointer_using_the_tabs_own_viewport_when_known()
 
     x, y = only_page(context).mouse.moves[-1]
     assert x == 200.0
-    assert y == 150.0  # max(300 * REST_Y_FRACTION, 300 * REST_MIN_Y_FRACTION)
+    assert y == 150.0  # 300 * REST_Y_FRACTION -- above REST_MIN_Y_PX, so the floor never bites
+
+
+async def test_scroll_clamps_to_the_header_floor_on_a_tiny_viewport() -> None:
+    """#192 review, F5: the floor has to be *reachable*, not just present in the
+    formula -- a small enough viewport is exactly where it bites, proving a
+    mutation that dropped it (or replaced it with 0) would be caught."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        page.viewport_size = {"width": 400, "height": 150}  # REST_Y_FRACTION * 150 = 75 < 96
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(2))
+
+    moves = only_page(context).mouse.moves
+    assert moves
+    assert all(y == browser.REST_MIN_Y_PX for _, y in moves), moves
+
+
+async def test_scroll_clamps_to_the_header_floor_when_the_box_is_near_the_top() -> None:
+    """The same floor, reached from the content-box path this time: a box that
+    starts (implausibly, but defensively) above the floor is still held below it,
+    not just the viewport-guess fallback (#192 review, F5)."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        page.content_boxes[browser.CONTENT_LANDMARK_SELECTOR] = {
+            "x": 0.0,
+            "y": 0.0,
+            "width": 300.0,
+            "height": 40.0,
+        }
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(2))
+
+    moves = only_page(context).mouse.moves
+    assert moves
+    assert all(y == browser.REST_MIN_Y_PX for _, y in moves), moves
 
 
 async def test_scroll_never_jitters_the_pointer_above_the_minimum_header_clearance() -> None:
-    """Every waypoint on the way to rest, not just the last one, across many seeds."""
+    """Every waypoint on the way to rest, not just the last one, across many seeds
+    (fallback path: no content box)."""
     for seed in range(30):
         connector = FakeConnector()
         provider = make_provider(connector)
@@ -737,8 +845,7 @@ async def test_scroll_never_jitters_the_pointer_above_the_minimum_header_clearan
         assert moves, (seed, "the pointer must move at least once before a scroll (#192)")
         for x, y in moves:
             assert 0 <= x <= browser.DEFAULT_VIEWPORT_WIDTH, (seed, x, y)
-            min_y = browser.DEFAULT_VIEWPORT_HEIGHT * browser.REST_MIN_Y_FRACTION
-            assert min_y <= y <= browser.DEFAULT_VIEWPORT_HEIGHT, (seed, x, y)
+            assert browser.REST_MIN_Y_PX <= y <= browser.DEFAULT_VIEWPORT_HEIGHT, (seed, x, y)
 
 
 async def test_scroll_rests_the_pointer_identically_for_the_same_seed() -> None:
@@ -756,6 +863,23 @@ async def test_scroll_rests_the_pointer_identically_for_the_same_seed() -> None:
     first = await moves_for(7)
     assert first, "the pointer must move at least once before a scroll (#192)"
     assert first == await moves_for(7)
+
+
+async def test_a_cancelled_scroll_never_moves_the_pointer_or_sends_a_wheel_event() -> None:
+    """#192 review, F6: cancelled before it starts means before *anything* starts,
+    the pointer-rest walk included -- not just the wheel replay."""
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+    plan = make_plan((100, 0.1), dwell_s=1.0)
+
+    async with provider.run() as run:
+        outcome = await run.scroll(plan, sleep=Sleeper(), cancelled=lambda: True)
+
+    page = only_page(context)
+    assert outcome.cancelled is True
+    assert page.mouse.moves == []
+    assert page.mouse.wheels == []
 
 
 # --- #169 F: keyed by the account row, and never alongside an older process ------------

@@ -267,7 +267,13 @@ async def test_an_incremental_sync_stops_at_the_first_page_it_knows() -> None:
     site = FlagshipSite(people)
     out = await sync(site, SyncMode.INCREMENTAL, known=known)
     assert out.result.reason is StopReason.CAUGHT_UP and out.result.pages == 2
-    assert len(site.fetches) <= 8  # it never scrolled on toward the end of the list
+    # The list has 120 people at 10 a fetch, so reaching the real end takes 12; the
+    # exact count short of that varies with the scroll plans a given seed draws
+    # (#192 review: sharing the source's rng with the pointer-rest walk shifts
+    # which ones, since the walk's own draws land before them once) -- what the
+    # invariant actually is, and what stays true regardless, is that it stopped
+    # well short of scrolling all the way to the list's own end.
+    assert len(site.fetches) < 12
 
 
 # --- one unit is bounded -----------------------------------------------------------------

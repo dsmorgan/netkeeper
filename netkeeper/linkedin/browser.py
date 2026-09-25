@@ -103,7 +103,7 @@ class _MouseLike(Protocol):
     exactly one shape. ``move`` is not a click or a hover on any element -- it only
     ever targets a bare point, never a locator -- so it needs nothing from the wider
     :data:`PAGE_DRIVERS` refusal in ``tests/test_browser_safety.py``, which pins that
-    reading (#192).
+    reading, scoped to the one method that may call it (#192).
     """
 
     async def wheel(self, delta_x: float, delta_y: float) -> None: ...
@@ -111,8 +111,31 @@ class _MouseLike(Protocol):
     async def move(self, x: float, y: float) -> None: ...
 
 
+class _LocatorLike(Protocol):
+    """The slice of a Playwright ``Locator`` :meth:`BrowserRun._rest_pointer_over_content`
+    reads a box from (#192).
+
+    ``bounding_box`` computes this from Playwright's own isolated DOM query -- a CDP
+    call, not a script Playwright runs inside the page's own execution context the
+    way ``evaluate`` does. A page's own script cannot see, hook, or answer it, which
+    is why ADR 0006's amendment treats it as a read rather than an input: nothing
+    about it resembles the ``fetch`` a page's own bot-detection telemetry watches
+    for. ``first`` narrows a locator that could otherwise match more than one
+    element, the same way ``.first`` does on a real Playwright ``Locator``.
+    """
+
+    @property
+    def first(self) -> _LocatorLike: ...
+
+    async def bounding_box(
+        self,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 -- mirrors Playwright's own signature
+    ) -> Mapping[str, float] | None: ...
+
+
 class _ScrollablePage(PageLike, Protocol):
-    """A tab that can also be scrolled. See :class:`_MouseLike`."""
+    """A tab that can also be scrolled. See :class:`_MouseLike` and :class:`_LocatorLike`."""
 
     @property
     def mouse(self) -> _MouseLike: ...
@@ -126,6 +149,8 @@ class _ScrollablePage(PageLike, Protocol):
         """
         ...
 
+    def locator(self, selector: str) -> _LocatorLike: ...
+
 
 class _ObservablePage(PageLike, ListenablePage, Protocol):
     """A tab that can also be listened to, for :meth:`BrowserRun.observe` alone.
@@ -137,24 +162,42 @@ class _ObservablePage(PageLike, ListenablePage, Protocol):
     """
 
 
+#: The landmark :meth:`BrowserRun._rest_pointer_over_content` reads a box from
+#: first (#192). A modern page's primary content -- flagship-web included -- is
+#: conventionally wrapped in a ``<main>`` element; :func:`_content_box` is where
+#: the read (and its fallback when there is no box) happens.
+CONTENT_LANDMARK_SELECTOR: Final = "main"
+
+#: How long to wait for the landmark's box before giving up on it. Short on
+#: purpose: this is a best-effort read, not something worth stalling a run's
+#: pacing over.
+CONTENT_BOX_TIMEOUT_MS: Final = 1000.0
+
 #: A conservative fallback viewport for :meth:`BrowserRun.scroll`'s pointer-rest step
-#: (#192), used only when the tab's own ``viewport_size`` is unknown -- true of every
-#: tab a real run attaches to, since attach mode never sets one (spec 9.1: never
-#: mutate the context) and Playwright reports ``None`` for a viewport it did not set
-#: itself. Sized like an ordinary laptop browser window, so a guessed point still
-#: lands well inside a real one and well clear of a fixed header.
+#: (#192), used only when neither a content box nor the tab's own ``viewport_size``
+#: is available. Sized like an ordinary laptop browser window -- but this is the
+#: last resort, not the primary source of truth: the first cut of this fix aimed at
+#: a fraction of *this* constant regardless of the tab's real window size, and
+#: missed at 560px wide, at a 293px-tall viewport, and on a centered column on a
+#: 2200px ultrawide (#192 review, F1). :data:`CONTENT_LANDMARK_SELECTOR`'s box is
+#: read first and is what the pointer actually targets whenever the page has one.
 DEFAULT_VIEWPORT_WIDTH: Final = 1280
 DEFAULT_VIEWPORT_HEIGHT: Final = 800
 
-#: Where the pointer comes to rest before a scroll replay, as a fraction of the
-#: viewport's height: centered, but never above :data:`REST_MIN_Y_FRACTION` -- clear
-#: of a fixed top nav (#192: LinkedIn's connections page has one, and Playwright's
-#: virtual pointer starts at (0, 0), which sits under it, not over the scrolling
-#: list -- that is the whole bug). The walk that gets the pointer there is pure and
-#: lives in :func:`~netkeeper.linkedin.pacing.rest_pointer_like_a_person`; this is
-#: the one part of it that depends on the tab's own geometry, so it stays here.
+#: Where the pointer comes to rest when there is no content box to read: centered
+#: in the guessed viewport, but never above :data:`REST_MIN_Y_PX`.
 REST_Y_FRACTION: Final = 0.5
-REST_MIN_Y_FRACTION: Final = 0.3
+
+#: No rest point, or any waypoint on the way to one, may land above this many
+#: pixels down from the top of the page -- an absolute floor, not a fraction of a
+#: guessed viewport height (#192 review, F1/F5: a fraction of the *wrong* guess is
+#: no floor at all, and the review's mutation replacing one with 0 went
+#: undetected). Real fixed headers on this kind of app run well under 100px tall
+#: (LinkedIn's connections page is about 52px); this clears any of them with room
+#: to spare. It applies whether the target came from a content box or the
+#: viewport fallback -- a box's coordinates are already real page pixels, in the
+#: same space this floor is measured in.
+REST_MIN_Y_PX: Final = 96
 
 
 @dataclass(frozen=True, slots=True)
@@ -540,20 +583,23 @@ class BrowserRun:
         instance for a run that should replay identically from one seed. Defaults to
         a fresh, unseeded one, spent only if this tab's pointer still needs resting.
 
-        ``cancelled``, when given, is polled before every wheel event and again before
-        the final dwell, so a caller wired to spec 9.9's cooperative cancel ("checked
-        between profiles and inside sliced cooldowns") has somewhere to plug one in;
-        nothing here reads a database or a settings flag itself (spec 9.10 keeps that
-        off this side of the boundary), so the check is the caller's to supply. A
-        cancelled replay stops before sending its remaining wheel events or waiting
-        out the dwell, and :attr:`ScrollOutcome.cancelled` says so -- the caller does
-        not have to re-poll its own ``cancelled`` callback, or compare how many wheel
-        events landed against how many the plan had, to find out (#168 review, F8).
-        It is not polled during the pointer-rest walk: that walk is not part of the
-        plan being replayed, and letting it finish once started keeps the pointer
-        from being left mid-hop.
+        ``cancelled``, when given, is polled once before the pointer-rest walk
+        begins, then again before every wheel event and again before the final
+        dwell, so a caller wired to spec 9.9's cooperative cancel ("checked
+        between profiles and inside sliced cooldowns") has somewhere to plug one
+        in; nothing here reads a database or a settings flag itself (spec 9.10
+        keeps that off this side of the boundary), so the check is the caller's
+        to supply. A cancelled replay stops before moving the pointer at all, or
+        before sending its remaining wheel events, or before waiting out the
+        dwell, and :attr:`ScrollOutcome.cancelled` says so -- the caller does not
+        have to re-poll its own ``cancelled`` callback, or compare how many wheel
+        events landed against how many the plan had, to find out (#168 review,
+        F8). It is not polled *during* the pointer-rest walk once that walk has
+        started: letting it finish keeps the pointer from being left mid-hop.
         """
         page = cast(_ScrollablePage, await self.ensure_page())
+        if cancelled is not None and cancelled():
+            return ScrollOutcome(page=page, cancelled=True)
         rest_rng = rng if rng is not None else random.Random()  # noqa: S311 -- pacing, not crypto
         await self._rest_pointer_over_content(page, sleep=sleep, rng=rest_rng)
         for step in plan.steps:
@@ -575,43 +621,60 @@ class BrowserRun:
     ) -> None:
         """Move the pointer to rest over the page's content, once per tab (#192).
 
-        A few short hops with small jitter, paced like a hand coming to rest,
-        landing centered low enough in the viewport to clear any fixed header
-        (:data:`REST_MIN_Y_FRACTION`) and nowhere near (0, 0), where the virtual
-        pointer starts. This is ``mouse.move`` alone, to a bare point over the
-        list's own background -- not a click, and not a hover resolved against any
-        particular element the way ``locator.hover()`` would be -- so it needs no
-        exception to spec 9.1's "scroll is the only automation" the way ADR 0006's
-        Contact info click does: a person's hand rests somewhere over the content
-        before it scrolls, and nothing on the connections list is wired to react to
-        the pointer merely passing over its background. Resting the pointer before
-        scrolling is part of what "scroll like a person" (spec 9.5) already means;
-        ADR 0006 records that reading as built.
+        A few short hops with small jitter, paced like a hand coming to rest. This
+        is ``mouse.move`` alone -- a bare point, not a click, and not a hover
+        resolved against a particular element the way ``locator.hover()`` would
+        be -- so it needs no exception to spec 9.1's "scroll is the only
+        automation" the way ADR 0006's Contact info click does: resting the
+        pointer somewhere over the content before scrolling is already part of
+        what spec 9.5's "scroll like a person" means. Where a real hand would
+        come to rest is wherever the content actually is -- most likely on a
+        card, not blank space -- and if that happens to trip some hover-triggered
+        request the *page's own script* sends on its own account, ADR 0006
+        already allows it: the seam only ever reads what the page decides to
+        send, at its own pace; nothing here sends, routes, or alters a request
+        either way.
 
-        ``page.viewport_size`` is a client-side value Playwright already holds for
-        this tab -- a passive read, not ``evaluate`` -- but it is commonly ``None``
-        for a tab this run attaches to (attach mode never calls
-        ``set_viewport_size``; spec 9.1 forbids mutating the context to do so), so
-        :func:`_viewport_size` falls back to a conservative default rather than
-        guessing at the real page's layout.
+        **The target, in order of preference (#192 review, F1):**
 
-        The walk itself -- how many hops, how jittered, how paced -- is
-        :func:`~netkeeper.linkedin.pacing.rest_pointer_like_a_person`'s pure
-        decision, replayed here the same way :meth:`scroll` replays a
-        :class:`~netkeeper.linkedin.pacing.ScrollPlan`; only the target point
-        depends on this tab's own geometry, which is this method's to know.
+        1. The center of :data:`CONTENT_LANDMARK_SELECTOR`'s box
+           (:func:`_content_box`), when the page has one. This is real, on-screen
+           geometry Playwright already computed from the page's actual layout --
+           correct at any window size, because it was never a guess. Jitter stays
+           inside the box.
+        2. Failing that, the center of the tab's own known ``viewport_size``
+           (:func:`_viewport_size`), or :data:`DEFAULT_VIEWPORT_WIDTH` /
+           :data:`DEFAULT_VIEWPORT_HEIGHT` when even that is unknown -- true for
+           most tabs this run attaches to (attach mode never sets one; spec 9.1
+           forbids mutating the context to do so). A last resort: a page with no
+           content landmark and an unknown viewport gets a guess, not a failure.
+
+        Either way, the final target and every waypoint on the way to it are held
+        at or below :data:`REST_MIN_Y_PX` from the top -- an absolute pixel
+        clearance, not a fraction of whichever height estimate was in play, so it
+        holds regardless of which one that was (#192 review, F5).
         """
         if self._pointer_rested:
             return
         mouse = cast(_ScrollablePage, page).mouse
-        width, height = _viewport_size(page)
-        min_y = height * REST_MIN_Y_FRACTION
-        target_x = width / 2
-        target_y = max(height * REST_Y_FRACTION, min_y)
+        box = await _content_box(page)
+        if box is not None:
+            target_x = box["x"] + box["width"] / 2
+            target_y = box["y"] + box["height"] / 2
+            jitter_x = (box["x"], box["x"] + box["width"])
+            jitter_y = (max(box["y"], REST_MIN_Y_PX), box["y"] + box["height"])
+        else:
+            width, height = _viewport_size(page)
+            target_x = width / 2
+            target_y = height * REST_Y_FRACTION
+            jitter_x = (0.0, width)
+            jitter_y = (REST_MIN_Y_PX, height)
+        target_x = max(target_x, 0.0)
+        target_y = max(target_y, REST_MIN_Y_PX)
         plan = rest_pointer_like_a_person(rng)
         for step in plan.steps:
-            x = _clamp(target_x + step.dx, 0, width)
-            y = _clamp(target_y + step.dy, min_y, height)
+            x = _clamp(target_x + step.dx, *jitter_x)
+            y = _clamp(target_y + step.dy, *jitter_y)
             await mouse.move(x, y)
             await sleep(step.pause_s)
         self._pointer_rested = True
@@ -833,6 +896,26 @@ class AttachBrowserProvider:
                 yield run
             finally:
                 await run.close()
+
+
+async def _content_box(page: PageLike) -> Mapping[str, float] | None:
+    """:data:`CONTENT_LANDMARK_SELECTOR`'s box, or ``None`` when there is nothing to read.
+
+    A passive geometry read (see :class:`_LocatorLike`), not a page input.
+    ``None`` covers every way there is nothing to rest on: no landmark on the
+    page, one present but not laid out (``bounding_box`` itself returns ``None``
+    for a detached or invisible element), or the read simply took too long
+    (:data:`CONTENT_BOX_TIMEOUT_MS`) to be worth waiting on -- a page whose
+    layout is still settling is not worth blocking a run's pacing over, and
+    :meth:`BrowserRun._rest_pointer_over_content` falls back to a viewport guess
+    either way.
+    """
+    locator = cast(_ScrollablePage, page).locator(CONTENT_LANDMARK_SELECTOR).first
+    try:
+        return await locator.bounding_box(timeout=CONTENT_BOX_TIMEOUT_MS)
+    except Exception as exc:
+        log.debug("could not read a content box to rest the pointer over: %s", exc)
+        return None
 
 
 def _viewport_size(page: PageLike) -> tuple[float, float]:

@@ -34,6 +34,33 @@ class FakeMouse:
         self.moves.append((x, y))
 
 
+class FakeLocator:
+    """A ``page.locator(selector).first`` fake: its box, armed by the page (#192).
+
+    ``first`` returns ``self``, matching a real chained locator's own type; a
+    fake never needs to represent "more than one match" to answer
+    ``bounding_box``.
+    """
+
+    def __init__(self, page: FakePage, selector: str) -> None:
+        self._page = page
+        self.selector = selector
+
+    @property
+    def first(self) -> FakeLocator:
+        return self
+
+    async def bounding_box(
+        self,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 -- mirrors Playwright's own signature
+    ) -> Mapping[str, float] | None:
+        if self._page.locator_error is not None:
+            error, self._page.locator_error = self._page.locator_error, None
+            raise error
+        return self._page.content_boxes.get(self.selector)
+
+
 class FakePage:
     """One tab. Records what it was asked to do and can be closed behind the run's back."""
 
@@ -51,6 +78,16 @@ class FakePage:
         #: ``None`` unless a test sets it: the common case for a tab this run
         #: attaches to, since attach mode never calls ``set_viewport_size`` (#192).
         self.viewport_size: Mapping[str, int] | None = None
+        #: What ``locator(selector).first.bounding_box()`` answers, keyed by
+        #: selector. Empty means every selector reads as "no box" -- the
+        #: fallback-to-viewport path (#192).
+        self.content_boxes: dict[str, Mapping[str, float]] = {}
+        self.locator_calls: list[str] = []
+        self.locator_error: Exception | None = None
+
+    def locator(self, selector: str) -> FakeLocator:
+        self.locator_calls.append(selector)
+        return FakeLocator(self, selector)
 
     @property
     def url(self) -> str:

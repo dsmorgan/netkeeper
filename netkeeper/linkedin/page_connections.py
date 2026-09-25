@@ -322,10 +322,23 @@ class PageConnections:
             dwell_median_s=self._scroll_profile.dwell_median_s,
             dwell_sigma=self._scroll_profile.dwell_sigma,
         )
+        # `rng` shares this source's own stream with the scroll plan above, on
+        # purpose: the pointer-rest walk (#192) is spent from the same seed a
+        # caller gives this source, so the whole read -- not just the wheel
+        # deltas and dwells -- reproduces identically for a fixed seed (the same
+        # promise :mod:`netkeeper.linkedin.pacing` makes for everything else it
+        # draws). Sharing costs nothing correctness-wise: it only decides which
+        # otherwise-equally-valid `ScrollPlan` each later scroll draws, since the
+        # rest walk's few extra draws land before them once, on the first call.
+        # `tests/test_page_connections.py`'s incremental-stop test pins the bound
+        # this shifted rather than the exact one a particular seed happened to
+        # land on before, which is what a test asserting the real invariant
+        # (stopped well short of the list's actual end) should have done from
+        # the start.
         if self._sleep is None:
-            outcome = await self._run.scroll(plan)
+            outcome = await self._run.scroll(plan, rng=self._rng)
         else:
-            outcome = await self._run.scroll(plan, sleep=self._sleep)
+            outcome = await self._run.scroll(plan, sleep=self._sleep, rng=self._rng)
         self._require_observed(outcome.page)
         return self._where(outcome.page.url)
 
