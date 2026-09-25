@@ -16,8 +16,8 @@ from typing import Any
 
 import factories
 import pytest
+from profile_fakes import PROFILES, Job, Profile, contact_info_of, details_of
 from sqlalchemy.orm import Session, sessionmaker
-from voyager_profiles import PROFILES, Job, Profile, contact_info_body, details_body
 
 from netkeeper.crm import apply as mapping
 from netkeeper.crm.apply import HarvestCounts, HarvestResult, apply_harvest
@@ -26,7 +26,6 @@ from netkeeper.crm.provenance import set_manual_field
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.enrich import ProfileHarvest
-from netkeeper.linkedin.voyager import parse_contact_info, parse_profile_details
 from netkeeper.models import (
     Contact,
     ContactAlias,
@@ -82,8 +81,8 @@ def _harvest(
         requested_public_id=slug or profile.slug,
         outcome=Outcome.OK,
         observed_at=at,
-        details=parse_profile_details(details_body(profile)),
-        contact_info=parse_contact_info(contact_info_body(profile)),
+        details=details_of(profile),
+        contact_info=contact_info_of(profile),
     )
 
 
@@ -633,3 +632,48 @@ def test_an_applied_harvest_does_not_clear_a_disconnect(writer: Session, user: U
 def _disconnected(contact: Contact) -> datetime | None:
     """Read afresh, so a type checker does not carry an earlier assertion across a write."""
     return contact.li_disconnected_at
+
+
+# --- #190: a harvest read from the page -----------------------------------------------------
+
+
+def test_a_mismatch_the_job_did_not_click_on_writes_nothing(writer: Session, user: User) -> None:
+    """The job skips the click on a profile under another id; the harvest has no contact
+    info, and the core finds the same mismatch."""
+    contact = _stored(writer, user, PRIYA)
+    stranger = replace(PRIYA, urn_prefix="ACoAANEW", headline="Somebody else")
+    harvest = replace(_harvest(contact, stranger), contact_info=None)
+    counts = HarvestCounts()
+    assert apply_harvest(writer, user, harvest, counts) is HarvestResult.MISMATCH
+    assert contact.headline is None and contact.last_enriched_at is None
+    assert contact.li_enrich_attempted_at == NOW and counts.mismatch == 1
+
+
+def test_a_matching_harvest_without_contact_info_writes_nothing(
+    writer: Session, user: User
+) -> None:
+    """Never produced by the job, refused anyway: a visit is written whole or not at all."""
+    contact = _stored(writer, user, PRIYA)
+    harvest = replace(_harvest(contact, PRIYA), contact_info=None)
+    counts = HarvestCounts()
+    assert apply_harvest(writer, user, harvest, counts) is HarvestResult.UNREADABLE
+    assert contact.headline is None and contact.last_enriched_at is None
+    assert contact.emails == [] and counts.unreadable == 1
+
+
+def test_every_address_the_overlay_shows_is_kept_the_first_as_primary(
+    writer: Session, user: User
+) -> None:
+    contact = _stored(writer, user, PRIYA)
+    harvest = _harvest(contact, PRIYA)
+    info = replace(
+        contact_info_of(PRIYA),
+        emails=("priya.first@example.test", "priya.second@example.test"),
+    )
+    assert apply_harvest(writer, user, replace(harvest, contact_info=info)) is (
+        HarvestResult.APPLIED
+    )
+    assert [(e.email, e.is_primary) for e in contact.emails] == [
+        ("priya.first@example.test", True),
+        ("priya.second@example.test", False),
+    ]

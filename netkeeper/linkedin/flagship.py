@@ -411,8 +411,8 @@ def split_display_name(name: str, *, endpoint: str, where: str) -> tuple[str, st
     """A card's one display name as ``(first, last)``: split at the first space.
 
     The card carries one string ("Jane Q. Doe, PMP"), where Voyager gave two. The
-    split is the one :mod:`netkeeper.linkedin.dom` already uses, so both sources
-    agree; :func:`netkeeper.crm.apply.apply_page` keeps a contact's existing split
+    split is the one P2-08's DOM reader used, so contacts it split read the same;
+    :func:`netkeeper.crm.apply.apply_page` keeps a contact's existing split
     when the two join to the same name, so a sync never reshuffles a name an import
     split differently. Whitespace runs collapse to one space. An empty name, one
     with a control character or a line break, or one past :data:`MAX_NAME_LENGTH`

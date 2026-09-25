@@ -11,10 +11,11 @@ the choice is marked as invented.
 
 * :func:`screen_payload`, :func:`pagination_payload`, :func:`document_html`, and
   :func:`pagination_request` are the connections list (#187).
-* :func:`profile_payload` and :func:`contact_info_payload` are the profile and the
-  contact-info overlay, for the enrichment lane: no parser reads them yet, and
-  ``tests/test_linkedin_flagship.py`` only checks that they are the grammar and carry
-  the anchors the shape note names.
+* :func:`profile_payload`, :func:`experience_payload`, and :func:`contact_info_payload`
+  are the profile, a lazy experience card, and the contact-info overlay, which
+  :mod:`netkeeper.linkedin.flagship_profile` reads (#190). Where the capture was silent
+  (where the member's id sits on a profile, grouped roles, education, the phone,
+  Twitter, birthday, and address sections), the shape is marked as invented.
 """
 
 from __future__ import annotations
@@ -522,7 +523,7 @@ def pages_of(
         start += size
 
 
-# --- the profile and the contact-info overlay (enrichment's, next) ----------------------
+# --- the profile and the contact-info overlay (#190) --------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,24 +537,88 @@ class Role:
     location: str | None = None
 
 
-def profile_payload(
-    person: Person, *, location: str, roles: Sequence[Role], degree: str = "1st"
-) -> bytes:
-    """A profile screen (``POST /flagship-web/in/<slug>/``), trimmed to the anchors.
+@dataclass(frozen=True, slots=True)
+class RoleGroup:
+    """Several roles at one company, under a company header. **Invented**: the capture
+    described this layout in words only (``<Employment type> · <total duration>`` under
+    the company, the roles below), so the nesting here is a guess the reader must fail
+    soft on."""
 
-    The top card (``viewName: profile-top-card``) renders the degree, the headline, the
-    location, and the **Contact info** link, whose action is a Navigate to
-    ``ProfileContactDetailsOverlay`` carrying ``{vanityName, givenName, familyName}``.
-    The experience card (``viewName: profile-card-experience``) renders each role as
-    text runs under the ``Experience`` heading. Seeds of ``profile_name_loading_state``
-    and ``profile_headline_loading_state`` appear on the screen as on a card's click.
-    """
-    rows = _Rows()
-    text = rows.module("default")
-    link = rows.module("default")
-    client = rows.module("ClientComponent")
-    contact_link = _el(
-        f"$L{link}",
+    company: str
+    summary: str  # "Full-time · 5 yrs"
+    roles: tuple[tuple[str, str], ...]  # (title, dates)
+
+
+@dataclass(frozen=True, slots=True)
+class School:
+    """One education entry. **Invented**: education was not in the capture."""
+
+    school: str
+    degree: str | None
+    years: str | None  # "2012 - 2016"
+
+
+def _text_el(module: str, text: str, **extra: Any) -> list[Any]:
+    return _el(f"$L{module}", {"textProps": {"children": [text], **extra}})
+
+
+def _experience_card(
+    rows: _Rows, text: str, client: str, roles: Sequence[Role], groups: Sequence[RoleGroup]
+) -> str:
+    entries: list[Any] = []
+    for role in roles:
+        runs = [
+            role.title,
+            f"{role.company} · {role.employment}" if role.employment else role.company,
+            role.dates,
+        ]
+        if role.location:
+            runs.append(role.location)
+        entries.append(_el("li", {"children": [_text_el(text, run) for run in runs]}))
+    for group in groups:
+        inner = [
+            _el("li", {"children": [_text_el(text, title), _text_el(text, dates)]})
+            for title, dates in group.roles
+        ]
+        entries.append(
+            _el(
+                "li",
+                {
+                    "children": [
+                        _text_el(text, group.company),
+                        _text_el(text, group.summary),
+                        _el("ul", {"children": inner}),
+                    ]
+                },
+            )
+        )
+    return rows.model(
+        _el(
+            f"$L{client}",
+            {
+                "componentKey": "fake-experience-card",
+                "viewTrackingSpecs": {"viewName": "profile-card-experience"},
+                "children": [
+                    _text_el(text, "Experience", tagName="h2"),
+                    _el("ul", {"children": entries}),
+                ],
+            },
+        )
+    )
+
+
+def _identity_button(
+    module: str, person: Person, *, profile_id: str, slug: str | None, key: str = "profileUrn"
+) -> list[Any]:
+    """A button whose action payload names the member (the message button, **invented**
+    placement: the capture saw ``firstName``/``lastName`` "sometimes with vanityName or
+    profileUrn beside them" in the message and follow buttons' payloads)."""
+    payload: dict[str, Any] = {"firstName": person.first, "lastName": person.last}
+    if slug is not None:
+        payload["vanityName"] = slug
+    payload[key] = f"urn:li:fsd_profile:{profile_id}" if key == "profileUrn" else profile_id
+    return _el(
+        f"$L{module}",
         {
             "action": {
                 "actions": [
@@ -564,20 +629,11 @@ def profile_payload(
                                 "$case": "screen",
                                 "screen": {
                                     "$type": "proto.sdui.actions.core.NavigateToScreen",
-                                    "screenId": CONTACT_DETAILS_SCREEN_ID,
-                                    "url": f"/in/{person.slug}/overlay/contact-info/",
-                                    "presentation": {
-                                        "$case": "modal",
-                                        "modal": {"$type": _MODAL},
-                                    },
+                                    "screenId": "com.linkedin.sdui.flagshipnav.messaging.Fake",
+                                    "url": "/messaging/compose/",
                                     "requestedArguments": {
                                         "$type": "proto.sdui.actions.requests.RequestedArguments",
-                                        "payload": {
-                                            "vanityName": person.slug,
-                                            "givenName": person.first,
-                                            "familyName": person.last,
-                                            "isVanityNameResolved": True,
-                                        },
+                                        "payload": payload,
                                     },
                                 },
                             }
@@ -585,74 +641,201 @@ def profile_payload(
                     }
                 ]
             },
-            "linkStyle": "inherit",
-            "viewTrackingSpecs": "$undefined",
-            "children": ["Contact info"],
+            "children": ["Message"],
         },
     )
-    top_texts: list[Any] = [
-        _el(f"$L{text}", {"textProps": {"children": [f"· {degree}"]}}),
-        _el(f"$L{text}", {"textProps": {"children": [person.headline or ""]}}),
-        _el(f"$L{text}", {"textProps": {"children": [location]}}),
-        _el(f"$L{text}", {"textProps": {"children": ["·"]}}),
-        _el(f"$L{text}", {"textProps": {"children": [contact_link]}}),
-        _el(f"$L{text}", {"textProps": {"children": ["500+ connections"]}}),
-    ]
-    top = rows.model(
-        _el(
-            f"$L{client}",
+
+
+def profile_payload(
+    person: Person,
+    *,
+    location: str | None,
+    roles: Sequence[Role] = (),
+    degree: str = "1st",
+    identity: str = "message",
+    profile_id_override: str | None = None,
+    also_viewed: Sequence[Person] = (),
+    experience_inline: bool = True,
+    groups: Sequence[RoleGroup] = (),
+    schools: Sequence[School] = (),
+    contact_links: int = 1,
+    contact_slug: str | None = None,
+    top_cards: int = 1,
+    extra_top_runs: Sequence[str] = (),
+) -> bytes:
+    """A profile screen (``POST /flagship-web/in/<slug>/``), trimmed to the anchors.
+
+    The top card (``viewName: profile-top-card``) renders the degree, the headline, the
+    location, and the **Contact info** link, whose action is a Navigate to
+    ``ProfileContactDetailsOverlay`` carrying ``{vanityName, givenName, familyName}``.
+    The experience card (``viewName: profile-card-experience``) renders each role as
+    text runs under the ``Experience`` heading. Seeds of ``profile_name_loading_state``
+    and ``profile_headline_loading_state`` appear on the screen as on a card's click.
+
+    ``identity`` is how the page names the member's id: ``"message"`` (a Message button
+    in the top card whose payload carries ``profileUrn`` beside ``vanityName``),
+    ``"bare"`` (the same button without ``vanityName``), ``"viewee"`` (a
+    ``vieweeProfileId`` beside ``vanityName``), or ``"none"``. Where the id sits is
+    **invented** (see :func:`_identity_button`). ``profile_id_override`` puts another
+    id there. ``also_viewed`` adds a "People also viewed" rail of other people's cards,
+    each with their own id, slug, and seeds. The other options spoil the page for the
+    parser's refusals. ``schools`` adds an education card (**invented** shape).
+    """
+    rows = _Rows()
+    text = rows.module("default")
+    link = rows.module("default")
+    client = rows.module("ClientComponent")
+    shown_slug = person.slug if contact_slug is None else contact_slug
+
+    def contact_link() -> list[Any]:
+        return _el(
+            f"$L{link}",
             {
-                "componentKey": "fake-top-card",
-                "viewTrackingSpecs": {"viewName": "profile-top-card"},
-                "children": _el("section", {"children": top_texts}),
+                "action": {
+                    "actions": [
+                        {
+                            "$type": "proto.sdui.actions.core.Navigate",
+                            "value": {
+                                "content": {
+                                    "$case": "screen",
+                                    "screen": {
+                                        "$type": "proto.sdui.actions.core.NavigateToScreen",
+                                        "screenId": CONTACT_DETAILS_SCREEN_ID,
+                                        "url": f"/in/{shown_slug}/overlay/contact-info/",
+                                        "presentation": {
+                                            "$case": "modal",
+                                            "modal": {"$type": _MODAL},
+                                        },
+                                        "requestedArguments": {
+                                            "$type": (
+                                                "proto.sdui.actions.requests.RequestedArguments"
+                                            ),
+                                            "payload": {
+                                                "vanityName": shown_slug,
+                                                "givenName": person.first,
+                                                "familyName": person.last,
+                                                "isVanityNameResolved": True,
+                                            },
+                                        },
+                                    },
+                                }
+                            },
+                        }
+                    ]
+                },
+                "linkStyle": "inherit",
+                "viewTrackingSpecs": "$undefined",
+                "children": ["Contact info"],
             },
         )
+
+    pid = profile_id_override or profile_id(person)
+    top_texts: list[Any] = [
+        _text_el(text, f"· {degree}"),
+        _text_el(text, person.headline or ""),
+        *[_text_el(text, run) for run in extra_top_runs],
+    ]
+    if location is not None:
+        top_texts.append(_text_el(text, location))
+    top_texts.append(_text_el(text, "·"))
+    top_texts.extend(
+        _el(f"$L{text}", {"textProps": {"children": [contact_link()]}})
+        for _ in range(contact_links)
     )
-    entries: list[Any] = []
-    for role in roles:
-        runs = [
-            role.title,
-            f"{role.company} · {role.employment}" if role.employment else role.company,
-        ]
-        runs.append(role.dates)
-        if role.location:
-            runs.append(role.location)
-        entries.append(
+    top_texts.append(_text_el(text, "500+ connections"))
+    buttons: list[Any] = []
+    if identity == "message":
+        buttons.append(_identity_button(link, person, profile_id=pid, slug=person.slug))
+    elif identity == "bare":
+        buttons.append(_identity_button(link, person, profile_id=pid, slug=None))
+    elif identity == "viewee":
+        buttons.append(
+            _identity_button(link, person, profile_id=pid, slug=person.slug, key="vieweeProfileId")
+        )
+    tops = [
+        rows.model(
+            _el(
+                f"$L{client}",
+                {
+                    "componentKey": f"fake-top-card-{n}",
+                    "viewTrackingSpecs": {"viewName": "profile-top-card"},
+                    "children": [_el("section", {"children": top_texts}), *buttons],
+                },
+            )
+        )
+        for n in range(top_cards)
+    ]
+    main: list[str] = [f"$L{top}" for top in tops]
+    if experience_inline and (roles or groups):
+        main.append(f"$L{_experience_card(rows, text, client, roles, groups)}")
+    if schools:
+        entries = [
             _el(
                 "li",
                 {
                     "children": [
-                        _el(f"$L{text}", {"textProps": {"children": [run]}}) for run in runs
+                        _text_el(text, run)
+                        for run in (school.school, school.degree, school.years)
+                        if run is not None
+                    ]
+                },
+            )
+            for school in schools
+        ]
+        education = rows.model(
+            _el(
+                f"$L{client}",
+                {
+                    "componentKey": "fake-education-card",
+                    "viewTrackingSpecs": {"viewName": "profile-card-education"},
+                    "children": [
+                        _text_el(text, "Education", tagName="h2"),
+                        _el("ul", {"children": entries}),
+                    ],
+                },
+            )
+        )
+        main.append(f"$L{education}")
+    if also_viewed:
+        rail = rows.model(
+            _el(
+                "aside",
+                {
+                    "children": [
+                        _el(
+                            f"$L{link}",
+                            {
+                                "action": _profile_click(other)["action"],
+                                "children": [display_name(other)],
+                            },
+                        )
+                        for other in also_viewed
                     ]
                 },
             )
         )
-    experience = rows.model(
-        _el(
-            f"$L{client}",
-            {
-                "componentKey": "fake-experience-card",
-                "viewTrackingSpecs": {"viewName": "profile-card-experience"},
-                "children": [
-                    _el(f"$L{text}", {"textProps": {"tagName": "h2", "children": ["Experience"]}}),
-                    _el("ul", {"children": entries}),
-                ],
-            },
-        )
-    )
+        main.append(f"$L{rail}")
     seeds = _click(
         [
             _set_state(NAME_STATE_ID, "stringValue", display_name(person)),
             _set_state(HEADLINE_STATE_ID, "stringValue", person.headline or ""),
         ]
     )
-    rows.model(
-        [
-            _el("main", {"children": [f"$L{top}", f"$L{experience}"]}),
-            {"triggers": [seeds]},
-        ],
-        row="0",
-    )
+    rows.model([_el("main", {"children": main}), {"triggers": [seeds]}], row="0")
+    return rows.payload()
+
+
+def experience_payload(roles: Sequence[Role], groups: Sequence[RoleGroup] = ()) -> bytes:
+    """A lazy experience card (``actions/component?componentId=...profileCardsExperienceOnly``).
+
+    The capture saw experience load this way on one profile but did not keep the answer,
+    so this reuses the inline card's shape.
+    """
+    rows = _Rows()
+    text = rows.module("default")
+    client = rows.module("ClientComponent")
+    card = _experience_card(rows, text, client, roles, groups)
+    rows.model([f"$L{card}"], row="0")
     return rows.payload()
 
 
@@ -669,21 +852,38 @@ def contact_info_payload(
     websites: Sequence[Website] = (),
     phones: Sequence[str] = (),
     connected_since: str | None = None,
+    twitter: Sequence[str] = (),
+    birthday: str | None = None,
+    address: str | None = None,
+    profile_slug: str | None = None,
+    profile_section: bool = True,
+    email_urls: Sequence[str] | None = None,
+    website_urls: Sequence[str] | None = None,
+    extra_sections: Sequence[str] = (),
 ) -> bytes:
     """The contact-info overlay's answer (``POST .../actions/navigation``), trimmed.
 
     One section per kind, each an element with ``viewTrackingSpecs.viewName`` of
     ``contact-your-profile``, ``contact-website``, ``contact-email`` (captured) or
-    ``contact-phone`` (invented: the capture's profile shared no phone, so the name
-    is a guess by analogy), a ``p`` heading, and one link per value whose action is a
-    ``NavigateToUrl``. Websites point through a ``linkedin.com`` redirect wrapper in
-    the capture, and so do these. Use example.test addresses only.
+    ``contact-phone``, ``contact-twitter``, ``contact-birthday``, ``contact-address``
+    (**invented**: the capture's profile shared none of them, so the names are guesses
+    by analogy), a ``p`` heading, and one link per value whose action is a
+    ``NavigateToUrl`` (or, for the birthday and the address, a text). Websites point
+    through a ``linkedin.com`` redirect wrapper in the capture, and so do these. Use
+    example.test addresses only. ``profile_slug`` makes the profile link name another
+    slug; ``email_urls``/``website_urls`` replace the links' urls to spoil the shape.
     """
     rows = _Rows()
     item = rows.module("default")
     link = rows.module("default")
 
-    def section(view: str, control: str, heading: str, links: list[tuple[str, str]]) -> Any:
+    def section(
+        view: str,
+        control: str,
+        heading: str,
+        links: Sequence[tuple[str, str]],
+        texts: Sequence[str] = (),
+    ) -> Any:
         return _el(
             f"$L{item}",
             {
@@ -722,43 +922,65 @@ def contact_info_payload(
                                 )
                                 for url, shown in links
                             ],
+                            *[_el("span", {"children": [value]}) for value in texts],
                         ]
                     },
                 ),
             },
         )
 
-    sections = [
-        section(
-            "contact-your-profile",
-            "contact_share_profile",
-            "Your Profile",
-            [(f"https://www.linkedin.com/in/{person.slug}", f"linkedin.com/in/{person.slug}")],
+    slug = person.slug if profile_slug is None else profile_slug
+    sections = []
+    if profile_section:
+        sections.append(
+            section(
+                "contact-your-profile",
+                "contact_share_profile",
+                "Your Profile",
+                [(f"https://www.linkedin.com/in/{slug}", f"linkedin.com/in/{slug}")],
+            )
         )
-    ]
-    if websites:
+    if websites or website_urls:
+        urls = (
+            list(website_urls)
+            if website_urls is not None
+            else [f"https://www.linkedin.com/redir/redirect?url={site.url}" for site in websites]
+        )
+        shown = [f"{site.url} {site.label}" if site.label else site.url for site in websites]
+        shown += [""] * (len(urls) - len(shown))
         sections.append(
             section(
                 "contact-website",
                 "contact_website",
                 "Website",
-                [
-                    (
-                        f"https://www.linkedin.com/redir/redirect?url={site.url}",
-                        f"{site.url} {site.label}" if site.label else site.url,
-                    )
-                    for site in websites
-                ],
+                list(zip(urls, shown, strict=False)),
             )
         )
     if phones:
         sections.append(
             section("contact-phone", "contact_phone", "Phone", [(f"tel:{p}", p) for p in phones])
         )
-    if emails:
+    if twitter:
         sections.append(
-            section("contact-email", "contact_email", "Email", [(f"mailto:{e}", e) for e in emails])
+            section(
+                "contact-twitter",
+                "contact_twitter",
+                "Twitter",
+                [(f"https://twitter.com/{handle}", f"@{handle}") for handle in twitter],
+            )
         )
+    if emails or email_urls:
+        urls = list(email_urls) if email_urls is not None else [f"mailto:{e}" for e in emails]
+        shown = list(emails) + [""] * (len(urls) - len(emails))
+        sections.append(
+            section("contact-email", "contact_email", "Email", list(zip(urls, shown, strict=False)))
+        )
+    if birthday is not None:
+        sections.append(section("contact-birthday", "contact_birthday", "Birthday", [], [birthday]))
+    if address is not None:
+        sections.append(section("contact-address", "contact_address", "Address", [], [address]))
+    for view in extra_sections:
+        sections.append(section(view, view, "Something new", [], ["a value"]))
     children: list[Any] = [*sections]
     if connected_since is not None:
         children.append(_el("p", {"children": ["Connected since"]}))

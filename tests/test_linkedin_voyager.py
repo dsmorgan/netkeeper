@@ -31,27 +31,19 @@ import pytest
 from netkeeper.linkedin.voyager import (
     CONNECTIONS_DEFAULT_COUNT,
     CONNECTIONS_ENDPOINT,
-    CONTACT_INFO_ENDPOINT,
     CONVERSATIONS_ENDPOINT,
-    PROFILE_ENDPOINT,
     RESTLI_PROTOCOL_VERSION,
     ConnectionsPageResult,
-    ContactInfo,
     ConversationsPageResult,
-    ProfileDetails,
     RouteChanged,
     VoyagerFetch,
     VoyagerRequest,
     VoyagerResponse,
     build_headers,
     connections_query,
-    contact_info_path,
     conversations_query,
     parse_connections_page,
-    parse_contact_info,
     parse_conversations_page,
-    parse_profile_details,
-    profile_query,
     strip_jsessionid,
 )
 
@@ -150,29 +142,6 @@ class TestConnectionsQuery:
     def test_non_positive_count_refused(self) -> None:
         with pytest.raises(ValueError, match="count"):
             connections_query(start=0, count=0)
-
-
-class TestContactInfoPath:
-    def test_formats_the_public_id_into_the_path(self) -> None:
-        assert contact_info_path("jamie-fake-rivera-1a2b3c4d") == (
-            "/voyager/api/identity/profiles/jamie-fake-rivera-1a2b3c4d/profileContactInfo"
-        )
-
-    def test_empty_public_id_refused(self) -> None:
-        with pytest.raises(ValueError, match="public_id"):
-            contact_info_path("")
-
-
-class TestProfileQuery:
-    def test_shape(self) -> None:
-        query = profile_query("jamie-fake-rivera-1a2b3c4d")
-        assert query["q"] == "memberIdentity"
-        assert query["memberIdentity"] == "jamie-fake-rivera-1a2b3c4d"
-        assert query["decorationId"]
-
-    def test_empty_public_id_refused(self) -> None:
-        with pytest.raises(ValueError, match="public_id"):
-            profile_query("")
 
 
 class TestConversationsQuery:
@@ -428,275 +397,6 @@ class TestParseConnectionsPage:
                     {
                         "data": {"elements": [], "paging": {"start": 0, "count": 40, "total": 0}},
                         "included": ["not an object"],
-                    }
-                )
-            )
-
-
-# --- contact info -------------------------------------------------------------
-
-
-class TestParseContactInfo:
-    def test_fixture(self) -> None:
-        info = parse_contact_info(_body("contact_info.json"))
-        assert isinstance(info, ContactInfo)
-        assert info.email == "jamie.fake.rivera@example-mail.test"
-        assert info.phones == ("+1-555-0101",)
-        assert info.websites == ("https://jamie-fake-rivera.example.test",)
-        assert info.twitter_handles == ("jamiefakerivera",)
-
-    def test_minimal_fixture_with_nothing_shared(self) -> None:
-        info = parse_contact_info(_body("contact_info_minimal.json"))
-        assert info.email is None
-        assert info.phones == ()
-        assert info.websites == ()
-        assert info.twitter_handles == ()
-
-    def test_empty_response_body(self) -> None:
-        with pytest.raises(RouteChanged) as exc:
-            parse_contact_info("")
-        assert exc.value.endpoint == CONTACT_INFO_ENDPOINT
-
-    def test_not_json_at_all(self) -> None:
-        with pytest.raises(RouteChanged):
-            parse_contact_info("<html>please sign in</html>")
-
-    def test_valid_json_but_a_completely_different_document(self) -> None:
-        with pytest.raises(RouteChanged):
-            parse_contact_info(json.dumps(["a", "list", "not", "an", "object"]))
-
-    def test_email_is_a_number_not_a_string(self) -> None:
-        with pytest.raises(RouteChanged):
-            parse_contact_info(json.dumps({"emailAddress": 12345}))
-
-    def test_phone_numbers_is_a_string_not_a_list(self) -> None:
-        with pytest.raises(RouteChanged):
-            parse_contact_info(json.dumps({"phoneNumbers": "+1-555-0101"}))
-
-    def test_phone_numbers_entry_missing_number_key(self) -> None:
-        with pytest.raises(RouteChanged, match="number"):
-            parse_contact_info(json.dumps({"phoneNumbers": [{"type": "MOBILE"}]}))
-
-    def test_phone_numbers_entry_number_is_wrong_type(self) -> None:
-        with pytest.raises(RouteChanged):
-            parse_contact_info(json.dumps({"phoneNumbers": [{"number": 5550101}]}))
-
-    def test_phone_numbers_entry_is_a_string_not_an_object(self) -> None:
-        with pytest.raises(RouteChanged):
-            parse_contact_info(json.dumps({"phoneNumbers": ["+1-555-0101"]}))
-
-
-# --- profile details -------------------------------------------------------------
-
-
-class TestParseProfileDetails:
-    def test_fixture(self) -> None:
-        details = parse_profile_details(_body("profile_details.json"))
-        assert isinstance(details, ProfileDetails)
-        assert details.urn == "urn:li:fsd_profile:ACoAAFAKE0000001"
-        assert details.public_id == "jamie-fake-rivera-1a2b3c4d"
-        assert details.first_name == "Jamie"
-        assert details.last_name == "Rivera"
-        assert details.location == "Faketown, State of Example"
-
-        assert len(details.positions) == 2
-        current, prior = details.positions
-        assert current.title == "Product Designer"
-        assert current.company == "Fictional Robotics Co"
-        assert current.start_year == 2022
-        assert current.start_month == 3
-        assert current.end_year is None
-        assert current.end_month is None
-
-        assert prior.company == "Prior Example Studio"
-        assert prior.end_year == 2022
-        assert prior.end_month == 2
-
-        assert len(details.education) == 1
-        school = details.education[0]
-        assert school.school == "Fictional State University"
-        assert school.degree == "B.A."
-        assert school.field_of_study == "Design"
-        assert school.start_year == 2015
-        assert school.end_year == 2019
-
-    def test_unrecognized_included_type_is_ignored_not_rejected(self) -> None:
-        # The fixture's Skill entity has no dateRange at all; if this parser
-        # tried to read positions/education out of it the way it does a
-        # Position or Education entity, it would raise. It must not even try.
-        details = parse_profile_details(_body("profile_details.json"))
-        assert all(p.title != "Prototyping" for p in details.positions)
-
-    def test_empty_response_body(self) -> None:
-        with pytest.raises(RouteChanged) as exc:
-            parse_profile_details("")
-        assert exc.value.endpoint == PROFILE_ENDPOINT
-
-    def test_valid_json_but_a_completely_different_document(self) -> None:
-        with pytest.raises(RouteChanged):
-            parse_profile_details(json.dumps({"status": 404, "message": "not found"}))
-
-    def test_missing_data_key(self) -> None:
-        with pytest.raises(RouteChanged, match="data"):
-            parse_profile_details(json.dumps({"included": []}))
-
-    def test_data_missing_entity_urn(self) -> None:
-        with pytest.raises(RouteChanged, match="entityUrn"):
-            parse_profile_details(
-                json.dumps(
-                    {
-                        "data": {
-                            "publicIdentifier": "x",
-                            "firstName": "X",
-                            "lastName": "Y",
-                        },
-                        "included": [],
-                    }
-                )
-            )
-
-    def test_included_entity_missing_type(self) -> None:
-        with pytest.raises(RouteChanged, match="\\$type"):
-            parse_profile_details(
-                json.dumps(
-                    {
-                        "data": {
-                            "entityUrn": "urn:li:fsd_profile:X",
-                            "publicIdentifier": "x",
-                            "firstName": "X",
-                            "lastName": "Y",
-                        },
-                        "included": [{"title": "Something"}],
-                    }
-                )
-            )
-
-    def test_position_missing_title(self) -> None:
-        with pytest.raises(RouteChanged, match="title"):
-            parse_profile_details(
-                json.dumps(
-                    {
-                        "data": {
-                            "entityUrn": "urn:li:fsd_profile:X",
-                            "publicIdentifier": "x",
-                            "firstName": "X",
-                            "lastName": "Y",
-                        },
-                        "included": [
-                            {
-                                "$type": "com.linkedin.voyager.dash.identity.profile.Position",
-                                "companyName": "Acme",
-                                "dateRange": {"start": {"year": 2020}},
-                            }
-                        ],
-                    }
-                )
-            )
-
-    def test_undated_entries_and_a_missing_company_are_none_not_route_changed(self) -> None:
-        """#171 review: a school listed without years is common; it must not make the
-        whole profile unreadable."""
-        details = parse_profile_details(
-            json.dumps(
-                {
-                    "data": {
-                        "entityUrn": "urn:li:fsd_profile:X",
-                        "publicIdentifier": "x",
-                        "firstName": "X",
-                        "lastName": "Y",
-                    },
-                    "included": [
-                        {
-                            "$type": "com.linkedin.voyager.dash.identity.profile.Position",
-                            "title": "Engineer",
-                        },
-                        {
-                            "$type": "com.linkedin.voyager.dash.identity.profile.Position",
-                            "title": "Founder",
-                            "companyName": None,
-                            "dateRange": None,
-                        },
-                        {
-                            "$type": "com.linkedin.voyager.dash.identity.profile.Education",
-                            "schoolName": "Fictional State University",
-                        },
-                    ],
-                }
-            )
-        )
-        assert [(p.title, p.company, p.start_year, p.end_year) for p in details.positions] == [
-            ("Engineer", None, None, None),
-            ("Founder", None, None, None),
-        ]
-        (school,) = details.education
-        assert (school.school, school.start_year, school.end_year) == (
-            "Fictional State University",
-            None,
-            None,
-        )
-
-    def test_a_date_range_that_is_not_an_object_is_still_route_changed(self) -> None:
-        with pytest.raises(RouteChanged, match="dateRange"):
-            parse_profile_details(
-                json.dumps(
-                    {
-                        "data": {
-                            "entityUrn": "urn:li:fsd_profile:X",
-                            "publicIdentifier": "x",
-                            "firstName": "X",
-                            "lastName": "Y",
-                        },
-                        "included": [
-                            {
-                                "$type": "com.linkedin.voyager.dash.identity.profile.Education",
-                                "schoolName": "Fictional State University",
-                                "dateRange": "2015-2019",
-                            }
-                        ],
-                    }
-                )
-            )
-
-    def test_date_range_start_is_a_list_not_an_object(self) -> None:
-        with pytest.raises(RouteChanged):
-            parse_profile_details(
-                json.dumps(
-                    {
-                        "data": {
-                            "entityUrn": "urn:li:fsd_profile:X",
-                            "publicIdentifier": "x",
-                            "firstName": "X",
-                            "lastName": "Y",
-                        },
-                        "included": [
-                            {
-                                "$type": "com.linkedin.voyager.dash.identity.profile.Position",
-                                "title": "Engineer",
-                                "companyName": "Acme",
-                                "dateRange": {"start": [2020, 1]},
-                            }
-                        ],
-                    }
-                )
-            )
-
-    def test_education_missing_school_name(self) -> None:
-        with pytest.raises(RouteChanged, match="schoolName"):
-            parse_profile_details(
-                json.dumps(
-                    {
-                        "data": {
-                            "entityUrn": "urn:li:fsd_profile:X",
-                            "publicIdentifier": "x",
-                            "firstName": "X",
-                            "lastName": "Y",
-                        },
-                        "included": [
-                            {
-                                "$type": "com.linkedin.voyager.dash.identity.profile.Education",
-                                "dateRange": {},
-                            }
-                        ],
                     }
                 )
             )
@@ -990,78 +690,6 @@ _CONNECTIONS_SWEEP = _Sweep(
     ),
 )
 
-_CONTACT_INFO_SWEEP = _Sweep(
-    name="contact_info",
-    fixture="contact_info.json",
-    parser=parse_contact_info,
-    # The three list fields are each optional as a whole (nobody has to share
-    # an email, phone, website, or handle); item_key is required within an
-    # item once the list itself is present.
-    optional=frozenset(
-        {
-            ("emailAddress",),
-            ("phoneNumbers",),
-            ("websites",),
-            ("twitterHandles",),
-        }
-    ),
-    # Only item_key is read out of a phoneNumbers/websites entry -- "type"
-    # and "category" ride along in the real payload and are never consulted.
-    unused=frozenset(
-        {
-            ("phoneNumbers", 0, "type"),
-            ("websites", 0, "category"),
-            ("websites", 0, "category", "type"),
-        }
-    ),
-)
-
-_PROFILE_DETAILS_SWEEP = _Sweep(
-    name="profile_details",
-    fixture="profile_details.json",
-    parser=parse_profile_details,
-    optional=frozenset(
-        {
-            ("data", "headline"),
-            ("data", "geoLocationName"),
-            ("included", 0, "companyName"),
-            ("included", 1, "companyName"),
-            ("included", 0, "dateRange"),
-            ("included", 1, "dateRange"),
-            ("included", 2, "dateRange"),
-            ("included", 0, "dateRange", "start"),
-            ("included", 0, "dateRange", "start", "year"),
-            ("included", 0, "dateRange", "start", "month"),
-            ("included", 1, "dateRange", "start"),
-            ("included", 1, "dateRange", "start", "year"),
-            ("included", 1, "dateRange", "start", "month"),
-            ("included", 1, "dateRange", "end"),
-            ("included", 1, "dateRange", "end", "year"),
-            ("included", 1, "dateRange", "end", "month"),
-            ("included", 2, "degreeName"),
-            ("included", 2, "fieldOfStudy"),
-            ("included", 2, "dateRange", "start"),
-            ("included", 2, "dateRange", "start", "year"),
-            ("included", 2, "dateRange", "end"),
-            ("included", 2, "dateRange", "end", "year"),
-        }
-    ),
-    # entityUrn on an included Position/Education/Skill entity is never read
-    # (only the top-card's own entityUrn, under "data", is); a Skill entity's
-    # "name" is ignored entirely, since this parser only extracts positions
-    # and education out of "included" (see parse_profile_details's docstring
-    # on why an unrecognized $type is skipped, not rejected).
-    unused=frozenset(
-        {
-            ("included", 0, "entityUrn"),
-            ("included", 1, "entityUrn"),
-            ("included", 2, "entityUrn"),
-            ("included", 3, "entityUrn"),
-            ("included", 3, "name"),
-        }
-    ),
-)
-
 _CONVERSATIONS_SWEEP = _Sweep(
     name="conversations",
     fixture="conversations_page.json",
@@ -1086,7 +714,7 @@ _CONVERSATIONS_SWEEP = _Sweep(
     ),
 )
 
-_SWEEPS = (_CONNECTIONS_SWEEP, _CONTACT_INFO_SWEEP, _PROFILE_DETAILS_SWEEP, _CONVERSATIONS_SWEEP)
+_SWEEPS = (_CONNECTIONS_SWEEP, _CONVERSATIONS_SWEEP)
 
 
 def _sweep_cases() -> list[tuple[_Sweep, FieldPath]]:

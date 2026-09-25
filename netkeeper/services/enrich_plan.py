@@ -386,6 +386,21 @@ def targets_for(session: Session, user: User, plan: StoredPlan) -> list[tuple[in
     ]
 
 
+def urns_for(session: Session, user: User, contact_ids: list[int]) -> dict[int, str]:
+    """The URN each of ``contact_ids`` holds now, for the ones enrichment may visit. Read-only.
+
+    The job checks a profile's own id against it before it clicks anything on the
+    page (#190), so it is read at the start of the run, like the slug.
+    """
+    if not contact_ids:
+        return {}
+    return {
+        contact.id: contact.li_urn
+        for contact in session.scalars(_eligible(user).where(Contact.id.in_(contact_ids)))
+        if contact.li_urn is not None
+    }
+
+
 def _enrich_run(session: Session, user: User, run_id: int) -> SyncRun:
     run = runs.get_run(session, user, run_id)
     if run.kind is not SyncRunKind.ENRICH:

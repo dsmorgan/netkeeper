@@ -103,24 +103,35 @@ class ListenablePage(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ResponseRule:
-    """One request shape to keep: an HTTP method and an exact path.
+    """One request shape to keep: an HTTP method and an exact path, or a path prefix.
 
     The path is compared after dropping one trailing ``/`` from both sides, so
     ``/mynetwork/invite-connect/connections`` and ``.../connections/`` are the same
     page. The query string is never compared: LinkedIn decorates these urls with
     tracking parameters that change per request.
+
+    ``prefix`` keeps every path under ``path`` instead (``/in/`` for any profile
+    page, #190): a profile a slug redirects to has a path nobody knew before the
+    navigation. A prefix must end with ``/``, so ``/in/`` never matches ``/inbox``.
     """
 
     method: str
     path: str
+    prefix: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "method", self.method.upper())
         if not self.path.startswith("/"):
             raise ValueError("a response rule's path starts with '/'")
+        if self.prefix and not self.path.endswith("/"):
+            raise ValueError("a prefix rule's path ends with '/'")
 
     def matches(self, method: str, path: str) -> bool:
-        return method.upper() == self.method and _trim(path) == _trim(self.path)
+        if method.upper() != self.method:
+            return False
+        if self.prefix:
+            return path.startswith(self.path) and len(path) > len(self.path)
+        return _trim(path) == _trim(self.path)
 
 
 @dataclass(frozen=True, slots=True)

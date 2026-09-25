@@ -839,3 +839,47 @@ def test_plan_enrichment_same_seed_is_identical_across_processes() -> None:
     third = run(43)
     assert first == second
     assert first != third
+
+
+# --- #190: back to the top before the Contact info click ------------------------------------
+
+
+def test_the_depth_a_plan_leaves_never_goes_above_the_top() -> None:
+    plan = pacing.ScrollPlan(
+        steps=(
+            pacing.ScrollStep(300, 0.1),
+            pacing.ScrollStep(-900, 0.1),  # past the top: the page stops there
+            pacing.ScrollStep(200, 0.1),
+        ),
+        dwell_s=1.0,
+    )
+    assert plan.total_delta_px == -400
+    assert pacing.depth_after(plan) == 200
+
+
+@pytest.mark.parametrize("depth", [0, 1, 250, 900, 5_000])
+def test_the_scroll_back_covers_the_depth_and_goes_only_up(depth: int) -> None:
+    for seed in range(50):
+        plan = pacing.scroll_back_to_top(random.Random(seed), depth)
+        assert all(step.delta_px < 0 for step in plan.steps)
+        covered = -sum(step.delta_px for step in plan.steps)
+        assert (covered > depth) if depth else not plan.steps
+        # At most one step past what was needed: a person overshoots, but not by a page.
+        assert covered - depth <= pacing.BACK_TO_TOP_DELTA_RANGE_PX[1]
+        assert all(
+            pacing.BACK_TO_TOP_PAUSE_RANGE_S[0] <= s.pause_s <= pacing.BACK_TO_TOP_PAUSE_RANGE_S[1]
+            for s in plan.steps
+        )
+        assert 0 < plan.dwell_s < 10
+
+
+def test_the_scroll_back_constants_are_pinned() -> None:
+    assert pacing.BACK_TO_TOP_DELTA_RANGE_PX == (300, 900)
+    assert pacing.BACK_TO_TOP_PAUSE_RANGE_S == (0.2, 0.9)
+    assert (pacing.BACK_TO_TOP_DWELL_MEDIAN_S, pacing.BACK_TO_TOP_DWELL_SIGMA) == (1.0, 0.4)
+
+
+def test_the_scroll_back_replays_from_its_seed() -> None:
+    assert pacing.scroll_back_to_top(random.Random(3), 1200) == pacing.scroll_back_to_top(
+        random.Random(3), 1200
+    )

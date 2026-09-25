@@ -564,8 +564,13 @@ GAPS: Final[tuple[str, ...]] = (
     " scrolled (ADR 0006); it sends no request of its own and alters none. Whether the"
     " page still loads the list the way the 2026-09-24 capture showed is something"
     " only a run learns: a page it cannot read stops the run as `route_changed`, and"
-    " a run that could not prove the end of the list ages nobody. Enrichment still"
-    " reads profiles through the in-page API until it moves to the same approach.",
+    " a run that could not prove the end of the list ages nobody.",
+    "enrichment reads each profile from what the page loads, and clicks Contact info"
+    " once per visit, only on a profile whose id is the contact's (ADR 0006). Which"
+    " answers carry the profile's id, the education and phone sections, and how a"
+    " missing profile answers were not in the 2026-09-24 capture: an unreadable"
+    " profile counts toward the run's cap and stops it as `route_changed` after two"
+    " in a row, which only a run learns.",
 )
 
 

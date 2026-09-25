@@ -298,11 +298,15 @@ async def enrich_contacts(
             else:
                 plan = enrich_plan.load_plan(session, user, run_id)
                 chosen = enrich_plan.targets_for(session, user, plan)
+            urns = enrich_plan.urns_for(session, user, [contact_id for contact_id, _ in chosen])
+            chosen = [(contact_id, slug) for contact_id, slug in chosen if contact_id in urns]
             skipped = len(plan.remaining) - len(chosen)
 
         configured = profiles(settings.pacing)
         spec = EnrichJobSpec(
-            targets=tuple(EnrichTarget(contact_id, slug) for contact_id, slug in chosen),
+            targets=tuple(
+                EnrichTarget(contact_id, slug, urns[contact_id]) for contact_id, slug in chosen
+            ),
             visit_budget=visit_budget,
             pacing=PacingProfile(delay=configured.delay, burst=configured.burst),
             heat_multiplier=multiplier,
@@ -351,7 +355,6 @@ async def enrich_contacts(
             rng=rng if rng is not None else random.Random(),  # noqa: S311 -- pacing, not crypto
             on_progress=progress,
             clock=clock,
-            sleep=sleep,
         )
 
         heat_raised = flagged = False

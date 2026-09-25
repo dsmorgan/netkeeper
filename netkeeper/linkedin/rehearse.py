@@ -1,23 +1,20 @@
-"""``netkeeper rehearse``: enrichment's real request pattern, against a neutral site (P2-11, CP3).
+"""``netkeeper rehearse``: enrichment's real pattern, against a neutral site (P2-11, CP3, #190).
 
-What a rehearsal rehearses is enrichment's profile visit, which still reads through
-the in-page API. The connections sync no longer requests anything: since P2-17 it
-scrolls the connections page and reads the answers the page itself loads (ADR 0006),
-and ``tests/smoke/test_observe_smoke.py``'s loopback replica is where that pattern is
-driven against a real Chrome. When enrichment moves to the same approach, this
-module's replica and its two in-page fetches go with it.
+What a rehearsal rehearses is enrichment's profile visit, as #190 built it on ADR 0006:
+the navigation to a profile, the scroll, the scroll back to the top, the one click on
+**Contact info**, and the requests the *page itself* makes in answer -- the profile
+screen in its HTML, a lazy card as it is scrolled, the overlay's ``actions/navigation``
+after the click. netkeeper sends none of those requests; it reads their answers.
 
 Before anyone points this tool at their own LinkedIn account, they get to watch
 it work without it. A rehearsal drives the genuine attach path
 (:class:`netkeeper.linkedin.browser.AttachBrowserProvider`) through the genuine
-enrichment job (:func:`netkeeper.linkedin.enrich.run_enrichment`, P2-07) -- the
-same navigation to a profile page, the same scroll deltas and dwell, the same
-two in-page API fetches for the profile's details and contact info
-(:class:`netkeeper.linkedin.fetch.PageVoyagerFetch`), the same lognormal waits
-between profiles, the same bursts -- at a replica of a profile page served on
-this machine's loopback, and records **every request the page made** while it
-did. The job is the one a real run uses, handed a source pointed at the
-replica: a rehearsal is that loop, not a copy of it.
+enrichment job (:func:`netkeeper.linkedin.enrich.run_enrichment`) and the genuine
+source (:class:`netkeeper.linkedin.page_profiles.PageProfiles`) -- the same
+navigation, the same scroll deltas and dwell, the same click, the same lognormal
+waits between profiles, the same bursts -- at a replica of a profile page served on
+this machine's loopback, and records **every request the page made** while it did.
+A rehearsal is that loop, not a copy of it.
 
 **The site is loopback, and that is enforced here rather than trusted.**
 :func:`rehearse` refuses any url whose host is not ``127.0.0.1``, ``::1``, or
@@ -33,26 +30,21 @@ Chrome the user started, opens one tab, and closes that tab. It never creates a
 context, never routes or intercepts a request, and never overrides anything:
 requests are *observed* through ``page.on("request")``, which is a listener and
 not ``page.route``, so what the log records is what the browser genuinely sent.
+A tab lost mid-rehearsal ends it, as it ends a real run: the source stops
+trusting a tab it is no longer listening to.
 
 **Nothing here touches the database** (spec 9.10, ADR 0005): a rehearsal has no
-contacts, so it needs no session. The replica's profile slugs are made up on
-the spot.
+contacts, so it needs no session. The replica's profile slugs, and the URNs its
+pages carry, are made up on the spot.
 
 :func:`serve_replica` is the neutral site itself, a small loopback server this
-module can start for the length of a block: a profile-shaped page and its two
-sub-resources, and invented answers in Voyager's shapes at the two profile
-endpoints. It is shipped rather than left in the tests because CP3's demo has to
-be one command, and because the smoke suite and the CLI then drive the same site
-rather than two that could drift.
-
-**The replica sets one cookie.** The in-page fetch reads its csrf token from the
-page's own ``JSESSIONID`` cookie, the way the real client does, and never from
-Python (#168). So the replica's profile page sets an invented one for
-``127.0.0.1``, ``Max-Age`` two minutes, as the fetch smoke suite's fixture does,
-and a finished rehearsal navigates the tab to :data:`REPLICA_EXPIRE_PATH` to
-expire it at once (a cookie ignores the port, so it would otherwise reach every
-loopback site for those two minutes). netkeeper still writes no cookie: the
-site does, the ordinary way a site does.
+module can start for the length of a block: a profile page carrying its screen the
+way LinkedIn's does (a ``rehydrate-data`` flight payload), a stylesheet and an image,
+a script that asks for a lazy card when the page is scrolled and for the overlay when
+**Contact info** is clicked, and invented flight answers for both. It is shipped
+rather than left in the tests because CP3's demo has to be one command, and because
+the smoke suite and the CLI then drive the same site rather than two that could drift.
+The replica sets no cookie: nothing reads one any more.
 """
 
 from __future__ import annotations
@@ -69,11 +61,10 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from random import Random
 from typing import Any, Final, Protocol, cast
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import urlsplit
 
 from netkeeper.linkedin.browser import SINGLE_ACCOUNT_KEY, BrowserProvider, PageLike
 from netkeeper.linkedin.enrich import (
-    BrowserProfiles,
     EnrichJobSpec,
     EnrichTarget,
     PacingProfile,
@@ -81,7 +72,17 @@ from netkeeper.linkedin.enrich import (
     StopReason,
     run_enrichment,
 )
-from netkeeper.linkedin.fetch import PageVoyagerFetch
+from netkeeper.linkedin.flagship import (
+    CONTACT_DETAILS_SCREEN_ID,
+    NAVIGATION_PATH,
+    REHYDRATION_GLOBAL,
+    REHYDRATION_SCRIPT_ID,
+)
+from netkeeper.linkedin.flagship_profile import (
+    COMPONENT_PATH,
+    PROFILE_PAGE_PREFIX,
+    profile_slug,
+)
 from netkeeper.linkedin.pacing import (
     DEFAULT_BURST_PROFILE,
     DEFAULT_DELAY_PROFILE,
@@ -89,8 +90,8 @@ from netkeeper.linkedin.pacing import (
     DelayProfile,
     ScrollPlan,
 )
+from netkeeper.linkedin.page_profiles import PageProfiles
 from netkeeper.linkedin.strict_origin import NotAStrictOrigin, parse_strict_origin
-from netkeeper.linkedin.voyager import CONTACT_INFO_PATH_TEMPLATE, PROFILE_PATH
 
 log = logging.getLogger(__name__)
 
@@ -203,9 +204,9 @@ class RehearsalVisit:
     planned_wait_s: float | None
     waited_s: float
     burst_break: bool
-    #: The pause taken between the profile-details and contact-info fetches, as
-    #: planned (unscaled); ``None`` when the second fetch was never made.
-    fetch_gap_s: float | None = None
+    #: The pause taken before the Contact info click, as planned (unscaled); ``None``
+    #: when the visit clicked nothing.
+    click_pause_s: float | None = None
 
     @property
     def scrolled_px(self) -> int:
@@ -230,26 +231,27 @@ class Rehearsal:
     #: recorded and then silently discarded, and the neutrality check that
     #: reads :attr:`requests` could not see them.
     trailing: tuple[RequestRecord, ...] = ()
-    #: How many visits the job harvested: both in-page fetches answered and parsed.
+    #: How many visits the job harvested: the profile and its contact info read whole.
     harvested: int = 0
     #: Why the job stopped before its last visit, or ``None`` when it made them all.
     #: Against the replica this should never be set; when it is, the log says so.
     stopped: str | None = None
-    #: The navigation that expired the replica's csrf cookie once the last visit
-    #: was over (:data:`REPLICA_EXPIRE_PATH`), and anything it loaded.
-    cleanup: tuple[RequestRecord, ...] = ()
+    #: Contact info clicks the job asked for: one per visit at most.
+    clicks: int = 0
+    #: Requests the page made before the first visit's navigation (none, normally).
+    before: tuple[RequestRecord, ...] = ()
 
     @property
     def requests(self) -> tuple[RequestRecord, ...]:
-        """Every request the page made: inside a visit, the cleanup, then any trailing ones.
+        """Every request the page made: before, inside a visit, then any trailing ones.
 
         :attr:`visits` partitions requests for reading. This is the complete
         list, and it is what :func:`_assert_stayed_neutral` checks -- a
         neutrality claim must not depend on how the log happens to be grouped.
         """
         return (
+            *self.before,
             *(record for visit in self.visits for record in visit.requests),
-            *self.cleanup,
             *self.trailing,
         )
 
@@ -292,8 +294,9 @@ async def rehearse(
     clock: Callable[[], float] = time.monotonic,
     now: datetime | None = None,
     slugs: Sequence[str] = REHEARSAL_SLUGS,
+    overlay_wait_s: float | None = None,
 ) -> Rehearsal:
-    """Drive the real request pattern at ``site``, recording every request the page makes.
+    """Drive the real visit pattern at ``site``, recording every request the page makes.
 
     ``site`` must be a loopback url (:func:`serve_replica` provides one);
     anything else raises :class:`NotANeutralSite`, and a linkedin.com host
@@ -331,15 +334,16 @@ async def rehearse(
     started_at = datetime.now(UTC) if now is None else now
     origin = clock()
     recorder = _Recorder(clock, origin)
-    notes: list[str] = []
-    urls: list[str] = []
-    grouped: list[tuple[RequestRecord, ...]] = []
     gate = _RehearsalGate(sleep=sleep, time_scale=time_scale)
     harvested = 0
-    # Each target is a slug on the replica; the reference is only its position,
-    # since a rehearsal has no contacts (and may visit a slug more than once).
+    # Each target is a slug on the replica, with the URN the replica's page carries
+    # for it; the reference is only its position, since a rehearsal has no contacts
+    # (and may visit a slug more than once).
+    chosen = [slugs[index % len(slugs)] for index in range(visits)]
     spec = EnrichJobSpec(
-        targets=tuple(EnrichTarget(index, slugs[index % len(slugs)]) for index in range(visits)),
+        targets=tuple(
+            EnrichTarget(index, slug, replica_urn(slug)) for index, slug in enumerate(chosen)
+        ),
         visit_budget=visits,
         pacing=PacingProfile(delay=delay, burst=burst),
     )
@@ -347,82 +351,25 @@ async def rehearse(
     async with provider.run(account) as run:
         recorder.follow(_as_rehearsal_page(await run.ensure_page()))
 
-        async def navigate(url: str) -> PageLike:
-            # A visit's requests run from its navigation to the next one's, so the
-            # wait after a profile is filed under that profile, as it happens.
-            if urls:
-                grouped.append(recorder.close_visit())
-            else:
-                recorder.open_visit()
-            urls.append(url)
-            page = await run.goto(url)
-            if recorder.follow(_as_rehearsal_page(page)):
-                notes.append(
-                    f"the tab was reopened before visit {len(urls)}; requests it made"
-                    " before the listeners were reattached are not in this log"
-                )
-            return page
-
-        # A separate Random from run_enrichment's own (below): resting the pointer
-        # (#192) is not part of the pacing plan, and drawing it from the same
-        # stream would shift which deltas and dwells that plan draws next. Seeded
-        # from the same `seed` so a rehearsal's *total* wait -- pointer rest
-        # included -- still reproduces line for line, and so time_scale still
-        # divides it exactly (see `test_time_scale_divides_the_waits_and_not_the_plan`).
-        rest_rng = Random(seed)  # noqa: S311 -- reproducibility is the point, not secrecy
-
-        async def scroll(plan: ScrollPlan) -> object:
-            scrolled = await run.scroll(plan, sleep=_scaled_sleep(sleep, time_scale), rng=rest_rng)
-            if recorder.follow(_as_rehearsal_page(scrolled.page)):
-                notes.append(
-                    f"the tab had already been lost before visit {len(urls)} could be"
-                    " scrolled and was reopened first; requests it made before the"
-                    " listeners were reattached are not in this log"
-                )
-            return scrolled
-
         async def on_harvest(harvest: ProfileHarvest) -> None:
             nonlocal harvested
-            harvested += 1
+            if harvest.contact_info is not None:
+                harvested += 1
 
-        source = BrowserProfiles(
-            navigate=navigate,
-            scroll_page=scroll,
-            fetch=PageVoyagerFetch(run, origin=base),
-            origin=base,
-        )
+        extra: dict[str, Any] = {} if overlay_wait_s is None else {"overlay_wait_s": overlay_wait_s}
+        source = PageProfiles(run, origin=base, sleep=_scaled_sleep(sleep, time_scale), **extra)
         # Not a cryptographic use: the seed is printed in the log precisely so a
         # rehearsal can be repeated line for line, which is the opposite of what a
         # secure generator is for.
-        finished = False
-        try:
-            result = await run_enrichment(
-                spec,
-                source,
-                gate,
-                on_harvest=on_harvest,
-                rng=Random(seed),  # noqa: S311
-                clock=lambda: started_at,
-                sleep=_scaled_sleep(sleep, time_scale),
-            )
-            finished = True
-        finally:
-            if urls:
-                grouped.append(recorder.close_visit())
-            # The replica's csrf cookie is for 127.0.0.1 on every port (a cookie
-            # ignores the port), so it is expired before the tab closes rather than
-            # left for its two minutes -- in a `finally`, so a rehearsal that ends
-            # by exception expires it too (#172). Recorded on its own, and checked
-            # like the rest.
-            try:
-                await run.goto(f"{base}{REPLICA_EXPIRE_PATH}")
-            except Exception:
-                if finished:
-                    raise
-                # The job's own exception is the one worth seeing; a tab that
-                # is already gone cannot expire anything anyway.
-                log.warning("could not expire the replica's cookie after the rehearsal failed")
-            cleanup = recorder.close_visit()
+        result = await run_enrichment(
+            spec,
+            source,
+            gate,
+            on_harvest=on_harvest,
+            rng=Random(seed),  # noqa: S311
+            clock=lambda: started_at,
+        )
+        before, grouped = recorder.visits()
 
     stopped = (
         None
@@ -433,23 +380,32 @@ async def rehearse(
     made = [
         RehearsalVisit(
             index=index + 1,
-            url=url,
+            url=source.profile_url(slug),
             scroll=step.scroll,
-            requests=requests,
+            requests=grouped[index] if index < len(grouped) else (),
             planned_wait_s=step.delay_after_s,
             waited_s=gate.waited[index] if index < len(gate.waited) else 0.0,
             burst_break=step.burst_break,
-            fetch_gap_s=result.fetch_gaps_s[index] if index < len(result.fetch_gaps_s) else None,
+            click_pause_s=(
+                result.click_pauses_s[index] if index < len(result.click_pauses_s) else None
+            ),
         )
-        for index, (url, requests, step) in enumerate(
-            zip(urls, grouped, result.plan.steps, strict=False)
-        )
+        for index, (slug, step) in enumerate(zip(chosen, result.plan.steps, strict=False))
+        if index < result.visits
     ]
-
+    notes: list[str] = []
+    if len(grouped) > len(made):
+        notes.append(
+            f"{len(grouped) - len(made)} profile page load(s) were not a visit of the job;"
+            " their requests are listed under AFTER THE LAST VISIT"
+        )
     # Taken after the `async with` block, so it includes anything the tab asked
     # for while it was being closed. That window is not hypothetical: an unload
     # beacon is precisely a request fired on teardown.
-    trailing = recorder.close_visit()
+    trailing = (
+        *(record for group in grouped[len(made) :] for record in group),
+        *recorder.trailing(),
+    )
     if trailing:
         notes.append(
             f"{len(trailing)} request(s) arrived after the last profile visit, during the"
@@ -465,10 +421,11 @@ async def rehearse(
         visits=tuple(made),
         elapsed_s=clock() - origin,
         notes=tuple(notes),
-        trailing=trailing,
+        trailing=tuple(trailing),
         harvested=harvested,
         stopped=stopped,
-        cleanup=cleanup,
+        clicks=result.clicks,
+        before=before,
     )
     _assert_stayed_neutral(rehearsal)
     return rehearsal
@@ -496,8 +453,8 @@ def _scaled_sleep(
 ) -> Callable[[float], Awaitable[None]]:
     """``sleep``, with every wait it is asked for divided by ``time_scale`` first.
 
-    What :meth:`~netkeeper.linkedin.browser.BrowserRun.scroll` is handed in place of
-    the plain ``sleep`` a real run would use: scaling the *wait*, not the *plan*, is
+    What the source's scroll and click pause are handed in place of the plain
+    ``sleep`` a real run would use: scaling the *wait*, not the *plan*, is
     ``rehearse``'s whole point (a scaled rehearsal still records what a run at this
     pacing would actually wait -- see :class:`_RehearsalGate`, which does the same
     division for the pause between profiles).
@@ -546,52 +503,66 @@ def _as_rehearsal_page(page: PageLike) -> RehearsalPage:
 class _Recorder:
     """Listens to one tab and files each request under the visit it happened during.
 
-    Playwright hands the same ``Request`` object to every event about it, so
-    requests are matched to their response by object identity. A request that
-    never finishes simply keeps ``finished_s`` of ``None`` and shows as ``-``
-    in the log, which is information rather than a hole.
+    A visit starts with the tab's navigation to a profile page: a ``document``
+    request whose path is ``/in/<slug>/``. Everything the page asks for until the
+    next one is that visit's. Playwright hands the same ``Request`` object to every
+    event about it, so requests are matched to their response by object identity. A
+    request that never finishes simply keeps ``finished_s`` of ``None`` and shows as
+    ``-`` in the log, which is information rather than a hole.
     """
 
     def __init__(self, clock: Callable[[], float], origin: float) -> None:
         self._clock = clock
         self._origin = origin
         self._attached: set[int] = set()
-        self._open: list[RequestRecord] = []
-        self._by_request: dict[int, int] = {}
+        self._groups: list[list[RequestRecord]] = [[]]
+        self._where: dict[int, tuple[int, int]] = {}
+        self._closed_at: int | None = None
 
-    def follow(self, page: RehearsalPage) -> bool:
-        """Listen to ``page``. True when this is a tab we had not seen before."""
+    def follow(self, page: RehearsalPage) -> None:
+        """Listen to ``page``, once."""
         key = id(page)
         if key in self._attached:
-            return False
+            return
         self._attached.add(key)
         page.on("request", self._on_request)
         page.on("response", self._on_response)
         page.on("requestfailed", self._on_failed)
-        return bool(len(self._attached) > 1)
 
-    def open_visit(self) -> None:
-        self._open = []
-        self._by_request = {}
+    def visits(self) -> tuple[tuple[RequestRecord, ...], list[tuple[RequestRecord, ...]]]:
+        """``(before the first visit, one group per visit)``, as recorded so far.
 
-    def close_visit(self) -> tuple[RequestRecord, ...]:
-        records, self._open = self._open, []
-        self._by_request = {}
-        return tuple(records)
+        Whatever arrives after this call is :meth:`trailing`.
+        """
+        self._closed_at = len(self._groups)
+        before, *groups = (tuple(group) for group in self._groups)
+        return before, groups
+
+    def trailing(self) -> tuple[RequestRecord, ...]:
+        """What arrived after :meth:`visits` was taken: the tab's teardown."""
+        start = self._closed_at if self._closed_at is not None else len(self._groups)
+        return tuple(record for group in self._groups[start:] for record in group)
 
     def _now(self) -> float:
         return self._clock() - self._origin
 
     def _on_request(self, request: RequestLike) -> None:
-        self._by_request[id(request)] = len(self._open)
-        self._open.append(
-            RequestRecord(
-                method=request.method,
-                url=request.url,
-                resource_type=_resource_type(request),
-                started_s=self._now(),
-            )
+        record = RequestRecord(
+            method=request.method,
+            url=request.url,
+            resource_type=_resource_type(request),
+            started_s=self._now(),
         )
+        opens_visit = (
+            self._closed_at is None
+            and record.resource_type == "document"
+            and profile_slug(urlsplit(record.url).path) is not None
+        )
+        if opens_visit or (self._closed_at is not None and len(self._groups) == self._closed_at):
+            self._groups.append([])
+        group = self._groups[-1]
+        self._where[id(request)] = (len(self._groups) - 1, len(group))
+        group.append(record)
 
     def _on_response(self, response: ResponseLike) -> None:
         self._finish(response.request, status=response.status, failure=None)
@@ -600,14 +571,12 @@ class _Recorder:
         self._finish(request, status=None, failure="the browser reported the request failed")
 
     def _finish(self, request: RequestLike, *, status: int | None, failure: str | None) -> None:
-        index = self._by_request.get(id(request))
-        if index is None:
-            # A request that started before this visit opened, or on a tab we
-            # stopped following. Recording it under the wrong visit would be
-            # worse than leaving it out of the timing.
-            return
-        record = self._open[index]
-        self._open[index] = RequestRecord(
+        where = self._where.get(id(request))
+        if where is None:
+            return  # a request that started before we listened
+        group, index = where
+        record = self._groups[group][index]
+        self._groups[group][index] = RequestRecord(
             method=record.method,
             url=record.url,
             resource_type=record.resource_type,
@@ -673,19 +642,17 @@ def _is_linkedin(host: str) -> bool:
 
 # --- the neutral site ----------------------------------------------------------
 
-_PROFILE_PAGE: Final = b"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<title>netkeeper rehearsal replica</title>
-<link rel="stylesheet" href="/static/replica.css">
-</head><body>
-<h1 id="marker">netkeeper rehearsal replica</h1>
-<img src="/static/avatar.svg" alt="" width="96" height="96">
-<p>A profile-shaped page on this machine's loopback. No real profile, no real site.</p>
-<div class="tall">a page tall enough to scroll like a person would</div>
-</body></html>
-"""
-
-_REPLICA_CSS: Final = b".tall { height: 4000px; } body { font-family: sans-serif; }\n"
+#: flagship-web's layout (#192): a fixed header at the top left, and the content scrolling
+#: inside its own container rather than the window.
+_REPLICA_CSS: Final = (
+    b"body { margin: 0; font-family: sans-serif; }"
+    b" #hdr { position: fixed; top: 0; left: 0; right: 0; height: 52px; background: #eee;"
+    b" z-index: 2; }"
+    b" #content { position: fixed; top: 52px; bottom: 0; left: 0; right: 0; overflow: auto; }"
+    b" .tall { height: 4000px; }"
+    b" #overlay { position: fixed; top: 20%; left: 20%; background: #fff; border: 1px solid;"
+    b" z-index: 3; }\n"
+)
 
 _AVATAR_SVG: Final = (
     b'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96">'
@@ -699,83 +666,355 @@ REDACTED_HEADERS: Final[frozenset[str]] = frozenset(
 )
 REDACTED: Final = "<redacted>"
 
+#: The lazy card the replica's page asks for once it is scrolled, as a profile's does.
+REPLICA_COMPONENT_ID: Final = (
+    "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsExperienceOnly"
+)
 
-#: The csrf cookie the replica's profile page sets, so the in-page fetch has one to
-#: read (see the module docstring). Invented, and gone two minutes after the last
-#: profile page set it.
-REPLICA_COOKIE: Final = 'JSESSIONID="ajax:netkeeper-rehearsal-replica"; Path=/; Max-Age=120'
-
-#: Where a rehearsal sends the tab when it is done, to expire that cookie at once.
-REPLICA_EXPIRE_PATH: Final = "/expire-cookie"
-REPLICA_EXPIRED_COOKIE: Final = "JSESSIONID=; Path=/; Max-Age=0"
+#: How far the replica's page must be scrolled before it asks for its lazy card.
+REPLICA_LAZY_AFTER_PX: Final = 200
 
 
-def replica_voyager(path: str) -> bytes | None:
-    """The replica's answer at a Voyager path, or ``None`` when ``path`` is not one.
+def replica_urn(slug: str) -> str:
+    """The invented URN the replica's page for ``slug`` carries. ``ACoAAREHEARSAL`` and digits."""
+    fake = sum(ord(c) for c in slug) % 10_000_000
+    return f"urn:li:fsd_profile:ACoAAREHEARSAL{fake:07d}"
 
-    Invented people in the shapes :mod:`netkeeper.linkedin.voyager` parses, named
-    after the slug asked for: fake URNs, ``example.test`` addresses, a company that
-    does not exist. Shared with the offline tests so the fake tab answers exactly
-    what the served replica does.
-    """
-    split = urlsplit(path)
-    prefix, _, suffix = CONTACT_INFO_PATH_TEMPLATE.partition("{public_id}")
-    if split.path.startswith(prefix) and split.path.endswith(suffix):
-        slug = unquote(split.path[len(prefix) : -len(suffix)])
-        return json.dumps(
-            {
-                "emailAddress": f"{slug}@example.test",
-                "websites": [
-                    {"url": f"https://{slug}.example.test", "category": {"type": "PERSONAL"}}
-                ],
-            }
-        ).encode()
-    if split.path == PROFILE_PATH:
-        slug = parse_qs(split.query).get("memberIdentity", ["rehearsal"])[0]
-        first, _, last = slug.removeprefix("rehearsal-").partition("-")
-        fake = sum(ord(c) for c in slug) % 10_000_000
-        return json.dumps(
-            {
-                "data": {
-                    "entityUrn": f"urn:li:fsd_profile:ACoAAREHEARSAL{fake:07d}",
-                    "publicIdentifier": slug,
-                    "firstName": first.title() or "Rehearsal",
-                    "lastName": last.title() or "Replica",
-                    "headline": "A rehearsal profile on this machine's loopback",
+
+def _replica_name(slug: str) -> tuple[str, str]:
+    first, _, last = slug.removeprefix("rehearsal-").partition("-")
+    return first.title() or "Rehearsal", last.title() or "Replica"
+
+
+def _flight(rows: Sequence[tuple[str, str, object]]) -> bytes:
+    """Flight rows, ``<id>:<tag><json>``, one per line (``I`` for an import, else no tag)."""
+    lines = [f"{row}:{tag}{json.dumps(value, separators=(',', ':'))}" for row, tag, value in rows]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _el(kind: str, props: dict[str, Any]) -> list[Any]:
+    return ["$", kind, None, props]
+
+
+def _navigate(screen_id: str, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "$type": "proto.sdui.actions.core.Navigate",
+        "value": {
+            "content": {
+                "$case": "screen",
+                "screen": {
+                    "$type": "proto.sdui.actions.core.NavigateToScreen",
+                    "screenId": screen_id,
+                    "url": url,
+                    "requestedArguments": {
+                        "$type": "proto.sdui.actions.requests.RequestedArguments",
+                        "payload": payload,
+                    },
                 },
-                "included": [
-                    {
-                        "entityUrn": f"urn:li:fsd_position:(ACoAAREHEARSAL{fake:07d},1)",
-                        "$type": "com.linkedin.voyager.dash.identity.profile.Position",
-                        "title": "Rehearsal Profile",
-                        "companyName": "Loopback Replica Co",
-                        "dateRange": {"start": {"year": 2020, "month": 1}},
-                    }
-                ],
             }
-        ).encode()
-    return None
+        },
+    }
+
+
+def replica_screen(slug: str) -> bytes:
+    """The replica's profile screen, in the shape ``flagship_profile.parse_profile`` reads.
+
+    Invented throughout: the name comes from the slug, the URN from :func:`replica_urn`,
+    the headline and location name this machine. The experience card is lazy: the
+    page asks for it when scrolled (:func:`replica_experience`).
+    """
+    first, last = _replica_name(slug)
+    contact = _el(
+        "$L1",
+        {
+            "action": {
+                "actions": [
+                    _navigate(
+                        CONTACT_DETAILS_SCREEN_ID,
+                        f"/in/{slug}/overlay/contact-info/",
+                        {
+                            "vanityName": slug,
+                            "givenName": first,
+                            "familyName": last,
+                            "isVanityNameResolved": True,
+                        },
+                    )
+                ]
+            },
+            "children": ["Contact info"],
+        },
+    )
+    message = _el(
+        "$L1",
+        {
+            "action": {
+                "actions": [
+                    _navigate(
+                        "replica.messaging.Compose",
+                        "/messaging/compose/",
+                        {
+                            "firstName": first,
+                            "lastName": last,
+                            "vanityName": slug,
+                            "profileUrn": replica_urn(slug),
+                        },
+                    )
+                ]
+            },
+            "children": ["Message"],
+        },
+    )
+    runs = [
+        "· 1st",
+        "A rehearsal profile on this machine's loopback",
+        "Loopback, Localhost",
+        "·",
+        contact,
+        "500+ connections",
+    ]
+    top = _el(
+        "$L2",
+        {
+            "componentKey": "replica-top-card",
+            "viewTrackingSpecs": {"viewName": "profile-top-card"},
+            "children": [
+                _el(
+                    "section",
+                    {"children": [_el("$L1", {"textProps": {"children": [run]}}) for run in runs]},
+                ),
+                message,
+            ],
+        },
+    )
+    return _flight(
+        [
+            ("1", "I", ["replica-chunk-1", [], "default"]),
+            ("2", "I", ["replica-chunk-2", [], "ClientComponent"]),
+            ("3", "", top),
+            ("0", "", [_el("main", {"children": ["$L3"]})]),
+        ]
+    )
+
+
+def replica_experience(slug: str) -> bytes:
+    """The replica's lazy experience card: one invented role."""
+    role = _el(
+        "li",
+        {
+            "children": [
+                _el("$L1", {"textProps": {"children": [run]}})
+                for run in (
+                    "Rehearsal Profile",
+                    "Loopback Replica Co · Full-time",
+                    "Jan 2020 - Present · 6 yrs 9 mos",
+                )
+            ]
+        },
+    )
+    card = _el(
+        "$L2",
+        {
+            "componentKey": "replica-experience",
+            "viewTrackingSpecs": {"viewName": "profile-card-experience"},
+            "children": [
+                _el("$L1", {"textProps": {"tagName": "h2", "children": ["Experience"]}}),
+                _el("ul", {"children": [role]}),
+            ],
+        },
+    )
+    return _flight(
+        [
+            ("1", "I", ["replica-chunk-1", [], "default"]),
+            ("2", "I", ["replica-chunk-2", [], "ClientComponent"]),
+            ("0", "", [card]),
+        ]
+    )
+
+
+def replica_contact_info(slug: str) -> bytes:
+    """The replica's contact-info overlay: the profile link, a website, an email."""
+
+    def link(url: str, shown: str) -> list[Any]:
+        return _el(
+            "$L1",
+            {
+                "action": {
+                    "actions": [
+                        {
+                            "$type": "proto.sdui.actions.core.Navigate",
+                            "value": {
+                                "content": {
+                                    "$case": "url",
+                                    "url": {
+                                        "$type": "proto.sdui.actions.core.NavigateToUrl",
+                                        "urlValue": {"$case": "url", "url": url},
+                                    },
+                                }
+                            },
+                        }
+                    ]
+                },
+                "children": [shown],
+            },
+        )
+
+    def section(view: str, heading: str, links: list[list[Any]]) -> list[Any]:
+        return _el(
+            "$L1",
+            {
+                "viewTrackingSpecs": {"viewName": view},
+                "children": _el("div", {"children": [_el("p", {"children": [heading]}), *links]}),
+            },
+        )
+
+    body = _el(
+        "div",
+        {
+            "data-testid": "replica-overlay",
+            "children": [
+                section(
+                    "contact-your-profile",
+                    "Your Profile",
+                    [link(f"/in/{slug}/", f"loopback/in/{slug}")],
+                ),
+                section(
+                    "contact-website",
+                    "Website",
+                    [link(f"https://{slug}.example.test/", f"{slug}.example.test")],
+                ),
+                section(
+                    "contact-email",
+                    "Email",
+                    [link(f"mailto:{slug}@example.test", f"{slug}@example.test")],
+                ),
+            ],
+        },
+    )
+    return _flight(
+        [("1", "I", ["replica-chunk-1", [], "default"]), ("2", "", body), ("0", "", ["$L2"])]
+    )
+
+
+def _profile_page(slug: str) -> bytes:
+    """The replica's profile page: its screen in ``rehydrate-data``, and a page to act on.
+
+    The page's own script is what asks for the lazy card when it is scrolled and for
+    the overlay when **Contact info** is clicked -- the page's requests, as on the real
+    site. netkeeper only scrolls and clicks.
+    """
+    screen = replica_screen(slug).decode("utf-8")
+    size = len(screen) // 2 + 1
+    chunks = json.dumps([screen[:size], screen[size:]]).replace("</", "<\\/")
+    first, last = _replica_name(slug)
+    config = json.dumps(
+        {
+            "slug": slug,
+            "first": first,
+            "last": last,
+            "screenId": CONTACT_DETAILS_SCREEN_ID,
+            "navigation": NAVIGATION_PATH,
+            "component": COMPONENT_PATH,
+            "componentId": REPLICA_COMPONENT_ID,
+            "lazyAfter": REPLICA_LAZY_AFTER_PX,
+        }
+    ).replace("</", "<\\/")
+    href = f"{PROFILE_PAGE_PREFIX}{slug}/overlay/contact-info/"
+    page = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>netkeeper rehearsal replica</title>
+<link rel="stylesheet" href="/static/replica.css">
+</head><body>
+<header id="hdr">netkeeper rehearsal replica</header>
+<main id="content">
+<h1 id="marker">netkeeper rehearsal replica</h1>
+<img src="/static/avatar.svg" alt="" width="96" height="96">
+<p>A profile-shaped page on this machine's loopback. No real profile, no real site.</p>
+<p>{first} {last} &middot; <a id="contact-info" href="{href}">Contact info</a></p>
+<div class="tall">a page tall enough to scroll like a person would</div>
+</main>
+<div id="overlay" hidden></div>
+<script id="{REHYDRATION_SCRIPT_ID}">window.{REHYDRATION_GLOBAL} = {chunks};</script>
+<script>
+(function () {{
+  var c = {config};
+  var asked = false;
+  var content = document.getElementById("content");
+  content.addEventListener("scroll", function () {{
+    if (asked || content.scrollTop < c.lazyAfter) return;
+    asked = true;
+    fetch(c.component + "?componentId=" + encodeURIComponent(c.componentId), {{
+      method: "POST",
+      headers: {{"content-type": "application/json"}},
+      body: JSON.stringify({{componentId: c.componentId, vanityName: c.slug}})
+    }});
+  }});
+  document.getElementById("contact-info").addEventListener("click", function (event) {{
+    event.preventDefault();
+    var body = {{
+      clientArguments: {{
+        requestedStateKeys: [],
+        payload: {{vanityName: c.slug, givenName: c.first, familyName: c.last,
+                   isVanityNameResolved: true}},
+        states: [],
+        screenId: c.screenId,
+        knownTemplateIds: []
+      }},
+      isModal: true
+    }};
+    fetch(c.navigation + "?screenId=" + encodeURIComponent(c.screenId) + "&sduiid=replica", {{
+      method: "POST",
+      headers: {{"content-type": "application/json"}},
+      body: JSON.stringify(body)
+    }}).then(function (answer) {{ return answer.text(); }}).then(function () {{
+      var overlay = document.getElementById("overlay");
+      overlay.hidden = false;
+      overlay.textContent = "Contact info";
+    }});
+  }});
+}})();
+</script>
+</body></html>
+"""
+    return page.encode("utf-8")
 
 
 class _ReplicaHandler(BaseHTTPRequestHandler):
-    """A profile page, a stylesheet, an image, and the two profile endpoints a visit fetches."""
+    """A profile page, its stylesheet and image, and the two answers its script asks for."""
 
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:
-        voyager = replica_voyager(self.path)
-        if voyager is not None:
-            self._send(voyager, "application/json")
-        elif self.path.startswith("/static/replica.css"):
+        path = urlsplit(self.path).path
+        slug = profile_slug(path)
+        if path.startswith("/static/replica.css"):
             self._send(_REPLICA_CSS, "text/css; charset=utf-8")
-        elif self.path.startswith("/static/avatar.svg"):
+        elif path.startswith("/static/avatar.svg"):
             self._send(_AVATAR_SVG, "image/svg+xml")
-        elif self.path.startswith("/headers"):
+        elif path.startswith("/headers"):
             self._send(json.dumps(self._echoed_headers()).encode(), "text/plain; charset=utf-8")
-        elif self.path.startswith(REPLICA_EXPIRE_PATH):
-            self._send(b"done\n", "text/plain; charset=utf-8", cookie=REPLICA_EXPIRED_COOKIE)
+        elif slug is not None:
+            self._send(_profile_page(slug), "text/html; charset=utf-8")
         else:
-            self._send(_PROFILE_PAGE, "text/html; charset=utf-8", cookie=REPLICA_COOKIE)
+            self._send(b"not found\n", "text/plain; charset=utf-8", status=404)
+
+    def do_POST(self) -> None:
+        path = urlsplit(self.path).path
+        length = int(self.headers.get("content-length") or 0)
+        raw = self.rfile.read(min(length, 65_536)) if length > 0 else b""
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            body = {}
+        if path == COMPONENT_PATH:
+            slug = body.get("vanityName") if isinstance(body, dict) else None
+            self._send(replica_experience(str(slug or "rehearsal")), "application/octet-stream")
+        elif path == NAVIGATION_PATH:
+            arguments = body.get("clientArguments") if isinstance(body, dict) else None
+            payload = arguments.get("payload") if isinstance(arguments, dict) else None
+            slug = payload.get("vanityName") if isinstance(payload, dict) else None
+            self._send(replica_contact_info(str(slug or "rehearsal")), "application/octet-stream")
+        else:
+            self._send(b"not found\n", "text/plain; charset=utf-8", status=404)
 
     def _echoed_headers(self) -> dict[str, str]:
         """The request's headers, with anything bearing a credential redacted.
@@ -793,12 +1032,10 @@ class _ReplicaHandler(BaseHTTPRequestHandler):
             for name, value in self.headers.items()
         }
 
-    def _send(self, body: bytes, content_type: str, *, cookie: str | None = None) -> None:
-        self.send_response(200)
+    def _send(self, body: bytes, content_type: str, *, status: int = 200) -> None:
+        self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        if cookie is not None:
-            self.send_header("Set-Cookie", cookie)
         self.end_headers()
         self.wfile.write(body)
 
@@ -847,9 +1084,9 @@ def render(rehearsal: Rehearsal) -> str:
     for visit in rehearsal.visits:
         lines.extend(_visit_lines(visit))
         lines.append("")
-    if rehearsal.cleanup:
-        lines.append("CLEANUP  (the replica's csrf cookie, expired)")
-        lines.extend(f"  {line}" for line in _request_table(rehearsal.cleanup).splitlines())
+    if rehearsal.before:
+        lines.append("BEFORE THE FIRST VISIT")
+        lines.extend(f"  {line}" for line in _request_table(rehearsal.before).splitlines())
         lines.append("")
     if rehearsal.trailing:
         lines.append("AFTER THE LAST VISIT  (the tab's own teardown)")
@@ -887,10 +1124,13 @@ def _visit_lines(visit: RehearsalVisit) -> list[str]:
         f"  scrolled {len(visit.scroll.steps)} times over {visit.scrolled_px} px,"
         f" dwelled {visit.scroll.dwell_s:.1f}s"
     )
-    if visit.fetch_gap_s is not None:
+    if visit.click_pause_s is not None:
         lines.append(
-            f"  paused {visit.fetch_gap_s:.1f}s between the profile and contact-info fetches"
+            f"  scrolled back to the top, paused {visit.click_pause_s:.1f}s, then clicked"
+            " Contact info once"
         )
+    else:
+        lines.append("  clicked nothing")
     if visit.planned_wait_s is None:
         lines.append("  no wait after the last profile of the run")
     else:
@@ -902,24 +1142,18 @@ def _visit_lines(visit: RehearsalVisit) -> list[str]:
 
 
 def _summary_lines(rehearsal: Rehearsal) -> list[str]:
-    """The verdict, qualified exactly as far as the log can support it.
+    """The verdict, as far as the log can support it.
 
-    An unqualified "nothing reached linkedin.com" is a claim about the run. It
-    is only true of the *log* once something is known to be missing from the
-    log -- after a tab loss, the navigation on the reopened tab happens before
-    the listeners are reattached. Printing the absolute claim above a note
-    saying the log is incomplete is the shape of over-claiming this whole
-    module exists to avoid, so the claim shrinks when the note appears.
+    The log is complete: the recorder listens to the run's tab from before the first
+    navigation, and a tab that is lost mid-run ends the rehearsal (the source stops
+    trusting a tab it is no longer listening to), so there is no reopened tab whose
+    first requests the log could have missed. Requests outside every visit -- before
+    the first, or during the teardown -- are listed and checked like the rest.
     """
     hosts = ", ".join(rehearsal.hosts) or "none"
-    complete = not rehearsal.notes
     verdict = (
         "every request above went to the loopback replica. Nothing reached linkedin.com,"
         " and a rehearsal that had would have raised instead of printing this."
-        if complete
-        else "nothing *in this log* reached linkedin.com, and a rehearsal whose log showed"
-        " otherwise would have raised instead of printing this -- but some requests are"
-        " missing from this log; see the notes below."
     )
     lines = [
         f"{len(rehearsal.visits)} visits, {len(rehearsal.requests)} requests,"
@@ -927,8 +1161,9 @@ def _summary_lines(rehearsal: Rehearsal) -> list[str]:
         verdict,
         f"elapsed {rehearsal.elapsed_s:.1f}s; a run at this pacing would have waited"
         f" {rehearsal.planned_wait_s:.1f}s between profiles.",
-        f"{rehearsal.harvested} of {len(rehearsal.visits)} visits harvested the profile's"
-        " details and contact info through the in-page API.",
+        f"{rehearsal.harvested} of {len(rehearsal.visits)} visits read the profile and its"
+        f" contact info from what the page loaded, with {rehearsal.clicks} Contact info"
+        " click(s) in all; netkeeper sent none of the page's requests itself.",
     ]
     if rehearsal.stopped is not None:
         lines.append(

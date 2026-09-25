@@ -8,7 +8,7 @@ warm-up-ramped, weekend-damped, heat-shrunk allowance; nothing at all while the
 session is flagged or heat is over the skip threshold; the budget spent before
 the navigation, never after.
 
-The tab is :class:`voyager_profiles.FakeBrowser`: invented people, served from
+The tab is :class:`profile_fakes.FakeBrowser`: invented people, served from
 memory, every navigation recorded. No socket, no browser, no real sleeping.
 """
 
@@ -22,8 +22,7 @@ from zoneinfo import ZoneInfo
 
 import factories
 import pytest
-from sqlalchemy.orm import Session, sessionmaker
-from voyager_profiles import (
+from profile_fakes import (
     BAD_REQUEST,
     CHECKPOINT,
     LOGGED_OUT,
@@ -35,6 +34,7 @@ from voyager_profiles import (
     Profile,
     Scripted,
 )
+from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import BudgetSettings, LinkedInSettings, Settings
 from netkeeper.db import session_scope
@@ -133,15 +133,17 @@ async def _enrich(
     sleeps: Sleeps | None = None,
     resume_of: int | None = None,
 ) -> EnrichRunReport:
+    sleep = sleeps or Sleeps()
     kwargs = {
         "settings": settings,
         "clock": clock or Clock(),
-        "sleep": sleeps or Sleeps(),
+        "sleep": sleep,
         "rng": random.Random(SEED),
     }
+    source = browser.source(sleep=sleep)
     if resume_of is None:
-        return await enrich_contacts(factory, user_id, browser.source(), **kwargs)  # type: ignore[arg-type]
-    return await resume_enrichment(factory, user_id, resume_of, browser.source(), **kwargs)  # type: ignore[arg-type]
+        return await enrich_contacts(factory, user_id, source, **kwargs)  # type: ignore[arg-type]
+    return await resume_enrichment(factory, user_id, resume_of, source, **kwargs)  # type: ignore[arg-type]
 
 
 def _read[T](factory: sessionmaker[Session], user_id: int, read: Callable[[Session, User], T]) -> T:
@@ -305,7 +307,7 @@ async def test_warm_heat_shrinks_the_run_and_stretches_the_waits(
     warm = replace(configured.delay, median=configured.delay.median * 2.0)
     expected = plan_enrichment(random.Random(SEED), 5, delay=warm, burst=configured.burst)
     assert report.result.plan == expected
-    gaps = sum(g or 0.0 for g in report.result.fetch_gaps_s)  # between each visit's fetches
+    gaps = sum(g or 0.0 for g in report.result.click_pauses_s)  # between each visit's fetches
     assert sum(sleeps.waits) == pytest.approx(expected.total_delay_s + gaps)
 
 
@@ -352,7 +354,7 @@ async def test_budget_spent_elsewhere_mid_run_stops_the_next_visit(
 
     def spend_the_rest(kind: str, value: object) -> None:
         nonlocal fired
-        if kind == "contact_info" and not fired:
+        if kind == "click" and not fired:
             fired = True
             with session_scope(session_factory, write=True) as session:
                 user = session.get(User, user_id)
@@ -521,12 +523,12 @@ async def test_a_profile_not_found_is_recorded_and_the_run_goes_on(
 def _cancel_after(
     factory: sessionmaker[Session], user_id: int, visits: int
 ) -> Callable[[str, object], None]:
-    """An ``on_event`` that asks the running plan to stop once ``visits`` harvests are fetched."""
+    """An ``on_event`` that asks the running plan to stop once ``visits`` clicks are made."""
     seen = 0
 
     def on_event(kind: str, value: object) -> None:
         nonlocal seen
-        if kind != "contact_info":
+        if kind != "click":
             return
         seen += 1
         if seen != visits:
@@ -555,7 +557,7 @@ async def test_cancel_stops_between_profiles_and_keeps_what_completed(
     assert browser.visited() == [p.slug for p in people[:2]]
     # The whole wait after the first profile, then one slice of the next and the check.
     steps = report.result.plan.steps
-    gaps = sum(g or 0.0 for g in report.result.fetch_gaps_s)
+    gaps = sum(g or 0.0 for g in report.result.click_pauses_s)
     assert sum(sleeps.waits[:-1]) == pytest.approx((steps[0].delay_after_s or 0.0) + gaps)
     assert sleeps.waits[-1] == min(CANCEL_SLICE_S, steps[1].delay_after_s or 0.0)
     plan = _plan(session_factory, user_id, report)
@@ -724,7 +726,7 @@ async def test_the_waits_between_profiles_are_sliced_for_cancel(
 
     report = await _enrich(session_factory, user_id, FakeBrowser.of(people), sleeps=sleeps)
 
-    gaps = [g for g in report.result.fetch_gaps_s if g is not None]
+    gaps = [g for g in report.result.click_pauses_s if g is not None]
     pauses = list(sleeps.waits)
     for gap in gaps:  # the pause between two fetches is not a cancel slice
         pauses.remove(gap)
@@ -781,11 +783,11 @@ async def test_the_gate_checks_the_cancel_flag_before_a_visit_as_well(
     assert _spent(session_factory, user_id) == 0
 
 
-async def test_a_broken_fetch_aborts_the_plan_and_says_nothing_about_the_session(
+async def test_a_broken_observation_aborts_the_plan_and_says_nothing_about_the_session(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """``VoyagerFetchError`` carries no response: no heat, no flag, the plan resumable."""
-    from netkeeper.linkedin.fetch import VoyagerFetchError
+    """``ObservationFailed`` carries no answer: no heat, no flag, the plan resumable."""
+    from netkeeper.linkedin.observe import ObservationFailed
 
     people = _people(4)
     user_id, _ = _setup(session_factory, people)
@@ -793,10 +795,10 @@ async def test_a_broken_fetch_aborts_the_plan_and_says_nothing_about_the_session
 
     def plumbing_breaks(kind: str, value: object) -> None:
         if kind == "details" and browser.kinds().count("details") == 3:
-            raise VoyagerFetchError("the in-page fetch failed")
+            raise ObservationFailed("a matching response was dropped")
 
     browser.on_event = plumbing_breaks
-    with pytest.raises(VoyagerFetchError):
+    with pytest.raises(ObservationFailed):
         await _enrich(session_factory, user_id, browser)
 
     died = _last_run(session_factory, user_id)
@@ -1011,3 +1013,119 @@ async def test_a_refused_run_is_recorded_failed_with_its_reason(
     run = _last_run(session_factory, user_id)
     assert (run.status, run.stop_reason) == ("failed", "session_flagged")
     assert run.plan_json is None and browser.visited() == []
+
+
+# --- #190: the page's own answers, and the one click ----------------------------------------------
+
+
+async def test_the_runner_hands_the_job_each_contacts_urn(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A slug that now belongs to somebody else: the job sees another id and does not
+    click; the core records the mismatch and writes nothing."""
+    people = _people(3)
+    user_id, ids = _setup(session_factory, people)
+    browser = FakeBrowser.of(people, urns={people[1].slug: "urn:li:fsd_profile:ACoAAFAKE9999999"})
+    report = await _enrich(session_factory, user_id, browser)
+    assert browser.clicks == [people[0].slug, people[2].slug]
+    assert report.harvests.mismatch == 1 and report.harvests.applied == 2
+    stranger = _contact(session_factory, user_id, ids[people[1].n])
+    assert stranger.last_enriched_at is None and stranger.headline is None
+    assert stranger.li_enrich_attempted_at is not None  # the attempt still counts
+
+
+async def test_one_budgeted_unit_covers_the_page_load_the_scroll_and_the_click(
+    session_factory: sessionmaker[Session],
+) -> None:
+    people = _people(4)
+    user_id, _ = _setup(session_factory, people)
+    browser = FakeBrowser.of(people)
+    report = await _enrich(session_factory, user_id, browser)
+    assert _spent(session_factory, user_id) == report.result.visits == 4
+    assert len(browser.clicks) == report.result.clicks == 4
+    assert "contact_info_fetches" not in report.counts()
+
+
+async def test_a_visit_read_from_the_page_is_written_and_never_takes_a_value_away(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """End to end through the real source (#190's done-when): the page's profile and
+    overlay become the contact's fields, and a later visit that reads less -- no
+    location, no email -- takes nothing away."""
+    from flagship_pages import Role, Website, contact_info_payload, profile_payload
+    from profile_site import ProfilePage, ProfileSite
+    from run_fakes import fake_provider
+    from voyager_pages import PEOPLE as CAST
+
+    from netkeeper.linkedin.page_profiles import PageProfiles
+
+    person = CAST[0]
+    user_id, ids = _setup(
+        session_factory,
+        [Profile(person.n, person.first, person.last, public_id=person.slug)],
+    )
+    full = ProfilePage(
+        person,
+        screen=profile_payload(
+            person,
+            location="Faketown, State of Example",
+            roles=[
+                Role("Staff Engineer", "Fictional Robotics Co", "Full-time", "Aug 2021 - Present")
+            ],
+        ),
+        overlay=contact_info_payload(
+            person,
+            emails=["priya.fake@example.test"],
+            websites=[Website("https://priya-fake.example.test")],
+        ),
+    )
+    sparse = ProfilePage(
+        person,
+        screen=profile_payload(person, location=None),
+        overlay=contact_info_payload(person),
+    )
+
+    async def run_once(page: ProfilePage, at: datetime) -> EnrichRunReport:
+        provider, _ = fake_provider(ProfileSite([page]))
+        async with provider.run("account-1") as run:
+            source = PageProfiles(
+                run, sleep=Sleeps(), landing_wait_s=0.05, lazy_wait_s=0.01, overlay_wait_s=0.05
+            )
+            with session_scope(session_factory, write=True) as session:
+                user = session.get(User, user_id)
+                assert user is not None
+                row = get_scoped(session, user, Contact, ids[person.n])
+                assert row is not None
+                row.enrich_priority = 1  # something asked: visit again within the stale window
+            return await enrich_contacts(
+                session_factory,
+                user_id,
+                source,
+                settings=SMALL,
+                clock=Clock(at),
+                sleep=Sleeps(),
+                rng=random.Random(SEED),
+            )
+
+    first = await run_once(full, NOW)
+    assert first.harvests.applied == 1
+    contact = _contact(session_factory, user_id, ids[person.n])
+    assert contact.headline == person.headline
+    assert contact.location == "Faketown, State of Example"
+    assert (contact.current_title, contact.current_company) == (
+        "Staff Engineer",
+        "Fictional Robotics Co",
+    )
+
+    second = await run_once(sparse, NOW + timedelta(days=1))
+    assert second.harvests.applied == 1
+    again = _contact(session_factory, user_id, ids[person.n])
+    assert again.location == "Faketown, State of Example"
+    assert again.current_title == "Staff Engineer"
+
+    def emails(session: Session, user: User) -> list[str]:
+        row = get_scoped(session, user, Contact, ids[person.n])
+        assert row is not None
+        return [email.email for email in row.emails]
+
+    assert _read(session_factory, user_id, emails) == ["priya.fake@example.test"]

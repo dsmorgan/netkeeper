@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from collections.abc import Callable, Sequence
 from random import Random
 from typing import Any
@@ -42,28 +41,43 @@ from urllib.parse import urlsplit
 
 import httpx
 import pytest
-from browser_fakes import FakeBrowser, FakeConnector, FakeContext, FakePage
+from browser_fakes import FakeBrowser, FakeConnector, FakeContext, FakeMouse, FakePage
+from flagship_site import FakeResponse
+from profile_site import SiteRequest
 
-from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserRun, PageLike, ScrollOutcome
+from netkeeper.linkedin.browser import AttachBrowserProvider, BrowserUnavailable, PageLike
+from netkeeper.linkedin.flagship import CONTACT_DETAILS_SCREEN_ID, NAVIGATION_PATH
+from netkeeper.linkedin.flagship_profile import (
+    COMPONENT_PATH,
+    parse_contact_info,
+    parse_profile,
+    profile_slug,
+)
 from netkeeper.linkedin.pacing import (
     DEFAULT_BURST_PROFILE,
     DEFAULT_DELAY_PROFILE,
     BurstProfile,
     DelayProfile,
+    depth_after,
+    human_delay,
     plan_enrichment,
-    rest_pointer_like_a_person,
+    scroll_back_to_top,
 )
 from netkeeper.linkedin.rehearse import (
     LINKEDIN_HOST,
     LOOPBACK_HOSTS,
     REHEARSAL_SLUGS,
+    REPLICA_COMPONENT_ID,
     NotANeutralSite,
     Rehearsal,
     _is_linkedin,
+    _profile_page,
     _require_neutral,
     rehearse,
     render,
-    replica_voyager,
+    replica_contact_info,
+    replica_experience,
+    replica_urn,
     serve_replica,
 )
 
@@ -75,35 +89,23 @@ CDP = "http://127.0.0.1:9222"
 # --- a browser that is not a browser -------------------------------------------
 
 
-class FakeRequest:
-    """What Playwright hands a ``request`` listener."""
-
-    def __init__(self, url: str, *, method: str = "GET", resource_type: str = "document") -> None:
-        self.url = url
-        self.method = method
-        self.resource_type = resource_type
-
-
-class FakeResponse:
-    """What Playwright hands a ``response`` listener."""
-
-    def __init__(self, request: FakeRequest, status: int = 200) -> None:
-        self.request = request
-        self.status = status
-
-
 class ReplayPage(FakePage):
-    """A tab that emits the requests a page load makes, and can lose itself on cue.
+    """A tab that behaves like the replica's profile page, and can lose itself on cue.
 
-    ``mouse`` comes from the shared :class:`FakePage` base now that
-    ``BrowserRun.scroll`` (#152) is what replays a scroll plan against it, rather
-    than this module's own (formerly separate) ``_replay_scroll``.
+    Navigating to ``/in/<slug>/`` "loads" the page: the document (the replica's own
+    HTML, with its screen in ``rehydrate-data``), its stylesheet, its image, and any
+    ``extra_requests``. The first scroll down makes the page ask for its lazy card,
+    and the one Contact info control, found by ``get_by_role``, makes it ask for the
+    overlay when clicked -- the replica script's requests, answered with the
+    replica's own answers. Every request and response reaches the listeners the way
+    Playwright reports them, so both the rehearsal's log and the source's observation
+    read them.
 
-    With ``context.fetch`` it really fetches each url over loopback and reports
-    the status it got, instead of fabricating one. That is what the CLI test
-    uses, because a fabricated 200 cannot tell a live replica from a port
-    nothing is listening on -- and "the command starts a replica that really
-    serves" is exactly what that test is for.
+    With ``context.fetch`` it really fetches each url over loopback and reports the
+    status and body it got, instead of computing them. That is what the CLI test uses,
+    because a computed 200 cannot tell a live replica from a port nothing is
+    listening on -- and "the command starts a replica that really serves" is exactly
+    what that test is for.
     """
 
     def __init__(self, context: ReplayContext, *, fail_at: int | None = None) -> None:
@@ -111,12 +113,17 @@ class ReplayPage(FakePage):
         self.handlers: dict[str, list[Callable[[Any], None]]] = {}
         self.fail_at = fail_at
         self.goto_count = 0
-        self._extra: tuple[str, ...] = context.extra_requests
-        self._on_close: tuple[str, ...] = context.unload_requests
-        self._fetch = context.fetch
+        self.replay = context
+        self.slug: str | None = None
+        self.asked_lazy = False
+        self.clicks = 0
+        self.mouse = _ReplayMouse(self)
 
     def on(self, event: str, handler: Callable[[Any], None]) -> None:
         self.handlers.setdefault(event, []).append(handler)
+
+    def remove_listener(self, event: str, handler: Callable[[Any], None]) -> None:
+        self.handlers.get(event, []).remove(handler)
 
     async def goto(self, url: str) -> object:
         self.goto_count += 1
@@ -124,63 +131,93 @@ class ReplayPage(FakePage):
             self.user_closed_it()
             raise RuntimeError("the tab went away mid-navigation")
         result = await super().goto(url)
-        self._load(url)
+        await self._load(url)
         return result
 
-    def _load(self, url: str) -> None:
-        """The requests a real profile page makes: the document, its css, its image.
-
-        Any other page (the cookie-expiry route) is a bare document.
-        """
-        if "/in/" not in url:
-            request = FakeRequest(url, resource_type="document")
-            self._emit("request", request)
-            self._emit("response", FakeResponse(request, status=self._status(url)))
+    async def _load(self, url: str) -> None:
+        split = urlsplit(url)
+        self.slug = profile_slug(split.path)
+        self.asked_lazy = False
+        base = f"{split.scheme}://{split.netloc}"
+        await self._request("GET", url, "document")
+        if self.slug is None:
             return
-        base = url.split("/in/")[0]
-        for target, kind in (
-            (url, "document"),
-            (f"{base}/static/replica.css", "stylesheet"),
-            (f"{base}/static/avatar.svg", "image"),
-            *((extra, "xhr") for extra in self._extra),
-        ):
-            request = FakeRequest(target, resource_type=kind)
-            self._emit("request", request)
-            self._emit("response", FakeResponse(request, status=self._status(target)))
+        await self._request("GET", f"{base}/static/replica.css", "stylesheet")
+        await self._request("GET", f"{base}/static/avatar.svg", "image")
+        for extra in self.replay.extra_requests:
+            await self._request("GET", extra, "xhr")
 
-    def _status(self, url: str) -> int:
-        """The real status when this context fetches, a fabricated 200 otherwise."""
-        if not self._fetch:
-            return 200
-        return httpx.get(url, timeout=5).status_code
+    async def scrolled(self, delta_y: float) -> None:
+        if self.slug is None or self.asked_lazy or delta_y <= 0:
+            return
+        self.asked_lazy = True
+        base = self.url.split("/in/")[0]
+        body = json.dumps({"componentId": REPLICA_COMPONENT_ID, "vanityName": self.slug})
+        await self._request(
+            "POST", f"{base}{COMPONENT_PATH}?componentId={REPLICA_COMPONENT_ID}", "fetch", body
+        )
 
-    async def evaluate(self, expression: str) -> Any:
-        """The in-page ``fetch()`` of ``PageVoyagerFetch``, answered as the replica would.
+    def get_by_role(self, role: str, *, name: str, exact: bool) -> ReplayControl:
+        return ReplayControl(self, (role, name, exact) == ("link", "Contact info", True))
 
-        The url is read out of the script, where ``PageVoyagerFetch`` embeds it as
-        a JSON literal. The request and its response are emitted to the listeners
-        the way Playwright reports a page's own ``fetch``, so the log shows it. With
-        ``context.fetch`` it really fetches over loopback (the CLI test's "the
-        command's replica really serves"); otherwise it answers from
-        :func:`replica_voyager`, the served replica's own answer.
-        """
-        match = re.search(r'fetch\(("(?:[^"\\]|\\.)*")', expression)
-        if match is None:
-            return await super().evaluate(expression)
-        self.evaluate_calls.append(expression)
-        url = json.loads(match.group(1))
-        request = FakeRequest(url, resource_type="fetch")
+    async def clicked(self) -> None:
+        assert self.slug is not None
+        self.clicks += 1
+        first, _, last = self.slug.removeprefix("rehearsal-").partition("-")
+        body = json.dumps(
+            {
+                "clientArguments": {
+                    "requestedStateKeys": [],
+                    "payload": {
+                        "vanityName": self.slug,
+                        "givenName": first.title(),
+                        "familyName": last.title(),
+                        "isVanityNameResolved": True,
+                    },
+                    "states": [],
+                    "screenId": CONTACT_DETAILS_SCREEN_ID,
+                    "knownTemplateIds": [],
+                },
+                "isModal": True,
+            }
+        )
+        base = self.url.split("/in/")[0]
+        url = f"{base}{NAVIGATION_PATH}?screenId={CONTACT_DETAILS_SCREEN_ID}&sduiid=replica"
+        await self._request("POST", url, "fetch", body, status=self.replay.overlay_status)
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        kind: str,
+        post: str | None = None,
+        *,
+        status: int | None = None,
+    ) -> None:
+        request = SiteRequest(method, url, kind, post)
         self._emit("request", request)
-        if self._fetch:
+        answered, body = await self._answer(method, url, post)
+        self._emit(
+            "response",
+            FakeResponse(url, status or answered, body, request),  # type: ignore[arg-type]
+        )
+
+    async def _answer(self, method: str, url: str, post: str | None) -> tuple[int, bytes]:
+        """The real answer when this context fetches, the replica's own otherwise."""
+        if self.replay.fetch:
             async with httpx.AsyncClient() as client:
-                answer = await client.get(url, timeout=5)
-            status, body = answer.status_code, answer.text
-        else:
-            split = urlsplit(url)
-            served = replica_voyager(f"{split.path}?{split.query}" if split.query else split.path)
-            status, body = (200, served.decode()) if served is not None else (404, "{}")
-        self._emit("response", FakeResponse(request, status=status))
-        return {"status": status, "body": body, "url": url}
+                answer = await client.request(method, url, content=post, timeout=5)
+            return answer.status_code, answer.content
+        split = urlsplit(url)
+        slug = profile_slug(split.path)
+        if method == "GET" and slug is not None:
+            return 200, _profile_page(slug)
+        if split.path == COMPONENT_PATH and post is not None:
+            return 200, replica_experience(json.loads(post)["vanityName"])
+        if split.path == NAVIGATION_PATH and post is not None:
+            vanity = json.loads(post)["clientArguments"]["payload"]["vanityName"]
+            return 200, replica_contact_info(vanity)
+        return 200, b""
 
     async def close(self) -> None:
         """Emit anything armed for the unload window, then close.
@@ -189,16 +226,53 @@ class ReplayPage(FakePage):
         has been closed out -- the one moment nothing groups a request under a
         visit.
         """
-        for target in self._on_close:
-            request = FakeRequest(target, method="POST", resource_type="other")
+        for target in self.replay.unload_requests:
+            request = SiteRequest("POST", target, "other", None)
             self._emit("request", request)
-            self._emit("response", FakeResponse(request, status=204))
+            self._emit("response", FakeResponse(target, 204, b"", request))  # type: ignore[arg-type]
         self.close_calls += 1
         self._closed = True
 
     def _emit(self, event: str, payload: object) -> None:
-        for handler in self.handlers.get(event, []):
+        for handler in list(self.handlers.get(event, [])):
             handler(payload)
+
+
+class _ReplayMouse(FakeMouse):
+    def __init__(self, page: ReplayPage) -> None:
+        super().__init__()
+        self._page = page
+
+    async def wheel(self, delta_x: float, delta_y: float) -> None:
+        await super().wheel(delta_x, delta_y)
+        await self._page.scrolled(delta_y)
+
+
+class ReplayControl:
+    """The replica's one Contact info link, as ``get_by_role`` finds it."""
+
+    def __init__(self, page: ReplayPage, named: bool) -> None:
+        self._page = page
+        self._named = named
+
+    async def count(self) -> int:
+        return 1 if self._named and self._page.slug is not None else 0
+
+    async def get_attribute(
+        self,
+        name: str,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 -- Playwright's own signature
+    ) -> str | None:
+        return f"/in/{self._page.slug}/overlay/contact-info/" if name == "href" else None
+
+    async def click(
+        self,
+        *,
+        delay: float | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109 -- Playwright's own signature
+    ) -> None:
+        await self._page.clicked()
 
 
 class ReplayContext(FakeContext):
@@ -211,12 +285,14 @@ class ReplayContext(FakeContext):
         extra_requests: Sequence[str] = (),
         unload_requests: Sequence[str] = (),
         fetch: bool = False,
+        overlay_status: int | None = None,
     ) -> None:
         super().__init__()
         self.fail_first_page_at = fail_first_page_at
         self.extra_requests = tuple(extra_requests)
         self.unload_requests = tuple(unload_requests)
         self.fetch = fetch
+        self.overlay_status = overlay_status
         self.replays: list[ReplayPage] = []
 
     async def new_page(self) -> PageLike:
@@ -259,11 +335,13 @@ def _setup(
     fail_first_page_at: int | None = None,
     extra_requests: Sequence[str] = (),
     unload_requests: Sequence[str] = (),
+    overlay_status: int | None = None,
 ) -> tuple[AttachBrowserProvider, ReplayContext, FakeConnector]:
     context = ReplayContext(
         fail_first_page_at=fail_first_page_at,
         extra_requests=extra_requests,
         unload_requests=unload_requests,
+        overlay_status=overlay_status,
     )
     connector = FakeConnector([FakeBrowser([context])])
     return AttachBrowserProvider(CDP, connector=connector), context, connector
@@ -308,15 +386,15 @@ async def test_a_rehearsal_logs_every_request_the_page_made() -> None:
 
     assert len(rehearsal.visits) == 3
     assert [visit.index for visit in rehearsal.visits] == [1, 2, 3]
-    # Per visit: the page and its two sub-resources, then the enrichment job's two
-    # in-page API fetches (P2-07); then one navigation to expire the csrf cookie.
-    assert len(rehearsal.requests) == 16
-    assert [record.path for record in rehearsal.cleanup] == ["/expire-cookie"]
+    # Per visit: the page and its two sub-resources, the lazy card the scroll made the
+    # page ask for, and the overlay the one click made it ask for (#190).
+    assert len(rehearsal.requests) == 15
     kinds = [record.resource_type for record in rehearsal.visits[0].requests]
     assert kinds == ["document", "stylesheet", "image", "fetch", "fetch"]
-    assert rehearsal.harvested == 3 and rehearsal.stopped is None
+    methods = [record.method for record in rehearsal.visits[0].requests]
+    assert methods == ["GET", "GET", "GET", "POST", "POST"]
+    assert rehearsal.harvested == 3 and rehearsal.stopped is None and rehearsal.clicks == 3
     for record in rehearsal.requests:
-        assert record.method == "GET"
         assert record.status == 200
         assert record.duration_ms is not None and record.duration_ms > 0
         assert record.host == "127.0.0.1"
@@ -517,26 +595,6 @@ async def test_a_run_with_no_beacon_has_nothing_trailing() -> None:
     assert "AFTER THE LAST VISIT" not in render(rehearsal)
 
 
-async def test_the_summary_stops_claiming_the_whole_run_once_the_log_is_incomplete() -> None:
-    """After a tab loss the reopened tab navigates before the listeners reattach.
-
-    The note was already there; the sentence above it still said "every request
-    above" and "nothing reached linkedin.com" without qualification, which is
-    the over-claiming this module exists to avoid.
-    """
-    lost, _, _, _ = await _rehearse(visits=3, fail_first_page_at=2)
-    complete, _, _, _ = await _rehearse(visits=3)
-
-    lost_text, complete_text = render(lost), render(complete)
-
-    assert "nothing *in this log* reached linkedin.com" in lost_text
-    assert "some requests are missing from this log" in lost_text
-    assert "every request above went to the loopback replica" not in lost_text
-    # And the unqualified claim is still made when the log really is complete.
-    assert "every request above went to the loopback replica" in complete_text
-    assert "missing from this log" not in complete_text
-
-
 def test_the_three_spellings_of_this_machine_are_accepted() -> None:
     for host in ("127.0.0.1", "localhost", "::1"):
         url = f"http://{host}:8080" if host != "::1" else "http://[::1]:8080"
@@ -622,8 +680,16 @@ async def test_the_rehearsal_replays_the_real_pacing_plan() -> None:
     assert [visit.planned_wait_s for visit in rehearsal.visits] == [
         step.delay_after_s for step in expected.steps
     ]
-    wheels = context.replays[0].mouse.wheels
-    assert wheels == [(0, step.delta_px) for plan in expected.steps for step in plan.scroll.steps]
+    # Each visit's plan, then its scroll back to the top before the click.
+    rng = Random(SEED)
+    plan_enrichment(rng, 4)
+    replayed: list[tuple[int, int]] = []
+    for step in expected.steps:
+        replayed += [(0, s.delta_px) for s in step.scroll.steps]
+        human_delay(rng, median=1.5, sigma=0.5, tail_p=0.0, tail_range=(0, 0))
+        back = scroll_back_to_top(rng, depth_after(step.scroll))
+        replayed += [(0, s.delta_px) for s in back.steps]
+    assert context.replays[0].mouse.wheels == replayed
 
 
 async def test_the_rehearsal_follows_the_pacing_it_is_given_not_the_library_default() -> None:
@@ -659,25 +725,24 @@ async def test_the_rehearsal_follows_the_burst_profile_it_is_given() -> None:
 
 
 async def test_every_wait_is_one_the_plan_asked_for() -> None:
-    """Every wait is one the pacing plan asked for, or #192's one-time pointer rest
-    before the run's first scroll -- ``rehearse``'s own ``rest_rng`` is a fresh
-    ``Random(seed)``, so it draws the identical walk :func:`rest_pointer_like_a_person`
-    would here, given the same seed (see ``rehearse.py``'s ``scroll`` closure)."""
     expected = plan_enrichment(Random(SEED), 4)
-    rest = rest_pointer_like_a_person(Random(SEED))
     rehearsal, _, _, sleeper = await _rehearse(visits=4)
 
-    planned = (
-        sum(
-            sum(step.pause_s for step in visit.scroll.steps)
-            + visit.scroll.dwell_s
-            + (visit.delay_after_s or 0.0)
-            for visit in expected.steps
-        )
-        + sum(visit.fetch_gap_s or 0.0 for visit in rehearsal.visits)
-        + sum(step.pause_s for step in rest.steps)
+    planned = sum(
+        sum(step.pause_s for step in visit.scroll.steps)
+        + visit.scroll.dwell_s
+        + (visit.delay_after_s or 0.0)
+        for visit in expected.steps
     )
-    assert all(visit.fetch_gap_s is not None for visit in rehearsal.visits)
+    # Each visit's pause before the click, and its scroll back to the top: drawn from
+    # the same seed, after the plan (``run_enrichment``'s own order).
+    rng = Random(SEED)
+    plan_enrichment(rng, 4)
+    for step in expected.steps:
+        planned += human_delay(rng, median=1.5, sigma=0.5, tail_p=0.0, tail_range=(0, 0))
+        back = scroll_back_to_top(rng, depth_after(step.scroll))
+        planned += sum(s.pause_s for s in back.steps) + back.dwell_s
+    assert all(visit.click_pause_s is not None for visit in rehearsal.visits)
     assert math.isclose(sleeper.total, planned, rel_tol=1e-9)
 
 
@@ -742,53 +807,11 @@ async def test_a_rehearsal_never_launches_a_browser() -> None:
     assert len(context.pages) == 1  # one tab for the run, no second context anywhere
 
 
-async def test_a_tab_lost_mid_rehearsal_is_recovered_and_said_so() -> None:
-    """The run carries on, and the log says the listeners missed what the old tab did."""
-    rehearsal, context, _, _ = await _rehearse(visits=3, fail_first_page_at=2)
-
-    assert len(context.replays) == 2
-    assert len(rehearsal.visits) == 3
-    assert any("the tab was reopened" in note for note in rehearsal.notes)
-    assert "note: the tab was reopened" in render(rehearsal)
-
-
-async def test_a_page_scroll_silently_recovers_is_re_followed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """N17: rehearse must re-`follow()` whatever page ``BrowserRun.scroll`` hands back.
-
-    ``BrowserRun.scroll`` can recover a tab that was already lost before its own
-    replay started (its docstring says so), the same way ``goto`` can -- and
-    unlike a loss ``goto`` recovers, nothing about that specific recovery raises
-    or fails a navigation, so there is no other signal for `rehearse` to notice it
-    by except re-``follow``ing whatever page the call actually returns. This forces
-    that by monkeypatching `BrowserRun.scroll` itself to simulate exactly that: a
-    successful scroll that quietly came back on a page nothing has followed yet.
-    """
-    provider, context, _ = _setup()
-    real_scroll = BrowserRun.scroll
-    swapped = False
-
-    async def scroll_onto_an_unfollowed_page(
-        self: BrowserRun, plan: object, **kwargs: object
-    ) -> ScrollOutcome:
-        nonlocal swapped
-        outcome = await real_scroll(self, plan, **kwargs)  # type: ignore[arg-type]
-        if not swapped:
-            swapped = True
-            fresh = await context.new_page()
-            return ScrollOutcome(page=fresh, cancelled=False)
-        return outcome
-
-    monkeypatch.setattr(BrowserRun, "scroll", scroll_onto_an_unfollowed_page)
-
-    rehearsal = await rehearse(
-        provider, site=SITE, visits=2, seed=SEED, sleep=Sleeper(), clock=Ticker()
-    )
-
-    assert any(
-        "already been lost before visit 1 could be scrolled" in note for note in rehearsal.notes
-    ), rehearsal.notes
+async def test_a_tab_lost_mid_rehearsal_ends_it_as_it_ends_a_run() -> None:
+    """A reopened tab is not the one being listened to: the source stops trusting it,
+    and the rehearsal ends by exception rather than print a log with a hole in it."""
+    with pytest.raises(BrowserUnavailable, match="replaced"):
+        await _rehearse(visits=3, fail_first_page_at=2)
 
 
 async def test_a_rehearsal_refuses_a_run_with_nothing_in_it() -> None:
@@ -814,9 +837,10 @@ async def test_the_rendered_log_shows_every_request_with_its_timing() -> None:
     for record in rehearsal.requests:
         assert record.path in text
     assert f"seed        {SEED}" in text
-    assert "2 visits, 11 requests, 1 host(s): 127.0.0.1" in text
-    assert "CLEANUP" in text and "/expire-cookie" in text
-    assert "2 of 2 visits harvested" in text
+    assert "2 visits, 10 requests, 1 host(s): 127.0.0.1" in text
+    assert "clicked Contact info once" in text
+    assert "2 of 2 visits read the profile and its contact info" in text
+    assert "2 Contact info click(s)" in text
     assert "Nothing reached linkedin.com" in text
 
 
@@ -842,14 +866,17 @@ def test_the_replica_serves_a_profile_shaped_page_on_loopback() -> None:
     assert page.status_code == 200
     assert "netkeeper rehearsal replica" in page.text
     assert 'href="/static/replica.css"' in page.text
+    assert 'href="/in/rehearsal-alex-doe/overlay/contact-info/">Contact info</a>' in page.text
+    assert 'id="rehydrate-data"' in page.text
     assert LINKEDIN_HOST not in page.text
+    assert "set-cookie" not in page.headers  # nothing reads a cookie any more
     assert css.status_code == 200 and css.headers["content-type"].startswith("text/css")
     assert svg.status_code == 200 and svg.headers["content-type"] == "image/svg+xml"
 
 
 def test_the_replica_stops_listening_when_the_block_ends() -> None:
     with serve_replica() as base:
-        assert httpx.get(base, timeout=5).status_code == 200
+        assert httpx.get(f"{base}/in/rehearsal-alex-doe/", timeout=5).status_code == 200
 
     with pytest.raises(httpx.HTTPError):
         httpx.get(base, timeout=2)
@@ -878,107 +905,75 @@ def test_the_rehearsal_slugs_are_invented() -> None:
     assert len(set(REHEARSAL_SLUGS)) == len(REHEARSAL_SLUGS)
 
 
-async def test_each_visit_is_the_enrichment_jobs_request_pattern() -> None:
-    """P2-07's done-when: the page view, then the profile's details, then its contact info.
-
-    The two fetches are the job's own (``run_enrichment`` through
-    ``PageVoyagerFetch``), in the order spec 9.4 gives, after the page loaded and
-    was scrolled, and only once per visit.
-    """
+async def test_each_visit_is_the_enrichment_jobs_pattern() -> None:
+    """#190: the page view, the lazy card the scroll made the page ask for, and the
+    overlay the one click made it ask for -- the page's requests, none of netkeeper's."""
     rehearsal, context, _, _ = await _rehearse(visits=2)
 
     for visit in rehearsal.visits:
         slug = visit.url.rstrip("/").rsplit("/", 1)[1]
         paths = [record.path for record in visit.requests]
         assert paths[0] == f"/in/{slug}/"
-        assert paths[3].startswith("/voyager/api/identity/dash/profiles?")
-        assert f"memberIdentity={slug}" in paths[3]
-        assert paths[4] == f"/voyager/api/identity/profiles/{slug}/profileContactInfo"
+        assert paths[3].startswith(f"{COMPONENT_PATH}?")
+        assert paths[4].startswith(f"{NAVIGATION_PATH}?screenId=")
+        assert visit.click_pause_s is not None
     (page,) = context.replays
-    assert len(page.evaluate_calls) == 4
-    assert all("document.cookie" in call for call in page.evaluate_calls)  # csrf stays in-page
+    assert page.clicks == 2 and page.evaluate_calls == []
 
 
 async def test_a_replica_that_stops_answering_is_named_in_the_log() -> None:
     """A rehearsal whose job stopped early says so rather than pretending it visited them all."""
-    provider, _, _ = _setup()
-    original = ReplayPage.evaluate
-
-    async def throttled(self: ReplayPage, expression: str) -> Any:
-        answer = await original(self, expression)
-        if isinstance(answer, dict) and len(self.evaluate_calls) == 3:
-            return {**answer, "status": 429, "body": "slow down"}
-        return answer
-
-    ReplayPage.evaluate = throttled  # type: ignore[method-assign]
-    try:
-        rehearsal = await rehearse(
-            provider, site=SITE, visits=3, seed=SEED, sleep=Sleeper(), clock=Ticker()
-        )
-    finally:
-        ReplayPage.evaluate = original  # type: ignore[method-assign]
+    provider, _, _ = _setup(overlay_status=429)
+    rehearsal = await rehearse(
+        provider, site=SITE, visits=3, seed=SEED, sleep=Sleeper(), clock=Ticker()
+    )
 
     assert rehearsal.stopped == "response (throttled)"
-    assert rehearsal.harvested == 1 and len(rehearsal.visits) == 2
+    assert rehearsal.harvested == 0 and len(rehearsal.visits) == 1
     assert "stopped early: response (throttled)" in render(rehearsal)
 
 
-def test_the_replica_answers_the_two_profile_endpoints_in_voyagers_shapes() -> None:
-    """The served JSON parses: a rehearsal that fetched garbage would stop at visit one."""
-    from netkeeper.linkedin.voyager import (
-        contact_info_path,
-        parse_contact_info,
-        parse_profile_details,
-        profile_query,
-    )
+def test_the_replica_answers_in_the_shapes_the_parsers_read() -> None:
+    """Served for real: a rehearsal that loaded garbage would stop at visit one."""
+    from netkeeper.linkedin.flagship import rehydration_payload
 
     slug = REHEARSAL_SLUGS[0]
     with serve_replica() as base:
-        details = httpx.get(
-            f"{base}/voyager/api/identity/dash/profiles", params=profile_query(slug), timeout=5
-        )
-        info = httpx.get(f"{base}{contact_info_path(slug)}", timeout=5)
         page = httpx.get(f"{base}/in/{slug}/", timeout=5)
+        card = httpx.post(
+            f"{base}{COMPONENT_PATH}",
+            content=json.dumps({"vanityName": slug}),
+            timeout=5,
+        )
+        overlay = httpx.post(
+            f"{base}{NAVIGATION_PATH}",
+            content=json.dumps({"clientArguments": {"payload": {"vanityName": slug}}}),
+            timeout=5,
+        )
+        missing = httpx.post(f"{base}/elsewhere", timeout=5)
 
-    parsed = parse_profile_details(details.text)
+    screen = rehydration_payload(page.text)
+    assert screen is not None
+    parsed = parse_profile(screen, [card.content], slug=slug)
     assert (parsed.public_id, parsed.first_name, parsed.last_name) == (slug, "Alex", "Doe")
-    assert parsed.urn.startswith("urn:li:fsd_profile:ACoAAREHEARSAL")
-    assert parse_contact_info(info.text).email == f"{slug}@example.test"
-    cookie = page.headers["set-cookie"]
-    assert cookie.startswith("JSESSIONID=") and "Max-Age=120" in cookie
-    assert "set-cookie" not in details.headers
+    assert parsed.urn == replica_urn(slug) and parsed.urn.startswith(
+        "urn:li:fsd_profile:ACoAAREHEARSAL"
+    )
+    assert [p.title for p in parsed.positions] == ["Rehearsal Profile"]
+    assert parse_contact_info(overlay.content, slug=slug).emails == (f"{slug}@example.test",)
+    assert missing.status_code == 404
 
 
-async def test_the_rehearsal_expires_the_replicas_cookie_before_the_tab_closes() -> None:
-    """F8: a loopback cookie ignores the port, so it is not left for its two minutes."""
-    rehearsal, context, _, _ = await _rehearse(visits=2)
-
-    (page,) = context.replays
-    assert page.goto_calls[-1] == f"{SITE}/expire-cookie"
-    assert page.close_calls == 1
-    assert rehearsal.cleanup and not rehearsal.trailing
-
-
-def test_the_replicas_expiry_route_expires_the_cookie() -> None:
-    with serve_replica() as base:
-        answer = httpx.get(f"{base}/expire-cookie", timeout=5)
-    assert answer.headers["set-cookie"] == "JSESSIONID=; Path=/; Max-Age=0"
-
-
-# --- #172: the replica's cookie is expired even when the rehearsal fails -----------
-
-
-async def test_a_rehearsal_that_fails_still_expires_the_replicas_cookie() -> None:
-    """The cleanup navigation is in a ``finally``: a job that raises between two
-    profiles still sends the tab to the expiry path before the tab closes, and the
-    job's own exception is the one that comes out."""
+async def test_a_rehearsal_that_fails_still_closes_its_tab() -> None:
+    """A job that raises between two profiles: its own exception comes out, and the
+    tab the rehearsal opened is closed, the context left as it was."""
     provider, context, _ = _setup()
     waits = 0
 
-    async def breaks_on_the_second_wait(seconds: float) -> None:
+    async def breaks_on_a_later_wait(seconds: float) -> None:
         nonlocal waits
         waits += 1
-        if waits == 2:
+        if waits == 12:
             raise RuntimeError("the rehearsal broke mid-run")
 
     with pytest.raises(RuntimeError, match="broke mid-run"):
@@ -987,10 +982,9 @@ async def test_a_rehearsal_that_fails_still_expires_the_replicas_cookie() -> Non
             site=SITE,
             visits=3,
             seed=SEED,
-            sleep=breaks_on_the_second_wait,
+            sleep=breaks_on_a_later_wait,
             clock=Ticker(),
         )
 
     (page,) = context.replays
-    assert page.goto_calls[-1] == f"{SITE}/expire-cookie"
     assert page.is_closed()

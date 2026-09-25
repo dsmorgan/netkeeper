@@ -28,8 +28,8 @@ than failing the page.
 **A DOM-sourced connection (P2-08's fallback, no URN) never reaches identity
 resolution** -- see :func:`apply_page`'s docstring for the full reasoning (a
 slug is not owned by one person forever, spec 9.6) and
-:mod:`netkeeper.linkedin.dom`'s module docstring for the scenarios that found
-the alternative unsafe. Against a contact that already holds its slug it is
+the P2-08 DOM reader's docstring (removed by #190; see its PRs) for the scenarios
+that found the alternative unsafe. Against a contact that already holds its slug it is
 sighting-only: it marks that contact seen and writes no field. A slug no
 contact holds creates one contact **marked needs review** (#184), which
 nothing enriches, enrolls, or ages until a person confirms it or a Voyager
@@ -254,8 +254,8 @@ def apply_page(
     -- LinkedIn lets an account release a vanity url and another claim it (spec
     9.6). Resolving and applying it the way a Voyager row is resolved would
     risk writing a stranger's name or headline onto the contact who used to
-    hold that slug (:mod:`netkeeper.linkedin.dom`'s module docstring has the
-    fuller argument, and the scenarios that found this). So a DOM row never
+    hold that slug (the P2-08 DOM reader's docstring had the fuller argument, and
+    the scenarios that found this; the reader was removed by #190). So a DOM row never
     calls :func:`~netkeeper.crm.identity.resolve` or
     :func:`~netkeeper.crm.identity.apply`, and what it does depends only on
     whether its (normalized) slug is known:
@@ -754,7 +754,12 @@ def apply_harvest(
     never removed, and a position's end date is only ever filled in. A field a
     person edited stays theirs (spec 10.5). A change to the headline, title,
     company, or location writes a ``contact_snapshot`` of the values before it.
-    Education has no table (spec 8.1) and is not stored.
+    Education, a birthday, and an address have no table (spec 8.1) and are not
+    stored; neither is the overlay's "Connected since" day, which the connections
+    list already gives. An ``Ok`` harvest without contact info (the job clicks
+    **Contact info** only on a profile whose id is the contact's, #190) writes
+    nothing: a mismatch is :attr:`HarvestResult.MISMATCH`, and a matching one,
+    which the job never hands over, is :attr:`HarvestResult.UNREADABLE`.
 
     **NotFound.** A harvest that found no profile adds to the contact's streak;
     at :data:`NOT_FOUND_GONE_AFTER` across at least :data:`NOT_FOUND_GONE_SPAN`
@@ -787,7 +792,7 @@ def apply_harvest(
         counts.add(HarvestResult.UNREADABLE)
         return HarvestResult.UNREADABLE
     details, info = harvest.details, harvest.contact_info
-    assert details is not None and info is not None  # ProfileHarvest's own invariant
+    assert details is not None  # ProfileHarvest's own invariant
     if contact.li_urn is None or details.urn != contact.li_urn:
         log.warning(
             "enrichment: the profile visited for contact %d of user %d is not theirs"
@@ -799,6 +804,19 @@ def apply_harvest(
         session.flush()
         counts.add(HarvestResult.MISMATCH)
         return HarvestResult.MISMATCH
+    if info is None:
+        # The job clicks Contact info only on a profile whose id is the contact's, so a
+        # harvest without it for a matching URN is not one the job makes. A visit is
+        # written whole or not at all: nothing but the attempt.
+        log.warning(
+            "enrichment: the harvest for contact %d of user %d has no contact info; nothing"
+            " written",
+            contact.id,
+            user.id,
+        )
+        session.flush()
+        counts.add(HarvestResult.UNREADABLE)
+        return HarvestResult.UNREADABLE
     incoming = _harvested(details, info, harvest.observed_at)
     before = len(contact.snapshots)
     try:
@@ -892,13 +910,17 @@ def _harvested(
 
 
 def _emails(info: ContactInfo) -> tuple[IncomingEmail, ...]:
-    if info.email is None:
-        return ()
-    try:
-        # Primary only when the contact has none yet; an existing primary stays.
-        return (IncomingEmail(info.email, kind=EmailKind.OTHER, is_primary=True),)
-    except ValueError:
-        return ()
+    """The overlay's addresses; the first it shows is the primary candidate.
+
+    Primary only when the contact has none yet; an existing primary stays.
+    """
+    emails: list[IncomingEmail] = []
+    for address in info.emails:
+        try:
+            emails.append(IncomingEmail(address, kind=EmailKind.OTHER, is_primary=not emails))
+        except ValueError:
+            continue  # not an address: nothing to key on
+    return tuple(emails)
 
 
 def _phones(info: ContactInfo) -> tuple[IncomingPhone, ...]:
