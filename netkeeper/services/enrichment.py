@@ -143,6 +143,7 @@ class EnrichRunReport:
             "completed": len(self.result.completed),
             "not_found": self.result.not_found,
             "unreadable": self.result.unreadable,
+            "mismatched": self.result.mismatched,
             "skipped": self.skipped,
             "visit_budget": self.visit_budget,
             "harvests": dataclasses.asdict(self.harvests),
@@ -341,6 +342,7 @@ async def enrich_contacts(
                         "harvested": event.harvested,
                         "not_found": event.not_found,
                         "unreadable": event.unreadable,
+                        "mismatched": event.mismatched,
                         "stopped": None if event.stopped is None else event.stopped.value,
                     },
                 )

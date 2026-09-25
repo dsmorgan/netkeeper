@@ -27,15 +27,11 @@ capture-date comment when it does. The defensive parsing in this module is
 what makes that safe: a wrong guess here degrades to :class:`RouteChanged`
 rather than corrupting data.
 
-**The fetch helper is deliberately not here.** Making the actual in-page
-``fetch()`` call needs a live page from P2-01's ``BrowserProvider`` (issue
-#97), which is being built in a separate worktree while this one is written;
-depending on it here would collide with that work. Instead, this module
-defines :class:`VoyagerFetch`, the callable protocol P2-01's provider will
-satisfy, and every parser below takes the response body it would return
-(``str``) rather than a browser object of any kind — so wiring P2-01 in later
-is "implement :class:`VoyagerFetch` and pass its result to these parsers",
-not a change to anything in this file.
+**No fetch helper here, and none anywhere now.** This module defines
+:class:`VoyagerFetch`, a callable protocol, and every parser takes the response
+body (``str``) rather than a browser object. P2-01's in-page fetch once
+implemented it; ADR 0006 retired that (#187, #190): netkeeper reads what the
+page loads and sends no request of its own.
 
 Capturing and sanitizing fixtures
 ----------------------------------
@@ -275,15 +271,15 @@ class VoyagerResponse:
 
 @runtime_checkable
 class VoyagerFetch(Protocol):
-    """What P2-01's browser provider must implement to drive this module.
+    """An async callable: a :class:`VoyagerRequest` in, a :class:`VoyagerResponse` out.
 
-    An async callable: given a :class:`VoyagerRequest` built from this
-    module's constants and :func:`build_headers`, return a
-    :class:`VoyagerResponse`. P2-01 wires its in-page
-    ``page.evaluate(...)``-driven fetch to satisfy this signature; every
-    parser below only ever sees the :class:`VoyagerResponse` it returns, never
-    a ``Page`` or any other Playwright/CDP type (spec 9.10's boundary reason:
-    this module is exercised entirely by fixtures and needs no browser).
+    Nothing in production implements this any more. P2-01's in-page fetch
+    (``linkedin/fetch.py``) did, until ADR 0006 retired it: #187 for the
+    connections list and #190 for enrichment, since netkeeper now sends no
+    request of its own. It stays because :class:`~netkeeper.linkedin.connections.VoyagerConnections`
+    (not wired) and the offline tests of the connections job's paging rules take
+    one; the parsers below only ever see the :class:`VoyagerResponse`, never a
+    ``Page`` or any other Playwright/CDP type (spec 9.10).
     """
 
     async def __call__(self, request: VoyagerRequest) -> VoyagerResponse: ...

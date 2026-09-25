@@ -376,10 +376,12 @@ async def test_two_profiles_under_other_ids_in_a_row_stop_the_run() -> None:
     others = {p.slug: f"urn:li:fsd_profile:ACoAAFAKE99999{n:02d}" for n, p in enumerate(PROFILES)}
     browser = FakeBrowser.of(PROFILES, urns={k: others[k] for k in list(others)[1:3]})
 
-    result, harvests, _ = await _run(_spec(PROFILES), browser)
+    result, harvests, events = await _run(_spec(PROFILES), browser)
 
     assert result.reason is StopReason.RESPONSE and result.outcome is Outcome.ROUTE_CHANGED
     assert result.mismatched == 2 and result.completed == (101, 102, 103)
+    # A mismatch wrote nothing: it is not counted as harvested.
+    assert (events[-1].harvested, events[-1].mismatched) == (1, 2)
     assert [h.contact_info is None for h in harvests] == [False, True, True]
     assert browser.clicks == [PROFILES[0].slug]
 

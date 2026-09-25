@@ -1129,3 +1129,45 @@ async def test_a_visit_read_from_the_page_is_written_and_never_takes_a_value_awa
         return [email.email for email in row.emails]
 
     assert _read(session_factory, user_id, emails) == ["priya.fake@example.test"]
+
+
+async def test_a_wall_after_the_contact_info_click_flags_the_session(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#193 review, M1: the click leads to a checkpoint and no overlay answers. The run
+    stops there as a checkpoint -- heat raised, the session flagged -- and visits nobody
+    else."""
+    from profile_site import CHECKPOINT_URL, ProfilePage, ProfileSite
+    from run_fakes import fake_provider
+    from voyager_pages import PEOPLE as CAST
+
+    from netkeeper.linkedin.page_profiles import PageProfiles
+
+    cast = CAST[:2]
+    user_id, _ = _setup(
+        session_factory,
+        [Profile(p.n, p.first, p.last, public_id=p.slug) for p in cast],
+    )
+    site = ProfileSite(
+        [ProfilePage(cast[0], tab_after_click=CHECKPOINT_URL, overlay_answers=0)]
+        + [ProfilePage(p) for p in cast[1:]]
+    )
+    provider, _ = fake_provider(site)
+    async with provider.run("account-1") as run:
+        source = PageProfiles(
+            run, sleep=Sleeps(), landing_wait_s=0.05, lazy_wait_s=0.01, overlay_wait_s=0.05
+        )
+        report = await enrich_contacts(
+            session_factory,
+            user_id,
+            source,
+            settings=SMALL,
+            clock=Clock(),
+            sleep=Sleeps(),
+            rng=random.Random(SEED),
+        )
+    assert report.result.outcome is Outcome.CHECKPOINT
+    assert report.session_flagged and report.heat_raised
+    assert report.result.visits == 1 and len(site.clicks) == 1
+    flag = _read(session_factory, user_id, lambda s, u: session_flag(s, u))
+    assert flag is not None

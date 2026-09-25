@@ -339,7 +339,10 @@ class Observation:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
         while not self._pending:
-            self._arrived.clear()
+            # A fresh event rather than clearing the old one: one waiter, and the
+            # listener sets whichever is current. (It also keeps `clear`, a page input
+            # in Playwright, out of this module for tests/test_browser_safety.py.)
+            self._arrived = asyncio.Event()
             remaining = deadline - loop.time()
             if remaining <= 0 or self._closed:
                 return None

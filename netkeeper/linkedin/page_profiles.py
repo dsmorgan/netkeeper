@@ -16,22 +16,26 @@ click; the only thing it reads is
 visit's observation and starts a new one before it navigates, so an answer the previous
 profile's page was still loading is never read as this one's. Within a visit an answer is
 also checked for whose it is: a profile document or screen for another slug is skipped, a
-lazy card that arrives before this profile's screen, or whose request names another member,
-is skipped, and the overlay's answer is read
+lazy card that arrives before this profile's screen, or whose request names another member
+by slug or by id, is skipped, and the overlay's answer is read
 only when the page's own request asked for *this* profile's overlay and the answer's
 profile link names it too.
 
-**Where the tab is decides.** After the navigation, the scroll, and the scroll back up,
-the tab's url is classified (spec 9.7) with the profile's slug masked out
+**Where the tab is decides.** After the navigation, the scroll, the scroll back up, a
+click that was refused, and an overlay that did not come or did not read, the tab's url
+is classified (spec 9.7) with the profile's slug masked out
 (:func:`~netkeeper.linkedin.enrich.masked`): a checkpoint or a login wall stops the run as
-that; any page that is not a profile, on LinkedIn's origin, is an *unreadable* visit. A
+that; any page that is not a profile, on LinkedIn's origin, is an *unreadable* visit, and
+so is a profile the tab landed on that is neither the one asked for nor one a redirect the
+page received led to. A
 document's HTML is never searched for wall paths (#188 review, M1): every logged-in page
 links to ``/uas/logout``. So a wall served in place at the profile's url, which carries no
 profile screen, is an unreadable visit too, and two of those in a row stop the run as
 ``RouteChanged`` without flagging the session.
 
 **What each answer means.** The profile's document answering ``404`` is spec 9.7's
-``NotFound`` for the contact. A redirect is judged by where it points: a wall is that
+``NotFound`` for the contact; the in-app screen request answering ``404`` is only an
+unreadable visit. A redirect is judged by where it points: a wall is that
 wall, another profile is followed by the tab's own url, anything else is unreadable. A
 throttle or a wall on any answer the visit reads stops the run. Any other non-``200``
 answer for the profile itself stops the run as ``RouteChanged``; for a lazy card it is
@@ -68,6 +72,7 @@ from netkeeper.linkedin.enrich import LINKEDIN_ORIGIN, Answer, masked
 from netkeeper.linkedin.flagship import (
     CONTACT_DETAILS_SCREEN_ID,
     NAVIGATION_PATH,
+    URN_PREFIX,
     rehydration_payload,
 )
 from netkeeper.linkedin.flagship_profile import (
@@ -157,7 +162,8 @@ class PageProfiles:
         self._path = ""
         self._url = ""
         self._screen: bytes | None = None
-        self._components: list[bytes] = []
+        self._components: list[tuple[bytes, str | None]] = []
+        self._redirects: list[str] = []
         self._stopped: Answer[None] | None = None
         self._clicked = False
 
@@ -204,7 +210,18 @@ class PageProfiles:
             return _as(self._stopped)
         assert self._screen is not None  # open_profile answered Ok
         try:
-            details = parse_profile(self._screen, self._components, slug=self._slug)
+            # The member's id first, from the screen alone: a lazy card whose request
+            # names another member, by slug or by id, is never read as this one's.
+            urn = parse_profile(self._screen, (), slug=self._slug).urn
+            kept = [
+                body for body, request in self._components if _names_only(request, self._slug, urn)
+            ]
+            if len(kept) < len(self._components):
+                log.info(
+                    "enrichment: skipped %d lazy card(s) that name another member",
+                    len(self._components) - len(kept),
+                )
+            details = parse_profile(self._screen, kept, slug=self._slug)
         except RouteChanged:
             log.warning("enrichment: the profile answered in a shape the parser does not know")
             return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
@@ -234,8 +251,22 @@ class PageProfiles:
         self._require_observed(click.page)
         if not click.clicked:
             log.warning("enrichment: Contact info was not clicked: %s", click.refusal)
+            # The tab may have left the profile for a wall during the pause: that is
+            # the session's problem, not this profile's, and it stops the run.
+            wall = self._wall(click.page.url)
+            if wall is not None:
+                self._stopped = wall
+                return _as(wall)
             return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
-        return await self._read_overlay()
+        info = await self._read_overlay()
+        if info.outcome is Outcome.ROUTE_CHANGED and info.unparsed:
+            # An overlay that did not come, or did not read, may be a wall the click
+            # led to: where the tab is now decides.
+            wall = self._wall(click.page.url)
+            if wall is not None:
+                self._stopped = wall
+                return _as(wall)
+        return info
 
     # --- landing -------------------------------------------------------------------
 
@@ -271,7 +302,12 @@ class PageProfiles:
             ):
                 continue  # another page's answer: not this profile's
             if response.status == 404:
-                return Answer(Outcome.NOT_FOUND, masked(response.url))
+                if response.method == "GET":
+                    # Spec 9.7's NotFound: the profile's own document says so.
+                    return Answer(Outcome.NOT_FOUND, masked(response.url))
+                # The screen request's 404 is not a missing profile by anything the
+                # capture showed: unreadable, never NotFound by guess.
+                return Answer(Outcome.ROUTE_CHANGED, masked(response.url), unparsed=True)
             outcome = _status_outcome(response)
             if outcome is not Outcome.OK:
                 return Answer(outcome, masked(response.url))
@@ -288,6 +324,13 @@ class PageProfiles:
                     continue
             else:
                 payload = response.body
+            if not same_slug(self._slug, self._requested) and not any(
+                same_slug(self._slug, target) for target in self._redirects
+            ):
+                # The tab is on a profile nobody asked for, and no redirect the page
+                # received led there: a stale tab, or a page that moved by itself.
+                log.warning("enrichment: the tab is on a profile no redirect led to")
+                return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
             self._screen = payload
             return Answer(Outcome.OK, self._url)
         log.warning("enrichment: %d answers arrived, none the profile screen", answers)
@@ -299,7 +342,9 @@ class PageProfiles:
         outcome = classify(response.status, masked(target), "")
         if outcome in (Outcome.CHECKPOINT, Outcome.LOGGED_OUT):
             return Answer(outcome, masked(target))
-        if self._on_origin(target) and profile_slug(urlsplit(target).path) is not None:
+        renamed = profile_slug(urlsplit(target).path) if self._on_origin(target) else None
+        if renamed is not None:
+            self._redirects.append(renamed)
             return None  # a renamed profile: the tab's own url says where it landed
         log.warning("enrichment: the profile redirected somewhere that is not a profile")
         return Answer(Outcome.ROUTE_CHANGED, masked(target), unparsed=True)
@@ -336,14 +381,14 @@ class PageProfiles:
             return Answer(outcome, masked(response.url))
         if not keep or _path(response.url) != _path(COMPONENT_PATH) or outcome is not Outcome.OK:
             return None
-        if not _names_only(response.request_body, self._slug):
+        if not _names_only(response.request_body, self._slug, None):
             log.info("enrichment: skipped a lazy card that names another member")
             return None
         if len(self._components) >= MAX_COMPONENTS:
             log.warning("enrichment: more lazy cards than a profile loads; unreadable")
             return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
         assert response.body is not None
-        self._components.append(response.body)
+        self._components.append((response.body, response.request_body))
         return None
 
     async def _read_overlay(self) -> Answer[ContactInfo]:
@@ -487,11 +532,14 @@ def _answer_slug(response: ObservedResponse) -> str | None:
     return None
 
 
-def _names_only(request_body: str | None, slug: str) -> bool:
+def _names_only(request_body: str | None, slug: str, urn: str | None) -> bool:
     """Whether a lazy card's request names no member but this profile's.
 
     The capture did not record these requests' bodies, so a body that names nobody is
-    accepted; one whose ``vanityName`` is another slug is not.
+    accepted; one whose ``vanityName`` is another slug is not, and neither is one whose
+    ``profileUrn`` or ``vieweeProfileId`` is another member's id than ``urn`` (when the
+    profile's id is known). Positions are upserted and never removed, so a card read
+    as the wrong person's could never be taken back.
     """
     try:
         request = json.loads(request_body) if request_body else None
@@ -506,6 +554,13 @@ def _names_only(request_body: str | None, slug: str) -> bool:
             vanity = node.get("vanityName")
             if isinstance(vanity, str) and not same_slug(vanity, slug):
                 return False
+            if urn is not None:
+                named = node.get("profileUrn")
+                if isinstance(named, str) and named != urn:
+                    return False
+                viewee = node.get("vieweeProfileId")
+                if isinstance(viewee, str) and f"{URN_PREFIX}{viewee}" != urn:
+                    return False
             stack.extend(node.values())
         elif isinstance(node, list):
             stack.extend(node)

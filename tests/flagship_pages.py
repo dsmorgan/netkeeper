@@ -608,7 +608,13 @@ def _experience_card(
 
 
 def _identity_button(
-    module: str, person: Person, *, profile_id: str, slug: str | None, key: str = "profileUrn"
+    module: str,
+    person: Person,
+    *,
+    profile_id: str,
+    slug: str | None,
+    key: str = "profileUrn",
+    raw_urn: str | None = None,
 ) -> list[Any]:
     """A button whose action payload names the member (the message button, **invented**
     placement: the capture saw ``firstName``/``lastName`` "sometimes with vanityName or
@@ -617,6 +623,8 @@ def _identity_button(
     if slug is not None:
         payload["vanityName"] = slug
     payload[key] = f"urn:li:fsd_profile:{profile_id}" if key == "profileUrn" else profile_id
+    if raw_urn is not None:
+        payload[key] = raw_urn
     return _el(
         f"$L{module}",
         {
@@ -662,6 +670,9 @@ def profile_payload(
     contact_slug: str | None = None,
     top_cards: int = 1,
     extra_top_runs: Sequence[str] = (),
+    mutuals: Sequence[Person] = (),
+    contact_url: str | None = None,
+    raw_urn: str | None = None,
 ) -> bytes:
     """A profile screen (``POST /flagship-web/in/<slug>/``), trimmed to the anchors.
 
@@ -678,7 +689,10 @@ def profile_payload(
     ``vieweeProfileId`` beside ``vanityName``), or ``"none"``. Where the id sits is
     **invented** (see :func:`_identity_button`). ``profile_id_override`` puts another
     id there. ``also_viewed`` adds a "People also viewed" rail of other people's cards,
-    each with their own id, slug, and seeds. The other options spoil the page for the
+    each with their own id, slug, and seeds. ``mutuals`` puts shared connections *inside*
+    the top card, each a link whose payload names that person's ``profileUrn`` beside
+    their own ``vanityName`` (**invented** shape: the capture saw the shared-connections
+    line in the top card, not its payloads). The other options spoil the page for the
     parser's refusals. ``schools`` adds an education card (**invented** shape).
     """
     rows = _Rows()
@@ -701,7 +715,8 @@ def profile_payload(
                                     "screen": {
                                         "$type": "proto.sdui.actions.core.NavigateToScreen",
                                         "screenId": CONTACT_DETAILS_SCREEN_ID,
-                                        "url": f"/in/{shown_slug}/overlay/contact-info/",
+                                        "url": contact_url
+                                        or f"/in/{shown_slug}/overlay/contact-info/",
                                         "presentation": {
                                             "$case": "modal",
                                             "modal": {"$type": _MODAL},
@@ -745,13 +760,19 @@ def profile_payload(
     top_texts.append(_text_el(text, "500+ connections"))
     buttons: list[Any] = []
     if identity == "message":
-        buttons.append(_identity_button(link, person, profile_id=pid, slug=person.slug))
+        buttons.append(
+            _identity_button(link, person, profile_id=pid, slug=person.slug, raw_urn=raw_urn)
+        )
     elif identity == "bare":
         buttons.append(_identity_button(link, person, profile_id=pid, slug=None))
     elif identity == "viewee":
         buttons.append(
             _identity_button(link, person, profile_id=pid, slug=person.slug, key="vieweeProfileId")
         )
+    buttons.extend(
+        _identity_button(link, other, profile_id=profile_id(other), slug=other.slug)
+        for other in mutuals
+    )
     tops = [
         rows.model(
             _el(
