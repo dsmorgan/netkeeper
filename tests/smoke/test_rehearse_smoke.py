@@ -89,11 +89,11 @@ async def test_a_rehearsal_is_the_enrichment_jobs_pattern_in_a_real_tab(
     assert (rehearsal.harvested, rehearsal.stopped, rehearsal.clicks) == (2, None, 2)
     for visit in rehearsal.visits:
         posts = [r.path for r in visit.requests if r.method == "POST"]
-        # The lazy card comes only if the wheel really scrolled the content container
-        # (#192); the overlay comes from the one click, last, exactly once.
-        assert posts[-1].startswith(f"{NAVIGATION_PATH}?screenId="), visit.requests
-        assert sum(p.startswith(NAVIGATION_PATH) for p in posts) == 1
-        assert all(p.startswith(f"{COMPONENT_PATH}?") for p in posts[:-1]) and len(posts) <= 2
+        # The lazy card: the wheel really scrolled the content container (#192). The
+        # overlay: the one click, last, exactly once.
+        assert len(posts) == 2, visit.requests
+        assert posts[0].startswith(f"{COMPONENT_PATH}?")
+        assert posts[1].startswith(f"{NAVIGATION_PATH}?screenId=")
         assert visit.click_pause_s is not None
     assert not rehearsal.touched_linkedin
 

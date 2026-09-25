@@ -357,7 +357,15 @@ async def rehearse(
                 harvested += 1
 
         extra: dict[str, Any] = {} if overlay_wait_s is None else {"overlay_wait_s": overlay_wait_s}
-        source = PageProfiles(run, origin=base, sleep=_scaled_sleep(sleep, time_scale), **extra)
+        # A separate Random from run_enrichment's own (below): resting the pointer
+        # (#192) is not part of the pacing plan, and drawing it from the same stream
+        # would shift which deltas and dwells that plan draws next. Seeded from the
+        # same `seed` so a rehearsal's *total* wait -- pointer rest included -- still
+        # reproduces line for line, and so time_scale still divides it exactly.
+        rest_rng = Random(seed)  # noqa: S311 -- reproducibility is the point, not secrecy
+        source = PageProfiles(
+            run, origin=base, sleep=_scaled_sleep(sleep, time_scale), rng=rest_rng, **extra
+        )
         # Not a cryptographic use: the seed is printed in the log precisely so a
         # rehearsal can be repeated line for line, which is the opposite of what a
         # secure generator is for.
