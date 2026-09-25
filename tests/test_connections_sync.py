@@ -1465,12 +1465,14 @@ async def test_a_stop_after_earlier_losses_names_them_all(
 async def test_an_incremental_run_that_lost_an_answer_is_not_completed(
     session_factory: sessionmaker[Session], user_id: int
 ) -> None:
-    await _sync(session_factory, user_id, FakeConnectionsSource(_many(99)))
-    fetch = _ReadOnSource(_many(99), losses={0: (_lost(40),)})
+    # 160 people, all known: the slices at 0 and 40 sit next to the loss and cannot
+    # prove the run caught up (#201 review, L1); the one at 80 does.
+    await _sync(session_factory, user_id, FakeConnectionsSource(_many(160)))
+    fetch = _ReadOnSource(_many(160), losses={0: (_lost(40),)})
     report = await _sync(
         session_factory, user_id, fetch, SyncMode.INCREMENTAL, at=NOW + timedelta(days=1)
     )
-    assert report.result.reason is StopReason.CAUGHT_UP
+    assert report.result.reason is StopReason.CAUGHT_UP and fetch.starts == [0, 40, 80]
     run = _run_row(session_factory, user_id, report.run_id)
     assert (run.status, run.stop_reason) == (SyncRunStatus.ABORTED, "answer_lost")
 
