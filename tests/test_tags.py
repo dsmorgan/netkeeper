@@ -654,6 +654,10 @@ def test_the_scan_cap_is_exact_and_counts_pairs_of_a_class_and_a_literal() -> No
     assert not _refused_by_the_cap(CLASS_BRANCHES[:3] + LITERAL_BRANCHES[:9])
     # 2 class branches and 15 literal ones: 1 class pair and 30 mixed, 31.
     assert _refused_by_the_cap(CLASS_BRANCHES[:2] + LITERAL_BRANCHES[:15])
+    # The same with the literal branches first, so every mixed pair has its class
+    # on the right: a count that only looked at the left side would see 1 and 3.
+    assert not _refused_by_the_cap(LITERAL_BRANCHES[:9] + CLASS_BRANCHES[:3])
+    assert _refused_by_the_cap(LITERAL_BRANCHES[:15] + CLASS_BRANCHES[:2])
 
 
 def test_the_scan_cap_counts_pairs_compared_in_the_fixed_prefixes() -> None:
@@ -702,6 +706,39 @@ def test_the_scan_cap_is_one_budget_for_the_whole_pattern(full_scans: list[int])
     with pytest.raises(InvalidPattern, match="too many alternatives"):
         compile_pattern(_alternation_at_the_cap(0) + "+" + _alternation_at_the_cap(1) + "+")
     compile_pattern(_alternation_at_the_cap(0) + "+" + _alternation_at_the_cap(1) + "?")
+
+
+TWO_ALTERNATIONS_AT_THE_CAP = {
+    # Each alternation at the cap in a group of its own: a budget per group would
+    # accept every one of these, since each group needs exactly 30 pairs.
+    "capturing": "(?:(A0)(A1))+",
+    "atomic": "(?:(?>A0)(?>A1))+",
+    "lookahead": "(?:(?=A0)(?=A1))+",
+    # Each branch of an outer alternation spends 30. The outer branches start with
+    # different literals, which cost no scan, so the outer comparison adds nothing.
+    "outer-branches": "(?:xA0|yA1)+",
+    # A conditional's branch: 30 in the "yes" branch, 30 in the sequence around it.
+    "conditional": "(x)?(?:A0(?(1)A1))+",
+}
+"""Two alternations at the cap, 60 pairs between them, inside every kind of group
+:func:`svc._ambiguous` walks into. The parser flattens ``(?:...)``, so the test above
+never passes the budget through a group; these do (#253)."""
+
+
+@pytest.mark.parametrize(
+    "shape", TWO_ALTERNATIONS_AT_THE_CAP.values(), ids=TWO_ALTERNATIONS_AT_THE_CAP.keys()
+)
+def test_every_kind_of_group_shares_the_scan_budget(shape: str) -> None:
+    def spelled(template: str) -> str:
+        return template.replace("A0", _alternation_at_the_cap(0)).replace(
+            "A1", _alternation_at_the_cap(1)
+        )
+
+    with pytest.raises(InvalidPattern, match="too many alternatives"):
+        compile_pattern(spelled(shape))
+    # One alternation at the cap in the same shape is accepted: the refusal above is
+    # the second one's 30 pairs, not the shape.
+    compile_pattern(spelled(shape.replace("A1", "z")))
 
 
 def test_the_scan_cap_message_says_to_split_the_rule() -> None:
