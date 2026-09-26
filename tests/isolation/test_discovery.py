@@ -37,6 +37,10 @@ HANDWRITTEN: dict[str, Any] = {
         "/api/v1/contacts/import": _post_json({"type": "array"}),
         # A POST answering with a page is a query, and needs an isolation test.
         "/api/v1/contacts/query": _post_json(_ref("ContactPage")),
+        # An object of nothing but arrays is a list in sections (#78).
+        "/api/v1/presets": _get_json(_ref("Presets")),
+        # One scalar beside the arrays makes it a record, not a list.
+        "/api/v1/budget": _get_json(_ref("Budget")),
         "/api/v1/stats": _get_json(
             {"type": "object", "properties": {"items": {"type": "integer"}}}
         ),
@@ -58,6 +62,20 @@ HANDWRITTEN: dict[str, Any] = {
             "ListItems": {"type": "array", "items": {"type": "string"}},
             "Contact": {"type": "object", "properties": {"id": {"type": "integer"}}},
             "Tag": {"type": "object"},
+            "Presets": {
+                "type": "object",
+                "properties": {
+                    "builtin": {"type": "array", "items": {"type": "object"}},
+                    "saved": _ref("ListItems"),
+                },
+            },
+            "Budget": {
+                "type": "object",
+                "properties": {
+                    "budgets": {"type": "array", "items": {"type": "object"}},
+                    "account": {"type": "string"},
+                },
+            },
             "User": {"type": "object"},
         }
     },
@@ -70,6 +88,7 @@ def test_list_operations_on_a_handwritten_schema() -> None:
         "/api/v1/contacts/query",
         "/api/v1/tags",
         "/api/v1/lists",
+        "/api/v1/presets",
     }
 
 

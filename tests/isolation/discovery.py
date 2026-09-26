@@ -10,9 +10,12 @@ REF_PREFIX = "#/components/schemas/"
 def list_operations(openapi: dict[str, Any]) -> set[str]:
     """Paths of every list operation: a ``GET`` returning rows, or a ``POST`` returning a page.
 
-    A ``GET`` counts when its ``200`` JSON response is an array or a paged
-    object — an object with an ``items`` property of type array, the convention
-    for paged lists.
+    A ``GET`` counts when its ``200`` JSON response is an array, a paged object
+    — an object with an ``items`` property of type array, the convention for
+    paged lists — or an object made of nothing but arrays, which is a list split
+    into sections (``GET /imports/presets`` answers ``builtin`` and ``saved``,
+    #78). An object with any non-array property is a record that happens to
+    carry arrays (a contact and its emails) and does not count.
 
     A ``POST`` counts only when that response is a *page*. A query whose filter
     does not fit a query string (``POST /contacts/query``) is a list like any
@@ -51,8 +54,14 @@ def _is_list(openapi: dict[str, Any], schema: dict[str, Any] | None, *, pages_on
         return not pages_only
     if resolved.get("type") != "object":
         return False
-    items = resolved.get("properties", {}).get("items")
-    return isinstance(items, dict) and _resolve(openapi, items).get("type") == "array"
+    properties = resolved.get("properties", {})
+    items = properties.get("items")
+    if isinstance(items, dict) and _resolve(openapi, items).get("type") == "array":
+        return True
+    return bool(properties) and all(
+        isinstance(value, dict) and _resolve(openapi, value).get("type") == "array"
+        for value in properties.values()
+    )
 
 
 def _resolve(openapi: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:

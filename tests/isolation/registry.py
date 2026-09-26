@@ -169,6 +169,19 @@ def _seed_import_rows(session: Session, user: User) -> int:
     return run.total_rows
 
 
+def _seed_import_presets(session: Session, user: User) -> int:
+    import_service.save_preset(session, user, f"mine-{user.id}", IMPORT_MAPPING)
+    import_service.save_preset(session, user, f"also-mine-{user.id}", IMPORT_MAPPING)
+    return 2
+
+
+def saved_presets_count(body: Any) -> int:
+    """The user's own presets; the built-in ones are the same for everybody (#78)."""
+    saved = body["saved"]
+    assert isinstance(saved, list), f"saved is not an array: {saved!r}"
+    return len(saved)
+
+
 def _seed_tags(session: Session, user: User) -> int:
     tag_service.create_tag(session, user, "seeded")
     return 1
@@ -347,6 +360,7 @@ REGISTRY: list[ListEndpoint] = [
         path_params=own_contact,
     ),
     ListEndpoint(f"{API_PREFIX}/imports", _seed_import_runs, paged_count),
+    ListEndpoint(f"{API_PREFIX}/imports/presets", _seed_import_presets, saved_presets_count),
     ListEndpoint(
         f"{API_PREFIX}/imports/{{run_id}}/rows",
         _seed_import_rows,

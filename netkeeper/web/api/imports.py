@@ -75,6 +75,8 @@ from netkeeper.web.schemas import (
     ImportRunCreate,
     ImportRunOut,
     ImportRunPage,
+    RollbackAcquiredOut,
+    RollbackRefusalOut,
 )
 
 router = APIRouter(tags=["imports"])
@@ -95,7 +97,11 @@ INVALID: Responses = {422: {"description": "A file or a mapping that cannot be u
 
 @contextmanager
 def translate_errors() -> Iterator[None]:
-    """Map the service's exceptions to HTTP statuses: 404, 409, 422."""
+    """Map the service's exceptions to HTTP statuses: 404, 409, 422.
+
+    A rollback's own refusals are not here: :func:`rollback_refusal` answers them
+    with a ``code`` and the details a client acts on.
+    """
     try:
         yield
     except service.UnknownRow as exc:
@@ -105,7 +111,6 @@ def translate_errors() -> Iterator[None]:
     except (
         service.RunNotDraft,
         service.RunNotCommitted,
-        service.RunMerged,
         service.UndecidedCandidates,
         service.DuplicatePreset,
     ) as exc:
@@ -540,23 +545,83 @@ def commit_import_run(
     return run_out(run)
 
 
+ROLLBACK_REFUSED: Responses = {
+    409: {
+        "model": RollbackRefusalOut,
+        "description": "The run is not committed, or rolling it back is refused: a merge "
+        "drew in a contact it created, a later run wrote over it, or contacts it created "
+        "have gained things since (unless force)",
+    }
+}
+
+
+def rollback_refusal(exc: service.ImportRunError) -> ApiError:
+    """A rollback refusal as a ``409`` carrying a ``code`` a client can act on (#78)."""
+    body: RollbackRefusalOut
+    if isinstance(exc, service.RunMerged):
+        body = RollbackRefusalOut(detail=str(exc), code="merged", contact_ids=list(exc.contact_ids))
+    elif isinstance(exc, service.RunSuperseded):
+        body = RollbackRefusalOut(
+            detail=str(exc),
+            code="superseded",
+            run_ids=list(exc.run_ids),
+            contact_ids=list(exc.contact_ids),
+        )
+    else:
+        assert isinstance(exc, service.CreatedContactsChanged)
+        acquired = exc.acquired
+        body = RollbackRefusalOut(
+            detail=str(exc),
+            code="created_contacts_changed",
+            contact_ids=list(acquired.contact_ids),
+            acquired=RollbackAcquiredOut(
+                interactions=acquired.interactions,
+                tags=acquired.tags,
+                list_memberships=acquired.list_memberships,
+                triage_decisions=acquired.triage_decisions,
+                children=acquired.children,
+                edited_contacts=acquired.edited_contacts,
+                later_imports=acquired.later_imports,
+            ),
+        )
+    return ApiError(409, body.model_dump(mode="json"))
+
+
 @router.post(
     "/imports/{run_id}/rollback",
     operation_id="rollback_import_run",
-    responses={**NOT_FOUND, **CONFLICT},
+    responses={**NOT_FOUND, **ROLLBACK_REFUSED},
 )
-def rollback_import_run(run_id: int, user: CurrentUser, session: SessionDep) -> ImportRollbackOut:
+def rollback_import_run(
+    run_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+    force: bool = Query(
+        False,
+        description="Roll back even though contacts the run created have gained things since; "
+        "they are deleted with them. Never overrides a merge or a later run.",
+    ),
+) -> ImportRollbackOut:
     """Undo a committed run, and only what that run did.
 
     A contact the run created is deleted; a contact it only enriched keeps the
     values it had before the run, and the child rows the run added are removed. A
     field something changed after the import keeps that later value, and its
-    provenance with it. A run whose created contacts a merge has since drawn in
-    answers ``409`` and is not undone at all: deleting one of those contacts
-    would take rows the run never created.
+    provenance with it.
+
+    Refused with ``409`` and nothing undone, the body's ``code`` saying why
+    (#78): ``merged`` when a merge has since drawn in a contact the run created,
+    because deleting it would take rows the run never created; ``superseded``
+    when a later run wrote over fields this one wrote, naming the runs to roll
+    back first; ``created_contacts_changed`` when contacts the run created have
+    gained interactions, tags, lists, edits or later imports, counted in
+    ``acquired``, which ``force`` overrides.
     """
-    with translate_errors():
-        result = service.rollback(session, user, run_id)
+    try:
+        with translate_errors():
+            result = service.rollback(session, user, run_id, force=force)
+    except (service.RunMerged, service.RunSuperseded, service.CreatedContactsChanged) as exc:
+        raise rollback_refusal(exc) from exc
     return ImportRollbackOut(
         run_id=result.run_id,
         contacts_deleted=result.contacts_deleted,

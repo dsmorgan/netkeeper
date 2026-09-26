@@ -67,7 +67,11 @@ describe('import history', () => {
  * As the real backend behaves: a rollback that lands flips the run to
  * `rolled_back`, which the page refetches. What it removed has to survive that.
  */
-function detailBackend(run = COMMITTED_RUN, calls: Call[] = [], rollback?: () => Response) {
+function detailBackend(
+  run = COMMITTED_RUN,
+  calls: Call[] = [],
+  rollback?: (call: Call) => Response | undefined,
+) {
   let undone = false
   return backend(
     {
@@ -77,8 +81,8 @@ function detailBackend(run = COMMITTED_RUN, calls: Call[] = [], rollback?: () =>
         ),
       [`GET /api/v1/imports/${run.id}/rows`]: () =>
         jsonResponse({ items: COMMITTED_ROWS, total: COMMITTED_ROWS.length }),
-      [`POST /api/v1/imports/${run.id}/rollback`]: () => {
-        const refused = rollback?.()
+      [`POST /api/v1/imports/${run.id}/rollback`]: (call) => {
+        const refused = rollback?.(call)
         if (refused !== undefined) return refused
         undone = true
         return jsonResponse({
@@ -205,6 +209,60 @@ describe('one import run', () => {
       screen.getByText(/Nothing was changed. Undo the merge on the contacts named above/),
     ).toBeVisible()
     expect(screen.queryByRole('alertdialog')).toBeNull()
+  })
+
+  it('names the later import to undo first, and offers no way around it', async () => {
+    const detail =
+      'import run(s) 9 wrote over fields this run also wrote, on contact(s) 31; roll back the ' +
+      'later run(s) first, newest first.'
+    mockFetch(
+      detailBackend(COMMITTED_RUN, [], () =>
+        jsonResponse({ detail, code: 'superseded', run_ids: [9], contact_ids: [31] }, 409),
+      ),
+    )
+    await renderApp('/imports/runs/7')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Roll back this import' }))
+    const dialog = within(await screen.findByRole('alertdialog'))
+    fireEvent.click(dialog.getByRole('button', { name: 'Delete 2 contacts and restore the rest' }))
+
+    expect(await screen.findByText('A later import has to be undone first.')).toBeVisible()
+    expect(screen.getByText(detail)).toBeVisible()
+    expect(screen.queryByText(/Undo the merge/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /anyway/ })).toBeNull()
+  })
+
+  it('says what a created contact gained, and rolls back anyway only when asked', async () => {
+    const detail =
+      '2 contact(s) this run created (31, 32) have gained things since the import that ' +
+      'rolling back would delete with them: 3 interactions, 1 tag added by hand.'
+    const calls: Call[] = []
+    mockFetch(
+      detailBackend(COMMITTED_RUN, calls, (call) =>
+        call.query.get('force') === 'true'
+          ? undefined
+          : jsonResponse({ detail, code: 'created_contacts_changed', contact_ids: [31, 32] }, 409),
+      ),
+    )
+    await renderApp('/imports/runs/7')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Roll back this import' }))
+    const dialog = within(await screen.findByRole('alertdialog'))
+    fireEvent.click(dialog.getByRole('button', { name: 'Delete 2 contacts and restore the rest' }))
+
+    expect(
+      await screen.findByText('Rolling back would delete more than this import added.'),
+    ).toBeVisible()
+    expect(screen.getByText(detail)).toBeVisible()
+    const rollbacks = () => calls.filter((call) => call.path === '/api/v1/imports/7/rollback')
+    expect(rollbacks()).toHaveLength(1)
+    expect(rollbacks()[0]?.query.get('force')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete them anyway and roll back' }))
+
+    expect(await screen.findByText('Rolled back')).toBeVisible()
+    expect(rollbacks()).toHaveLength(2)
+    expect(rollbacks()[1]?.query.get('force')).toBe('true')
   })
 
   it('warns beforehand that a merge can make a rollback impossible', async () => {

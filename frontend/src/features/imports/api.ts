@@ -231,9 +231,14 @@ export async function commitRun(
 }
 
 /** Undo a committed run, and only what that run did. */
-export async function rollbackRun(runId: number): Promise<RollbackResult> {
+/**
+ * Undo a committed run. `force` deletes the contacts it created even though
+ * they have gained things since (a 409 with `created_contacts_changed`, #78);
+ * it never overrides a merge or a later run that wrote over this one.
+ */
+export async function rollbackRun(runId: number, force = false): Promise<RollbackResult> {
   const { data, error, response } = await api.POST('/api/v1/imports/{run_id}/rollback', {
-    params: { path: { run_id: runId } },
+    params: { path: { run_id: runId }, query: force ? { force: true } : {} },
   })
   if (data === undefined) throw apiError(error, response, `POST /api/v1/imports/${runId}/rollback`)
   return data

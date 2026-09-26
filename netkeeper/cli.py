@@ -1745,8 +1745,23 @@ def import_resume_cmd(
 @import_app.command("rollback")
 def import_rollback_cmd(
     run_id: Annotated[int, typer.Argument(help="The import run to undo.")],
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Roll back even though contacts the run created have gained interactions, "
+            "tags, lists or edits since; they are deleted with them. Never overrides a merge "
+            "or a later run that wrote over this one.",
+        ),
+    ] = False,
 ) -> None:
-    """Undo a committed import run: delete what it created, restore what it enriched."""
+    """Undo a committed import run: delete what it created, restore what it enriched.
+
+    Refused, with nothing undone, when a merge has drawn in a contact the run
+    created, when a later run wrote over fields it wrote (roll that one back
+    first), or when contacts it created have gained things since, which
+    ``--force`` deletes anyway (#78).
+    """
     engine = make_engine(database_url())
     try:
         factory = make_session_factory(engine)
@@ -1754,7 +1769,7 @@ def import_rollback_cmd(
         with session_scope(factory, write=True) as session:
             user = _local_user_or_exit(session)
             try:
-                result = import_runs.rollback(session, user, run_id)
+                result = import_runs.rollback(session, user, run_id, force=force)
             # Same defensive symmetry as _commit_run: rollback() does not raise
             # CsvImportError today, but the except clause matches
             # translate_errors() rather than assuming it never will.

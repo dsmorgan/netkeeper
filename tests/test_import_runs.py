@@ -15,28 +15,35 @@ from typing import Any
 
 import factories
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.crm import identity, import_runs
 from netkeeper.crm.identity import CreateNew, MergeInto
+from netkeeper.crm.interactions import add_interaction
+from netkeeper.crm.lists import add_members, create_list
 from netkeeper.crm.provenance import may_overwrite, set_manual_field
-from netkeeper.crm.tags import create_rule, create_tag
+from netkeeper.crm.tags import create_rule, create_tag, tag_contact
 from netkeeper.db import mark_for_write, session_scope
 from netkeeper.models import (
     Contact,
     ContactEmail,
+    ContactPhone,
     ContactSource,
     ContactTag,
     ImportResolution,
     ImportRow,
     ImportStatus,
+    Interaction,
+    InteractionKind,
+    ListKind,
     RuleField,
     User,
 )
 from netkeeper.scoping import scoped, unscoped
 
 FIXTURES = Path(__file__).parent / "fixtures" / "csv"
+NOW = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 LINKEDHELPER = (FIXTURES / "linkedhelper-sample.csv").read_text()
 NINE_COLUMN = (FIXTURES / "nine-column-sample.csv").read_text()
 
@@ -321,22 +328,236 @@ def test_a_later_import_still_refuses_an_edit_that_outlived_a_rollback(
     assert fern.field_sources["current_title"] == ContactSource.MANUAL.value
 
 
-def test_rolling_back_the_earlier_of_two_runs_leaves_the_later_one_alone(
+def test_rolling_back_the_earlier_of_two_overlapping_runs_is_refused(
+    writer: Session, user: User
+) -> None:
+    """#78 item 1. Each row records the value it found, so undoing run 1 first would
+    leave run 2's rollback putting back run 1's value: a value no live run backs.
+    """
+    seeded = seed_existing(writer, user)
+    fern = seeded["fern"]
+    first = import_sample(writer, user)
+    second = import_sample(writer, user, content=SECOND_FILE)
+    assert fern.current_title == "Kite Director"
+
+    with pytest.raises(import_runs.RunSuperseded) as raised:
+        import_runs.rollback(writer, user, first)
+
+    assert raised.value.run_ids == (second,)
+    assert raised.value.contact_ids == (fern.id,)
+    assert f"import run(s) {second}" in str(raised.value)
+    # Refused whole: nothing moved.
+    assert import_runs.get_run(writer, user, first).status is ImportStatus.COMMITTED
+    assert fern.current_title == "Kite Director"
+
+
+def test_overlapping_runs_rolled_back_newest_first_end_where_they_began(
     writer: Session, user: User
 ) -> None:
     seeded = seed_existing(writer, user)
     fern = seeded["fern"]
+    sources_before = dict(fern.field_sources)
+    synced_before = dict(fern.synced_values)
     first = import_sample(writer, user)
-    import_sample(writer, user, content=SECOND_FILE)
-    assert fern.current_title == "Kite Director"
+    second = import_sample(writer, user, content=SECOND_FILE)
+
+    import_runs.rollback(writer, user, second)
+    assert fern.current_title == "Head of Kites"  # the first run's value, which it backs
+    import_runs.rollback(writer, user, first)
+
+    assert fern.current_title == "Kite Apprentice"
+    assert fern.headline is None
+    assert dict(fern.field_sources) == sources_before
+    assert dict(fern.synced_values) == synced_before
+
+
+def test_a_later_run_that_rolled_back_no_longer_blocks_the_earlier_one(
+    writer: Session, user: User
+) -> None:
+    seeded = seed_existing(writer, user)
+    first = import_sample(writer, user)
+    second = import_sample(writer, user, content=SECOND_FILE)
+    import_runs.rollback(writer, user, second)
 
     import_runs.rollback(writer, user, first)
 
-    # The field is the second run's now, value and source together.
-    assert fern.current_title == "Kite Director"
-    assert fern.field_sources["current_title"] == ContactSource.CSV.value
-    # The fields the second run never touched do go back.
-    assert fern.headline is None
+    assert seeded["fern"].current_title == "Kite Apprentice"
+
+
+def test_a_later_run_on_other_contacts_does_not_block_a_rollback(
+    writer: Session, user: User
+) -> None:
+    seeded = seed_existing(writer, user)
+    first = import_runs.create_run(writer, user, filename="one.csv", content=SECOND_FILE)
+    import_runs.commit(writer, user, first.id)
+    other = (
+        "Profile Url,First Name,Last Name,Position\n"
+        "https://www.linkedin.com/in/wilhelmina-pockrandt-qz/,Wilhelmina,Pockrandt,Tin Queen\n"
+    )
+    later = import_runs.create_run(writer, user, filename="two.csv", content=other)
+    import_runs.commit(writer, user, later.id)
+
+    import_runs.rollback(writer, user, first.id)
+
+    assert seeded["fern"].current_title == "Kite Apprentice"
+    assert seeded["wilhelmina"].current_title == "Tin Queen"
+
+
+# --- what a created contact gained since is not silently deleted (#78 item 2) ----
+
+
+def _created_imogen(writer: Session, user: User) -> tuple[int, Contact]:
+    """Commit the sample and return the run id and the contact it created for Imogen."""
+    seed_existing(writer, user)
+    run_id = import_sample(writer, user)
+    imogen = writer.scalars(scoped(user, Contact).where(Contact.last_name == "Thistlewhite")).one()
+    return run_id, imogen
+
+
+def test_a_rollback_is_refused_when_a_created_contact_gained_things_since(
+    writer: Session, user: User
+) -> None:
+    run_id, imogen = _created_imogen(writer, user)
+    add_interaction(writer, user, imogen.id, InteractionKind.NOTE, NOW, "coffee")
+    add_interaction(writer, user, imogen.id, InteractionKind.EMAIL_OUT, NOW, "thanks")
+    tag_contact(writer, user, imogen.id, create_tag(writer, user, "pickles").id)
+    shortlist = create_list(writer, user, "shortlist", ListKind.STATIC)
+    add_members(writer, user, shortlist.id, [imogen.id])
+    imogen.notes = "Knows everyone in brining."
+    writer.flush()
+
+    with pytest.raises(import_runs.CreatedContactsChanged) as raised:
+        import_runs.rollback(writer, user, run_id)
+
+    acquired = raised.value.acquired
+    assert imogen.id in acquired.contact_ids
+    assert (acquired.interactions, acquired.tags, acquired.list_memberships) == (2, 1, 1)
+    assert acquired.edited_contacts == 1
+    assert acquired.triage_decisions == acquired.children == acquired.later_imports == 0
+    assert (
+        "2 interactions, 1 tag added by hand, 1 list membership, 1 contact with your own edits"
+    ) in str(raised.value)
+    # Refused whole: nothing moved.
+    assert import_runs.get_run(writer, user, run_id).status is ImportStatus.COMMITTED
+    assert by_slug(writer, user, "fern-oglethorpe-qz") is not None
+
+
+def test_force_rolls_back_anyway_and_deletes_what_the_contact_gained(
+    writer: Session, user: User
+) -> None:
+    run_id, imogen = _created_imogen(writer, user)
+    imogen_id = imogen.id
+    add_interaction(writer, user, imogen_id, InteractionKind.NOTE, NOW, "coffee")
+    writer.flush()
+
+    result = import_runs.rollback(writer, user, run_id, force=True)
+
+    assert result.contacts_deleted >= 1
+    assert writer.scalars(scoped(user, Contact).where(Contact.id == imogen_id)).first() is None
+    assert writer.scalars(scoped(user, Interaction)).first() is None
+
+
+def test_rule_tags_and_the_runs_own_children_are_not_counted_as_gained(
+    writer: Session, user: User
+) -> None:
+    """The commit itself runs the auto-tag rules and creates child rows; neither is a loss."""
+    seed_existing(writer, user)
+    create_rule(writer, user, create_tag(writer, user, "picklers").id, RuleField.COMPANY, "pickle")
+    run_id = import_sample(writer, user)
+    tagged = writer.scalars(scoped(user, ContactTag)).all()
+    assert tagged, "the rule should have tagged the created contact"
+
+    result = import_runs.rollback(writer, user, run_id)
+
+    assert result.contacts_deleted >= 1
+
+
+def test_a_later_import_that_changed_a_created_contact_is_counted(
+    writer: Session, user: User
+) -> None:
+    run_id, imogen = _created_imogen(writer, user)
+    later = (
+        "Profile Url,First Name,Last Name,Position\n"
+        f"https://www.linkedin.com/in/{imogen.li_public_id}/,Imogen,Thistlewhite,Chief Pickler\n"
+    )
+    later_run = import_runs.create_run(writer, user, filename="later.csv", content=later)
+    import_runs.commit(writer, user, later_run.id)
+
+    with pytest.raises(import_runs.CreatedContactsChanged) as raised:
+        import_runs.rollback(writer, user, run_id)
+
+    assert raised.value.acquired.later_imports == 1
+
+
+def test_a_detail_added_after_the_import_is_counted(writer: Session, user: User) -> None:
+    run_id, imogen = _created_imogen(writer, user)
+    imogen.phones.append(
+        ContactPhone(
+            user_id=user.id, raw="+15550100999", source=ContactSource.MANUAL, observed_at=NOW
+        )
+    )
+    writer.flush()
+
+    with pytest.raises(import_runs.CreatedContactsChanged) as raised:
+        import_runs.rollback(writer, user, run_id)
+
+    assert raised.value.acquired.children == 1
+
+
+# --- the snapshot is not an N+1 (#78 item 4) ------------------------------------
+
+
+def _file_of(count: int) -> str:
+    lines = ["Profile Url,First Name,Last Name,Position"]
+    lines += [
+        f"https://www.linkedin.com/in/person-{n}-qz/,Person,Number{n},Title {n}"
+        for n in range(count)
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _child_selects(writer: Session, user: User, count: int) -> int:
+    """SELECTs against the contact child tables while committing ``count`` matched rows."""
+    for n in range(count):
+        factories.make_contact(
+            writer, user, li_urn=None, li_public_id=f"person-{n}-qz", emails=[f"p{n}@x.example"]
+        )
+    writer.flush()
+    writer.expire_all()
+    run = import_runs.create_run(writer, user, filename="many.csv", content=_file_of(count))
+    writer.expire_all()
+    tables = tuple(import_runs.CHILD_MODELS)
+    seen: list[str] = []
+
+    def count_selects(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        head = statement.lstrip().upper()
+        if head.startswith("SELECT") and any(f"FROM {table.upper()}" in head for table in tables):
+            seen.append(statement)
+
+    engine = writer.get_bind()
+    event.listen(engine, "before_cursor_execute", count_selects)
+    try:
+        import_runs.commit(writer, user, run.id)
+    finally:
+        event.remove(engine, "before_cursor_execute", count_selects)
+    return len(seen)
+
+
+def test_committing_matched_rows_reads_child_rows_in_a_constant_number_of_queries(
+    session_factory: sessionmaker[Session],
+) -> None:
+    counts = []
+    for size in (3, 12):
+        session = session_factory()
+        mark_for_write(session)
+        try:
+            user = factories.make_user(session)
+            counts.append(_child_selects(session, user, size))
+        finally:
+            session.rollback()
+            session.close()
+    small, large = counts
+    assert large == small, f"child-table SELECTs grew with the file: {small} for 3, {large} for 12"
 
 
 # --- a merge afterwards is refused, not overrun -----------------------------

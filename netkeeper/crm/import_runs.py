@@ -40,6 +40,18 @@ contact a merge has drawn in would take rows with it that the run never created,
 a run whose created contacts have since been merged is *refused* rather than
 partly undone (:class:`RunMerged`).
 
+Runs are undone newest first where they overlap (#78). Each row records the
+value it found, so when two runs wrote the same field, undoing the earlier one
+first leaves the field to the later one, and undoing the later one afterwards
+puts back the earlier run's value, which nothing backs any more. A run that a
+later, still committed run has written over, on any field of any contact it
+enriched, is therefore refused (:class:`RunSuperseded`), naming the runs to
+undo first. And a contact the run created may since have gained things the run
+never gave it: interactions, tags or lists a person added, triage decisions,
+their own edits, child rows from a later import. Deleting it would take all of
+that with it, so such a run is refused (:class:`CreatedContactsChanged`),
+saying what would be lost, unless the caller passes ``force``.
+
 Every function that writes needs a writer session (CLAUDE.md): each reads before
 it writes, and on SQLite an unmarked read-then-write fails at once with
 "database is locked". An importer is a writer. Transactions belong to the
@@ -57,11 +69,19 @@ from dataclasses import field as dataclass_field
 from datetime import date, datetime
 from typing import Any, Final, assert_never, cast
 
-from sqlalchemy import CursorResult, Date, Delete, inspect
-from sqlalchemy.orm import Session, class_mapper
+from sqlalchemy import CursorResult, Date, Delete, inspect, or_, select
+from sqlalchemy.orm import Session, class_mapper, selectinload
 
 from netkeeper.crm import identity
-from netkeeper.crm.identity import Candidate, CreateNew, Decision, Matched, MergeInto, New
+from netkeeper.crm.identity import (
+    Candidate,
+    CreateNew,
+    Decision,
+    IncomingContact,
+    Matched,
+    MergeInto,
+    New,
+)
 from netkeeper.crm.importer import (
     CsvImportError,
     EmptyFile,
@@ -90,10 +110,12 @@ from netkeeper.models import (
     ContactChild,
     ContactEmail,
     ContactLink,
+    ContactMet,
     ContactPhone,
     ContactPosition,
     ContactSnapshot,
     ContactSource,
+    ContactTag,
     FieldChange,
     ImportDecisionKind,
     ImportResolution,
@@ -101,10 +123,14 @@ from netkeeper.models import (
     ImportRun,
     ImportSourceKind,
     ImportStatus,
+    Interaction,
+    ListMember,
     RefusedField,
     RowChanges,
     RowDecision,
     SyncedValue,
+    TagSource,
+    TriageDecision,
     User,
 )
 from netkeeper.models.base import utcnow
@@ -186,6 +212,82 @@ class RunMerged(ImportRunError, ValueError):
             f"this run created contact(s) {shown}, which a merge has since drawn in; "
             "rolling it back would delete rows the merge moved onto them, or leave "
             "behind rows it moved off them. Undo the merge first."
+        )
+
+
+class RunSuperseded(ImportRunError, ValueError):
+    """A later committed run wrote over fields this run wrote; undo that run first (#78)."""
+
+    def __init__(self, run_ids: Sequence[int], contact_ids: Sequence[int]) -> None:
+        self.run_ids = tuple(run_ids)
+        self.contact_ids = tuple(contact_ids)
+        runs = ", ".join(str(run_id) for run_id in self.run_ids)
+        contacts = ", ".join(str(contact_id) for contact_id in self.contact_ids)
+        super().__init__(
+            f"import run(s) {runs} wrote over fields this run also wrote, on contact(s) "
+            f"{contacts}; roll back the later run(s) first, newest first. Undoing this one "
+            "first would leave their rollback putting back this run's values, which "
+            "nothing would back any more."
+        )
+
+
+@dataclass(frozen=True)
+class Acquired:
+    """What the contacts a run created have gained since, none of it from the run (#78).
+
+    Counts across all of them. ``edited_contacts`` counts contacts carrying a
+    person's own edit (a manual field, notes, a met decision, do-not-contact);
+    ``children`` counts emails, phones, links, positions, snapshots and aliases
+    added after the run ("details added later"); ``later_imports`` counts other committed runs that
+    changed one of them.
+    """
+
+    contact_ids: tuple[int, ...]
+    interactions: int = 0
+    tags: int = 0
+    list_memberships: int = 0
+    triage_decisions: int = 0
+    children: int = 0
+    edited_contacts: int = 0
+    later_imports: int = 0
+
+    def __bool__(self) -> bool:
+        return any(count for count, _, _ in self._parts())
+
+    def _parts(self) -> tuple[tuple[int, str, str], ...]:
+        return (
+            (self.interactions, "interaction", "interactions"),
+            (self.tags, "tag added by hand", "tags added by hand"),
+            (self.list_memberships, "list membership", "list memberships"),
+            (self.triage_decisions, "triage decision", "triage decisions"),
+            (self.children, "detail added later", "details added later"),
+            (self.edited_contacts, "contact with your own edits", "contacts with your own edits"),
+            (
+                self.later_imports,
+                "later import that changed them",
+                "later imports that changed them",
+            ),
+        )
+
+    def describe(self) -> str:
+        """``"3 interactions, 1 tag added by hand"``: the non-zero parts, in words."""
+        return ", ".join(
+            f"{count} {one if count == 1 else many}" for count, one, many in self._parts() if count
+        )
+
+
+class CreatedContactsChanged(ImportRunError, ValueError):
+    """Contacts the run created have gained things since; deleting them would lose them (#78)."""
+
+    def __init__(self, acquired: Acquired) -> None:
+        self.acquired = acquired
+        count = len(acquired.contact_ids)
+        shown = ", ".join(str(contact_id) for contact_id in acquired.contact_ids[:10])
+        more = "" if count <= 10 else f" and {count - 10} more"
+        super().__init__(
+            f"{count} contact(s) this run created ({shown}{more}) have gained things since the "
+            f"import that rolling back would delete with them: {acquired.describe()}. "
+            "Roll back with force to delete them anyway."
         )
 
 
@@ -549,6 +651,74 @@ def _owned(session: Session, user: User, contact_id: int) -> Contact:
     return contact
 
 
+PREFETCH_CHUNK: Final[int] = 500
+"""Rows whose identities :func:`_prefetch` looks up per query, to keep ``IN`` lists short."""
+
+
+def _prefetch(
+    session: Session,
+    user: User,
+    raws: Sequence[Mapping[str, str]],
+    mapping: Mapping[str, ImportField],
+    *,
+    observed_at: datetime,
+    contact_ids: Iterable[int] = (),
+) -> list[Contact]:
+    """Load, in a few queries, the contacts these rows can match, with their child rows (#78).
+
+    Resolution finds a matched row's contact by URN, slug, alias, or email, one
+    row at a time; :func:`_snapshot` and :func:`_effect` then read six child
+    collections of it, and ``identity.apply`` four. Lazily, that is up to ten
+    queries per matched row. Loading every contact the file's identities point
+    at up front, collections and all, leaves those reads to the identity map:
+    the per-row lookups still run, but find the contact already there with its
+    collections loaded. ``contact_ids`` adds the contacts decisions name.
+
+    The caller keeps the returned list for as long as it processes the rows.
+    The session's identity map holds objects weakly, so a prefetched contact
+    nobody references can be collected and its collections read again.
+    """
+    urns: set[str] = set()
+    slugs: set[str] = set()
+    emails: set[str] = set()
+    for raw in raws:
+        incoming: IncomingContact | None = map_row(raw, mapping, observed_at=observed_at).incoming
+        if incoming is None:
+            continue
+        if incoming.li_urn is not None:
+            urns.add(incoming.li_urn)
+        if incoming.li_public_id is not None:
+            slugs.add(incoming.li_public_id)
+        emails.update(email.email for email in incoming.emails)
+    loaders = [selectinload(getattr(Contact, name)) for name in _CHILD_RELATIONSHIPS.values()]
+    loaded: list[Contact] = []
+
+    def load(condition: Any) -> None:
+        statement = scoped(user, Contact).where(condition).options(*loaders)
+        loaded.extend(session.scalars(statement))
+
+    for chunk in _chunks(sorted(urns)):
+        load(Contact.li_urn.in_(chunk))
+    for chunk in _chunks(sorted(slugs)):
+        aliased = select(ContactAlias.contact_id).where(
+            ContactAlias.user_id == user.id, ContactAlias.li_public_id.in_(chunk)
+        )
+        load(or_(Contact.li_public_id.in_(chunk), Contact.id.in_(aliased)))
+    for chunk in _chunks(sorted(emails)):
+        addressed = select(ContactEmail.contact_id).where(
+            ContactEmail.user_id == user.id, ContactEmail.email.in_(chunk)
+        )
+        load(Contact.id.in_(addressed))
+    for ids in _chunks(sorted(set(contact_ids))):
+        load(Contact.id.in_(ids))
+    return loaded
+
+
+def _chunks[T](items: Sequence[T]) -> Iterator[Sequence[T]]:
+    for start in range(0, len(items), PREFETCH_CHUNK):
+        yield items[start : start + PREFETCH_CHUNK]
+
+
 @contextmanager
 def _dry_run(session: Session) -> Iterator[None]:
     """Run the block against the database and undo every write it makes.
@@ -608,6 +778,13 @@ def create_run(
     observed_at = utcnow()
     outcomes: list[_Outcome] = []
     with _dry_run(session):
+        held = _prefetch(  # noqa: F841 - held so the identity map keeps what it loaded
+            session,
+            user,
+            inspection.parsed.rows,
+            inspection.resolved.mapping,
+            observed_at=observed_at,
+        )
         for number, raw in enumerate(inspection.parsed.rows, start=1):
             outcomes.append(
                 _process_row(
@@ -738,6 +915,14 @@ def preview(
     observed_at = utcnow()
     previews: list[RowPreview] = []
     with _dry_run(session):
+        held = _prefetch(  # noqa: F841 - held so the identity map keeps what it loaded
+            session,
+            user,
+            [row.raw_json for row in rows],
+            mapping,
+            observed_at=observed_at,
+            contact_ids=_decided_contacts(rows),
+        )
         for row in rows:
             outcome = _process_row(
                 session,
@@ -769,6 +954,15 @@ def preview(
 def _mapping_headers(rows: Sequence[ImportRow], run: ImportRun) -> list[str]:
     """The header names the stored rows carry; the mapping is filtered to these."""
     return list(rows[0].raw_json) if rows else list(run.mapping_json)
+
+
+def _decided_contacts(rows: Iterable[ImportRow]) -> set[int]:
+    """The contacts the rows' merge decisions name."""
+    return {
+        row.decision_json["contact_id"]
+        for row in rows
+        if row.decision_json is not None and row.decision_json["contact_id"] is not None
+    }
 
 
 def _decision_of(row: ImportRow) -> Decision | None:
@@ -859,6 +1053,14 @@ def commit(
     outcomes: list[_Outcome] = []
     waiting: list[int] = []
     fallback: Decision | None = CreateNew() if undecided is UndecidedPolicy.CREATE_NEW else None
+    held = _prefetch(  # noqa: F841 - held so the identity map keeps what it loaded
+        session,
+        user,
+        [row.raw_json for row in rows],
+        mapping,
+        observed_at=observed_at,
+        contact_ids=_decided_contacts(rows),
+    )
     for row in rows:
         decision = _decision_of(row)
         outcome = _process_row(
@@ -949,7 +1151,7 @@ class RollbackResult:
     children_deleted: int
 
 
-def rollback(session: Session, user: User, run_id: int) -> RollbackResult:
+def rollback(session: Session, user: User, run_id: int, *, force: bool = False) -> RollbackResult:
     """Undo one committed run, and only what that run did (spec 10.5).
 
     A contact the run created is deleted with its children. A contact the run
@@ -959,10 +1161,16 @@ def rollback(session: Session, user: User, run_id: int) -> RollbackResult:
     import keeps that later value, and keeps its ``field_sources`` and
     ``synced_values`` entries with it: putting the provenance back without the
     value would leave a person's own edit in place marked as nobody's, and the
-    next import would overwrite it. ``RunMerged`` when a merge has drawn in a
-    contact the run created; nothing is undone, because deleting that contact
-    would take rows the run never made. ``RunNotCommitted`` for a draft or an
-    already rolled-back run. ``RuntimeError`` when ``session`` is not a writer.
+    next import would overwrite it.
+
+    Refused, with nothing undone: ``RunMerged`` when a merge has drawn in a
+    contact the run created, because deleting that contact would take rows the
+    run never made; ``RunSuperseded`` when a later committed run wrote over a
+    field this run wrote, because undoing this one first would leave that run's
+    rollback restoring a value nothing backs (#78); ``CreatedContactsChanged``
+    when a contact the run created has gained things since, which deleting it
+    would lose, unless ``force``. ``RunNotCommitted`` for a draft or an already
+    rolled-back run. ``RuntimeError`` when ``session`` is not a writer.
     """
     _require_writer(session)
     run = get_run(session, user, run_id)
@@ -983,6 +1191,13 @@ def rollback(session: Session, user: User, run_id: int) -> RollbackResult:
     merged = _merged_since(session, user, created_ids)
     if merged:
         raise RunMerged(merged)
+    later_runs, overwritten = _superseded_by(session, user, run, rows, created_ids)
+    if later_runs:
+        raise RunSuperseded(later_runs, overwritten)
+    if not force:
+        acquired = _acquired_since(session, user, run, created_ids)
+        if acquired:
+            raise CreatedContactsChanged(acquired)
     restored = fields = children = 0
     for row in rows:
         changes = row.changes_json
@@ -1125,6 +1340,126 @@ def _merged_since(session: Session, user: User, contact_ids: Iterable[int]) -> l
     return sorted(involved)
 
 
+def _touched_keys(changes: RowChanges) -> set[str]:
+    """Every field a row wrote a value, a source, or a ledger entry for."""
+    return set(changes["fields"]) | set(changes["sources"]) | set(changes["synced"])
+
+
+def _later_rows(
+    session: Session, user: User, run: ImportRun, contact_ids: Iterable[int]
+) -> list[ImportRow]:
+    """Rows of other committed runs, committed after ``run``, that landed on ``contact_ids``."""
+    ids = sorted(contact_ids)
+    if not ids or run.committed_at is None:
+        return []
+    statement = (
+        scoped(user, ImportRow)
+        .join(ImportRun, ImportRun.id == ImportRow.run_id)
+        .where(
+            ImportRun.user_id == user.id,
+            ImportRun.id != run.id,
+            ImportRun.status == ImportStatus.COMMITTED,
+            ImportRun.committed_at > run.committed_at,
+            ImportRow.contact_id.in_(ids),
+        )
+    )
+    return list(session.scalars(statement))
+
+
+def _superseded_by(
+    session: Session,
+    user: User,
+    run: ImportRun,
+    rows: Sequence[ImportRow],
+    created_ids: set[int],
+) -> tuple[list[int], list[int]]:
+    """The later runs that wrote over a field this run wrote, and the contacts, ascending.
+
+    Only contacts this run enriched count: one it created is deleted whole, and
+    what a later run did to it is :func:`_acquired_since`'s to report. A field
+    counts as written when the row recorded its value, its source, or its
+    ``synced_values`` entry, because each of those is something a rollback puts
+    back from what it found.
+    """
+    touched: dict[int, set[str]] = {}
+    for row in rows:
+        changes = row.changes_json
+        if changes is None or changes["created_contact"] or row.contact_id is None:
+            continue
+        if row.contact_id in created_ids:
+            continue
+        keys = _touched_keys(changes)
+        if keys:
+            touched.setdefault(row.contact_id, set()).update(keys)
+    later_runs: set[int] = set()
+    contacts: set[int] = set()
+    for other in _later_rows(session, user, run, touched):
+        changes = other.changes_json
+        if changes is None or other.contact_id is None:
+            continue
+        if _touched_keys(changes) & touched[other.contact_id]:
+            later_runs.add(other.run_id)
+            contacts.add(other.contact_id)
+    return sorted(later_runs, reverse=True), sorted(contacts)
+
+
+def _acquired_since(
+    session: Session, user: User, run: ImportRun, created_ids: set[int]
+) -> Acquired:
+    """What the contacts ``run`` created have gained that deleting them would lose (#78).
+
+    Rule-assigned tags are not counted: the rules would assign them again to
+    anybody who still matched, so nothing a person did is lost with them.
+    """
+    ids = sorted(created_ids)
+    if not ids:
+        return Acquired(())
+
+    def count(statement: Any) -> int:
+        return int(session.scalar(statement) or 0)
+
+    since = run.committed_at
+    children = 0
+    if since is not None:
+        for model in CHILD_MODELS.values():
+            children += count(
+                scoped_count(user, model).where(model.contact_id.in_(ids), model.created_at > since)
+            )
+    edited = 0
+    for contact in session.scalars(scoped(user, Contact).where(Contact.id.in_(ids))):
+        if (
+            ContactSource.MANUAL.value in (contact.field_sources or {}).values()
+            or (contact.notes or "").strip()
+            or contact.met is not ContactMet.UNKNOWN
+            or contact.do_not_contact
+        ):
+            edited += 1
+    later_imports = {
+        row.run_id
+        for row in _later_rows(session, user, run, ids)
+        if row.changes_json is not None
+        and (row.changes_json["fields"] or row.changes_json["children"])
+    }
+    return Acquired(
+        contact_ids=tuple(ids),
+        interactions=count(scoped_count(user, Interaction).where(Interaction.contact_id.in_(ids))),
+        tags=count(
+            scoped_count(user, ContactTag).where(
+                ContactTag.contact_id.in_(ids), ContactTag.source != TagSource.RULE
+            )
+        ),
+        list_memberships=count(
+            scoped_count(user, ListMember).where(ListMember.contact_id.in_(ids))
+        ),
+        triage_decisions=count(
+            scoped_count(user, TriageDecision).where(TriageDecision.contact_id.in_(ids))
+        ),
+        children=children,
+        edited_contacts=edited,
+        later_imports=len(later_imports),
+    )
+
+
 def _delete_contacts(session: Session, user: User, contact_ids: Iterable[int]) -> int:
     """Delete the contacts a run created. Children go with them, in the database."""
     ids = sorted(contact_ids)
@@ -1243,9 +1578,11 @@ def delete_preset(session: Session, user: User, name: str) -> None:
 __all__ = [
     "PREVIEW_ROWS",
     "SAVED_PRESETS_KEY",
+    "Acquired",
     "Candidate",
     "ContactNotFound",
     "CreateNew",
+    "CreatedContactsChanged",
     "CsvImportError",
     "Decision",
     "DuplicatePreset",
@@ -1263,6 +1600,7 @@ __all__ = [
     "RunNotCommitted",
     "RunNotDraft",
     "RunNotFound",
+    "RunSuperseded",
     "UndecidedCandidates",
     "UndecidedPolicy",
     "UnknownPreset",
