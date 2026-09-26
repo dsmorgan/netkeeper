@@ -436,6 +436,32 @@ def test_cli_import_csv_on_candidate_new_creates_a_separate_contact(
         assert session.scalar(scoped_count(user, Contact)) == 4
 
 
+def test_cli_import_csv_on_candidate_new_makes_a_repeated_person_two_contacts(
+    cli_db: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """#90 item 2, pinned as documented behavior rather than fixed: the policy decides
+    each row on its own, so the second occurrence of an ambiguous person is still
+    ambiguous -- its candidates now include the first occurrence's new contact -- and
+    becomes a second new contact. The flag's help says so; this keeps the help honest.
+    """
+    _seed_candidate(cli_db)
+    repeated = tmp_path / "repeated.csv"
+    lines = NINE_COLUMN_SAMPLE.read_text().splitlines()
+    repeated.write_text("\n".join([*lines, lines[-1]]) + "\n")
+
+    result = CliRunner().invoke(cli, ["import", "csv", str(repeated), "--on-candidate", "new"])
+    assert result.exit_code == 0, result.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        thaddeuses = session.scalar(
+            scoped_count(user, Contact).where(Contact.last_name == "Ravensworth")
+        )
+        assert thaddeuses == 3  # the seeded one, plus one per row
+
+    help_text = CliRunner().invoke(cli, ["import", "csv", "--help"], env={"COLUMNS": "200"})
+    assert "a person listed twice in the file becomes two new contacts" in help_text.output
+
+
 # --- import resume, runs, rm (#90) -------------------------------------------
 
 
