@@ -395,6 +395,55 @@ describe('save and delete', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
   })
 
+  it('counts a save the server normalized as saved, with no discard prompt after it', async () => {
+    let saved = template()
+    mockApi(
+      routes([], {
+        'GET /api/v1/templates': () => jsonResponse([saved]),
+        'GET /api/v1/templates/1': () => jsonResponse(saved),
+        // The server trims the name and stores a blank subject as none.
+        'PATCH /api/v1/templates/1': () => {
+          saved = template({ name: 'renamed', subject: null })
+          return jsonResponse(saved)
+        },
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'renamed ' } })
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: '   ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled(), WAIT)
+    expect(screen.getByLabelText('Name')).toHaveValue('renamed')
+    expect(screen.getByLabelText('Subject')).toHaveValue('')
+    expect(screen.queryByText(/The preview shows the saved version/)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'New template' }))
+    expect(await screen.findByRole('heading', { name: 'New template' })).toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('stops guarding once a dirty template is deleted', async () => {
+    mockApi(
+      routes([template()], {
+        'DELETE /api/v1/templates/1': () => new Response(null, { status: 204 }),
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    fireEvent.change(await screen.findByLabelText('Body'), { target: { value: 'Unsaved' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete “reconnect”?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete template' }))
+    expect(await screen.findByText('No template open', undefined, WAIT)).toBeInTheDocument()
+
+    // The draft went with the template, so leaving has nothing to ask about.
+    fireEvent.click(screen.getByRole('link', { name: 'Elsewhere' }))
+    expect(await screen.findByText('Somewhere else', undefined, WAIT)).toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
   it('deletes a template after you confirm, without asking about the draft', async () => {
     let deleted = false
     const seen = mockApi(

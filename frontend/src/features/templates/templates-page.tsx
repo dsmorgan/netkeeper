@@ -195,7 +195,12 @@ interface WorkspaceProps {
 
 function Workspace({ current, versions, onSaved, onDeleted, onDirtyChange }: WorkspaceProps) {
   const [draft, setDraft] = useState(() => draftOf(current))
-  const dirty = !sameDraft(draft, draftOf(current))
+  // What the last save answered. The server normalizes a save (a trimmed name, a blank
+  // subject stored as none), and the refetched `current` lags it, so this, not the typed
+  // draft or the stale row, is what "unsaved" compares against once a save lands.
+  const [lastSaved, setLastSaved] = useState<TemplateOut | null>(null)
+  const saved = lastSaved ?? current
+  const dirty = !sameDraft(draft, draftOf(saved))
   useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange])
   useEffect(() => () => onDirtyChange(false), [onDirtyChange])
   const [viewingId, setViewingId] = useState<number | null>(current?.id ?? null)
@@ -211,10 +216,14 @@ function Workspace({ current, versions, onSaved, onDeleted, onDirtyChange }: Wor
           <OlderVersion row={older} onBack={() => setViewingId(current.id)} />
         ) : (
           <TemplateEditor
-            template={current}
+            template={saved}
             draft={draft}
             onDraftChange={setDraft}
-            onSaved={onSaved}
+            onSaved={(row) => {
+              setLastSaved(row)
+              setDraft(draftOf(row))
+              onSaved(row)
+            }}
             onDeleted={onDeleted}
           />
         )}
