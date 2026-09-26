@@ -681,6 +681,31 @@ def test_vcard_fold_does_not_split_a_multibyte_character() -> None:
         text.encode("utf-8").decode("utf-8")  # raises if a codepoint was split
 
 
+def test_vcard_escape_turns_a_bare_carriage_return_into_one_newline() -> None:
+    """A bare ``\r`` (old Mac line endings) is a line break too; ``\r\n`` is one
+    break, not two. The 3.0 and 4.0 exports share this (#254)."""
+    assert _vcard_escape("one\rtwo\r\nthree\nfour") == "one\\ntwo\\nthree\\nfour"
+    assert "\r" not in _vcard_escape("\r\r\n\r")
+
+
+def test_vcard_fold_backs_off_a_character_straddling_the_first_fold() -> None:
+    """A 3-octet character across octet 75 moves whole to the next physical line."""
+    line = "NOTE:" + "a" * 69 + "€" + "b" * 5  # the € is octets 74-76
+    assert _fold(line) == "NOTE:" + "a" * 69 + "\r\n €" + "b" * 5
+
+
+def test_vcard_fold_backs_off_past_every_continuation_octet() -> None:
+    """A 4-octet character whose lead octet is two before the fold point."""
+    line = "NOTE:" + "a" * 68 + "😀" + "b" * 5  # the emoji is octets 73-76
+    assert _fold(line) == "NOTE:" + "a" * 68 + "\r\n 😀" + "b" * 5
+
+
+def test_vcard_fold_backs_off_on_a_continuation_line_too() -> None:
+    """Continuation lines hold 74 octets after their space; the check applies there as well."""
+    line = "NOTE:" + "a" * 143 + "€" + "b" * 5  # the € is octets 148-150
+    assert _fold(line) == "NOTE:" + "a" * 70 + "\r\n " + "a" * 73 + "\r\n €" + "b" * 5
+
+
 def test_full_vcard_contains_begin_end_and_crlf_line_endings(session: Session) -> None:
     user = factories.make_user(session)
     factories.make_contact(

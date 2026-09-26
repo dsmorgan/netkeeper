@@ -249,6 +249,25 @@ def test_text_values_escape_comma_semicolon_backslash_and_newline(session: Sessi
     assert _one(group, "FN") == "clients\\, 2026\\; west\\\\coast"
 
 
+def test_nickname_title_and_the_group_n_are_escaped(session: Session) -> None:
+    """NICKNAME, TITLE, and the group card's N go through the same escaping as
+    every other TEXT value, so none can end its line or add a component (#254)."""
+    user = factories.make_user(session)
+    contact = factories.make_contact(
+        session,
+        user,
+        first_name="Robert",
+        preferred_name="Bob; the, \\builder",
+        current_title="VP, Sales; West\rRegion",
+    )
+    _tag(session, user, "clients, 2026; west\\coast\nnew", contact)
+    session.commit()
+    contact_card, group = _cards(_run(session, user))  # no bare CR or LF on any line
+    assert _one(contact_card, "NICKNAME") == "Bob\\; the\\, \\\\builder"
+    assert _one(contact_card, "TITLE") == "VP\\, Sales\\; West\\nRegion"
+    assert _one(group, "N") == "clients\\, 2026\\; west\\\\coast\\nnew;;;;"
+
+
 # --- tags: CATEGORIES and group cards -------------------------------------------------
 
 
