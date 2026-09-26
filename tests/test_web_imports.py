@@ -501,6 +501,7 @@ async def test_rolling_back_a_created_contact_that_gained_things_needs_force(
     assert imogen.id in body["contact_ids"]
     assert body["acquired"]["interactions"] == 1
     assert body["acquired"]["enriched_contacts"] == 0
+    assert body["acquired"]["enrollments"] == 0
     assert "1 interaction" in body["detail"]
     assert contact_by_slug(running_app, "imogen-thistlewhite-qz") is not None
 
@@ -509,6 +510,37 @@ async def test_rolling_back_a_created_contact_that_gained_things_needs_force(
     )
     assert forced.status_code == 200, forced.text
     assert contact_by_slug(running_app, "imogen-thistlewhite-qz") is None
+
+
+async def test_rolling_back_a_created_contact_with_a_campaign_message_is_refused_for_good(
+    client: httpx.AsyncClient, running_app: FastAPI, seeded: object
+) -> None:
+    """#242: a 409 naming the contacts, not a 500 from the message's foreign key."""
+    run = await draft(client)
+    await client.post(
+        f"/api/v1/imports/{run['id']}/commit", headers=CSRF, json={"skip_undecided": True}
+    )
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = session.scalars(select(User)).one()
+        imogen = session.scalars(
+            scoped(user, Contact).where(Contact.li_public_id == "imogen-thistlewhite-qz")
+        ).one()
+        campaign = factories.make_campaign(session, user)
+        factories.make_message(session, factories.make_enrollment(session, campaign, imogen))
+        imogen_id = imogen.id
+
+    for params in ({}, {"force": "true"}):
+        response = await client.post(
+            f"/api/v1/imports/{run['id']}/rollback", headers=CSRF, params=params
+        )
+        assert response.status_code == 409, response.text
+        body = response.json()
+        assert body["code"] == "created_contacts_messaged"
+        assert body["contact_ids"] == [imogen_id]
+        assert "never deleted" in body["detail"]
+    assert contact_by_slug(running_app, "imogen-thistlewhite-qz") is not None
+    assert (await client.get(f"/api/v1/imports/{run['id']}")).json()["status"] == "committed"
 
 
 async def test_a_saved_preset_maps_a_later_file_missing_one_of_its_columns(

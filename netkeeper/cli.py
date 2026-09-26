@@ -1832,14 +1832,16 @@ def import_rollback_cmd(
         typer.Option(
             "--force",
             help="Roll back even though contacts the run created have gained interactions, "
-            "tags, lists or edits since; they are deleted with them. Never overrides a merge "
-            "or a later run that wrote over this one.",
+            "tags, lists, campaign enrollments or edits since; they are deleted with them. "
+            "Never overrides a campaign message, a merge or a later run that wrote over "
+            "this one.",
         ),
     ] = False,
 ) -> None:
     """Undo a committed import run: delete what it created, restore what it enriched.
 
-    Refused, with nothing undone, when a merge has drawn in a contact the run
+    Refused, with nothing undone, when a contact the run created has a campaign
+    message (#242), when a merge has drawn in a contact the run
     created, when a later run wrote over fields it wrote (roll that one back
     first), or when contacts it created have gained things since, which
     ``--force`` deletes anyway (#78).

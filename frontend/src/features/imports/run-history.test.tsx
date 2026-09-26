@@ -295,6 +295,27 @@ describe('one import run', () => {
     expect(screen.queryByRole('alertdialog')).toBeNull()
   })
 
+  it('says a contact with a campaign message stops the rollback for good', async () => {
+    const detail =
+      '1 contact(s) this run created (31) have 1 campaign message on record, and a message is ' +
+      'never deleted, so this run cannot be rolled back, with force or without.'
+    mockFetch(
+      detailBackend(COMMITTED_RUN, [], () =>
+        jsonResponse({ detail, code: 'created_contacts_messaged', contact_ids: [31] }, 409),
+      ),
+    )
+    await renderApp('/imports/runs/7')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Roll back this import' }))
+    const dialog = within(await screen.findByRole('alertdialog'))
+    fireEvent.click(dialog.getByRole('button', { name: 'Delete 2 contacts and restore the rest' }))
+
+    expect(await screen.findByText('This import can no longer be rolled back.')).toBeVisible()
+    expect(screen.getByText(detail)).toBeVisible()
+    expect(screen.queryByText(/Undo the merge/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /anyway/ })).toBeNull()
+  })
+
   it('names the later import to undo first, and offers no way around it', async () => {
     const detail =
       'import run(s) 9 wrote over fields this run also wrote, on contact(s) 31; roll back the ' +

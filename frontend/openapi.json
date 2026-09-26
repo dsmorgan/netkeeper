@@ -6276,6 +6276,10 @@
             "title": "Enriched Contacts",
             "type": "integer"
           },
+          "enrollments": {
+            "title": "Enrollments",
+            "type": "integer"
+          },
           "interactions": {
             "title": "Interactions",
             "type": "integer"
@@ -6305,7 +6309,8 @@
           "children",
           "edited_contacts",
           "enriched_contacts",
-          "later_imports"
+          "later_imports",
+          "enrollments"
         ],
         "title": "RollbackAcquiredOut",
         "type": "object"
@@ -6325,6 +6330,7 @@
           },
           "code": {
             "enum": [
+              "created_contacts_messaged",
               "merged",
               "superseded",
               "created_contacts_changed"
@@ -11589,7 +11595,7 @@
     },
     "/api/v1/imports/{run_id}/rollback": {
       "post": {
-        "description": "Undo a committed run, and only what that run did.\n\nA contact the run created is deleted; a contact it only enriched keeps the\nvalues it had before the run, and the child rows the run added are removed. A\nfield something changed after the import keeps that later value, and its\nprovenance with it.\n\nRefused with ``409`` and nothing undone, the body's ``code`` saying why\n(#78): ``merged`` when a merge has since drawn in a contact the run created,\nbecause deleting it would take rows the run never created; ``superseded``\nwhen a later run wrote over fields this one wrote, naming the runs to roll\nback first; ``created_contacts_changed`` when contacts the run created have\ngained interactions, tags, lists, edits, another source's data or later\nimports, counted in\n``acquired``, which ``force`` overrides.",
+        "description": "Undo a committed run, and only what that run did.\n\nA contact the run created is deleted; a contact it only enriched keeps the\nvalues it had before the run, and the child rows the run added are removed. A\nfield something changed after the import keeps that later value, and its\nprovenance with it.\n\nRefused with ``409`` and nothing undone, the body's ``code`` saying why\n(#78): ``created_contacts_messaged`` when a contact the run created has a\ncampaign message, which is never deleted, so ``force`` does not override it\n(#242); ``merged`` when a merge has since drawn in a contact the run created,\nbecause deleting it would take rows the run never created; ``superseded``\nwhen a later run wrote over fields this one wrote, naming the runs to roll\nback first; ``created_contacts_changed`` when contacts the run created have\ngained interactions, tags, lists, campaign enrollments, edits, another\nsource's data or later imports, counted in\n``acquired``, which ``force`` overrides.",
         "operationId": "rollback_import_run",
         "parameters": [
           {
@@ -11602,13 +11608,13 @@
             }
           },
           {
-            "description": "Roll back even though contacts the run created have gained things since; they are deleted with them. Never overrides a merge or a later run.",
+            "description": "Roll back even though contacts the run created have gained things since; they are deleted with them. Never overrides a campaign message, a merge or a later run.",
             "in": "query",
             "name": "force",
             "required": false,
             "schema": {
               "default": false,
-              "description": "Roll back even though contacts the run created have gained things since; they are deleted with them. Never overrides a merge or a later run.",
+              "description": "Roll back even though contacts the run created have gained things since; they are deleted with them. Never overrides a campaign message, a merge or a later run.",
               "title": "Force",
               "type": "boolean"
             }
@@ -11636,7 +11642,7 @@
                 }
               }
             },
-            "description": "The run is not committed, or rolling it back is refused: a merge drew in a contact it created, a later run wrote over it, or contacts it created have gained things since (unless force)"
+            "description": "The run is not committed, or rolling it back is refused: a contact it created has a campaign message, a merge drew in a contact it created, a later run wrote over it, or contacts it created have gained things since (unless force)"
           },
           "422": {
             "content": {
