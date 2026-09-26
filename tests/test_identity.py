@@ -69,6 +69,7 @@ from netkeeper.models import (
     ListKind,
     ListMember,
     Message,
+    MessageStatus,
     MetSource,
     RuleField,
     Tag,
@@ -2230,31 +2231,49 @@ def test_merge_moves_an_enrollment_the_survivor_has_no_match_for(
     assert enrollments_of(writer, alice, loser.id) == []
 
 
+E = EnrollmentStatus
+
+
 @pytest.mark.parametrize(
-    ("loser_state", "survivor_state", "keeps_losers"),
+    ("loser_state", "survivor_state", "combined"),
     [
         # Furthest along wins, whichever contact it was on.
-        ((EnrollmentStatus.ACTIVE, 2), (EnrollmentStatus.ACTIVE, 1), True),
-        ((EnrollmentStatus.ACTIVE, 1), (EnrollmentStatus.ACTIVE, 2), False),
-        ((EnrollmentStatus.COMPLETED, 3), (EnrollmentStatus.ACTIVE, 1), True),
+        ((E.ACTIVE, 2), (E.ACTIVE, 1), (E.ACTIVE, 2)),
+        ((E.ACTIVE, 1), (E.ACTIVE, 2), (E.ACTIVE, 2)),
+        ((E.COMPLETED, 3), (E.ACTIVE, 1), (E.COMPLETED, 3)),
         # On a tie, the active one, then the survivor's own.
-        ((EnrollmentStatus.ACTIVE, None), (EnrollmentStatus.PENDING, None), True),
-        ((EnrollmentStatus.PAUSED, 1), (EnrollmentStatus.ACTIVE, 1), False),
-        ((EnrollmentStatus.ACTIVE, 1), (EnrollmentStatus.ACTIVE, 1), False),
-        # One the person or the contact ended is never restarted by a merge.
-        ((EnrollmentStatus.REPLIED, 1), (EnrollmentStatus.ACTIVE, 2), True),
-        ((EnrollmentStatus.OPTED_OUT, 1), (EnrollmentStatus.ACTIVE, 2), True),
-        ((EnrollmentStatus.BOUNCED, 1), (EnrollmentStatus.ACTIVE, 2), True),
-        ((EnrollmentStatus.REMOVED, None), (EnrollmentStatus.ACTIVE, 2), True),
-        ((EnrollmentStatus.ACTIVE, 2), (EnrollmentStatus.OPTED_OUT, 1), False),
+        ((E.ACTIVE, None), (E.PENDING, None), (E.ACTIVE, None)),
+        ((E.ACTIVE, 1), (E.ACTIVE, 1), (E.ACTIVE, 1)),
+        # A pause holds, in both directions, at the same step or behind (#242 review, 1).
+        ((E.PAUSED, 1), (E.ACTIVE, 1), (E.PAUSED, 1)),
+        ((E.ACTIVE, 1), (E.PAUSED, 1), (E.PAUSED, 1)),
+        ((E.ACTIVE, 3), (E.PAUSED, 1), (E.PAUSED, 3)),
+        ((E.PAUSED, 1), (E.ACTIVE, 3), (E.PAUSED, 3)),
+        ((E.PENDING, None), (E.PAUSED, None), (E.PAUSED, None)),
+        ((E.COMPLETED, 3), (E.PAUSED, 1), (E.COMPLETED, 3)),  # nothing left to pause
+        # One the person or the contact ended is never restarted by a merge, and the
+        # step is the higher one either way (#242 review, 2).
+        ((E.REPLIED, 1), (E.ACTIVE, 2), (E.REPLIED, 2)),
+        ((E.OPTED_OUT, 1), (E.ACTIVE, 2), (E.OPTED_OUT, 2)),
+        ((E.BOUNCED, 1), (E.ACTIVE, 2), (E.BOUNCED, 2)),
+        ((E.REMOVED, None), (E.ACTIVE, 2), (E.REMOVED, 2)),
+        ((E.ACTIVE, 2), (E.OPTED_OUT, 1), (E.OPTED_OUT, 2)),
+        ((E.ACTIVE, 3), (E.REMOVED, 1), (E.REMOVED, 3)),
+        # Of two ended ones: opted out, then bounced, then replied, then removed (#242
+        # review, 4), whatever the steps.
+        ((E.OPTED_OUT, 1), (E.REPLIED, 2), (E.OPTED_OUT, 2)),
+        ((E.REPLIED, 2), (E.OPTED_OUT, 1), (E.OPTED_OUT, 2)),
+        ((E.REPLIED, 2), (E.BOUNCED, 1), (E.BOUNCED, 2)),
+        ((E.BOUNCED, 1), (E.OPTED_OUT, 1), (E.OPTED_OUT, 1)),
+        ((E.REMOVED, 3), (E.REPLIED, 1), (E.REPLIED, 3)),
     ],
 )
-def test_merge_keeps_the_enrollment_that_is_furthest_or_was_ended(
+def test_merge_combines_two_enrollments_in_one_campaign(
     writer: Session,
     users: tuple[User, User],
     loser_state: tuple[EnrollmentStatus, int | None],
     survivor_state: tuple[EnrollmentStatus, int | None],
-    keeps_losers: bool,
+    combined: tuple[EnrollmentStatus, int | None],
 ) -> None:
     alice, _ = users
     campaign = factories.make_campaign(writer, alice)
@@ -2271,9 +2290,118 @@ def test_merge_keeps_the_enrollment_that_is_furthest_or_was_ended(
     writer.expire_all()
 
     [kept] = enrollments_of(writer, alice, survivor.id)
-    assert (kept.status, kept.current_step) == (loser_state if keeps_losers else survivor_state)
+    assert (kept.status, kept.current_step) == combined
     [set_aside] = enrollments_of(writer, alice, loser.id)
     assert (set_aside.status, set_aside.exit_reason) == (EnrollmentStatus.REMOVED, "merged")
+
+
+def test_the_stop_precedence_is_pinned() -> None:
+    """Safety constants against words written out here (CLAUDE.md)."""
+    assert [s.value for s in identity.STOP_PRECEDENCE] == [
+        "opted_out",
+        "bounced",
+        "replied",
+        "removed",
+    ]
+    assert {s.value for s in identity.UNSENT_MESSAGE_STATUSES} == {
+        "scheduled",
+        "drafted",
+        "prefilled",
+    }
+
+
+@pytest.mark.parametrize("losers_wins", [True, False])
+def test_merge_keeps_a_reply_the_winning_enrollment_did_not_see(
+    writer: Session, users: tuple[User, User], losers_wins: bool
+) -> None:
+    """An opt-out beats a reply, but the reply still happened."""
+    alice, _ = users
+    campaign = factories.make_campaign(writer, alice)
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    replied = {"status": EnrollmentStatus.REPLIED, "current_step": 1, "replied_at": NOW}
+    opted_out = {"status": EnrollmentStatus.OPTED_OUT, "current_step": 1}
+    factories.make_enrollment(writer, campaign, loser, **(opted_out if losers_wins else replied))
+    factories.make_enrollment(writer, campaign, survivor, **(replied if losers_wins else opted_out))
+
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+
+    [kept] = enrollments_of(writer, alice, survivor.id)
+    assert (kept.status, kept.replied_at) == (EnrollmentStatus.OPTED_OUT, NOW)
+
+
+@pytest.mark.parametrize(
+    "unsent", [MessageStatus.SCHEDULED, MessageStatus.DRAFTED, MessageStatus.PREFILLED]
+)
+@pytest.mark.parametrize("survivor_ahead", [True, False])
+def test_merge_discards_the_outranked_enrollments_unsent_messages(
+    writer: Session, users: tuple[User, User], unsent: MessageStatus, survivor_ahead: bool
+) -> None:
+    """Both held step 2 waiting to go: the combined enrollment keeps only the winner's.
+
+    What was sent stays as it is, on either side (#242 review, 3).
+    """
+    alice, _ = users
+    campaign = factories.make_campaign(
+        writer, alice, channels=(TemplateChannel.EMAIL, TemplateChannel.EMAIL)
+    )
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    to_loser = factories.make_enrollment(
+        writer, campaign, loser, current_step=1 if survivor_ahead else 2
+    )
+    to_survivor = factories.make_enrollment(
+        writer, campaign, survivor, current_step=2 if survivor_ahead else 1
+    )
+    waiting = {"status": unsent, "sent_at": None}
+    sent = {
+        "losers": factories.make_message(writer, to_loser, position=1).id,
+        "survivors": factories.make_message(writer, to_survivor, position=1).id,
+    }
+    pending = {
+        "losers": factories.make_message(writer, to_loser, position=2, **waiting).id,
+        "survivors": factories.make_message(writer, to_survivor, position=2, **waiting).id,
+    }
+    kept_id = to_survivor.id
+
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+
+    statuses = {m.id: m.status for m in writer.scalars(scoped(alice, Message))}
+    winner, outranked = ("survivors", "losers") if survivor_ahead else ("losers", "survivors")
+    assert statuses == {
+        sent["losers"]: MessageStatus.SENT,
+        sent["survivors"]: MessageStatus.SENT,
+        pending[winner]: unsent,
+        pending[outranked]: MessageStatus.DISCARDED,
+    }
+    waiting_now = writer.scalars(
+        scoped(alice, Message).where(
+            Message.enrollment_id == kept_id, Message.status.in_(identity.UNSENT_MESSAGE_STATUSES)
+        )
+    ).all()
+    assert [m.id for m in waiting_now] == [pending[winner]]
+
+
+def test_merge_discards_nothing_when_no_enrollments_combine(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    alice, _ = users
+    campaign = factories.make_campaign(writer, alice)
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    enrollment = factories.make_enrollment(writer, campaign, loser)
+    scheduled = factories.make_message(
+        writer, enrollment, status=MessageStatus.SCHEDULED, sent_at=None
+    )
+    scheduled_id = scheduled.id
+
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+
+    moved = writer.scalars(scoped(alice, Message).where(Message.id == scheduled_id)).one()
+    assert (moved.status, moved.contact_id) == (MessageStatus.SCHEDULED, survivor.id)
 
 
 def test_merge_moves_every_message_and_leaves_a_third_contacts_alone(
