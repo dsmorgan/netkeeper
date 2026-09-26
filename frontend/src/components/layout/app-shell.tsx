@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react'
 
+import { ReauthBanner } from '@/features/mailboxes/reauth-banner'
+
 import { Sidebar } from './sidebar'
 import { TopBar } from './top-bar'
 
@@ -10,7 +12,10 @@ export function AppShell({ children }: { children: ReactNode }) {
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar />
-        <main className="flex-1 p-4">{children}</main>
+        <main className="flex-1 p-4">
+          <ReauthBanner />
+          {children}
+        </main>
       </div>
     </div>
   )
