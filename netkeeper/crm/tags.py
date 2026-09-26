@@ -106,9 +106,10 @@ MATCH_TIMEOUT_GIVE_UP: Final = 20
 MAX_EXPANSION: Final = 1000
 """The largest product of counted repeats a pattern may expand to (see :func:`expansion`)."""
 MAX_SCANNED_PAIRS: Final = 30
-"""How many pairs of character sets one alternation under an unbounded repeat may need
-compared by a scan of every code point, a few milliseconds each, before the guard
-refuses it rather than spend seconds deciding (#240, see :func:`_ambiguous_branches`)."""
+"""How many distinct pairs of character sets the alternations under unbounded repeats in
+one pattern may need compared by a scan of every code point, a few milliseconds each,
+before the guard refuses the pattern rather than spend seconds deciding (#240, #246; see
+:func:`_ambiguous_branches`)."""
 PREVIEW_SAMPLE: Final = 10
 """How many matching contact ids a preview returns alongside the count."""
 BATCH_SIZE: Final = 500
@@ -335,7 +336,14 @@ def compile_pattern(pattern: str) -> regex.Pattern[str]:
     except (re.error, OverflowError) as exc:
         # A repeat count at or above MAXREPEAT raises OverflowError, which is not an re.error.
         raise InvalidPattern(f"invalid regular expression: {exc}") from exc
-    if has_ambiguous_nested_repeat(tree):
+    try:
+        ambiguous = _ambiguous_pattern(tree)
+    except _TooManyScans as exc:
+        raise InvalidPattern(
+            "pattern has too many alternatives that start with a character class, such as "
+            r"[ab] or \w, to check in time; split it into several rules"
+        ) from exc
+    if ambiguous:
         raise InvalidPattern(
             "pattern may run slowly: a repeat or an alternation inside an unbounded repeat "
             "(+, *, {n,}), where the same character could go more than one way, as in "
@@ -404,16 +412,36 @@ def has_ambiguous_nested_repeat(tree: Any) -> bool:
     An alternation is the same choice spelled out, so inside an unbounded
     repeat it is checked too (#233, :func:`_ambiguous_branches`): ``(a|aa)+``
     and ``(a?|a)+`` are refused, ``(ab|ac)+`` and ``(a|b)+`` are not.
+
+    A pattern whose alternations would need more than :data:`MAX_SCANNED_PAIRS`
+    scans to decide counts as ambiguous, because doubt rejects;
+    :func:`compile_pattern` gives that refusal its own message.
     """
-    return _ambiguous(tree, frozenset(), inside_unbounded=False, alone_in_pass=False)
+    try:
+        return _ambiguous_pattern(tree)
+    except _TooManyScans:
+        return True
 
 
-def _ambiguous(tree: Any, follow: _Chars, *, inside_unbounded: bool, alone_in_pass: bool) -> bool:
+def _ambiguous_pattern(tree: Any) -> bool:
+    """:func:`has_ambiguous_nested_repeat`, raising :class:`_TooManyScans` past the budget."""
+    return _ambiguous(tree, frozenset(), inside_unbounded=False, alone_in_pass=False, scanned=set())
+
+
+_Scanned = set[frozenset[_Chars]]
+"""The distinct pairs of character sets a pattern's check has compared by a full scan."""
+
+
+def _ambiguous(
+    tree: Any, follow: _Chars, *, inside_unbounded: bool, alone_in_pass: bool, scanned: _Scanned
+) -> bool:
     """:func:`has_ambiguous_nested_repeat` for a sequence that ``follow`` can come after.
 
     ``alone_in_pass``: nothing in the innermost unbounded repeat's pass outside
     this sequence can match a character, so an element here that matches
-    nothing may leave the pass empty.
+    nothing may leave the pass empty. ``scanned`` is shared by the whole
+    pattern (see :func:`_ambiguous_branches`); past its budget this raises
+    :class:`_TooManyScans`.
     """
     elements = list(tree)
     silent = [not _first([element])[0] for element in elements]
@@ -436,32 +464,59 @@ def _ambiguous(tree: Any, follow: _Chars, *, inside_unbounded: bool, alone_in_pa
                 loop,
                 inside_unbounded=inside_unbounded or unbounded,
                 alone_in_pass=True if unbounded else alone and high <= 1,
+                scanned=scanned,
             ):
                 return True
         elif op is _parser.SUBPATTERN:
-            if _ambiguous(args[3], after, inside_unbounded=inside_unbounded, alone_in_pass=alone):
+            if _ambiguous(
+                args[3],
+                after,
+                inside_unbounded=inside_unbounded,
+                alone_in_pass=alone,
+                scanned=scanned,
+            ):
                 return True
         elif op is _parser.ATOMIC_GROUP:
-            if _ambiguous(args, after, inside_unbounded=inside_unbounded, alone_in_pass=alone):
+            if _ambiguous(
+                args, after, inside_unbounded=inside_unbounded, alone_in_pass=alone, scanned=scanned
+            ):
                 return True
         elif op is _parser.BRANCH:
-            if inside_unbounded and _ambiguous_branches(args[1], after, alone=alone):
+            if inside_unbounded and _ambiguous_branches(
+                args[1], after, alone=alone, scanned=scanned
+            ):
                 return True
             if any(
-                _ambiguous(branch, after, inside_unbounded=inside_unbounded, alone_in_pass=alone)
+                _ambiguous(
+                    branch,
+                    after,
+                    inside_unbounded=inside_unbounded,
+                    alone_in_pass=alone,
+                    scanned=scanned,
+                )
                 for branch in args[1]
             ):
                 return True
         elif op in (_parser.ASSERT, _parser.ASSERT_NOT):
             # What a lookaround's contents are followed by is not this sequence.
             unknown = frozenset({_ANY_CHAR})
-            if _ambiguous(args[1], unknown, inside_unbounded=inside_unbounded, alone_in_pass=False):
+            if _ambiguous(
+                args[1],
+                unknown,
+                inside_unbounded=inside_unbounded,
+                alone_in_pass=False,
+                scanned=scanned,
+            ):
                 return True
         elif op is _parser.GROUPREF_EXISTS:
             _group, yes, no = args
             for branch in (yes, no):
                 if branch is not None and _ambiguous(
-                    branch, after, inside_unbounded=inside_unbounded, alone_in_pass=alone
+                    branch,
+                    after,
+                    inside_unbounded=inside_unbounded,
+                    alone_in_pass=alone,
+                    scanned=scanned,
                 ):
                     return True
         starts, nullable = _first([(op, args)])
@@ -469,7 +524,7 @@ def _ambiguous(tree: Any, follow: _Chars, *, inside_unbounded: bool, alone_in_pa
     return False
 
 
-def _ambiguous_branches(branches: Any, after: _Chars, *, alone: bool) -> bool:
+def _ambiguous_branches(branches: Any, after: _Chars, *, alone: bool, scanned: _Scanned) -> bool:
     """Whether an alternation inside an unbounded repeat can take a string two ways (#233).
 
     The parser has already factored out a prefix every branch shares, so
@@ -493,9 +548,12 @@ def _ambiguous_branches(branches: Any, after: _Chars, *, alone: bool) -> bool:
 
     Comparing two plain literals is cheap, but a pair where either side is a
     class (``[xy]``, ``\\w``) takes a scan of every code point. Past
-    :data:`MAX_SCANNED_PAIRS` distinct such pairs the alternation is refused
-    unexamined, because doubt rejects: eighty branches like ``[xy]z`` would
-    otherwise take twenty seconds to save (#240). The count does not depend on
+    :data:`MAX_SCANNED_PAIRS` distinct such pairs this raises
+    :class:`_TooManyScans` and the pattern is refused unexamined, because doubt
+    rejects: eighty branches like ``[xy]z`` would otherwise take twenty seconds
+    to save (#240). ``scanned`` counts the pairs across every alternation in
+    the pattern, not per alternation, since twelve alternations each just under
+    the budget cost twelve times as much (#246). The count does not depend on
     what earlier patterns left in the caches, so neither does the answer.
     """
     firsts = [_first(branch) for branch in branches]
@@ -505,7 +563,6 @@ def _ambiguous_branches(branches: Any, after: _Chars, *, alone: bool) -> bool:
     _learn_case_classes(
         frozenset().union(*(starts for starts, _ in firsts), *(c for p in prefixes for c in p))
     )
-    scanned: set[frozenset[_Chars]] = set()
 
     def overlap(a: _Chars, b: _Chars) -> bool:
         if a and b and not all(_is_literal(c) for c in a | b):
@@ -514,15 +571,12 @@ def _ambiguous_branches(branches: Any, after: _Chars, *, alone: bool) -> bool:
                 raise _TooManyScans
         return _overlap(a, b)
 
-    try:
-        for index, (starts, _) in enumerate(firsts):
-            for other in range(index + 1, len(firsts)):
-                if overlap(starts, firsts[other][0]) and not _differ(
-                    prefixes[index], prefixes[other], overlap
-                ):
-                    return True
-    except _TooManyScans:
-        return True
+    for index, (starts, _) in enumerate(firsts):
+        for other in range(index + 1, len(firsts)):
+            if overlap(starts, firsts[other][0]) and not _differ(
+                prefixes[index], prefixes[other], overlap
+            ):
+                return True
     empty = sum(1 for _, nullable in firsts if nullable)
     if not empty or alone:
         return False
@@ -538,7 +592,7 @@ def _differ(
 
 
 class _TooManyScans(Exception):
-    """An alternation needs more than :data:`MAX_SCANNED_PAIRS` full scans to decide."""
+    """A pattern needs more than :data:`MAX_SCANNED_PAIRS` full scans to decide."""
 
 
 _ONE_CHAR: Final[frozenset[Any]] = frozenset(
