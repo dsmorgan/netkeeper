@@ -120,6 +120,15 @@ def _session(request: Request) -> Iterator[Session]:
     to every page the export fetches — no page skips a row that moved past its
     offset or repeats one that moved into it.
 
+    The price is deliberate: that one read transaction stays open for the whole
+    download, and on SQLite in WAL mode an open reader stops a checkpoint from
+    getting past it, so the WAL file grows for as long as a slow client takes to
+    drain a large export. That is the trade for a consistent file. The SSE stream
+    (``web/api/events.py``) makes the opposite choice for the same reason: it
+    runs for as long as the tab is open, so it holds no session while streaming,
+    and its user lookup uses the ordinary ``scope="function"`` session, which
+    has closed before the first event is sent (#77).
+
     Neither dependency is ever a writer for a safe method or a
     :func:`read_only`-marked one; an export in particular is always a read.
     """

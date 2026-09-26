@@ -31,13 +31,21 @@ from netkeeper.crm.exports import (
     NINE_COLUMN,
     _fold,
     _vcard_escape,
+    _vcard_escape_uri,
     export_stream,
     filename_for,
 )
 from netkeeper.crm.filters import FilterTree, SortKey, parse_filter
 from netkeeper.crm.importer import ImportField, get_preset
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
-from netkeeper.models import Base, ContactSnapshot, User
+from netkeeper.models import (
+    Base,
+    ContactLink,
+    ContactSnapshot,
+    EmailStatus,
+    LinkKind,
+    User,
+)
 from netkeeper.scoping import install_scope_guard
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
@@ -274,7 +282,7 @@ def test_linkedin_archive_uses_the_raw_first_name_not_preferred_name(session: Se
 # --- full: everything, including children, minus internal bookkeeping ---------
 
 
-def test_full_json_includes_children_and_excludes_internal_fields(session: Session) -> None:
+def test_full_json_includes_children(session: Session) -> None:
     user = factories.make_user(session)
     contact = factories.make_contact(
         session,
@@ -296,10 +304,101 @@ def test_full_json_includes_children_and_excludes_internal_fields(session: Sessi
     assert len(row["positions"]) == 1
     assert row["notes"] == "Met at a conference"
 
-    # No database ids, foreign keys, or sync-internal bookkeeping anywhere in the row.
-    dumped = json.dumps(row)
-    for leaked in ('"id"', "user_id", "contact_id", "field_sources", "synced_values"):
-        assert leaked not in dumped, f"{leaked!r} leaked into the full export"
+
+_INTERNAL_FIELDS = (
+    "id",
+    "user_id",
+    "contact_id",
+    "field_sources",
+    "synced_values",
+    "enrich_priority",
+    "li_missing_count",
+    "merged_into_id",
+    "created_at",
+    "updated_at",
+    "li_urn",
+)
+# Values planted in those fields, distinct enough that finding one anywhere in
+# the file can only mean the field leaked.
+_PLANTED_USER_ID = 424201
+_PLANTED_CONTACT_ID = 424202
+_PLANTED_VALUES = (
+    str(_PLANTED_USER_ID),
+    str(_PLANTED_CONTACT_ID),
+    "PLANTEDURN",
+    "PLANTEDSOURCE",
+    "PLANTEDSYNCED",
+    "93717",  # enrich_priority
+    "82431",  # li_missing_count
+    "2001-02-03",  # created_at
+    "2002-03-04",  # updated_at
+)
+
+
+def _field_names(text: str, output_format: str) -> set[str]:
+    """Every field name ``text`` carries, normalized to snake_case."""
+    names: set[str] = set()
+    if output_format == "json":
+
+        def walk(value: object) -> None:
+            if isinstance(value, dict):
+                names.update(value)
+                for child in value.values():
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        walk(json.loads(text))
+    elif output_format == "csv":
+        header = next(csv.reader(io.StringIO(text)))
+        names.update(header)
+    else:
+        for line in text.split("\r\n"):
+            if line and not line.startswith(" "):
+                names.add(line.split(":", 1)[0].split(";", 1)[0])
+    return {name.strip().lower().replace(" ", "_").replace("-", "_") for name in names}
+
+
+@pytest.mark.parametrize("output_format", ["csv", "json", "vcard"])
+@pytest.mark.parametrize("preset", ["nine-column", "linkedin-archive", "full", "campaign-audience"])
+def test_no_preset_or_format_leaks_internal_fields(
+    session: Session, preset: str, output_format: str
+) -> None:
+    """All 12 preset/format combinations, by field name and by planted value (#77)."""
+    user = factories.make_user(session, id=_PLANTED_USER_ID)
+    contact = factories.make_contact(
+        session,
+        user,
+        id=_PLANTED_CONTACT_ID,
+        emails=["a@example.test"],
+        phones=["+15551234567"],
+        positions=[{"title": "Engineer", "company": "Acme"}],
+        notes="Met at a conference",
+        li_urn="urn:li:fsd_profile/PLANTEDURN",
+        field_sources={"headline": "PLANTEDSOURCE"},
+        synced_values={
+            "headline": {
+                "value": "PLANTEDSYNCED",
+                "source": "sync",
+                "observed_at": "2020-01-01T00:00:00+00:00",
+            }
+        },
+        enrich_priority=93717,
+        li_missing_count=82431,
+        created_at=datetime(2001, 2, 3, tzinfo=UTC),
+        updated_at=datetime(2002, 3, 4, tzinfo=UTC),
+    )
+    session.add(ContactSnapshot(user_id=user.id, contact_id=contact.id, headline="Before"))
+    session.commit()
+
+    text = _run(session, user, preset=preset, output_format=output_format)
+    assert "a@example.test" in text  # the contact is in the file, so absence below means something
+
+    leaked_names = _field_names(text, output_format) & set(_INTERNAL_FIELDS)
+    assert not leaked_names, f"{sorted(leaked_names)} leaked into {preset}/{output_format}"
+    leaked_values = [value for value in _PLANTED_VALUES if value in text]
+    assert not leaked_values, f"{leaked_values} leaked into {preset}/{output_format}"
 
 
 def test_full_csv_flattens_children(session: Session) -> None:
@@ -465,6 +564,51 @@ def test_campaign_audience_never_exports_a_contact_waiting_for_review(session: S
     assert len(full_rows) == 2  # other presets still export it
 
 
+def test_campaign_audience_skips_a_bounced_primary_for_the_next_address(
+    session: Session,
+) -> None:
+    """Spec 11.9: "channel address present and not bounced" (#77)."""
+    user = factories.make_user(session)
+    contact = factories.make_contact(
+        session, user, emails=["bounced@example.test", "works@example.test"]
+    )
+    contact.emails[0].status = EmailStatus.BOUNCED
+    session.commit()
+
+    (row,) = json.loads(_run(session, user, preset="campaign-audience", output_format="json"))
+    assert row["email"] == "works@example.test"
+    text = _run(session, user, preset="campaign-audience", output_format="csv")
+    assert "bounced@example.test" not in text
+
+
+def test_campaign_audience_keeps_a_contact_whose_only_address_bounced_without_it(
+    session: Session,
+) -> None:
+    """The row stays, email empty, like a contact with no email: LinkedIn still reaches them."""
+    user = factories.make_user(session)
+    contact = factories.make_contact(session, user, emails=["bounced@example.test"])
+    contact.emails[0].status = EmailStatus.BOUNCED
+    session.commit()
+
+    for output_format in ("csv", "json", "vcard"):
+        text = _run(session, user, preset="campaign-audience", output_format=output_format)
+        assert "bounced@example.test" not in text, output_format
+    (row,) = json.loads(_run(session, user, preset="campaign-audience", output_format="json"))
+    assert row["email"] is None
+    assert row["linkedin_profile_url"] == contact.li_url
+
+
+def test_re_importable_presets_still_carry_a_bounced_primary(session: Session) -> None:
+    """Only the send-list preset filters bounces; nine-column is a copy of the data."""
+    user = factories.make_user(session)
+    contact = factories.make_contact(session, user, emails=["bounced@example.test"])
+    contact.emails[0].status = EmailStatus.BOUNCED
+    session.commit()
+
+    (row,) = json.loads(_run(session, user, preset="nine-column", output_format="json"))
+    assert row["email_address"] == "bounced@example.test"
+
+
 # --- vCard 4.0: escaping and 75-octet line folding -----------------------------
 
 
@@ -503,6 +647,48 @@ def test_full_vcard_contains_begin_end_and_crlf_line_endings(session: Session) -
     assert text.startswith("BEGIN:VCARD\r\nVERSION:4.0\r\n")
     assert text.rstrip("\r\n").endswith("END:VCARD")
     assert "NOTE:Line one\\,\\nline two\\; done" in text
+
+
+def test_vcard_uri_escape_leaves_comma_and_semicolon_alone() -> None:
+    """``URL`` is a URI, not TEXT: only backslash and newline are escaped (#77)."""
+    assert _vcard_escape_uri("https://example.test/p?q=a,b;c") == "https://example.test/p?q=a,b;c"
+    assert _vcard_escape_uri("https://example.test/a\\b") == "https://example.test/a\\\\b"
+    assert _vcard_escape_uri("https://example.test/\r\nx") == "https://example.test/\\nx"
+
+
+@pytest.mark.parametrize("preset", ["nine-column", "full"])
+def test_vcard_url_is_not_text_escaped(session: Session, preset: str) -> None:
+    user = factories.make_user(session)
+    contact = factories.make_contact(session, user, li_url="https://example.test/in/a,b;c")
+    contact.links.append(
+        ContactLink(user_id=user.id, url="https://example.test/p?q=a,b", kind=LinkKind.WEBSITE)
+    )
+    session.commit()
+    text = _run(session, user, preset=preset, output_format="vcard")
+    assert "URL:https://example.test/in/a,b;c\r\n" in text
+    assert "\\," not in text.split("URL:", 1)[1].split("\r\n", 1)[0]
+    if preset == "full":
+        assert "URL:https://example.test/p?q=a,b\r\n" in text
+
+
+def test_full_vcard_fn_keeps_the_surname_with_a_preferred_name(session: Session) -> None:
+    """FN is the canonical display name; it was ``preferred_name`` alone (#77)."""
+    user = factories.make_user(session)
+    factories.make_contact(
+        session, user, first_name="Zoe", preferred_name="Zoë", last_name="Müller-Łukasz"
+    )
+    text = _run(session, user, preset="full", output_format="vcard")
+    assert "FN:Zoë Müller-Łukasz\r\n" in text
+    assert "N:Müller-Łukasz;Zoe;;;\r\n" in text
+
+
+def test_full_vcard_fn_falls_back_to_first_name_and_then_to_unknown(session: Session) -> None:
+    user = factories.make_user(session)
+    factories.make_contact(session, user, first_name="Ada", preferred_name=None, last_name="")
+    factories.make_contact(session, user, first_name="", preferred_name=None, last_name="")
+    text = _run(session, user, preset="full", output_format="vcard")
+    assert "FN:Ada\r\n" in text
+    assert "FN:Unknown\r\n" in text
 
 
 # --- filenames, filters, and sort ------------------------------------------------

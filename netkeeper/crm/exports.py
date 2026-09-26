@@ -66,6 +66,12 @@ Four presets:
   the preset is that someone pastes it straight into a mailing tool. Nor is a
   contact waiting for review (``needs_review_at``, #184): one read off a
   connections-page card is not somebody to reach until it is confirmed.
+  Its email column skips a ``bounced`` address and takes the next address that
+  has not bounced, if there is one (spec 11.9, "channel address present and not
+  bounced"; #77). A contact left with no address stays in the file with an
+  empty email cell, as a contact with no email at all always has: the row still
+  carries a LinkedIn URL, and a bounce leaves the contact eligible for LinkedIn
+  steps (spec 11.5).
 
 ``spreadsheet_safe`` (CSV only, off by default, #76) prefixes ``'`` to any
 cell whose first character is one a spreadsheet reads as the start of a formula
@@ -103,7 +109,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from netkeeper.crm.filters import FilterTree, SortKey, apply_sort, compile_filter, paginate
 from netkeeper.crm.identity import phone_key
-from netkeeper.models import Contact, User
+from netkeeper.models import Contact, EmailStatus, User
 
 ExportFormat = Literal["csv", "json", "vcard"]
 ExportPreset = Literal["nine-column", "linkedin-archive", "full", "campaign-audience"]
@@ -199,6 +205,21 @@ def _primary_email(contact: Contact) -> str | None:
     return contact.emails[0].email if contact.emails else None
 
 
+def _sendable_email(contact: Contact) -> str | None:
+    """The first address that has not bounced, primary first; ``campaign-audience`` only.
+
+    ``Contact.emails`` is ordered ``is_primary DESC, id ASC``, so this is the
+    primary unless the primary bounced. A mail-merge file is a send path by
+    proxy, and spec 11.9 guards every send on "channel address present and not
+    bounced" (#77). The re-importable presets keep :func:`_primary_email`: they
+    are a copy of the data, not a send list.
+    """
+    for email in contact.emails:
+        if email.status is not EmailStatus.BOUNCED:
+            return email.email
+    return None
+
+
 def _primary_phone(contact: Contact) -> str | None:
     """The primary phone's raw text, or None if there isn't one or it has no digits to dial.
 
@@ -288,7 +309,7 @@ LINKEDIN_ARCHIVE: Final[tuple[_Column, ...]] = (
 )
 
 CAMPAIGN_AUDIENCE: Final[tuple[_Column, ...]] = (
-    _Column("Email Address", "email", lambda c, _today: _primary_email(c), "email"),
+    _Column("Email Address", "email", lambda c, _today: _sendable_email(c), "email"),
     _Column("First Name", "first_name", lambda c, _today: c.preferred_name, "given"),
     _Column("Last Name", "last_name", lambda c, _today: c.last_name, "family"),
     _Column("Company", "company", lambda c, _today: c.current_company, "org"),
@@ -502,7 +523,10 @@ def _full_csv(
 
 def _full_vcard(contact: Contact) -> str:
     given, family = contact.first_name, contact.last_name
-    full_name = contact.preferred_name or " ".join(p for p in (given, family) if p) or "Unknown"
+    # FN is the RFC's canonical display name, so it keeps the surname even when
+    # the contact goes by a preferred first name (#77).
+    shown_given = contact.preferred_name or given
+    full_name = " ".join(p for p in (shown_given, family) if p) or "Unknown"
     lines = [
         "BEGIN:VCARD",
         "VERSION:4.0",
@@ -518,9 +542,9 @@ def _full_vcard(contact: Contact) -> str:
     for phone in contact.phones:
         lines.append(f"TEL:{_vcard_escape(phone.raw)}")
     if contact.li_url:
-        lines.append(f"URL:{_vcard_escape(contact.li_url)}")
+        lines.append(f"URL:{_vcard_escape_uri(contact.li_url)}")
     for link in contact.links:
-        lines.append(f"URL:{_vcard_escape(link.url)}")
+        lines.append(f"URL:{_vcard_escape_uri(link.url)}")
     if contact.location:
         lines.append(f"ADR:;;;{_vcard_escape(contact.location)};;;")
     if contact.notes:
@@ -541,6 +565,18 @@ def _vcard_escape(value: str) -> str:
     value = value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
     value = value.replace(",", "\\,").replace(";", "\\;")
     return value
+
+
+def _vcard_escape_uri(value: str) -> str:
+    """Escape a URI value (``URL``): backslash and newline only, never comma or semicolon.
+
+    RFC 6350 §3.4's comma and semicolon escaping applies to TEXT values. ``URL``
+    is a URI, where ``,`` and ``;`` are ordinary characters and a parser
+    following the RFC would read ``\\,`` as a literal backslash (#77). A
+    newline still has to be escaped, or it would end the content line.
+    """
+    value = value.replace("\\", "\\\\")
+    return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
 
 
 def _fold(line: str) -> str:
@@ -588,7 +624,7 @@ def _vcard_for(columns: tuple[_Column, ...], contact: Contact, *, today: date) -
     if values.get("phone"):
         lines.append(f"TEL:{_vcard_escape(values['phone'] or '')}")
     if values.get("url"):
-        lines.append(f"URL:{_vcard_escape(values['url'] or '')}")
+        lines.append(f"URL:{_vcard_escape_uri(values['url'] or '')}")
     if values.get("adr"):
         lines.append(f"ADR:;;;{_vcard_escape(values['adr'] or '')};;;")
     lines.append("END:VCARD")
