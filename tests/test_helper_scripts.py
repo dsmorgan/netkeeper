@@ -38,7 +38,12 @@ def run_sh(
     script: Path, *args: str, env: dict[str, str], stdin: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     assert SH is not None
-    full_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": "/nonexistent", **env}
+    # The interpreter's own bin first: chrome.sh finds netkeeper as <repo>/.venv/bin or on
+    # PATH, and a sibling worktree has no .venv of its own (#210).
+    path = os.pathsep.join(
+        (str(Path(sys.executable).parent), os.environ.get("PATH", "/usr/bin:/bin"))
+    )
+    full_env = {"PATH": path, "HOME": "/nonexistent", **env}
     return subprocess.run(
         [SH, str(script), *args],
         capture_output=True,
