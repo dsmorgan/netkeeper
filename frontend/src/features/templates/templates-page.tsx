@@ -219,9 +219,11 @@ function Workspace({ current, versions, onSaved, onDeleted, onDirtyChange }: Wor
             template={saved}
             draft={draft}
             onDraftChange={setDraft}
-            onSaved={(row) => {
+            onSaved={(row, sent) => {
               setLastSaved(row)
-              setDraft(draftOf(row))
+              // Take the server's normalized text only if nothing was typed while the save
+              // was out; an edit made meanwhile stays, and stays unsaved against `row`.
+              setDraft((now) => (sameDraft(now, sent) ? draftOf(row) : now))
               onSaved(row)
             }}
             onDeleted={onDeleted}
