@@ -42,6 +42,17 @@ import { jsonResponse } from './fetch'
 import { renderApp } from './render'
 
 const BIG = 10_000
+
+/**
+ * Wall-clock ceilings for mounting the window and for one scroll. The exact
+ * row counts below are the real guard: rendering every row would blow through
+ * these by an order of magnitude, while a contended machine should not. Measured
+ * on a 4-core machine (#220): mount 220 ms alone and up to 470 ms with the
+ * backend suite competing, scroll 180 ms and up to 400 ms, which left the old
+ * 500 ms scroll ceiling one busy run from failing.
+ */
+const MOUNT_CEILING_MS = 2_000
+const SCROLL_CEILING_MS = 1_000
 const EMPTY_SORT: never[] = []
 
 /** Rows in view when the container reports no height, plus the overscan below. */
@@ -118,7 +129,7 @@ describe('contacts table responsiveness', () => {
     // space below the last row, and `toBeLessThan(60)` would not notice.
     expect(rowRenders.count).toBe(WINDOW_AT_TOP)
     expect(renderedRows()).toBe(WINDOW_AT_TOP)
-    expect(mount).toBeLessThan(1000)
+    expect(mount).toBeLessThan(MOUNT_CEILING_MS)
 
     // The rows that are not rendered are spacers, so the scrollbar is honest.
     const padBottom = screen.getByTestId('pad-bottom').firstElementChild as HTMLElement
@@ -142,7 +153,7 @@ describe('contacts table responsiveness', () => {
 
     expect(rowRenders.count).toBe(WINDOW_MID_LIST)
     expect(renderedRows()).toBe(WINDOW_MID_LIST)
-    expect(scroll).toBeLessThan(500)
+    expect(scroll).toBeLessThan(SCROLL_CEILING_MS)
 
     // The spacer above accounts for every row scrolled past.
     const padTop = screen.getByTestId('pad-top').firstElementChild as HTMLElement

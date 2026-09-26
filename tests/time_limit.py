@@ -24,9 +24,13 @@ from pathlib import Path
 
 import pytest
 
-#: A test's own body, setup and teardown excluded. Every ordinary test is far under it.
-TIME_LIMIT_S = 5.0
-#: A ``slow`` test's body: the simulations take a few seconds of CPU each.
+#: A test's own body, setup and teardown excluded. Measured under full ``-n auto`` load
+#: (#220), the slowest ordinary tests take 4-5 s on a contended 4-core machine and went
+#: over 5 s on a busy 10-core one; alone they take about 2 s. Ten seconds is twice the
+#: worst seen, and still fails the 20 s landing wait this guard was written to catch.
+TIME_LIMIT_S = 10.0
+#: A ``slow`` test's body: the simulations take a few seconds of CPU each, up to about
+#: 10 s under load.
 SLOW_TIME_LIMIT_S = 30.0
 LIMIT_ENV = "NETKEEPER_TEST_TIME_LIMIT_S"
 

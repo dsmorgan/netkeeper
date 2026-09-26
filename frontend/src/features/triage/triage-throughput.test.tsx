@@ -45,13 +45,11 @@ const BUDGET_MS = 10 * 60 * 1000
 /**
  * The runner's own patience, which is not the budget and does not carry weight.
  *
- * Both runs take about 0.8 s alone and about 1.1 s with two dozen other test
- * files competing for the machine, so the default five seconds is enough: with
- * the accessible-name lookups hoisted out of the loop below, the whole file
- * passes three full-suite runs in a row at `5_000`. This is headroom for
- * hardware slower than the one it was measured on, not a workaround — a
- * regression large enough to matter trips `PER_CONTACT_CEILING_MS` first, at
- * roughly a fifth of this.
+ * On a 4-core machine (#220) the keyboard run takes about 1 s alone and 2.3 s
+ * with the backend suite competing; the mouse run takes 3 s and 5.5 s, which
+ * is past vitest's default five seconds. This is headroom, not a workaround: a
+ * regression large enough to matter trips the per-contact ceilings below first,
+ * at 6 s (keyboard) and 12.5 s (mouse) for fifty.
  */
 const TEST_TIMEOUT_MS = 20_000
 
@@ -65,6 +63,15 @@ const TEST_TIMEOUT_MS = 20_000
  * only a regression large enough to clear that ceiling shows up here.
  */
 const PER_CONTACT_CEILING_MS = 120
+
+/**
+ * The same guard for the mouse, which the harness makes slower than the
+ * keyboard: each decision is two `waitFor` polls and a click, not a keydown.
+ * Measured on a 4-core machine (#220): 60 ms a contact alone, 110 ms with the
+ * backend suite competing for it, which the keyboard's 120 ms left no room
+ * for. The keyboard took 20 and 46 ms on the same runs, so its ceiling stays.
+ */
+const MOUSE_PER_CONTACT_CEILING_MS = 250
 
 function cardName(): string {
   return screen.queryByTestId('triage-card')?.querySelector('h2')?.textContent ?? ''
@@ -205,7 +212,7 @@ describe('fifty contacts on the keyboard alone', () => {
           `${backend.seen.length} requests. Budget is ${BUDGET_MS} ms.`,
       )
       expect(elapsed).toBeLessThan(BUDGET_MS)
-      expect(elapsed / CONTACTS).toBeLessThan(PER_CONTACT_CEILING_MS)
+      expect(elapsed / CONTACTS).toBeLessThan(MOUSE_PER_CONTACT_CEILING_MS)
     },
     TEST_TIMEOUT_MS,
   )
