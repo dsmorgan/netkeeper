@@ -713,6 +713,8 @@ All four save-time rules are errors. A field with no value renders as an empty s
 
 Activation lints again rather than reading `lint_json`, because the `me.*` keys can change with the config.
 
+*As built (P3-10):* the editor lints as you type through `POST /templates/lint`, which lints unsaved text exactly as a save of it would and stores nothing (a read-only `POST`). The preview renders a *saved* version for the contact you pick, as plain text, so an unsaved edit is not in it until you save. The version history walks `previous_id` from the current version.
+
 Autoescape is off, because every template is plain text today. **An HTML body needs autoescape on.** Merge values come from imported data, so without it a contact field could inject markup into the message. Whoever adds HTML email must render the HTML part with autoescape on, not reuse this plain-text environment as it is.
 
 ### 11.2 Sequences
