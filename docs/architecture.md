@@ -382,7 +382,7 @@ Merging two contacts is a first-class operation that re-points every child row a
 
 ### 8.3 Organization
 
-- `tag` (`name` unique, `color`, `kind` manual/auto/llm, `met_signal` nullable `met`/`not_met`: what the user says carrying the tag means for triage, 10.2), `contact_tag` (`contact_id`, `tag_id`, `source`, `rule_id` nullable). Unique on (`contact_id`, `tag_id`). Removing an auto-tag manually writes a `contact_tag_suppression` row so the rule does not re-add it.
+- `tag` (`name` unique, `color`, `kind` manual/auto/llm, `met_signal` nullable `met`/`not_met`: what the user says carrying the tag means for triage, 10.2), `contact_tag` (`contact_id`, `tag_id`, `source`, `rule_id` nullable). Unique on (`contact_id`, `tag_id`). Removing an auto-tag manually writes a `contact_tag_suppression` row so the rule does not re-add it. A merge (8.2) keeps at most one of an assignment and a suppression per tag on the survivor: two suppressions of the same tag become one, a suppression on either contact removes an automatic assignment on the other, and a manual assignment on either beats and clears a suppression on either, as tagging by hand does.
 - `autotag_rule` (`tag_id`, `field` title/headline/company, `pattern` regex, `enabled`, `order`).
 - `list` (`name`, `kind` static/smart, `filter_json` for smart), `list_member` (`list_id`, `contact_id`, `added_at`) for static.
 - `saved_view` (table column and sort presets for the Contacts page).

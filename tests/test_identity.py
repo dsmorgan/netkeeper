@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import Table
 from sqlalchemy.orm import Session, class_mapper, sessionmaker
 
+from netkeeper.crm import identity
 from netkeeper.crm.identity import (
     JOB_FIELDS,
     LINK_SCHEMES,
@@ -39,7 +40,14 @@ from netkeeper.crm.provenance import (
     revert_to_synced,
     set_manual_field,
 )
-from netkeeper.crm.tags import create_rule, create_tag, run_rules, tag_contact, untag_contact
+from netkeeper.crm.tags import (
+    RuleRun,
+    create_rule,
+    create_tag,
+    run_rules,
+    tag_contact,
+    untag_contact,
+)
 from netkeeper.db import is_writer, session_scope
 from netkeeper.models import (
     CONTACT_CHILDREN,
@@ -1847,34 +1855,101 @@ def test_merging_twice_does_not_duplicate_a_tag(writer: Session, users: tuple[Us
     assert writer.scalar(scoped_count(alice, ContactTag)) == 1
 
 
-def test_merge_tags_roll_back_with_the_rest(session_factory: sessionmaker[Session]) -> None:
+def test_merge_tags_roll_back_with_the_rest(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure halfway through the tag fold undoes the tags already folded (#70).
+
+    The failure is raised inside ``_merge_tags``, on its second assignment, after
+    the first tag has already moved across, so the rollback has real work to undo.
+    """
     with session_scope(session_factory, write=True) as session:
         alice = factories.make_user(session)
         survivor = factories.make_contact(session, alice)
         loser = factories.make_contact(session, alice)
         kept = create_tag(session, alice, "investor")
         blocked = create_tag(session, alice, "recruiter")
+        moved = create_tag(session, alice, "founder")
         tag_contact(session, alice, survivor.id, kept.id, source=TagSource.RULE)
         tag_contact(session, alice, loser.id, kept.id)
         tag_contact(session, alice, loser.id, blocked.id, source=TagSource.RULE)
         untag_contact(session, alice, loser.id, blocked.id)
+        tag_contact(session, alice, loser.id, moved.id, source=TagSource.RULE)
         user_id, survivor_id, loser_id = alice.id, survivor.id, loser.id
-        kept_id, blocked_id = kept.id, blocked.id
+        kept_id, blocked_id, moved_id = kept.id, blocked.id, moved.id
+
+    keep_assignment = identity._keep_assignment
+    calls: list[int] = []
+
+    def fail_on_the_second(
+        session: Session, survivor: Contact, mine: ContactTag | None, theirs: ContactTag | None
+    ) -> ContactTag:
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("halfway through the tags")
+        return keep_assignment(session, survivor, mine, theirs)
+
+    monkeypatch.setattr(identity, "_keep_assignment", fail_on_the_second)
     with (
-        pytest.raises(RuntimeError, match="after the merge"),
+        pytest.raises(RuntimeError, match="halfway through the tags"),
         session_scope(session_factory, write=True) as session,
     ):
-        alice = session.get_one(User, user_id)
-        merge(session, alice, survivor_id, loser_id)
-        raise RuntimeError("after the merge")
+        merge(session, session.get_one(User, user_id), survivor_id, loser_id)
+    assert len(calls) == 2  # "investor" folded across, then "founder" failed
     with session_scope(session_factory) as session:
         alice = session.get_one(User, user_id)
         survivor = session.scalars(scoped(alice, Contact).where(Contact.id == survivor_id)).one()
         loser = session.scalars(scoped(alice, Contact).where(Contact.id == loser_id)).one()
         assert assignments_of(session, alice, survivor) == {kept_id: (TagSource.RULE, None)}
-        assert assignments_of(session, alice, loser) == {kept_id: (TagSource.MANUAL, None)}
+        assert assignments_of(session, alice, loser) == {
+            kept_id: (TagSource.MANUAL, None),
+            moved_id: (TagSource.RULE, None),
+        }
         assert suppressions_of(session, alice, loser) == {blocked_id}
         assert suppressions_of(session, alice, survivor) == set()
+        assert loser.merged_into_id is None
+
+
+def test_a_moved_rule_assignment_is_credited_not_added_by_the_next_run(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """The row keeps its id and ``rule_id``, so the next run finds nothing to do (#70)."""
+    alice, _ = users
+    tag = create_tag(writer, alice, "investor")
+    rule = create_rule(writer, alice, tag.id, RuleField.TITLE, r"\binvestor\b")
+    survivor = factories.make_contact(writer, alice, current_title=None)
+    loser = factories.make_contact(writer, alice, current_title="Investor")
+    assert run_rules(writer, alice) == RuleRun(contacts=2, added=1, removed=0, updated=0)
+    row = writer.scalars(scoped(alice, ContactTag).where(ContactTag.contact_id == loser.id)).one()
+    row_id = row.id
+
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+    moved = writer.scalars(scoped(alice, ContactTag)).one()
+    assert (moved.id, moved.contact_id, moved.rule_id) == (row_id, survivor.id, rule.id)
+    assert survivor.current_title == "Investor"  # the survivor matches the rule now
+    assert run_rules(writer, alice) == RuleRun(contacts=1, added=0, removed=0, updated=0)
+
+
+def test_merge_leaves_no_stale_tag_collections_in_the_session(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """A caller that serializes the survivor in the merge's session sees its tags (#70)."""
+    alice, _ = users
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    shared, moved = create_tag(writer, alice, "investor"), create_tag(writer, alice, "founder")
+    tag_contact(writer, alice, survivor.id, shared.id)
+    tag_contact(writer, alice, loser.id, shared.id)
+    tag_contact(writer, alice, loser.id, moved.id)
+    # Warm every collection the merge changes underneath.
+    assert len(loser.tag_assignments) == 2
+    assert [tag.name for tag in survivor.tags] == ["investor"]
+
+    merge(writer, alice, survivor.id, loser.id)
+    assert loser.tag_assignments == []
+    assert [tag.name for tag in survivor.tags] == ["founder", "investor"]
+    assert {row.tag_id for row in survivor.tag_assignments} == {shared.id, moved.id}
 
 
 def test_merge_never_moves_another_users_tags(writer: Session, users: tuple[User, User]) -> None:
