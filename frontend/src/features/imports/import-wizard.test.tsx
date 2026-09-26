@@ -740,8 +740,11 @@ describe('the archive shape: a zip, or a lone message/invitation file (P1-21)', 
     expect(screen.getByText('messages.csv')).toBeVisible()
     expect(screen.getByText('Invitations.csv')).toBeVisible()
     expect(screen.getByText(/1 more looked like someone you might already have/)).toBeVisible()
-    // Not on the History tab, and not undoable from there.
-    expect(screen.getByText(/doesn.t appear on the History tab/)).toBeVisible()
+    // Recorded as a run (#132): in the history, and undone from there.
+    expect(screen.getByRole('link', { name: 'Open this import' })).toHaveAttribute(
+      'href',
+      '/imports/runs/12',
+    )
 
     const upload = calls.find((call) => call.path === '/api/v1/imports/archive')
     expect(upload?.method).toBe('POST')

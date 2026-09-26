@@ -4,7 +4,14 @@ import { describe, expect, it } from 'vitest'
 import { jsonResponse, mockFetch } from '@/test/fetch'
 import { renderApp } from '@/test/render'
 
-import { COMMITTED_ROWS, COMMITTED_RUN, DRAFT_RUN, type Call, backend } from './test-support'
+import {
+  ARCHIVE_RESULT,
+  COMMITTED_ROWS,
+  COMMITTED_RUN,
+  DRAFT_RUN,
+  type Call,
+  backend,
+} from './test-support'
 
 const ROLLED_BACK_RUN = {
   ...COMMITTED_RUN,
@@ -263,6 +270,33 @@ describe('one import run', () => {
     expect(await screen.findByText('Rolled back')).toBeVisible()
     expect(rollbacks()).toHaveLength(2)
     expect(rollbacks()[1]?.query.get('force')).toBe('true')
+  })
+
+  it('shows an archive import with every file\'s counts, and offers to roll it back', async () => {
+    const report = {
+      observed_at: ARCHIVE_RESULT.observed_at,
+      owner_public_id: ARCHIVE_RESULT.owner_public_id,
+      owner_by: ARCHIVE_RESULT.owner_by,
+      connections: ARCHIVE_RESULT.connections,
+      messages: ARCHIVE_RESULT.messages,
+      invitations: ARCHIVE_RESULT.invitations,
+      ignored_files: ARCHIVE_RESULT.ignored_files,
+    }
+    const archiveRun = {
+      ...COMMITTED_RUN,
+      id: 12,
+      source_kind: 'archive' as const,
+      filename: 'export.zip',
+      preset: null,
+      archive: report,
+    }
+    mockFetch(detailBackend(archiveRun))
+    await renderApp('/imports/runs/12')
+
+    expect(await screen.findByText(/from a LinkedIn data archive/)).toBeVisible()
+    expect(screen.getByText('messages.csv')).toBeVisible()
+    expect(screen.getByText('Invitations.csv')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Roll back this import' })).toBeVisible()
   })
 
   it('warns beforehand that a merge can make a rollback impossible', async () => {

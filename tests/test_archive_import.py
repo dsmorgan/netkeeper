@@ -15,6 +15,7 @@ import factories
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.crm import import_runs
 from netkeeper.crm.archive import (
     SUMMARY_MAX_CHARS,
     ArchiveImport,
@@ -31,6 +32,9 @@ from netkeeper.models import (
     ContactPosition,
     ContactSource,
     ContactTag,
+    ImportResolution,
+    ImportSourceKind,
+    ImportStatus,
     Interaction,
     InteractionKind,
     RuleField,
@@ -730,3 +734,114 @@ def test_an_archive_row_does_not_overwrite_a_sync(
     writer.refresh(contact)
     assert contact.current_company == "What The Sync Saw"
     assert contact.synced_values["current_company"]["value"] == "Fictional Works"
+
+
+# --- the import is a run, and it rolls back (#132) ----------------------------
+
+
+def test_an_archive_import_is_recorded_as_a_committed_run(
+    writer: Session, user: User, archive: Archive
+) -> None:
+    report = _run(writer, user, archive)
+
+    assert report.run_id is not None
+    run = import_runs.get_run(writer, user, report.run_id)
+    assert run.source_kind is ImportSourceKind.ARCHIVE
+    assert run.status is ImportStatus.COMMITTED
+    assert run.committed_at is not None
+    assert (run.total_rows, run.created_count, run.matched_count) == (9, 7, 1)
+    assert (run.skipped_count, run.candidate_count) == (1, 0)
+    assert run.report_json is not None
+    assert run.report_json["connections"]["rows"] == 9
+    assert run.report_json["messages"]["added"] == report.messages.added
+    assert run.report_json["invitations"]["added"] == report.invitations.added
+    assert run.report_json["owner_public_id"] == "nettie-keeperton"
+    written = {row.id for row in _interactions(writer, user)}
+    assert run.created_json is not None
+    assert set(run.created_json["interactions"]) == written
+
+    rows, total = import_runs.list_rows(writer, user, run.id)
+    assert total == 9
+    resolutions = [row.resolution for row in rows]
+    assert resolutions.count(ImportResolution.CREATED) == 7
+    assert resolutions.count(ImportResolution.MATCHED) == 1
+    assert resolutions.count(ImportResolution.SKIPPED) == 1
+    assert all(row.raw_json.keys() >= {"First Name", "Last Name", "URL"} for row in rows)
+    listed, _ = import_runs.list_runs(writer, user)
+    assert [listed_run.id for listed_run in listed] == [run.id]
+
+
+def test_rolling_back_an_archive_run_removes_what_it_created(
+    writer: Session, user: User, archive: Archive
+) -> None:
+    report = _run(writer, user, archive)
+    assert report.run_id is not None
+
+    result = import_runs.rollback(writer, user, report.run_id)
+
+    assert result.contacts_deleted == 7
+    assert _all_contacts(writer, user) == []
+    assert _interactions(writer, user) == []
+    run = import_runs.get_run(writer, user, report.run_id)
+    assert run.status is ImportStatus.ROLLED_BACK
+
+
+def test_rolling_back_an_archive_run_restores_a_contact_it_enriched(
+    writer: Session, user: User, archive: Archive
+) -> None:
+    """A contact that was there first keeps its old values and loses the run's interactions."""
+    ada = factories.make_contact(
+        writer,
+        user,
+        li_urn=None,
+        li_public_id="ada-fictional",
+        first_name="Ada",
+        last_name="Fictional",
+        current_company=None,
+        current_title=None,
+    )
+    hand_written = add_interaction(writer, user, ada.id, InteractionKind.NOTE, OBSERVED, "met")
+    writer.flush()
+    report = _run(writer, user, archive)
+    assert report.run_id is not None
+    assert ada.current_company == "Fictional Works"
+    assert len([row for row in _interactions(writer, user) if row.contact_id == ada.id]) > 1
+
+    import_runs.rollback(writer, user, report.run_id)
+
+    # Read through a fresh query: mypy keeps ``ada``'s narrowing from before the
+    # rollback and would call an ``is None`` on it unreachable.
+    restored = writer.scalars(scoped(user, Contact).where(Contact.id == ada.id)).one()
+    assert restored.current_company is None
+    assert restored.current_title is None
+    assert [row.id for row in _interactions(writer, user)] == [hand_written.id]
+    assert list(_contacts(writer, user)) == ["ada-fictional"]
+
+
+def test_an_archive_imported_again_after_its_rollback_lands_again(
+    writer: Session, user: User, archive: Archive
+) -> None:
+    first = _run(writer, user, archive)
+    assert first.run_id is not None
+    import_runs.rollback(writer, user, first.run_id)
+
+    second = _run(writer, user, archive)
+
+    assert second.connections.created == 7
+    assert second.messages.added == first.messages.added
+    assert second.invitations.added == first.invitations.added
+
+
+def test_the_first_of_two_imports_of_one_archive_rolls_back_after_the_second(
+    writer: Session, user: User, archive: Archive
+) -> None:
+    """The second import changed nothing, so it neither supersedes nor counts as a loss."""
+    first = _run(writer, user, archive)
+    second = _run(writer, user, archive)
+    assert first.run_id is not None and second.run_id is not None
+    assert second.connections.created == 0
+
+    import_runs.rollback(writer, user, second.run_id)
+    import_runs.rollback(writer, user, first.run_id)
+
+    assert _all_contacts(writer, user) == []

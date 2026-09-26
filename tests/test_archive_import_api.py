@@ -122,6 +122,35 @@ async def test_the_upload_reports_the_known_counts(
     assert interactions == 10
 
 
+async def test_the_upload_is_a_run_in_the_history_and_rolls_back(
+    client: httpx.AsyncClient, running_app: FastAPI, tmp_path: Path
+) -> None:
+    """#132: the import that populated the database can be shown and undone."""
+    response = await _upload(client, _zipped(tmp_path, extra={"Skills.csv": "Name\nMade up\n"}))
+    assert response.status_code == 201, response.text
+    run_id = response.json()["run_id"]
+    assert isinstance(run_id, int)
+
+    history = (await client.get("/api/v1/imports")).json()
+    assert [run["id"] for run in history["items"]] == [run_id]
+    run = (await client.get(f"/api/v1/imports/{run_id}")).json()
+    assert run["source_kind"] == "archive"
+    assert run["status"] == "committed"
+    assert run["filename"] == "export.zip"
+    assert run["created_count"] == KNOWN_CONNECTIONS["created"]
+    assert run["archive"]["connections"] == KNOWN_CONNECTIONS
+    assert run["archive"]["messages"] == KNOWN_MESSAGES
+    assert run["archive"]["invitations"] == KNOWN_INVITATIONS
+    assert run["archive"]["ignored_files"] == ["Skills.csv"]
+    rows = (await client.get(f"/api/v1/imports/{run_id}/rows")).json()
+    assert rows["total"] == KNOWN_CONNECTIONS["rows"]
+
+    undone = await client.post(f"/api/v1/imports/{run_id}/rollback", headers=CSRF)
+    assert undone.status_code == 200, undone.text
+    assert undone.json()["contacts_deleted"] == KNOWN_CONNECTIONS["created"]
+    assert _counts(running_app.state.session_factory) == (0, 0)
+
+
 async def test_a_table_this_importer_does_not_read_is_named_as_ignored(
     client: httpx.AsyncClient, tmp_path: Path
 ) -> None:

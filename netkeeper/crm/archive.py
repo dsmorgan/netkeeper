@@ -52,6 +52,19 @@ button, and a failed import takes its tags down with it. The counts are in
 ``ArchiveImport.tagging``. A row that resolved to a candidate was not written,
 so it is not in the run; the next import that resolves it will be.
 
+Every import is recorded as an ``import_runs`` row of kind ``archive`` (#132),
+committed with the rest in the same transaction, so it shows in the import
+history and can be rolled back by run like a CSV import
+(:func:`netkeeper.crm.import_runs.rollback`). Each ``Connections.csv`` row is an
+``import_rows`` row that records what it did in the same shape a CSV row does:
+a contact it created, or the values it found on a contact it enriched. The
+interactions the messages and invitations tables wrote are recorded on the run
+by id (``created_json``), since each belongs to a contact rather than to a row.
+The run's CSV-shaped counts describe ``Connections.csv`` (updated counts as
+matched, needs review as candidate); ``report_json`` keeps every table's.
+A rollback does not touch the user's own job history from ``Positions.csv``,
+which is not about a contact and which the import only upserts.
+
 Transactions belong to the caller: nothing here commits, and the session must
 be a writer (``session_scope(factory, write=True)``) because every step reads
 before it writes.
@@ -61,10 +74,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from html.parser import HTMLParser
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy.orm import Session
 
@@ -77,6 +90,13 @@ from netkeeper.crm.identity import (
     New,
     apply,
     resolve,
+    resolve_survivor,
+)
+from netkeeper.crm.import_runs import (
+    contact_effect,
+    created_effect,
+    prefetch_contacts,
+    snapshot_contact,
 )
 from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
 from netkeeper.crm.positions import PositionCounts
@@ -92,8 +112,20 @@ from netkeeper.linkedin.archive import (
     PositionRow,
 )
 from netkeeper.linkedin.conversations import Owner, group
-from netkeeper.models import ContactSource, EmailKind, Interaction, InteractionKind, User
+from netkeeper.models import (
+    ContactSource,
+    EmailKind,
+    ImportResolution,
+    ImportRow,
+    ImportRun,
+    ImportSourceKind,
+    ImportStatus,
+    Interaction,
+    InteractionKind,
+    User,
+)
 from netkeeper.models.base import utcnow
+from netkeeper.models.imports import FILENAME_MAX_LENGTH
 from netkeeper.scoping import scoped
 
 log = logging.getLogger(__name__)
@@ -286,10 +318,12 @@ class ArchiveImport:
     are ``None`` when the messages table was absent or the owner unclear, in
     which case no message was imported at all. ``observed_at`` is the instant
     every row was recorded as observed. ``tagging`` is what the auto-tag rules
-    did to the contacts this import created or enriched.
+    did to the contacts this import created or enriched. ``run_id`` is the
+    ``import_runs`` row that records the import (#132).
     """
 
     observed_at: datetime
+    run_id: int | None = None
     owner_public_id: str | None = None
     owner_by: str | None = None
     connections: ConnectionCounts = field(default_factory=ConnectionCounts)
@@ -326,12 +360,23 @@ def import_archive(
     if when.tzinfo is None or when.utcoffset() is None:
         raise ValueError("observed_at must be timezone-aware")
     report = ArchiveImport(observed_at=when)
+    run = ImportRun(
+        user_id=user.id,
+        source_kind=ImportSourceKind.ARCHIVE,
+        filename=archive.name[:FILENAME_MAX_LENGTH],
+        preset=None,
+        mapping_json=dict(ARCHIVE_ROW_MAPPING),
+        status=ImportStatus.DRAFT,
+    )
+    session.add(run)
     touched: list[int] = []
-    for member in archive.members:
-        if member.kind is ArchiveKind.CONNECTIONS:
-            _import_connections(
-                session, user, archive.connections(member), when, report.connections, touched
-            )
+    connections = [
+        row
+        for member in archive.members
+        if member.kind is ArchiveKind.CONNECTIONS
+        for row in archive.connections(member)
+    ]
+    _import_connections(session, user, run, connections, when, report.connections, touched)
     for member in archive.members:
         if member.kind is ArchiveKind.POSITIONS:
             _import_positions(session, user, archive.positions(member), when, report)
@@ -355,12 +400,16 @@ def import_archive(
     # deleted (netkeeper.crm.tags.ensure_default_rules).
     ensure_default_rules(session, user)
     report.tagging = run_rules(session, user, sorted(set(touched)))
+    _finish_run(run, report, written.created, ignored=archive.ignored)
+    session.flush()
+    report.run_id = run.id
     log.info(
-        "archive %s imported for user %d: %d connections (%d created, %d updated, "
+        "archive %s imported for user %d as import run %d: %d connections (%d created, %d updated, "
         "%d for review), %d positions (%d created, %d updated), %d message interactions, "
         "%d invitation interactions",
         archive.name,
         user.id,
+        run.id,
         report.connections.rows,
         report.connections.created,
         report.connections.updated,
@@ -375,6 +424,39 @@ def import_archive(
 
 
 # --- positions ----------------------------------------------------------
+
+
+def _finish_run(
+    run: ImportRun, report: ArchiveImport, interactions: list[int], *, ignored: Iterable[str]
+) -> None:
+    """Mark ``run`` committed with the import's counts, and what it created by id (#132)."""
+    counts = report.connections
+    run.total_rows = counts.rows
+    run.matched_count = counts.updated
+    run.created_count = counts.created
+    run.candidate_count = counts.needs_review
+    run.skipped_count = counts.skipped
+    run.tagged_contacts = report.tagging.contacts
+    run.tags_added = report.tagging.added
+    run.tags_removed = report.tagging.removed
+    run.report_json = report_json(report, ignored_files=ignored)
+    run.created_json = {Interaction.__tablename__: sorted(interactions)} if interactions else None
+    run.status = ImportStatus.COMMITTED
+    run.committed_at = utcnow()
+
+
+def report_json(report: ArchiveImport, *, ignored_files: Iterable[str] = ()) -> dict[str, Any]:
+    """``report`` as ``import_runs.report_json`` keeps it: every table's counts, JSON-ready."""
+    return {
+        "observed_at": report.observed_at.isoformat(),
+        "owner_public_id": report.owner_public_id,
+        "owner_by": report.owner_by,
+        "connections": asdict(report.connections),
+        "messages": asdict(report.messages),
+        "invitations": asdict(report.invitations),
+        "positions": asdict(report.positions),
+        "ignored_files": list(ignored_files),
+    }
 
 
 def _import_positions(
@@ -402,33 +484,89 @@ def _import_positions(
 def _import_connections(
     session: Session,
     user: User,
+    run: ImportRun,
     rows: Iterable[ConnectionRow],
     observed_at: datetime,
     counts: ConnectionCounts,
     touched: list[int],
 ) -> None:
-    """Import every row, collecting into ``touched`` the contacts that were written."""
-    for row in rows:
+    """Import every row as a row of ``run``, collecting into ``touched`` the contacts written.
+
+    Each row is recorded the way a CSV commit records one (#132): what it
+    resolved to, and what it changed, in the shape
+    :func:`netkeeper.crm.import_runs.rollback` reads.
+    """
+    planned = [(row, _incoming_contact(row, observed_at)) for row in rows]
+    held = prefetch_contacts(  # noqa: F841 - held so the identity map keeps what it loaded
+        session, user, [incoming for _, incoming in planned if incoming is not None]
+    )
+    for number, (row, incoming) in enumerate(planned, start=1):
         counts.rows += 1
         if row.connected_on is None:
             counts.undated += 1
-        incoming = _incoming_contact(row, observed_at)
+        record = ImportRow(
+            user_id=user.id,
+            row_number=number,
+            raw_json=_raw_cells(row),
+            resolution=ImportResolution.SKIPPED,
+        )
+        run.rows.append(record)
         if incoming is None:
-            # Neither a profile URL nor a name: nothing to resolve or to create.
             counts.skipped += 1
+            record.error = "no profile URL and no name: this row names nobody"
             continue
         if incoming.emails:
             counts.with_email += 1
         resolution = resolve(session, user, incoming)
         match resolution:
-            case Candidate():
+            case Candidate(contact_ids=contact_ids):
                 counts.needs_review += 1
-            case Matched():
-                touched.append(apply(session, user, incoming, resolution).id)
+                record.resolution = ImportResolution.CANDIDATE
+                record.candidate_ids_json = list(contact_ids)
+                record.error = (
+                    "matches more than one contact; left alone for a CSV import to decide"
+                )
+            case Matched(contact_id=contact_id, by=by):
+                before = snapshot_contact(resolve_survivor(session, user, contact_id))
+                contact = apply(session, user, incoming, resolution)
+                touched.append(contact.id)
                 counts.updated += 1
+                record.resolution = ImportResolution.MATCHED
+                record.contact_id = contact.id
+                record.matched_by = by
+                record.changes_json = contact_effect(before, contact)
             case New():
-                touched.append(apply(session, user, incoming, resolution).id)
+                contact = apply(session, user, incoming, resolution)
+                touched.append(contact.id)
                 counts.created += 1
+                record.resolution = ImportResolution.CREATED
+                record.contact_id = contact.id
+                record.changes_json = created_effect()
+
+
+ARCHIVE_ROW_MAPPING: Final[dict[str, str]] = {
+    "First Name": "first_name",
+    "Last Name": "last_name",
+    "URL": "li_url",
+    "Email Address": "email",
+    "Company": "current_company",
+    "Position": "current_title",
+    "Connected On": "connected_on",
+}
+"""What each column of an archive run's ``raw_json`` is, as a CSV run's mapping says it (#132)."""
+
+
+def _raw_cells(row: ConnectionRow) -> dict[str, str]:
+    """A connection row as ``import_rows.raw_json`` keeps one: its columns, as text."""
+    return {
+        "First Name": row.first_name,
+        "Last Name": row.last_name,
+        "URL": row.url or "",
+        "Email Address": row.email or "",
+        "Company": row.company or "",
+        "Position": row.position or "",
+        "Connected On": row.connected_on.isoformat() if row.connected_on is not None else "",
+    }
 
 
 def _incoming_contact(row: ConnectionRow, observed_at: datetime) -> IncomingContact | None:
@@ -572,12 +710,14 @@ class _Interactions:
     is new. See the module docstring on why that triple is the key.
     """
 
-    __slots__ = ("_contacts", "_seen", "_session", "_user")
+    __slots__ = ("_contacts", "_seen", "_session", "_user", "created")
 
     def __init__(self, session: Session, user: User) -> None:
         self._session = session
         self._user = user
         self._contacts: dict[str, int | None] = {}
+        self.created: list[int] = []
+        """The ids of the interactions this import wrote, for its run (#132)."""
         self._seen: dict[tuple[int, InteractionKind, datetime], int] = {}
         statement = scoped(user, Interaction).where(Interaction.source == ContactSource.ARCHIVE)
         for row in session.scalars(statement):
@@ -623,7 +763,7 @@ class _Interactions:
         if planned > 0:
             self._seen[key] = planned - 1
             return False
-        add_interaction(
+        interaction = add_interaction(
             self._session,
             self._user,
             contact_id,
@@ -632,6 +772,7 @@ class _Interactions:
             summary,
             source=ContactSource.ARCHIVE,
         )
+        self.created.append(interaction.id)
         return True
 
 

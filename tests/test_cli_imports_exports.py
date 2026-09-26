@@ -119,6 +119,25 @@ def test_cli_import_archive_reports_the_known_counts(cli_db: sessionmaker[Sessio
         assert session.scalar(scoped_count(user, Interaction)) == 10
 
 
+def test_cli_import_archive_names_its_run_and_that_run_rolls_back(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """#132: the archive import is a run like any other, found and undone by its id."""
+    result = CliRunner().invoke(cli, ["import", "archive", str(FIXTURES_ARCHIVE)])
+    assert result.exit_code == 0, result.output
+    assert "recorded as import run 1; undo it with `netkeeper import rollback 1`" in result.output
+    runs = CliRunner().invoke(cli, ["import", "runs"])
+    assert "archive" in runs.output and "committed" in runs.output
+
+    undone = CliRunner().invoke(cli, ["import", "rollback", "1"])
+    assert undone.exit_code == 0, undone.output
+    assert "run 1: 7 contact(s) deleted" in undone.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        assert session.scalar(scoped_count(user, Contact)) == 0
+        assert session.scalar(scoped_count(user, Interaction)) == 0
+
+
 def test_cli_import_archive_of_a_bad_file_reports_a_clean_error(
     cli_db: sessionmaker[Session], tmp_path: Path
 ) -> None:

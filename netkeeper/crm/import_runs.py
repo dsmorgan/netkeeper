@@ -156,6 +156,11 @@ CHILD_MODELS: Final[dict[str, type[ContactChild]]] = {
     ContactSnapshot.__tablename__: ContactSnapshot,
     ContactAlias.__tablename__: ContactAlias,
 }
+# Rows a run creates that belong to a contact rather than to one of its rows:
+# an archive run's interactions (#132), recorded in ``import_runs.created_json``.
+RUN_CREATED_MODELS: Final[dict[str, type[ContactChild]]] = {
+    Interaction.__tablename__: Interaction,
+}
 _CHILD_RELATIONSHIPS: Final[dict[str, str]] = {
     ContactEmail.__tablename__: "emails",
     ContactPhone.__tablename__: "phones",
@@ -434,8 +439,13 @@ class _Outcome:
 
 
 @dataclass(frozen=True)
-class _Before:
-    """A contact's state before a row was applied: everything a rollback needs."""
+class ContactState:
+    """A contact's state before a row was applied: everything a rollback needs.
+
+    Taken with :func:`snapshot_contact` before ``identity.apply`` and compared
+    with :func:`contact_effect` after it. Public so the archive importer records
+    what its rows did in the same shape a CSV run does (#132).
+    """
 
     fields: dict[str, str | date | None]
     sources: dict[str, str]
@@ -443,8 +453,9 @@ class _Before:
     children: dict[str, set[int]] = dataclass_field(default_factory=dict)
 
 
-def _snapshot(contact: Contact) -> _Before:
-    return _Before(
+def snapshot_contact(contact: Contact) -> ContactState:
+    """``contact`` as it is now: its provenance fields, their sources and ledger, its children."""
+    return ContactState(
         fields={name: getattr(contact, name) for name in PROVENANCE_ORDER},
         sources=dict(contact.field_sources or {}),
         synced={name: dict(entry) for name, entry in (contact.synced_values or {}).items()},  # type: ignore[misc]
@@ -455,7 +466,7 @@ def _snapshot(contact: Contact) -> _Before:
     )
 
 
-def _effect(before: _Before, contact: Contact) -> RowChanges:
+def contact_effect(before: ContactState, contact: Contact) -> RowChanges:
     """The difference the row made, in the shape :func:`rollback` reads."""
     fields: dict[str, FieldChange] = {}
     sources: dict[str, str | None] = {}
@@ -482,6 +493,18 @@ def _effect(before: _Before, contact: Contact) -> RowChanges:
         "sources": sources,
         "synced": synced,
         "children": {table: ids for table, ids in children.items() if ids},
+        "refused": [],
+    }
+
+
+def created_effect() -> RowChanges:
+    """A row's effect when it created its contact: the rollback deletes the contact whole."""
+    return {
+        "created_contact": True,
+        "fields": {},
+        "sources": {},
+        "synced": {},
+        "children": {},
         "refused": [],
     }
 
@@ -603,9 +626,9 @@ def _process_row(
         return outcome
     created = outcome.resolution is ImportResolution.CREATED
     before = (
-        _Before({}, {}, {})
+        ContactState({}, {}, {})
         if created
-        else _snapshot(_owned(session, user, cast(int, outcome.contact_id)))
+        else snapshot_contact(_owned(session, user, cast(int, outcome.contact_id)))
     )
     try:
         contact = identity.apply(session, user, mapped.incoming, resolution, decision=decision)
@@ -622,18 +645,7 @@ def _process_row(
             decision=outcome.decision,
         )
     outcome.contact_id = contact.id
-    effect: RowChanges = (
-        {
-            "created_contact": True,
-            "fields": {},
-            "sources": {},
-            "synced": {},
-            "children": {},
-            "refused": [],
-        }
-        if created
-        else _effect(before, contact)
-    )
+    effect = created_effect() if created else contact_effect(before, contact)
     effect["refused"] = _refused_json(outcome.changes)
     outcome.effect = effect
     return outcome
@@ -664,10 +676,27 @@ def _prefetch(
     observed_at: datetime,
     contact_ids: Iterable[int] = (),
 ) -> list[Contact]:
+    """:func:`prefetch_contacts` for CSV rows, mapped the way the rows will be."""
+    incomings = (map_row(raw, mapping, observed_at=observed_at).incoming for raw in raws)
+    return prefetch_contacts(
+        session,
+        user,
+        [incoming for incoming in incomings if incoming is not None],
+        contact_ids=contact_ids,
+    )
+
+
+def prefetch_contacts(
+    session: Session,
+    user: User,
+    incomings: Iterable[IncomingContact],
+    *,
+    contact_ids: Iterable[int] = (),
+) -> list[Contact]:
     """Load, in a few queries, the contacts these rows can match, with their child rows (#78).
 
     Resolution finds a matched row's contact by URN, slug, alias, or email, one
-    row at a time; :func:`_snapshot` and :func:`_effect` then read six child
+    row at a time; :func:`snapshot_contact` and :func:`contact_effect` then read six child
     collections of it, and ``identity.apply`` four. Lazily, that is up to ten
     queries per matched row. Loading every contact the file's identities point
     at up front, collections and all, leaves those reads to the identity map:
@@ -681,10 +710,7 @@ def _prefetch(
     urns: set[str] = set()
     slugs: set[str] = set()
     emails: set[str] = set()
-    for raw in raws:
-        incoming: IncomingContact | None = map_row(raw, mapping, observed_at=observed_at).incoming
-        if incoming is None:
-            continue
+    for incoming in incomings:
         if incoming.li_urn is not None:
             urns.add(incoming.li_urn)
         if incoming.li_public_id is not None:
@@ -1211,6 +1237,7 @@ def rollback(session: Session, user: User, run_id: int, *, force: bool = False) 
         restored += 1
         fields += undone[0]
         children += undone[1]
+    children += _delete_run_created(session, user, run)
     session.flush()
     deleted = _delete_contacts(session, user, created_ids)
     session.expire_all()  # the delete cascaded in the database, behind the ORM's back
@@ -1409,11 +1436,22 @@ def _acquired_since(
     """What the contacts ``run`` created have gained that deleting them would lose (#78).
 
     Rule-assigned tags are not counted: the rules would assign them again to
-    anybody who still matched, so nothing a person did is lost with them.
+    anybody who still matched, so nothing a person did is lost with them. Nor
+    are the interactions the run itself wrote (an archive run's messages).
     """
     ids = sorted(created_ids)
     if not ids:
         return Acquired(())
+    # Compared in Python: an archive's message history can hold more ids than a
+    # statement may bind parameters.
+    own_interactions = set((run.created_json or {}).get(Interaction.__tablename__, []))
+    interactions = set(
+        session.scalars(
+            scoped(user, Interaction)
+            .where(Interaction.contact_id.in_(ids))
+            .with_only_columns(Interaction.id)
+        )
+    )
 
     def count(statement: Any) -> int:
         return int(session.scalar(statement) or 0)
@@ -1442,7 +1480,7 @@ def _acquired_since(
     }
     return Acquired(
         contact_ids=tuple(ids),
-        interactions=count(scoped_count(user, Interaction).where(Interaction.contact_id.in_(ids))),
+        interactions=len(interactions - own_interactions),
         tags=count(
             scoped_count(user, ContactTag).where(
                 ContactTag.contact_id.in_(ids), ContactTag.source != TagSource.RULE
@@ -1458,6 +1496,21 @@ def _acquired_since(
         edited_contacts=edited,
         later_imports=len(later_imports),
     )
+
+
+def _delete_run_created(session: Session, user: User, run: ImportRun) -> int:
+    """Delete the rows ``run.created_json`` records, by id. How many there were."""
+    deleted = 0
+    for table, ids in (run.created_json or {}).items():
+        model = RUN_CREATED_MODELS.get(table)
+        if model is None or not ids:  # pragma: no cover - a table this version dropped
+            continue
+        (key,) = class_mapper(model).primary_key
+        for chunk in _chunks(sorted(ids)):
+            statement = scoped_delete(user, model).where(key.in_(chunk))
+            result = cast("CursorResult[Any]", session.execute(_unsynchronized(statement)))
+            deleted += result.rowcount
+    return deleted
 
 
 def _delete_contacts(session: Session, user: User, contact_ids: Iterable[int]) -> int:
@@ -1581,6 +1634,7 @@ __all__ = [
     "Acquired",
     "Candidate",
     "ContactNotFound",
+    "ContactState",
     "CreateNew",
     "CreatedContactsChanged",
     "CsvImportError",
@@ -1606,16 +1660,20 @@ __all__ = [
     "UnknownPreset",
     "UnknownRow",
     "commit",
+    "contact_effect",
     "create_run",
+    "created_effect",
     "delete_preset",
     "delete_run",
     "get_run",
     "inspect_csv",
     "list_rows",
     "list_runs",
+    "prefetch_contacts",
     "preview",
     "rollback",
     "save_preset",
     "saved_presets",
     "set_decisions",
+    "snapshot_contact",
 ]

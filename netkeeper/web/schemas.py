@@ -975,6 +975,12 @@ class ImportRunOut(BaseModel):
     rolled_back_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    archive: ArchiveReportOut | None = None
+    """For an ``archive`` run, every table's counts as the import reported them (#132).
+
+    The counts above describe ``Connections.csv`` alone: updated rows count as
+    matched, rows needing review as candidates.
+    """
 
 
 class ImportRunPage(BaseModel):
@@ -1171,6 +1177,21 @@ class ArchiveInvitationCountsOut(BaseModel):
     undirected: int
 
 
+class ArchiveReportOut(BaseModel):
+    """Every table's counts from one archive import, as its run keeps them (#132)."""
+
+    observed_at: datetime
+    owner_public_id: str | None
+    """Whose archive this was taken to be; ``None`` when the message traffic could not say."""
+    owner_by: str | None
+    """What identified the owner (see :mod:`netkeeper.linkedin.conversations`), or ``None``."""
+    connections: ArchiveConnectionCountsOut
+    messages: ArchiveMessageCountsOut
+    invitations: ArchiveInvitationCountsOut
+    ignored_files: list[str]
+    """Tables the archive carried that no importer reads yet."""
+
+
 class ArchiveImportOut(BaseModel):
     """What importing one uploaded archive did (P1-20).
 
@@ -1183,6 +1204,8 @@ class ArchiveImportOut(BaseModel):
     """
 
     filename: str
+    run_id: int | None
+    """The import run that records this import, for the history and a rollback (#132)."""
     observed_at: datetime
     owner_public_id: str | None
     """Whose archive this was taken to be; ``None`` when the message traffic could not say."""

@@ -1794,6 +1794,8 @@ export interface components {
             owner_by: string | null;
             /** Owner Public Id */
             owner_public_id: string | null;
+            /** Run Id */
+            run_id: number | null;
         };
         /**
          * ArchiveInvitationCountsOut
@@ -1873,6 +1875,26 @@ export interface components {
             code: components["schemas"]["ArchiveRefusalCode"];
             /** Detail */
             detail: string;
+        };
+        /**
+         * ArchiveReportOut
+         * @description Every table's counts from one archive import, as its run keeps them (#132).
+         */
+        ArchiveReportOut: {
+            connections: components["schemas"]["ArchiveConnectionCountsOut"];
+            /** Ignored Files */
+            ignored_files: string[];
+            invitations: components["schemas"]["ArchiveInvitationCountsOut"];
+            messages: components["schemas"]["ArchiveMessageCountsOut"];
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Owner By */
+            owner_by: string | null;
+            /** Owner Public Id */
+            owner_public_id: string | null;
         };
         /** AutotagRuleCreate */
         AutotagRuleCreate: {
@@ -3102,6 +3124,7 @@ export interface components {
         };
         /** ImportRunOut */
         ImportRunOut: {
+            archive?: components["schemas"]["ArchiveReportOut"] | null;
             /** Candidate Count */
             candidate_count: number;
             /** Committed At */
