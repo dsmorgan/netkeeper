@@ -68,6 +68,7 @@ from netkeeper.models import (
     LinkKind,
     ListMember,
     Message,
+    MessageStatus,
     MetSource,
     PhoneKind,
     TagSource,
@@ -1147,15 +1148,22 @@ def _merge_list_members(session: Session, user: User, survivor: Contact, loser: 
 MERGED_EXIT_REASON: Final = "merged"
 """``exit_reason`` of an enrollment a merge set aside for the survivor's in the same campaign."""
 
-STOPPED_ENROLLMENT_STATUSES: Final[frozenset[EnrollmentStatus]] = frozenset(
-    {
-        EnrollmentStatus.REPLIED,
-        EnrollmentStatus.OPTED_OUT,
-        EnrollmentStatus.BOUNCED,
-        EnrollmentStatus.REMOVED,
-    }
+STOP_PRECEDENCE: Final[tuple[EnrollmentStatus, ...]] = (
+    EnrollmentStatus.OPTED_OUT,
+    EnrollmentStatus.BOUNCED,
+    EnrollmentStatus.REPLIED,
+    EnrollmentStatus.REMOVED,
 )
-"""Enrollments the person or the contact ended. Of two in one campaign, one of these is kept."""
+"""Enrollments the person or the contact ended, strongest first (#242 review).
+
+Of two in one campaign, one of these is kept over one still going, and the
+earlier here over the later: an opt-out must survive a merge with a reply.
+"""
+
+UNSENT_MESSAGE_STATUSES: Final[frozenset[MessageStatus]] = frozenset(
+    {MessageStatus.SCHEDULED, MessageStatus.DRAFTED, MessageStatus.PREFILLED}
+)
+"""Outbound messages waiting to go. A merge discards the set-aside enrollment's (#242 review)."""
 
 _ENROLLMENT_STATE: Final = (
     "status",
@@ -1176,22 +1184,32 @@ def _merge_campaign_rows(session: Session, user: User, survivor: Contact, loser:
     sent to the person.
 
     An enrollment moves when the survivor has none in that campaign. When both
-    do, ``(campaign_id, contact_id)`` allows one, and one is kept:
+    do, ``(campaign_id, contact_id)`` allows one, so the two combine. Whose
+    state wins:
 
-    - An enrollment the person or the contact ended
-      (:data:`STOPPED_ENROLLMENT_STATUSES`) is kept over one still going. A
-      merge must never restart a sequence somebody replied to, opted out of,
-      bounced from, or was taken out of.
-    - Otherwise the one furthest along (the higher ``current_step``), so no
-      step is sent twice.
+    - An enrollment the person or the contact ended (:data:`STOP_PRECEDENCE`)
+      wins over one still going, and the earlier in that order over the later.
+      A merge must never restart a sequence somebody opted out of, bounced
+      from, replied to, or was taken out of, nor let a reply hide an opt-out.
+    - Otherwise the one furthest along (the higher ``current_step``).
     - Otherwise the ``active`` one, and then the survivor's own.
 
-    The survivor's row is the one that stays, whichever enrollment is kept: it
-    takes the kept one's state (:data:`_ENROLLMENT_STATE`) and every message of
-    both. Moving the loser's row across instead would collide with the
-    survivor's on the unique constraint. The loser's row is left on the loser,
-    ``removed`` with :data:`MERGED_EXIT_REASON` and no messages, as the record
-    that it existed.
+    Whichever wins, the combined enrollment keeps what either one knew:
+
+    - ``current_step`` is the higher of the two, because it holds the messages
+      of both, and a resume must not send a step again.
+    - A pause holds: if either was ``paused`` and the winner is ``active`` or
+      ``pending``, the combined one is ``paused``.
+    - ``replied_at`` is the winner's, or else the other's.
+    - The other one's unsent messages (:data:`UNSENT_MESSAGE_STATUSES`) are
+      ``discarded``, so the combined enrollment never holds two of a step
+      waiting to go.
+
+    The survivor's row is the one that stays: it takes the combined state and
+    every message of both. Moving the loser's row across instead would collide
+    with the survivor's on the unique constraint. The loser's row is left on the
+    loser, ``removed`` with :data:`MERGED_EXIT_REASON` and no messages, as the
+    record that it existed.
     """
     mine = {
         row.campaign_id: row
@@ -1205,21 +1223,37 @@ def _merge_campaign_rows(session: Session, user: User, survivor: Contact, loser:
         .order_by(Enrollment.campaign_id)
     ).all()
     set_aside: dict[int, int] = {}  # loser's enrollment id -> the survivor's that absorbs it
+    outranked: list[int] = []  # the enrollments whose unsent messages are discarded
     for row in theirs:
         kept = mine.get(row.campaign_id)
         if kept is None:
             row.contact_id = survivor.id
             mine[row.campaign_id] = row
             continue
-        if _enrollment_rank(row, survivor_row=False) > _enrollment_rank(kept, survivor_row=True):
-            for name in _ENROLLMENT_STATE:
-                setattr(kept, name, getattr(row, name))
+        losers_wins = _enrollment_rank(row, survivor_row=False) > _enrollment_rank(
+            kept, survivor_row=True
+        )
+        winner, other = (row, kept) if losers_wins else (kept, row)
+        state = {name: getattr(winner, name) for name in _ENROLLMENT_STATE}
+        state["current_step"] = max(
+            (step for step in (row.current_step, kept.current_step) if step is not None),
+            default=None,
+        )
+        if (
+            state["status"] in (EnrollmentStatus.ACTIVE, EnrollmentStatus.PENDING)
+            and other.status is EnrollmentStatus.PAUSED
+        ):
+            state["status"] = EnrollmentStatus.PAUSED
+        state["replied_at"] = winner.replied_at or other.replied_at
+        outranked.append(other.id)
+        for name, value in state.items():
+            setattr(kept, name, value)
         row.status = EnrollmentStatus.REMOVED
         row.exit_reason = MERGED_EXIT_REASON
         row.next_action_at = None
         set_aside[row.id] = kept.id
         log.info(
-            "contact %d's enrollment %d in campaign %d is set aside for contact %d's %d",
+            "contact %d's enrollment %d in campaign %d is combined into contact %d's %d",
             loser.id,
             row.id,
             row.campaign_id,
@@ -1227,6 +1261,18 @@ def _merge_campaign_rows(session: Session, user: User, survivor: Contact, loser:
             kept.id,
         )
     session.flush()  # the survivor's enrollments hold before messages point at them
+    if outranked:
+        # Before the messages move: afterwards both sides' sit on the one enrollment.
+        unsent = session.scalars(
+            scoped(user, Message).where(
+                Message.enrollment_id.in_(outranked),
+                Message.status.in_(UNSENT_MESSAGE_STATUSES),
+            )
+        ).all()
+        for message in unsent:
+            message.status = MessageStatus.DISCARDED
+        if unsent:
+            log.info("discarded %d unsent messages of combined enrollments", len(unsent))
     messages = session.scalars(
         scoped(user, Message).where(
             (Message.contact_id == loser.id) | Message.enrollment_id.in_(sorted(set_aside))
@@ -1245,14 +1291,14 @@ def _merge_campaign_rows(session: Session, user: User, survivor: Contact, loser:
     session.flush()
 
 
-def _enrollment_rank(row: Enrollment, *, survivor_row: bool) -> tuple[bool, int, bool, bool]:
-    """Of two enrollments in one campaign, the higher is kept: see :func:`_merge_campaign_rows`."""
-    return (
-        row.status in STOPPED_ENROLLMENT_STATUSES,
-        row.current_step or 0,
-        row.status is EnrollmentStatus.ACTIVE,
-        survivor_row,
+def _enrollment_rank(row: Enrollment, *, survivor_row: bool) -> tuple[int, int, bool, bool]:
+    """Of two enrollments in one campaign, the higher wins: see :func:`_merge_campaign_rows`."""
+    stop = (
+        len(STOP_PRECEDENCE) - STOP_PRECEDENCE.index(row.status)
+        if row.status in STOP_PRECEDENCE
+        else 0
     )
+    return (stop, row.current_step or 0, row.status is EnrollmentStatus.ACTIVE, survivor_row)
 
 
 def _assignments_of(session: Session, user: User, contact_id: int) -> dict[int, ContactTag]:
