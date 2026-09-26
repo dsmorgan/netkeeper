@@ -102,6 +102,33 @@ describe('the export form', () => {
     ).toBeInTheDocument()
   })
 
+  it('says linkedin-archive drops rows too, like nine-column', () => {
+    mockApi(countRoute())
+    renderWithClient(<ExportForm filter={FILTER} />)
+    fireEvent.change(screen.getByLabelText('Preset'), { target: { value: 'linkedin-archive' } })
+    expect(
+      screen.getByText(/Contacts with nothing identifying in these columns are left out/),
+    ).toBeInTheDocument()
+  })
+
+  it.each([
+    ['nine-column', true],
+    ['linkedin-archive', true],
+    ['campaign-audience', true],
+    ['full', false],
+  ] as const)(
+    'qualifies the headline count for %s only when it can drop rows',
+    async (preset, drops) => {
+      mockApi(countRoute(214))
+      renderWithClient(<ExportForm filter={FILTER} />)
+      fireEvent.change(screen.getByLabelText('Preset'), { target: { value: preset } })
+      const headline = (await screen.findByText('214')).closest('[role="status"]')
+      expect(headline).toHaveTextContent('214 contacts selected')
+      if (drops) expect(headline).toHaveTextContent('The file may hold fewer')
+      else expect(headline).not.toHaveTextContent('may hold fewer')
+    },
+  )
+
   it('makes no claim about the presets that carry no caveat', () => {
     mockApi(countRoute())
     renderWithClient(<ExportForm filter={FILTER} />)

@@ -13,6 +13,7 @@
 import { queryOptions } from '@tanstack/react-query'
 
 import { api } from '@/api/client'
+import { detailMessage } from '@/api/errors'
 import type { paths } from '@/api/schema'
 
 import type {
@@ -29,11 +30,6 @@ import type {
   TagOut,
 } from './types'
 
-/** The shape FastAPI puts in an error body: a string, or a list of validation errors. */
-interface ErrorBody {
-  detail?: unknown
-}
-
 /**
  * The message the server sent, or a plain fallback.
  *
@@ -41,18 +37,11 @@ interface ErrorBody {
  * person who typed it ("an unbounded repeat inside another one ... rewrite it
  * without the nesting"). Swallowing that and showing "request failed" would
  * turn a fixable mistake into a mystery, so this digs the sentence out of every
- * shape FastAPI can produce.
+ * shape FastAPI can produce — including the validation-error list a schema
+ * guard answers with, minus pydantic's own "Value error, " prefix.
  */
 export function errorMessage(error: unknown, status: number, fallback: string): string {
-  const detail = (error as ErrorBody | undefined)?.detail
-  if (typeof detail === 'string' && detail !== '') return detail
-  if (Array.isArray(detail)) {
-    const parts = detail
-      .map((item) => (item as { msg?: unknown }).msg)
-      .filter((msg): msg is string => typeof msg === 'string')
-    if (parts.length > 0) return parts.join('; ')
-  }
-  return `${fallback} (HTTP ${status})`
+  return detailMessage(error) ?? `${fallback} (HTTP ${status})`
 }
 
 export class ApiError extends Error {
@@ -141,6 +130,18 @@ export async function updateRule(
     body,
   })
   if (data === undefined) fail(error, response.status, 'could not save the rule')
+  return data
+}
+
+/**
+ * Puts the rules in this order. The service takes the listed ids first and the
+ * rest after them, so the editor sends every id to say the whole order.
+ */
+export async function reorderRules(ruleIds: number[]): Promise<AutotagRuleOut[]> {
+  const { data, error, response } = await api.POST('/api/v1/autotag-rules/reorder', {
+    body: { rule_ids: ruleIds },
+  })
+  if (data === undefined) fail(error, response.status, 'could not reorder the rules')
   return data
 }
 
