@@ -444,6 +444,90 @@ describe('save and delete', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
   })
 
+  it('keeps an edit typed while an in-place save is out, and leaves it unsaved', async () => {
+    let answer: ((row: TemplateOut) => void) | undefined
+    const seen = mockApi(
+      routes([template()], {
+        'PATCH /api/v1/templates/1': () =>
+          new Promise((resolve) => {
+            answer = (row) => resolve(jsonResponse(row))
+          }),
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    const body = await screen.findByLabelText('Body')
+    fireEvent.change(body, { target: { value: 'first' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(answer).toBeDefined(), WAIT)
+
+    // The save is out; the editor stays editable, and you keep typing.
+    expect(body).not.toHaveAttribute('readonly')
+    fireEvent.change(body, { target: { value: 'first plus more' } })
+    act(() => answer?.(template({ body: 'first' })))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled(), WAIT)
+    expect(body).toHaveValue('first plus more')
+    expect(requestsTo(seen, 'PATCH', '/api/v1/templates/1')[0]?.body).toMatchObject({
+      body: 'first',
+    })
+    // What was typed after the save is still unsaved, so it is still guarded.
+    fireEvent.click(screen.getByRole('button', { name: 'New template' }))
+    expect(
+      await screen.findByRole('alertdialog', { name: 'Discard unsaved changes?' }),
+    ).toBeInTheDocument()
+  })
+
+  it('holds the fields still while a create is out, since the saved row opens fresh', async () => {
+    let answer: (() => void) | undefined
+    mockApi(
+      routes([], {
+        'POST /api/v1/templates': () =>
+          new Promise((resolve) => {
+            answer = () => resolve(jsonResponse(template({ id: 5, name: 'fresh' }), 201))
+          }),
+        'GET /api/v1/templates/5': () => jsonResponse(template({ id: 5, name: 'fresh' })),
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'New template' }))
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'fresh' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create template' }))
+    await waitFor(() => expect(answer).toBeDefined(), WAIT)
+
+    for (const label of ['Name', 'Subject', 'Body']) {
+      expect(screen.getByLabelText(label)).toHaveAttribute('readonly')
+    }
+    expect(screen.getByLabelText('Channel')).toBeDisabled()
+
+    act(() => answer?.())
+    expect(await screen.findByRole('heading', { name: 'Editing version 1' }, WAIT)).toBeVisible()
+    expect(screen.getByLabelText('Body')).not.toHaveAttribute('readonly')
+  })
+
+  it('holds the fields still while a save that makes a new version is out', async () => {
+    let answer: (() => void) | undefined
+    const next = template({ id: 9, version: 2, previous_id: 1, body: 'Yo' })
+    mockApi(
+      routes([template({ in_use: true }), next], {
+        'GET /api/v1/templates': () => jsonResponse([template({ in_use: true })]),
+        'PATCH /api/v1/templates/1': () =>
+          new Promise((resolve) => {
+            answer = () => resolve(jsonResponse(next))
+          }),
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: /^reconnect/ }))
+    fireEvent.change(await screen.findByLabelText('Body'), { target: { value: 'Yo' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save as version 2' }))
+    await waitFor(() => expect(answer).toBeDefined(), WAIT)
+
+    expect(screen.getByLabelText('Body')).toHaveAttribute('readonly')
+    act(() => answer?.())
+    expect(await screen.findByText('Saved as version 2', undefined, WAIT)).toBeInTheDocument()
+  })
+
   it('deletes a template after you confirm, without asking about the draft', async () => {
     let deleted = false
     const seen = mockApi(

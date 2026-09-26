@@ -37,7 +37,8 @@ interface TemplateEditorProps {
   template: TemplateOut | null
   draft: TemplateDraft
   onDraftChange: (draft: TemplateDraft) => void
-  onSaved: (saved: TemplateOut) => void
+  /** `sent` is the draft the save sent, which the draft may have moved on from since. */
+  onSaved: (saved: TemplateOut, sent: TemplateDraft) => void
   onDeleted: () => void
 }
 
@@ -74,8 +75,12 @@ export function TemplateEditor({
   const save = useMutation({
     mutationFn: (value: TemplateDraft) =>
       template === null ? createTemplate(value) : updateTemplate(template.id, value),
-    onSuccess: onSaved,
+    onSuccess: (saved, sent) => onSaved(saved, sent),
   })
+  // A create, or a save that makes a new version, opens the saved row in a fresh editor,
+  // so anything typed while it is out would be lost: hold the fields still until it lands.
+  // An in-place save keeps the editor, and an edit typed during it stays in the draft.
+  const locked = save.isPending && (template === null || template.in_use)
   const remove = useMutation({
     mutationFn: (id: number) => deleteTemplate(id),
     onSuccess: () => {
@@ -119,6 +124,7 @@ export function TemplateEditor({
               <Input
                 id={ids.name}
                 value={draft.name}
+                readOnly={locked}
                 required
                 onChange={(event) => set({ name: event.target.value })}
               />
@@ -128,6 +134,7 @@ export function TemplateEditor({
               <Select
                 id={ids.channel}
                 value={draft.channel}
+                disabled={locked}
                 onChange={(event) => set({ channel: event.target.value as TemplateChannel })}
               >
                 {CHANNELS.map((channel) => (
@@ -143,6 +150,7 @@ export function TemplateEditor({
             <Input
               id={ids.subject}
               value={draft.subject}
+              readOnly={locked}
               aria-invalid={partHasError('subject') || undefined}
               onChange={(event) => set({ subject: event.target.value })}
             />
@@ -155,6 +163,7 @@ export function TemplateEditor({
             <Textarea
               id={ids.body}
               value={draft.body}
+              readOnly={locked}
               rows={12}
               spellCheck
               className="font-mono"
