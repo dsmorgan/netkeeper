@@ -63,8 +63,11 @@ from netkeeper.models import (
     ContactTag,
     ContactTagSuppression,
     EmailKind,
+    Enrollment,
+    EnrollmentStatus,
     LinkKind,
     ListMember,
+    Message,
     MetSource,
     PhoneKind,
     TagSource,
@@ -883,6 +886,8 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     :func:`~netkeeper.crm.tags.tag_contact`'s precedence, one row per tag; see
     :func:`_merge_tags`. Static-list memberships carry across too, so the
     survivor is in every list the loser was in; see :func:`_merge_list_members`.
+    Campaign messages all move, and so do enrollments, one per campaign; see
+    :func:`_merge_campaign_rows`.
     The loser's URN and slug move to the survivor when it lacks
     them; otherwise the slug becomes an alias of the survivor and the URN is
     dropped. Both are cleared on the loser, whose ``merged_into_id`` points at
@@ -925,6 +930,7 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     _merge_children(survivor, loser)
     _merge_tags(session, user, survivor, loser)
     _merge_list_members(session, user, survivor, loser)
+    _merge_campaign_rows(session, user, survivor, loser)
     _merge_scalars(survivor, loser)
     _merge_synced_values(survivor, loser)
     loser.merged_into_id = survivor.id
@@ -1136,6 +1142,117 @@ def _merge_list_members(session: Session, user: User, survivor: Contact, loser: 
             "moved %d list memberships from contact %d to %d", len(theirs), loser.id, survivor.id
         )
     session.flush()
+
+
+MERGED_EXIT_REASON: Final = "merged"
+"""``exit_reason`` of an enrollment a merge set aside for the survivor's in the same campaign."""
+
+STOPPED_ENROLLMENT_STATUSES: Final[frozenset[EnrollmentStatus]] = frozenset(
+    {
+        EnrollmentStatus.REPLIED,
+        EnrollmentStatus.OPTED_OUT,
+        EnrollmentStatus.BOUNCED,
+        EnrollmentStatus.REMOVED,
+    }
+)
+"""Enrollments the person or the contact ended. Of two in one campaign, one of these is kept."""
+
+_ENROLLMENT_STATE: Final = (
+    "status",
+    "current_step",
+    "next_action_at",
+    "exit_reason",
+    "replied_at",
+    "channel_ids_json",
+)
+"""The columns that say where an enrollment is: what the kept one's row carries (#242)."""
+
+
+def _merge_campaign_rows(session: Session, user: User, survivor: Contact, loser: Contact) -> None:
+    """Move the loser's campaign messages and enrollments to the survivor (spec 8.2; #242).
+
+    Every message moves: nothing about a message is unique per contact, and the
+    survivor's timeline and the recency guard (spec 11.9) must see all that was
+    sent to the person.
+
+    An enrollment moves when the survivor has none in that campaign. When both
+    do, ``(campaign_id, contact_id)`` allows one, and one is kept:
+
+    - An enrollment the person or the contact ended
+      (:data:`STOPPED_ENROLLMENT_STATUSES`) is kept over one still going. A
+      merge must never restart a sequence somebody replied to, opted out of,
+      bounced from, or was taken out of.
+    - Otherwise the one furthest along (the higher ``current_step``), so no
+      step is sent twice.
+    - Otherwise the ``active`` one, and then the survivor's own.
+
+    The survivor's row is the one that stays, whichever enrollment is kept: it
+    takes the kept one's state (:data:`_ENROLLMENT_STATE`) and every message of
+    both. Moving the loser's row across instead would collide with the
+    survivor's on the unique constraint. The loser's row is left on the loser,
+    ``removed`` with :data:`MERGED_EXIT_REASON` and no messages, as the record
+    that it existed.
+    """
+    mine = {
+        row.campaign_id: row
+        for row in session.scalars(
+            scoped(user, Enrollment).where(Enrollment.contact_id == survivor.id)
+        )
+    }
+    theirs = session.scalars(
+        scoped(user, Enrollment)
+        .where(Enrollment.contact_id == loser.id)
+        .order_by(Enrollment.campaign_id)
+    ).all()
+    set_aside: dict[int, int] = {}  # loser's enrollment id -> the survivor's that absorbs it
+    for row in theirs:
+        kept = mine.get(row.campaign_id)
+        if kept is None:
+            row.contact_id = survivor.id
+            mine[row.campaign_id] = row
+            continue
+        if _enrollment_rank(row, survivor_row=False) > _enrollment_rank(kept, survivor_row=True):
+            for name in _ENROLLMENT_STATE:
+                setattr(kept, name, getattr(row, name))
+        row.status = EnrollmentStatus.REMOVED
+        row.exit_reason = MERGED_EXIT_REASON
+        row.next_action_at = None
+        set_aside[row.id] = kept.id
+        log.info(
+            "contact %d's enrollment %d in campaign %d is set aside for contact %d's %d",
+            loser.id,
+            row.id,
+            row.campaign_id,
+            survivor.id,
+            kept.id,
+        )
+    session.flush()  # the survivor's enrollments hold before messages point at them
+    messages = session.scalars(
+        scoped(user, Message).where(
+            (Message.contact_id == loser.id) | Message.enrollment_id.in_(sorted(set_aside))
+        )
+    ).all()
+    for message in messages:
+        if message.contact_id == loser.id:
+            message.contact_id = survivor.id
+        if message.enrollment_id in set_aside:
+            message.enrollment_id = set_aside[message.enrollment_id]
+            session.expire(message, ["enrollment"])  # the column moved under the relationship
+    if messages:
+        log.debug(
+            "moved %d campaign messages from contact %d to %d", len(messages), loser.id, survivor.id
+        )
+    session.flush()
+
+
+def _enrollment_rank(row: Enrollment, *, survivor_row: bool) -> tuple[bool, int, bool, bool]:
+    """Of two enrollments in one campaign, the higher is kept: see :func:`_merge_campaign_rows`."""
+    return (
+        row.status in STOPPED_ENROLLMENT_STATUSES,
+        row.current_step or 0,
+        row.status is EnrollmentStatus.ACTIVE,
+        survivor_row,
+    )
 
 
 def _assignments_of(session: Session, user: User, contact_id: int) -> dict[int, ContactTag]:
