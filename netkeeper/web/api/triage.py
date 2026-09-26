@@ -28,6 +28,7 @@ from netkeeper.crm import triage as service
 from netkeeper.crm.triage import Card, Progress
 from netkeeper.models import ContactMet, MetSource, TriageDecision
 from netkeeper.web.deps import CurrentUser, SessionDep
+from netkeeper.web.errors import ApiError
 from netkeeper.web.schemas import (
     InteractionOut,
     OverlapOut,
@@ -58,7 +59,19 @@ Responses = dict[int | str, dict[str, Any]]
 NO_SUCH_CONTACT: Responses = {404: {"description": "No such contact"}}
 NOTHING_TO_UNDO: Responses = {404: {"description": "No triage decision left to undo"}}
 UNDO_CONFLICT: Responses = {
-    409: {"description": "The contact changed after the decision; retry with `force`"}
+    409: {
+        "description": "The contact changed after the decision; retry with `force`. Or "
+        "another undo took the same decision back first, and nothing changed"
+    }
+}
+# The queue never serves either, so only a hand-written request meets this (#83).
+# A merged-away contact answers the Contacts routes' own 409 body, naming the
+# survivor to retry against.
+NOT_IN_QUEUE: Responses = {
+    409: {
+        "description": 'The contact is archived (`{"detail": "archived"}`) or merged into '
+        'another (`{"detail": "merged", "merged_into_id": <survivor>}`)'
+    }
 }
 COUNT_CHANGED: Responses = {409: {"description": "The suggestion matches a different count now"}}
 NO_SUCH_SUGGESTION: Responses = {404: {"description": "No suggestion by that key"}}
@@ -107,9 +120,13 @@ def translate_errors() -> Iterator[None]:
         yield
     except service.NotFound as exc:
         raise HTTPException(status_code=404, detail="no such contact") from exc
+    except service.NotInQueue as exc:
+        if exc.survivor_id is None:
+            raise ApiError(409, {"detail": "archived"}) from exc
+        raise ApiError(409, {"detail": "merged", "merged_into_id": exc.survivor_id}) from exc
     except service.NothingToUndo as exc:
         raise HTTPException(status_code=404, detail="nothing to undo") from exc
-    except (service.UndoConflict, service.CountChanged) as exc:
+    except (service.UndoConflict, service.UndoRaced, service.CountChanged) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except service.AlreadyDecided as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -154,7 +171,7 @@ def get_next_triage_contact(
     "/triage/decisions",
     operation_id="decide_triage",
     status_code=201,
-    responses={**NO_SUCH_CONTACT},
+    responses={**NO_SUCH_CONTACT, **NOT_IN_QUEUE},
 )
 def decide_triage(
     body: TriageDecisionIn,
@@ -224,7 +241,7 @@ def undo_triage(
 @router.put(
     "/triage/contacts/{contact_id}/preferred-name",
     operation_id="set_preferred_name",
-    responses=NO_SUCH_CONTACT,
+    responses={**NO_SUCH_CONTACT, **NOT_IN_QUEUE},
 )
 def set_preferred_name(
     contact_id: int, body: PreferredNameIn, user: CurrentUser, session: SessionDep

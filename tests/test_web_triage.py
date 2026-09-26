@@ -21,6 +21,7 @@ from sqlalchemy import Engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.crm import tags as tag_service
+from netkeeper.crm.identity import merge
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import session_scope
 from netkeeper.models import (
@@ -321,6 +322,52 @@ async def test_deciding_a_contact_that_is_not_yours_is_not_found(
     response = await _decide(client, theirs, "met")
     assert response.status_code == 404
     assert response.json()["detail"] == "no such contact"
+
+
+@pytest.fixture
+def gone(running_app: FastAPI) -> tuple[int, int, int]:
+    """``(archived, merged_away, survivor)``: two contacts the queue never serves (#83)."""
+    with session_scope(_factory(running_app), write=True) as session:
+        user = _local_user(session)
+        archived = factories.make_contact(session, user, archived_at=NOW)
+        survivor = factories.make_contact(session, user)
+        loser = factories.make_contact(session, user)
+        merge(session, user, survivor.id, loser.id)
+        return archived.id, loser.id, survivor.id
+
+
+async def test_deciding_a_contact_the_queue_never_serves_is_a_conflict(
+    running_app: FastAPI, client: httpx.AsyncClient, gone: tuple[int, int, int]
+) -> None:
+    """A hand-written request, since the queue excludes both; nothing is written (#83)."""
+    archived, loser, survivor = gone
+    response = await _decide(client, archived, "met")
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": "archived"}
+    response = await _decide(client, loser, "met")
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": "merged", "merged_into_id": survivor}
+    for contact_id in (archived, loser, survivor):
+        assert _contact_row(running_app, LOCAL_USER_ID, contact_id).met is ContactMet.UNKNOWN
+    assert (await _undo(client)).status_code == 404, "nothing reached the undo stack"
+
+
+async def test_naming_a_contact_the_queue_never_serves_is_a_conflict(
+    running_app: FastAPI, client: httpx.AsyncClient, gone: tuple[int, int, int]
+) -> None:
+    archived, loser, survivor = gone
+    for contact_id, body in (
+        (archived, {"detail": "archived"}),
+        (loser, {"detail": "merged", "merged_into_id": survivor}),
+    ):
+        response = await client.put(
+            f"{TRIAGE}/contacts/{contact_id}/preferred-name",
+            json={"preferred_name": "Bob"},
+            headers=CSRF,
+        )
+        assert response.status_code == 409, response.text
+        assert response.json() == body
+        assert _contact_row(running_app, LOCAL_USER_ID, contact_id).preferred_name != "Bob"
 
 
 async def test_message_summaries_and_notes_come_back_verbatim(

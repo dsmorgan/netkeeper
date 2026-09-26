@@ -98,11 +98,12 @@ import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Any, Final
+from typing import Any, Final, cast
 
-from sqlalchemy import ColumnElement, Select, case, func, select
+from sqlalchemy import ColumnElement, CursorResult, Select, case, func, select
 from sqlalchemy.orm import Session, selectinload
 
+from netkeeper.crm.identity import resolve_survivor
 from netkeeper.crm.interactions import (
     OUTBOUND_KINDS,
     TimelineEntry,
@@ -127,7 +128,7 @@ from netkeeper.models import (
     UserPosition,
 )
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import get_scoped, scoped, scoped_count
+from netkeeper.scoping import get_scoped, scoped, scoped_count, scoped_update
 
 log = logging.getLogger(__name__)
 
@@ -224,12 +225,46 @@ class NotFound(LookupError):
     """The contact is not one of the user's. Never says which user has it."""
 
 
+class NotInQueue(RuntimeError):
+    """A decision or a name edit reached a contact the queue would never serve (#83).
+
+    Archived, or merged into another contact. The queue excludes both, so this
+    only answers a hand-written request, but writing ``met`` onto a tombstone
+    would leave the survivor untouched while the log claims a decision was
+    made. ``survivor_id`` names where a merged-away contact went, so a caller
+    can retry against it; it is ``None`` for an archived contact.
+    """
+
+    def __init__(self, contact_id: int, *, survivor_id: int | None) -> None:
+        self.contact_id = contact_id
+        self.survivor_id = survivor_id
+        why = "archived" if survivor_id is None else f"merged into {survivor_id}"
+        super().__init__(f"contact {contact_id} is {why}, so it is not in the triage queue")
+
+
 class InvalidDecision(ValueError):
     """A met value that is not one of the three keys, or an empty preferred name."""
 
 
 class NothingToUndo(LookupError):
     """The user's undo stack is empty: every decision has been undone already."""
+
+
+class UndoRaced(RuntimeError):
+    """Another undo spent the same decision first, so this one wrote nothing (#83).
+
+    Unreachable on SQLite, where a writer session holds the database's write
+    lock for the whole request; reachable on PostgreSQL at READ COMMITTED,
+    where two undos can both read the same newest decision. The loser is
+    refused rather than retried, so a ``u`` never reaches further back than
+    the decision the person was shown.
+    """
+
+    def __init__(self, decision_id: int) -> None:
+        self.decision_id = decision_id
+        super().__init__(
+            f"triage decision {decision_id} was undone by another request first; nothing changed"
+        )
 
 
 class UndoConflict(RuntimeError):
@@ -588,9 +623,10 @@ def decide(
     Writes ``met`` and ``triaged_at``, and logs what both were, so undo can put
     them back exactly. Deciding a contact that was decided before is allowed and
     logs another row, so undo walks back one decision at a time.
-    :class:`NotFound` when the contact is not ``user``'s; :class:`InvalidDecision`
-    for ``unknown`` (undo is how a contact goes back to untriaged);
-    ``RuntimeError`` when ``session`` is not a writer.
+    :class:`NotFound` when the contact is not ``user``'s; :class:`NotInQueue`
+    when it is archived or merged away, as undo refuses both too;
+    :class:`InvalidDecision` for ``unknown`` (undo is how a contact goes back to
+    untriaged); ``RuntimeError`` when ``session`` is not a writer.
     """
     _require_writer(session)
     decided = ContactMet(met)
@@ -599,7 +635,7 @@ def decide(
             f"{decided.value} is not a triage decision; the keys set "
             + ", ".join(sorted(state.value for state in DECIDABLE))
         )
-    contact = _owned_contact(session, user, contact_id)
+    contact = _live_contact(session, user, contact_id)
     moment = at if at is not None else utcnow()
     _require_aware(moment)
     before = _snapshot(contact, _MET_FIELDS)
@@ -626,10 +662,11 @@ def set_preferred_name(
     archive, or CSV import overwrites it (spec 10.5). An empty name means "use
     the first name", which is what the column does with it; the log records what
     the column ended up with, so undo restores that. :class:`NotFound`;
+    :class:`NotInQueue` for an archived or merged-away contact;
     ``RuntimeError`` when ``session`` is not a writer.
     """
     _require_writer(session)
-    contact = _owned_contact(session, user, contact_id)
+    contact = _live_contact(session, user, contact_id)
     before = _snapshot(contact, (_PREFERRED_NAME_FIELD,))
     set_manual_field(contact, _PREFERRED_NAME_FIELD, preferred_name)
     return _log(session, user, contact, TriageDecisionKind.PREFERRED_NAME, before=before)
@@ -647,7 +684,8 @@ def undo(session: Session, user: User, *, force: bool = False) -> Undone:
     overrode. The decisions it does undo are marked spent, so the next undo
     reaches the one before.
 
-    :class:`NothingToUndo` when the stack is empty; ``RuntimeError`` when
+    :class:`NothingToUndo` when the stack is empty; :class:`UndoRaced` when a
+    concurrent undo spent the same decision first; ``RuntimeError`` when
     ``session`` is not a writer.
     """
     _require_writer(session)
@@ -672,9 +710,9 @@ def undo(session: Session, user: User, *, force: bool = False) -> Undone:
                 raise UndoConflict(row.id, contact.id, *diverged)
             forced.append(contact.id)
     moment = utcnow()
+    _spend(session, user, newest, len(decisions), moment)
     for row in decisions:
         _restore(contacts[row.contact_id], row)
-        row.undone_at = moment
     session.flush()
     single = contacts[decisions[0].contact_id] if len(decisions) == 1 else None
     log.info(
@@ -1436,6 +1474,32 @@ def _batch(session: Session, user: User, newest: TriageDecision) -> list[TriageD
     return list(rows)
 
 
+def _spend(
+    session: Session, user: User, newest: TriageDecision, expected: int, at: datetime
+) -> None:
+    """Mark the decisions undo is taking back spent, or :class:`UndoRaced` (#83).
+
+    A conditional ``UPDATE ... WHERE undone_at IS NULL`` rather than an
+    assignment to the rows :func:`undo` already read: the read takes no lock,
+    so on PostgreSQL at READ COMMITTED two undos can both select the same
+    newest decision. The second ``UPDATE`` waits on the first's row locks,
+    re-checks ``undone_at`` once they are released, matches fewer rows than it
+    read, and is refused before it restores anything. (On SQLite the writer
+    session's ``BEGIN IMMEDIATE`` already serializes the whole request.) The
+    rows are picked the way :func:`_batch` picked them -- the batch by id, or
+    the one decision -- so no ``IN`` list grows with the batch.
+    """
+    statement = scoped_update(user, TriageDecision).where(TriageDecision.undone_at.is_(None))
+    if newest.batch_id is None:
+        statement = statement.where(TriageDecision.id == newest.id)
+    else:
+        statement = statement.where(TriageDecision.batch_id == newest.batch_id)
+    # Session.execute() is typed as the plain Result; DML gets a CursorResult.
+    result = cast(CursorResult[Any], session.execute(statement.values(undone_at=at)))
+    if result.rowcount != expected:
+        raise UndoRaced(newest.id)
+
+
 def _contacts_by_id(session: Session, user: User, ids: Sequence[int]) -> dict[int, Contact]:
     """The user's contacts with those ids, in chunks so a large batch stays one statement each."""
     found: dict[int, Contact] = {}
@@ -1554,8 +1618,18 @@ def _require_aware(value: datetime) -> None:
         raise ValueError("timestamps must be timezone-aware")
 
 
-def _owned_contact(session: Session, user: User, contact_id: int) -> Contact:
+def _live_contact(session: Session, user: User, contact_id: int) -> Contact:
+    """One of ``user``'s contacts that the queue could serve, for a decision to write to.
+
+    The same liveness :func:`_queue_where` filters on and :func:`_diverged`
+    refuses an undo over (#83): not merged away, not archived.
+    """
     contact = get_scoped(session, user, Contact, contact_id)
     if contact is None:
         raise NotFound(f"contact {contact_id} is not one of user {user.id}'s")
+    if contact.merged_into_id is not None:
+        survivor = resolve_survivor(session, user, contact.id)
+        raise NotInQueue(contact.id, survivor_id=survivor.id)
+    if contact.archived_at is not None:
+        raise NotInQueue(contact.id, survivor_id=None)
     return contact
