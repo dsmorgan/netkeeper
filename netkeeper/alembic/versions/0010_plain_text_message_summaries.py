@@ -20,8 +20,15 @@ LinkedIn's own rich-text editor is actually known to emit is stripped; an
 unrecognized bracketed word is put back verbatim rather than guessed at,
 because a person's own plain text -- an email address in angle brackets, a
 placeholder -- must not be deleted by a cleanup pass. See the importer's
-docstring for the full reasoning; keep the two in step if one changes, since
-this file is the one place that reasoning cannot be shared by import.
+docstring for the full reasoning.
+
+The mirror is frozen on purpose and does not track later fixes to the
+importer. A migration that has run cannot run again, so editing this copy
+would change nothing for the databases it already cleaned and would make
+the same revision mean different things on different machines. #231's fix to
+how ``_TextExtractor.close()`` settles an unterminated tag at the end of the
+input, for instance, is in ``crm/archive.py`` and deliberately not here. A
+later fix that existing rows need ships as a new migration.
 
 Not a perfect match for a re-import, though: a summary already cut to
 ``SUMMARY_MAX_CHARS`` at the old, raw character boundary lost whatever came
