@@ -55,6 +55,7 @@ class FakeGoogle:
     revoked: set[str] = field(default_factory=set)
     profile_status: int = 200
     token_status: int | None = None  # force every /token answer to this status
+    truncate: bool = False  # promise more body than is sent, then hang up (IncompleteRead)
     requests: list[tuple[str, str]] = field(default_factory=list)  # (path, grant_type or "")
     _counter: itertools.count[int] = field(default_factory=lambda: itertools.count(1))
     _server: ThreadingHTTPServer | None = None
@@ -154,7 +155,8 @@ class FakeGoogle:
         raw = json.dumps(body).encode()
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json")
-        handler.send_header("Content-Length", str(len(raw)))
+        promised = len(raw) + 100 if self.truncate else len(raw)
+        handler.send_header("Content-Length", str(promised))
         handler.end_headers()
         handler.wfile.write(raw)
 

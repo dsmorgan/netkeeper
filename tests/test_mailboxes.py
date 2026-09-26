@@ -257,6 +257,15 @@ def test_google_being_down_changes_nothing(
     assert _row(session_factory, mailbox.id).checked_at == NOW  # not a success either
 
 
+def test_an_answer_cut_off_part_way_changes_nothing(
+    session_factory: sessionmaker[Session], connected: tuple[User, Mailbox], fake_google: FakeGoogle
+) -> None:
+    user, mailbox = connected
+    fake_google.truncate = True
+    result = service.check_mailbox(session_factory, user.id, mailbox.id)
+    assert result == service.CheckResult(mailbox.id, user.id, MailboxStatus.OK, None, False)
+
+
 def test_a_locked_keychain_changes_nothing(
     session_factory: sessionmaker[Session],
     connected: tuple[User, Mailbox],

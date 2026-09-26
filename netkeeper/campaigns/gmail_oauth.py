@@ -16,9 +16,10 @@ the same refresh token and client.
 :class:`InvalidGrant`: the grant is dead (revoked, or seven days old on a
 consent screen still in Testing) and only a person authorizing again fixes it.
 Any other refusal is :class:`OAuthRefused` with Google's error code (a wrong
-client secret is ``invalid_client``). A network failure, a timeout, a 5xx, a
-``408`` or a ``429`` is :class:`OAuthUnavailable`: nothing is known about the grant, so nothing is
-marked. No message carries a token, a code, or the client secret.
+client secret is ``invalid_client``). A network failure, a timeout, an answer
+cut off part way, a 5xx, a ``408`` or a ``429`` is :class:`OAuthUnavailable`:
+nothing is known about the grant, so nothing is marked. No message carries a
+token, a code, or the client secret.
 
 **Endpoints.** Every call takes :class:`GoogleEndpoints`, defaulting to
 :data:`GOOGLE` read at call time. Tests point it at a loopback fake
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import json
 import logging
 import secrets
@@ -464,7 +466,8 @@ def _send(ends: GoogleEndpoints, request: Request) -> dict[str, Any]:
             raise OAuthUnavailable(f"Google answered {exc.code}", code="unavailable") from exc
         code = error or f"http_{exc.code}"
         raise OAuthRefused(f"Google refused the request: {code}", code=code) from exc
-    except (URLError, TimeoutError, OSError) as exc:
+    except (URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        # HTTPException: the connection broke mid-answer (IncompleteRead, a bad status line).
         log.info("%s %s failed: %s", request.get_method(), where, type(exc).__name__)
         raise OAuthUnavailable("could not reach Google", code="unavailable") from exc
     try:
@@ -482,7 +485,7 @@ def _error_code(exc: HTTPError) -> str | None:
     """Google's ``error`` field, when the body has one that looks like a code."""
     try:
         body: Any = json.loads(exc.read())
-    except (json.JSONDecodeError, OSError, ValueError):
+    except (json.JSONDecodeError, OSError, ValueError, http.client.HTTPException):
         return None
     error = body.get("error") if isinstance(body, dict) else None
     if isinstance(error, dict):  # the Gmail API's shape: {"error": {"status": ...}}
