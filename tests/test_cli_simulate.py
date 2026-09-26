@@ -11,6 +11,7 @@ checking: `test_runs_with_no_database_configured_at_all` would fail loudly
 
 from __future__ import annotations
 
+import pytest
 from typer.testing import CliRunner
 
 from netkeeper.cli import app as cli
@@ -37,6 +38,7 @@ def test_prints_the_day_table_and_the_fires_table() -> None:
     assert "1 throttle(s) requested" in result.output
 
 
+@pytest.mark.slow
 def test_is_repeatable_from_the_seed_it_was_given() -> None:
     first = CliRunner().invoke(cli, ["simulate", "--days", "5", "--throttles", "2", "--seed", "9"])
     second = CliRunner().invoke(cli, ["simulate", "--days", "5", "--throttles", "2", "--seed", "9"])
@@ -61,6 +63,7 @@ def test_refuses_negative_throttles() -> None:
     assert "throttles" in result.output
 
 
+@pytest.mark.slow
 def test_matches_cp3s_demo_invocation() -> None:
     """The exact invocation #30's demo names: ``netkeeper simulate --days 14
     --throttles 2``. Both requested throttles must actually land -- a review

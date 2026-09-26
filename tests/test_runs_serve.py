@@ -163,6 +163,7 @@ async def _every_get(app: FastAPI) -> None:
             assert response.status_code == 200, (path, response.text)
 
 
+@pytest.mark.slow
 async def test_a_disarmed_serve_never_touches_the_browser_across_a_week(
     bare_engine: Engine,
     settings: Settings,
@@ -250,6 +251,7 @@ async def test_a_disarmed_serve_never_touches_the_browser_across_a_week(
     assert (row.status, row.stop_reason) == (SyncRunStatus.FAILED, "disarmed")
 
 
+@pytest.mark.slow
 async def test_the_same_week_armed_does_attach(
     bare_engine: Engine, settings: Settings, no_frontend: None
 ) -> None:

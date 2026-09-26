@@ -93,6 +93,7 @@ def test_two_consecutive_throttled_units_abort_the_fire() -> None:
 # --- throttle injection: the heat column must move ----------------------------
 
 
+@pytest.mark.slow
 async def test_throttles_raise_heat_visibly() -> None:
     report = await sr.run_simulation(days=14, throttles=2, seed=1, settings=DEFAULTS)
 
@@ -100,6 +101,7 @@ async def test_throttles_raise_heat_visibly() -> None:
     assert any(day.heat.score > 0 for day in report.days)
 
 
+@pytest.mark.slow
 async def test_removing_the_throttle_injection_leaves_the_heat_column_flat() -> None:
     """The mutation twin of the test above: the same run with ``throttles=0`` --
     what "removing the throttle injection" looks like from the outside -- must
@@ -110,6 +112,7 @@ async def test_removing_the_throttle_injection_leaves_the_heat_column_flat() -> 
     assert all(day.heat.score == 0.0 for day in report.days)
 
 
+@pytest.mark.slow
 async def test_a_different_seed_places_the_throttles_on_different_days() -> None:
     """Seeds 0 and 1 were picked by running them: both land all 2 requested
     throttles, so the comparison is about *where*, not *how many* -- whether a
@@ -143,6 +146,7 @@ def test_pick_spend_ordinals_never_exceeds_the_true_total() -> None:
     assert ordinals == {0, 1, 2}  # more requested than exist: every one is used, none invented
 
 
+@pytest.mark.slow
 async def test_the_same_seed_twice_is_byte_identical() -> None:
     first = sr.render(await sr.run_simulation(days=14, throttles=2, seed=1, settings=DEFAULTS))
     second = sr.render(await sr.run_simulation(days=14, throttles=2, seed=1, settings=DEFAULTS))
@@ -176,6 +180,7 @@ async def test_the_cap_shrinks_within_the_same_fire_that_raised_heat() -> None:
     assert day_with.min_heat_cap == 10  # shrink(20, cooldown_multiplier=2.0)
 
 
+@pytest.mark.slow
 async def test_heat_cap_is_the_live_tracked_cap_not_an_end_of_day_rereading() -> None:
     """The defect a second review caught coming back with no test failing: a
     version that kept ``MIN-CAP`` live but reverted ``HEAT-CAP``
@@ -298,6 +303,7 @@ async def test_removing_the_abort_would_let_more_than_two_land_in_one_fire(
 # --- spec 9.6's other ceiling: the weekly limit, with real numbers -----------
 
 
+@pytest.mark.slow
 async def test_the_weekly_ceiling_refuses_once_exceeded() -> None:
     """Spec 9.6's separate weekly limit on ``profile_visits`` (300 by default).
     ``throttles=0`` so heat noise cannot shift which day the week's counter
@@ -333,6 +339,7 @@ async def test_heat_skip_suppresses_fires_during_a_hot_period() -> None:
     assert any(day.heat_skipped_today for day in report.days)
 
 
+@pytest.mark.slow
 async def test_disabling_the_heat_skip_lets_browser_jobs_run_through_the_hot_period() -> None:
     """The mutation twin: the identical scenario with the skip gate off must show
     zero heat-skipped fires, even though heat itself still rose (raise_heat is
@@ -392,6 +399,7 @@ async def test_the_warmup_ramp_grows_by_ten_a_day_from_twenty() -> None:
 # --- weekend damping: it needs an actual weekend to prove anything ------------
 
 
+@pytest.mark.slow
 async def test_weekend_damping_halves_the_ramp_on_saturday_and_sunday() -> None:
     """``--days 14`` from the fixed Monday start (see the module docstring)
     guarantees days 5 and 6 are a real Saturday and Sunday."""
@@ -495,6 +503,7 @@ async def test_the_report_reuses_postures_todaysbudget_and_heatposture() -> None
 # --- rendering: every scheduled job kind's fires show up, and nothing lies ----
 
 
+@pytest.mark.slow
 async def test_render_shows_every_job_kind_and_the_week_ceiling() -> None:
     report = await sr.run_simulation(days=8, throttles=1, seed=1, settings=DEFAULTS)
 
@@ -521,6 +530,7 @@ async def test_render_warns_when_fewer_throttles_land_than_requested() -> None:
     assert f"{report.throttles_landed} of {report.throttles_requested}" in text
 
 
+@pytest.mark.slow
 async def test_render_does_not_warn_when_every_throttle_lands() -> None:
     report = await sr.run_simulation(days=14, throttles=2, seed=0, settings=DEFAULTS)
 
