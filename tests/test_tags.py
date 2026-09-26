@@ -572,6 +572,32 @@ def test_the_slow_pattern_message_says_how_to_rewrite_it() -> None:
     assert "start differently" in str(caught.value)
 
 
+@pytest.fixture
+def full_scans(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """How many scans of every code point the test has run so far, in ``[count]``.
+
+    Each full scan, a class overlap or learning literals' case classes, starts by
+    asking :func:`svc._every_character` for the text, so counting those calls counts
+    the scans. The count is what the timing bounds below stand in for, without a
+    busy runner's load in it (#253).
+    """
+    original = svc._every_character
+    original()  # built once per process, whatever the pattern
+    count = [0]
+
+    def counted() -> str:
+        count[0] += 1
+        return original()
+
+    monkeypatch.setattr(svc, "_every_character", counted)
+    return count
+
+
+QUICKLY_S = 3.0
+"""The bound on the saves below, which take 0.2 to 0.4 s alone. The regressions they
+exist for took 8 to 25 s; 1 s let a loaded runner fail them at random (#253)."""
+
+
 def _branches_under_plus(pairs: Sequence[str]) -> str:
     return "(?:" + "|".join(pairs) + ")+"
 
@@ -588,15 +614,17 @@ characters includes a class, so each needs a scan of every code point. The 82 of
 under ``+`` took about 20 s to decide before #240's cap."""
 
 
-def test_an_alternation_needing_too_many_scans_is_refused_quickly() -> None:
+def test_an_alternation_needing_too_many_scans_is_refused_quickly(full_scans: list[int]) -> None:
     pattern = _branches_under_plus(CLASS_BRANCHES)
     assert len(pattern) <= svc.PATTERN_MAX_LENGTH
-    svc._every_character()  # built once per process, whatever the pattern
+    svc._CASE_CLASSES.clear()
     svc._overlap.cache_clear()
     started = time.perf_counter()
     with pytest.raises(InvalidPattern, match="too many alternatives"):
         compile_pattern(pattern)
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < QUICKLY_S
+    # The cap's 30 pairs, and one scan to learn the literals' case classes.
+    assert full_scans[0] == 31
 
 
 def test_the_scan_cap_counts_distinct_pairs_of_classes() -> None:
@@ -655,18 +683,20 @@ def test_one_alternation_at_the_scan_cap_is_accepted() -> None:
     compile_pattern(_alternation_at_the_cap(0) + "+")
 
 
-def test_the_scan_cap_is_one_budget_for_the_whole_pattern() -> None:
+def test_the_scan_cap_is_one_budget_for_the_whole_pattern(full_scans: list[int]) -> None:
     """Twelve alternations each at the cap under one ``+``: 360 scans took two to five
     seconds to save when every alternation had a budget of its own."""
     pattern = "(?:" + "".join(_alternation_at_the_cap(k) for k in range(12)) + ")+"
     assert len(pattern) == 497 <= svc.PATTERN_MAX_LENGTH
-    svc._every_character()  # built once per process, whatever the pattern
     svc._CASE_CLASSES.clear()
     svc._overlap.cache_clear()
     started = time.perf_counter()
     with pytest.raises(InvalidPattern, match="too many alternatives"):
         compile_pattern(pattern)
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < QUICKLY_S
+    # The last alternation's case classes and its 30 pairs, then the next one's case
+    # classes before its first pair is one too many; a budget each would be 372.
+    assert full_scans[0] == 32
     assert has_ambiguous_nested_repeat(_parser.parse(pattern, re.IGNORECASE))
     # Two alternations at the cap are 60 pairs between them.
     with pytest.raises(InvalidPattern, match="too many alternatives"):
@@ -705,14 +735,17 @@ LARGE_ALTERNATIONS = [
 @pytest.mark.parametrize(
     "pattern", LARGE_ALTERNATIONS, ids=["shared-first-letters", "no-shared-characters"]
 )
-def test_a_large_alternation_under_a_repeat_saves_quickly(pattern: str) -> None:
+def test_a_large_alternation_under_a_repeat_saves_quickly(
+    pattern: str, full_scans: list[int]
+) -> None:
     assert len(pattern) <= svc.PATTERN_MAX_LENGTH
-    svc._every_character()  # built once per process, whatever the pattern
     svc._CASE_CLASSES.clear()
     svc._overlap.cache_clear()
     started = time.perf_counter()
     compile_pattern(pattern)
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < QUICKLY_S
+    # Every literal's case class learned at once; a scan per pair was thousands.
+    assert full_scans[0] == 1
 
 
 CASE_TRAPS = (
