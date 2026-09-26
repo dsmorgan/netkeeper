@@ -10,7 +10,7 @@ netkeeper keeps a professional network warm: a LinkedIn 1st-degree connection ex
 
 ```sh
 make install          # uv sync --all-extras → .venv
-make check            # ruff, mypy --strict, pytest (what CI runs)
+make check            # resync .venv, then ruff, mypy --strict, pytest (what CI runs)
 make test             # the offline suite across every core (pytest-xdist)
 make test-serial      # the same in one process, for a failure only parallel shows
 make test-fast        # skips the few `slow` simulations, for local iteration

@@ -58,6 +58,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["netkeeper"]
 
+[tool.uv]
+# Always a uv-managed CPython, never the host's own: CI's `uv python install` gets
+# the newest 3.12 patch, while a container's system python3.12 can be an older one
+# that behaves differently (#231). uv downloads the interpreter on first sync.
+python-preference = "only-managed"
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

@@ -27,7 +27,7 @@ test-serial:        ## The same suite in one process: for a failure that only sh
 test-fast:          ## For local iteration: skips the few `slow` week simulations. CI runs everything
 	$(PY) -m pytest -q -n auto --dist worksteal -m "not slow"
 
-check: lint typecheck test   ## Everything CI runs on the Python side
+check: install lint typecheck test   ## Everything CI runs on the Python side, after resyncing .venv
 
 serve:              ## Run the backend (serves the built frontend if present)
 	$(PY) -m netkeeper.cli serve
