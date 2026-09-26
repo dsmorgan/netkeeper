@@ -29,8 +29,9 @@ What this module decides
   takes about a minute on a thirty-character title) is guarded twice. At save
   and preview time the pattern's parse tree is refused when an unbounded
   repeat (``+``, ``*``, ``{n,}``) contains another one, or one whose count can
-  vary (``{1,2}``), that some character could either extend or end, the shape
-  behind exponential backtracking
+  vary (``{1,2}``), that some character could either extend or end, or an
+  alternation whose branches could match from the same place (``(a|aa)``),
+  the shapes behind exponential backtracking
   (:func:`has_ambiguous_nested_repeat`), and when its counted repeats
   multiply out past :data:`MAX_EXPANSION`, because ``regex`` expands those at compile time and
   a twenty-four character pattern can ask for gigabytes. At run time every
@@ -332,10 +333,11 @@ def compile_pattern(pattern: str) -> regex.Pattern[str]:
         raise InvalidPattern(f"invalid regular expression: {exc}") from exc
     if has_ambiguous_nested_repeat(tree):
         raise InvalidPattern(
-            "pattern may run slowly: a repeat inside an unbounded one (+, *, {n,}), where "
-            "the same character could continue the inner repeat or come after it, as in "
-            r"(a+)+, (a{1,2})+ or (\w+\s*)+, can take exponential time; put something neither "
-            r"can match between them, as in (\w+\s+)+, or rewrite it without the nesting"
+            "pattern may run slowly: a repeat or an alternation inside an unbounded repeat "
+            "(+, *, {n,}), where the same character could go more than one way, as in "
+            r"(a+)+, (a{1,2})+, (a|aa)+ or (\w+\s*)+, can take exponential time; put something "
+            r"neither can match between them, as in (\w+\s+)+, make the alternatives start "
+            "differently, or rewrite it without the nesting"
         )
     if expansion(tree) > MAX_EXPANSION:
         raise InvalidPattern(
@@ -394,6 +396,10 @@ def has_ambiguous_nested_repeat(tree: Any) -> bool:
     match a character, that leaves the pass empty, which ends the outer
     repeat rather than splitting the text another way. So ``(a?)+`` passes,
     while ``(aa?)+``, ``(a?a)+`` and ``(a?b?)+`` do not.
+
+    An alternation is the same choice spelled out, so inside an unbounded
+    repeat it is checked too (#233, :func:`_ambiguous_branches`): ``(a|aa)+``
+    and ``(a?|a)+`` are refused, ``(ab|ac)+`` and ``(a|b)+`` are not.
     """
     return _ambiguous(tree, frozenset(), inside_unbounded=False, alone_in_pass=False)
 
@@ -435,6 +441,8 @@ def _ambiguous(tree: Any, follow: _Chars, *, inside_unbounded: bool, alone_in_pa
             if _ambiguous(args, after, inside_unbounded=inside_unbounded, alone_in_pass=alone):
                 return True
         elif op is _parser.BRANCH:
+            if inside_unbounded and _ambiguous_branches(args[1], after, alone=alone):
+                return True
             if any(
                 _ambiguous(branch, after, inside_unbounded=inside_unbounded, alone_in_pass=alone)
                 for branch in args[1]
@@ -455,6 +463,59 @@ def _ambiguous(tree: Any, follow: _Chars, *, inside_unbounded: bool, alone_in_pa
         starts, nullable = _first([(op, args)])
         after = starts | after if nullable else starts
     return False
+
+
+def _ambiguous_branches(branches: Any, after: _Chars, *, alone: bool) -> bool:
+    """Whether an alternation inside an unbounded repeat can take a string two ways (#233).
+
+    The parser has already factored out a prefix every branch shares, so
+    ``(ab|ac)`` reaches here as ``a(?:b|c)``, ``(a|aa)`` as ``a(?:|a)``, and
+    ``(a|a)`` as ``a(?:|)``. What is left is ambiguous when two branches could
+    both match from the same place (``(a?|aa)+``), when two can match the empty
+    string (``(a|a)+``), or when one can match the empty string and another
+    starts with a character that could instead come after the alternation
+    (``(a|aa)+``, where the next ``a`` either takes the second branch or starts
+    the next pass). As with ``?``, the empty choices are harmless when nothing
+    else in the pass can match a character, because an empty pass ends the
+    repeat: ``(a|)+`` and ``(a?|b?)+`` pass, ``((a?|b?)c)+`` does not.
+
+    Two branches that differ in some character before either stops being one
+    fixed character after another cannot both match from one place, so
+    ``((senior|staff|lead)\\s+)+`` passes although two branches start with
+    ``s``. Otherwise branches whose first characters overlap count as
+    ambiguous without proof: ``(ab|a)+`` is refused, because doubt rejects.
+    """
+    firsts = [_first(branch) for branch in branches]
+    prefixes = [_fixed_prefix(branch) for branch in branches]
+    for index, (starts, _) in enumerate(firsts):
+        for other in range(index + 1, len(firsts)):
+            if _overlap(starts, firsts[other][0]) and not _differ(prefixes[index], prefixes[other]):
+                return True
+    empty = sum(1 for _, nullable in firsts if nullable)
+    if not empty or alone:
+        return False
+    consuming = frozenset().union(*(starts for starts, _ in firsts))
+    return empty > 1 or _overlap(consuming, after)
+
+
+_ONE_CHAR: Final[frozenset[Any]] = frozenset(
+    {_parser.LITERAL, _parser.NOT_LITERAL, _parser.ANY, _parser.IN}
+)
+
+
+def _fixed_prefix(tree: Any) -> list[_Chars]:
+    """The characters of the leading run of ``tree`` that matches exactly one character each."""
+    prefix: list[_Chars] = []
+    for op, args in tree:
+        if op not in _ONE_CHAR:
+            break
+        prefix.append(_first_of(op, args)[0])
+    return prefix
+
+
+def _differ(a: Sequence[_Chars], b: Sequence[_Chars]) -> bool:
+    """Whether no character matches both ``a`` and ``b`` at some position both fix."""
+    return any(not _overlap(x, y) for x, y in zip(a, b, strict=False))
 
 
 def _first(tree: Any) -> tuple[_Chars, bool]:
