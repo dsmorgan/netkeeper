@@ -1,6 +1,22 @@
 import { describe, expect, it } from 'vitest'
 
+import openapiText from '../../../openapi.json?raw'
+
 import { MAX_IMPORT_CHARACTERS, readCsvFile, sniffEncoding } from './read-csv'
+
+interface ContentSchema {
+  maxLength?: number
+}
+
+/** The backend's own cap on `content`, from the committed OpenAPI export. */
+function backendCap(schema: string): number {
+  const openapi = JSON.parse(openapiText) as {
+    components: { schemas: Record<string, { properties: { content?: ContentSchema } }> }
+  }
+  const cap = openapi.components.schemas[schema]?.properties.content?.maxLength
+  if (cap === undefined) throw new Error(`${schema}.content has no maxLength in openapi.json`)
+  return cap
+}
 
 /** `name,note\nÉlodie,café\n` in one encoding or another. */
 function accented(bytes: number[]): File {
@@ -121,6 +137,33 @@ describe('readCsvFile', () => {
     expect(read).toMatchObject({ content: 'name', encoding: 'utf-8', reason: 'bom' })
   })
 
+  it('refuses a file that is only a byte-order mark as empty, not as content', async () => {
+    for (const mark of [
+      [0xff, 0xfe],
+      [0xfe, 0xff],
+      [0xef, 0xbb, 0xbf],
+    ]) {
+      const read = await readCsvFile(new File([new Uint8Array(mark)], 'bom.csv'))
+      expect(read.ok).toBe(false)
+      expect(read.ok === false && read.reason).toMatch(/bom\.csv is empty/)
+    }
+  })
+
+  it('does not call a UTF-8 file broken for carrying a U+FFFD of its own', async () => {
+    const read = await readCsvFile(new File(['name\nPlaceholder \uFFFD kept\n'], 'own.csv'))
+    expect(read).toMatchObject({ ok: true, encoding: 'utf-8', replacements: 0 })
+  })
+
+  it('refuses UTF-32 by its mark rather than reading it as UTF-16', async () => {
+    const little = [0xff, 0xfe, 0x00, 0x00, 0x6e, 0x00, 0x00, 0x00]
+    const big = [0x00, 0x00, 0xfe, 0xff, 0x00, 0x00, 0x00, 0x6e]
+    for (const bytes of [little, big]) {
+      const read = await readCsvFile(new File([new Uint8Array(bytes)], 'wide.csv'))
+      expect(read.ok).toBe(false)
+      expect(read.ok === false && read.reason).toMatch(/UTF-32/)
+    }
+  })
+
   it('refuses an empty file', async () => {
     const read = await readCsvFile(new File([], 'nothing.csv'))
     expect(read.ok).toBe(false)
@@ -137,6 +180,15 @@ describe('readCsvFile', () => {
     // disk is bytes, which for an accented file is the larger number.
     expect(reason).toContain('8,000,001 characters')
     expect(reason).toContain('over the 8,000,000')
+  })
+
+  it('never lets through a file the backend would refuse after the upload (#94)', () => {
+    // What ties the two caps: a file that passes here must not be refused by
+    // the backend once its whole body is sent. Lowering the backend's cap below
+    // this one, or raising this one above it, fails here, not in production.
+    for (const schema of ['ImportRunCreate', 'ImportInspectIn']) {
+      expect(MAX_IMPORT_CHARACTERS).toBeLessThanOrEqual(backendCap(schema))
+    }
   })
 
   it('accepts a file right on the limit', async () => {
