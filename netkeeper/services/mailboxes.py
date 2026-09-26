@@ -11,11 +11,15 @@ is ``ok`` or ``reauth_required`` is refused (:class:`OtherMailboxConnected`)
 until that one is disconnected. A disconnected mailbox stays, ``disabled``, for
 the campaigns that name it, and authorizing its address again brings it back.
 
-**Health.** :func:`check_mailbox` refreshes the token. Google's ``invalid_grant``
-(or any other refusal of the grant or client, or a token missing from the
-Keychain) sets the mailbox to ``reauth_required``, which is what pauses email
-steps: the guards read :func:`mailbox_health` (P3-06 wires it into
-``ChannelState``). A network failure changes nothing. :func:`poll_mailboxes`
+**Health.** :func:`check_mailbox` refreshes the token. Google's ``invalid_grant``,
+``invalid_client`` or ``unauthorized_client``
+(:data:`~netkeeper.campaigns.gmail_oauth.REAUTH_CODES`), or a token or client
+missing from the Keychain, sets the mailbox to ``reauth_required``, which is
+what pauses email steps: the guards read :func:`mailbox_health` (P3-06 wires it
+into ``ChannelState``). Anything else changes nothing: a network failure, a
+5xx, and any other refusal (a proxy's ``407``, an HTML ``403``,
+``invalid_request``, an answer with no access token), which says nothing
+certain about the grant. :func:`poll_mailboxes`
 checks every ``ok`` mailbox of every local user, and ``netkeeper serve`` runs it
 every ``[campaigns] reply_poll_minutes`` (:class:`MailboxMonitor`), so a
 revoked token shows as the banner within one poll.
@@ -306,6 +310,9 @@ def check_mailbox(
 ) -> CheckResult | None:
     """Refresh the mailbox's token; mark it ``reauth_required`` when the grant is dead.
 
+    Dead means a code in :data:`~netkeeper.campaigns.gmail_oauth.REAUTH_CODES`
+    or a secret missing from the Keychain; any other failure leaves it as it is.
+
     Only an ``ok`` mailbox is checked; any other is returned as it is. None when
     the user or mailbox is gone. Blocking: call it off the event loop.
     """
@@ -330,11 +337,15 @@ def check_mailbox(
             reason = REASON_TOKEN_MISSING
         else:
             gmail_oauth.refresh_access_token(client, token, endpoints=endpoints)
-    except (gmail_oauth.InvalidGrant, gmail_oauth.OAuthRefused) as exc:
-        reason = exc.code
     except gmail_oauth.OAuthUnavailable as exc:
         log.info("mailbox %d not checked: %s", mailbox_id, exc)
         return CheckResult(mailbox_id, user_id, MailboxStatus.OK, None, False)
+    except gmail_oauth.OAuthError as exc:
+        if not gmail_oauth.needs_reauthorization(exc):
+            # Refused, but not in a way that says the grant is dead: try again next poll.
+            log.warning("mailbox %d not checked: Google refused (%s)", mailbox_id, exc.code)
+            return CheckResult(mailbox_id, user_id, MailboxStatus.OK, None, False)
+        reason = exc.code
     except keychain.KeychainUnavailable as exc:
         log.warning("mailbox %d not checked: %s", mailbox_id, exc)
         return CheckResult(mailbox_id, user_id, MailboxStatus.OK, None, False)

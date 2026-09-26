@@ -12,14 +12,18 @@ This module speaks HTTP and nothing else: no session, no Keychain, no model.
 only (``urllib``), so the flow needs no Google SDK; P3-02's client builds its credentials from
 the same refresh token and client.
 
-**Errors.** A refresh or exchange Google answers with ``invalid_grant`` raises
-:class:`InvalidGrant`: the grant is dead (revoked, or seven days old on a
-consent screen still in Testing) and only a person authorizing again fixes it.
-Any other refusal is :class:`OAuthRefused` with Google's error code (a wrong
-client secret is ``invalid_client``). A network failure, a timeout, an answer
-cut off part way, a 5xx, a ``408`` or a ``429`` is :class:`OAuthUnavailable`:
-nothing is known about the grant, so nothing is marked. No message carries a
-token, a code, or the client secret.
+**Errors.** The status is read before the body. A network failure, a timeout,
+an answer cut off part way, a 5xx, a ``408`` or a ``429`` is
+:class:`OAuthUnavailable`, whatever the body says: nothing is known about the
+grant. Otherwise a refresh or exchange Google refuses with ``invalid_grant``
+raises :class:`InvalidGrant`: the grant is dead (revoked, or seven days old on
+a consent screen still in Testing). Any other refusal is :class:`OAuthRefused`
+with Google's error code (a wrong client secret is ``invalid_client``), or
+``http_<status>`` when the body has none. Only the codes in
+:data:`REAUTH_CODES` mean a person has to authorize again
+(:func:`needs_reauthorization`); any other refusal (a proxy's ``407``, an HTML
+``403``, ``invalid_request``) says nothing certain about the grant. No message
+carries a token, a code, or the client secret.
 
 **Endpoints.** Every call takes :class:`GoogleEndpoints`, defaulting to
 :data:`GOOGLE` read at call time. Tests point it at a loopback fake
@@ -52,6 +56,11 @@ CLIENT_ID_SUFFIX: Final = ".apps.googleusercontent.com"
 
 #: What Google's token endpoint answers for a revoked or expired grant.
 INVALID_GRANT: Final = "invalid_grant"
+
+#: The token endpoint's error codes (RFC 6749 5.2) that mean the grant or the
+#: client is dead, so only a person authorizing again fixes it. Any other refusal
+#: is treated as transient: a mailbox is never marked on a guess.
+REAUTH_CODES: Final = frozenset({INVALID_GRANT, "invalid_client", "unauthorized_client"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +119,11 @@ class OAuthRefused(OAuthError):
 
 class OAuthUnavailable(OAuthError):
     """Google could not be reached, timed out, or failed on its side. Try later."""
+
+
+def needs_reauthorization(exc: OAuthError) -> bool:
+    """Whether ``exc`` is Google saying the grant or client is dead (:data:`REAUTH_CODES`)."""
+    return isinstance(exc, InvalidGrant | OAuthRefused) and exc.code in REAUTH_CODES
 
 
 class ScopeNotGranted(OAuthError):
@@ -454,6 +468,10 @@ def _send(ends: GoogleEndpoints, request: Request) -> dict[str, Any]:
         with opener.open(request, timeout=ends.timeout_s) as response:
             raw = response.read()
     except HTTPError as exc:
+        if exc.code >= 500 or exc.code in _TRY_LATER:
+            # Before the body: a 5xx is never read as a dead grant, whatever it says.
+            log.info("%s %s answered %d", request.get_method(), where, exc.code)
+            raise OAuthUnavailable(f"Google answered {exc.code}", code="unavailable") from exc
         error = _error_code(exc)
         log.info("%s %s answered %d (%s)", request.get_method(), where, exc.code, error)
         if error == INVALID_GRANT:
@@ -462,8 +480,6 @@ def _send(ends: GoogleEndpoints, request: Request) -> dict[str, Any]:
                 " Testing); authorize again",
                 code=INVALID_GRANT,
             ) from exc
-        if exc.code >= 500 or exc.code in _TRY_LATER:
-            raise OAuthUnavailable(f"Google answered {exc.code}", code="unavailable") from exc
         code = error or f"http_{exc.code}"
         raise OAuthRefused(f"Google refused the request: {code}", code=code) from exc
     except (URLError, TimeoutError, OSError, http.client.HTTPException) as exc:

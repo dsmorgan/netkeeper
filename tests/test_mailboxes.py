@@ -223,6 +223,42 @@ def test_a_deleted_oauth_client_needs_reauth_with_googles_code(
     assert (result.status, result.reason) == (MailboxStatus.REAUTH_REQUIRED, "invalid_client")
 
 
+def test_an_unauthorized_client_needs_reauth(
+    session_factory: sessionmaker[Session], connected: tuple[User, Mailbox], fake_google: FakeGoogle
+) -> None:
+    user, mailbox = connected
+    fake_google.token_answer = (400, {"error": "unauthorized_client"})
+    result = service.check_mailbox(session_factory, user.id, mailbox.id)
+    assert result is not None
+    assert (result.status, result.reason) == (MailboxStatus.REAUTH_REQUIRED, "unauthorized_client")
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (407, "<html>Proxy Authentication Required</html>"),
+        (403, "<html>Forbidden</html>"),
+        (404, "<html>Not Found</html>"),
+        (400, {"error": "invalid_request"}),
+        (200, {"token_type": "Bearer"}),
+        (503, {"error": "invalid_grant"}),
+    ],
+)
+def test_a_refusal_that_says_nothing_about_the_grant_changes_nothing(
+    session_factory: sessionmaker[Session],
+    connected: tuple[User, Mailbox],
+    fake_google: FakeGoogle,
+    answer: tuple[int, dict[str, object] | str],
+) -> None:
+    """A proxy, an HTML error page, a malformed request or a 5xx is not a dead grant (#256)."""
+    user, mailbox = connected
+    fake_google.token_answer = answer
+    result = service.check_mailbox(session_factory, user.id, mailbox.id)
+    assert result == service.CheckResult(mailbox.id, user.id, MailboxStatus.OK, None, False)
+    row = _row(session_factory, mailbox.id)
+    assert (row.status, row.status_reason, row.checked_at) == (MailboxStatus.OK, None, NOW)
+
+
 def test_a_token_missing_from_the_keychain_needs_reauth(
     session_factory: sessionmaker[Session],
     connected: tuple[User, Mailbox],

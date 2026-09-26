@@ -55,6 +55,8 @@ class FakeGoogle:
     revoked: set[str] = field(default_factory=set)
     profile_status: int = 200
     token_status: int | None = None  # force every /token answer to this status
+    # Force every /token answer to this status and body (a str is sent as HTML).
+    token_answer: tuple[int, dict[str, Any] | str] | None = None
     truncate: bool = False  # promise more body than is sent, then hang up (IncompleteRead)
     requests: list[tuple[str, str]] = field(default_factory=list)  # (path, grant_type or "")
     _counter: itertools.count[int] = field(default_factory=lambda: itertools.count(1))
@@ -142,19 +144,22 @@ class FakeGoogle:
 
     def _handle(self, handler: BaseHTTPRequestHandler, method: str) -> None:
         path = urlsplit(handler.path).path
+        status: int
+        body: dict[str, Any] | str
         if method == "POST" and path == "/token":
             length = int(handler.headers.get("Content-Length", "0"))
             form = {k: v[0] for k, v in parse_qs(handler.rfile.read(length).decode()).items()}
             self.requests.append((path, form.get("grant_type", "")))
-            status, body = self._token(form)
+            status, body = self.token_answer or self._token(form)
         elif method == "GET" and path == "/profile":
             self.requests.append((path, ""))
             status, body = self._profile(handler.headers.get("Authorization", ""))
         else:
             status, body = 404, {"error": "not_found"}
-        raw = json.dumps(body).encode()
+        html = isinstance(body, str)
+        raw = body.encode() if isinstance(body, str) else json.dumps(body).encode()
         handler.send_response(status)
-        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Type", "text/html" if html else "application/json")
         promised = len(raw) + 100 if self.truncate else len(raw)
         handler.send_header("Content-Length", str(promised))
         handler.end_headers()

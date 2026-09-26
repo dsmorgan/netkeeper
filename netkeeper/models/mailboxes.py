@@ -8,8 +8,9 @@ here or in any other table holds a token (spec 15, 18).
 
 - ``ok``: the last check could refresh the token.
 - ``reauth_required``: Google answered ``invalid_grant`` (the grant was revoked,
-  or the consent screen is in Testing and the token's seven days are up), or the
-  Keychain has no token for it. Email steps pause until someone authorizes again.
+  or the consent screen is in Testing and the token's seven days are up),
+  ``invalid_client`` or ``unauthorized_client``, or the Keychain has no token or
+  client for it. Email steps pause until someone authorizes again.
 - ``disabled``: a person disconnected it. Its token is gone from the Keychain.
 
 A mailbox is never deleted, because the campaigns that name it keep pointing at
