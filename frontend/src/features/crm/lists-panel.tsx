@@ -262,7 +262,7 @@ function SmartListFilter({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <FilterBuilder value={draft} onChange={setDraft} tags={tags} />
+        <FilterBuilder value={draft} onChange={setDraft} tags={tags} editingListId={list.id} />
         <div className="flex items-center gap-2">
           <Button onClick={() => save.mutate()} disabled={issues.length > 0 || save.isPending}>
             Save filter
