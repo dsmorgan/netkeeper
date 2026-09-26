@@ -21,10 +21,11 @@ from netkeeper.campaigns.render import LintIssue, TemplateRenderError, me_fields
 from netkeeper.config import Settings
 from netkeeper.models import Contact, Template
 from netkeeper.scoping import get_scoped
-from netkeeper.web.deps import CurrentUser, SessionDep
+from netkeeper.web.deps import CurrentUser, SessionDep, read_only
 from netkeeper.web.schemas import (
     LintIssueOut,
     TemplateCreate,
+    TemplateLintIn,
     TemplateOut,
     TemplatePatch,
     TemplatePreviewOut,
@@ -118,6 +119,20 @@ def create_template(
             me_keys=_me(request).keys(),
         )
     return _template_out(row, current=True)
+
+
+@router.post("/templates/lint", operation_id="lint_template", responses=INVALID)
+@read_only
+def lint_template(body: TemplateLintIn, request: Request, user: CurrentUser) -> list[LintIssueOut]:
+    """Lint a template's text without saving it, as a save of it would.
+
+    The editor calls this as you type, so a lint error shows before you save. It
+    stores nothing and reads no rows; ``user`` is there so the route authenticates
+    like every other.
+    """
+    with translate_errors():
+        issues = service.lint_draft(body.channel, body.subject, body.body, _me(request).keys())
+    return [_issue_out(issue) for issue in issues]
 
 
 @router.get("/templates/{template_id}", operation_id="get_template", responses=NOT_FOUND)
