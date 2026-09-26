@@ -698,9 +698,10 @@ def test_the_scan_cap_is_one_budget_for_the_whole_pattern(full_scans: list[int])
     with pytest.raises(InvalidPattern, match="too many alternatives"):
         compile_pattern(pattern)
     assert time.perf_counter() - started < QUICKLY_S
-    # The last alternation's case classes and its 30 pairs, then the next one's case
-    # classes before its first pair is one too many; a budget each would be 372.
-    assert full_scans[0] == 32
+    # The cap's 30 pairs and one scan per alternation to learn its literals' case
+    # classes: past the cap the check goes on without scanning pairs, looking for an
+    # ambiguity it can prove. A budget per alternation would be 372.
+    assert full_scans[0] == 42
     assert has_ambiguous_nested_repeat(_parser.parse(pattern, re.IGNORECASE))
     # Two alternations at the cap are 60 pairs between them.
     with pytest.raises(InvalidPattern, match="too many alternatives"):
@@ -741,13 +742,36 @@ def test_every_kind_of_group_shares_the_scan_budget(shape: str) -> None:
     compile_pattern(spelled(shape.replace("A1", "z")))
 
 
-def test_the_scan_cap_message_says_to_split_the_rule() -> None:
+@pytest.mark.parametrize(
+    "branches",
+    [CLASS_BRANCHES, CLASS_BRANCHES[:1] + LITERAL_BRANCHES[:20] + [f"{c}y" for c in "bcdefghijkl"]],
+    ids=["all-classes", "one-class-and-31-literals"],
+)
+def test_the_scan_cap_message_says_to_split_the_rule(branches: list[str]) -> None:
+    # One class branch among 31 literal ones is over the cap too, so the message
+    # does not say the alternatives start with a class (#253).
     with pytest.raises(InvalidPattern) as caught:
-        compile_pattern(_branches_under_plus(CLASS_BRANCHES))
-    message = str(caught.value)
-    assert "character class" in message
-    assert "split it into several rules" in message
-    assert "may run slowly" not in message
+        compile_pattern(_branches_under_plus(branches))
+    assert str(caught.value) == (
+        "pattern has too many alternatives to check in time; split it into several rules"
+    )
+
+
+@pytest.mark.parametrize("where", ["first", "last"])
+def test_a_pattern_over_the_scan_cap_that_is_ambiguous_says_so(where: str) -> None:
+    """An ambiguity the check can prove gets the message that says how to fix it, even
+    when the pattern is over the cap; splitting ``(a|aa)+`` into rules would not help."""
+    ambiguous = ["a", "aa"]
+    over = CLASS_BRANCHES[:9]  # 36 pairs
+    branches = ambiguous + over if where == "first" else over + ambiguous
+    with pytest.raises(InvalidPattern) as caught:
+        compile_pattern(_branches_under_plus(branches))
+    assert "may run slowly" in str(caught.value)
+    assert "too many alternatives" not in str(caught.value)
+    # In another part of the pattern, which the check reaches after the cap ran out:
+    # it walks a sequence from the end.
+    with pytest.raises(InvalidPattern, match="may run slowly"):
+        compile_pattern(r"(\w+\s*)+" + _branches_under_plus(over))
 
 
 def test_the_scan_cap_counts_each_distinct_pair_once() -> None:
@@ -756,6 +780,20 @@ def test_the_scan_cap_counts_each_distinct_pair_once() -> None:
     # are literals, which cost no scan.
     branches = [f"[{'ab' if i % 2 else 'ba'}]{chr(0x4E00 + i)}" for i in range(40)]
     assert not _refused_by_the_cap(branches)
+
+
+def test_a_counted_pair_is_scanned_once(full_scans: list[int]) -> None:
+    """Seven classes in turn before 60 literals: 28 distinct pairs of classes, under
+    the cap, among 1,770 comparisons. The 1,770 pairs of literals between them pushed
+    counted pairs out of :func:`svc._overlap`'s cache, and each came back as another
+    scan the cap did not count: 50 scans for 28 pairs (#253)."""
+    classes = [f"[{chr(0x4E00 + 2 * i)}{chr(0x4E01 + 2 * i)}]" for i in range(7)]
+    branches = [classes[i % 7] + chr(0x6000 + i) for i in range(60)]
+    svc._CASE_CLASSES.clear()
+    svc._overlap.cache_clear()
+    compile_pattern(_branches_under_plus(branches))
+    # The 28 pairs, and one scan to learn the literals' case classes.
+    assert full_scans[0] == 29
 
 
 LARGE_ALTERNATIONS = [
