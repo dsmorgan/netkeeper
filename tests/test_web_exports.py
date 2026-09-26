@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
 
 from netkeeper.crm.lists import add_members, create_list
+from netkeeper.crm.tags import create_tag, tag_contact
 from netkeeper.db import session_scope
 from netkeeper.models import ListKind, User, UserKind
 
@@ -125,6 +126,34 @@ async def test_vcard_download(client: httpx.AsyncClient, running_app: FastAPI) -
     assert 'filename="contacts-full.vcf"' in response.headers["content-disposition"]
     assert "BEGIN:VCARD" in response.text
     assert "END:VCARD" in response.text
+
+
+async def test_macos_contacts_vcard_download(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """#249: vCard 3.0, each tag a group card after the contacts."""
+    with session_scope(_factory(running_app), write=True) as session:
+        user = _local_user(session)
+        contact = factories.make_contact(session, user)
+        tag_contact(session, user, contact.id, create_tag(session, user, "Fake Tag").id)
+    response = await client.get("/api/v1/exports?preset=macos-contacts&format=vcard")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/vcard")
+    assert 'filename="contacts-macos-contacts.vcf"' in response.headers["content-disposition"]
+    assert response.text.startswith("BEGIN:VCARD\r\nVERSION:3.0\r\n")
+    assert "CATEGORIES:Fake Tag\r\n" in response.text
+    assert "X-ADDRESSBOOKSERVER-KIND:group\r\n" in response.text
+
+
+@pytest.mark.parametrize("output_format", ["csv", "json"])
+async def test_macos_contacts_as_csv_or_json_is_422(
+    client: httpx.AsyncClient, output_format: str
+) -> None:
+    response = await client.get(
+        "/api/v1/exports", params={"preset": "macos-contacts", "format": output_format}
+    )
+    assert response.status_code == 422
+    assert "vCard only" in response.json()["detail"]
 
 
 async def test_invalid_filter_json_is_422(client: httpx.AsyncClient) -> None:

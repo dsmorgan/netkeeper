@@ -663,7 +663,8 @@ export interface paths {
          *     ``nine-column``; harmless, if unusual, on the other presets) and is ignored
          *     by the other two formats. ``spreadsheet_safe`` prefixes ``'`` to CSV cells
          *     a spreadsheet would evaluate as formulas: safe to open in a spreadsheet, not
-         *     safe to re-import (#76). Also CSV only.
+         *     safe to re-import (#76). Also CSV only. ``macos-contacts`` is vCard only
+         *     (vCard 3.0 with a group per tag, for macOS Contacts); any other format is a 422.
          */
         get: operations["export_contacts"];
         put?: never;
@@ -6399,7 +6400,7 @@ export interface operations {
     export_contacts: {
         parameters: {
             query?: {
-                preset?: "nine-column" | "linkedin-archive" | "full" | "campaign-audience";
+                preset?: "nine-column" | "linkedin-archive" | "full" | "campaign-audience" | "macos-contacts";
                 format?: "csv" | "json" | "vcard";
                 headerless?: boolean;
                 spreadsheet_safe?: boolean;
@@ -6425,7 +6426,7 @@ export interface operations {
                     "text/vcard": string;
                 };
             };
-            /** @description An invalid filter or sort */
+            /** @description An invalid filter or sort, or a vCard-only preset as CSV or JSON */
             422: {
                 headers: {
                     [name: string]: unknown;

@@ -1,6 +1,6 @@
-"""Exporters: CSV, JSON, and vCard 4.0 over a filtered, sorted stream of contacts (spec 10.6).
+"""Exporters: CSV, JSON, and vCard over a filtered, sorted stream of contacts (spec 10.6).
 
-Four presets:
+Five presets:
 
 - ``nine-column`` (and its ``headerless`` CSV variant): the eight columns of
   Appendix A, in that exact order, headed by the labels the reference
@@ -72,6 +72,21 @@ Four presets:
   empty email cell, as a contact with no email at all always has: the row still
   carries a LinkedIn URL, and a bounce leaves the contact eligible for LinkedIn
   steps (spec 11.5).
+- ``macos-contacts`` (vCard only, P6-02, #249): a vCard 3.0 file for macOS
+  Contacts, the version it imports most reliably, where every other preset's
+  vCard is 4.0. Each contact carries every email, phone, and link, its notes,
+  and its tags in ``CATEGORIES``; after the contacts comes one group card per
+  tag (``X-ADDRESSBOOKSERVER-KIND:group``, one
+  ``X-ADDRESSBOOKSERVER-MEMBER`` per member), which Contacts turns into a
+  group. A tag none of the exported contacts carries gets no group. Every card
+  has a ``UID`` derived from the database id (:func:`_contact_uid`,
+  :func:`_tag_uid`), so exporting twice gives the same cards and the members
+  resolve without a lookup. A contact with ``do_not_contact`` set is left out,
+  as ``campaign-audience`` leaves it out: Mail and Messages complete addresses
+  from Contacts, so an address book is a send path by proxy too. Archived
+  contacts follow the filter as they do in every preset. Asking for this
+  preset as CSV or JSON raises :class:`ExportError` before anything renders.
+  The import steps are in ``docs/macos-contacts.md``.
 
 ``spreadsheet_safe`` (CSV only, off by default, #76) prefixes ``'`` to any cell
 whose first character, or first after leading whitespace, is one a spreadsheet
@@ -98,6 +113,7 @@ from __future__ import annotations
 import contextlib
 import csv
 import json
+import uuid
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, tzinfo
@@ -110,10 +126,15 @@ from sqlalchemy.orm import Session, selectinload
 from netkeeper.crm.contacts import sendable_email
 from netkeeper.crm.filters import FilterTree, SortKey, apply_sort, compile_filter, paginate
 from netkeeper.crm.identity import phone_key
-from netkeeper.models import Contact, EmailStatus, User
+from netkeeper.models import Contact, EmailKind, EmailStatus, PhoneKind, User
 
 ExportFormat = Literal["csv", "json", "vcard"]
-ExportPreset = Literal["nine-column", "linkedin-archive", "full", "campaign-audience"]
+ExportPreset = Literal[
+    "nine-column", "linkedin-archive", "full", "campaign-audience", "macos-contacts"
+]
+
+VCARD_ONLY_PRESETS: Final[frozenset[ExportPreset]] = frozenset({"macos-contacts"})
+"""Presets that only exist as a vCard file; CSV or JSON of one is an :class:`ExportError`."""
 
 EXTENSIONS: Final[dict[ExportFormat, str]] = {"csv": "csv", "json": "json", "vcard": "vcf"}
 MEDIA_TYPES: Final[dict[ExportFormat, str]] = {
@@ -128,6 +149,10 @@ FORMULA_TRIGGERS: Final[tuple[str, ...]] = ("=", "+", "-", "@", "\t", "\r")
 """A cell starting with one of these is read as a formula by at least one of
 Excel, Sheets, and LibreOffice (#76). Tab and carriage return are on the list
 because some importers strip leading whitespace before looking for ``=``."""
+
+
+class ExportError(ValueError):
+    """An export that cannot be produced as asked, such as a vCard-only preset as CSV."""
 
 
 def filename_for(preset: ExportPreset, output_format: ExportFormat) -> str:
@@ -338,6 +363,7 @@ _COLUMN_PRESETS: Final[dict[ExportPreset, tuple[_Column, ...] | None]] = {
     "linkedin-archive": LINKEDIN_ARCHIVE,
     "campaign-audience": CAMPAIGN_AUDIENCE,
     "full": None,  # full has its own row shape (nested children); see below
+    "macos-contacts": None,  # vCard 3.0 cards plus group cards; see below
 }
 
 # nine-column and linkedin-archive round-trip through netkeeper.crm.importer, whose
@@ -646,6 +672,116 @@ def _vcard_for(columns: tuple[_Column, ...], contact: Contact, *, today: date) -
     return _vcard_body(lines)
 
 
+# --- macos-contacts: vCard 3.0 with a group card per tag (P6-02, #249) ---------
+
+UID_NAMESPACE: Final[uuid.UUID] = uuid.UUID("853e7fc6-408e-4b6c-833f-998c611189f2")
+"""The namespace every ``macos-contacts`` ``UID`` is a version-5 UUID in.
+
+Changing it changes every UID, and a second import into Contacts would then
+see a new card for everybody instead of the one already there."""
+
+_EMAIL_TYPES: Final[dict[EmailKind, str]] = {EmailKind.PERSONAL: "HOME", EmailKind.WORK: "WORK"}
+_PHONE_TYPES: Final[dict[PhoneKind, str]] = {
+    PhoneKind.MOBILE: "CELL",
+    PhoneKind.HOME: "HOME",
+    PhoneKind.WORK: "WORK",
+}
+
+
+def _contact_uid(user: User, contact: Contact) -> str:
+    """A stable ``UID`` for ``contact``: the same database row always gets the same one."""
+    return str(uuid.uuid5(UID_NAMESPACE, f"{user.id}:contact:{contact.id}"))
+
+
+def _tag_uid(user: User, tag_id: int) -> str:
+    """A stable ``UID`` for a tag's group card. A different string from any contact's."""
+    return str(uuid.uuid5(UID_NAMESPACE, f"{user.id}:tag:{tag_id}"))
+
+
+def _type_params(*types: str | None) -> str:
+    """``;TYPE=X`` for each type given, as Contacts itself writes them (one param per type)."""
+    return "".join(f";TYPE={kind}" for kind in types if kind)
+
+
+def _macos_vcard(contact: Contact, uid: str) -> str:
+    """One contact as a vCard 3.0 card (RFC 2426) for macOS Contacts.
+
+    RFC 2426 escapes TEXT the same way RFC 6350 does and folds the same way,
+    so the 4.0 helpers serve here unchanged.
+    """
+    given, family = contact.first_name, contact.last_name
+    shown_given = contact.preferred_name or given
+    full_name = " ".join(p for p in (shown_given, family) if p) or "Unknown"
+    lines = [
+        "BEGIN:VCARD",
+        "VERSION:3.0",
+        f"UID:{uid}",
+        f"N:{_vcard_escape(family)};{_vcard_escape(given)};;;",
+        f"FN:{_vcard_escape(full_name)}",
+    ]
+    if contact.preferred_name and contact.preferred_name != given:
+        lines.append(f"NICKNAME:{_vcard_escape(contact.preferred_name)}")
+    if contact.current_company:
+        lines.append(f"ORG:{_vcard_escape(contact.current_company)}")
+    if contact.current_title:
+        lines.append(f"TITLE:{_vcard_escape(contact.current_title)}")
+    for email in contact.emails:
+        params = _type_params(
+            "INTERNET", _EMAIL_TYPES.get(email.kind), "PREF" if email.is_primary else None
+        )
+        lines.append(f"EMAIL{params}:{_vcard_escape(email.email)}")
+    for phone in contact.phones:
+        if not phone_key(phone.raw):  # "ask reception" is not a number to dial
+            continue
+        params = _type_params(_PHONE_TYPES.get(phone.kind), "PREF" if phone.is_primary else None)
+        lines.append(f"TEL{params}:{_vcard_escape(phone.raw)}")
+    if contact.li_url:
+        lines.append(f"URL:{_vcard_escape_uri(contact.li_url)}")
+    for link in contact.links:
+        lines.append(f"URL:{_vcard_escape_uri(link.url)}")
+    if contact.location:
+        lines.append(f"ADR:;;;{_vcard_escape(contact.location)};;;")
+    if contact.notes:
+        lines.append(f"NOTE:{_vcard_escape(contact.notes)}")
+    if contact.tags:
+        lines.append(f"CATEGORIES:{','.join(_vcard_escape(tag.name) for tag in contact.tags)}")
+    lines.append("END:VCARD")
+    return _vcard_body(lines)
+
+
+def _macos_group_vcard(name: str, uid: str, member_uids: Iterable[str]) -> str:
+    """A tag as a Contacts group card: ``X-ADDRESSBOOKSERVER-KIND:group`` plus its members."""
+    lines = [
+        "BEGIN:VCARD",
+        "VERSION:3.0",
+        f"UID:{uid}",
+        f"N:{_vcard_escape(name)};;;;",
+        f"FN:{_vcard_escape(name)}",
+        "X-ADDRESSBOOKSERVER-KIND:group",
+    ]
+    lines.extend(f"X-ADDRESSBOOKSERVER-MEMBER:urn:uuid:{member}" for member in member_uids)
+    lines.append("END:VCARD")
+    return _vcard_body(lines)
+
+
+def _macos_contacts(user: User, contacts: Iterable[Contact]) -> Iterator[str]:
+    """Every contact's card, then one group card per tag any of them carries.
+
+    The groups come last so each member it names is already in the file, and
+    because membership is only known once every contact has streamed. What is
+    held meanwhile is a UID per tagged contact, not the contacts themselves.
+    Groups are in tag-name order, like ``Contact.tags``.
+    """
+    groups: dict[int, tuple[str, str, list[str]]] = {}
+    for contact in contacts:
+        uid = _contact_uid(user, contact)
+        yield _macos_vcard(contact, uid)
+        for tag in contact.tags:
+            groups.setdefault(tag.id, (tag.name_key, tag.name, []))[2].append(uid)
+    for tag_id, (_key, name, members) in sorted(groups.items(), key=lambda item: item[1][0]):
+        yield _macos_group_vcard(name, _tag_uid(user, tag_id), members)
+
+
 # --- JSON streaming, shared by every preset ------------------------------------
 
 
@@ -690,17 +826,22 @@ def export_stream(
     ``StreamingResponse`` is after the ``200`` is on the wire: the failure
     would reach the client as a truncated file with a success status, which is
     worse than a 500 because nothing about it looks like an error (#95).
+    :class:`ExportError`, for a vCard-only preset asked for as CSV or JSON, is
+    raised here for the same reason.
     """
+    if preset in VCARD_ONLY_PRESETS and output_format != "vcard":
+        raise ExportError(f"the {preset} preset is vCard only; ask for format vcard")
     today = _local_today(user, now)
-    extra_where = (
-        and_(Contact.do_not_contact.is_(False), Contact.needs_review_at.is_(None))
-        if preset == "campaign-audience"
-        else None
-    )
+    extra_where: ColumnElement[bool] | None = None
+    if preset == "campaign-audience":
+        extra_where = and_(Contact.do_not_contact.is_(False), Contact.needs_review_at.is_(None))
+    elif preset == "macos-contacts":
+        extra_where = Contact.do_not_contact.is_(False)
     base = _contacts_statement(session, user, tree, sort, now=now, extra_where=extra_where)
     return _render(
         session,
         base,
+        user=user,
         preset=preset,
         output_format=output_format,
         headerless=headerless,
@@ -713,6 +854,7 @@ def _render(
     session: Session,
     base: Select[tuple[Contact]],
     *,
+    user: User,
     preset: ExportPreset,
     output_format: ExportFormat,
     headerless: bool,
@@ -724,6 +866,9 @@ def _render(
     ``cell`` transforms each CSV cell after rendering; the other formats never see it.
     """
     contacts = _iter_contacts(session, base)
+    if preset == "macos-contacts":  # vCard only; export_stream refused any other format
+        yield from _macos_contacts(user, contacts)
+        return
     columns = _COLUMN_PRESETS[preset]
     if columns is None:  # "full"
         if output_format == "csv":
