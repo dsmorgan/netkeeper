@@ -84,6 +84,9 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = ["error::DeprecationWarning:netkeeper.*"]
+markers = [
+  "slow: seconds of CPU on purpose (the week simulations); skipped by `make test-fast`, and given tests/time_limit.py's longer limit",
+]
 
 [tool.towncrier]
 package = "netkeeper"
