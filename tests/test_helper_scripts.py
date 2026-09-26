@@ -290,6 +290,15 @@ def test_chrome_script_refuses_a_port_something_else_holds(tmp_path: Path) -> No
 
 # --- reset-data.sh ---------------------------------------------------------------
 
+# reset-data.sh archives and verifies with the sqlite3 command-line tool, which a
+# fresh cloud container lacks (#231). There these tests skip with the fix in the
+# reason. CI (GitHub Actions sets CI=true) always has the tool, so they never skip
+# there: a missing sqlite3 in CI fails rather than quietly leaving the script untested.
+needs_sqlite3_cli = pytest.mark.skipif(
+    shutil.which("sqlite3") is None and not os.environ.get("CI"),
+    reason="needs the sqlite3 command-line tool: apt-get install sqlite3",
+)
+
 
 @pytest.fixture
 def data(tmp_path: Path) -> Path:
@@ -316,6 +325,7 @@ def marker(db: Path) -> int:
     return int(row[0])
 
 
+@needs_sqlite3_cli
 def test_reset_dry_run_changes_nothing(data: Path) -> None:
     db = make_db(data)
     result = run_sh(RESET, "--data-dir", str(data), "--dry-run", env={})
@@ -324,6 +334,7 @@ def test_reset_dry_run_changes_nothing(data: Path) -> None:
     assert not (data / "archives").exists()
 
 
+@needs_sqlite3_cli
 def test_reset_archives_then_removes_and_restore_puts_it_back(data: Path) -> None:
     db = make_db(data)
     result = run_sh(RESET, "--data-dir", str(data), "--yes", env={})
@@ -348,6 +359,7 @@ def test_reset_archives_then_removes_and_restore_puts_it_back(data: Path) -> Non
     assert marker(db) == 42
 
 
+@needs_sqlite3_cli
 def test_reset_refuses_while_the_database_is_open(data: Path) -> None:
     db = make_db(data)
     with closing(sqlite3.connect(db)) as holder:
@@ -393,6 +405,7 @@ def test_reset_refuses_without_lsof_rather_than_assume_the_database_is_free(
     assert (data / "netkeeper.sqlite3").exists()
 
 
+@needs_sqlite3_cli
 def test_reset_keeps_the_database_when_the_archive_does_not_verify(
     data: Path, tmp_path: Path
 ) -> None:
@@ -413,6 +426,7 @@ def test_reset_keeps_the_database_when_the_archive_does_not_verify(
     assert marker(db) == 42
 
 
+@needs_sqlite3_cli
 def test_reset_answering_no_changes_nothing(data: Path) -> None:
     db = make_db(data)
     result = run_sh(RESET, "--data-dir", str(data), env={}, stdin="n\n")
@@ -422,6 +436,7 @@ def test_reset_answering_no_changes_nothing(data: Path) -> None:
     assert not (data / "archives").exists()
 
 
+@needs_sqlite3_cli
 def test_restore_archives_the_database_in_place_first(data: Path) -> None:
     db = make_db(data, value=1)
     run_sh(RESET, "--data-dir", str(data), "--yes", env={})
@@ -434,6 +449,7 @@ def test_restore_archives_the_database_in_place_first(data: Path) -> None:
     assert [marker(p) for p in archived] == [2]
 
 
+@needs_sqlite3_cli
 def test_two_archives_in_one_second_never_share_a_name(data: Path) -> None:
     """The #182 review's reproduction: the second restore overwrote the first archive."""
     db = make_db(data, value=1)
@@ -448,6 +464,7 @@ def test_two_archives_in_one_second_never_share_a_name(data: Path) -> None:
     assert marker(db) == 1
 
 
+@needs_sqlite3_cli
 def test_restore_refuses_a_file_that_is_not_a_database(data: Path, tmp_path: Path) -> None:
     db = make_db(data)
     junk = tmp_path / "junk.sqlite3"
@@ -458,6 +475,7 @@ def test_restore_refuses_a_file_that_is_not_a_database(data: Path, tmp_path: Pat
     assert marker(db) == 42
 
 
+@needs_sqlite3_cli
 def test_reset_refuses_when_the_server_uses_another_database(data: Path) -> None:
     db = make_db(data)
     result = run_sh(
@@ -472,6 +490,7 @@ def test_reset_refuses_when_the_server_uses_another_database(data: Path) -> None
     assert db.exists()
 
 
+@needs_sqlite3_cli
 def test_reset_defaults_to_netkeeper_data(data: Path) -> None:
     db = make_db(data)
     result = run_sh(RESET, "--dry-run", env={"NETKEEPER_DATA": str(data)})
