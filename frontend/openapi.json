@@ -5211,7 +5211,9 @@
       "LintRule": {
         "enum": [
           "syntax",
+          "unsupported",
           "unsafe_attribute",
+          "attribute_access",
           "undefined_variable",
           "no_contact_field",
           "missing_subject",

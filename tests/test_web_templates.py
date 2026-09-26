@@ -128,6 +128,21 @@ async def test_an_edit_of_a_template_in_use_answers_with_the_new_version(
     assert (await client.delete(newest, headers=CSRF)).status_code == 409  # still in use
 
 
+async def test_a_concurrent_edit_of_a_version_in_use_is_409_not_500(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created = await _create(client)
+    monkeypatch.setattr(service, "is_in_use", lambda _session, _user, row: row.id == created["id"])
+    url = f"/api/v1/templates/{created['id']}"
+    first = await client.patch(url, json={"body": "Hey {{ first_name }}"}, headers=CSRF)
+    assert first.status_code == 200
+    # A second edit that read the row before the first one's insert saw no successor.
+    monkeypatch.setattr(service, "is_superseded", lambda _session, _user, _row: False)
+    second = await client.patch(url, json={"body": "Yo {{ first_name }}"}, headers=CSRF)
+    assert second.status_code == 409
+    assert "replaced by another edit" in second.json()["detail"]
+
+
 async def test_preview(client: httpx.AsyncClient, running_app: FastAPI) -> None:
     created = await _create(client, body="Hi {{ first_name }} at {{ company }}.")
     with session_scope(_factory(running_app), write=True) as session:

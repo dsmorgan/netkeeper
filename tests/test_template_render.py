@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -9,6 +10,8 @@ import pytest
 
 from netkeeper.campaigns.render import (
     CONTACT_FIELDS,
+    MAX_OUTPUT_CHARS,
+    MAX_POWER_BITS,
     ME_FIELDS,
     LintIssue,
     LintRule,
@@ -50,8 +53,8 @@ def test_a_template_naming_every_merge_field_lints_clean() -> None:
     body = (
         f"{contact} {me} {{{{ campaign.name }}}} {{{{ step.number }}}} "
         "{{ previous_send_date | ago }} {{ personal_line }} {{ me['name'] }}"
-        "{% if company %}at {{ company | upper }}{% endif %}"
-        "{% for word in ['a', 'b'] %}{{ word }}{% endfor %}{% set x = 1 %}{{ x }}"
+        "{% if company %}at {{ company | upper }}{% endif %}{{ first_name[0] }}"
+        "{{ years_since_connected + 1 }}{% filter upper %}{{ title }}{% endfilter %}"
     )
     assert lint(EMAIL, "Hello {{ first_name }}", body, ME.keys()) == []
     assert not has_errors([])
@@ -84,7 +87,7 @@ def test_undefined_variables_are_errors() -> None:
 
 
 def test_a_group_of_fields_used_whole_or_computed_is_an_error() -> None:
-    body = "{{ first_name }} {{ me }} {% for k in me %}{% endfor %} {{ me[first_name] }}"
+    body = "{{ first_name }} {{ me }} {{ me|length }} {{ me[first_name] }}"
     issues = lint(LINKEDIN, None, body, ME.keys())
     assert [(issue.rule, issue.field, issue.message) for issue in issues] == [
         (
@@ -97,7 +100,7 @@ def test_a_group_of_fields_used_whole_or_computed_is_an_error() -> None:
 
 
 def test_the_globals_jinja_ships_are_not_merge_fields() -> None:
-    body = "{{ first_name }}{% for i in range(3) %}{% endfor %}{{ cycler }}{{ lipsum() }}"
+    body = "{{ first_name }}{{ range(3) }}{{ cycler }}{{ lipsum() }}"
     assert {name for _, name in _rules(lint(LINKEDIN, None, body, ME.keys()))} == {
         "range",
         "cycler",
@@ -191,13 +194,13 @@ def test_a_template_that_does_not_compile_is_a_syntax_error() -> None:
         "{% from 'macros' import greet %}",
     ],
 )
-def test_reaching_for_another_template_is_a_syntax_error(tag: str) -> None:
+def test_reaching_for_another_template_is_refused(tag: str) -> None:
     """Each compiles and then fails at render, so it has to fail lint: lint is the gate."""
     body = "{{ first_name }}\n" + tag
     issues = lint(LINKEDIN, None, body, ME.keys())
-    assert [issue.rule for issue in issues] == [LintRule.SYNTAX]
-    assert issues[0].message == "line 2: a template cannot extend, include, or import another"
-    with pytest.raises(TemplateRenderError):
+    assert LintRule.UNSUPPORTED in {issue.rule for issue in issues}
+    assert issues[0].message.startswith("line 2: `")
+    with pytest.raises(TemplateRenderError, match="is not available in a message template"):
         render(LINKEDIN, None, body, _values(first_name="A"), today=TODAY)
 
 
@@ -246,18 +249,20 @@ def test_underscore_names_fail_the_render(escape: str) -> None:
 @pytest.mark.parametrize(
     "escape",
     [
-        "{{ first_name | attr(x) }}",  # the name is computed, so lint cannot see it
-        "{{ me[x] }}",
+        # The name is computed, so lint cannot see its underscores.
+        "{{ first_name | attr('_' ~ '_class__') }}",
+        "{{ me['_' ~ '_class__'] }}",
     ],
 )
 def test_the_sandbox_itself_refuses_what_lint_cannot_see(escape: str) -> None:
-    body = "{% set x = '_' ~ '_class__' %}{{ first_name }} " + escape
+    body = "{{ first_name }} " + escape
+    assert LintRule.UNSAFE_ATTRIBUTE not in {i.rule for i in lint(LINKEDIN, None, body, ())}
     with pytest.raises(TemplateRenderError, match="sandbox"):
         render(LINKEDIN, None, body, _values(first_name="A"), today=TODAY)
 
 
 def test_a_method_that_mutates_is_refused() -> None:
-    body = "{% set l = [1] %}{{ l.append(2) }}{{ first_name }}"
+    body = "{{ [1].append(2) }}{{ first_name }}"
     with pytest.raises(TemplateRenderError, match="sandbox"):
         render(LINKEDIN, None, body, _values(first_name="A"), today=TODAY)
 
@@ -411,3 +416,201 @@ def test_ago_of_nothing_is_empty_and_of_a_non_date_is_an_error() -> None:
     assert ago("", today=TODAY) == ""
     with pytest.raises(TemplateRenderError, match="ago needs a date"):
         render(LINKEDIN, None, "{{ first_name | ago }}", _values(first_name="A"), today=TODAY)
+
+
+# --- a missing field never raises (#227 review) ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("shape", "missing", "present"),
+    [
+        # The shapes the review found raising, then the other operators on the same path.
+        ("{% if years_since_connected > 5 %}old{% endif %}", "", "old"),
+        ("{{ years_since_connected + 1 }}", "", "8"),
+        ("{{ connected_year - 1 }}", "", "2018"),
+        ("{{ company.upper() }}", "", "ACME"),
+        ("{{ first_name.strip() }}", "", "Bo"),
+        ("{{ first_name|int + 1 }}", "1", "1"),
+        ("{{ years_since_connected|round }}", "", "7"),
+        ("{{ 5 < years_since_connected }}", "False", "True"),
+        ("{{ years_since_connected >= 1 }}", "False", "True"),
+        ("{{ -years_since_connected }}", "", "-7"),
+        ("{{ +years_since_connected }}", "", "7"),
+        ("{{ connected_year * 2 }}", "", "4038"),
+        ("{{ 2 * connected_year }}", "", "4038"),
+        ("{{ connected_year / 2 }}", "", "1009.5"),
+        ("{{ connected_year // 2 }}", "", "1009"),
+        ("{{ connected_year % 2 }}", "", "1"),
+        ("{{ connected_year ** 1 }}", "", "2019"),
+        ("{{ 1 - connected_year }}", "", "-2018"),
+        ("{{ years_since_connected|abs }}", "0", "7"),
+        ("{{ years_since_connected|float }}", "0.0", "7.0"),
+        ("{{ years_since_connected is divisibleby 7 }}", "False", "True"),
+        ("{{ company.upper().strip() }}", "", "ACME"),
+        ("{{ company|center(6) }}", "", " Acme "),
+        ("{{ company|replace('A', 'a') }}", "", "acme"),
+        ("{{ company|truncate(3, leeway=0) }}", "", "..."),
+    ],
+)
+def test_a_missing_field_never_raises_whatever_the_template_does(
+    shape: str, missing: str, present: str
+) -> None:
+    empty = render(LINKEDIN, None, shape, _values(), today=TODAY)
+    assert empty.body == missing
+    assert {i.rule for i in empty.issues if i.severity is Severity.WARNING} == {
+        LintRule.MISSING_VALUE
+    }
+    full = _values(first_name="Bo", company="Acme", connected_year=2019, years_since_connected=7)
+    assert render(LINKEDIN, None, shape, full, today=TODAY).body == present
+
+
+# --- attribute access and self (#227 review) ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "name"),
+    [
+        ("{{ first_name.format }}", "first_name.format"),
+        ("{{ last_position_change.max }} {{ first_name }}", "last_position_change.max"),
+        ("{{ company.upper() }}", "company.upper"),
+        ("{{ first_name['upper'] }}", "first_name.upper"),
+        ("{{ first_name }} {{ me.name.upper() }}", "upper"),
+        ("{{ first_name }} {{ 'x'.center(5) }}", "center"),
+        ("{{ first_name|attr('upper') }}", "attr"),
+    ],
+)
+def test_attributes_of_anything_but_a_group_are_errors(body: str, name: str) -> None:
+    issues = lint(LINKEDIN, None, body, ME.keys())
+    assert [(i.rule, i.field) for i in issues] == [(LintRule.ATTRIBUTE_ACCESS, name)]
+    assert has_errors(issues)
+
+
+def test_an_index_of_a_value_is_not_attribute_access() -> None:
+    assert lint(LINKEDIN, None, "{{ first_name[0] }}. {{ first_name[1:] }}", ME.keys()) == []
+
+
+def test_self_is_refused() -> None:
+    body = "{{ first_name }} {{ self }}"
+    issues = lint(LINKEDIN, None, body, ME.keys())
+    assert _rules(issues) == [(LintRule.UNSUPPORTED, "self")]
+    with pytest.raises(TemplateRenderError, match="`self` is not available"):
+        render(LINKEDIN, None, body, _values(first_name="A"), today=TODAY)
+
+
+def test_a_method_a_render_allows_cannot_widen_a_value() -> None:
+    """Lint refuses every method; a preview of a template with lint errors still renders, so
+    the render allows only methods whose result is no larger than the value."""
+    values = _values(first_name="bo")
+    assert render(LINKEDIN, None, "{{ first_name.title() }}", values, today=TODAY).body == "Bo"
+    for widening in ("ljust(10)", "center(10)", "zfill(10)", "expandtabs(10)", "join('ab')"):
+        with pytest.raises(TemplateRenderError, match="unsafe"):
+            render(LINKEDIN, None, f"{{{{ first_name.{widening} }}}}", values, today=TODAY)
+
+
+# --- bounded work (#227 review) ---------------------------------------------------------
+
+
+def test_the_limits_are_pinned() -> None:
+    assert MAX_OUTPUT_CHARS == 100_000
+    assert MAX_POWER_BITS == 10_000
+
+
+def _fails_fast(body: str, values: MergeValues | None = None) -> TemplateRenderError:
+    start = time.perf_counter()
+    with pytest.raises(TemplateRenderError) as caught:
+        render(LINKEDIN, None, body, values or _values(first_name="Bo"), today=TODAY)
+    assert time.perf_counter() - start < 1.0
+    return caught.value
+
+
+@pytest.mark.parametrize(
+    "amplifier",
+    [
+        "{{ 'a' * 10**9 }}",
+        "{{ 10**9 * 'a' }}",
+        "{{ [0] * 10**9 }}",
+        "{{ 'a'|center(1000000000) }}",
+        "{{ ('a' * 1000)|replace('a', 'a' * 1000)|replace('a', 'a' * 1000) }}",
+        "{{ 'a'|replace('', 'b' * 1000) * 1 }}{{ ('a' * 999)|replace('', 'b' * 1000) }}",
+        "{{ ('a\n' * 1000)|indent(1000) }}",
+        "{{ 'a'|indent(1000000000, first=true) }}",
+        "{{ ('a' * 1000)|join('b' * 1000) }}",
+        "{{ ('a' * 50000)|wordwrap(1, wrapstring='xxxxx') }}",
+        "{{ 'a' * 60000 }}{{ 'a' * 60000 }}",  # each under the limit, together over it
+    ],
+)
+def test_amplifying_operations_share_one_bounded_budget(amplifier: str) -> None:
+    assert "past 100000 characters" in str(_fails_fast("{{ first_name }}" + amplifier))
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ("{{ 2 ** 100000000 }}", "power larger than 10000 bits"),
+        ("{{ '%999999999d' % 1 }}", "% string formatting"),
+        ("{{ '{:>999999999}'.format(1) }}", "str.format"),
+        ("{{ first_name.format(1) }}", "str.format"),
+        ("{{ 'a'.ljust(1000000000) }}", "unsafe"),
+    ],
+)
+def test_formatting_and_huge_powers_are_refused(body: str, message: str) -> None:
+    assert message in str(_fails_fast("{{ first_name }}" + body))
+
+
+@pytest.mark.parametrize("name", ["batch", "slice", "format"])
+def test_filters_that_pad_or_format_to_a_chosen_size_are_gone(name: str) -> None:
+    body = f"{{{{ first_name }}}}{{{{ 'a'|{name}(1000000000) }}}}"
+    assert [i.rule for i in lint(LINKEDIN, None, body, ME.keys())] == [LintRule.SYNTAX]
+    _fails_fast(body)
+
+
+@pytest.mark.parametrize(
+    ("body", "tag"),
+    [
+        ("{% for a in 'ab' %}{% for b in 'cd' %}x{% endfor %}{% endfor %}", "for"),
+        ("{% macro m() %}{{ m() }}{% endmacro %}{{ m() }}", "macro"),
+        ("{% call first_name() %}x{% endcall %}", "call"),
+        ("{% set x = 1 %}", "set"),
+        ("{% set x %}x{% endset %}", "set"),
+        ("{% block b %}{{ self.b() }}{% endblock %}", "block"),
+    ],
+)
+def test_loops_definitions_and_recursion_are_refused(body: str, tag: str) -> None:
+    issues = lint(LINKEDIN, None, "{{ first_name }}" + body, ME.keys())
+    assert (LintRule.UNSUPPORTED, tag) in _rules(issues)
+    assert f"`{tag}` is not available" in str(_fails_fast("{{ first_name }}" + body))
+
+
+def test_the_output_stops_at_the_limit() -> None:
+    long = _values(first_name="a" * (MAX_OUTPUT_CHARS + 1))
+    assert "longer than 100000 characters" in str(_fails_fast("{{ first_name }}", long))
+
+
+def test_ordinary_use_of_the_bounded_operations_renders() -> None:
+    values = _values(first_name="Bo", company="Acme")
+    body = (
+        "{{ first_name }} {{ '-' * 3 }} {{ company|center(8) }} {{ ['a', 'b']|join(', ') }} "
+        "{{ company|replace('A', 'a') }} {{ 2 ** 10 }} {{ company|truncate(10) }}"
+    )
+    assert render(LINKEDIN, None, body, values, today=TODAY).body == (
+        "Bo ---   Acme   a, b acme 1024 Acme"
+    )
+
+
+# --- the subject is one line (#227 review) ----------------------------------------------
+
+
+def test_a_merge_value_cannot_add_an_email_header() -> None:
+    values = _values(first_name="Bo", company="Acme\r\nBcc: x@example.test")
+    rendered = render(
+        EMAIL, "Hi {{ company }}", "{{ first_name }}\n{{ company }}", values, today=TODAY
+    )
+    assert rendered.subject == "Hi Acme Bcc: x@example.test"
+    assert rendered.body == "Bo\nAcme\r\nBcc: x@example.test"  # the body keeps its lines
+
+
+@pytest.mark.parametrize("brk", ["\r", "\n", "\r\n", "\n\n", "\x0b", "\x0c", "\x85", "\u2028"])
+def test_every_line_break_in_a_subject_becomes_one_space(brk: str) -> None:
+    values = _values(first_name=f"A{brk}B")
+    rendered = render(EMAIL, "{{ first_name }}", "{{ first_name }}", values, today=TODAY)
+    assert rendered.subject == "A B"

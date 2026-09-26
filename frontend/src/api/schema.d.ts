@@ -3427,7 +3427,7 @@ export interface components {
          * LintRule
          * @enum {string}
          */
-        LintRule: "syntax" | "unsafe_attribute" | "undefined_variable" | "no_contact_field" | "missing_subject" | "bad_link" | "missing_value";
+        LintRule: "syntax" | "unsupported" | "unsafe_attribute" | "attribute_access" | "undefined_variable" | "no_contact_field" | "missing_subject" | "bad_link" | "missing_value";
         /** ListCreate */
         ListCreate: {
             filter?: components["schemas"]["FilterTree-Input"] | null;

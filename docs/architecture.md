@@ -687,7 +687,23 @@ Jinja2 in a sandboxed environment with autoescape off for plain-text email and o
 
 Template lint at save time: undefined variables, a body with no per-contact merge field (identical bulk mail is a spam signal), missing subject on email, links that do not parse. Lint results are shown in the editor and block activation for errors.
 
-*As built (P3-03):* `netkeeper/campaigns/render.py`. All four save-time rules are errors, as are a template that does not compile and a `_`-prefixed name. The sandbox has no globals (`range`, `cycler` and the rest are undefined), and an unsafe attribute fails the render instead of printing as empty. A field with no value renders as an empty string and adds a warning to the preview. `connected_year` and `years_since_connected` (whole years) come from `connected_on`, and `last_position_change` is the latest `started_on` among the contact's positions. `ago` counts whole UTC days: today, yesterday, N days ago, last week (7 to 13 days), N weeks ago, last month (28 to 59), N months ago, last year (365 to 729), N years ago. Activation lints again rather than reading `lint_json`, because the `me.*` keys can change with the config. Autoescape is off: every template is plain text until HTML email exists.
+*As built (P3-03):* `netkeeper/campaigns/render.py`. All four save-time rules are errors, and so are these: a template that does not compile; a `_`-prefixed name; an attribute or method of anything but `me`, `campaign` and `step` (merge fields are plain values); and `for`, `macro`, `call`, `set`, `block`, `include`, `extends`, `import` and `self`. Lint refuses those constructs and so does the render, since merge fields are scalars and a message needs no loops or recursion.
+
+The sandbox has no globals (`range`, `cycler` and the rest are undefined), and an unsafe attribute fails the render instead of printing as empty. Its work is bounded:
+
+- `*` on a string or list, and the `center`, `indent`, `truncate`, `replace`, `join` and `wordwrap` filters, share one budget of 100,000 characters per render.
+- `**` is capped at 10,000 bits.
+- `%` string formatting, `str.format`, and the `batch`, `slice` and `format` filters are gone.
+- A render may call only methods whose result is no larger than the value.
+- The output stops at 100,000 characters.
+
+A field with no value renders as an empty string and adds a warning to the preview. Whatever the template does with it (arithmetic, comparison, a method call, `int` or `round`), it never raises. The rendered subject is one line: every line break in it becomes a space, so no merge value can add a header.
+
+`connected_year` and `years_since_connected` (whole years) come from `connected_on`. `last_position_change` is the latest `started_on` among the contact's positions. `ago` counts whole UTC days: today, yesterday, N days ago, last week (7 to 13 days), N weeks ago, last month (28 to 59), N months ago, last year (365 to 729), N years ago.
+
+Activation lints again rather than reading `lint_json`, because the `me.*` keys can change with the config.
+
+Autoescape is off, because every template is plain text today. **An HTML body needs autoescape on.** Merge values come from imported data, so without it a contact field could inject markup into the message. Whoever adds HTML email must render the HTML part with autoescape on, not reuse this plain-text environment as it is.
 
 ### 11.2 Sequences
 
