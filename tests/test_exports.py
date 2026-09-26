@@ -445,6 +445,29 @@ def test_spreadsheet_safe_quotes_every_formula_trigger(session: Session, value: 
     assert row["Current Company"] == "'" + value
 
 
+@pytest.mark.parametrize("value", [" =1+1", "\n=1+1", "  @SUM(A1)", "\n\t-2+3", " \r+41 name"])
+def test_spreadsheet_safe_quotes_a_trigger_behind_leading_whitespace(
+    session: Session, value: str
+) -> None:
+    """Importers that trim leading whitespace still reach the ``=`` (#215 review)."""
+    user = factories.make_user(session)
+    factories.make_contact(session, user, current_company=value)
+    text = _run(session, user, preset="nine-column", output_format="csv", spreadsheet_safe=True)
+    (row,) = csv.DictReader(io.StringIO(text, newline=""))
+    assert row["Current Company"] == "'" + value
+
+
+@pytest.mark.parametrize("value", ["  Acme Corp", "\nAcme", "   "])
+def test_spreadsheet_safe_leaves_ordinary_text_behind_whitespace_alone(
+    session: Session, value: str
+) -> None:
+    user = factories.make_user(session)
+    factories.make_contact(session, user, current_company=value, emails=["a@example.test"])
+    text = _run(session, user, preset="nine-column", output_format="csv", spreadsheet_safe=True)
+    (row,) = csv.DictReader(io.StringIO(text, newline=""))
+    assert row["Current Company"] == value
+
+
 def test_spreadsheet_safe_leaves_ordinary_and_empty_cells_and_the_header_alone(
     session: Session,
 ) -> None:
