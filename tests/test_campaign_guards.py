@@ -11,6 +11,7 @@ import factories
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.crm.contacts import merge_contacts
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import session_scope
 from netkeeper.models import (
@@ -19,11 +20,13 @@ from netkeeper.models import (
     Contact,
     ContactEmail,
     EmailStatus,
+    Enrollment,
     EnrollmentStatus,
     InteractionKind,
     TemplateChannel,
     User,
 )
+from netkeeper.scoping import scoped
 from netkeeper.services import campaign_guards as guards
 from netkeeper.services.campaign_guards import (
     GUARDS,
@@ -37,6 +40,7 @@ from netkeeper.services.campaign_guards import (
     check_contact,
     check_enrollment,
     check_step,
+    enrollment_state,
     excluded_summary,
     load_facts,
 )
@@ -86,6 +90,8 @@ def test_the_guard_sets_are_pinned() -> None:
         "paused",
     }
     assert [r.value for r in guards.REASON_ORDER] == [
+        "campaign_not_active",
+        "enrollment_not_active",
         "unknown_contact",
         "merged",
         "archived",
@@ -238,6 +244,22 @@ def test_now_must_be_aware() -> None:
         check_contact(facts(), 1, EMAIL, POLICY, now=NOW.replace(tzinfo=None))
 
 
+@pytest.mark.parametrize("campaign_status", sorted(CampaignStatus))
+@pytest.mark.parametrize("enrollment_status", sorted(EnrollmentStatus))
+def test_only_an_active_enrollment_of_an_active_campaign_may_fire(
+    campaign_status: CampaignStatus, enrollment_status: EnrollmentStatus
+) -> None:
+    expected = tuple(
+        reason
+        for reason, blocked in (
+            (Reason.CAMPAIGN_NOT_ACTIVE, campaign_status is not CampaignStatus.ACTIVE),
+            (Reason.ENROLLMENT_NOT_ACTIVE, enrollment_status is not EnrollmentStatus.ACTIVE),
+        )
+        if blocked
+    )
+    assert enrollment_state(enrollment_status, campaign_status) == expected
+
+
 # --- the channel guard -------------------------------------------------------------------
 
 HEALTHY = ChannelState(
@@ -339,6 +361,8 @@ def test_every_reason_has_its_label() -> None:
     """The words on the review screen, written out (spec 11.8)."""
     labels = {r.value: guards.reason_label(r, contacted_within_days=1) for r in Reason}
     assert labels == {
+        "campaign_not_active": "campaign not active",
+        "enrollment_not_active": "enrollment not active",
         "unknown_contact": "not found",
         "merged": "merged into another contact",
         "archived": "archived",
@@ -624,3 +648,150 @@ def test_a_bounced_address_row_is_what_the_facts_skip(writer: Session, user: Use
     got = load_facts(writer, user, [contact.id], campaign_id=None)[contact.id]
     assert got.sendable_email is None
     assert reasons(got) == (Reason.EMAIL_INVALID,)
+
+
+# --- the #235 review ----------------------------------------------------------------------
+
+
+def test_a_step_a_merged_away_duplicate_was_sent_counts_against_the_survivor(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    """Step 1 went to L; L merged into S; S's own step 1 must not go out a second time.
+
+    Only the firing enrollment's own messages are exempt, not the whole campaign's.
+    """
+    survivor = _contact(writer, user)
+    loser = factories.make_contact(writer, user)
+    to_loser = factories.make_enrollment(writer, campaign, loser, current_step=1)
+    to_survivor = factories.make_enrollment(writer, campaign, survivor)
+    sent = factories.make_message(writer, to_loser, sent_at=NOW - timedelta(days=1))
+    add_interaction(
+        writer, user, loser.id, InteractionKind.EMAIL_OUT, NOW - timedelta(days=1), None, sent.id
+    )
+    merge_contacts(writer, user, survivor.id, loser.id)
+    writer.flush()
+    verdict = check_step(writer, user, to_survivor, campaign.steps[0], now=NOW)
+    assert Reason.CONTACTED_RECENTLY in verdict.reasons
+
+
+def test_a_sent_message_with_no_interaction_counts_unless_it_is_the_enrollments_own(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    """The messages side of the exemption is per enrollment too, and nothing is exempt at
+    enrollment time."""
+    contact = _contact(writer, user)
+    enrollment = factories.make_enrollment(writer, campaign, contact, current_step=1)
+    factories.make_message(writer, enrollment, sent_at=NOW - timedelta(days=1))
+    assert check_step(writer, user, enrollment, campaign.steps[1], now=NOW).eligible
+    facts_now = load_facts(writer, user, [contact.id], campaign_id=campaign.id)
+    assert facts_now[contact.id].last_outbound_at == NOW - timedelta(days=1)
+
+
+def test_a_change_another_session_committed_is_never_missed(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Sessions keep objects across commits; the guards must read the contact fresh."""
+    with session_scope(session_factory, write=True) as setup:
+        user = factories.make_user(setup)
+        campaign = factories.make_campaign(setup, user, channels=(EMAIL, LINKEDIN))
+        contact = _contact(setup, user)
+        enrollment = factories.make_enrollment(setup, campaign, contact)
+        ids = (user.id, campaign.id, contact.id, enrollment.id)
+
+    with session_factory() as a:
+        user_a = a.get(User, ids[0])
+        assert user_a is not None
+        enrollment_a = a.scalars(scoped(user_a, Enrollment).where(Enrollment.id == ids[3])).one()
+        step_a = enrollment_a.campaign.steps[0]
+        # Held, so session A's identity map keeps the contact and its addresses, as a
+        # long-lived caller holding them would.
+        contact_a = a.scalars(scoped(user_a, Contact).where(Contact.id == ids[2])).one()
+        assert [e.status for e in contact_a.emails] == [EmailStatus.OK]
+        assert check_step(a, user_a, enrollment_a, step_a, now=NOW).eligible
+        a.commit()  # objects survive the commit (expire_on_commit=False)
+
+        with session_scope(session_factory, write=True) as b:
+            user_b = b.get(User, ids[0])
+            assert user_b is not None
+            contact_b = b.scalars(scoped(user_b, Contact).where(Contact.id == ids[2])).one()
+            contact_b.do_not_contact = True
+            contact_b.emails[0].status = EmailStatus.BOUNCED
+            campaign_b = b.scalars(scoped(user_b, Campaign).where(Campaign.id == ids[1])).one()
+            campaign_b.status = CampaignStatus.PAUSED
+
+        verdict = check_step(a, user_a, enrollment_a, step_a, now=NOW)
+        assert verdict.reasons == (
+            Reason.CAMPAIGN_NOT_ACTIVE,
+            Reason.DO_NOT_CONTACT,
+            Reason.EMAIL_BOUNCED,
+        )
+
+
+def test_an_email_step_is_excluded_once_the_address_bounces_but_linkedin_is_not(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    """The step's own channel is what is checked (spec 11.5)."""
+    contact = _contact(writer, user)
+    enrollment = factories.make_enrollment(writer, campaign, contact)
+    contact.emails[0].status = EmailStatus.BOUNCED
+    writer.flush()
+    email_step, linkedin_step = campaign.steps
+    assert email_step.channel is EMAIL and linkedin_step.channel is LINKEDIN
+    email_verdict = check_step(writer, user, enrollment, email_step, now=NOW)
+    assert email_verdict.reasons == (Reason.EMAIL_BOUNCED,)
+    assert check_step(writer, user, enrollment, linkedin_step, now=NOW).eligible
+
+
+@pytest.mark.parametrize(
+    ("campaign_status", "enrollment_status", "expected"),
+    [
+        (CampaignStatus.PAUSED, EnrollmentStatus.ACTIVE, (Reason.CAMPAIGN_NOT_ACTIVE,)),
+        (CampaignStatus.ARCHIVED, EnrollmentStatus.ACTIVE, (Reason.CAMPAIGN_NOT_ACTIVE,)),
+        (CampaignStatus.ACTIVE, EnrollmentStatus.OPTED_OUT, (Reason.ENROLLMENT_NOT_ACTIVE,)),
+        (CampaignStatus.ACTIVE, EnrollmentStatus.REMOVED, (Reason.ENROLLMENT_NOT_ACTIVE,)),
+        (CampaignStatus.ACTIVE, EnrollmentStatus.BOUNCED, (Reason.ENROLLMENT_NOT_ACTIVE,)),
+        (CampaignStatus.ACTIVE, EnrollmentStatus.PENDING, (Reason.ENROLLMENT_NOT_ACTIVE,)),
+    ],
+)
+def test_a_step_never_fires_for_a_finished_enrollment_or_an_idle_campaign(
+    writer: Session,
+    user: User,
+    campaign_status: CampaignStatus,
+    enrollment_status: EnrollmentStatus,
+    expected: tuple[Reason, ...],
+) -> None:
+    campaign = factories.make_campaign(writer, user, status=campaign_status)
+    contact = _contact(writer, user)
+    enrollment = factories.make_enrollment(writer, campaign, contact, status=enrollment_status)
+    assert check_step(writer, user, enrollment, campaign.steps[0], now=NOW).reasons == expected
+
+
+def test_a_deleted_enrollment_never_fires(writer: Session, user: User, campaign: Campaign) -> None:
+    contact = _contact(writer, user)
+    enrollment = factories.make_enrollment(writer, campaign, contact)
+    step = campaign.steps[0]
+    writer.delete(enrollment)
+    writer.flush()
+    verdict = check_step(writer, user, enrollment, step, now=NOW)
+    assert verdict.reasons == (Reason.ENROLLMENT_NOT_ACTIVE,)
+
+
+def test_of_two_sendable_addresses_the_primary_is_chosen(writer: Session, user: User) -> None:
+    contact = factories.make_contact(
+        writer, user, emails=["primary@example.test", "second@example.test"]
+    )
+    got = load_facts(writer, user, [contact.id], campaign_id=None)[contact.id]
+    assert got.sendable_email == "primary@example.test"
+
+
+def test_an_enrollment_row_naming_another_users_campaign_never_counts(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    """The other-campaign query checks the campaign's owner, not only the enrollment's."""
+    contact = _contact(writer, user)
+    stranger = factories.make_user(writer)
+    theirs = factories.make_campaign(writer, stranger)
+    # A row the service never writes: the user's enrollment in another user's campaign.
+    factories.make_enrollment(writer, theirs, contact, user_id=user.id)
+    [verdict] = check_enrollment(writer, user, campaign, [contact.id], now=NOW)
+    assert verdict.eligible
