@@ -500,6 +500,7 @@ async def test_rolling_back_a_created_contact_that_gained_things_needs_force(
     assert body["code"] == "created_contacts_changed"
     assert imogen.id in body["contact_ids"]
     assert body["acquired"]["interactions"] == 1
+    assert body["acquired"]["enriched_contacts"] == 0
     assert "1 interaction" in body["detail"]
     assert contact_by_slug(running_app, "imogen-thistlewhite-qz") is not None
 

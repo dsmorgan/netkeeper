@@ -1108,6 +1108,7 @@ class RollbackAcquiredOut(BaseModel):
     triage_decisions: int
     children: int
     edited_contacts: int
+    enriched_contacts: int
     later_imports: int
 
 
