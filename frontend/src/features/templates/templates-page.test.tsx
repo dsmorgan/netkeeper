@@ -3,7 +3,18 @@
  * a missing field as empty text with a warning, and the version history opens
  * an older version read-only.
  */
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import {
+  Link,
+  Outlet,
+  RouterProvider,
+  createBrowserHistory,
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  type RouterHistory,
+} from '@tanstack/react-router'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import { mockApi, renderWithClient, requestsTo, type RouteHandler } from '@/features/crm/harness'
@@ -13,6 +24,35 @@ import type { LintIssue, TemplateOut } from './api'
 import { TemplatesPage } from './templates-page'
 
 const WAIT = { timeout: 3000 }
+
+/**
+ * The page at `/templates` under a router of its own, with a link to one other
+ * page, so leaving it is a real navigation the unsaved-draft guard can stop.
+ */
+async function renderPage(
+  history: RouterHistory = createMemoryHistory({ initialEntries: ['/templates'] }),
+) {
+  const root = createRootRoute({
+    component: () => (
+      <>
+        <Link to="/contacts">Elsewhere</Link>
+        <Outlet />
+      </>
+    ),
+  })
+  const routeTree = root.addChildren([
+    createRoute({ getParentRoute: () => root, path: '/templates', component: TemplatesPage }),
+    createRoute({
+      getParentRoute: () => root,
+      path: '/contacts',
+      component: () => <p>Somewhere else</p>,
+    }),
+  ])
+  const router = createRouter({ routeTree, history })
+  const utils = renderWithClient(<RouterProvider router={router} />)
+  await screen.findByRole('heading', { name: 'Templates' })
+  return { ...utils, router }
+}
 
 function template(overrides: Partial<TemplateOut> = {}): TemplateOut {
   return {
@@ -59,7 +99,7 @@ function routes(rows: TemplateOut[], extra: Record<string, RouteHandler> = {}) {
 describe('lint', () => {
   it('shows a lint error, with its line and a plain sentence, before anything is saved', async () => {
     const seen = mockApi(routes([]))
-    renderWithClient(<TemplatesPage />)
+    await renderPage()
     fireEvent.click(await screen.findByRole('button', { name: 'New template' }))
 
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'loopy' } })
@@ -87,7 +127,7 @@ describe('lint', () => {
 
   it('clears once the text is fixed', async () => {
     mockApi(routes([template({ body: '{% for x in y %}{% endfor %}' })]))
-    renderWithClient(<TemplatesPage />)
+    await renderPage()
     fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
     await screen.findByRole('list', { name: 'Lint issues' }, WAIT)
 
@@ -123,7 +163,7 @@ describe('preview', () => {
           }),
       }),
     )
-    renderWithClient(<TemplatesPage />)
+    await renderPage()
     fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
 
     fireEvent.change(await screen.findByLabelText('Contact'), { target: { value: 'rob' } })
@@ -147,7 +187,7 @@ describe('preview', () => {
 
   it('says it shows the saved version while the editor has changes', async () => {
     mockApi(routes([template()]))
-    renderWithClient(<TemplatesPage />)
+    await renderPage()
     fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
     await screen.findByLabelText('Body')
     expect(screen.queryByText(/The preview shows the saved version/)).not.toBeInTheDocument()
@@ -164,7 +204,7 @@ describe('versions', () => {
 
   it('lists every version, newest first, and opens an older one read-only', async () => {
     mockApi(routes([v1, v2, v3]))
-    renderWithClient(<TemplatesPage />)
+    await renderPage()
     fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
 
     const list = await screen.findByRole('list', { name: 'Versions' })
@@ -197,7 +237,7 @@ describe('versions', () => {
         'PATCH /api/v1/templates/1': () => jsonResponse(saved),
       }),
     )
-    renderWithClient(<TemplatesPage />)
+    await renderPage()
     fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
     fireEvent.change(await screen.findByLabelText('Body'), {
       target: { value: 'Yo {{ first_name }}' },
@@ -215,5 +255,137 @@ describe('versions', () => {
       subject: 'Hi {{ first_name }}',
       body: 'Yo {{ first_name }}',
     })
+  })
+})
+
+describe('unsaved draft', () => {
+  const other = template({ id: 2, name: 'follow-up', body: 'Following up, {{ first_name }}.' })
+
+  async function openAndEdit() {
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    fireEvent.change(await screen.findByLabelText('Body'), {
+      target: { value: 'Unsaved {{ first_name }}' },
+    })
+  }
+
+  it('asks before opening another template, and Cancel keeps the draft', async () => {
+    mockApi(routes([template(), other]))
+    await openAndEdit()
+
+    fireEvent.click(screen.getByRole('button', { name: 'follow-up' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Discard unsaved changes?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    expect(screen.getByLabelText('Body')).toHaveValue('Unsaved {{ first_name }}')
+  })
+
+  it('opens the other template once you discard', async () => {
+    mockApi(routes([template(), other]))
+    await openAndEdit()
+
+    fireEvent.click(screen.getByRole('button', { name: 'follow-up' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Discard unsaved changes?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Discard changes' }))
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Body')).toHaveValue('Following up, {{ first_name }}.'),
+    )
+  })
+
+  it('asks before starting a new template', async () => {
+    mockApi(routes([template()]))
+    await openAndEdit()
+
+    fireEvent.click(screen.getByRole('button', { name: 'New template' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Discard unsaved changes?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Discard changes' }))
+
+    expect(await screen.findByRole('heading', { name: 'New template' }, WAIT)).toBeInTheDocument()
+    expect(screen.getByLabelText('Body')).toHaveValue('')
+  })
+
+  it('asks about a new template that has text in it', async () => {
+    mockApi(routes([template()]))
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'New template' }))
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'half-written' } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'reconnect' }))
+    expect(
+      await screen.findByRole('alertdialog', { name: 'Discard unsaved changes?' }),
+    ).toBeInTheDocument()
+  })
+
+  it('switches without asking when nothing is unsaved', async () => {
+    mockApi(routes([template(), other]))
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    await screen.findByLabelText('Body')
+
+    fireEvent.click(screen.getByRole('button', { name: 'follow-up' }))
+    await waitFor(() =>
+      expect(screen.getByLabelText('Body')).toHaveValue('Following up, {{ first_name }}.'),
+    )
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('asks before leaving the page, and stays on Cancel', async () => {
+    mockApi(routes([template()]))
+    await openAndEdit()
+
+    fireEvent.click(screen.getByRole('link', { name: 'Elsewhere' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Discard unsaved changes?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    expect(screen.queryByText('Somewhere else')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Body')).toHaveValue('Unsaved {{ first_name }}')
+  })
+
+  it('leaves the page once you discard', async () => {
+    mockApi(routes([template()]))
+    await openAndEdit()
+
+    fireEvent.click(screen.getByRole('link', { name: 'Elsewhere' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Discard unsaved changes?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Discard changes' }))
+
+    expect(await screen.findByText('Somewhere else', undefined, WAIT)).toBeInTheDocument()
+  })
+
+  it('leaves without asking when nothing is unsaved', async () => {
+    mockApi(routes([template()]))
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    await screen.findByLabelText('Body')
+
+    fireEvent.click(screen.getByRole('link', { name: 'Elsewhere' }))
+    expect(await screen.findByText('Somewhere else', undefined, WAIT)).toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('holds the tab open through beforeunload only while a draft is unsaved', async () => {
+    window.history.replaceState(null, '', '/templates')
+    mockApi(routes([template()]))
+    await renderPage(createBrowserHistory())
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    const body = await screen.findByLabelText('Body')
+
+    const unload = () => {
+      const event = new Event('beforeunload', { cancelable: true })
+      act(() => {
+        window.dispatchEvent(event)
+      })
+      return event.defaultPrevented
+    }
+    expect(unload()).toBe(false)
+
+    fireEvent.change(body, { target: { value: 'Unsaved {{ first_name }}' } })
+    await waitFor(() => expect(unload()).toBe(true))
+
+    fireEvent.change(body, { target: { value: template().body } })
+    await waitFor(() => expect(unload()).toBe(false))
   })
 })

@@ -1,14 +1,19 @@
 /**
  * Templates (spec 11.1, 14.3; item P3-10): the list, the editor with lint as
  * you type, a preview against a contact you pick, and the version history.
+ *
+ * An unsaved draft is never thrown away without asking: opening another
+ * template, starting a new one, or leaving the page confirms first, and closing
+ * the tab gets the browser's own prompt.
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { DiscardChangesDialog, UnsavedChangesGuard } from '@/components/unsaved-changes'
 import { Callout, EmptyState, ErrorNote, LoadingNote } from '@/features/crm/controls'
 
 import { templateKeys, templatesQuery, versionsQuery } from './api'
@@ -33,10 +38,18 @@ export function TemplatesPage() {
   const templates = useQuery(templatesQuery)
   const [selected, setSelected] = useState<Selection>(null)
   const [notice, setNotice] = useState<NewVersionNotice | null>(null)
+  // Whether the open workspace holds edits that aren't saved; it reports this itself.
+  const [dirty, setDirty] = useState(false)
+  // Where a click would go, held while the discard confirm is open.
+  const [asked, setAsked] = useState<{ next: Selection } | null>(null)
 
-  const select = (next: Selection) => {
+  const go = (next: Selection) => {
     setNotice(null)
     setSelected(next)
+  }
+  const select = (next: Selection) => {
+    if (dirty && next !== selected) setAsked({ next })
+    else go(next)
   }
   const onSaved = (before: TemplateOut | null, saved: TemplateOut) => {
     void client.invalidateQueries({ queryKey: templateKeys.all })
@@ -111,7 +124,8 @@ export function TemplatesPage() {
               key="new"
               current={null}
               onSaved={(saved) => onSaved(null, saved)}
-              onDeleted={() => select(null)}
+              onDeleted={() => go(null)}
+              onDirtyChange={setDirty}
             />
           ) : (
             <LoadedWorkspace
@@ -120,12 +134,22 @@ export function TemplatesPage() {
               onSaved={onSaved}
               onDeleted={() => {
                 void client.invalidateQueries({ queryKey: templateKeys.all })
-                select(null)
+                go(null)
               }}
+              onDirtyChange={setDirty}
             />
           )}
         </div>
       </div>
+      <UnsavedChangesGuard when={dirty} />
+      <DiscardChangesDialog
+        open={asked !== null}
+        onDiscard={() => {
+          if (asked !== null) go(asked.next)
+          setAsked(null)
+        }}
+        onKeep={() => setAsked(null)}
+      />
     </div>
   )
 }
@@ -134,9 +158,10 @@ interface LoadedWorkspaceProps {
   id: number
   onSaved: (before: TemplateOut, saved: TemplateOut) => void
   onDeleted: () => void
+  onDirtyChange: (dirty: boolean) => void
 }
 
-function LoadedWorkspace({ id, onSaved, onDeleted }: LoadedWorkspaceProps) {
+function LoadedWorkspace({ id, onSaved, onDeleted, onDirtyChange }: LoadedWorkspaceProps) {
   const versions = useQuery(versionsQuery(id))
   const current = versions.data?.[0]
   if (current === undefined) {
@@ -151,6 +176,7 @@ function LoadedWorkspace({ id, onSaved, onDeleted }: LoadedWorkspaceProps) {
       versions={versions.data}
       onSaved={(saved) => onSaved(current, saved)}
       onDeleted={onDeleted}
+      onDirtyChange={onDirtyChange}
     />
   )
 }
@@ -160,10 +186,15 @@ interface WorkspaceProps {
   versions?: readonly TemplateOut[]
   onSaved: (saved: TemplateOut) => void
   onDeleted: () => void
+  /** Told whenever the draft starts or stops differing from what is saved, and false on unmount. */
+  onDirtyChange: (dirty: boolean) => void
 }
 
-function Workspace({ current, versions, onSaved, onDeleted }: WorkspaceProps) {
+function Workspace({ current, versions, onSaved, onDeleted, onDirtyChange }: WorkspaceProps) {
   const [draft, setDraft] = useState(() => draftOf(current))
+  const dirty = !sameDraft(draft, draftOf(current))
+  useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange])
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange])
   const [viewingId, setViewingId] = useState<number | null>(current?.id ?? null)
   const older =
     current !== null && viewingId !== current.id
@@ -188,7 +219,7 @@ function Workspace({ current, versions, onSaved, onDeleted }: WorkspaceProps) {
       <div className="min-w-0 space-y-4">
         <PreviewPanel
           templateId={viewingId}
-          unsaved={older === undefined && current !== null && !sameDraft(draft, draftOf(current))}
+          unsaved={older === undefined && current !== null && dirty}
         />
         {versions !== undefined && viewingId !== null && (
           <VersionHistory versions={versions} viewingId={viewingId} onView={setViewingId} />
