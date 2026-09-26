@@ -483,10 +483,16 @@ def _ambiguous_branches(branches: Any, after: _Chars, *, alone: bool) -> bool:
     fixed character after another cannot both match from one place, so
     ``((senior|staff|lead)\\s+)+`` passes although two branches start with
     ``s``. Otherwise branches whose first characters overlap count as
-    ambiguous without proof: ``(ab|a)+`` is refused, because doubt rejects.
+    ambiguous without proof: ``(ab|cd|a)+`` is refused, because doubt rejects.
+    (``(ab|a)+`` is not an example: the parser rewrites it as ``a(?:b|)``, an
+    empty branch alone in its pass, which is accepted.)
     """
     firsts = [_first(branch) for branch in branches]
     prefixes = [_fixed_prefix(branch) for branch in branches]
+    # One scan for every literal the comparisons below can meet, not one per pair.
+    _learn_case_classes(
+        frozenset().union(*(starts for starts, _ in firsts), *(c for p in prefixes for c in p))
+    )
     for index, (starts, _) in enumerate(firsts):
         for other in range(index + 1, len(firsts)):
             if _overlap(starts, firsts[other][0]) and not _differ(prefixes[index], prefixes[other]):
@@ -579,15 +585,58 @@ def _every_character() -> str:
     return "".join(map(chr, range(sys.maxunicode + 1)))
 
 
+_CASE_CLASSES: dict[str, frozenset[str]] = {}
+"""What :func:`_learn_case_classes` has found: a literal's text to every character it
+matches. It only grows, by at most one small entry per code point a pattern has used."""
+
+
+def _is_literal(char: str) -> bool:
+    """Whether ``char`` is one character as :func:`_first_of` spells a ``LITERAL``."""
+    return len(char) == 10 and char.startswith("\\U")
+
+
+def _learn_case_classes(chars: _Chars) -> None:
+    """Record in :data:`_CASE_CLASSES` what each literal in ``chars`` matches, ignoring case.
+
+    Found the way :func:`_scan_overlap` would find them, by the ``regex``
+    package over every code point, so :func:`_overlap`'s fast path uses the
+    same case folding as the scan (``k`` also matches the Kelvin sign, ``s``
+    the long s). One scan for all the literals not yet known finds every
+    character any of them matches; each literal then only needs checking
+    against those few (#240).
+    """
+    missing = sorted(c for c in chars if c not in _CASE_CLASSES and _is_literal(c))
+    if not missing:
+        return
+    any_of = regex.compile(f"[{''.join(missing)}]", regex.IGNORECASE)
+    found = "".join(sorted({m.group() for m in any_of.finditer(_every_character())}))
+    for literal in missing:
+        one = regex.compile(literal, regex.IGNORECASE)
+        _CASE_CLASSES[literal] = frozenset(m.group() for m in one.finditer(found))
+
+
 @functools.lru_cache(maxsize=256)
 def _overlap(a: _Chars, b: _Chars) -> bool:
     """Whether some character matches one of ``a`` and one of ``b``, ignoring case.
 
     The ``regex`` package decides, over every code point, so the answer uses the
     same ``\\w``, ``\\s``, and case folding as the searches the guard protects.
+    When both sides are plain literals, the characters each one matches are
+    known from :func:`_learn_case_classes`, and comparing those is enough: a large
+    alternation of words compares thousands of pairs, and a scan of every code
+    point per pair took seconds (#240).
     """
     if not a or not b:
         return False
+    if all(_is_literal(c) for c in a | b):
+        _learn_case_classes(a | b)
+        matched = frozenset().union(*(_CASE_CLASSES[c] for c in a))
+        return any(not matched.isdisjoint(_CASE_CLASSES[c]) for c in b)
+    return _scan_overlap(a, b)
+
+
+def _scan_overlap(a: _Chars, b: _Chars) -> bool:
+    """:func:`_overlap` by a search over every code point, whatever ``a`` and ``b`` hold."""
     either = "|".join(sorted(a))
     other = "|".join(sorted(b))
     probe = regex.compile(f"(?=(?:{either}))(?:{other})", regex.IGNORECASE)
