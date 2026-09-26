@@ -1498,6 +1498,81 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Templates
+         * @description Every template, the newest version of each, by name.
+         */
+        get: operations["list_templates"];
+        put?: never;
+        /**
+         * Create Template
+         * @description Save a new template with its lint. Lint errors are reported, not refused.
+         */
+        post: operations["create_template"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/templates/{template_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Template
+         * @description One template, any version.
+         */
+        get: operations["get_template"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Template
+         * @description Delete a template and its earlier versions. Refused for an older version, and while
+         *     a campaign uses any of them.
+         */
+        delete: operations["delete_template"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Template
+         * @description Edit a template. Answers with the row that now holds it: the same one, or a new
+         *     version when a campaign uses the old one (spec 8.5). An older version is read-only.
+         */
+        patch: operations["update_template"];
+        trace?: never;
+    };
+    "/api/v1/templates/{template_id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Preview Template
+         * @description Render a template for one contact. Missing contact data is a warning on the result;
+         *     ``422`` only for a template that does not compile or reaches past the sandbox.
+         */
+        get: operations["preview_template"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/triage/contacts/{contact_id}/preferred-name": {
         parameters: {
             query?: never;
@@ -3335,6 +3410,24 @@ export interface components {
             /** Session Flagged At */
             session_flagged_at: string | null;
         };
+        /**
+         * LintIssueOut
+         * @description One lint finding. ``field`` names the merge field or link it is about, if any.
+         */
+        LintIssueOut: {
+            /** Field */
+            field?: string | null;
+            /** Message */
+            message: string;
+            part: components["schemas"]["Part"];
+            rule: components["schemas"]["LintRule"];
+            severity: components["schemas"]["Severity"];
+        };
+        /**
+         * LintRule
+         * @enum {string}
+         */
+        LintRule: "syntax" | "unsafe_attribute" | "undefined_variable" | "no_contact_field" | "missing_subject" | "bad_link" | "missing_value";
         /** ListCreate */
         ListCreate: {
             filter?: components["schemas"]["FilterTree-Input"] | null;
@@ -3576,6 +3669,12 @@ export interface components {
             /** Started On */
             started_on: string | null;
         };
+        /**
+         * Part
+         * @description Which text of the template an issue is about.
+         * @enum {string}
+         */
+        Part: "subject" | "body";
         /** PeriodBudgetOut */
         PeriodBudgetOut: {
             /** Count */
@@ -3916,6 +4015,11 @@ export interface components {
             next_due: string | null;
         };
         /**
+         * Severity
+         * @enum {string}
+         */
+        Severity: "error" | "warning";
+        /**
          * SharedCompanyOut
          * @description A company this contact is at or was at, and the overlap with the address book.
          *
@@ -4160,6 +4264,81 @@ export interface components {
              * @enum {string}
              */
             status: "pending" | "running" | "succeeded" | "failed";
+        };
+        /**
+         * TemplateChannel
+         * @description Where a template's message goes (spec 8.5).
+         * @enum {string}
+         */
+        TemplateChannel: "email" | "linkedin";
+        /** TemplateCreate */
+        TemplateCreate: {
+            /** Body */
+            body: string;
+            channel: components["schemas"]["TemplateChannel"];
+            /** Name */
+            name: string;
+            /** Subject */
+            subject?: string | null;
+        };
+        /** TemplateOut */
+        TemplateOut: {
+            /** Body */
+            body: string;
+            channel: components["schemas"]["TemplateChannel"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Current */
+            current: boolean;
+            /** Id */
+            id: number;
+            /** Lint */
+            lint: components["schemas"]["LintIssueOut"][];
+            /** Name */
+            name: string;
+            /** Previous Id */
+            previous_id: number | null;
+            /** Subject */
+            subject: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version */
+            version: number;
+        };
+        /**
+         * TemplatePatch
+         * @description Fields left out are left alone; ``subject: null`` clears it.
+         *
+         *     Editing a template an active campaign uses answers with a new version, one up,
+         *     and leaves the old one as it was (spec 8.5); the response's ``id`` says which.
+         */
+        TemplatePatch: {
+            /** Body */
+            body?: string | null;
+            channel?: components["schemas"]["TemplateChannel"] | null;
+            /** Name */
+            name?: string | null;
+            /** Subject */
+            subject?: string | null;
+        };
+        /**
+         * TemplatePreviewOut
+         * @description A template rendered for one contact, and every issue: lint's errors, then warnings for
+         *     fields with no value and links that came out broken.
+         */
+        TemplatePreviewOut: {
+            /** Body */
+            body: string;
+            /** Issues */
+            issues: components["schemas"]["LintIssueOut"][];
+            /** Subject */
+            subject: string | null;
         };
         /** TimelineInteraction */
         TimelineInteraction: {
@@ -7896,6 +8075,231 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    list_templates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateOut"][];
+                };
+            };
+        };
+    };
+    create_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TemplateCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateOut"];
+                };
+            };
+            /** @description A template by that name already exists, the template is an older version, or a campaign uses it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A value that cannot be stored or rendered */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                template_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateOut"];
+                };
+            };
+            /** @description No such template or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                template_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such template or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A template by that name already exists, the template is an older version, or a campaign uses it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                template_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TemplatePatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateOut"];
+                };
+            };
+            /** @description No such template or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A template by that name already exists, the template is an older version, or a campaign uses it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A value that cannot be stored or rendered */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    preview_template: {
+        parameters: {
+            query: {
+                /** @description The contact to render the template for. */
+                contact_id: number;
+            };
+            header?: never;
+            path: {
+                template_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplatePreviewOut"];
+                };
+            };
+            /** @description No such template or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A value that cannot be stored or rendered */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

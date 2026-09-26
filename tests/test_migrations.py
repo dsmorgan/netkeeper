@@ -1440,3 +1440,54 @@ def test_the_seeded_validated_list_is_marked_builtin_and_nothing_else_is(
     assert "builtin" not in columns
     with migration_engine.begin() as connection:
         assert _count(connection, "lists") == 7
+
+
+# --- templates (0017, P3-03) -----------------------------------------------------------
+
+
+def _insert_template(
+    connection: Connection,
+    *,
+    id: int,
+    user_id: int = 1,
+    channel: str = "email",
+    version: int = 1,
+    previous_id: int | None = None,
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO templates (id, user_id, name, channel, subject, body, lint_json,"
+            " version, previous_id, created_at, updated_at) VALUES (:id, :user_id, 'T',"
+            " :channel, NULL, 'Hi', '[]', :version, :previous_id, :t, :t)"
+        ),
+        {
+            "id": id,
+            "user_id": user_id,
+            "channel": channel,
+            "version": version,
+            "previous_id": previous_id,
+            "t": STAMP,
+        },
+    )
+
+
+def test_templates_keep_a_version_chain_a_line(migration_engine: Engine) -> None:
+    """A version is replaced at most once, per user; deleting one never takes a newer one."""
+    migrations.upgrade(migration_engine, "0017")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        _insert_template(connection, id=1)
+        _insert_template(connection, id=2)  # any number of first versions
+        _insert_template(connection, id=3, version=2, previous_id=1)
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_template(connection, id=4, version=2, previous_id=1)  # a fork
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_template(connection, id=4, channel="fax")
+
+    with migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM templates WHERE id = 1"))
+        previous = connection.execute(text("SELECT previous_id FROM templates WHERE id = 3"))
+        assert previous.scalar_one() is None  # SET NULL, the newer version kept
+
+    migrations.downgrade(migration_engine, "0016")
+    assert "templates" not in inspect(migration_engine).get_table_names()
