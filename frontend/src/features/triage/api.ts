@@ -62,17 +62,36 @@ export function decidedByFor(filter: QueueFilter): MetSource | null {
   return filter === 'automatic' ? 'automatic' : null
 }
 
-/** A non-2xx answer, with the status the screen branches on and the backend's wording. */
+/**
+ * A non-2xx answer, with the status the screen branches on and the backend's wording.
+ *
+ * `reason` is the backend's own code for a `409` that is not an ordinary
+ * conflict, when it sends one: `raced` is an undo that another request beat to
+ * the same decision (#222). `null` for everything else.
+ */
 export class TriageError extends Error {
   readonly status: number
   readonly detail: string
+  readonly reason: string | null
 
-  constructor(status: number, detail: string) {
+  constructor(status: number, detail: string, reason: string | null = null) {
     super(detail)
     this.name = 'TriageError'
     this.status = status
     this.detail = detail
+    this.reason = reason
   }
+}
+
+/**
+ * The triage routes answer a contact that left the queue with a code, not a
+ * sentence: `{"detail": "archived"}` or `{"detail": "merged", …}`, which a
+ * caller branches on. Shown as it came, the error list read "Ada Lovelace was
+ * not recorded: archived." (#222), so these are worded once, here.
+ */
+const NOT_IN_QUEUE: Record<string, string> = {
+  archived: 'they were archived after this card was shown',
+  merged: 'they were merged into another contact after this card was shown',
 }
 
 /**
@@ -101,13 +120,21 @@ export function conflictFieldOf(detail: string): string | null {
 function detailOf(error: unknown, whenUnknown: string): string {
   if (typeof error === 'object' && error !== null && 'detail' in error) {
     const { detail } = error as { detail: unknown }
-    if (typeof detail === 'string') return detail
+    if (typeof detail === 'string') return NOT_IN_QUEUE[detail] ?? detail
   }
   return whenUnknown
 }
 
+function reasonOf(error: unknown): string | null {
+  if (typeof error === 'object' && error !== null && 'reason' in error) {
+    const { reason } = error as { reason: unknown }
+    if (typeof reason === 'string') return reason
+  }
+  return null
+}
+
 function fail(status: number, error: unknown, whenUnknown: string): never {
-  throw new TriageError(status, detailOf(error, whenUnknown))
+  throw new TriageError(status, detailOf(error, whenUnknown), reasonOf(error))
 }
 
 /**
@@ -167,7 +194,9 @@ export async function decide(options: {
 
 /**
  * Undo the newest action. `409` when the contact moved on since the decision:
- * the caller offers that as a choice rather than forcing it.
+ * the caller offers that as a choice rather than forcing it. A `409` whose
+ * `reason` is `raced` is not that: another undo took the same decision back
+ * first, and forcing would take back the one before it (#222).
  */
 export async function undo(options: {
   force?: boolean

@@ -258,6 +258,12 @@ class UndoRaced(RuntimeError):
     where two undos can both read the same newest decision. The loser is
     refused rather than retried, so a ``u`` never reaches further back than
     the decision the person was shown.
+
+    Never an :class:`UndoConflict`, even though the winner has already put the
+    contacts back by the time the loser looks at them: a conflict is offered
+    ``force``, and forcing the loser would take back the decision *before* the
+    one it was aimed at without checking it (#222). :func:`undo` counts its
+    decisions again once it holds the contacts' locks, before it compares them.
     """
 
     def __init__(self, decision_id: int) -> None:
@@ -698,7 +704,11 @@ def undo(session: Session, user: User, *, force: bool = False) -> Undone:
     if newest is None:
         raise NothingToUndo(f"user {user.id} has no triage decision left to undo")
     decisions = _batch(session, user, newest)
+    # Locked (#222), so nothing changes these contacts between the comparison
+    # below and the restore. A concurrent undo of the same decision waits here
+    # for the first to commit, and then finds its decisions spent.
     contacts = _contacts_by_id(session, user, [row.contact_id for row in decisions])
+    _require_unspent(session, user, newest, len(decisions))
     forced: list[int] = []
     for row in decisions:
         contact = contacts.get(row.contact_id)
@@ -1489,26 +1499,64 @@ def _spend(
     rows are picked the way :func:`_batch` picked them -- the batch by id, or
     the one decision -- so no ``IN`` list grows with the batch.
     """
-    statement = scoped_update(user, TriageDecision).where(TriageDecision.undone_at.is_(None))
-    if newest.batch_id is None:
-        statement = statement.where(TriageDecision.id == newest.id)
-    else:
-        statement = statement.where(TriageDecision.batch_id == newest.batch_id)
+    statement = scoped_update(user, TriageDecision).where(*_open_decisions(newest))
     # Session.execute() is typed as the plain Result; DML gets a CursorResult.
     result = cast(CursorResult[Any], session.execute(statement.values(undone_at=at)))
     if result.rowcount != expected:
         raise UndoRaced(newest.id)
 
 
+def _open_decisions(newest: TriageDecision) -> tuple[ColumnElement[bool], ...]:
+    """The rows :func:`_batch` read for ``newest`` that are still on the stack."""
+    unspent = TriageDecision.undone_at.is_(None)
+    if newest.batch_id is None:
+        return (unspent, TriageDecision.id == newest.id)
+    return (unspent, TriageDecision.batch_id == newest.batch_id)
+
+
+def _require_unspent(session: Session, user: User, newest: TriageDecision, expected: int) -> None:
+    """:class:`UndoRaced` when another undo spent any of the decisions this one read (#222).
+
+    Called once :func:`_contacts_by_id` holds the contacts' locks. On PostgreSQL a
+    concurrent undo of the same decision holds them until it commits, so by the
+    time this count runs, at READ COMMITTED, it sees that undo's spend -- and the
+    contacts that undo put back, which :func:`_diverged` would otherwise report
+    as an edit, with ``force`` on offer. :func:`_spend`'s conditional update
+    stays the last word.
+    """
+    open_rows = session.scalar(scoped_count(user, TriageDecision).where(*_open_decisions(newest)))
+    if open_rows != expected:
+        raise UndoRaced(newest.id)
+
+
 def _contacts_by_id(session: Session, user: User, ids: Sequence[int]) -> dict[int, Contact]:
-    """The user's contacts with those ids, in chunks so a large batch stays one statement each."""
+    """The user's contacts with those ids, locked, in chunks so a large batch stays one
+    statement each.
+
+    ``FOR UPDATE`` on PostgreSQL (SQLite has no row locks, and its writer
+    session's ``BEGIN IMMEDIATE`` already serializes the request), taken in id
+    order so two batch undos cannot deadlock. ``populate_existing`` because a
+    lock that waited is only worth having if the rows are read again after it.
+    """
     found: dict[int, Contact] = {}
     unique = sorted(set(ids))
     for start in range(0, len(unique), _CHUNK):
         chunk = unique[start : start + _CHUNK]
-        for contact in session.scalars(scoped(user, Contact).where(Contact.id.in_(chunk))):
+        for contact in session.scalars(
+            _locked(scoped(user, Contact).where(Contact.id.in_(chunk)).order_by(Contact.id))
+        ):
             found[contact.id] = contact
     return found
+
+
+def _locked(statement: Select[tuple[Contact]]) -> Select[tuple[Contact]]:
+    """``statement`` as a read that a triage write goes on to act on (#222).
+
+    The row locks keep a merge, an archive, or another decision from landing
+    between the check a writer makes and the write it makes; the fresh read
+    means the check sees whatever landed while the lock was awaited.
+    """
+    return statement.with_for_update().execution_options(populate_existing=True)
 
 
 # --- queue helpers ----------------------------------------------------------
@@ -1622,9 +1670,13 @@ def _live_contact(session: Session, user: User, contact_id: int) -> Contact:
     """One of ``user``'s contacts that the queue could serve, for a decision to write to.
 
     The same liveness :func:`_queue_where` filters on and :func:`_diverged`
-    refuses an undo over (#83): not merged away, not archived.
+    refuses an undo over (#83): not merged away, not archived. Read locked
+    (:func:`_locked`, #222), so a merge or an archive cannot land between this
+    check and the decision's write.
     """
-    contact = get_scoped(session, user, Contact, contact_id)
+    contact = session.scalars(
+        _locked(scoped(user, Contact).where(Contact.id == contact_id))
+    ).one_or_none()
     if contact is None:
         raise NotFound(f"contact {contact_id} is not one of user {user.id}'s")
     if contact.merged_into_id is not None:

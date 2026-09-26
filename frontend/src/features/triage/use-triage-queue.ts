@@ -840,6 +840,23 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
             }
           })
         } catch (error) {
+          if (error instanceof TriageError && error.status === 409 && error.reason === 'raced') {
+            // Another undo, from another tab or window, took this decision back
+            // first. Not a conflict: offering "Undo anyway" would send a forced
+            // undo that reaches the decision *before* this one, unchecked
+            // (#222). The decision is spent either way, so it leaves the stack,
+            // and the buffer describes a queue that undo has since changed.
+            await load()
+            commit((state) => ({
+              ...state,
+              undoable: state.undoable.slice(1),
+              taggedSinceUndoable: false,
+              notice: `Another undo took back ${
+                taking === undefined ? 'the newest triage decision' : `“${taking.label}”`
+              } first, so this one changed nothing. The queue has been read again.`,
+            }))
+            return
+          }
           if (error instanceof TriageError && error.status === 409) {
             commit((state) => ({
               ...state,

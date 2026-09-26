@@ -61,7 +61,9 @@ NOTHING_TO_UNDO: Responses = {404: {"description": "No triage decision left to u
 UNDO_CONFLICT: Responses = {
     409: {
         "description": "The contact changed after the decision; retry with `force`. Or "
-        "another undo took the same decision back first, and nothing changed"
+        'another undo took the same decision back first (`{"detail": <why>, "reason": '
+        '"raced", "decision_id": <id>}`) and nothing changed: never retry that with `force`, '
+        "which would take back the decision before it"
     }
 }
 # The queue never serves either, so only a hand-written request meets this (#83).
@@ -126,7 +128,13 @@ def translate_errors() -> Iterator[None]:
         raise ApiError(409, {"detail": "merged", "merged_into_id": exc.survivor_id}) from exc
     except service.NothingToUndo as exc:
         raise HTTPException(status_code=404, detail="nothing to undo") from exc
-    except (service.UndoConflict, service.UndoRaced, service.CountChanged) as exc:
+    except service.UndoRaced as exc:
+        # Not the conflict's shape: that one is answered with `force`, and forcing
+        # past a race takes back the decision before the one that was meant (#222).
+        raise ApiError(
+            409, {"detail": str(exc), "reason": "raced", "decision_id": exc.decision_id}
+        ) from exc
+    except (service.UndoConflict, service.CountChanged) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except service.AlreadyDecided as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

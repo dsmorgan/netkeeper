@@ -9,7 +9,10 @@ from zoneinfo import ZoneInfo
 
 import factories
 import pytest
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import Select, event
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import Dialect
+from sqlalchemy.orm import ORMExecuteState, Session, sessionmaker
 
 from netkeeper.crm import triage as module
 from netkeeper.crm.identity import IncomingContact, apply, merge, resolve
@@ -841,6 +844,151 @@ def test_a_batch_undo_that_loses_a_race_writes_nothing(
     with pytest.raises(UndoRaced):
         module.undo(writer, user, force=True)  # force never gets past a race
     assert (_met(first), _met(second)) == (ContactMet.MET, ContactMet.MET)
+
+
+def _undone_by_another_request_first(
+    monkeypatch: pytest.MonkeyPatch, writer: Session, user: User
+) -> None:
+    """Run a whole other undo where this one waits on the contacts' locks (#222).
+
+    On PostgreSQL the loser blocks on ``FOR UPDATE`` until the winner commits, so
+    what it reads next is the winner's work in full: the decisions spent *and*
+    the contacts put back. The fields alone then look like an edit in between.
+    """
+    real = module._contacts_by_id
+
+    def racing(session: Session, owner: User, ids: Sequence[int]) -> dict[int, Contact]:
+        monkeypatch.setattr(module, "_contacts_by_id", real)
+        module.undo(writer, user)  # the winner, start to finish
+        return real(session, owner, ids)
+
+    monkeypatch.setattr(module, "_contacts_by_id", racing)
+
+
+def test_an_undo_that_waited_out_the_winner_is_raced_not_a_conflict(
+    writer: Session, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A conflict would be offered ``force``, and a forced retry would take back the
+    decision before the one the person pressed ``u`` for, unchecked (#222)."""
+    earlier, contact = _contacts(writer, user, 2)
+    module.decide(writer, user, earlier.id, ContactMet.SKIP, at=EARLIER)
+    decision = module.decide(writer, user, contact.id, ContactMet.MET, at=NOW)
+    _undone_by_another_request_first(monkeypatch, writer, user)
+    with pytest.raises(UndoRaced) as caught:
+        module.undo(writer, user)
+    assert caught.value.decision_id == decision.id
+    assert _met(contact) is ContactMet.UNKNOWN  # the winner's undo, and only that
+    assert _met(earlier) is ContactMet.SKIP
+    assert _open_decisions(writer, user) == 1  # the earlier decision is still there
+
+
+def test_a_batch_undo_that_finds_part_of_its_batch_spent_writes_nothing(
+    writer: Session, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial count is a race too: all of the batch or none of it (#222, M5)."""
+    first, second = _contacts(writer, user, 2)
+    _message(writer, user, first)
+    _message(writer, user, second)
+    applied = module.apply_suggestion(writer, user, module.SUGGESTION_MET_WITH_MESSAGES, at=NOW)
+    real = module._contacts_by_id
+
+    def racing(session: Session, owner: User, ids: Sequence[int]) -> dict[int, Contact]:
+        one = writer.scalars(
+            scoped(user, TriageDecision).where(TriageDecision.batch_id == applied.batch_id)
+        ).first()
+        assert one is not None
+        writer.execute(
+            scoped_update(user, TriageDecision)
+            .where(TriageDecision.id == one.id)
+            .values(undone_at=NOW)
+            .execution_options(synchronize_session=False)
+        )
+        return real(session, owner, ids)
+
+    monkeypatch.setattr(module, "_contacts_by_id", racing)
+    with pytest.raises(UndoRaced):
+        module.undo(writer, user)
+    assert (_met(first), _met(second)) == (ContactMet.MET, ContactMet.MET)
+
+
+def test_the_spend_refuses_a_batch_it_matches_only_part_of(writer: Session, user: User) -> None:
+    """The conditional update is the last word even when the count before it passed."""
+    first, second = _contacts(writer, user, 2)
+    _message(writer, user, first)
+    _message(writer, user, second)
+    applied = module.apply_suggestion(writer, user, module.SUGGESTION_MET_WITH_MESSAGES, at=NOW)
+    rows = writer.scalars(
+        scoped(user, TriageDecision)
+        .where(TriageDecision.batch_id == applied.batch_id)
+        .order_by(TriageDecision.id)
+    ).all()
+    rows[0].undone_at = NOW
+    writer.flush()
+    with pytest.raises(UndoRaced):
+        module._spend(writer, user, rows[1], len(rows), NOW)
+
+
+#: What ``FOR UPDATE`` compiles to, which SQLite leaves out. The dialect is untyped upstream.
+_POSTGRESQL: Dialect = postgresql.dialect()  # type: ignore[no-untyped-call]
+
+
+def _contact_reads(writer: Session) -> list[str]:
+    """Every ``SELECT`` of contacts ``writer`` runs from here on, as PostgreSQL would get it."""
+    reads: list[str] = []
+
+    def record(state: ORMExecuteState) -> None:
+        if not isinstance(state.statement, Select):
+            return
+        statement: Select[Any] = state.statement
+        if any(
+            description.get("entity") is Contact for description in statement.column_descriptions
+        ):
+            reads.append(str(statement.compile(dialect=_POSTGRESQL)))
+
+    event.listen(writer, "do_orm_execute", record)
+    return reads
+
+
+def test_undo_locks_the_contacts_it_compares_and_restores(writer: Session, user: User) -> None:
+    """So a decide or a merge cannot land between the check and the restore (#222)."""
+    contact = factories.make_contact(writer, user)
+    module.decide(writer, user, contact.id, ContactMet.MET, at=NOW)
+    writer.expunge_all()
+    reads = _contact_reads(writer)
+    module.undo(writer, user)
+    assert reads and all("FOR UPDATE" in read for read in reads)
+
+
+@pytest.mark.parametrize("write", ["decide", "preferred_name"])
+def test_a_decision_locks_the_contact_it_checks(writer: Session, user: User, write: str) -> None:
+    """The liveness check and the write it guards see the same row (#222)."""
+    contact = factories.make_contact(writer, user)
+    writer.expunge_all()
+    reads = _contact_reads(writer)
+    if write == "decide":
+        module.decide(writer, user, contact.id, ContactMet.MET, at=NOW)
+    else:
+        module.set_preferred_name(writer, user, contact.id, "Ada")
+    assert reads and all("FOR UPDATE" in read for read in reads)
+
+
+def test_a_decision_reads_the_contact_again_rather_than_trusting_the_session(
+    writer: Session, user: User
+) -> None:
+    """A lock that waited is only worth having if the row is read after it: a merge
+    that landed meanwhile is seen, not the copy the session already held (#222)."""
+    loser, survivor = _contacts(writer, user, 2)
+    writer.refresh(loser)  # every column loaded, so the session holds a value to go stale
+    writer.execute(
+        scoped_update(user, Contact)
+        .where(Contact.id == loser.id)
+        .values(merged_into_id=survivor.id)
+        .execution_options(synchronize_session=False)
+    )
+    assert loser.merged_into_id is None  # the session's copy has not seen it
+    with pytest.raises(NotInQueue) as caught:
+        module.decide(writer, user, loser.id, ContactMet.MET, at=NOW)
+    assert caught.value.survivor_id == survivor.id
 
 
 def test_undo_spends_exactly_the_rows_it_restored(writer: Session, user: User) -> None:

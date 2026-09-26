@@ -8197,7 +8197,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The contact changed after the decision; retry with `force`. Or another undo took the same decision back first, and nothing changed */
+            /** @description The contact changed after the decision; retry with `force`. Or another undo took the same decision back first (`{"detail": <why>, "reason": "raced", "decision_id": <id>}`) and nothing changed: never retry that with `force`, which would take back the decision before it */
             409: {
                 headers: {
                     [name: string]: unknown;

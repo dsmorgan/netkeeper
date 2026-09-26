@@ -274,6 +274,52 @@ describe('undo', () => {
     expect(backend.decisions.filter((decision) => decision.undone_at !== null)).toHaveLength(0)
   })
 
+  it('offers no force when another undo took the decision back first (#222)', async () => {
+    // Another tab's undo reaches the server first and spends the decision; this
+    // one loses the race. Forcing it would take back the decision *before*.
+    let raced = false
+    const { backend } = renderTriage({
+      contacts: 4,
+      intercept: async (request, next) => {
+        const { pathname } = new URL(request.url)
+        if (request.method === 'POST' && pathname === '/api/v1/triage/undo' && !raced) {
+          raced = true
+          const newest = backend.decisions.at(-1)
+          await next(request) // the other tab's undo, which won
+          return jsonResponse(
+            {
+              detail: `triage decision ${newest?.id} was undone by another request first; nothing changed`,
+              reason: 'raced',
+              decision_id: newest?.id,
+            },
+            409,
+          )
+        }
+        return next(request)
+      },
+    })
+    await currentName()
+
+    press('m')
+    await waitFor(() => expect(backend.byId(1).met).toBe('met'))
+    press('n')
+    await waitFor(() => expect(backend.byId(2).met).toBe('not_met'))
+
+    press('u')
+
+    expect(await screen.findByTestId('triage-notice')).toHaveTextContent(
+      /another undo took back .* first, so this one changed nothing/i,
+    )
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('undo-force')).not.toBeInTheDocument()
+    expect(backend.countOf('/api/v1/triage/undo', 'POST')).toBe(1)
+    // The winner's undo, and nothing past it: the decision before is untouched.
+    expect(backend.byId(2).met).toBe('unknown')
+    expect(backend.byId(1).met).toBe('met')
+    // The queue was read again, so the card is the contact the winner put back.
+    await waitFor(async () => expect(await currentName()).toContain(backend.byId(2).last_name))
+  })
+
   it('says so when there is nothing left to undo', async () => {
     renderTriage({ contacts: 3 })
     await currentName()
