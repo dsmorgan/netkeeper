@@ -49,6 +49,12 @@ logic; it decides what the job may do and what happens after it stops:
   "answer_lost"`` even when it read on to the end of the list, every lost start
   is in ``counts_json.lost`` and in its note, and the weekly full sync's scheduler
   treats it as not done (:mod:`netkeeper.services.scheduled_runs`).
+* **A shortfall within the slack** (#204). A full sync may complete a little short
+  of LinkedIn's own total (:func:`~netkeeper.linkedin.connections.completion_slack`);
+  ``counts_json.shortfall`` carries how many, and a nonzero one gets its own line
+  on the run's note ("complete with 4 short of LinkedIn's total"). This is on top
+  of, not instead of, the aging limits below: aging can still refuse a complete
+  run outright.
 * **Mapping.** Each page is written in its own writer session as it arrives,
   so the write lock is never held across a fetch or a pause. After a
   *complete* full sync, and only then, contacts it did not see are aged
@@ -146,6 +152,7 @@ class SyncRunReport:
             "connections": self.result.connections,
             "total": self.result.max_total,
             "complete": self.result.complete,
+            "shortfall": self.result.shortfall,
             "seen": pages.seen,
             "created": pages.created,
             "updated": pages.updated,
@@ -452,7 +459,7 @@ async def sync_connections(
                 now=clock(),
                 stop_reason=_stop_reason(result, cancelled=gate.cancelled),
                 counts=report.counts(),
-                notes=(*_lost_notes(result), *_aging_notes(aging)),
+                notes=(*_lost_notes(result), *_completion_notes(result), *_aging_notes(aging)),
             )
     return report
 
@@ -490,6 +497,13 @@ def _lost_notes(result: SyncResult) -> tuple[str, ...]:
             f" and aged nobody: {starts}."
         )
     return tuple(notes)
+
+
+def _completion_notes(result: SyncResult) -> tuple[str, ...]:
+    """#204: a full sync that completed a little short of LinkedIn's own total says so."""
+    if result.complete and result.shortfall > 0:
+        return (f"complete with {result.shortfall} short of LinkedIn's total.",)
+    return ()
 
 
 def _aging_notes(aging: mapping.AgingCounts | None) -> tuple[str, ...]:

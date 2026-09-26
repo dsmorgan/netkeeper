@@ -283,10 +283,22 @@ async def test_a_list_with_no_stated_total_is_never_complete() -> None:
     assert out.result.reason is StopReason.END_OF_LIST and not out.result.complete
 
 
-async def test_a_total_larger_than_the_list_is_never_complete() -> None:
-    """A total that counts someone the list never shows (a hidden member) ages nobody."""
+async def test_a_total_a_little_larger_than_the_list_still_completes() -> None:
+    """#204: a total that counts one hidden member the list never shows is within the
+    slack (5, for a total of 16), so the run still completes rather than aging nobody."""
     out = await sync(FlagshipSite(many(15), total=16))
-    assert out.result.reason is StopReason.END_OF_LIST and not out.result.complete
+    assert out.result.reason is StopReason.END_OF_LIST
+    assert out.result.shortfall == 1
+    assert out.result.complete
+
+
+async def test_a_total_far_larger_than_the_list_is_still_never_complete() -> None:
+    """Past #204's slack (5, for a total of 30), a total the list falls well short of
+    still ages nobody."""
+    out = await sync(FlagshipSite(many(15), total=30))
+    assert out.result.reason is StopReason.END_OF_LIST
+    assert out.result.shortfall == 15
+    assert not out.result.complete
 
 
 async def test_an_incremental_sync_stops_at_the_first_page_it_knows() -> None:
