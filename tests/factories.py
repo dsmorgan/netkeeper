@@ -1,4 +1,4 @@
-"""Row factories for tests: a user, and a contact with children, flushed and ready.
+"""Row factories for tests: a user, a contact with children, a campaign, flushed and ready.
 
 Names come from counters, so the rows a test makes are the same on every run
 (the counters reset before each test, see ``conftest.py``). Only the models are
@@ -14,11 +14,22 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from netkeeper.models import (
+    Campaign,
+    CampaignStatus,
+    CampaignStep,
     Contact,
     ContactEmail,
     ContactPhone,
     ContactPosition,
     ContactSource,
+    Enrollment,
+    EnrollmentStatus,
+    Message,
+    MessageDirection,
+    MessageStatus,
+    StepMode,
+    Template,
+    TemplateChannel,
     User,
     UserKind,
     UserPosition,
@@ -27,13 +38,15 @@ from netkeeper.models.base import utcnow
 
 _users: Iterator[int] = itertools.count(1)
 _contacts: Iterator[int] = itertools.count(1)
+_campaigns: Iterator[int] = itertools.count(1)
 
 
 def reset_counters() -> None:
     """Start the name counters over, so each test sees ``First1 Last1`` first."""
-    global _users, _contacts
+    global _users, _contacts, _campaigns
     _users = itertools.count(1)
     _contacts = itertools.count(1)
+    _campaigns = itertools.count(1)
 
 
 def make_user(session: Session, kind: UserKind = UserKind.LOCAL, **overrides: Any) -> User:
@@ -111,3 +124,86 @@ def make_user_position(session: Session, user: User, **overrides: Any) -> UserPo
     session.add(position)
     session.flush()
     return position
+
+
+def make_campaign(
+    session: Session,
+    user: User,
+    *,
+    channels: Sequence[TemplateChannel] = (TemplateChannel.EMAIL,),
+    **overrides: Any,
+) -> Campaign:
+    """A flushed campaign of ``user`` with one step per channel in ``channels``.
+
+    Each step gets its own template, a draft email or a prefilled LinkedIn
+    message, seven days after the one before. ``overrides`` are ``Campaign``
+    columns; the recency guard defaults to 30 days, as the config does.
+    """
+    n = next(_campaigns)
+    fields: dict[str, Any] = {
+        "name": f"Campaign {n}",
+        "status": CampaignStatus.ACTIVE,
+        "contacted_within_days_guard": 30,
+    }
+    fields.update(overrides)
+    campaign = Campaign(user_id=user.id, **fields)
+    for position, channel in enumerate(channels, start=1):
+        template = Template(
+            user_id=user.id,
+            name=f"Campaign {n} step {position}",
+            channel=channel,
+            subject="Hello" if channel is TemplateChannel.EMAIL else None,
+            body="Hi {{ first_name }}",
+            lint_json=[],
+        )
+        campaign.steps.append(
+            CampaignStep(
+                user_id=user.id,
+                position=position,
+                channel=channel,
+                template=template,
+                delay_days=0 if position == 1 else 7,
+                mode=StepMode.DRAFT if channel is TemplateChannel.EMAIL else StepMode.PREFILL,
+            )
+        )
+    session.add(campaign)
+    session.flush()
+    return campaign
+
+
+def make_enrollment(
+    session: Session, campaign: Campaign, contact: Contact, **overrides: Any
+) -> Enrollment:
+    """A flushed enrollment of ``contact`` in ``campaign``, active unless overridden."""
+    fields: dict[str, Any] = {"status": EnrollmentStatus.ACTIVE}
+    fields.update(overrides)
+    enrollment = Enrollment(
+        user_id=campaign.user_id, campaign_id=campaign.id, contact_id=contact.id, **fields
+    )
+    session.add(enrollment)
+    session.flush()
+    return enrollment
+
+
+def make_message(
+    session: Session, enrollment: Enrollment, *, position: int = 1, **overrides: Any
+) -> Message:
+    """A flushed outbound message from step ``position`` of ``enrollment``, sent now."""
+    step = next(s for s in enrollment.campaign.steps if s.position == position)
+    fields: dict[str, Any] = {
+        "channel": step.channel,
+        "direction": MessageDirection.OUT,
+        "status": MessageStatus.SENT,
+        "sent_at": utcnow(),
+    }
+    fields.update(overrides)
+    message = Message(
+        user_id=enrollment.user_id,
+        enrollment_id=enrollment.id,
+        step_id=step.id,
+        contact_id=enrollment.contact_id,
+        **fields,
+    )
+    session.add(message)
+    session.flush()
+    return message

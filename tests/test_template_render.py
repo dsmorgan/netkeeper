@@ -7,6 +7,7 @@ import time
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import jinja2
 import pytest
 from jinja2 import nodes
 from jinja2.exceptions import SecurityError
@@ -710,6 +711,29 @@ def test_deep_nesting_is_refused_fast_not_a_crash(deep: str) -> None:
     assert has_errors(issues)
     assert {issue.rule for issue in issues} <= {LintRule.UNSUPPORTED, LintRule.SYNTAX}
     _fails_fast(body)
+
+
+def test_the_nesting_limit_is_ours_not_the_compilers() -> None:
+    """``MAX_NESTING`` refuses a tree the stock compiler would still take (#226 review note).
+
+    The cases above nest past Python's own limit, so a walker that lost its depth
+    check would still see them fail, from ``SyntaxError``. A chain of ``and``
+    nests one level per term: 49 terms sit at the limit and 50 go one past it,
+    both far below the depth at which Jinja or Python gives up.
+    """
+
+    def chain(terms: int) -> str:
+        return "{{ " + " and ".join(["first_name"] * terms) + " }}"
+
+    jinja2.Environment().from_string(chain(50))  # compiles fine without the walker
+    assert lint(LINKEDIN, None, chain(MAX_NESTING - 1), ME.keys()) == []
+    rendered = render(
+        LINKEDIN, None, chain(MAX_NESTING - 1), _values(first_name="Ada"), today=TODAY
+    )
+    assert rendered.body == "Ada"
+    issues = lint(LINKEDIN, None, chain(MAX_NESTING), ME.keys())
+    assert _rules(issues) == [(LintRule.UNSUPPORTED, "nesting")]
+    assert "nesting deeper than 50 levels" in str(_fails_fast(chain(MAX_NESTING)))
 
 
 def test_the_output_stops_at_the_limit() -> None:

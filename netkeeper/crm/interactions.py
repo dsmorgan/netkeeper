@@ -41,6 +41,7 @@ from netkeeper.models import (
     ContactSource,
     Interaction,
     InteractionKind,
+    Message,
     User,
 )
 from netkeeper.scoping import get_scoped, scoped, scoped_update
@@ -118,6 +119,15 @@ class NotFound(LookupError):
     """The contact or interaction is not one of the user's. Never says which user has it."""
 
 
+class NoSuchMessage(ValueError):
+    """``message_id`` is not one of the user's campaign messages to this interaction's contact.
+
+    An interaction records a message to its own contact (P3-04 gave the column
+    its foreign key): pointing it at another contact's message would let the
+    campaign guards read one person's history as another's (spec 11.9).
+    """
+
+
 class _Missing(enum.Enum):
     MISSING = "missing"
 
@@ -170,12 +180,15 @@ def add_interaction(
     that is later than the current value; an earlier outbound row, backfilled
     from an archive, leaves a newer value alone. ``source`` is ``manual`` for a
     person's own entry; an importer passes its own. :class:`NotFound` when the
-    contact is not ``user``'s; ``ValueError`` for a naive ``at``; ``RuntimeError``
+    contact is not ``user``'s; :class:`NoSuchMessage` for a ``message_id`` that is not
+    a message to that contact; ``ValueError`` for a naive ``at``; ``RuntimeError``
     when ``session`` is not a writer.
     """
     _require_writer(session)
     _require_aware(at)
     contact = _owned_contact(session, user, contact_id)
+    if message_id is not None:
+        _check_message(session, user, contact.id, message_id)
     row = Interaction(
         user_id=user.id,
         contact_id=contact.id,
@@ -238,13 +251,15 @@ def update_interaction(
     ``last_contacted_at`` is recomputed from its outbound rows: moving the
     newest outbound interaction back in time, or turning it into a note, must
     lower the column, and only a query over the remaining rows knows by how
-    much. :class:`NotFound`, ``ValueError`` for a naive ``at``, ``RuntimeError``
-    for a session that is not a writer.
+    much. :class:`NotFound`, :class:`NoSuchMessage`, ``ValueError`` for a naive
+    ``at``, ``RuntimeError`` for a session that is not a writer.
     """
     _require_writer(session)
     if at is not MISSING:
         _require_aware(at)
     row = get_interaction(session, user, interaction_id)
+    if message_id is not MISSING and message_id is not None:
+        _check_message(session, user, row.contact_id, message_id)
     was_outbound = is_outbound(row.kind)
     if kind is not MISSING:
         row.kind = InteractionKind(kind)
@@ -437,6 +452,12 @@ def _check_page(limit: int, offset: int) -> None:
         raise ValueError("limit must be at least 1")
     if offset < 0:
         raise ValueError("offset must not be negative")
+
+
+def _check_message(session: Session, user: User, contact_id: int, message_id: int) -> None:
+    message = get_scoped(session, user, Message, message_id)
+    if message is None or message.contact_id != contact_id:
+        raise NoSuchMessage(f"message {message_id} is not a message to contact {contact_id}")
 
 
 def _owned_contact(session: Session, user: User, contact_id: int) -> Contact:

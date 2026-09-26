@@ -533,9 +533,12 @@ class Interaction(ContactChild, Base):
     )
     at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=utcnow)
     summary: Mapped[str | None] = mapped_column(Text)
-    # The messages table arrives with the campaign engine (P3-04). Until then this
-    # is a plain integer with no foreign key, so that migration adds the constraint.
-    message_id: Mapped[int | None] = mapped_column(Integer)
+    # The campaign message this interaction records, when there is one (P3-04). SET NULL:
+    # the timeline entry outlives it. The guards read it to tell a campaign's own
+    # earlier step from other contact (spec 11.9, netkeeper.campaigns.guards).
+    message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"), index=True
+    )
 
     contact: Mapped[Contact] = relationship(back_populates="interactions")
 
