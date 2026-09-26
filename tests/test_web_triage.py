@@ -21,6 +21,7 @@ from sqlalchemy import Engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.crm import tags as tag_service
+from netkeeper.crm import triage as triage_service
 from netkeeper.crm.identity import merge
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import session_scope
@@ -31,10 +32,11 @@ from netkeeper.models import (
     ContactSource,
     InteractionKind,
     MetSource,
+    TriageDecision,
     User,
     UserKind,
 )
-from netkeeper.scoping import get_scoped
+from netkeeper.scoping import get_scoped, scoped_update
 from netkeeper.web.deps import LocalSingleUser
 
 CSRF = {"X-Netkeeper-Client": "1"}
@@ -453,6 +455,54 @@ async def test_undo_refuses_to_overwrite_a_change_that_arrived_after_the_decisio
     assert forced.status_code == 200, forced.text
     assert forced.json()["forced"] == [contact_id]
     assert _contact_row(running_app, LOCAL_USER_ID, contact_id).met is ContactMet.UNKNOWN
+
+
+async def test_an_undo_that_lost_a_race_is_a_409_that_offers_no_force(
+    running_app: FastAPI,
+    client: httpx.AsyncClient,
+    contact_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its own shape, not the conflict's: a client that answers a conflict with
+    ``force`` would take back the decision before the one it meant (#222). A 409
+    and not a 500: ``translate_errors`` has to know the error at all."""
+    await _decide(client, contact_id, "met")
+    real = triage_service._contacts_by_id
+
+    def racing(session: Session, owner: User, ids: Any) -> dict[int, Contact]:
+        # Another undo committed first: its spend is what this one then counts.
+        session.execute(
+            scoped_update(owner, TriageDecision)
+            .where(TriageDecision.undone_at.is_(None))
+            .values(undone_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+        return real(session, owner, ids)
+
+    monkeypatch.setattr(triage_service, "_contacts_by_id", racing)
+    response = await _undo(client)
+    assert response.status_code == 409, response.text
+    body = response.json()
+    assert body["reason"] == "raced"
+    assert isinstance(body["decision_id"], int)
+    assert "undone by another request first" in body["detail"]
+    monkeypatch.undo()
+    # Nothing was restored by the loser, and the request rolled the spend back.
+    assert _contact_row(running_app, LOCAL_USER_ID, contact_id).met is ContactMet.MET
+    assert (await _undo(client)).status_code == 200
+
+
+async def test_an_undo_conflict_is_not_marked_as_a_race(
+    running_app: FastAPI, client: httpx.AsyncClient, contact_id: int
+) -> None:
+    await _decide(client, contact_id, "met")
+    with session_scope(_factory(running_app), write=True) as session:
+        contact = get_scoped(session, _local_user(session), Contact, contact_id)
+        assert contact is not None
+        contact.met = ContactMet.NOT_MET
+    response = await _undo(client)
+    assert response.status_code == 409, response.text
+    assert "reason" not in response.json()
 
 
 async def test_undo_refuses_a_contact_that_left_the_queue_and_says_so(

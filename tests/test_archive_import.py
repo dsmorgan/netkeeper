@@ -22,6 +22,7 @@ from netkeeper.crm.archive import (
     SUMMARY_MAX_CHARS,
     ArchiveImport,
     _html_to_text,
+    _note_unfamiliar_messages,
     import_archive,
     report_json,
 )
@@ -919,6 +920,23 @@ def test_the_familiar_name_in_a_subdirectory_or_another_case_is_not_named(
         report = _run(writer, user, opened)
     assert report.messages.rows == 13  # the sample's table, found where it moved
     assert report.unfamiliar_message_files == []
+
+
+@pytest.mark.parametrize(
+    ("name", "named"),
+    [
+        ("export\\Messages.csv", False),
+        ("export\\inbox\\MESSAGES.CSV", False),
+        ("export\\interview_prep_messages.csv", True),
+        ("messages.csv\\my inbox.csv", True),
+    ],
+)
+def test_a_backslash_is_a_separator_when_naming_a_messages_file(name: str, named: bool) -> None:
+    """A zip written on Windows can name its members with backslashes: the base
+    name is what is compared, whichever separator the member uses (#222, M14)."""
+    report = ArchiveImport(observed_at=OBSERVED)
+    _note_unfamiliar_messages(name, report)
+    assert report.unfamiliar_message_files == ([name] if named else [])
 
 
 def test_a_renamed_message_history_is_imported_and_named(

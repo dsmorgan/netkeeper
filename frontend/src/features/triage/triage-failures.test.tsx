@@ -34,7 +34,36 @@ function failDecisionsFor(contactIds: number[]) {
   }
 }
 
+/** Answers the decision on `contactId` the way the route answers one that left the queue. */
+function leftTheQueue(contactId: number, body: Record<string, unknown>) {
+  return async (request: Request, next: (request: Request) => Promise<Response>) => {
+    const { pathname } = new URL(request.url)
+    if (request.method === 'POST' && pathname === '/api/v1/triage/decisions') {
+      const sent = (await request.clone().json()) as { contact_id: number }
+      if (sent.contact_id === contactId) return jsonResponse(body, 409)
+    }
+    return next(request)
+  }
+}
+
 describe('a decision that is not recorded', () => {
+  it.each([
+    [{ detail: 'archived' }, /Ada Example-1 was not recorded: they were archived after this/],
+    [
+      { detail: 'merged', merged_into_id: 3 },
+      /Ada Example-1 was not recorded: they were merged into another contact after this/,
+    ],
+  ])('says in words why a contact that left the queue was refused (#222)', async (body, says) => {
+    renderTriage({ contacts: 5, intercept: leftTheQueue(1, body) })
+    await currentName()
+
+    press('m')
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(says)
+    expect(alert).not.toHaveTextContent(/recorded: (archived|merged)\./)
+  })
+
   it('names the contact it lost', async () => {
     const { backend } = renderTriage({ contacts: 5, intercept: failDecisionsFor([1]) })
     await currentName()
