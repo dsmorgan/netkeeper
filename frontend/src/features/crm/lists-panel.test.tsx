@@ -193,6 +193,22 @@ describe('a static list', () => {
 })
 
 describe('a smart list', () => {
+  it('does not offer itself in its own filter’s list picker (#140)', async () => {
+    mockApi(routes())
+    renderWithClient(<ListsPanel />)
+    await openList('Warm engineers')
+
+    const filterCard = (await screen.findByText('Filter')).closest('[data-slot="card"]')
+    const scoped = within(filterCard as HTMLElement)
+    fireEvent.click(scoped.getByRole('button', { name: 'Remove has an email' }))
+    fireEvent.click(scoped.getByRole('button', { name: /^Add a condition/ }))
+    fireEvent.click(document.querySelector('[data-op="list_member"]') as HTMLElement)
+
+    await scoped.findByRole('option', { name: /First 100/ })
+    const picker = scoped.getByRole('combobox', { name: 'List' })
+    expect(within(picker).queryByRole('option', { name: /Warm engineers/ })).toBeNull()
+  })
+
   it('offers the export dialog, because its filter is the selection', async () => {
     mockApi(routes())
     renderWithClient(<ListsPanel />)

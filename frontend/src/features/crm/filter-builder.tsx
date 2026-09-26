@@ -36,9 +36,20 @@ export interface FilterBuilderProps {
   tags: readonly TagOut[]
   /** Off for a builder inside a dialog that already shows its own count. */
   showCount?: boolean
+  /**
+   * The smart list whose own filter this is, if any. Its list picker leaves out
+   * that list and every list that already leads back to it (#140).
+   */
+  editingListId?: number
 }
 
-export function FilterBuilder({ value, onChange, tags, showCount = true }: FilterBuilderProps) {
+export function FilterBuilder({
+  value,
+  onChange,
+  tags,
+  showCount = true,
+  editingListId,
+}: FilterBuilderProps) {
   const [openPaletteKey, setOpenPaletteKey] = useState<string | null>(null)
   const issues = validateTree(value)
 
@@ -96,6 +107,7 @@ export function FilterBuilder({ value, onChange, tags, showCount = true }: Filte
           node={value.where}
           path={[]}
           tags={tags}
+          editingListId={editingListId}
           openPaletteKey={openPaletteKey}
           renderPalette={renderPalette}
           onRequestAdd={(path) => setOpenPaletteKey(pathKey(path))}

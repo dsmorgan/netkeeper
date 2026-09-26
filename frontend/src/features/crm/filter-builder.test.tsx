@@ -54,11 +54,11 @@ function countRoute(total = 7, describe_ = 'company contains "acme"') {
   }
 }
 
-function Harness({ initial }: { initial: FilterTree }) {
+function Harness({ initial, editingListId }: { initial: FilterTree; editingListId?: number }) {
   const [value, setValue] = useState(initial)
   return (
     <>
-      <FilterBuilder value={value} onChange={setValue} tags={TAGS} />
+      <FilterBuilder value={value} onChange={setValue} tags={TAGS} editingListId={editingListId} />
       <pre data-testid="tree">{JSON.stringify(value)}</pre>
     </>
   )
@@ -286,6 +286,16 @@ describe('choosing which list', () => {
     expect(tree().where).toEqual({ op: 'list_member', list_id: 4 })
   })
 
+  it('says there are no lists yet rather than showing an empty picker', async () => {
+    mockApi({ ...countRoute(), 'GET /api/v1/lists': () => jsonResponse([]) })
+    renderWithClient(
+      <Harness initial={{ include_archived: false, where: { op: 'list_member', list_id: 0 } }} />,
+    )
+
+    expect(await screen.findByText('No lists yet — make one first.')).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'List' })).not.toBeInTheDocument()
+  })
+
   it('says the lists could not be read rather than showing an empty picker', async () => {
     mockApi({
       ...countRoute(),
@@ -298,6 +308,76 @@ describe('choosing which list', () => {
     expect(
       await screen.findByText(/could not be read, so this row still names list #4/),
     ).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'List' })).not.toBeInTheDocument()
+  })
+})
+
+describe('choosing a list inside a smart list’s own filter', () => {
+  // List 5 is being edited. List 3 names 5, and list 4 names 3 (inside a `not`),
+  // so choosing either would make list 5 include itself; 1 and 2 are fine.
+  const where = (listId: number) => ({ op: 'list_member', list_id: listId })
+  const LISTS = [
+    { id: 1, name: 'Warm intros', kind: 'static', filter: null, member_count: 12 },
+    { id: 2, name: 'Validated', kind: 'smart', filter: { where: null }, member_count: 40 },
+    { id: 3, name: 'Names five', kind: 'smart', filter: { where: where(5) }, member_count: 1 },
+    {
+      id: 4,
+      name: 'Names three',
+      kind: 'smart',
+      filter: { where: { op: 'and', children: [{ op: 'not', child: where(3) }] } },
+      member_count: 1,
+    },
+    { id: 5, name: 'Being edited', kind: 'smart', filter: { where: null }, member_count: 0 },
+  ]
+
+  async function options() {
+    await screen.findByRole('option', { name: /Warm intros/ })
+    const picker = screen.getByRole('combobox', { name: 'List' })
+    return within(picker)
+      .getAllByRole('option')
+      .map((option) => option.textContent)
+  }
+
+  it('leaves out the list itself and every list that already leads back to it', async () => {
+    mockApi({ ...countRoute(), 'GET /api/v1/lists': () => jsonResponse(LISTS) })
+    renderWithClient(
+      <Harness
+        initial={{ include_archived: false, where: where(0) } as FilterTree}
+        editingListId={5}
+      />,
+    )
+    expect(await options()).toEqual(['Choose a list…', 'Warm intros (static)', 'Validated (smart)'])
+  })
+
+  it('offers every list when the filter is not a list’s own', async () => {
+    mockApi({ ...countRoute(), 'GET /api/v1/lists': () => jsonResponse(LISTS) })
+    renderWithClient(
+      <Harness initial={{ include_archived: false, where: where(0) } as FilterTree} />,
+    )
+    expect(await options()).toHaveLength(LISTS.length + 1)
+  })
+
+  it('keeps a row that already names a left-out list, so the filter is shown as saved', async () => {
+    mockApi({ ...countRoute(), 'GET /api/v1/lists': () => jsonResponse(LISTS) })
+    renderWithClient(
+      <Harness
+        initial={{ include_archived: false, where: where(3) } as FilterTree}
+        editingListId={5}
+      />,
+    )
+    expect(await options()).toContain('Names five (smart)')
+    expect(screen.getByRole('combobox', { name: 'List' })).toHaveValue('3')
+  })
+
+  it('says why there is nothing to choose when the only list is this one', async () => {
+    mockApi({ ...countRoute(), 'GET /api/v1/lists': () => jsonResponse([LISTS[4]]) })
+    renderWithClient(
+      <Harness
+        initial={{ include_archived: false, where: where(0) } as FilterTree}
+        editingListId={5}
+      />,
+    )
+    expect(await screen.findByText(/a list cannot include itself/)).toBeInTheDocument()
     expect(screen.queryByRole('combobox', { name: 'List' })).not.toBeInTheDocument()
   })
 })

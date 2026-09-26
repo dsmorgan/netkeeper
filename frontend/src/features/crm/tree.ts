@@ -283,3 +283,43 @@ export function validateTree(tree: FilterTree): FilterIssue[] {
 export function emptyTree(): FilterTree {
   return { where: null, include_archived: false }
 }
+
+/** The ids every `list_member` predicate under `node` names. */
+export function listsNamedIn(node: FilterNode): number[] {
+  if (node.op === 'list_member') return [node.list_id]
+  return childrenOf(node).flatMap(listsNamedIn)
+}
+
+/**
+ * The lists a filter for list `target` may not name, because each one already
+ * leads back to `target`: `target` itself, every list whose saved filter names
+ * it, every list whose filter names one of those, and so on. Choosing any of
+ * them would close a cycle, which the server refuses at save (P1-27).
+ *
+ * Read from the lists' saved filters, so it is as current as `GET /lists`; the
+ * server's check stays the authority.
+ */
+export function listsLeadingTo(
+  target: number,
+  lists: readonly { id: number; filter: FilterTree | null }[],
+): Set<number> {
+  const namedBy = new Map<number, number[]>()
+  for (const list of lists) {
+    const where = list.filter?.where
+    if (where === null || where === undefined) continue
+    for (const named of listsNamedIn(where)) {
+      namedBy.set(named, [...(namedBy.get(named) ?? []), list.id])
+    }
+  }
+  const reached = new Set<number>([target])
+  const pending = [target]
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    for (const naming of namedBy.get(next) ?? []) {
+      if (!reached.has(naming)) {
+        reached.add(naming)
+        pending.push(naming)
+      }
+    }
+  }
+  return reached
+}

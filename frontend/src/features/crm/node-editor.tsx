@@ -22,7 +22,7 @@ import { FIELDS, OPS_BY_KIND, fieldSpec } from './fields'
 import type { FieldKind } from './fields'
 import { predicateOrThrow } from './predicates'
 import type { FilterPath } from './tree'
-import { pathKey, valueFits } from './tree'
+import { listsLeadingTo, pathKey, valueFits } from './tree'
 import type { FilterField, FilterNode, TagOut } from './types'
 
 /** The ops that compare a column, all of which carry a `field`. */
@@ -216,11 +216,28 @@ function ScalarEditor({ kind, values, value, label, onChange }: ScalarEditorProp
  * the picker does not know (deleted since the filter was saved, most often)
  * keeps its id and says so, because dropping it would quietly change what a
  * saved filter means.
+ *
+ * Inside a smart list's own filter (`editingListId`), the list being edited and
+ * every list that already leads back to it are left out (#140): choosing one
+ * would define the list in terms of itself, which the server refuses only once
+ * Save is pressed. A row that already names one keeps it, for the same reason a
+ * missing list is kept.
  */
-function ListPicker({ listId, onChange }: { listId: number; onChange: (listId: number) => void }) {
+function ListPicker({
+  listId,
+  editingListId,
+  onChange,
+}: {
+  listId: number
+  editingListId?: number
+  onChange: (listId: number) => void
+}) {
   const lists = useQuery(listsQuery)
   const known = lists.data ?? []
   const missing = listId !== 0 && !known.some((list) => list.id === listId)
+  const barred =
+    editingListId === undefined ? new Set<number>() : listsLeadingTo(editingListId, known)
+  const choices = known.filter((list) => !barred.has(list.id) || list.id === listId)
 
   if (lists.isError) {
     return (
@@ -232,6 +249,14 @@ function ListPicker({ listId, onChange }: { listId: number; onChange: (listId: n
   if (!lists.isPending && known.length === 0) {
     return <span className="text-sm text-muted-foreground">No lists yet — make one first.</span>
   }
+  if (!lists.isPending && choices.length === 0 && !missing) {
+    return (
+      <span className="text-sm text-muted-foreground">
+        No list to choose — a list cannot include itself, or a list that includes it. Make another
+        list first.
+      </span>
+    )
+  }
   return (
     <>
       <Select
@@ -241,7 +266,7 @@ function ListPicker({ listId, onChange }: { listId: number; onChange: (listId: n
       >
         <option value="0">Choose a list…</option>
         {missing && <option value={String(listId)}>list #{listId} (no longer there)</option>}
-        {known.map((list) => (
+        {choices.map((list) => (
           <option key={list.id} value={String(list.id)}>
             {list.name} ({list.kind})
           </option>
@@ -322,6 +347,8 @@ export interface NodeEditorProps {
   node: FilterNode
   path: FilterPath
   tags: readonly TagOut[]
+  /** See `FilterBuilderProps.editingListId`. */
+  editingListId?: number
   onChange: (path: FilterPath, next: FilterNode) => void
   onRemove: (path: FilterPath) => void
   /** Ask the builder to open the palette for the group at `path`. */
@@ -440,7 +467,7 @@ function RemoveButton({ label, onClick }: { label: string; onClick: () => void }
 
 type LeafProps = NodeEditorProps & { node: Exclude<FilterNode, { op: 'and' | 'or' | 'not' }> }
 
-function LeafControls({ node, path, tags, onChange }: LeafProps) {
+function LeafControls({ node, path, tags, editingListId, onChange }: LeafProps) {
   const spec = predicateOrThrow(node.op)
 
   if (isComparison(node)) {
@@ -652,6 +679,7 @@ function LeafControls({ node, path, tags, onChange }: LeafProps) {
       return (
         <ListPicker
           listId={node.list_id}
+          editingListId={editingListId}
           onChange={(listId) => onChange(path, { ...node, list_id: listId })}
         />
       )
