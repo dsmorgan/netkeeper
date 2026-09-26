@@ -6,21 +6,71 @@ name: CI
 on:
   push:
     branches: [main]
+  # A draft runs nothing (see `changes`); marking it ready for review starts the run.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
-# A newer push to the same branch or pull request cancels the run it supersedes.
+# A newer push to the same branch cancels the run it supersedes. head_ref is the PR's
+# branch; a push to main falls back to the ref.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
+  # What the change touches, so frontend or docs work does not wait on the Python
+  # suite and backend work does not wait on the frontend. A job skipped here reports
+  # "skipped", which a required check accepts; the `python` job below reports for
+  # the three Python jobs. A push to main, and any change to this workflow, runs all.
+  changes:
+    name: Changed areas
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      python: ${{ steps.areas.outputs.python }}
+      frontend: ${{ steps.areas.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: areas
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            echo "python=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "$BASE...$HEAD")
+          printf '%s\n' "$files"
+          python=false
+          frontend=false
+          while IFS= read -r file; do
+            case "$file" in
+              "") ;;
+              .github/*) python=true; frontend=true ;;
+              frontend/*) frontend=true ;;
+              docs/* | changelog.d/* | *.md) ;;
+              *) python=true ;;
+            esac
+          done <<EOF
+          $files
+          EOF
+          echo "python=$python" >> "$GITHUB_OUTPUT"
+          echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
+          echo "python: $python, frontend: $frontend" >> "$GITHUB_STEP_SUMMARY"
+
   # Lint, typecheck and tests are separate jobs so they run side by side, and a lint
   # failure shows without waiting on the suite (#210). Each installs from the uv cache.
   lint:
     name: Python lint (ruff)
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -37,6 +87,8 @@ jobs:
 
   typecheck:
     name: Python typecheck (mypy)
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -50,6 +102,8 @@ jobs:
 
   test:
     name: Python tests (pytest)
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -83,23 +137,35 @@ jobs:
       - run: make test
 
   # The name the single Python job had, kept so a branch-protection rule that
-  # requires it still finds it: green only when all three jobs above are.
+  # requires it still finds it: green when all three jobs above passed, or when the
+  # change touched no Python and they were skipped on purpose. Skipped on a draft.
   python:
     name: Python (ruff, mypy, pytest)
-    if: always()
-    needs: [lint, typecheck, test]
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    needs: [changes, lint, typecheck, test]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Every Python job passed
+      - name: Every Python job passed, or none was needed
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          NEEDED: ${{ needs.changes.outputs.python }}
+          LINT: ${{ needs.lint.result }}
+          TYPECHECK: ${{ needs.typecheck.result }}
+          TEST: ${{ needs.test.result }}
         run: |
-          echo "lint: ${{ needs.lint.result }}, typecheck: ${{ needs.typecheck.result }}, test: ${{ needs.test.result }}"
-          test "${{ needs.lint.result }}" = success
-          test "${{ needs.typecheck.result }}" = success
-          test "${{ needs.test.result }}" = success
+          echo "changes: $CHANGES (python: $NEEDED), lint: $LINT, typecheck: $TYPECHECK, test: $TEST"
+          test "$CHANGES" = success
+          if [ "$NEEDED" = true ]; then
+            test "$LINT" = success && test "$TYPECHECK" = success && test "$TEST" = success
+          else
+            test "$LINT" = skipped && test "$TYPECHECK" = skipped && test "$TEST" = skipped
+          fi
 
   frontend:
     name: Frontend (eslint, tsc, vitest, build, prettier)
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -122,8 +188,11 @@ jobs:
       - run: pnpm build
       - run: pnpm format:check
 
+  # The client is generated from the backend's schema, so either side can drift it.
   client-drift:
     name: Generated client is current
+    needs: changes
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
