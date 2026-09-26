@@ -37,7 +37,7 @@ from netkeeper.campaigns.templates import (
     versions,
 )
 from netkeeper.db import session_scope
-from netkeeper.models import Template, TemplateChannel, User, UserKind
+from netkeeper.models import Campaign, CampaignStatus, Template, TemplateChannel, User, UserKind
 from netkeeper.scoping import scoped
 
 EMAIL = TemplateChannel.EMAIL
@@ -302,9 +302,69 @@ def test_delete_is_refused_while_any_version_is_in_use(
     assert versions(writer, user, new) == [new, old]
 
 
-def test_nothing_is_in_use_until_campaigns_exist(writer: Session, user: User) -> None:
+def _use(session: Session, user: User, row: Template, status: CampaignStatus) -> Campaign:
+    """A campaign in ``status`` whose one step sends ``row``."""
+    campaign = factories.make_campaign(session, user, status=status)
+    campaign.steps[0].template_id = row.id
+    session.flush()
+    return campaign
+
+
+@pytest.mark.parametrize("status", sorted(CampaignStatus))
+def test_a_version_is_in_use_once_a_campaign_naming_it_leaves_draft(
+    writer: Session, user: User, status: CampaignStatus
+) -> None:
     row = _create(writer, user)
     assert service.is_in_use(writer, user, row) is False
+    _use(writer, user, row, status)
+    assert service.is_in_use(writer, user, row) is (status is not CampaignStatus.DRAFT)
+    assert service.is_referenced(writer, user, row) is True
+
+
+def test_the_frozen_statuses_are_every_status_past_draft() -> None:
+    assert {s.value for s in service.IN_USE_STATUSES} == {
+        "reviewing",
+        "active",
+        "paused",
+        "completed",
+        "archived",
+    }
+
+
+def test_an_edit_while_only_a_draft_campaign_names_it_is_in_place(
+    writer: Session, user: User
+) -> None:
+    row = _create(writer, user)
+    draft = _use(writer, user, row, CampaignStatus.DRAFT)
+    same = update_template(writer, user, row.id, me_keys=ME_KEYS, body="Hey {{ first_name }}")
+    assert same is row and draft.steps[0].template_id == row.id
+
+    draft.status = CampaignStatus.REVIEWING
+    writer.flush()
+    new = update_template(writer, user, row.id, me_keys=ME_KEYS, body="Yo {{ first_name }}")
+    assert new.id != row.id and new.previous_id == row.id
+    assert row.body == "Hey {{ first_name }}"  # what the campaign under review sends
+
+
+def test_delete_is_refused_while_even_a_draft_campaign_names_it(
+    writer: Session, user: User
+) -> None:
+    row = _create(writer, user)
+    _use(writer, user, row, CampaignStatus.DRAFT)
+    with pytest.raises(TemplateInUse):
+        delete_template(writer, user, row.id)
+    assert get_template(writer, user, row.id) is row
+
+
+def test_another_users_campaign_never_puts_a_template_in_use(writer: Session, user: User) -> None:
+    row = _create(writer, user)
+    stranger = factories.make_user(writer)
+    campaign = factories.make_campaign(writer, stranger)
+    # A cross-user reference the service never makes; the scoped lookups must ignore it.
+    campaign.steps[0].template_id = row.id
+    writer.flush()
+    assert service.is_in_use(writer, user, row) is False
+    assert service.is_referenced(writer, user, row) is False
 
 
 # --- the activation gate -------------------------------------------------------

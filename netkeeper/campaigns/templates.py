@@ -11,13 +11,14 @@ What this module decides
   template; :func:`list_templates` shows only those. Editing one that
   :func:`is_in_use` adds a new row pointing back at it, so a campaign keeps the
   text it was approved with until someone upgrades it; editing one that is not
-  in use changes it in place. An older version is kept for the campaigns that
-  use it and is read-only: editing or deleting it is
+  in use changes it in place. In use means named by a step of a campaign past
+  ``draft`` (:data:`IN_USE_STATUSES`). An older version is kept for the
+  campaigns that use it and is read-only: editing or deleting it is
   :class:`TemplateSuperseded`.
 - Names are unique among the user's current templates. Older versions share
   their template's name, which is why that is not a database constraint.
 - Deleting a template deletes its whole chain, and is refused while any
-  version is in use.
+  version is in use or named by any campaign, a draft's included.
 - :func:`render_preview` renders one template for one contact. Missing contact
   data is a warning on the result, never an exception.
 
@@ -50,6 +51,9 @@ from netkeeper.db import is_writer
 from netkeeper.models import (
     TEMPLATE_NAME_MAX_LENGTH,
     TEMPLATE_SUBJECT_MAX_LENGTH,
+    Campaign,
+    CampaignStatus,
+    CampaignStep,
     Contact,
     Template,
     TemplateChannel,
@@ -184,14 +188,47 @@ def versions(session: Session, user: User, row: Template) -> list[Template]:
     return chain
 
 
-def is_in_use(session: Session, user: User, row: Template) -> bool:
-    """Whether an active campaign uses this version (spec 8.5).
+IN_USE_STATUSES: Final[frozenset[CampaignStatus]] = frozenset(CampaignStatus) - {
+    CampaignStatus.DRAFT
+}
+"""The campaign statuses whose templates are frozen: every status past ``draft``.
 
-    Always False until campaigns exist: P3-04 adds ``campaign_step.template_id``
-    and replaces this body with the lookup. Everything that versions or refuses
-    a delete already asks here, so that change is the only one it needs.
+A campaign in ``reviewing`` is being approved on its rendered previews (spec
+11.8), so an edit in place would change what the approval saw; ``paused``
+resumes with the same text; ``completed`` and ``archived`` are the record of
+what was sent. A ``draft`` campaign is still being written, and sees the
+template's edits as they happen.
+"""
+
+
+def is_in_use(session: Session, user: User, row: Template) -> bool:
+    """Whether a campaign past ``draft`` (:data:`IN_USE_STATUSES`) sends this version (spec 8.5).
+
+    An edit of a version in use makes a new version and leaves this one to the
+    campaigns that use it.
     """
-    return False
+    statement = (
+        scoped(user, CampaignStep)
+        .join(Campaign, Campaign.id == CampaignStep.campaign_id)
+        .where(
+            CampaignStep.template_id == row.id,
+            Campaign.user_id == user.id,
+            Campaign.status.in_(IN_USE_STATUSES),
+        )
+        .limit(1)
+    )
+    return session.scalars(statement).first() is not None
+
+
+def is_referenced(session: Session, user: User, row: Template) -> bool:
+    """Whether any campaign's step names this version, a draft's included.
+
+    The step's foreign key has no ``ON DELETE`` action, so a version this is
+    true of cannot be deleted; :func:`delete_template` asks first so the answer
+    is :class:`TemplateInUse` rather than an integrity error.
+    """
+    statement = scoped(user, CampaignStep).where(CampaignStep.template_id == row.id).limit(1)
+    return session.scalars(statement).first() is not None
 
 
 def _check_name_free(
@@ -315,7 +352,7 @@ def delete_template(session: Session, user: User, template_id: int) -> None:
     """Delete a template and every earlier version of it.
 
     Refused for an older version (delete the template through its newest one)
-    and while any version is in use.
+    and while any version is in use or named by a campaign, a draft's included.
     """
     _require_writer(session)
     row = get_template(session, user, template_id)
@@ -324,7 +361,10 @@ def delete_template(session: Session, user: User, template_id: int) -> None:
             f"template {template_id} is an older version; delete the newest one instead"
         )
     chain = versions(session, user, row)
-    if any(is_in_use(session, user, version) for version in chain):
+    if any(
+        is_in_use(session, user, version) or is_referenced(session, user, version)
+        for version in chain
+    ):
         raise TemplateInUse(f"a campaign uses template {template_id}")
     for version in chain:  # newest first, so nothing is left pointing at a deleted row
         session.delete(version)

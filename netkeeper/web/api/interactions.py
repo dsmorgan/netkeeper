@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import AwareDatetime
 
 from netkeeper.crm import interactions as service
-from netkeeper.crm.interactions import MISSING, NotFound
+from netkeeper.crm.interactions import MISSING, NoSuchMessage, NotFound
 from netkeeper.web.deps import CurrentUser, SessionDep
 from netkeeper.web.schemas import (
     InteractionIn,
@@ -85,6 +85,8 @@ def create_interaction(
         )
     except NotFound:
         raise _no_such_contact() from None
+    except NoSuchMessage:
+        raise _no_such_message() from None
     return InteractionOut.model_validate(row)
 
 
@@ -110,6 +112,8 @@ def update_interaction(
         )
     except NotFound:
         raise _no_such_interaction() from None
+    except NoSuchMessage:
+        raise _no_such_message() from None
     return InteractionOut.model_validate(row)
 
 
@@ -174,3 +178,9 @@ def _no_such_contact() -> HTTPException:
 
 def _no_such_interaction() -> HTTPException:
     return HTTPException(status_code=404, detail="no such interaction")
+
+
+def _no_such_message() -> HTTPException:
+    # 422 like a body that fails validation, and documented as one: an override in
+    # ``responses`` would replace the validation-error schema the client is typed with.
+    return HTTPException(status_code=422, detail="no such message for this contact")

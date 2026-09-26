@@ -14,6 +14,7 @@ from netkeeper.crm import provenance
 from netkeeper.crm.interactions import (
     MISSING,
     OUTBOUND_KINDS,
+    NoSuchMessage,
     NotFound,
     TimelineEntry,
     add_interaction,
@@ -65,6 +66,12 @@ def other(writer: Session) -> User:
 @pytest.fixture
 def contact(writer: Session, user: User) -> Contact:
     return factories.make_contact(writer, user)
+
+
+def sent_to(session: Session, user: User, contact: Contact) -> int:
+    """The id of a campaign message sent to ``contact``."""
+    campaign = factories.make_campaign(session, user)
+    return factories.make_message(session, factories.make_enrollment(session, campaign, contact)).id
 
 
 def snapshot(session: Session, contact: Contact, observed_at: datetime, **fields: str) -> int:
@@ -119,8 +126,9 @@ def test_outbound_kinds_are_the_ones_where_you_reached_out() -> None:
 def test_add_returns_a_flushed_row_of_the_user(
     writer: Session, user: User, contact: Contact
 ) -> None:
+    message_id = sent_to(writer, user, contact)
     row = add_interaction(
-        writer, user, contact.id, InteractionKind.NOTE, NOW, "met at a meetup", message_id=7
+        writer, user, contact.id, InteractionKind.NOTE, NOW, "met at a meetup", message_id
     )
     assert row.id is not None
     assert row.user_id == user.id
@@ -128,7 +136,7 @@ def test_add_returns_a_flushed_row_of_the_user(
     assert row.kind is InteractionKind.NOTE
     assert row.at == NOW
     assert row.summary == "met at a meetup"
-    assert row.message_id == 7
+    assert row.message_id == message_id
     assert row.source is ContactSource.MANUAL
     assert contact.interactions == [row]
 
@@ -248,17 +256,40 @@ def test_list_checks_its_page_arguments(writer: Session, user: User, contact: Co
 def test_update_changes_only_the_given_fields(
     writer: Session, user: User, contact: Contact
 ) -> None:
-    row = add_interaction(
-        writer, user, contact.id, InteractionKind.NOTE, NOW, "first", message_id=3
-    )
+    first, second = sent_to(writer, user, contact), sent_to(writer, user, contact)
+    row = add_interaction(writer, user, contact.id, InteractionKind.NOTE, NOW, "first", first)
     same = update_interaction(writer, user, row.id, summary="second")
     assert same is row
-    assert fields(row) == (InteractionKind.NOTE, NOW, "second", 3)
+    assert fields(row) == (InteractionKind.NOTE, NOW, "second", first)
     update_interaction(writer, user, row.id, summary=None, message_id=None)
     assert fields(row) == (InteractionKind.NOTE, NOW, None, None)
-    update_interaction(writer, user, row.id, kind=InteractionKind.LI_IN, at=LATER, message_id=4)
-    assert fields(row) == (InteractionKind.LI_IN, LATER, None, 4)
+    update_interaction(
+        writer, user, row.id, kind=InteractionKind.LI_IN, at=LATER, message_id=second
+    )
+    assert fields(row) == (InteractionKind.LI_IN, LATER, None, second)
     assert update_interaction(writer, user, row.id) is row  # nothing given, nothing changed
+
+
+def test_an_interaction_records_only_a_message_to_its_own_contact(
+    writer: Session, user: User, other: User, contact: Contact
+) -> None:
+    """P3-04: ``message_id`` is a foreign key, and one of the user's messages to this contact."""
+    someone_else = factories.make_contact(writer, user)
+    theirs = sent_to(writer, other, factories.make_contact(writer, other))
+    for message_id in (
+        999,  # nothing
+        sent_to(writer, user, someone_else),  # the user's, to another contact
+        theirs,  # another user's
+    ):
+        with pytest.raises(NoSuchMessage):
+            add_interaction(
+                writer, user, contact.id, InteractionKind.EMAIL_OUT, NOW, None, message_id
+            )
+    row = add_interaction(writer, user, contact.id, InteractionKind.NOTE, NOW)
+    with pytest.raises(NoSuchMessage):
+        update_interaction(writer, user, row.id, message_id=theirs)
+    assert row.message_id is None
+    assert contact.last_contacted_at is None  # the refused adds wrote nothing
 
 
 def test_moving_the_newest_outbound_back_lowers_last_contacted(

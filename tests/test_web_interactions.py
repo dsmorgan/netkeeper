@@ -55,6 +55,17 @@ def foreign(running_app: FastAPI) -> tuple[int, int]:
         return contact.id, row.id
 
 
+def _sent_to(app: FastAPI, contact_id: int) -> int:
+    """The id of a campaign message sent to the local user's contact ``contact_id``."""
+    with session_scope(_factory(app), write=True) as session:
+        user = _local_user(session)
+        contact = get_scoped(session, user, Contact, contact_id)
+        assert contact is not None
+        campaign = factories.make_campaign(session, user)
+        enrollment = factories.make_enrollment(session, campaign, contact)
+        return factories.make_message(session, enrollment).id
+
+
 def _contact(app: FastAPI, contact_id: int) -> Contact:
     with session_scope(_factory(app)) as session:
         contact = get_scoped(session, _local_user(session), Contact, contact_id)
@@ -84,13 +95,16 @@ async def _create(
 
 
 async def test_create_returns_the_row_and_lists_it(
-    client: httpx.AsyncClient, contact_id: int
+    client: httpx.AsyncClient, running_app: FastAPI, contact_id: int
 ) -> None:
-    body = await _create(client, contact_id, "note", NOW, summary="met at a meetup", message_id=5)
+    message_id = _sent_to(running_app, contact_id)
+    body = await _create(
+        client, contact_id, "note", NOW, summary="met at a meetup", message_id=message_id
+    )
     assert body["contact_id"] == contact_id
     assert body["kind"] == "note"
     assert body["summary"] == "met at a meetup"
-    assert body["message_id"] == 5
+    assert body["message_id"] == message_id
     assert body["source"] == "manual"
     assert datetime.fromisoformat(body["at"]) == NOW
     assert body["created_at"] and body["updated_at"]
@@ -98,6 +112,23 @@ async def test_create_returns_the_row_and_lists_it(
     listed = await client.get(f"/api/v1/contacts/{contact_id}/interactions")
     assert listed.status_code == 200
     assert listed.json() == {"items": [body], "total": 1}
+
+
+async def test_a_message_id_that_is_not_a_message_to_the_contact_is_422(
+    client: httpx.AsyncClient, running_app: FastAPI, contact_id: int
+) -> None:
+    response = await client.post(
+        f"/api/v1/contacts/{contact_id}/interactions",
+        json={"kind": "email_out", "at": NOW.isoformat(), "message_id": 999},
+        headers=CSRF,
+    )
+    assert response.status_code == 422
+    assert _interaction_count(running_app) == 0
+    created = await _create(client, contact_id, "note", NOW)
+    response = await client.patch(
+        f"/api/v1/interactions/{created['id']}", json={"message_id": 999}, headers=CSRF
+    )
+    assert response.status_code == 422
 
 
 async def test_create_with_the_minimum_body(client: httpx.AsyncClient, contact_id: int) -> None:
@@ -189,7 +220,10 @@ async def test_list_of_another_users_contact_is_404(
 async def test_patch_changes_only_what_is_sent(
     client: httpx.AsyncClient, running_app: FastAPI, contact_id: int
 ) -> None:
-    created = await _create(client, contact_id, "call", LATER, summary="first", message_id=3)
+    message_id = _sent_to(running_app, contact_id)
+    created = await _create(
+        client, contact_id, "call", LATER, summary="first", message_id=message_id
+    )
     assert _contact(running_app, contact_id).last_contacted_at == LATER
 
     response = await client.patch(
@@ -198,7 +232,7 @@ async def test_patch_changes_only_what_is_sent(
     assert response.status_code == 200
     body = response.json()
     assert body["summary"] == "second"
-    assert body["message_id"] == 3 and body["kind"] == "call"
+    assert body["message_id"] == message_id and body["kind"] == "call"
 
     response = await client.patch(
         f"/api/v1/interactions/{created['id']}",

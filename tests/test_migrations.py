@@ -16,7 +16,7 @@ import json
 import os
 import re
 import tokenize
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -1491,3 +1491,341 @@ def test_templates_keep_a_version_chain_a_line(migration_engine: Engine) -> None
 
     migrations.downgrade(migration_engine, "0016")
     assert "templates" not in inspect(migration_engine).get_table_names()
+
+
+# --- campaigns (0018, P3-04) -----------------------------------------------------------
+
+CAMPAIGN_TABLES = ("campaigns", "campaign_steps", "enrollments", "messages")
+
+
+def _insert_campaign(
+    connection: Connection,
+    *,
+    id: int,
+    user_id: int = 1,
+    name: str | None = None,
+    status: str = "draft",
+    source_list_id: int | None = None,
+    filter_json: str | None = None,
+    guard_days: int = 30,
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO campaigns (id, user_id, name, status, source_list_id, filter_json,"
+            " contacted_within_days_guard, created_at, updated_at)"
+            " VALUES (:id, :user_id, :name, :status, :source_list_id, :filter_json, :guard,"
+            " :t, :t)"
+        ),
+        {
+            "id": id,
+            "user_id": user_id,
+            "name": f"Campaign {id}" if name is None else name,
+            "status": status,
+            "source_list_id": source_list_id,
+            "filter_json": filter_json,
+            "guard": guard_days,
+            "t": STAMP,
+        },
+    )
+
+
+def _insert_step(
+    connection: Connection,
+    *,
+    id: int,
+    campaign_id: int,
+    template_id: int,
+    user_id: int = 1,
+    position: int = 1,
+    channel: str = "email",
+    mode: str = "draft",
+    same_thread: bool = False,
+    delay_days: int = 0,
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO campaign_steps (id, user_id, campaign_id, position, channel,"
+            " template_id, delay_days, mode, condition, same_thread, created_at, updated_at)"
+            " VALUES (:id, :user_id, :campaign_id, :position, :channel, :template_id,"
+            " :delay_days, :mode, 'always', :same_thread, :t, :t)"
+        ),
+        {
+            "id": id,
+            "user_id": user_id,
+            "campaign_id": campaign_id,
+            "position": position,
+            "channel": channel,
+            "template_id": template_id,
+            "delay_days": delay_days,
+            "mode": mode,
+            "same_thread": same_thread,
+            "t": STAMP,
+        },
+    )
+
+
+def _insert_enrollment(
+    connection: Connection, *, id: int, campaign_id: int, contact_id: int, user_id: int = 1
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO enrollments (id, user_id, campaign_id, contact_id, status,"
+            " channel_ids_json, created_at, updated_at)"
+            " VALUES (:id, :user_id, :campaign_id, :contact_id, 'pending', '{}', :t, :t)"
+        ),
+        {
+            "id": id,
+            "user_id": user_id,
+            "campaign_id": campaign_id,
+            "contact_id": contact_id,
+            "t": STAMP,
+        },
+    )
+
+
+def _insert_message(
+    connection: Connection,
+    *,
+    id: int,
+    enrollment_id: int,
+    contact_id: int,
+    step_id: int | None = None,
+    user_id: int = 1,
+    direction: str = "out",
+    status: str = "sent",
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO messages (id, user_id, enrollment_id, step_id, contact_id, channel,"
+            " direction, status, created_at, updated_at)"
+            " VALUES (:id, :user_id, :enrollment_id, :step_id, :contact_id, 'email',"
+            " :direction, :status, :t, :t)"
+        ),
+        {
+            "id": id,
+            "user_id": user_id,
+            "enrollment_id": enrollment_id,
+            "step_id": step_id,
+            "contact_id": contact_id,
+            "direction": direction,
+            "status": status,
+            "t": STAMP,
+        },
+    )
+
+
+def _ids(connection: Connection, table: str, where: str) -> list[int]:
+    return list(connection.execute(text(f"SELECT id FROM {table} WHERE {where}")).scalars())
+
+
+def _seed_a_sent_campaign(connection: Connection) -> None:
+    """User 1: contact 1 sent one message by campaign 1 (step 1, template 1)."""
+    _seed_users(connection, 1)
+    _insert_contact(connection, id=1, user_id=1)
+    _insert_template(connection, id=1)
+    _insert_campaign(connection, id=1, status="active")
+    _insert_step(connection, id=1, campaign_id=1, template_id=1)
+    _insert_enrollment(connection, id=1, campaign_id=1, contact_id=1)
+    _insert_message(connection, id=1, enrollment_id=1, contact_id=1, step_id=1)
+
+
+def test_migration_creates_the_campaign_tables(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0018")
+    assert set(CAMPAIGN_TABLES) <= set(inspect(migration_engine).get_table_names())
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "value"),
+    [
+        ("campaigns", "status", "running"),
+        ("campaign_steps", "mode", "carrier_pigeon"),
+        ("campaign_steps", "condition", "sometimes"),
+        ("enrollments", "status", "waiting"),
+        ("messages", "status", "lost"),
+        ("messages", "direction", "sideways"),
+    ],
+)
+def test_campaign_enums_are_checked_by_the_database(
+    migration_engine: Engine, table: str, column: str, value: str
+) -> None:
+    migrations.upgrade(migration_engine, "0018")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(text(f"UPDATE {table} SET {column} = :v WHERE id = 1"), {"v": value})
+
+
+def test_a_campaign_has_one_audience_and_a_unique_name(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0018")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        _insert_list(connection, id=1, user_id=1, name="L")
+        _insert_campaign(connection, id=1, name="Same")
+        _insert_campaign(connection, id=2, user_id=2, name="Same")  # another user's
+        _insert_campaign(connection, id=3, source_list_id=1)
+        _insert_campaign(connection, id=4, filter_json='{"where": null}')
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_campaign(connection, id=5, name="Same")
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_campaign(connection, id=5, source_list_id=1, filter_json='{"where": null}')
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_campaign(connection, id=5, guard_days=-1)
+
+    with migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM lists WHERE id = 1"))
+        kept = connection.execute(text("SELECT source_list_id FROM campaigns WHERE id = 3"))
+        assert kept.scalar_one() is None  # SET NULL: the campaign outlives its list
+
+
+@pytest.mark.parametrize(
+    ("channel", "mode", "same_thread", "allowed"),
+    [
+        ("email", "draft", False, True),
+        ("email", "send", True, True),
+        ("linkedin", "prefill", False, True),
+        ("linkedin", "auto_send", False, True),
+        ("email", "prefill", False, False),
+        ("linkedin", "send", False, False),
+        ("linkedin", "prefill", True, False),  # threading is an email idea
+    ],
+)
+def test_a_step_mode_belongs_to_its_channel(
+    migration_engine: Engine, channel: str, mode: str, same_thread: bool, allowed: bool
+) -> None:
+    migrations.upgrade(migration_engine, "0018")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_template(connection, id=1)
+        _insert_campaign(connection, id=1)
+
+    def insert() -> None:
+        with migration_engine.begin() as connection:
+            _insert_step(
+                connection,
+                id=1,
+                campaign_id=1,
+                template_id=1,
+                channel=channel,
+                mode=mode,
+                same_thread=same_thread,
+            )
+
+    if allowed:
+        insert()
+    else:
+        with pytest.raises(IntegrityError):
+            insert()
+
+
+def test_steps_and_enrollments_are_unique_and_positions_start_at_one(
+    migration_engine: Engine,
+) -> None:
+    migrations.upgrade(migration_engine, "0018")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_template(connection, id=1)
+        _insert_campaign(connection, id=1)
+        _insert_step(connection, id=1, campaign_id=1, template_id=1)
+        _insert_enrollment(connection, id=1, campaign_id=1, contact_id=1)
+    refused: list[Callable[[Connection], None]] = [
+        lambda c: _insert_step(c, id=2, campaign_id=1, template_id=1),  # position 1 again
+        lambda c: _insert_step(c, id=2, campaign_id=1, template_id=1, position=0),
+        lambda c: _insert_step(c, id=2, campaign_id=1, template_id=1, position=2, delay_days=-1),
+        lambda c: _insert_enrollment(c, id=2, campaign_id=1, contact_id=1),
+    ]
+    for bad in refused:
+        with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+            bad(connection)
+
+
+def test_a_message_direction_and_status_agree(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0018")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+        _insert_message(
+            connection, id=2, enrollment_id=1, contact_id=1, direction="in", status="received"
+        )
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_message(connection, id=3, enrollment_id=1, contact_id=1, status="received")
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_message(connection, id=3, enrollment_id=1, contact_id=1, direction="in")
+
+
+@pytest.mark.parametrize(
+    "delete",
+    [
+        "DELETE FROM contacts WHERE id = 1",
+        "DELETE FROM enrollments WHERE id = 1",
+        "DELETE FROM campaign_steps WHERE id = 1",
+        "DELETE FROM campaigns WHERE id = 1",
+        "DELETE FROM templates WHERE id = 1",
+    ],
+)
+def test_nothing_a_message_names_can_be_deleted_out_from_under_it(
+    migration_engine: Engine, delete: str
+) -> None:
+    """What was sent is the record of what was sent (spec 8): deleting what it names fails."""
+    migrations.upgrade(migration_engine, "0018")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(text(delete))
+    with migration_engine.begin() as connection:
+        assert _count(connection, "messages") == 1
+
+
+def test_what_was_never_sent_goes_with_its_owner(migration_engine: Engine) -> None:
+    """A contact takes its enrollments; a campaign its steps and enrollments; a user everything."""
+    migrations.upgrade(migration_engine, "0018")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+        _insert_contact(connection, id=2, user_id=1)
+        _insert_contact(connection, id=3, user_id=1)
+        _insert_campaign(connection, id=2)
+        _insert_step(connection, id=2, campaign_id=2, template_id=1)
+        _insert_enrollment(connection, id=2, campaign_id=2, contact_id=2)
+        _insert_enrollment(connection, id=3, campaign_id=1, contact_id=3)
+
+        connection.execute(text("DELETE FROM contacts WHERE id = 3"))
+        assert _ids(connection, "enrollments", "contact_id = 3") == []
+        connection.execute(text("DELETE FROM campaigns WHERE id = 2"))
+        assert _ids(connection, "campaign_steps", "campaign_id = 2") == []
+        assert _ids(connection, "enrollments", "campaign_id = 2") == []
+
+        connection.execute(text("DELETE FROM users WHERE id = 1"))
+        for table in (*CAMPAIGN_TABLES, "templates", "contacts"):
+            assert _count(connection, table) == 0, table
+
+
+def test_an_interaction_message_id_is_a_foreign_key_now(migration_engine: Engine) -> None:
+    """0018 clears ids that pointed at nothing, then constrains the column (SET NULL)."""
+    migrations.upgrade(migration_engine, "0017")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_interaction(connection, id=1, user_id=1, contact_id=1, summary="hi")
+        connection.execute(text("UPDATE interactions SET message_id = 7 WHERE id = 1"))
+
+    migrations.upgrade(migration_engine, "0018")
+    with migration_engine.begin() as connection:
+        stale = connection.execute(text("SELECT message_id FROM interactions WHERE id = 1"))
+        assert stale.scalar_one() is None
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(text("UPDATE interactions SET message_id = 7 WHERE id = 1"))
+
+    with migration_engine.begin() as connection:
+        _insert_template(connection, id=1)
+        _insert_campaign(connection, id=1)
+        _insert_enrollment(connection, id=1, campaign_id=1, contact_id=1)
+        _insert_message(connection, id=1, enrollment_id=1, contact_id=1)
+        connection.execute(text("UPDATE interactions SET message_id = 1 WHERE id = 1"))
+        connection.execute(text("DELETE FROM messages WHERE id = 1"))
+        kept = connection.execute(text("SELECT message_id FROM interactions WHERE id = 1"))
+        assert kept.scalar_one() is None  # the timeline entry outlives the message
+
+    migrations.downgrade(migration_engine, "0017")
+    assert not set(CAMPAIGN_TABLES) & set(inspect(migration_engine).get_table_names())
+    with migration_engine.begin() as connection:
+        assert _count(connection, "interactions") == 1
+        connection.execute(text("UPDATE interactions SET message_id = 7 WHERE id = 1"))

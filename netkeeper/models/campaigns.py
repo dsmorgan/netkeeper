@@ -1,4 +1,4 @@
-"""Campaign tables (spec 8.5). Templates so far (item P3-03); campaigns join them in P3-04.
+"""Campaign tables (spec 8.5): templates (item P3-03), campaigns and what they send (P3-04).
 
 A ``templates`` row is one version of a message template. Versions form a
 chain through ``previous_id``: editing a template that an active campaign uses
@@ -14,20 +14,53 @@ database, so any number of first versions coexist.
 Every rule about what may be stored and when a new version is made lives in
 :mod:`netkeeper.campaigns.templates`; the render and lint rules in
 :mod:`netkeeper.campaigns.render`.
+
+A ``campaigns`` row is a sequence (spec 11.2) of ``campaign_steps``, sent to
+the contacts it has ``enrollments`` for (spec 11.3). ``messages`` is every
+message a step produced for an enrollment, and every reply detected to one.
+Who may be enrolled, and who may be sent the next step, is decided by
+:mod:`netkeeper.campaigns.guards` (spec 11.9).
+
+What the database refuses to lose (spec 8, "contacts are archived, never
+deleted, because messages reference them"): a message's contact, enrollment,
+and step are plain foreign keys with no ``ON DELETE`` action, so deleting a
+contact, an enrollment, a campaign, or a step that a message names fails,
+rather than taking the record of what was sent with it. What was never sent
+goes with its owner: a contact's enrollments cascade with the contact, and a
+campaign's steps and enrollments with the campaign, so a draft campaign (or a
+contact an import rollback removes) can still be deleted while nothing has
+been sent. Deleting a user takes everything, as it does for every table.
+
+A step's template is a plain foreign key too: a template a campaign names
+cannot be deleted (:func:`netkeeper.campaigns.templates.delete_template`
+refuses first, with a reason).
 """
 
 from __future__ import annotations
 
 import enum
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from netkeeper.models.base import Base, TimestampMixin, UserOwned, string_enum
+from netkeeper.models.base import Base, TimestampMixin, UserOwned, UTCDateTime, string_enum
 
 TEMPLATE_NAME_MAX_LENGTH = 200
 TEMPLATE_SUBJECT_MAX_LENGTH = 500
+CAMPAIGN_NAME_MAX_LENGTH = 200
+MESSAGE_SUBJECT_MAX_LENGTH = 1000
 
 
 class TemplateChannel(enum.StrEnum):
@@ -64,5 +97,268 @@ class Template(UserOwned, TimestampMixin, Base):
     )
 
 
+class CampaignStatus(enum.StrEnum):
+    """Where a campaign is in its life (spec 8.5, 11.8)."""
+
+    DRAFT = "draft"
+    REVIEWING = "reviewing"
+    ACTIVE = "active"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    ARCHIVED = "archived"
+
+
+class StepMode(enum.StrEnum):
+    """What a step does with the message it renders (spec 8.5, 11.5, 11.6).
+
+    ``draft`` and ``send`` are email modes, ``prefill`` and ``auto_send``
+    LinkedIn ones; the ``step_channel_mode`` CHECK keeps them to their channel.
+    """
+
+    DRAFT = "draft"
+    SEND = "send"
+    PREFILL = "prefill"
+    AUTO_SEND = "auto_send"
+
+
+class StepCondition(enum.StrEnum):
+    """When a step fires (spec 11.2): every time, or only if nobody has replied yet."""
+
+    ALWAYS = "always"
+    NO_REPLY = "no_reply"
+
+
+class EnrollmentStatus(enum.StrEnum):
+    """One contact's state in one campaign: spec 11.3's state machine."""
+
+    PENDING = "pending"
+    ACTIVE = "active"
+    PAUSED = "paused"
+    REPLIED = "replied"
+    COMPLETED = "completed"
+    BOUNCED = "bounced"
+    OPTED_OUT = "opted_out"
+    REMOVED = "removed"
+
+
+class MessageDirection(enum.StrEnum):
+    OUT = "out"
+    IN = "in"
+
+
+class MessageStatus(enum.StrEnum):
+    """Where one message is (spec 11.5, 11.6, 11.7).
+
+    Outbound: ``scheduled`` (rendered, waiting for its send), ``drafted`` (a
+    Gmail draft, waiting for you), ``prefilled`` (typed into LinkedIn's compose
+    box, waiting for you), ``sent``, ``stale`` (a prefill not seen sent within
+    three days), ``discarded`` (a draft you deleted instead of sending),
+    ``bounced``, ``failed`` (with ``error``). Inbound: ``received``.
+    """
+
+    SCHEDULED = "scheduled"
+    DRAFTED = "drafted"
+    PREFILLED = "prefilled"
+    SENT = "sent"
+    STALE = "stale"
+    DISCARDED = "discarded"
+    BOUNCED = "bounced"
+    FAILED = "failed"
+    RECEIVED = "received"
+
+
+class Campaign(UserOwned, TimestampMixin, Base):
+    """A sequence of steps sent to an audience (spec 8.5, 11.2)."""
+
+    __tablename__ = "campaigns"
+    __table_args__ = (
+        # The name is the Gmail label's (spec 11.5, ``netkeeper/<campaign name>``), so two
+        # campaigns of one user sharing it would share a label.
+        UniqueConstraint("user_id", "name"),
+        # The audience is a list or a filter, never both; a new draft may have neither yet
+        # (spec 11.8: a campaign needs an audience to leave ``draft``).
+        CheckConstraint(
+            "source_list_id IS NULL OR filter_json IS NULL", name="campaign_one_audience"
+        ),
+        CheckConstraint("daily_cap IS NULL OR daily_cap >= 0", name="campaign_daily_cap"),
+        CheckConstraint(
+            "contacted_within_days_guard >= 0", name="campaign_contacted_within_days_guard"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, sort_order=-100)
+    name: Mapped[str] = mapped_column(String(CAMPAIGN_NAME_MAX_LENGTH), nullable=False)
+    status: Mapped[CampaignStatus] = mapped_column(
+        string_enum(CampaignStatus, "campaign_status"),
+        nullable=False,
+        default=CampaignStatus.DRAFT,
+    )
+    # SET NULL: deleting a list must not delete a campaign that was built from it. The
+    # enrollments already made are the audience from then on.
+    source_list_id: Mapped[int | None] = mapped_column(
+        ForeignKey("lists.id", ondelete="SET NULL"), index=True
+    )
+    # A FilterTree as netkeeper.crm.filters dumps it, like ``lists.filter_json``.
+    # ``none_as_null`` so None is SQL NULL, which the CHECK above reads.
+    filter_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    # The ``mailbox`` table (spec 8.5) arrives with the Gmail work (P3-07). Until then this
+    # is a plain integer with no foreign key, as ``interactions.message_id`` was until
+    # this table existed; the migration that adds ``mailbox`` adds the constraint.
+    mailbox_id: Mapped[int | None] = mapped_column(Integer)
+    # The campaign's own send window and cap (spec 11.4); NULL for the config's.
+    send_window_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    daily_cap: Mapped[int | None] = mapped_column(Integer)
+    # Spec 11.9's recency guard, in days; 0 turns it off. No default: whatever creates a
+    # campaign copies ``[campaigns] contacted_within_days_guard`` from the config, so a
+    # later config change never changes a campaign already reviewed.
+    contacted_within_days_guard: Mapped[int] = mapped_column(Integer, nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    test_sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+    steps: Mapped[list[CampaignStep]] = relationship(
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by=lambda: CampaignStep.position,
+    )
+
+
+class CampaignStep(UserOwned, TimestampMixin, Base):
+    """One message of a campaign's sequence (spec 8.5, 11.2)."""
+
+    __tablename__ = "campaign_steps"
+    __table_args__ = (
+        UniqueConstraint("user_id", "campaign_id", "position"),
+        CheckConstraint("position >= 1", name="step_position"),
+        CheckConstraint("delay_days >= 0", name="step_delay_days"),
+        CheckConstraint(
+            "(channel = 'email' AND mode IN ('draft', 'send'))"
+            " OR (channel = 'linkedin' AND mode IN ('prefill', 'auto_send'))",
+            name="step_channel_mode",
+        ),
+        # Threading is a Gmail idea (spec 11.5); a LinkedIn conversation is one thread anyway.
+        CheckConstraint("NOT same_thread OR channel = 'email'", name="step_same_thread"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, sort_order=-100)
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # 1 for the first step. Unique within the campaign.
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    channel: Mapped[TemplateChannel] = mapped_column(
+        string_enum(TemplateChannel, "step_channel"), nullable=False
+    )
+    # The template version this step sends. No ON DELETE action: see the module docstring.
+    template_id: Mapped[int] = mapped_column(ForeignKey("templates.id"), nullable=False, index=True)
+    delay_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    mode: Mapped[StepMode] = mapped_column(string_enum(StepMode, "step_mode"), nullable=False)
+    condition: Mapped[StepCondition] = mapped_column(
+        string_enum(StepCondition, "step_condition"),
+        nullable=False,
+        default=StepCondition.ALWAYS,
+    )
+    same_thread: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    campaign: Mapped[Campaign] = relationship(back_populates="steps")
+    template: Mapped[Template] = relationship()
+
+
+class Enrollment(UserOwned, TimestampMixin, Base):
+    """One contact in one campaign (spec 8.5, 11.3)."""
+
+    __tablename__ = "enrollments"
+    __table_args__ = (
+        UniqueConstraint("user_id", "campaign_id", "contact_id"),
+        # The tick's question (spec 11.4): whose next action is due.
+        Index(
+            "ix_enrollments_user_id_status_next_action_at", "user_id", "status", "next_action_at"
+        ),
+        CheckConstraint(
+            "current_step IS NULL OR current_step >= 1", name="enrollment_current_step"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, sort_order=-100)
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # CASCADE: an enrollment nothing was sent for goes with its contact. One with messages
+    # cannot, because the messages keep both (see the module docstring).
+    contact_id: Mapped[int] = mapped_column(
+        ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[EnrollmentStatus] = mapped_column(
+        string_enum(EnrollmentStatus, "enrollment_status"),
+        nullable=False,
+        default=EnrollmentStatus.PENDING,
+    )
+    # The position of the step that fired most recently; NULL before the first.
+    current_step: Mapped[int | None] = mapped_column(Integer)
+    next_action_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # Why the enrollment left the sequence, once it has: the guard reason or event that
+    # ended it (``replied``, ``bounced``, ``do_not_contact`` ...). NULL while it is in it.
+    exit_reason: Mapped[str | None] = mapped_column(String(100))
+    replied_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # Per-channel conversation handles the follow-ups reuse (spec 11.5, 11.6): the Gmail
+    # thread and step-1 message ids, the LinkedIn conversation URN.
+    channel_ids_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+    campaign: Mapped[Campaign] = relationship()
+
+
+class Message(UserOwned, TimestampMixin, Base):
+    """One message a campaign sent (or tried to), or one reply to it (spec 8.5, 11.5 to 11.7)."""
+
+    __tablename__ = "messages"
+    __table_args__ = (
+        Index("ix_messages_user_id_status", "user_id", "status"),
+        # An inbound message is received and nothing else; an outbound one never is.
+        CheckConstraint(
+            "(direction = 'in') = (status = 'received')", name="message_direction_status"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, sort_order=-100)
+    # No ON DELETE action on the next three: see the module docstring.
+    enrollment_id: Mapped[int] = mapped_column(
+        ForeignKey("enrollments.id"), nullable=False, index=True
+    )
+    # The step that produced it; for a reply, the step it answers, when that is known.
+    step_id: Mapped[int | None] = mapped_column(ForeignKey("campaign_steps.id"), index=True)
+    contact_id: Mapped[int] = mapped_column(ForeignKey("contacts.id"), nullable=False, index=True)
+    channel: Mapped[TemplateChannel] = mapped_column(
+        string_enum(TemplateChannel, "message_channel"), nullable=False
+    )
+    direction: Mapped[MessageDirection] = mapped_column(
+        string_enum(MessageDirection, "message_direction"), nullable=False
+    )
+    status: Mapped[MessageStatus] = mapped_column(
+        string_enum(MessageStatus, "message_status"), nullable=False
+    )
+    subject: Mapped[str | None] = mapped_column(String(MESSAGE_SUBJECT_MAX_LENGTH))
+    # The text as rendered for this contact, stored so what was sent never depends on a
+    # template that may have changed since (spec 11.1).
+    body_rendered: Mapped[str | None] = mapped_column(Text)
+    scheduled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    gmail_message_id: Mapped[str | None] = mapped_column(String(200))
+    gmail_thread_id: Mapped[str | None] = mapped_column(String(200))
+    gmail_draft_id: Mapped[str | None] = mapped_column(String(200))
+    li_conversation_urn: Mapped[str | None] = mapped_column(String(300))
+    li_message_urn: Mapped[str | None] = mapped_column(String(300))
+    # One line on why a send failed. Never a message body, a token, or a header.
+    error: Mapped[str | None] = mapped_column(String(500))
+
+    enrollment: Mapped[Enrollment] = relationship()
+
+
 TEMPLATE_TABLES: tuple[type[UserOwned], ...] = (Template,)
-"""Every table this module adds, in creation order, for tests and tooling that iterate them."""
+"""The tables P3-03 added, for tests and tooling that iterate them."""
+
+CAMPAIGN_TABLES: tuple[type[UserOwned], ...] = (Campaign, CampaignStep, Enrollment, Message)
+"""The tables P3-04 added, in creation order, for tests and tooling that iterate them."""
