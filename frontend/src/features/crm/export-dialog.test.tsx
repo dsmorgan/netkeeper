@@ -29,14 +29,20 @@ function choose(preset: ExportPreset, format: ExportFormat) {
 }
 
 describe('the export form', () => {
-  it('offers the four presets and the three formats', () => {
+  it('offers the five presets and the three formats', () => {
     mockApi(countRoute())
     renderWithClient(<ExportForm filter={FILTER} />)
     expect(screen.getByLabelText('Preset')).toHaveDisplayValue('Nine-column')
     const presets = Array.from(screen.getByLabelText('Preset').querySelectorAll('option')).map(
       (option) => option.value,
     )
-    expect(presets).toEqual(['nine-column', 'linkedin-archive', 'full', 'campaign-audience'])
+    expect(presets).toEqual([
+      'nine-column',
+      'linkedin-archive',
+      'full',
+      'campaign-audience',
+      'macos-contacts',
+    ])
     const formats = Array.from(screen.getByLabelText('Format').querySelectorAll('option')).map(
       (option) => option.value,
     )
@@ -47,10 +53,8 @@ describe('the export form', () => {
     mockApi(countRoute())
     renderWithClient(<ExportForm filter={FILTER} />)
 
-    const presets: ExportPreset[] = EXPORT_PRESETS.map((preset) => preset.value)
-    const formats: ExportFormat[] = ['csv', 'json', 'vcard']
-    for (const preset of presets) {
-      for (const format of formats) {
+    for (const { value: preset, formats } of EXPORT_PRESETS) {
+      for (const format of formats ?? (['csv', 'json', 'vcard'] as const)) {
         choose(preset, format)
         const url = new URL(downloadHref(), 'http://localhost')
         expect(url.pathname).toBe('/api/v1/exports')
@@ -90,6 +94,27 @@ describe('the export form', () => {
     fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'vcard' } })
     expect(param()).toBeNull()
     expect(screen.queryByRole('checkbox', { name: /safe to open in a spreadsheet/i })).toBeNull()
+  })
+
+  it('locks macos-contacts to vCard and gives the other format back afterwards', () => {
+    mockApi(countRoute())
+    renderWithClient(<ExportForm filter={FILTER} />)
+    const format = () => new URL(downloadHref(), 'http://localhost').searchParams.get('format')
+    const option = (value: ExportFormat) =>
+      screen.getByLabelText('Format').querySelector<HTMLOptionElement>(`option[value="${value}"]`)
+
+    choose('full', 'json')
+    fireEvent.change(screen.getByLabelText('Preset'), { target: { value: 'macos-contacts' } })
+    expect(format()).toBe('vcard')
+    expect(screen.getByLabelText('Format')).toHaveDisplayValue('vCard')
+    expect(option('csv')?.disabled).toBe(true)
+    expect(option('json')?.disabled).toBe(true)
+    expect(option('vcard')?.disabled).toBe(false)
+    expect(screen.getByText(/do-not-contact is left out/)).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Preset'), { target: { value: 'full' } })
+    expect(format()).toBe('json')
+    expect(option('csv')?.disabled).toBe(false)
   })
 
   it('exports every contact when there is no filter', () => {
@@ -134,6 +159,7 @@ describe('the export form', () => {
     ['nine-column', true],
     ['linkedin-archive', true],
     ['campaign-audience', true],
+    ['macos-contacts', true],
     ['full', false],
   ] as const)(
     'qualifies the headline count for %s only when it can drop rows',

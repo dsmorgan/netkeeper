@@ -4,7 +4,7 @@
  * Its own module because both the dialog and the Exports page read it, and a
  * file that exports a table beside a component loses fast refresh.
  */
-import type { ExportPreset } from './types'
+import type { ExportFormat, ExportPreset } from './types'
 
 interface PresetSpec {
   value: ExportPreset
@@ -17,6 +17,8 @@ interface PresetSpec {
    * marked do-not-contact. The dialog's headline count says so.
    */
   dropsRows: boolean
+  /** The only formats the backend accepts for this preset; omitted means all three. */
+  formats?: readonly ExportFormat[]
 }
 
 export const EXPORT_PRESETS: readonly PresetSpec[] = [
@@ -52,5 +54,15 @@ export const EXPORT_PRESETS: readonly PresetSpec[] = [
     caveat:
       'Everyone marked do-not-contact is left out, because a mail-merge file is a send path once it leaves this tool. Expect fewer rows than the count above — that gap is the point, not a miscount.',
     dropsRows: true,
+  },
+  {
+    value: 'macos-contacts',
+    label: 'macOS Contacts',
+    description:
+      'A vCard 3.0 file for macOS Contacts: one card per contact, with a Contacts group for each tag. See docs/macos-contacts.md for the import steps.',
+    caveat:
+      'Everyone marked do-not-contact is left out, because Mail and Messages suggest addresses from Contacts. vCard only.',
+    dropsRows: true,
+    formats: ['vcard'],
   },
 ]
