@@ -2,11 +2,13 @@
  * The `/lists` page and its third tab, saved views.
  */
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { useState } from 'react'
 import { describe, expect, it } from 'vitest'
 
 import { jsonResponse } from '@/test/fetch'
 
 import { CrmPage } from './crm-page'
+import type { CrmTab } from './crm-tabs'
 import { mockApi, renderWithClient, requestsTo } from './harness'
 import { SavedViewsPanel } from './saved-views-panel'
 
@@ -32,10 +34,16 @@ function routes(overrides: Record<string, () => Response> = {}) {
   }
 }
 
+/** The page with its tab held in state, as the route holds it in the URL. */
+function StatefulCrmPage() {
+  const [tab, setTab] = useState<CrmTab>('lists')
+  return <CrmPage tab={tab} onTabChange={setTab} />
+}
+
 describe('the lists page', () => {
   it('keeps lists, tags and rules, and saved views on one page', async () => {
     mockApi(routes())
-    renderWithClient(<CrmPage />)
+    renderWithClient(<StatefulCrmPage />)
 
     expect(await screen.findByText('No lists yet')).toBeInTheDocument()
 

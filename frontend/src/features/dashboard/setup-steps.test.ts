@@ -94,12 +94,13 @@ function byKey(steps: SetupStep[], key: string) {
 
 /** Every field a person or a test can observe, for one `toEqual` per scenario. */
 function shape(steps: SetupStep[]) {
-  return steps.map(({ key, title, detail, state, to, cta }) => ({
+  return steps.map(({ key, title, detail, state, to, tab, cta }) => ({
     key,
     title,
     detail,
     state,
     to,
+    tab,
     cta,
   }))
 }
@@ -130,6 +131,8 @@ describe('buildSetupSteps: the empty state', () => {
         detail: 'Nothing tagged yet',
         state: 'not_started',
         to: '/lists',
+        // Its control is about the rules, which are on this tab (#134).
+        tab: 'tags',
         cta: 'Review tags',
       },
       {
