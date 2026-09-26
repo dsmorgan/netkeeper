@@ -478,6 +478,17 @@ async def test_a_total_that_lies_low_cannot_cut_the_run_short() -> None:
     assert result.complete
 
 
+async def test_shortfall_clamps_at_zero_when_seen_outgrows_the_total() -> None:
+    """The same total that lies low: 100 seen against a claimed 40 is 60 over, not a
+    negative shortfall (#204) -- ``shortfall`` never goes below 0."""
+    source = FakeConnectionsSource(_hundred(), total=40)
+
+    result, _, _ = await _run(source, page_size=40)
+
+    assert len(result.seen_urns) == 100 and result.max_total == 40
+    assert result.shortfall == 0
+
+
 async def test_a_trailing_empty_page_cannot_lower_the_bar() -> None:
     """Page 0 says 100; page 1 comes back empty and says 0. Forty seen is not the list."""
     empty_says_zero = _page([], start=40, total=0)

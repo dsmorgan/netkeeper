@@ -32,8 +32,10 @@ short-page rule stand.
 **What makes a run complete.** The first screen states the total connection count, and
 every slice reports it as the page's ``total``.
 :attr:`~netkeeper.linkedin.connections.SyncResult.complete` then holds a full sync to
-the bar it always has: the end of the list proven, and at least as many distinct URNs
-seen as the total. A first screen without a total reports
+the bar it always has: the end of the list proven, and distinct URNs seen no more than
+:func:`~netkeeper.linkedin.connections.completion_slack` short of that total (#204) --
+the larger of 5 and one percent of it, rounded up, since LinkedIn's own total can count
+a member the list never shows. A first screen without a total reports
 0, which completes nothing. The answers must also arrive in order: each pagination
 answer's ``startIndex`` has to be the one the previous answer asked for. A retried
 request for a page already read is skipped; a start past it means a page went unseen,
