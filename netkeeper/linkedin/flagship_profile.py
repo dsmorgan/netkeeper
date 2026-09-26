@@ -115,6 +115,9 @@ CONNECTED_SINCE: Final = "Connected since"  # captured 2026-09-24
 REDIRECT_PATHS: Final = frozenset({"/safety/go", "/redir/redirect"})  # captured 2026-09-24
 REDIRECT_PARAM: Final = "url"
 
+#: The schemes a website must have to be kept (#206 review).
+_SITE_SCHEMES: Final = frozenset({"http", "https"})
+
 PROFILE_ENDPOINT: Final = "flagship-web/profile"
 COMPONENT_ENDPOINT: Final = "flagship-web/profile-component"
 CONTACT_INFO_ENDPOINT: Final = "flagship-web/contact-info"
@@ -535,26 +538,40 @@ _PLAIN_TEXT_TAGS: Final = frozenset({"p"})
 
 def _item_runs(
     payload: FlightPayload, item: object, *, endpoint: str
-) -> tuple[list[str], list[object]]:
+) -> tuple[list[str] | None, list[object]]:
     """An ``li``'s own text runs, in page order, and the ``li`` elements nested in it.
 
     A run is a string in a text component's ``textProps.children``, or a string among a
-    plain ``p`` element's ``children``.
+    plain ``p`` element's ``children``. The runs are ``None`` when the entry's first
+    ``p`` -- its title, as captured -- holds no text of its own (#206 review).
     """
     assert isinstance(item, list)
     nested = _items(payload, item[3], endpoint=endpoint)
     own: list[str] = []
+    title_seen = False
     for node in _without(payload, item[3], nested, endpoint=endpoint):
         props = element_props(node)
         if props is None:
             continue
         text = props.get("textProps")
-        if _is_plain_text(node):
+        plain = _is_plain_text(node)
+        if plain:
             children = props.get("children")
         else:
             children = text.get("children") if isinstance(text, dict) else None
-        if isinstance(children, list) and not is_element(children):
-            own.extend(child for child in children if isinstance(child, str))
+        strings = (
+            [child for child in children if isinstance(child, str)]
+            if isinstance(children, list) and not is_element(children)
+            else []
+        )
+        if plain and not title_seen:
+            title_seen = True
+            if not strings:
+                # The entry's title element holds no text of its own (its text sits in
+                # an element inside it): the runs after it would slide into its place
+                # and a company would read as a title. The entry does not read.
+                return None, nested
+        own.extend(strings)
     return own, nested
 
 
@@ -596,11 +613,14 @@ def _roles(payload: FlightPayload, card: object, *, endpoint: str) -> list[Posit
     for item in _items(payload, card, endpoint=endpoint):
         runs, nested = _item_runs(payload, item, endpoint=endpoint)
         if nested:
+            if runs is None:
+                skipped += len(nested)  # the company header did not read: never guess
+                continue
             # A company with several roles under it: its own first run is the company.
             company = _text(runs[0]) if runs else None
             for inner in nested:
                 inner_runs, deeper = _item_runs(payload, inner, endpoint=endpoint)
-                if deeper:
+                if deeper or inner_runs is None:
                     skipped += 1  # nesting the capture never showed: skip, never guess
                     continue
                 role = _role(inner_runs, company=company)
@@ -609,7 +629,7 @@ def _roles(payload: FlightPayload, card: object, *, endpoint: str) -> list[Posit
                 else:
                     roles.append(role)
             continue
-        role = _role(runs, company=None)
+        role = _role(runs, company=None) if runs is not None else None
         if role is None:
             skipped += 1
         else:
@@ -832,11 +852,13 @@ def _websites(
     listed (a company page, a newsletter, their own profile): LinkedIn does not wrap its
     own links. One that carries a ``url`` parameter on a path that is not a known wrapper
     is skipped, since which parameter is the site is unknown. A site, wrapped or not, that
-    is this member's own profile is skipped too: the contact holds that already. Any
-    other is kept.
+    is this member's own profile is skipped too: the contact holds that already. So is a
+    site that is not an absolute ``http`` or ``https`` url with a host (``javascript:``,
+    ``data:``, a protocol-relative ``//host``): it would be stored as a link. Any other
+    is kept.
     """
     found: list[str] = []
-    skipped = 0
+    skipped = not_web = 0
     for node in nodes:
         for url, _ in _links(payload, node, endpoint=endpoint):
             split = urlsplit(url)
@@ -854,12 +876,19 @@ def _websites(
             if any(ch.isspace() for ch in site.strip()):
                 raise RouteChanged(endpoint, "a website that is not one url")
             inner = urlsplit(site.strip())
+            if inner.scheme not in _SITE_SCHEMES or not inner.hostname:
+                # #206 review: a site is stored as a link and rendered as an href, so
+                # only an absolute http or https url with a host is one.
+                not_web += 1
+                continue
             if _on_linkedin(inner.hostname) and _is_own_profile(inner.path, slug):
                 skipped += 1
                 continue
             found.append(site.strip())
     if skipped:
         log.info("enrichment: skipped %d website link(s) to LinkedIn itself", skipped)
+    if not_web:
+        log.info("enrichment: skipped %d website link(s) that are not http or https", not_web)
     return tuple(dict.fromkeys(found))
 
 

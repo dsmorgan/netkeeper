@@ -568,7 +568,11 @@ def map_row(
                 problems.append(f"{header}: {value!r} has no digits to dial")
                 continue
         else:
-            links.append(IncomingLink(url=value))
+            try:
+                links.append(IncomingLink(url=value))
+            except ValueError:
+                problems.append(f"{header}: {value!r} is not an http or https url")
+                continue
         provided.add(field)
 
     if not provided & IDENTIFYING_FIELDS:

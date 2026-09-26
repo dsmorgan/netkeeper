@@ -937,7 +937,10 @@ def _links(info: ContactInfo) -> tuple[IncomingLink, ...]:
     links: list[IncomingLink] = []
     for url in info.websites:
         if url.strip():
-            links.append(IncomingLink(url, kind=_link_kind(url)))
+            try:
+                links.append(IncomingLink(url, kind=_link_kind(url)))
+            except ValueError:
+                log.info("enrichment: skipped a website that is not an http or https url")
     for handle in info.twitter_handles:
         cleaned = handle.strip().lstrip("@")
         if cleaned:

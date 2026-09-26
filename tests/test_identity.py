@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, class_mapper, sessionmaker
 
 from netkeeper.crm.identity import (
     JOB_FIELDS,
+    LINK_SCHEMES,
     Candidate,
     CreateNew,
     IncomingContact,
@@ -2017,3 +2018,47 @@ def test_merge_keeps_the_date_the_person_joined_the_list(
 
     moved = writer.scalars(scoped(alice, ListMember)).one()
     assert (moved.contact_id, moved.added_at) == (survivor.id, added_at)
+
+
+# --- #206 review: a link is http or https, or has no scheme ------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)",
+        "JaVaScRiPt:alert(1)",
+        "  javascript:alert(1)",
+        "\tjavascript:alert(1)",
+        "java\tscript:alert(1)",
+        "java\nscript:alert(1)",
+        "\x01javascript:alert(1)",
+        "data:text/html;base64,PHNjcmlwdD4=",
+        "vbscript:msgbox(1)",
+        "VBScript:msgbox(1)",
+        "mailto:priya.fake@example.test",
+    ],
+)
+def test_a_link_with_another_scheme_is_refused(url: str) -> None:
+    with pytest.raises(ValueError, match="http or https"):
+        IncomingLink(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://a.test",
+        "HTTP://a.test/x",
+        " http://a.test ",
+        "a.test/path",  # no scheme: kept as given
+        "//a.test/x",  # protocol-relative: no scheme of its own
+        "javascript%3Aalert(1)",  # an encoded colon is no scheme
+        "&#106;avascript:alert(1)",  # nor is an entity: nothing decodes it
+    ],
+)
+def test_an_http_link_or_one_with_no_scheme_is_kept(url: str) -> None:
+    assert IncomingLink(url).url == url.strip()
+
+
+def test_the_link_schemes_are_pinned() -> None:
+    assert frozenset({"http", "https"}) == LINK_SCHEMES

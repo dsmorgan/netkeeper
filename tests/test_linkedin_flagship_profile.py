@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import replace
 from datetime import date
+from urllib.parse import urlencode
 
 import pytest
 from flagship_pages import (
@@ -569,6 +571,7 @@ def test_an_element_is_never_read_as_runs() -> None:
         None,
         {
             "children": [
+                ["$", "p", None, {"children": ["Staff Data Engineer"]}],
                 ["$", "p", None, {"children": strong}],
                 ["$", "$L1", None, {"textProps": {"children": strong}}],
             ]
@@ -576,7 +579,7 @@ def test_an_element_is_never_read_as_runs() -> None:
     ]
     payload = parse_flight(b"0:" + json.dumps(item).encode() + b"\n", endpoint="test")
     runs, nested = flagship_profile._item_runs(payload, payload.rows["0"], endpoint="test")
-    assert (runs, nested) == ([], [])
+    assert (runs, nested) == (["Staff Data Engineer"], [])
 
 
 def test_no_linkedin_website_logs_no_count(caplog: pytest.LogCaptureFixture) -> None:
@@ -675,3 +678,126 @@ def test_every_captured_entry_reads_and_none_is_skipped(caplog: pytest.LogCaptur
     details = parse_profile(_profile(), slug=PRIYA.slug)
     assert len(details.positions) == 2
     assert "did not read" not in caplog.text
+
+
+# --- #206 review -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "site",
+    [
+        *[
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "  javascript:alert(1)",
+            "\tjavascript:alert(1)",
+            "java\tscript:alert(1)",
+            "java\nscript:alert(1)",
+            "\x01javascript:alert(1)",
+            "data:text/html;base64,PHNjcmlwdD4=",
+            "vbscript:msgbox(1)",
+            "VBScript:msgbox(1)",
+            "mailto:priya.fake@example.test",
+        ],
+        "//evil.example.test/x",  # protocol-relative
+        "javascript%3Aalert(1)",  # an encoded scheme is no url at all
+        "https:///no-host",
+        "ftp://files.example.test/",
+    ],
+)
+@pytest.mark.parametrize("wrapped", [True, False])
+def test_only_an_http_or_https_site_with_a_host_is_kept(
+    site: str, wrapped: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    if any(ch in site for ch in "\t\n\x01"):
+        pytest.skip("a control character is refused as a shape: see the test below")
+    url = (
+        "https://www.linkedin.com/safety/go/?" + urlencode({"url": site, "urlhash": "FAKE"})
+        if wrapped
+        else site
+    )
+    body = contact_info_payload(
+        PRIYA,
+        emails=["priya.fake@example.test"],
+        website_urls=[url, "https://priya-fake.example.test/"],
+    )
+    info = parse_contact_info(body, slug=PRIYA.slug)
+    assert info.websites == ("https://priya-fake.example.test/",)
+    assert info.emails == ("priya.fake@example.test",)
+    assert "skipped 1 website link(s) that are not http or https" in caplog.text
+    assert "alert" not in caplog.text and "evil" not in caplog.text
+
+
+def test_a_control_character_in_a_site_is_still_refused_whole() -> None:
+    body = contact_info_payload(
+        PRIYA,
+        website_urls=["https://www.linkedin.com/safety/go/?url=java%09script%3Aalert(1)"],
+    )
+    with pytest.raises(RouteChanged, match="website"):
+        parse_contact_info(body, slug=PRIYA.slug)
+
+
+@pytest.mark.parametrize("wrapped", [True, False])
+def test_an_in_path_on_another_host_is_a_site_not_the_members_profile(wrapped: bool) -> None:
+    """Only LinkedIn's own host has member profiles; the same path elsewhere is a site."""
+    site = f"https://priya-fake.example.test/in/{PRIYA.slug}/"
+    url = "https://www.linkedin.com/safety/go/?" + urlencode({"url": site}) if wrapped else site
+    body = contact_info_payload(PRIYA, website_urls=[url])
+    assert parse_contact_info(body, slug=PRIYA.slug).websites == (site,)
+
+
+def test_a_title_whose_text_sits_inside_another_element_is_skipped_not_relabelled() -> None:
+    """``<p><strong>Title</strong></p>``: the title element holds no text of its own. The
+    company line after it must never read as the title."""
+    body = _profile(roles=ROLES).replace(
+        b'["$","p",null,{"children":["Staff Data Engineer"]}]',
+        b'["$","p",null,{"children":["$","strong",null,{"children":["Staff Data Engineer"]}]}]',
+    )
+    assert b"strong" in body
+    details = parse_profile(body, slug=PRIYA.slug)
+    assert [(p.title, p.company) for p in details.positions] == [
+        ("Data Engineer", "Placeholder Partners")
+    ]
+
+
+def test_a_title_element_holding_only_an_element_list_is_skipped_too() -> None:
+    body = _profile(roles=ROLES).replace(
+        b'["$","p",null,{"children":["Data Engineer"]}]',
+        b'["$","p",null,{"children":[["$","strong",null,{"children":["Data Engineer"]}]]}]',
+    )
+    details = parse_profile(body, slug=PRIYA.slug)
+    assert [p.title for p in details.positions] == ["Staff Data Engineer"]
+
+
+def test_a_grouped_role_whose_title_does_not_read_is_skipped() -> None:
+    group = RoleGroup(
+        "Acme Testing Group",
+        "Full-time · 5 yrs",
+        (("Head of Design", "Jun 2023 - Present"), ("Designer", "2020 - 2023")),
+    )
+    body = _profile(roles=(), groups=[group])
+    header = b'["$","p",null,{"children":["Head of Design"]}]'
+    assert header in body
+    body = body.replace(header, b'["$","p",null,{"children":[]}]')
+    details = parse_profile(body, slug=PRIYA.slug)
+    assert [p.title for p in details.positions] == ["Designer"]
+
+
+def test_a_group_whose_header_title_does_not_read_is_skipped_whole() -> None:
+    """A group header whose title element holds no text of its own: its summary would
+    read as the company of every role under it. None of them reads."""
+    group = RoleGroup(
+        "Acme Testing Group",
+        "Full-time · 5 yrs",
+        (("Head of Design", "Jun 2023 - Present"), ("Designer", "2020 - 2023")),
+    )
+    body = _profile(roles=ROLES[:1], groups=[group])
+    header, count = re.subn(
+        rb'\["\$","\$L[0-9a-f]+",null,\{"textProps":\{"children":\["Acme Testing Group"\]\}\}\]',
+        b'["$","p",null,{"children":["$","strong",null,{"children":["Acme Testing Group"]}]}]',
+        body,
+    )
+    assert count == 1
+    details = parse_profile(header, slug=PRIYA.slug)
+    assert [p.title for p in details.positions] == ["Staff Data Engineer"]
