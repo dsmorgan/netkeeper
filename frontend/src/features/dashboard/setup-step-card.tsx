@@ -32,7 +32,7 @@ export function SetupStepCard({ step, index }: { step: SetupStep; index: number 
   return (
     <Card size="sm">
       <CardHeader>
-        <CardTitle>
+        <CardTitle level={2}>
           <span aria-hidden="true" className="text-muted-foreground">
             {index}.{' '}
           </span>

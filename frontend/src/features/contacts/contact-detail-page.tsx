@@ -163,7 +163,7 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
       <div className="grid gap-4 lg:grid-cols-2">
         <Card size="sm">
           <CardHeader>
-            <CardTitle>Fields</CardTitle>
+            <CardTitle level={3}>Fields</CardTitle>
             <CardDescription>
               A LinkedIn field you edit here is a manual override: no later sync or import
               overwrites it until you revert it.
@@ -187,7 +187,7 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
         <div className="grid content-start gap-4">
           <Card size="sm">
             <CardHeader>
-              <CardTitle>Tags</CardTitle>
+              <CardTitle level={3}>Tags</CardTitle>
             </CardHeader>
             <CardContent>
               <ContactTags contactId={contact.id} />
@@ -196,7 +196,7 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
 
           <Card size="sm">
             <CardHeader>
-              <CardTitle>Record</CardTitle>
+              <CardTitle level={3}>Record</CardTitle>
             </CardHeader>
             <CardContent>
               <Facts
@@ -221,7 +221,7 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
 
           <Card size="sm">
             <CardHeader>
-              <CardTitle>Notes</CardTitle>
+              <CardTitle level={3}>Notes</CardTitle>
               <CardDescription>Yours. No import ever touches them.</CardDescription>
             </CardHeader>
             <CardContent>
@@ -232,7 +232,7 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
 
         <Card size="sm">
           <CardHeader>
-            <CardTitle>Contact details</CardTitle>
+            <CardTitle level={3}>Contact details</CardTitle>
           </CardHeader>
           <CardContent>
             <ContactChildren contact={contact} />
@@ -242,7 +242,7 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
         <div className="grid content-start gap-4">
           <Card size="sm">
             <CardHeader>
-              <CardTitle>Timeline</CardTitle>
+              <CardTitle level={3}>Timeline</CardTitle>
               <CardDescription>Interactions and snapshots, newest first.</CardDescription>
             </CardHeader>
             <CardContent>
@@ -252,7 +252,7 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
 
           <Card size="sm">
             <CardHeader>
-              <CardTitle>Snapshots</CardTitle>
+              <CardTitle level={3}>Snapshots</CardTitle>
               <CardDescription>The headline and job as they were when seen.</CardDescription>
             </CardHeader>
             <CardContent>

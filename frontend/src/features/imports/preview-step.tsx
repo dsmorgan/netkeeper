@@ -81,7 +81,7 @@ export function PreviewStep({
     <div className="flex max-w-4xl flex-col gap-4">
       <Card>
         <CardHeader>
-          <CardTitle>What this import would do</CardTitle>
+          <CardTitle level={2}>What this import would do</CardTitle>
           <CardDescription>
             {run.filename} · read with{' '}
             {run.preset === null ? 'a mapping of your own' : `the ${run.preset} preset`} · nothing
@@ -139,7 +139,9 @@ export function PreviewStep({
 
       <Card>
         <CardHeader>
-          <CardTitle>{rows === undefined ? 'Preview' : `The first ${rows.length} rows`}</CardTitle>
+          <CardTitle level={2}>
+            {rows === undefined ? 'Preview' : `The first ${rows.length} rows`}
+          </CardTitle>
           <CardDescription>Resolved against your contacts as they are right now.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">

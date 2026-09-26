@@ -201,7 +201,7 @@ export function ArchiveImportFlow({ file, kind, onBack, onRestart }: ArchiveImpo
   const upload = useMutation({
     mutationFn: () => importArchive(file),
   })
-  const headingRef = useRef<HTMLDivElement>(null)
+  const headingRef = useRef<HTMLHeadingElement>(null)
   useAnnounceOnMount(headingRef)
 
   if (upload.isSuccess) {
@@ -216,13 +216,7 @@ export function ArchiveImportFlow({ file, kind, onBack, onRestart }: ArchiveImpo
             anything is sent, and a screen reader user gets nothing today —
             the same silence review finding 9 measured on the result screen. */}
         <CardHeader role="status">
-          <CardTitle
-            ref={headingRef}
-            tabIndex={-1}
-            role="heading"
-            aria-level={2}
-            className="outline-none"
-          >
+          <CardTitle level={2} ref={headingRef} tabIndex={-1} className="outline-none">
             {KIND_TITLE[kind]}
           </CardTitle>
           <CardDescription>{file.name}</CardDescription>
@@ -323,7 +317,7 @@ function ConnectionsCard({ counts }: { counts: ArchiveConnectionCounts }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Connections.csv</CardTitle>
+        <CardTitle level={3}>Connections.csv</CardTitle>
         <CardDescription>Your contact list</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -365,7 +359,7 @@ export function MessagesCard({ counts }: { counts: ArchiveMessageCounts }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>messages.csv</CardTitle>
+        <CardTitle level={3}>messages.csv</CardTitle>
         <CardDescription>Message history, added to contacts you already have</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -404,7 +398,7 @@ export function InvitationsCard({ counts }: { counts: ArchiveInvitationCounts })
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Invitations.csv</CardTitle>
+        <CardTitle level={3}>Invitations.csv</CardTitle>
         <CardDescription>Invitation history, added to contacts you already have</CardDescription>
       </CardHeader>
       <CardContent>
@@ -441,20 +435,14 @@ function ArchiveResult({
   onRestart: () => void
 }) {
   const ignored = result.ignored_files
-  const headingRef = useRef<HTMLDivElement>(null)
+  const headingRef = useRef<HTMLHeadingElement>(null)
   useAnnounceOnMount(headingRef)
   return (
     <div className="flex max-w-3xl flex-col gap-4">
       <StepNav current="result" steps={ARCHIVE_STEPS} />
       <Card>
         <CardHeader role="status">
-          <CardTitle
-            ref={headingRef}
-            tabIndex={-1}
-            role="heading"
-            aria-level={2}
-            className="outline-none"
-          >
+          <CardTitle level={2} ref={headingRef} tabIndex={-1} className="outline-none">
             Imported {result.filename}
           </CardTitle>
           <CardDescription>{summary(result)}</CardDescription>

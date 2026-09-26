@@ -1,9 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
 
-import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 
 import { browserQuery, statusQuery } from './api'
-import { SectionTitle } from './section-title'
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -29,7 +28,7 @@ export function BrowserCard() {
   return (
     <Card size="sm">
       <CardHeader>
-        <SectionTitle>Browser</SectionTitle>
+        <CardTitle level={2}>Browser</CardTitle>
         <CardDescription>
           netkeeper attaches to a Chrome you start yourself. It never starts one.
         </CardDescription>

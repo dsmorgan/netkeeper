@@ -2,13 +2,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { cn } from '@/lib/utils'
 
 import { armSchedule, disarmSchedule, linkedinKeys, scheduleQuery } from './api'
 import { formatWhen } from './fields'
-import { SectionTitle } from './section-title'
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -49,7 +48,7 @@ export function ScheduleCard() {
   return (
     <Card size="sm">
       <CardHeader>
-        <SectionTitle>Scheduled runs</SectionTitle>
+        <CardTitle level={2}>Scheduled runs</CardTitle>
         <CardDescription>Syncs and enrichment that run on their own, when armed.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">

@@ -37,7 +37,7 @@ export function UploadStep({ onSelect, pending, pendingName, error }: UploadStep
     <div className="flex max-w-2xl flex-col gap-4">
       <Card>
         <CardHeader>
-          <CardTitle>Choose a file to import</CardTitle>
+          <CardTitle level={2}>Choose a file to import</CardTitle>
           <CardDescription>
             The zip LinkedIn emails you, one of its files on its own (Connections.csv, messages.csv,
             Invitations.csv), or any other CSV with a header row. The next screen says which one
@@ -126,7 +126,7 @@ function GettingYourData() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Getting your data from LinkedIn</CardTitle>
+        <CardTitle level={2}>Getting your data from LinkedIn</CardTitle>
         <CardDescription>For anyone who has not requested this before.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4 text-muted-foreground">

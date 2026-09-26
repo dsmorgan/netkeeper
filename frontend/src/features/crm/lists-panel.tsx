@@ -44,7 +44,7 @@ export function ListsPanel() {
     <div className="grid gap-4 lg:grid-cols-[20rem_1fr]">
       <Card>
         <CardHeader>
-          <CardTitle>Lists</CardTitle>
+          <CardTitle level={2}>Lists</CardTitle>
           <CardDescription>
             A static list is the people you put in it. A smart list is a filter, counted fresh every
             time you look.
@@ -179,7 +179,7 @@ function ListDetail({ list, onDeleted }: { list: ListOut; onDeleted: () => void 
     <div className="space-y-4">
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
+          <CardTitle level={2} className="flex items-center gap-2">
             {list.name}
             <Badge variant="outline">{list.kind}</Badge>
           </CardTitle>
@@ -217,7 +217,7 @@ function ListDetail({ list, onDeleted }: { list: ListOut; onDeleted: () => void 
 
       <Card>
         <CardHeader>
-          <CardTitle>Bulk actions</CardTitle>
+          <CardTitle level={2}>Bulk actions</CardTitle>
           <CardDescription>
             Every action confirms a count first. If the selection moves between the count and the
             click, nothing is applied and the new count is shown.
@@ -256,7 +256,7 @@ function SmartListFilter({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Filter</CardTitle>
+        <CardTitle level={2}>Filter</CardTitle>
         <CardDescription>
           The same filter the contacts table, a campaign audience, and an export run.
         </CardDescription>
@@ -299,7 +299,7 @@ function StaticListMembers({ list, onChanged }: { list: ListOut; onChanged: () =
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Membership</CardTitle>
+        <CardTitle level={2}>Membership</CardTitle>
         <CardDescription>
           Contacts you put in this list by hand, each with the moment it was added.
         </CardDescription>
@@ -375,7 +375,7 @@ function MemberTable({ list }: { list: ListOut }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Members</CardTitle>
+        <CardTitle level={2}>Members</CardTitle>
       </CardHeader>
       <CardContent>
         {members.isPending && <LoadingNote label="Loading members…" />}

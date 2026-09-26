@@ -32,7 +32,7 @@ export function RunHistoryPage() {
     return (
       <Card className="max-w-2xl">
         <CardHeader>
-          <CardTitle>No imports yet</CardTitle>
+          <CardTitle level={2}>No imports yet</CardTitle>
           <CardDescription>
             Every import is kept here with the rows it read, so one can be audited or undone later.
           </CardDescription>
@@ -48,7 +48,7 @@ export function RunHistoryPage() {
     <div className="flex max-w-5xl flex-col gap-4">
       <Card>
         <CardHeader>
-          <CardTitle>Import history</CardTitle>
+          <CardTitle level={2}>Import history</CardTitle>
           <CardDescription>
             {total} {total === 1 ? 'import' : 'imports'}. Open one to see its rows or undo it.
           </CardDescription>

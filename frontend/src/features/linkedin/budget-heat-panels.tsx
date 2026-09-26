@@ -1,11 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
 
-import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 
 import { budgetQuery, heatQuery } from './api'
 import { formatWhen } from './fields'
-import { SectionTitle } from './section-title'
 import { ACTION_CLASS_LABELS } from './types'
 
 function message(error: unknown): string {
@@ -24,7 +23,7 @@ export function BudgetPanel() {
   return (
     <Card size="sm">
       <CardHeader>
-        <SectionTitle>Budget</SectionTitle>
+        <CardTitle level={2}>Budget</CardTitle>
         <CardDescription>
           Today's profile-visit chain, and every action class's counters.
         </CardDescription>
@@ -112,7 +111,7 @@ export function HeatPanel() {
   return (
     <Card size="sm">
       <CardHeader>
-        <SectionTitle>Heat</SectionTitle>
+        <CardTitle level={2}>Heat</CardTitle>
         <CardDescription>
           Rises on a throttle or a checkpoint, decays on its own. While warm, pacing slows down.
         </CardDescription>
