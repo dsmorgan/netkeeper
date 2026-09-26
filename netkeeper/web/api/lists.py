@@ -71,6 +71,7 @@ def _list_out(row: ContactList, count: service.ListCount) -> ListOut:
         kind=row.kind,
         filter=None if row.filter_json is None else parse_filter(row.filter_json),
         member_count=count.count,
+        builtin=row.builtin,
         broken=count.broken,
         created_at=row.created_at,
         updated_at=row.updated_at,

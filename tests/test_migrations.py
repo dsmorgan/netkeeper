@@ -1379,3 +1379,64 @@ def test_existing_contacts_need_no_review_and_the_mark_downgrades_away(
     assert "needs_review_at" not in columns
     with migration_engine.begin() as connection:
         assert _count(connection, "contacts") == 1
+
+
+# --- the builtin list mark (0016, #133) ------------------------------------------------
+
+SEEDED_FILTER = '{"where": {"op": "eq", "field": "met", "value": "met"}, "include_archived": false}'
+
+
+def test_the_seeded_validated_list_is_marked_builtin_and_nothing_else_is(
+    migration_engine: Engine,
+) -> None:
+    """Only a list every sign says the app seeded is marked; doubt leaves a list unmarked."""
+    migrations.upgrade(migration_engine, "0015")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2, 3, 4)
+        for user_id in (1, 2, 3, 4):
+            _put_setting(connection, user_id, "lists.validated_seeded", "true")
+        # 1: as seeded, and a filter stored before include_archived existed also counts.
+        _insert_list(
+            connection, id=1, user_id=1, name="Validated", kind="smart", filter_json=SEEDED_FILTER
+        )
+        _insert_list(connection, id=2, user_id=1, name="First 100")
+        _insert_list(
+            connection,
+            id=3,
+            user_id=2,
+            name="Validated",
+            kind="smart",
+            filter_json='{"where": {"op": "eq", "field": "met", "value": "met"}}',
+        )
+        # 3: renamed, and 4: filter edited. Past recognition, so left unmarked.
+        _insert_list(
+            connection, id=4, user_id=3, name="Met", kind="smart", filter_json=SEEDED_FILTER
+        )
+        _insert_list(
+            connection,
+            id=5,
+            user_id=4,
+            name="Validated",
+            kind="smart",
+            filter_json='{"where": {"op": "has_email"}, "include_archived": false}',
+        )
+        # 5: the seeded filter under a user never seeded, so the person made it.
+        _seed_users(connection, 5)
+        _insert_list(
+            connection, id=6, user_id=5, name="Validated", kind="smart", filter_json=SEEDED_FILTER
+        )
+
+    migrations.upgrade(migration_engine, "0016")
+
+    with migration_engine.begin() as connection:
+        marked = connection.execute(text("SELECT id FROM lists WHERE builtin ORDER BY id"))
+        assert marked.scalars().all() == [1, 3]
+        _insert_list(connection, id=7, user_id=1, name="New")  # the default fills it
+        new = connection.execute(text("SELECT builtin FROM lists WHERE id = 7"))
+        assert not new.scalar_one()  # 0 on SQLite, false on PostgreSQL
+
+    migrations.downgrade(migration_engine, "0015")
+    columns = {column["name"] for column in inspect(migration_engine).get_columns("lists")}
+    assert "builtin" not in columns
+    with migration_engine.begin() as connection:
+        assert _count(connection, "lists") == 7

@@ -1244,6 +1244,12 @@ class ListOut(BaseModel):
     kind: ListKind
     filter: FilterTree | None
     member_count: int
+    builtin: bool
+    """True for the list netkeeper made for the person ("Validated"), false for one they made.
+
+    Where the row came from, not whether it may change: it stays true after the
+    person renames or edits that list, and the list can be deleted like any other.
+    """
     broken: str | None = None
     """Why this list's filter does not compile, for the rare list where it does not.
 

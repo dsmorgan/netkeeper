@@ -388,6 +388,7 @@ def test_validated_list_is_seeded_once_and_matches_met_contacts(
 
     row = ensure_validated_list(writer, user)
     assert row is not None and row.name == VALIDATED_LIST_NAME and row.kind is ListKind.SMART
+    assert row.builtin is True
     assert get_setting(writer, user, VALIDATED_SEEDED_KEY) is True
 
     tree = parse_filter(VALIDATED_FILTER)
@@ -414,6 +415,22 @@ def test_validated_list_reuses_an_existing_list_of_that_name(writer: Session, us
     row = ensure_validated_list(writer, user)
     assert row is not None and row.id == manual.id
     assert row.kind is ListKind.STATIC  # untouched: not converted to smart
+    assert row.builtin is False  # the person made it; adopting it does not change that (#133)
+
+
+def test_only_the_seeded_list_is_builtin_and_an_edit_keeps_the_mark(
+    writer: Session, user: User
+) -> None:
+    """``builtin`` is where the row came from (#133): set once, at creation, never by an edit."""
+    mine = create_list(writer, user, "First 100", ListKind.STATIC)
+    assert mine.builtin is False
+    seeded = ensure_validated_list(writer, user)
+    assert seeded is not None and seeded.builtin is True
+    edited = update_list(
+        writer, user, seeded.id, name="Met", filter=parse_filter({"where": {"op": "has_email"}})
+    )
+    assert edited.builtin is True
+    assert update_list(writer, user, mine.id, name="Validated").builtin is False
 
 
 # --- saved views ------------------------------------------------------------

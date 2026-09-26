@@ -42,6 +42,7 @@ function list(id: number, overrides: Partial<ListOut> = {}): ListOut {
     kind: 'static',
     filter: null,
     member_count: 0,
+    builtin: false,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
     ...overrides,
@@ -50,15 +51,16 @@ function list(id: number, overrides: Partial<ListOut> = {}): ListOut {
 
 /**
  * `GET /api/v1/lists` on a real server: `ensure_validated_list` seeds this
- * smart list at every start (`netkeeper/web/app.py`), and nothing in the
- * response marks it as built-in. A fixture that defaults to `[]` is the one
- * PR #129's review caught the fake diverging from the server on.
+ * smart list at every start (`netkeeper/web/app.py`), marked `builtin` (#133).
+ * A fixture that defaults to `[]` is the one PR #129's review caught the fake
+ * diverging from the server on.
  */
 function seededValidatedList(): ListOut {
   return list(1, {
     name: 'Validated',
     kind: 'smart',
     filter: { where: { op: 'eq', field: 'met', value: 'met' }, include_archived: false },
+    builtin: true,
   })
 }
 

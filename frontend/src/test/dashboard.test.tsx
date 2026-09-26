@@ -45,8 +45,7 @@ function draftRun(id: number) {
 /**
  * `GET /api/v1/lists` on a real server: `ensure_validated_list` seeds this
  * smart list at every start (`netkeeper/web/app.py`), before any contact
- * exists and with nothing in the response marking it as built-in (PR #129
- * review, finding 1). A fake that defaults `lists` to `[]` renders a state
+ * exists (PR #129 review, finding 1), marked `builtin` (#133). A fake that defaults `lists` to `[]` renders a state
  * the server only reaches if the user deletes the seeded list, which is
  * exactly what hid "build a list" reading "Done" for nobody having built one.
  */
@@ -57,6 +56,7 @@ function seededValidatedList() {
     kind: 'smart',
     filter: { where: { op: 'eq', field: 'met', value: 'met' }, include_archived: false },
     member_count: 0,
+    builtin: true,
   }
 }
 

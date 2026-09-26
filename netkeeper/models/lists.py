@@ -23,7 +23,7 @@ import enum
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, CheckConstraint, ForeignKey, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, CheckConstraint, ForeignKey, String, UniqueConstraint, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from netkeeper.models.base import Base, TimestampMixin, UserOwned, UTCDateTime, string_enum, utcnow
@@ -64,6 +64,14 @@ class ContactList(UserOwned, TimestampMixin, Base):
     # or not-yet-supported filter is refused at write time, not at read time.
     filter_json: Mapped[dict[str, Any] | None] = mapped_column(
         JSON(none_as_null=True), nullable=True
+    )
+
+    # Provenance, not protection (#133): true on the one row netkeeper created for the
+    # user (``netkeeper.crm.lists.ensure_validated_list``), marked when it is created and
+    # kept through renames and edits. The user may still rename, edit, or delete it. The
+    # server default is what migration 0016 filled existing rows with.
+    builtin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
     )
 
     members: Mapped[list[ListMember]] = relationship(

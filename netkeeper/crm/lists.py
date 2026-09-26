@@ -753,8 +753,11 @@ def ensure_validated_list(session: Session, user: User) -> ContactList | None:
 
     Idempotent: after the first call ``settings_kv`` records
     :data:`VALIDATED_SEEDED_KEY` and later calls return None, so a list the
-    user deleted or renamed is never re-created. A list the user already has
-    named exactly :data:`VALIDATED_LIST_NAME` is *adopted* as it is, the way
+    user deleted or renamed is never re-created. The list it creates is marked
+    ``builtin`` (#133), a record of where the row came from that survives any
+    rename or edit and protects nothing. A list the user already has
+    named exactly :data:`VALIDATED_LIST_NAME` is *adopted* as it is, and stays
+    unmarked, because the user made it; it is adopted the way
     :func:`netkeeper.crm.tags.ensure_default_rules` reuses an existing tag by
     name — including when that list is a static one, which leaves the user
     with a built-in named "Validated" that is not smart at all. Unreachable
@@ -780,6 +783,8 @@ def ensure_validated_list(session: Session, user: User) -> ContactList | None:
             ListKind.SMART,
             filter=parse_filter(VALIDATED_FILTER),
         )
+        row.builtin = True
+        session.flush()
         log.info("seeded built-in list %r for user %d", VALIDATED_LIST_NAME, user.id)
     set_setting(session, user, VALIDATED_SEEDED_KEY, True)
     return row
