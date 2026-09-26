@@ -24,6 +24,7 @@ from netkeeper import __version__, migrations
 from netkeeper.config import ConfigError, Settings, load_settings, render_toml
 from netkeeper.crm import import_runs
 from netkeeper.crm.archive import ArchiveImport, import_archive
+from netkeeper.crm.archive_check import open_checked_archive
 from netkeeper.crm.contacts import ContactStats, contact_stats
 from netkeeper.crm.exports import ExportFormat, ExportPreset, export_stream
 from netkeeper.crm.filters import FilterError, FilterTree, SortKey, parse_filter, parse_sort
@@ -31,7 +32,7 @@ from netkeeper.crm.lists import ListCount, list_lists, list_views, member_counts
 from netkeeper.crm.tags import ensure_default_rules, list_tags, run_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.linkedin.activity_lock import SINGLE_ACCOUNT_KEY, account_key
-from netkeeper.linkedin.archive import ArchiveFormatError, open_archive
+from netkeeper.linkedin.archive import ArchiveFormatError
 from netkeeper.linkedin.browser import (
     CHROME_PROFILE_DIRNAME,
     ActivityLocks,
@@ -1433,7 +1434,7 @@ def import_archive_cmd(
 ) -> None:
     """Import a LinkedIn archive: connections, messages, and invitations (netkeeper.crm.archive)."""
     try:
-        with open_archive(path) as archive:
+        with open_checked_archive(path) as archive:
             engine = make_engine(database_url())
             try:
                 factory = make_session_factory(engine)

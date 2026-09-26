@@ -454,3 +454,72 @@ async def test_every_refusal_code_is_reachable_and_present_on_the_response(
         f"no scenario covers {set(ArchiveRefusalCode) - seen}; "
         "every refusal code needs one, not just most"
     )
+
+
+# --- a damaged central directory (#138) -----------------------------------------
+
+
+def _corrupt_central_directory(data: bytes, start: int, length: int = 100) -> bytes:
+    """``data`` with ``length`` bytes XOR 0xFF from ``start`` bytes into its central directory.
+
+    Every local file header and every member's bytes are left intact, as in the
+    reproduction #138 opened with.
+    """
+    raw = bytearray(data)
+    eocd = raw.rfind(b"PK\x05\x06")
+    size, offset = struct.unpack_from("<II", raw, eocd + 12)
+    begin = offset + start
+    for index in range(begin, min(begin + length, offset + size)):
+        raw[index] ^= 0xFF
+    return bytes(raw)
+
+
+@pytest.mark.parametrize(
+    ("start", "said"),
+    [
+        # The #138 reproduction: a garbled name length makes one record swallow the
+        # three after it. zipfile opened the rest, and the import answered 201 with
+        # Connections and Invitations only; messages.csv was simply gone.
+        (154, "declares 6 files, but only 3 could be read"),
+        # The last record's name garbled, lengths intact: the count still matches,
+        # but "messages.csv" no longer ends in .csv and was skipped as noise.
+        (336, "1 of its 6 file names no longer match the files they point at"),
+        # A garbled name in a record flagged UTF-8: a UnicodeDecodeError, and a 500.
+        (7, "the zip's directory is damaged"),
+    ],
+)
+async def test_a_damaged_central_directory_is_refused_rather_than_read_partly(
+    client: httpx.AsyncClient, running_app: FastAPI, tmp_path: Path, start: int, said: str
+) -> None:
+    response = await _upload(client, _corrupt_central_directory(_zipped(tmp_path), start))
+
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert body["code"] == ArchiveRefusalCode.DAMAGED.value
+    assert said in body["detail"]
+    assert _counts(running_app.state.session_factory) == (0, 0)
+
+
+async def test_no_corruption_of_the_central_directory_imports_partly_or_answers_500(
+    client: httpx.AsyncClient, running_app: FastAPI, tmp_path: Path
+) -> None:
+    """Sweep the damage across the whole directory: every upload either imports in
+    full or is refused with a 422 and a code. None imports some tables and drops the
+    rest, and none escapes as a 500 (a garbled UTF-8 name used to).
+    """
+    pristine = _zipped(tmp_path)
+    eocd = pristine.rfind(b"PK\x05\x06")
+    (size,) = struct.unpack_from("<I", pristine, eocd + 12)
+    outcomes: set[int | str] = set()
+    for start in range(0, size - 20, 7):
+        response = await _upload(client, _corrupt_central_directory(pristine, start))
+        if response.status_code == 201:
+            body = response.json()
+            assert body["connections"] == KNOWN_CONNECTIONS, f"partial import at {start}"
+            assert body["messages"]["rows"] == KNOWN_MESSAGES["rows"], f"partial at {start}"
+            assert body["invitations"]["rows"] == KNOWN_INVITATIONS["rows"], f"partial at {start}"
+            outcomes.add(201)
+        else:
+            assert response.status_code == 422, f"{response.status_code} at {start}"
+            outcomes.add(response.json()["code"])
+    assert ArchiveRefusalCode.DAMAGED.value in outcomes
