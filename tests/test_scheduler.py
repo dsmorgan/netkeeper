@@ -11,7 +11,7 @@ not to a coincidence of two code paths landing on the same number (the
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, time, timedelta
 from itertools import pairwise
 from random import Random
@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import HeatSettings
 from netkeeper.db import session_scope
-from netkeeper.models import User
+from netkeeper.models import SyncRunKind, User
 from netkeeper.models.base import utcnow
 from netkeeper.services import heat, route_breaker, scheduler
 from netkeeper.services.scheduler import DEFAULT_SCHEDULES
@@ -756,16 +756,26 @@ async def test_the_route_changed_breaker_does_not_skip_enrichment(
 # --- answer-lost limit skip: connections kinds only (#199) ------------------------
 
 
-def _answer_lost_runs(session_factory: sessionmaker[Session], owner: User, runs: int) -> None:
+def _answer_lost_runs(
+    session_factory: sessionmaker[Session], owner: User, runs: int, kind: scheduler.JobKind
+) -> None:
     with session_scope(session_factory, write=True) as session:
         for _ in range(runs):
             route_breaker.record_answer_lost(
-                session, owner, ACCOUNT, answer_lost=True, clean_end=False, now=NOW
+                session,
+                owner,
+                ACCOUNT,
+                kind=SyncRunKind(kind.value),
+                answer_lost=True,
+                clean_end=False,
+                now=NOW,
             )
 
 
-async def _fire_after_answer_lost_runs(
-    session_factory: sessionmaker[Session], kind: scheduler.JobKind, runs: int
+async def _fire_after(
+    session_factory: sessionmaker[Session],
+    kind: scheduler.JobKind,
+    setup: Callable[[User], None],
 ) -> tuple[scheduler.FireResult | None, int]:
     schedule = DEFAULT_SCHEDULES[kind]
     calls: list[scheduler.JobContext] = []
@@ -787,7 +797,7 @@ async def _fire_after_answer_lost_runs(
             active_start=ALL_DAY[0],
             active_end=ALL_DAY[1],
         )
-    _answer_lost_runs(session_factory, owner, runs)
+    setup(owner)
     result = await scheduler.poll_and_fire(
         session_factory,
         owner,
@@ -805,38 +815,79 @@ async def _fire_after_answer_lost_runs(
     return result, len(calls)
 
 
-@pytest.mark.parametrize(
-    "kind", [scheduler.JobKind.CONNECTIONS_FULL, scheduler.JobKind.CONNECTIONS_INCREMENTAL]
-)
-async def test_the_answer_lost_limit_skips_a_connections_fire_when_tripped(
-    session_factory: sessionmaker[Session], kind: scheduler.JobKind
+_CONNECTIONS = [scheduler.JobKind.CONNECTIONS_FULL, scheduler.JobKind.CONNECTIONS_INCREMENTAL]
+
+
+@pytest.mark.parametrize("fired", _CONNECTIONS)
+@pytest.mark.parametrize("lost", _CONNECTIONS)
+async def test_either_kinds_tripped_streak_skips_every_connections_fire(
+    session_factory: sessionmaker[Session], fired: scheduler.JobKind, lost: scheduler.JobKind
 ) -> None:
-    result, calls = await _fire_after_answer_lost_runs(
-        session_factory, kind, route_breaker.ANSWER_LOST_THRESHOLD
+    """#199 review, M2: either kind reaching the limit trips it for both kinds."""
+    result, calls = await _fire_after(
+        session_factory,
+        fired,
+        lambda owner: _answer_lost_runs(
+            session_factory, owner, route_breaker.ANSWER_LOST_THRESHOLD, lost
+        ),
     )
     assert calls == 0
     assert result is not None and result.fired is False
     assert result.skipped_reason == "answer_lost_breaker"
     # the cadence still advances -- a skip is not a stall
     assert result.next_due is not None
-    assert result.next_due > NOW + DEFAULT_SCHEDULES[kind].interval
+    assert result.next_due > NOW + DEFAULT_SCHEDULES[fired].interval
 
 
 async def test_an_answer_lost_streak_below_the_threshold_does_not_skip(
     session_factory: sessionmaker[Session],
 ) -> None:
-    result, calls = await _fire_after_answer_lost_runs(
-        session_factory, scheduler.JobKind.CONNECTIONS_FULL, route_breaker.ANSWER_LOST_THRESHOLD - 1
+    result, calls = await _fire_after(
+        session_factory,
+        scheduler.JobKind.CONNECTIONS_FULL,
+        lambda owner: _answer_lost_runs(
+            session_factory,
+            owner,
+            route_breaker.ANSWER_LOST_THRESHOLD - 1,
+            scheduler.JobKind.CONNECTIONS_FULL,
+        ),
     )
     assert calls == 1
     assert result is not None and result.fired is True
 
 
+async def test_a_corrupt_answer_lost_row_skips_a_connections_fire(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#199 review, L4: the gate asks ``answer_lost_tripped``, which fails closed on
+    a row it cannot read -- not ``count >= 3``, which would read it as clear."""
+
+    def corrupt(owner: User) -> None:
+        with session_scope(session_factory, write=True) as session:
+            set_setting(
+                session,
+                owner,
+                f"linkedin.answer_lost_breaker.connections_incremental.{ACCOUNT}",
+                "not an object",
+            )
+
+    result, calls = await _fire_after(session_factory, scheduler.JobKind.CONNECTIONS_FULL, corrupt)
+    assert calls == 0
+    assert result is not None and result.skipped_reason == "answer_lost_breaker"
+
+
 async def test_the_answer_lost_limit_does_not_skip_enrichment(
     session_factory: sessionmaker[Session],
 ) -> None:
-    result, calls = await _fire_after_answer_lost_runs(
-        session_factory, scheduler.JobKind.ENRICH, route_breaker.ANSWER_LOST_THRESHOLD
+    result, calls = await _fire_after(
+        session_factory,
+        scheduler.JobKind.ENRICH,
+        lambda owner: _answer_lost_runs(
+            session_factory,
+            owner,
+            route_breaker.ANSWER_LOST_THRESHOLD,
+            scheduler.JobKind.CONNECTIONS_FULL,
+        ),
     )
     assert calls == 1
     assert result is not None and result.fired is True

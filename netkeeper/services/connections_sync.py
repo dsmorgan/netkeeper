@@ -45,9 +45,10 @@ logic; it decides what the job may do and what happens after it stops:
   a run that reached the end of the list clears the streak, and a stall or a gap
   with no answer pending still counts as ``route_changed``.
 * **The answer-lost limit** (#199, in the same module). A run recorded with
-  ``stop_reason = "answer_lost"`` extends a second, separate streak; three in a
-  row skip scheduled connections fires the way the breaker does, until a run
-  ends ``completed`` (a natural end with nothing lost) or a person runs
+  ``stop_reason = "answer_lost"`` extends its own kind's streak (full and
+  incremental count separately); three in a row of either kind skip scheduled
+  connections fires the way the breaker does, until a run of that kind ends
+  ``completed`` (a natural end with nothing lost) or a person runs
   ``reset-breaker``. Recorded in the breaker's writer session.
 * **Lost answers** (#200). A run that lost any of the page's answers is never
   complete, so it ages nobody; it is recorded ``aborted`` with ``stop_reason =
@@ -427,13 +428,16 @@ async def sync_connections(
                 succeeded=result.reason in _NATURAL_ENDS,
                 now=clock(),
             )
-            # #199: the answer-lost limit, its own streak beside the breaker's. A run
-            # recorded ``answer_lost`` (stopped for a lost answer, or read to the end
-            # without some) extends it; a run recorded ``completed`` clears it.
+            # #199: the answer-lost limit, a streak per run kind beside the breaker's. A
+            # run recorded ``answer_lost`` (stopped for a lost answer, or read to the
+            # end without some) extends its kind's streak; a run of the same kind
+            # recorded ``completed`` clears it. A cancel or a budget stop, losses or
+            # not, is recorded as that and leaves it.
             route_breaker.record_answer_lost(
                 session,
                 _load_user(session, user_id),
                 account_id,
+                kind=kind,
                 answer_lost=(
                     _stop_reason(result, cancelled=gate.cancelled) == StopReason.ANSWER_LOST.value
                 ),

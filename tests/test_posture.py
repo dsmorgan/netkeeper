@@ -53,7 +53,7 @@ from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin.browser import AttachBrowserProvider
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.preflight import preflight
-from netkeeper.models import SettingKV, User
+from netkeeper.models import SettingKV, SyncRunKind, User
 from netkeeper.scoping import unscoped
 from netkeeper.services import heat as heat_rows
 from netkeeper.services import posture as posture_module
@@ -1668,10 +1668,10 @@ def test_a_corrupt_route_changed_breaker_row_warns_unknown(writer: Session, user
 # --- #199: the answer-lost limit ------------------------------------------------------
 
 
-def _lose_answers(writer: Session, user: User, runs: int) -> None:
+def _lose_answers(writer: Session, user: User, runs: int, kind: SyncRunKind) -> None:
     for _ in range(runs):
         route_breaker.record_answer_lost(
-            writer, user, ACCOUNT, answer_lost=True, clean_end=False, now=NOW
+            writer, user, ACCOUNT, kind=kind, answer_lost=True, clean_end=False, now=NOW
         )
 
 
@@ -1681,26 +1681,34 @@ def test_a_clear_answer_lost_limit_shows_no_warning(writer: Session, user: User)
     assert row.value.startswith("clear")
 
 
-def test_an_answer_lost_streak_below_the_limit_shows_its_count(writer: Session, user: User) -> None:
-    _lose_answers(writer, user, 2)
+def test_an_answer_lost_streak_below_the_limit_shows_both_counts(
+    writer: Session, user: User
+) -> None:
+    _lose_answers(writer, user, 2, SyncRunKind.CONNECTIONS_FULL)
+    _lose_answers(writer, user, 1, SyncRunKind.CONNECTIONS_INCREMENTAL)
     row = _row(_report(writer, user), "answer-lost limit")
     assert row.status is Status.ON and row.warnings == ()
-    assert row.value.startswith("2 of 3 answer_lost connections runs in a row")
+    assert row.value.startswith(
+        "answer_lost runs in a row: connections_full 2 of 3 since 2026-09-23 18:00 UTC;"
+        " connections_incremental 1 of 3"
+    )
 
 
-def test_a_tripped_answer_lost_limit_warns(writer: Session, user: User) -> None:
-    _lose_answers(writer, user, 3)
+def test_a_tripped_answer_lost_limit_warns_and_names_the_kind(writer: Session, user: User) -> None:
+    _lose_answers(writer, user, 3, SyncRunKind.CONNECTIONS_INCREMENTAL)
     row = _row(_report(writer, user), "answer-lost limit")
     assert row.status is Status.ON
-    assert row.value.startswith("tripped: 3 answer_lost connections runs in a row")
+    assert row.value.startswith("tripped (connections_incremental): answer_lost runs in a row")
     assert len(row.warnings) == 1
     assert "skipped" in row.warnings[0] and "reset-breaker" in row.warnings[0]
 
 
 def test_a_corrupt_answer_lost_row_warns_unknown(writer: Session, user: User) -> None:
-    set_setting(writer, user, f"linkedin.answer_lost_breaker.{ACCOUNT}", "not an object")
+    set_setting(
+        writer, user, f"linkedin.answer_lost_breaker.connections_full.{ACCOUNT}", "not an object"
+    )
     report = _report(writer, user)
     row = _row(report, "answer-lost limit")
     assert row.status is Status.UNKNOWN
-    assert row.warnings
+    assert row.warnings and "connections_full" in row.warnings[0]
     assert not report.ok

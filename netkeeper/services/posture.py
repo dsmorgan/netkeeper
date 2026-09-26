@@ -1233,53 +1233,61 @@ def _route_changed_breaker(session: Session, user: User, account_id: int) -> Pro
 
 
 def _answer_lost_limit(session: Session, user: User, account_id: int) -> Protection:
-    """The answer-lost limit's count (#199): consecutive connections runs recorded
+    """The answer-lost limit's counts (#199): consecutive connections runs recorded
     ``answer_lost`` -- the page's answers arrived with no body the browser could
-    hand over. That moves neither heat nor the route-changed breaker, so this is
-    what stops scheduled runs spending page views on it once it reaches
-    :data:`~netkeeper.services.route_breaker.ANSWER_LOST_THRESHOLD`. Reported
-    the way :func:`_route_changed_breaker` reports its own streak, unreadable
-    row included.
+    hand over -- counted per run kind (full, incremental; #199 review M2). That
+    moves neither heat nor the route-changed breaker, so this is what stops
+    scheduled runs spending page views on it once either kind reaches
+    :data:`~netkeeper.services.route_breaker.ANSWER_LOST_THRESHOLD`. Reported the
+    way :func:`_route_changed_breaker` reports its own streak, unreadable rows
+    included.
     """
-    current = route_breaker.answer_lost_state(session, user, account_id)
-    since = f" (since {current.since:%Y-%m-%d %H:%M UTC})" if current.since is not None else ""
-    if not current.readable:
+    states = route_breaker.answer_lost_states(session, user, account_id)
+    unreadable = [kind.value for kind, state in states.items() if not state.readable]
+    if unreadable:
         return Protection(
             name="answer-lost limit",
             status=Status.UNKNOWN,
             value="stored state unreadable; treated as tripped",
             warnings=(
-                "the answer-lost limit's stored state is corrupt and could not be read."
-                " Scheduled connections runs are skipped until it is next written (fail"
-                " closed) -- run one by hand (`netkeeper linkedin sync`) to check and"
-                " repair it, or clear it directly with"
+                f"the answer-lost limit's stored state ({', '.join(unreadable)}) is corrupt"
+                " and could not be read. Scheduled connections runs are skipped until it"
+                " is next written (fail closed) -- run one by hand (`netkeeper linkedin"
+                " sync`) to check and repair it, or clear it directly with"
                 " `netkeeper linkedin schedule reset-breaker`",
             ),
         )
-    if current.count == 0:
+    if all(state.count == 0 for state in states.values()):
         return Protection(
             name="answer-lost limit",
             status=Status.ON,
             value="clear: no consecutive connections runs have ended answer_lost",
         )
-    if not current.tripped:
+
+    def since(state: route_breaker.BreakerState) -> str:
+        return "" if state.since is None else f" since {state.since:%Y-%m-%d %H:%M UTC}"
+
+    counts = "; ".join(
+        f"{kind.value} {state.count} of {route_breaker.ANSWER_LOST_THRESHOLD}{since(state)}"
+        for kind, state in states.items()
+    )
+    tripped = [kind.value for kind, state in states.items() if state.tripped]
+    if not tripped:
         return Protection(
             name="answer-lost limit",
             status=Status.ON,
-            value=(
-                f"{current.count} of {route_breaker.ANSWER_LOST_THRESHOLD} answer_lost"
-                f" connections runs in a row{since}"
-            ),
+            value=f"answer_lost runs in a row: {counts}",
         )
     return Protection(
         name="answer-lost limit",
         status=Status.ON,
-        value=f"tripped: {current.count} answer_lost connections runs in a row{since}",
+        value=f"tripped ({', '.join(tripped)}): answer_lost runs in a row: {counts}",
         warnings=(
-            f"{current.count} connections runs in a row ended answer_lost{since}: the"
-            " page's answers keep arriving unreadable, and scheduled connections runs are"
-            " skipped until this clears. Run one by hand (`netkeeper linkedin sync`) to"
-            " check whether they still do, or clear it directly with"
+            f"{route_breaker.ANSWER_LOST_THRESHOLD} or more {' and '.join(tripped)} runs in a"
+            f" row ended answer_lost ({counts}): the page's answers keep arriving"
+            " unreadable, and scheduled connections runs are skipped until this clears."
+            " Run one of that kind by hand (`netkeeper linkedin sync`, with `--full` for a"
+            " full sync) to check whether they still do, or clear it directly with"
             " `netkeeper linkedin schedule reset-breaker`",
         ),
     )
