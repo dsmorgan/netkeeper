@@ -71,8 +71,16 @@ function renderHarness(initial: FilterTree) {
   )
 }
 
+/**
+ * The runner's patience for the walk below, which is not a budget: it checks
+ * the tree, not the clock. Every ordered pair of fields is a few hundred
+ * renders, about 2.8 s alone and up to 6.3 s with the backend suite competing
+ * for a 4-core machine (#220), past vitest's default five seconds.
+ */
+const WALK_TIMEOUT_MS = 20_000
+
 describe('changing the column of a comparison', () => {
-  it('never leaves a value of the wrong kind behind', () => {
+  it('never leaves a value of the wrong kind behind', { timeout: WALK_TIMEOUT_MS }, () => {
     mockApi({})
     const broken: string[] = []
 

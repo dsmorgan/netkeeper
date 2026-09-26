@@ -136,6 +136,11 @@ class Sleeps:
         return gaps
 
 
+#: The seed ``_sync`` paces with. Its first draw is well over ``CANCEL_SLICE_S``, which
+#: the cancel tests' single-slice assertion relies on; the test that pins that says so.
+PACING_SEED = 7
+
+
 async def _sync(
     factory: sessionmaker[Session],
     user_id: int,
@@ -147,6 +152,10 @@ async def _sync(
     sleeps: Sleeps | None = None,
     rng: random.Random | None = None,
 ) -> SyncRunReport:
+    """One sync. The waits between pages are drawn from a seeded generator unless a
+    test passes its own: an unseeded one drew a first wait under ``CANCEL_SLICE_S``
+    on about one run in 250, and every assertion on :attr:`Sleeps.slices` then
+    failed (#220)."""
     return await sync_connections(
         factory,
         user_id,
@@ -155,7 +164,7 @@ async def _sync(
         settings=settings,
         clock=Clock(at),
         sleep=sleeps or Sleeps(),
-        rng=rng,
+        rng=rng if rng is not None else random.Random(PACING_SEED),
     )
 
 
@@ -908,6 +917,21 @@ class CancelsOnFirstWait(Sleeps):
                 assert running is not None
                 runs.request_cancel(session, user, running.id, now=NOW)
         await super().__call__(seconds)
+
+
+def test_the_pacing_seed_draws_a_first_wait_longer_than_one_slice() -> None:
+    """The cancel tests assert the run slept one full slice and stopped. That holds
+    only while ``_sync``'s seeded first wait is longer than a slice; if a change to
+    the seed or the pacing defaults breaks it, this says so rather than they."""
+    delay = profiles(SETTINGS.pacing).delay
+    first = human_delay(
+        random.Random(PACING_SEED),
+        median=delay.median,
+        sigma=delay.sigma,
+        tail_p=delay.tail_p,
+        tail_range=delay.tail_range,
+    )
+    assert first > 2 * CANCEL_SLICE_S
 
 
 async def test_a_cancel_inside_the_wait_stops_before_the_next_page(
