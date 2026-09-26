@@ -1209,3 +1209,64 @@ async def test_a_run_with_no_lost_answer_has_no_note(
     await _enrich(session_factory, user_id, FakeBrowser.of(people))
     run = _last_run(session_factory, user_id)
     assert run.notes is None and run.counts_json is not None and run.counts_json["lost"] == 0
+
+
+# --- #207 review: Contact info read from a streamed copy ----------------------------------------
+
+
+async def test_a_thin_contact_info_copy_keeps_the_contact_due_and_is_noted_on_the_run(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The overlay's own body is lost, and its whole streamed copy holds no email and no
+    phone. The visit is applied, the contact stays due, and the run says a copy was
+    read."""
+    from flagship_pages import Website, contact_info_payload
+    from profile_site import ProfilePage, ProfileSite
+    from run_fakes import fake_provider
+    from voyager_pages import PEOPLE as CAST
+
+    from netkeeper.linkedin.page_profiles import PageProfiles
+
+    cast = CAST[:2]
+    user_id, ids = _setup(
+        session_factory,
+        [Profile(p.n, p.first, p.last, public_id=p.slug) for p in cast],
+    )
+    thin = contact_info_payload(cast[0], websites=[Website("https://a.example.test/")])
+    lost = Exception(
+        "Protocol error (Network.getResponseBody): No resource with given identifier found"
+    )
+    site = ProfileSite(
+        [
+            ProfilePage(cast[0], overlay=thin, overlay_error=lost, overlay_streamed="whole"),
+            ProfilePage(cast[1]),
+        ],
+        tap=True,
+    )
+    provider, _ = fake_provider(site)
+    async with provider.run("account-1") as run:
+        source = PageProfiles(
+            run, sleep=Sleeps(), landing_wait_s=0.05, lazy_wait_s=0.01, overlay_wait_s=0.05
+        )
+        report = await enrich_contacts(
+            session_factory,
+            user_id,
+            source,
+            settings=SMALL,
+            clock=Clock(),
+            sleep=Sleeps(),
+            rng=random.Random(SEED),
+        )
+    assert report.result.reason is StopReason.END_OF_PLAN
+    assert (report.harvests.applied, report.harvests.kept_due) == (2, 1)
+    copied = next(
+        i
+        for i in ids.values()
+        if _contact(session_factory, user_id, i).li_public_id == cast[0].slug
+    )
+    other = next(i for i in ids.values() if i != copied)
+    assert _contact(session_factory, user_id, copied).last_enriched_at is None
+    assert _contact(session_factory, user_id, other).last_enriched_at is not None
+    run_row = _last_run(session_factory, user_id)
+    assert run_row.notes is not None and "read from streamed copies: visit" in run_row.notes
+    assert run_row.counts_json is not None and run_row.counts_json["copied"] == 1

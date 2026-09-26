@@ -129,8 +129,10 @@ class ProfilePage:
     component_error: Exception | None = None
     #: #203: what the body tap's session receives as a lost overlay or lazy card
     #: streams in, on a site built with ``tap``: ``"whole"`` (the page's own copy),
-    #: ``"half"`` (cut mid-row), ``"rows"`` (cut at a row boundary, so it still parses
-    #: but names a row it never got), or ``"none"`` (Chrome refuses to stream it).
+    #: ``"half"`` (cut mid-row), ``"rows"`` (root first, cut at a row boundary, so it
+    #: still parses but names a row it never got), ``"orphan"`` (whole, plus a row
+    #: nothing reaches), ``"custom"`` (the site's ``custom_copies`` for that body), or
+    #: ``"none"`` (Chrome refuses to stream it).
     overlay_streamed: str = "none"
     component_streamed: str = "none"
     #: #197: the navigation to this profile raises this after the page's answers
@@ -289,6 +291,8 @@ class ProfileSite(FakeContext):
         self.tap = tap
         self.cdp: FakeCdpSession | None = None
         self._request_ids = 0
+        #: What a ``"custom"`` stream receives, by the answer's own body.
+        self.custom_copies: dict[bytes, bytes] = {}
         self.profiles: dict[str, ProfilePage] = {p.person.slug.casefold(): p for p in pages}
         self.profiles.update({k.casefold(): v for k, v in (extra or {}).items()})
         self.tabs: list[ProfileTab] = []
@@ -420,7 +424,7 @@ class ProfileSite(FakeContext):
                 "fetch",
                 request,
                 body_error=page.component_error,
-                streamed=streamed_copy(body, page.component_streamed),
+                streamed=self._copy(body, page.component_streamed),
             )
         if page.tab_after_scroll is not None:
             tab._url = page.tab_after_scroll
@@ -461,10 +465,13 @@ class ProfileSite(FakeContext):
                 "fetch",
                 request,
                 body_error=page.overlay_error,
-                streamed=streamed_copy(page.overlay_body(), page.overlay_streamed),
+                streamed=self._copy(page.overlay_body(), page.overlay_streamed),
             )
         if page.tab_after_click is not None:
             tab._url = page.tab_after_click
+
+    def _copy(self, body: bytes, how: str) -> bytes | None:
+        return self.custom_copies[body] if how == "custom" else streamed_copy(body, how)
 
     def _send(
         self,
@@ -521,13 +528,16 @@ def streamed_copy(body: bytes, how: str) -> bytes | None:
         return body
     if how == "half":
         return body[: len(body) // 2]
-    if how == "rows":
-        # A real flight answer streams row 0 first and the rows it refers to after it;
-        # the fixtures write row 0 last. Put it first, then lose the last row.
+    if how in ("rows", "reordered"):
+        # The fixtures write row 0, the root, last. Put it first ("reordered"), then,
+        # for "rows", lose the last row: a cut that still parses.
         lines = [line for line in body.split(b"\n") if line]
         ordered = [line for line in lines if line.startswith(b"0:")] + [
             line for line in lines if not line.startswith(b"0:")
         ]
-        return b"\n".join(ordered[:-1]) + b"\n"
+        kept = ordered[:-1] if how == "rows" else ordered
+        return b"\n".join(kept) + b"\n"
+    if how == "orphan":
+        return body + b'fff:{"stray":true}\n'
     assert how == "none", how
     return None

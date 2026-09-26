@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from netkeeper.linkedin import flight
-from netkeeper.linkedin.flight import element_props, is_element, parse_flight, references_resolve
+from netkeeper.linkedin.flight import element_props, is_element, is_whole, parse_flight
 from netkeeper.linkedin.voyager import RouteChanged
 
 E = "test/flight"
@@ -101,20 +101,88 @@ def test_the_max_nodes_bound_is_pinned() -> None:
     assert flight.MAX_NODES == 2_000_000
 
 
-# --- whole or cut short (#203) ---------------------------------------------------------------
+# --- whole or cut short (#203, #207 review) ------------------------------------------------
 
 
-def test_references_resolve_to_rows_imports_and_texts() -> None:
-    body = (
-        b'1:I["chunk",[],"TriggerButton"]\n'
-        b"2:T5,hello\n"
-        b'3:["$","p",null,{"children":["$2"]}]\n'
-        b'0:["$","$L1",null,{"children":"$L3","x":"$undefined","y":"$@4","z":"$Sreact.suspense"}]\n'
-    )
-    assert references_resolve(parse_flight(body, endpoint="t"), endpoint="t")
+def _whole(body: bytes) -> bool:
+    return is_whole(parse_flight(body, endpoint="t"), endpoint="t")
 
 
-@pytest.mark.parametrize("ref", ["$L9", "$9", "$1f"])
-def test_a_reference_to_a_row_it_never_got_is_not_whole(ref: str) -> None:
-    body = b'0:["$","div",null,{"children":"' + ref.encode() + b'"}]\n'
-    assert not references_resolve(parse_flight(body, endpoint="t"), endpoint="t")
+#: A small answer written child first, as React's ``outlineModel`` orders rows and the
+#: fixtures write them: every row the root reaches arrives before the root.
+CHILD_FIRST = (
+    b'1:I["chunk",[],"TriggerButton"]\n'
+    b"2:T5,hello\n"
+    b'a:["$","span",null,{"children":["$2"]}]\n'
+    b'b:{"then":"$@c"}\n'
+    b'c:["$","p",null,{"children":["$La"]}]\n'
+    b'3:["$","div",null,{"children":["$Lc","$b:then"]}]\n'
+    b'0:["$","$L1",null,{"children":"$L3","x":"$undefined","y":"$Sreact.suspense","z":"$-0"}]\n'
+)
+
+
+def test_a_whole_answer_is_whole() -> None:
+    assert _whole(CHILD_FIRST)
+
+
+def test_a_root_first_answer_is_whole_too() -> None:
+    lines = CHILD_FIRST.splitlines(keepends=True)
+    assert _whole(lines[-1] + b"".join(lines[:-1]))
+
+
+def _prefixes(body: bytes) -> list[bytes]:
+    lines = body.splitlines(keepends=True)
+    return [b"".join(lines[:cut]) for cut in range(1, len(lines))]
+
+
+@pytest.mark.parametrize("root_first", [False, True])
+def test_every_cut_at_a_row_boundary_is_not_whole(root_first: bool) -> None:
+    """Child first, a cut has no root; root first, a cut names a row it never got."""
+    lines = CHILD_FIRST.splitlines(keepends=True)
+    body = lines[-1] + b"".join(lines[:-1]) if root_first else CHILD_FIRST
+    judged = []
+    for prefix in _prefixes(body):
+        try:
+            judged.append(_whole(prefix))
+        except RouteChanged:
+            judged.append(False)  # no model row at all
+    assert judged and not any(judged)
+
+
+def test_no_root_is_not_whole() -> None:
+    assert not _whole(b'1:["$","div",null,{}]\n')
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "$L9",
+        "$9",
+        "$@9",
+        "$Q9",
+        "$W9",
+        "$K9",
+        "$B9",
+        "$F9",
+        "$R9",
+        "$r9",
+        "$X9",
+        "$x9",
+        "$h9",
+        "$9:props:children",
+    ],
+)
+def test_every_id_bearing_marker_to_a_missing_row_is_not_whole(marker: str) -> None:
+    assert not _whole(b'0:["$","div",null,{"children":"' + marker.encode() + b'"}]\n')
+    assert _whole(b'9:{"x":1}\n0:["$","div",null,{"children":"' + marker.encode() + b'"}]\n')
+
+
+def test_an_orphan_row_is_not_whole() -> None:
+    """A row nothing reaches from the root: a whole answer sends none."""
+    assert not _whole(b'5:{"stray":true}\n0:["$","div",null,{}]\n')
+
+
+def test_the_root_row_and_the_markers_are_pinned() -> None:
+    assert flight.ROOT_ROW == "0"
+    for text in ("$undefined", "$Sreact.suspense", "$-0", "$NaN", "$Infinity", "$D2026", "$n12"):
+        assert flight._ROW_MARKER.fullmatch(text) is None

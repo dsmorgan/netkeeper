@@ -716,6 +716,9 @@ class HarvestCounts:
     missing: int = 0
     unreadable: int = 0
     snapshots: int = 0
+    #: Applied harvests left due again: Contact info read from a streamed copy that
+    #: held no email and no phone (#207 review).
+    kept_due: int = 0
 
     def add(self, result: HarvestResult) -> None:
         setattr(self, result.value, getattr(self, result.value) + 1)
@@ -769,10 +772,12 @@ def apply_harvest(
     sync that sees the contact (:func:`_mark_seen`).
 
     ``last_enriched_at`` is set, and ``enrich_priority`` cleared, only by an
-    applied harvest. An applied harvest does **not** clear ``li_disconnected_at``:
-    a profile that can be looked up is not proof of a connection, and only a
-    sync that sees the contact in the connections list clears it. Nothing is
-    committed; the session must be a writer.
+    applied harvest, and not by one whose Contact info came from a streamed copy
+    and holds no email and no phone (#207 review): that one stays due. An applied
+    harvest does **not** clear ``li_disconnected_at``: a profile that can be
+    looked up is not proof of a connection, and only a sync that sees the contact
+    in the connections list clears it. Nothing is committed; the session must be a
+    writer.
     """
     _require_writer(session)
     counts = HarvestCounts() if counts is None else counts
@@ -834,8 +839,21 @@ def apply_harvest(
         counts.add(HarvestResult.CONFLICT)
         return HarvestResult.CONFLICT
     counts.snapshots += len(contact.snapshots) - before
-    contact.last_enriched_at = harvest.observed_at
-    contact.enrich_priority = 0
+    if harvest.contact_info_from_copy and not info.emails and not info.phones:
+        # #207 review: the overlay came from the body tap's streamed copy, and it
+        # holds no address and no number. The copy passed every check, but a copy cut
+        # short can look like a person who shares nothing: what it had is written,
+        # and the contact stays due, so the next cycle reads the overlay again.
+        log.info(
+            "enrichment: contact %d of user %d kept due: its Contact info came from a"
+            " streamed copy with no email and no phone",
+            contact.id,
+            user.id,
+        )
+        counts.kept_due += 1
+    else:
+        contact.last_enriched_at = harvest.observed_at
+        contact.enrich_priority = 0
     contact.li_not_found_count = 0
     contact.li_not_found_since = None
     contact.li_not_found_at = None

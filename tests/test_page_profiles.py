@@ -61,7 +61,7 @@ from netkeeper.linkedin.enrich import (
 )
 from netkeeper.linkedin.flagship import CONTACT_DETAILS_SCREEN_ID, NAVIGATION_PATH
 from netkeeper.linkedin.flagship_profile import COMPONENT_PATH
-from netkeeper.linkedin.flight import parse_flight, references_resolve
+from netkeeper.linkedin.flight import is_whole, parse_flight
 from netkeeper.linkedin.observe import (
     ObservationFailed,
     ObservationLimits,
@@ -70,6 +70,7 @@ from netkeeper.linkedin.observe import (
 )
 from netkeeper.linkedin.pacing import ScrollPlan, ScrollStep, human_delay, plan_enrichment
 from netkeeper.linkedin.page_profiles import PageProfiles
+from netkeeper.linkedin.voyager import RouteChanged
 
 NOW = datetime(2026, 9, 24, 15, 0, tzinfo=UTC)
 PRIYA, MATEO, HANA, TOMASZ = PEOPLE[0], PEOPLE[1], PEOPLE[2], PEOPLE[3]
@@ -1217,7 +1218,7 @@ async def test_a_lost_lazy_card_reads_from_its_whole_streamed_copy(
     assert "fake-lost-slug" not in caplog.text
 
 
-@pytest.mark.parametrize("how", ["half", "rows", "none"])
+@pytest.mark.parametrize("how", ["half", "rows", "orphan", "none"])
 async def test_a_lost_lazy_card_without_a_whole_copy_is_still_skipped(
     how: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1233,15 +1234,42 @@ async def test_a_lost_lazy_card_without_a_whole_copy_is_still_skipped(
     assert (not_whole in caplog.text) is (how != "none")
 
 
-def test_a_copy_cut_at_a_row_still_parses_and_so_needs_the_reference_check() -> None:
-    """The ``rows`` copy is what the reference check is for: flight that parses whole,
-    short of a row it names."""
-    copy = streamed_copy(experience_payload(LAZY_ROLES), "rows")
-    assert copy is not None
-    payload = parse_flight(copy, endpoint="test")
-    assert not references_resolve(payload, endpoint="test")
-    whole = parse_flight(experience_payload(LAZY_ROLES), endpoint="test")
-    assert references_resolve(whole, endpoint="test")
+@pytest.mark.parametrize("body", ["card", "overlay"])
+def test_every_row_cut_of_a_fixture_parses_or_not_but_is_never_whole(body: str) -> None:
+    """The fixtures write rows child first, root last, as React's ``outlineModel``
+    does; ``rows`` reorders them root first. Either way no cut copy is whole."""
+    whole = (
+        experience_payload(LAZY_ROLES)
+        if body == "card"
+        else contact_info_payload(PRIYA, emails=["priya.fake@example.test"])
+    )
+    assert is_whole(parse_flight(whole, endpoint="test"), endpoint="test")
+    for ordered in (whole, streamed_copy(whole, "reordered")):
+        assert ordered is not None
+        lines = ordered.splitlines(keepends=True)
+        for cut in range(1, len(lines)):
+            prefix = b"".join(lines[:cut])
+            try:
+                payload = parse_flight(prefix, endpoint="test")
+            except RouteChanged:
+                continue
+            assert not is_whole(payload, endpoint="test"), (body, cut)
+
+
+async def test_a_cut_overlay_copy_before_its_email_row_is_never_read() -> None:
+    """The #207 review's case: child rows first, cut before the email's row. The copy
+    parses, and without the root would have read as a person who shares nothing."""
+    overlay = contact_info_payload(PRIYA, emails=[f"{PRIYA.slug}@example.test"])
+    lines = overlay.splitlines(keepends=True)
+    email_row = next(i for i, line in enumerate(lines) if b"mailto:" in line)
+    cut = b"".join(lines[:email_row])
+    site = ProfileSite(
+        [ProfilePage(PRIYA, overlay=overlay, overlay_error=LOST, overlay_streamed="custom")],
+        tap=True,
+    )
+    site.custom_copies[overlay] = cut
+    out = await visit(site, [target(PRIYA)])
+    assert out.outcomes == [Outcome.ROUTE_CHANGED] and out.harvests[0].contact_info is None
 
 
 async def test_a_lost_overlay_reads_from_its_whole_streamed_copy() -> None:
@@ -1254,9 +1282,12 @@ async def test_a_lost_overlay_reads_from_its_whole_streamed_copy() -> None:
     info = out.harvests[0].contact_info
     assert info is not None and info.emails == (f"{PRIYA.slug}@example.test",)
     assert [slug for slug, _, _ in site.clicks] == [PRIYA.slug, MATEO.slug]
+    # The harvest says its Contact info came from a copy, and the run notes it.
+    assert [h.contact_info_from_copy for h in out.harvests] == [True, False]
+    assert out.result.copied == ("visit 1: the Contact info was read from a streamed copy",)
 
 
-@pytest.mark.parametrize("how", ["half", "rows", "none"])
+@pytest.mark.parametrize("how", ["half", "rows", "orphan", "none"])
 async def test_a_lost_overlay_without_a_whole_copy_is_still_unreadable(how: str) -> None:
     site = ProfileSite([ProfilePage(PRIYA, overlay_error=LOST, overlay_streamed=how)], tap=True)
     out = await visit(site, [target(PRIYA)])
