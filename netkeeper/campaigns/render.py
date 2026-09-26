@@ -1,34 +1,45 @@
 """Template rendering and lint (spec 11.1; item P3-03). Pure: no session, no I/O.
 
+The allowlist
+-------------
+A message template is text with merge fields in it, so the template language
+it gets is the small part of Jinja that needs, and nothing else. Every node of
+a parsed template must be on :data:`ALLOWED_NODES`, checked by one walker
+(:func:`_walk`) that runs at save time as lint and again before every render:
+
+- text and ``{{ }}`` output; names; literals that are text (at most
+  :data:`MAX_LITERAL_CHARS`), whole numbers, true, false and none;
+- ``me.<key>``, ``campaign.name`` and ``step.number``, the only attributes;
+- the filters in :data:`ALLOWED_FILTERS` and the tests in :data:`ALLOWED_TESTS`,
+  with ``truncate``'s length at most :data:`MAX_TRUNCATE_LENGTH`;
+- ``{% if %}`` and ``x if y else z``; comparisons, ``in``, ``and``, ``or``,
+  ``not``; ``~`` to join text; ``*`` and ``+`` on whole numbers.
+
+Anything else is an error (:attr:`LintRule.UNSUPPORTED`, or
+:attr:`LintRule.ATTRIBUTE_ACCESS` and :attr:`LintRule.UNSAFE_ATTRIBUTE` for
+the attribute cases) and the render refuses it outright: ``with``, ``for``,
+``set``, ``macro``, ``call``, ``filter`` and ``autoescape`` blocks, lists,
+tuples, dicts, calls, subscripts, slices, the other operators, every other
+filter (``tojson``, ``pprint``, ``attr``...) and the name ``self``. An
+allowlist rather than a list of refusals, so a construct nobody thought of is
+refused by default.
+
 The sandbox
 -----------
-Every template renders in :class:`jinja2.sandbox.ImmutableSandboxedEnvironment`,
-changed so that it cannot be walked out of and cannot be made to run long or
-allocate much. A preview renders inside the shared server, and the P3-06
-worker will render on every send.
+What the allowlist lets through renders in
+:class:`jinja2.sandbox.ImmutableSandboxedEnvironment`, which bounds it a second
+time. A preview renders inside the shared server, and the P3-06 worker will
+render on every send.
 
-- Access to an unsafe attribute *raises*. The stock sandbox returns an
-  undefined value that prints as an empty string, so ``{{ ''.__class__ }}``
-  would render as nothing and look harmless. Here it fails the render
-  (:class:`TemplateRenderError`), and lint refuses any ``_``-prefixed name
-  before a template is ever rendered (:attr:`LintRule.UNSAFE_ATTRIBUTE`).
-- No globals. ``range``, ``cycler``, ``joiner``, ``namespace``, ``dict`` and
-  ``lipsum`` are gone, so the only names a template can reach are the merge
-  fields below; anything else is :attr:`LintRule.UNDEFINED_VARIABLE`.
-- No control structures that repeat or define: ``for``, ``macro``, ``call``,
-  ``set``, ``block``, ``include``, ``extends``, ``import``, and the name
-  ``self`` are refused by lint and by the render (:attr:`LintRule.UNSUPPORTED`).
-  Merge fields are scalars, so a message has nothing to loop over; without
-  loops and recursion a render's work is bounded by the template's length.
-- Every operation that can make a value much larger than its inputs is
-  bounded. ``*`` on a string or list, the ``center``, ``indent``,
-  ``truncate``, ``replace``, ``join`` and ``wordwrap`` filters all draw on one
-  budget of :data:`MAX_OUTPUT_CHARS` per render; ``**`` is capped at
-  :data:`MAX_POWER_BITS`; ``%`` string formatting, ``str.format``, and the
-  ``batch``, ``slice`` and ``format`` filters are gone. A method call on a
-  value is allowed only for methods whose result is no larger than the value
-  (:data:`BOUNDED_ATTRIBUTES`), and the output stops at
-  :data:`MAX_OUTPUT_CHARS`. Hitting any of these is a :class:`TemplateRenderError`.
+- Access to an unsafe attribute raises. The stock sandbox prints it as "".
+- No globals, and only the allowlisted filters and tests exist.
+- ``*`` and ``+`` refuse anything but whole numbers, and a product or sum
+  larger than :data:`MAX_INT_BITS` bits.
+- Text only grows through ``~`` and filters, and each counts its result
+  against one budget of :data:`MAX_OUTPUT_CHARS` per render as the value is
+  built; the output stops at the same limit. The compiler is changed to route
+  ``~`` through the environment (:class:`_CodeGenerator`), since Jinja joins
+  it in a module-level function the sandbox never sees.
 - Merge values are data, never template source. A contact whose name is
   ``{{ me.name }}`` (imported data is not trusted) renders that text literally.
 - The rendered subject is one line: CR, LF and the other line breaks become
@@ -47,22 +58,20 @@ Merge fields (spec 11.1)
 
 A field with no value renders as an empty string and adds a
 :attr:`LintRule.MISSING_VALUE` *warning* to the render. It never raises,
-whatever the template does with it: arithmetic, comparison, a method call, or
-a filter such as ``int`` or ``round`` (:class:`_Missing`). So
-``{{ company | default("your team") }}`` and ``{% if company %}`` work as they
-would for any undefined value.
+whatever an allowed template does with it (:class:`_Missing`): arithmetic
+gives no value, a comparison or ``in`` is false, and ``default`` and
+``{% if %}`` work as they would for any undefined value.
 
 Lint
 ----
 :func:`lint` runs at save time over the template text alone. Every rule it
 applies is an error, and :func:`has_errors` is what blocks activation:
 
-- :attr:`LintRule.SYNTAX`: the template does not compile (this includes an
-  unknown filter).
-- :attr:`LintRule.UNSUPPORTED`: a construct the sandbox refuses (above).
-- :attr:`LintRule.UNSAFE_ATTRIBUTE`: a ``_``-prefixed attribute or key.
-- :attr:`LintRule.ATTRIBUTE_ACCESS`: an attribute or method of anything but
-  ``me``, ``campaign`` and ``step``. Merge fields are plain values.
+- :attr:`LintRule.SYNTAX`: the template does not parse.
+- :attr:`LintRule.UNSUPPORTED`: anything off the allowlist.
+- :attr:`LintRule.UNSAFE_ATTRIBUTE`: a ``_``-prefixed attribute.
+- :attr:`LintRule.ATTRIBUTE_ACCESS`: an attribute of anything but ``me``,
+  ``campaign`` and ``step``. Merge fields are plain values.
 - :attr:`LintRule.UNDEFINED_VARIABLE`: a name that is not a merge field.
 - :attr:`LintRule.NO_CONTACT_FIELD`: a body that names no per-contact field.
   Identical bulk mail is a spam signal.
@@ -76,8 +85,10 @@ contact, and links that came out broken once merge values were filled in.
 from __future__ import annotations
 
 import enum
+import functools
+import operator
 import re
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from functools import partial
@@ -85,19 +96,13 @@ from types import SimpleNamespace
 from typing import Any, Final
 from urllib.parse import urlsplit
 
-from jinja2 import (
-    ChainableUndefined,
-    TemplateError,
-    TemplateSyntaxError,
-    nodes,
-    pass_environment,
-    pass_eval_context,
-)
-from jinja2.environment import Environment
+from jinja2 import ChainableUndefined, TemplateError, TemplateSyntaxError, nodes
+from jinja2.compiler import CodeGenerator, Frame
 from jinja2.exceptions import FilterArgumentError, SecurityError
-from jinja2.nodes import EvalContext
+from jinja2.filters import FILTERS
 from jinja2.runtime import Context, Undefined
 from jinja2.sandbox import ImmutableSandboxedEnvironment
+from jinja2.tests import TESTS
 
 from netkeeper.config import MeSettings
 from netkeeper.models.campaigns import TemplateChannel
@@ -131,45 +136,87 @@ NAMESPACE_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
 
 SCALAR_FIELDS: Final = frozenset((*CONTACT_FIELDS, PERSONAL_LINE, PREVIOUS_SEND_DATE))
 
+NUMBER_FIELDS: Final = frozenset({"connected_year", "years_since_connected", "step.number"})
+"""The merge fields that hold whole numbers, the only ones ``*`` and ``+`` accept."""
+
 MAX_OUTPUT_CHARS: Final = 100_000
-"""The most one render may produce, and the budget its amplifying operations share."""
+"""The most one render may produce, and the budget text-building operations share."""
 
-MAX_POWER_BITS: Final = 10_000
-"""The largest integer ``**`` may make, in bits: enough for any real use, cheap to compute."""
+MAX_INT_BITS: Final = 10_000
+"""The largest whole number ``*`` or ``+`` may make, in bits: about 3,000 digits."""
 
-BOUNDED_ATTRIBUTES: Final = frozenset(
+MAX_LITERAL_CHARS: Final = 1_000
+"""The longest text literal a template may contain."""
+
+MAX_TRUNCATE_LENGTH: Final = 1_000
+"""The largest length ``truncate`` may be given."""
+
+MAX_NESTING: Final = 50
+"""The deepest a template's tree may go. ``a * b * c`` nests one level per term, and Python's
+own compiler refuses a template nested past about 200 (and gets slow well before that)."""
+
+ALLOWED_NODES: Final[frozenset[type[nodes.Node]]] = frozenset(
     {
-        # str methods whose result is no larger than the string
-        "capitalize", "casefold", "count", "endswith", "find", "index", "isalnum",
-        "isalpha", "isdigit", "islower", "isspace", "istitle", "isupper", "lower",
-        "lstrip", "partition", "removeprefix", "removesuffix", "rfind", "rindex",
-        "rpartition", "rsplit", "rstrip", "split", "splitlines", "startswith",
-        "strip", "swapcase", "title", "upper",
-        # date parts
-        "day", "month", "year", "isoformat", "weekday", "isoweekday",
+        nodes.Template,
+        nodes.Output,
+        nodes.TemplateData,
+        nodes.Name,
+        nodes.Const,
+        nodes.Getattr,  # on me, campaign and step only
+        nodes.Filter,  # ALLOWED_FILTERS only
+        nodes.Test,  # ALLOWED_TESTS only
+        nodes.Keyword,  # a filter's or test's keyword argument
+        nodes.If,
+        nodes.CondExpr,
+        nodes.Compare,
+        nodes.Operand,
+        nodes.And,
+        nodes.Or,
+        nodes.Not,
+        nodes.Concat,
+        nodes.Mul,  # whole numbers only
+        nodes.Add,  # whole numbers only
     }
-)  # fmt: skip
-"""What a template may reach on a merge value at render. Lint refuses all of them anyway
-(:attr:`LintRule.ATTRIBUTE_ACCESS`); this bounds what a preview of a template with lint
-errors can do."""
+)
+"""Every node type a template may contain. Checked by exact type, never by subclass."""
 
-# Constructs lint and the render refuse: each either repeats, defines, or reaches for
-# another template, and a message built from scalar merge fields needs none of them.
-_REFUSED_NODES: Final[Mapping[type[nodes.Node], str]] = {
+ALLOWED_FILTERS: Final = frozenset(
+    {"default", "upper", "lower", "title", "capitalize", "trim", "truncate", "ago"}
+)
+ALLOWED_TESTS: Final = frozenset(
+    {"defined", "undefined", "none", "number", "string", "even", "odd", "divisibleby"}
+)
+
+# How a refused node is named in a lint message. Anything not here goes by its class name.
+_NODE_NAMES: Final[Mapping[type[nodes.Node], str]] = {
     nodes.For: "for",
+    nodes.With: "with",
     nodes.Macro: "macro",
     nodes.CallBlock: "call",
     nodes.Assign: "set",
     nodes.AssignBlock: "set",
+    nodes.FilterBlock: "filter",
+    nodes.ScopedEvalContextModifier: "autoescape",
+    nodes.EvalContextModifier: "autoescape",
     nodes.Block: "block",
     nodes.Extends: "extends",
     nodes.Include: "include",
     nodes.Import: "import",
     nodes.FromImport: "import",
+    nodes.List: "list",
+    nodes.Tuple: "tuple",
+    nodes.Dict: "dict",
+    nodes.Call: "call",
+    nodes.Getitem: "subscript",
+    nodes.Slice: "slice",
+    nodes.Sub: "-",
+    nodes.Div: "/",
+    nodes.FloorDiv: "//",
+    nodes.Mod: "%",
+    nodes.Pow: "**",
+    nodes.Neg: "unary -",
+    nodes.Pos: "unary +",
 }
-# Filters with no bounded use in a message: ``batch`` and ``slice`` pad to a size the
-# template chooses, and ``format`` takes widths.
-_REMOVED_FILTERS: Final = ("batch", "slice", "format")
 # Every line break a header could be split on.
 _LINE_BREAKS = re.compile(r"[\r\n\x0b\x0c\x1c-\x1e\x85\u2028\u2029]+")
 
@@ -272,13 +319,18 @@ class Rendered:
 
 
 class TemplateRenderError(Exception):
-    """The template cannot be rendered: it does not compile, uses a construct the sandbox
-    refuses, reached past the sandbox, or went over a size limit."""
+    """The template cannot be rendered: it does not parse, uses something off the allowlist,
+    reached past the sandbox, or went over a size limit."""
 
 
 # Rules whose templates the render refuses outright, rather than rendering with the error.
 _RENDER_REFUSES: Final = frozenset(
-    {LintRule.SYNTAX, LintRule.UNSUPPORTED, LintRule.UNSAFE_ATTRIBUTE}
+    {
+        LintRule.SYNTAX,
+        LintRule.UNSUPPORTED,
+        LintRule.UNSAFE_ATTRIBUTE,
+        LintRule.ATTRIBUTE_ACCESS,
+    }
 )
 
 
@@ -296,10 +348,10 @@ class _Missing(ChainableUndefined):
     """A merge field with no value. It renders as "" and never raises (P3-03 done-when).
 
     :class:`jinja2.ChainableUndefined` already survives attribute and item
-    lookups; this also survives what a template does with a value: arithmetic
-    and unary operators give itself back, so does calling it (a method of a
-    missing field) and ``round``; ordering comparisons are false; ``int``,
-    ``float`` and ``abs`` give 0.
+    lookups; this also survives what an allowed template does with a value.
+    Arithmetic gives itself back, ordering comparisons are false, and ``in``
+    with it on either side is false (:meth:`_Sandbox.compare`, since ``in``
+    asks the right-hand side, which a missing field cannot answer for).
     """
 
     __slots__ = ()
@@ -312,8 +364,8 @@ class _Missing(ChainableUndefined):
 
     # jinja2 types each of these on Undefined as raising (``-> Never``); not raising is
     # this class's whole purpose, so each override is a deliberate break with that type.
-    __add__ = __radd__ = __sub__ = __rsub__ = _self  # type: ignore[assignment]
-    __mul__ = __rmul__ = __truediv__ = __rtruediv__ = _self  # type: ignore[assignment]
+    __add__ = __radd__ = __mul__ = __rmul__ = _self  # type: ignore[assignment]
+    __sub__ = __rsub__ = __truediv__ = __rtruediv__ = _self  # type: ignore[assignment]
     __floordiv__ = __rfloordiv__ = __mod__ = __rmod__ = __pow__ = __rpow__ = _self  # type: ignore[assignment]
     __pos__ = __neg__ = __call__ = __round__ = _self  # type: ignore[assignment]
     __lt__ = __le__ = __gt__ = __ge__ = _false  # type: ignore[assignment]
@@ -331,10 +383,46 @@ class _Missing(ChainableUndefined):
         return 0
 
 
+_ORDERING: Final[Mapping[str, Callable[[Any, Any], Any]]] = {
+    "eq": operator.eq,
+    "ne": operator.ne,
+    "gt": operator.gt,
+    "gteq": operator.ge,
+    "lt": operator.lt,
+    "lteq": operator.le,
+}
+
+
+class _CodeGenerator(CodeGenerator):
+    """Jinja's compiler, with ``~`` and comparisons routed through the environment.
+
+    Stock Jinja compiles ``a ~ b`` to a module-level ``str_join`` and ``a in b`` to
+    Python's own ``in``; the sandbox sees neither. Here they call
+    :meth:`_Sandbox.join_text`, which counts the text against the budget as it is
+    built, and :meth:`_Sandbox.compare`, which lets a missing field answer ``in``.
+    """
+
+    def visit_Concat(self, node: nodes.Concat, frame: Frame) -> None:
+        self.write("environment.join_text((")
+        for arg in node.nodes:
+            self.visit(arg, frame)
+            self.write(", ")
+        self.write("))")
+
+    def visit_Compare(self, node: nodes.Compare, frame: Frame) -> None:
+        self.write("environment.compare(")
+        self.visit(node.expr, frame)
+        for op in node.ops:
+            self.write(f", {op.op!r}, ")
+            self.visit(op.expr, frame)
+        self.write(")")
+
+
 class _Sandbox(ImmutableSandboxedEnvironment):
     """The sandbox (see the module docstring). One per render: it carries the budget."""
 
-    intercepted_binops = frozenset({"*", "**", "%"})
+    code_generator_class = _CodeGenerator
+    intercepted_binops = frozenset({"*", "+"})
 
     def __init__(self, **options: Any) -> None:
         super().__init__(**options)
@@ -346,6 +434,24 @@ class _Sandbox(ImmutableSandboxedEnvironment):
         if self.budget < 0:
             raise SecurityError(f"{what} would take the output past {MAX_OUTPUT_CHARS} characters")
 
+    def join_text(self, values: tuple[Any, ...]) -> str:
+        text = "".join(str(value) for value in values)
+        self.spend(len(text), "joining text with ~")
+        return text
+
+    def compare(self, left: Any, *rest: Any) -> bool:
+        for op, right in zip(rest[::2], rest[1::2], strict=True):
+            if op in ("in", "notin"):
+                missing = isinstance(left, Undefined) or isinstance(right, Undefined)
+                found = False if missing else left in right
+                result = found if op == "in" else not found
+            else:
+                result = bool(_ORDERING[op](left, right))
+            if not result:
+                return False
+            left = right
+        return True
+
     def unsafe_undefined(self, obj: Any, attribute: str) -> Undefined:
         # The stock sandbox returns an undefined value here, which prints as "".
         raise SecurityError(
@@ -353,129 +459,49 @@ class _Sandbox(ImmutableSandboxedEnvironment):
         )
 
     def is_safe_attribute(self, obj: Any, attr: str, value: Any) -> bool:
-        if not super().is_safe_attribute(obj, attr, value):
-            return False
-        if isinstance(obj, SimpleNamespace | Undefined):
-            return True  # me, campaign, step; or a field with no value
-        return attr in BOUNDED_ATTRIBUTES
+        # Only me, campaign and step have attributes; a missing field answers any.
+        return isinstance(obj, SimpleNamespace | Undefined) and super().is_safe_attribute(
+            obj, attr, value
+        )
 
     def wrap_str_format(self, value: Any) -> Callable[..., str] | None:
-        # A format spec takes a width, and the sandbox's own formatter honors it.
+        # Unreachable while only namespaces have attributes; kept so it stays refused.
         if super().wrap_str_format(value) is not None:
             raise SecurityError("str.format is refused")
         return None
 
     def call_binop(self, context: Context, operator: str, left: Any, right: Any) -> Any:
-        if operator == "*":
-            for sequence, times in ((left, right), (right, left)):
-                if isinstance(sequence, str | list | tuple) and isinstance(times, int):
-                    self.spend(len(sequence) * times, "repeating a value")
-        elif operator == "**":
-            if (
-                isinstance(left, int)
-                and isinstance(right, int)
-                and right > 0
-                and abs(left) > 1
-                and left.bit_length() * right > MAX_POWER_BITS
-            ):
-                raise SecurityError(f"a power larger than {MAX_POWER_BITS} bits is refused")
-        elif operator == "%" and isinstance(left, str):
-            raise SecurityError("% string formatting is refused")
+        for value in (left, right):
+            if not isinstance(value, int | Undefined):
+                raise SecurityError(
+                    f"{operator} is for whole numbers only; join text with ~ instead"
+                )
+        if isinstance(left, int) and isinstance(right, int):
+            bits = left.bit_length() + right.bit_length()
+            if bits > MAX_INT_BITS:
+                raise SecurityError(f"a number larger than {MAX_INT_BITS} bits is refused")
         return super().call_binop(context, operator, left, right)
 
 
-def _bound_filters(env: _Sandbox) -> None:
-    """Replace the filters that can widen a value with ones that spend the budget first."""
-    stock = dict(env.filters)
-    for name in _REMOVED_FILTERS:
-        del env.filters[name]
+def _counted(env: _Sandbox, name: str, func: Callable[..., Any]) -> Callable[..., Any]:
+    """``func`` as a filter whose text result is counted against the render's budget."""
 
-    def center(value: Any, width: int = 80) -> Any:
-        if isinstance(value, Undefined):
-            return value
-        if isinstance(width, int):
-            env.spend(width, "center")
-        return stock["center"](value, width)
+    @functools.wraps(func)  # copies jinja_pass_arg, so Jinja still passes what it needs
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        result = func(*args, **kwargs)
+        if isinstance(result, str):
+            env.spend(len(result), f"the {name} filter")
+        return result
 
-    def indent(s: Any, width: int | str = 4, first: bool = False, blank: bool = False) -> Any:
-        if isinstance(s, Undefined):
-            return s
-        text = str(s)
-        pad = width if isinstance(width, int) else len(str(width))
-        env.spend(len(text) + pad * (text.count("\n") + 1), "indent")
-        return stock["indent"](s, width, first, blank)
-
-    @pass_environment
-    def truncate(
-        environment: Environment,
-        s: Any,
-        length: int = 255,
-        killwords: bool = False,
-        end: str = "...",
-        leeway: int | None = None,
-    ) -> Any:
-        if isinstance(s, Undefined):
-            return s
-        env.spend(min(len(str(s)), max(length, 0)) + len(str(end)), "truncate")
-        return stock["truncate"](environment, s, length, killwords, end, leeway)
-
-    @pass_eval_context
-    def replace(eval_ctx: EvalContext, s: Any, old: Any, new: Any, count: int | None = None) -> Any:
-        if isinstance(s, Undefined):
-            return s
-        text, old_text, new_text = str(s), str(old), str(new)
-        hits = len(text) + 1 if not old_text else text.count(old_text)
-        if count is not None and count >= 0:
-            hits = min(hits, count)
-        env.spend(len(text) + hits * (len(new_text) - len(old_text)), "replace")
-        return stock["replace"](eval_ctx, s, old, new, count)
-
-    @pass_eval_context
-    def join(
-        eval_ctx: EvalContext, value: Iterable[Any], d: str = "", attribute: Any = None
-    ) -> Any:
-        if isinstance(value, Undefined):
-            return value
-        items = list(value)
-        size = sum(len(str(item)) for item in items) + len(str(d)) * max(len(items) - 1, 0)
-        env.spend(size, "join")
-        return stock["join"](eval_ctx, items, d, attribute)
-
-    @pass_environment
-    def wordwrap(
-        environment: Environment,
-        s: Any,
-        width: int = 79,
-        break_long_words: bool = True,
-        wrapstring: str | None = None,
-        break_on_hyphens: bool = True,
-    ) -> Any:
-        if isinstance(s, Undefined):
-            return s
-        text = str(s)
-        separator = environment.newline_sequence if wrapstring is None else str(wrapstring)
-        # Words can leave a line half empty, so a line holds at least width // 2 characters.
-        lines = 2 * len(text) // max(width, 1) + text.count("\n") + 1
-        env.spend(len(text) + len(separator) * lines, "wordwrap")
-        return stock["wordwrap"](
-            environment, s, width, break_long_words, wrapstring, break_on_hyphens
-        )
-
-    env.filters.update(
-        center=center,
-        indent=indent,
-        truncate=truncate,
-        replace=replace,
-        join=join,
-        wordwrap=wordwrap,
-    )
+    return counted
 
 
 def _environment(today: date) -> _Sandbox:
     env = _Sandbox(undefined=_Missing, autoescape=False, keep_trailing_newline=True)
     env.globals.clear()
-    _bound_filters(env)
-    env.filters["ago"] = partial(ago, today=today)
+    stock: dict[str, Callable[..., Any]] = {**FILTERS, "ago": partial(ago, today=today)}
+    env.filters = {name: _counted(env, name, stock[name]) for name in ALLOWED_FILTERS}
+    env.tests = {name: TESTS[name] for name in ALLOWED_TESTS}
     return env
 
 
@@ -551,13 +577,172 @@ class _Analysis:
             self.references.append(name)
 
 
-def _static_key(node: nodes.Getattr | nodes.Getitem) -> str | None:
-    """The attribute or string key a lookup names, or None when it is computed."""
+def _node_name(node: nodes.Node) -> str:
+    return _NODE_NAMES.get(type(node), type(node).__name__.lower())
+
+
+def _is_number(node: nodes.Node) -> bool:
+    """True for an operand ``*`` and ``+`` accept: a whole number, as far as lint can tell."""
+    if isinstance(node, nodes.Const):
+        return isinstance(node.value, int)  # bool is an int too
+    if isinstance(node, nodes.Name):
+        return node.name in NUMBER_FIELDS
     if isinstance(node, nodes.Getattr):
-        return node.attr
-    if isinstance(node.arg, nodes.Const) and isinstance(node.arg.value, str):
-        return node.arg.value
-    return None
+        return isinstance(node.node, nodes.Name) and f"{node.node.name}.{node.attr}" in (
+            NUMBER_FIELDS
+        )
+    return type(node) in (nodes.Mul, nodes.Add)
+
+
+class _Walker:
+    """Checks one part's tree against the allowlist, and collects the fields it names."""
+
+    def __init__(self, analysis: _Analysis, part: Part, me_keys: Collection[str]) -> None:
+        self.analysis = analysis
+        self.part = part
+        self.allowed: dict[str, Collection[str]] = {
+            **NAMESPACE_FIELDS,
+            "me": (*ME_FIELDS, *me_keys),
+        }
+
+    def refuse(self, node: nodes.Node, what: str, name: str | None) -> None:
+        self.analysis.error(
+            LintRule.UNSUPPORTED,
+            self.part,
+            f"line {node.lineno}: {what} is not available in a message template",
+            name,
+        )
+
+    def walk(self, node: nodes.Node, parent: nodes.Node | None, depth: int = 0) -> None:
+        kind = type(node)
+        if depth > MAX_NESTING:
+            self.refuse(node, f"nesting deeper than {MAX_NESTING} levels", "nesting")
+            return
+        if kind not in ALLOWED_NODES:
+            name = _node_name(node)
+            label = f"`{name}`" if kind in _NODE_NAMES else f"`{name}` ({kind.__name__})"
+            self.refuse(node, label, name)
+            return  # its insides are refused with it
+        if isinstance(node, nodes.Keyword) and not isinstance(parent, nodes.Filter | nodes.Test):
+            self.refuse(node, "a keyword argument", "keyword")
+            return
+        if isinstance(node, nodes.Name):
+            self.name(node)
+            return
+        if isinstance(node, nodes.Const):
+            self.const(node)
+            return
+        if isinstance(node, nodes.Getattr):
+            self.getattr(node)
+            return
+        if isinstance(node, nodes.Filter | nodes.Test) and not self.filter_or_test(node):
+            return
+        if isinstance(node, nodes.Mul | nodes.Add):
+            for operand in (node.left, node.right):
+                if not _is_number(operand):
+                    self.refuse(
+                        node,
+                        f"`{node.operator}` on something other than a whole number "
+                        "(join text with ~)",
+                        node.operator,
+                    )
+                    break
+        for child in node.iter_child_nodes():
+            self.walk(child, node, depth + 1)
+
+    def name(self, node: nodes.Name) -> None:
+        name = node.name
+        if node.ctx != "load":
+            self.refuse(node, f"assigning `{name}`", name)
+        elif name == "self":
+            self.refuse(node, "`self`", name)
+        elif name in SCALAR_FIELDS:
+            self.analysis.refer(name)
+        elif name in self.allowed:
+            self.analysis.error(
+                LintRule.UNDEFINED_VARIABLE,
+                self.part,
+                f"`{name}` is a group of fields; name one, like "
+                f"`{name}.{NAMESPACE_FIELDS[name][0]}`",
+                name,
+            )
+        else:
+            self.analysis.error(
+                LintRule.UNDEFINED_VARIABLE, self.part, f"`{name}` is not a merge field", name
+            )
+
+    def const(self, node: nodes.Const) -> None:
+        value = node.value
+        if isinstance(value, str):
+            if len(value) > MAX_LITERAL_CHARS:
+                self.refuse(node, f"text longer than {MAX_LITERAL_CHARS} characters", "text")
+        elif isinstance(value, int):
+            if value.bit_length() > MAX_INT_BITS:
+                self.refuse(node, f"a number larger than {MAX_INT_BITS} bits", "number")
+        elif value is not None:
+            self.refuse(node, f"a {type(value).__name__} value", type(value).__name__)
+
+    def getattr(self, node: nodes.Getattr) -> None:
+        key = node.attr
+        base = node.node
+        if key.startswith("_"):
+            self.analysis.error(
+                LintRule.UNSAFE_ATTRIBUTE,
+                self.part,
+                f"`{key}`: names starting with _ are refused",
+                key,
+            )
+        elif not isinstance(base, nodes.Name) or base.name not in self.allowed:
+            dotted = f"{base.name}.{key}" if isinstance(base, nodes.Name) else key
+            self.analysis.error(
+                LintRule.ATTRIBUTE_ACCESS,
+                self.part,
+                f"`{dotted}`: merge fields are plain values, with no attributes or methods",
+                dotted,
+            )
+        elif key not in self.allowed[base.name]:
+            dotted = f"{base.name}.{key}"
+            self.analysis.error(
+                LintRule.UNDEFINED_VARIABLE, self.part, f"`{dotted}` is not a merge field", dotted
+            )
+        else:
+            self.analysis.refer(f"{base.name}.{key}")
+
+    def filter_or_test(self, node: nodes.Filter | nodes.Test) -> bool:
+        """False when ``node`` is refused, so the walk does not go into it."""
+        is_filter = isinstance(node, nodes.Filter)
+        allowed = ALLOWED_FILTERS if is_filter else ALLOWED_TESTS
+        what = "filter" if is_filter else "test"
+        if node.name not in allowed:
+            self.refuse(node, f"the `{node.name}` {what}", node.name)
+            return False
+        if node.dyn_args is not None or node.dyn_kwargs is not None:
+            self.refuse(node, f"`*args` or `**kwargs` in the `{node.name}` {what}", node.name)
+            return False
+        if node.name == "truncate":
+            length = node.args[0] if node.args else None
+            for keyword in node.kwargs:
+                if keyword.key == "length":
+                    length = keyword.value
+            if length is not None and not (
+                isinstance(length, nodes.Const)
+                and isinstance(length.value, int)
+                and length.value <= MAX_TRUNCATE_LENGTH
+            ):
+                self.refuse(
+                    node,
+                    f"a `truncate` length that is not a number up to {MAX_TRUNCATE_LENGTH}",
+                    "truncate",
+                )
+                return False
+        return True
+
+
+def refused_nodes(source: str) -> Iterator[str]:
+    """The name of every node in ``source`` the allowlist refuses; for tests and tooling."""
+    for issue in lint(TemplateChannel.LINKEDIN, None, source, ()):
+        if issue.rule is LintRule.UNSUPPORTED and issue.field is not None:
+            yield issue.field
 
 
 def _analyse(source: str, part: Part, me_keys: Collection[str]) -> _Analysis:
@@ -565,106 +750,27 @@ def _analyse(source: str, part: Part, me_keys: Collection[str]) -> _Analysis:
     env = _environment(date.min)
     try:
         tree = env.parse(source)
-        env.compile(source)  # parsing alone accepts an unknown filter
     except TemplateSyntaxError as exc:
         analysis.error(LintRule.SYNTAX, part, f"line {exc.lineno}: {exc.message}")
         analysis.compiled = False
         return analysis
-    for node_type, tag in _REFUSED_NODES.items():
-        for refused in tree.find_all(node_type):
-            analysis.error(
-                LintRule.UNSUPPORTED,
-                part,
-                f"line {refused.lineno}: `{tag}` is not available in a message template",
-                tag,
-            )
-
-    lookups = [
-        node
-        for node in tree.find_all((nodes.Getattr, nodes.Getitem))
-        if isinstance(node, nodes.Getattr | nodes.Getitem)
-    ]
-    attr_filters = [node for node in tree.find_all(nodes.Filter) if isinstance(node, nodes.Filter)]
-    attr_filters = [node for node in attr_filters if node.name == "attr"]
-    # ``x | attr("__class__")`` is a lookup too; the sandbox refuses it at render.
-    attr_names = [
-        use.args[0].value
-        for use in attr_filters
-        if use.args and isinstance(use.args[0], nodes.Const) and isinstance(use.args[0].value, str)
-    ]
-    for key in [_static_key(lookup) for lookup in lookups] + attr_names:
-        if key is not None and key.startswith("_"):
-            analysis.error(
-                LintRule.UNSAFE_ATTRIBUTE, part, f"`{key}`: names starting with _ are refused", key
-            )
-
-    looked_into = {id(lookup.node) for lookup in lookups}
-    allowed: dict[str, Collection[str]] = {**NAMESPACE_FIELDS, "me": (*ME_FIELDS, *me_keys)}
-
-    for node in tree.find_all(nodes.Name):
-        if not isinstance(node, nodes.Name) or node.ctx != "load":
-            continue  # a name being assigned, which only a refused construct does
-        name = node.name
-        if name == "self":
-            analysis.error(
-                LintRule.UNSUPPORTED,
-                part,
-                f"line {node.lineno}: `self` is not available in a message template",
-                name,
-            )
-        elif name in SCALAR_FIELDS:
-            analysis.refer(name)
-        elif name in allowed:
-            if id(node) not in looked_into:
-                analysis.error(
-                    LintRule.UNDEFINED_VARIABLE,
-                    part,
-                    f"`{name}` is a group of fields; name one, like "
-                    f"`{name}.{NAMESPACE_FIELDS[name][0]}`",
-                    name,
-                )
-        else:
-            analysis.error(
-                LintRule.UNDEFINED_VARIABLE, part, f"`{name}` is not a merge field", name
-            )
-
-    for lookup in lookups:
-        base = lookup.node
-        key = _static_key(lookup)
-        if isinstance(base, nodes.Name) and base.name in allowed:
-            if key is None:
-                analysis.error(
-                    LintRule.UNDEFINED_VARIABLE,
-                    part,
-                    f"`{base.name}[...]` needs the field name written out",
-                    base.name,
-                )
-            elif key.startswith("_"):
-                continue  # reported as unsafe
-            elif key not in allowed[base.name]:
-                dotted = f"{base.name}.{key}"
-                analysis.error(
-                    LintRule.UNDEFINED_VARIABLE, part, f"`{dotted}` is not a merge field", dotted
-                )
-            else:
-                analysis.refer(f"{base.name}.{key}")
-        elif key is not None and not key.startswith("_"):
-            # An index (``first_name[0]``) is a plain value's own; an attribute is not.
-            dotted = f"{base.name}.{key}" if isinstance(base, nodes.Name) else key
-            analysis.error(
-                LintRule.ATTRIBUTE_ACCESS,
-                part,
-                f"`{dotted}`: merge fields are plain values, with no attributes or methods",
-                dotted,
-            )
-    for use in attr_filters:
-        analysis.error(
-            LintRule.ATTRIBUTE_ACCESS,
-            part,
-            f"line {use.lineno}: the `attr` filter is not available in a message template",
-            "attr",
-        )
-
+    except RecursionError:
+        analysis.error(LintRule.SYNTAX, part, "the template nests too deeply to read")
+        analysis.compiled = False
+        return analysis
+    except ValueError as exc:  # a number literal past Python's int conversion limit
+        analysis.error(LintRule.SYNTAX, part, f"the template does not parse: {exc}")
+        analysis.compiled = False
+        return analysis
+    _Walker(analysis, part, me_keys).walk(tree, None)
+    if not has_errors(analysis.issues):
+        # The allowlist and the nesting limit should leave nothing for this to find.
+        try:
+            env.compile(source)
+        except TemplateSyntaxError as exc:
+            analysis.error(LintRule.SYNTAX, part, f"line {exc.lineno}: {exc.message}")
+        except (SyntaxError, RecursionError) as exc:
+            analysis.error(LintRule.SYNTAX, part, f"the template does not compile: {exc}")
     for link in _bad_links(_text_with_placeholders(env, source)):
         analysis.error(LintRule.BAD_LINK, part, f"`{link}` is not a link that parses", link)
     return analysis
