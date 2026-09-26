@@ -138,6 +138,25 @@ def position_key(company: str | None, title: str | None, started_on: date | None
     return (_fold(company), _fold(title), started_on)
 
 
+#: The only schemes a stored link may name.
+LINK_SCHEMES: Final = frozenset({"http", "https"})
+
+#: A URL's scheme, as a browser reads one: a letter, then letters, digits, ``+``, ``-``,
+#: or ``.``, then ``:``.
+_SCHEME: Final = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*):")
+
+#: What a browser's URL parser drops before it reads a scheme: leading and trailing C0
+#: controls and spaces, and every tab and newline anywhere (``java\tscript:``).
+_URL_STRIPPED: Final = "".join(chr(n) for n in range(0x21))
+_URL_REMOVED: Final = str.maketrans("", "", "\t\n\r")
+
+
+def link_scheme(url: str) -> str | None:
+    """The scheme a browser would read off ``url``, lower-cased, or ``None`` for none."""
+    match = _SCHEME.match(url.strip(_URL_STRIPPED).translate(_URL_REMOVED))
+    return match.group(1).lower() if match is not None else None
+
+
 def _clean(value: str | None) -> str | None:
     """Trim; empty becomes None, which every incoming field reads as "not provided"."""
     if value is None:
@@ -209,7 +228,13 @@ class IncomingPhone:
 
 @dataclass(frozen=True, slots=True)
 class IncomingLink:
-    """A URL as a source reports it, trimmed; the URL itself is the natural key."""
+    """A URL as a source reports it, trimmed; the URL itself is the natural key.
+
+    A URL that names a scheme must name ``http`` or ``https`` (#206 review): a link is
+    rendered as an ``href``, and ``javascript:``, ``data:`` and the like would run or
+    show something rather than open a site. A URL with no scheme (``example.test``) is
+    kept as a source gave it.
+    """
 
     url: str
     kind: LinkKind = LinkKind.OTHER
@@ -218,6 +243,9 @@ class IncomingLink:
         url = _clean(self.url)
         if url is None:
             raise ValueError("link url is empty")
+        scheme = link_scheme(url)
+        if scheme is not None and scheme not in LINK_SCHEMES:
+            raise ValueError("a link must be an http or https url")
         object.__setattr__(self, "url", url)
         object.__setattr__(self, "kind", LinkKind(self.kind))
 

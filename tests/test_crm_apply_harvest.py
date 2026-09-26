@@ -9,6 +9,7 @@ NotFound streak that must not mark anyone gone early.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -677,3 +678,17 @@ def test_every_address_the_overlay_shows_is_kept_the_first_as_primary(
         ("priya.first@example.test", True),
         ("priya.second@example.test", False),
     ]
+
+
+def test_a_website_that_is_not_http_is_never_stored(
+    writer: Session, user: User, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#206 review: the parser keeps only http and https sites; this boundary holds
+    even for a source that did not."""
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    contact = _stored(writer, user, MATEO)
+    sites = ("javascript:alert(1)", " Data:text/html,x", "https://mateo.example.test/")
+    apply_harvest(writer, user, _harvest(contact, replace(MATEO, websites=sites)))
+    assert [link.url for link in contact.links] == ["https://mateo.example.test/"]
+    assert caplog.text.count("skipped a website that is not an http or https url") == 2
+    assert "javascript" not in caplog.text

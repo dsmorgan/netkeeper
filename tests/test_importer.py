@@ -320,6 +320,15 @@ def test_a_phone_number_with_no_digits_is_dropped_and_named() -> None:
     assert "has no digits" in (mapped.problem_text or "")
 
 
+@pytest.mark.parametrize("website", ["javascript:alert(1)", " DATA:text/html,x", "vbscript:x"])
+def test_a_website_that_is_not_http_is_dropped_and_named(website: str) -> None:
+    """#206 review: a link is rendered as an href, so no other scheme is stored."""
+    mapped = map_row(row(first_name="Hortensia", website=website), MAPPING)
+    assert mapped.incoming is not None
+    assert mapped.incoming.links == ()
+    assert "is not an http or https url" in (mapped.problem_text or "")
+
+
 def test_a_url_that_is_not_a_linkedin_profile_is_dropped_and_named() -> None:
     mapped = map_row(row(first_name="Hortensia", profile_url="https://tarnish.example/h"), MAPPING)
     assert mapped.incoming is not None

@@ -5,6 +5,7 @@ import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { safeHref } from '@/lib/safe-href'
 
 import {
   addEmail,
@@ -156,14 +157,7 @@ export function ContactChildren({ contact }: { contact: ContactDetail }) {
           {contact.links.length === 0 && <li className="text-muted-foreground">None.</li>}
           {contact.links.map((link) => (
             <li key={link.id} className="flex items-center gap-2">
-              <a
-                href={link.url}
-                target="_blank"
-                rel="noreferrer noopener"
-                className="min-w-0 truncate underline-offset-4 hover:underline"
-              >
-                {link.url}
-              </a>
+              <LinkUrl url={link.url} />
               <Badge variant="ghost">{link.kind}</Badge>
               <Button
                 size="icon-xs"
@@ -208,5 +202,23 @@ export function ContactChildren({ contact }: { contact: ContactDetail }) {
 
       <WriteError error={write.error} />
     </div>
+  )
+}
+
+/** A stored link: an href only when it is http or https, else plain text (#206 review). */
+function LinkUrl({ url }: { url: string }) {
+  const href = safeHref(url)
+  if (href === null) {
+    return <span className="min-w-0 truncate">{url}</span>
+  }
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer noopener"
+      className="min-w-0 truncate underline-offset-4 hover:underline"
+    >
+      {url}
+    </a>
   )
 }

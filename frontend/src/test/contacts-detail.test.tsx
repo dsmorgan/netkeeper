@@ -288,6 +288,35 @@ describe('contact detail', () => {
     expect(seen.some((entry) => entry.method === 'DELETE')).toBe(true)
   })
 
+  it('renders only an http or https link as an href, anything else as plain text', async () => {
+    const unsafe = [
+      'javascript:alert(1)',
+      ' JavaScript:alert(1)',
+      'data:text/html;base64,PHNjcmlwdD4=',
+      'vbscript:msgbox(1)',
+      '//evil.example.test/x',
+    ]
+    const links = ['https://example.test/ada', ...unsafe].map((url, index) => ({
+      id: 100 + index,
+      url,
+      kind: 'website' as const,
+      source: 'csv' as const,
+      observed_at: '2026-01-02T09:00:00Z',
+    }))
+    serveContact(contactDetail({ links }))
+    await renderApp('/contacts/1')
+
+    expect(await screen.findByRole('link', { name: 'https://example.test/ada' })).toHaveAttribute(
+      'href',
+      'https://example.test/ada',
+    )
+    for (const url of unsafe) {
+      const shown = screen.getByText(url.trim())
+      expect(shown.closest('a')).toBeNull()
+      expect(screen.queryByRole('link', { name: url.trim() })).toBeNull()
+    }
+  })
+
   it('shows a plain message when the contact cannot be loaded', async () => {
     mockApi((request) => {
       const { pathname } = new URL(request.url)
