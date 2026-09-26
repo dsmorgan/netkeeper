@@ -535,7 +535,7 @@ class Interaction(ContactChild, Base):
     summary: Mapped[str | None] = mapped_column(Text)
     # The campaign message this interaction records, when there is one (P3-04). SET NULL:
     # the timeline entry outlives it. The guards read it to tell a campaign's own
-    # earlier step from other contact (spec 11.9, netkeeper.campaigns.guards).
+    # earlier step from other contact (spec 11.9, netkeeper.services.campaign_guards).
     message_id: Mapped[int | None] = mapped_column(
         ForeignKey("messages.id", ondelete="SET NULL"), index=True
     )

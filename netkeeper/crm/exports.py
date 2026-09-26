@@ -107,6 +107,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import ColumnElement, Select, and_
 from sqlalchemy.orm import Session, selectinload
 
+from netkeeper.crm.contacts import sendable_email
 from netkeeper.crm.filters import FilterTree, SortKey, apply_sort, compile_filter, paginate
 from netkeeper.crm.identity import phone_key
 from netkeeper.models import Contact, EmailStatus, User
@@ -214,12 +215,11 @@ def _sendable_email(contact: Contact) -> str | None:
     bounced" (#77). An ``invalid`` address is still exported: the guard names
     bounces only, and the maintainer confirmed keeping it (#215). The
     re-importable presets keep :func:`_primary_email`, bounced or not, by the
-    same decision: they are a copy of the data, not a send list.
+    same decision: they are a copy of the data, not a send list. The campaign
+    guards refuse ``invalid`` too (#226); a file is not a send.
     """
-    for email in contact.emails:
-        if email.status != EmailStatus.BOUNCED:
-            return email.email
-    return None
+    email = sendable_email(contact, refuse=(EmailStatus.BOUNCED,))
+    return None if email is None else email.email
 
 
 def _primary_phone(contact: Contact) -> str | None:
