@@ -598,8 +598,19 @@ def test_campaign_audience_keeps_a_contact_whose_only_address_bounced_without_it
     assert row["linkedin_profile_url"] == contact.li_url
 
 
+def test_campaign_audience_still_exports_an_invalid_address(session: Session) -> None:
+    """Only ``bounced`` is held out; ``invalid`` stays, by the maintainer's decision (#215)."""
+    user = factories.make_user(session)
+    contact = factories.make_contact(session, user, emails=["invalid@example.test"])
+    contact.emails[0].status = EmailStatus.INVALID
+    session.commit()
+
+    (row,) = json.loads(_run(session, user, preset="campaign-audience", output_format="json"))
+    assert row["email"] == "invalid@example.test"
+
+
 def test_re_importable_presets_still_carry_a_bounced_primary(session: Session) -> None:
-    """Only the send-list preset filters bounces; nine-column is a copy of the data."""
+    """Only the send-list preset filters bounces; nine-column is a copy of the data (#215)."""
     user = factories.make_user(session)
     contact = factories.make_contact(session, user, emails=["bounced@example.test"])
     contact.emails[0].status = EmailStatus.BOUNCED

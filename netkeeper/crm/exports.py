@@ -211,8 +211,10 @@ def _sendable_email(contact: Contact) -> str | None:
     ``Contact.emails`` is ordered ``is_primary DESC, id ASC``, so this is the
     primary unless the primary bounced. A mail-merge file is a send path by
     proxy, and spec 11.9 guards every send on "channel address present and not
-    bounced" (#77). The re-importable presets keep :func:`_primary_email`: they
-    are a copy of the data, not a send list.
+    bounced" (#77). An ``invalid`` address is still exported: the guard names
+    bounces only, and the maintainer confirmed keeping it (#215). The
+    re-importable presets keep :func:`_primary_email`, bounced or not, by the
+    same decision: they are a copy of the data, not a send list.
     """
     for email in contact.emails:
         if email.status is not EmailStatus.BOUNCED:
