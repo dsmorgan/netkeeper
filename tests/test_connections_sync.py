@@ -850,6 +850,46 @@ async def test_a_full_sync_that_aged_as_usual_does_not_warn(
     assert aging.warnings == () and "aged as usual" in aging.value
 
 
+# --- #204: a full sync a little short of LinkedIn's total still completes ----------------
+
+
+async def test_a_shortfall_within_the_slack_still_completes_and_ages(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """96 of a claimed 100: the slack for a total of 100 is 5, so 4 short still completes."""
+    people = _many(96)
+    fetch = FakeConnectionsSource(people, total=100)
+
+    report = await _sync(session_factory, user_id, fetch)
+
+    assert fetch.starts == [0, 40, 80, 96]
+    assert report.result.complete and report.result.shortfall == 4
+    assert report.aging is not None and report.aging.missed == 0
+    run = _run_row(session_factory, user_id, report.run_id)
+    assert (run.status, run.stop_reason) == (SyncRunStatus.COMPLETED, "end_of_list")
+    assert run.counts_json is not None
+    assert run.counts_json["shortfall"] == 4 and run.counts_json["complete"] is True
+    assert run.notes == "complete with 4 short of LinkedIn's total."
+
+
+async def test_a_shortfall_past_the_slack_keeps_todays_behavior(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """94 of a claimed 100: 6 short is past the slack of 5, so nothing changes (#204)."""
+    people = _many(94)
+    fetch = FakeConnectionsSource(people, total=100)
+
+    report = await _sync(session_factory, user_id, fetch)
+
+    assert not report.result.complete and report.result.shortfall == 6
+    assert report.aging is None
+    run = _run_row(session_factory, user_id, report.run_id)
+    assert (run.status, run.stop_reason) == (SyncRunStatus.COMPLETED, "end_of_list")
+    assert run.counts_json is not None
+    assert run.counts_json["shortfall"] == 6 and run.counts_json["complete"] is False
+    assert run.notes is None
+
+
 class CancelsOnFirstWait(Sleeps):
     """Asks the running run to stop during the first wait between two pages."""
 

@@ -44,23 +44,30 @@ request that comes back empty. The page budget bounds all of it.
 
 **Completion.** :attr:`SyncResult.complete` is true only for a full sync that
 ended on a short page with every page ``Ok``, that lost none of the page's
-answers (#200), whose pages reported a total
-above zero, and that saw at least as many distinct connections as the
-*largest* total any page reported. Only a complete full sync may age contacts
-it did not see (spec 9.8); an aborted one saw part of the list, and treating
-the rest as gone is how a network gets deleted. The total is the one number
-the run cannot check for itself, so it is read as the least it must have
-seen, never as permission to stop: a total of 0 (or none at all) proves
+answers (#200), whose pages reported a total above zero, and that saw at
+least the *largest* total any page reported, minus a small slack (#204): the
+larger of 5 and one percent of that total, rounded up. LinkedIn's own total
+can count people the list itself never serves (a deactivated account, say),
+so a run that reaches a natural end a few short of it is still complete,
+short by no more than the slack; :attr:`SyncResult.shortfall` is how far it
+fell, and the run's note and ``counts_json`` record it when it is not zero.
+Short by more than the slack keeps the run incomplete, as it always was.
+Only a complete full sync may age contacts it did not see (spec 9.8); an
+aborted one saw part of the list, and treating the rest as gone is how a
+network gets deleted. The total is the one number the run cannot check for
+itself, so it is read as the least it must have seen (give or take that
+slack), never as permission to stop: a total of 0 (or none at all) proves
 nothing and completes nothing, and a trailing empty page reporting a smaller
 total cannot lower the bar an earlier page set. The count check catches the
 ways to end "at the end" having seen part of a list: a short or empty page
 served before the reported total (a list the site stops paging early), and a
 list that grew during the run (a connection added at the top pushes every row
-down one, so the run sees one person fewer than the new total). Because the
-bar is the *largest* total, a connection removed mid-run is caught too: later
-rows move up one and the row at the next page boundary is never served, but
-the total the first page reported still counts that person, so the run falls
-one short. The price is that a sync during which the list changed at all is
+down one, so the run sees one person fewer than the new total) -- past the
+slack's tolerance, not within it. Because the bar is the *largest* total, a
+connection removed mid-run is caught the same way: later rows move up one
+and the row at the next page boundary is never served, but the total the
+first page reported still counts that person, so the run falls short. The
+price is that a sync during which the list changed by more than the slack is
 incomplete and ages nobody that week; the next one catches up.
 
 **The source seam.** The job reads pages through a :class:`ConnectionsSource`.
@@ -81,6 +88,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -236,6 +244,22 @@ class ProgressEvent:
     stopped: StopReason | None = None
 
 
+def completion_slack(total: int) -> int:
+    """The most a full sync's distinct count may fall short of ``total`` and still
+    complete (#204): the larger of 5 and one percent of ``total``, rounded up.
+
+    LinkedIn's stated total can count people the connections list itself never
+    serves (a deactivated account, for instance), so a run that reaches a natural
+    end need not match the total exactly. A small network gets the floor of 5
+    rather than a fraction of a person; a large one gets roughly its own one
+    percent. Only :attr:`SyncResult.complete` reads this -- the end-of-list rule
+    for a short final page (the module docstring's "The end of the list") is
+    unchanged: a page short of a full page still reads on past the total exactly
+    as before, and only the completion decision at the end gets this slack.
+    """
+    return max(5, math.ceil(total * 0.01))
+
+
 @dataclass(frozen=True, slots=True)
 class SyncResult:
     """How a run ended, and what it saw.
@@ -247,6 +271,8 @@ class SyncResult:
     :attr:`StopReason.RESPONSE` (the core raises heat or the session flag from
     them), and are ``None`` otherwise. ``total`` is the last page's reported
     total and ``max_total`` the largest any page reported (0 before any page).
+    :attr:`shortfall` is how far ``seen_urns`` fell short of ``max_total``; a
+    full sync may still be :attr:`complete` with a small one (#204).
     ``source_switched`` is true when any page of this run came from a source that
     had fallen back to a secondary one (folded from
     :attr:`SourcePage.switched`, spec 9.3/P2-08's #173 review, F5(a)) --
@@ -273,23 +299,37 @@ class SyncResult:
     losses: tuple[LostAnswer, ...] = ()
 
     @property
-    def complete(self) -> bool:
-        """A full sync that read the whole list: the only run that may age anyone (spec 9.8).
+    def shortfall(self) -> int:
+        """How many fewer distinct connections were seen than :attr:`max_total` claimed.
 
-        Ended at the end of the list, the list claimed to hold someone, the run saw
-        at least as many people as the largest total any page claimed, and no page
-        of this run ever came from a source that had fallen back (``source_switched``) --
-        the simple invariant #173's review asks for, on top of (not instead of) the
-        totals check: once DOM has ever answered for this run, nothing it reported
-        can be trusted enough to call the run complete, whatever the totals math
-        alone would say. A run that lost any of the page's answers (#200) is never
-        complete either: it read on past them, and whoever was on them went unseen.
+        0 once ``seen_urns`` reaches ``max_total``, and never negative. Used by
+        :attr:`complete` to allow a small shortfall through (#204): LinkedIn's total
+        can count people the list itself never serves, so a run a few short of it
+        at a natural end need not be treated as having missed part of the list.
+        """
+        return max(0, self.max_total - len(self.seen_urns))
+
+    @property
+    def complete(self) -> bool:
+        """A full sync that read the whole list, give or take a slack: the only run
+        that may age anyone (spec 9.8).
+
+        Ended at the end of the list, the list claimed to hold someone, the run's
+        :attr:`shortfall` is no more than :func:`completion_slack` of the largest
+        total any page claimed (#204), and no page of this run ever came from a
+        source that had fallen back (``source_switched``) -- the simple invariant
+        #173's review asks for, on top of (not instead of) the totals check: once
+        DOM has ever answered for this run, nothing it reported can be trusted
+        enough to call the run complete, whatever the totals math alone would say.
+        A run that lost any of the page's answers (#200) is never complete either:
+        it read on past them, and whoever was on them went unseen. A shortfall past
+        the slack keeps the run incomplete, exactly as an exact mismatch always did.
         """
         return (
             self.mode is SyncMode.FULL
             and self.reason is StopReason.END_OF_LIST
             and self.max_total > 0
-            and len(self.seen_urns) >= self.max_total
+            and self.shortfall <= completion_slack(self.max_total)
             and not self.source_switched
             and not self.losses
         )

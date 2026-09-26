@@ -267,30 +267,33 @@ async def test_a_page_at_an_offset_nobody_asked_for_is_a_changed_route() -> None
 
 
 async def test_an_empty_page_before_the_total_is_not_complete() -> None:
-    """A list that stops paging short of its own total ends the run but ages nobody."""
-    empty_early = _page([], start=6, total=10)
-    source = FakeConnectionsSource(list(PEOPLE), script={2: empty_early})
+    """A list that stops paging well short of its own total ends the run but ages
+    nobody: the gap here (94) is far past #204's slack for a total of 100 (5)."""
+    empty_early = _page([], start=6, total=100)
+    source = FakeConnectionsSource(list(PEOPLE), total=100, script={2: empty_early})
 
     result, _, _ = await _run(source)
 
     assert source.starts == [0, 3, 6]
     assert result.reason is StopReason.END_OF_LIST
-    assert len(result.seen_urns) == 6 and result.total == 10
+    assert len(result.seen_urns) == 6 and result.total == 100
+    assert result.shortfall == 94 > job.completion_slack(100)
     assert not result.complete
 
 
 async def test_a_list_that_grew_during_the_run_is_not_complete() -> None:
-    """A connection accepted mid-run lands at the top, behind the run: seen 10 of 11."""
-    people = list(PEOPLE)
+    """More connections accepted mid-run than #204's slack allows land at the top,
+    behind the run: 6 newcomers, never read, is past the slack for a total of 106 (5)."""
+    people = _hundred()
     source = FakeConnectionsSource(people)
-    newcomer = Person(111, "Zanele", "Oyelaran", "Analyst at Pretend Freight", 1_701_000_000_000)
+    newcomers = [Person(700 + i, f"New{i}", f"Comer{i}", None, 1_701_000_000_000) for i in range(6)]
 
     async def grow(page: ConnectionsPage) -> None:
         if page.number == 0:
-            people.insert(0, newcomer)
+            people[:0] = newcomers
 
     result = await run_connections_sync(
-        SyncJobSpec(mode=SyncMode.FULL, page_budget=50, page_size=3),
+        SyncJobSpec(mode=SyncMode.FULL, page_budget=50, page_size=40),
         source,
         Gate(),
         on_page=grow,
@@ -298,32 +301,33 @@ async def test_a_list_that_grew_during_the_run_is_not_complete() -> None:
     )
 
     assert result.reason is StopReason.END_OF_LIST
-    assert newcomer.urn not in result.seen_urns
-    assert result.seen_urns == {person.urn for person in PEOPLE}
-    assert result.total == 11
+    assert not any(newcomer.urn in result.seen_urns for newcomer in newcomers)
+    assert result.max_total == 106
+    assert result.shortfall == 6 > job.completion_slack(106)
     assert not result.complete
 
 
 async def test_a_removal_during_the_run_is_caught_by_the_largest_total() -> None:
-    """A removal skips a row at a page boundary; the first page's total still counts it."""
-    people = list(PEOPLE)
+    """More removals than #204's slack allows skip a gap at a page boundary; the first
+    page's larger total still counts them, past the slack for that total (100) of 5."""
+    people = _hundred()
     source = FakeConnectionsSource(people)
 
-    async def remove_a_seen_one(page: ConnectionsPage) -> None:
+    async def remove_seen_ones(page: ConnectionsPage) -> None:
         if page.number == 0:
-            del people[0]
+            del people[:6]
 
     result = await run_connections_sync(
-        SyncJobSpec(mode=SyncMode.FULL, page_budget=50, page_size=3),
+        SyncJobSpec(mode=SyncMode.FULL, page_budget=50, page_size=40),
         source,
         Gate(),
-        on_page=remove_a_seen_one,
+        on_page=remove_seen_ones,
         clock=lambda: NOW,
     )
 
-    assert PEOPLE[3].urn not in result.seen_urns  # moved up to offset 2, already read
     assert result.reason is StopReason.END_OF_LIST
-    assert (len(result.seen_urns), result.total, result.max_total) == (9, 9, 10)
+    assert (len(result.seen_urns), result.max_total) == (94, 100)
+    assert result.shortfall == 6 > job.completion_slack(100)
     assert not result.complete
 
 
@@ -493,6 +497,84 @@ async def test_an_honest_trailing_empty_page_reporting_zero_still_completes() ->
     result, _, _ = await _run(source, page_size=40)
     assert source.starts == [0, 40, 80]
     assert result.complete
+
+
+# --- the completion slack (#204) ------------------------------------------------------
+# LinkedIn's own total can count people the connections list itself never serves, so a
+# full sync that reaches a natural end a little short of it is still complete. These
+# use the same "a total that lies" mechanism above -- a fixed total above the real,
+# invented list -- to land the run's shortfall exactly on a boundary of the slack
+# (the larger of 5 and one percent of the total, rounded up).
+
+
+def _many(n: int) -> list[Person]:
+    """``n`` invented people, numbered from a range no other fixture here uses."""
+    return [Person(5000 + i, f"Slack{i}", f"Person{i}", None) for i in range(n)]
+
+
+async def test_a_shortfall_exactly_at_the_slack_still_completes() -> None:
+    """1000 claimed, 990 seen: the slack is max(5, ceil(1%)) = 10, exactly the gap."""
+    source = FakeConnectionsSource(_many(990), total=1000)
+
+    result, _, _ = await _run(source, page_size=40)
+
+    assert job.completion_slack(1000) == 10
+    assert len(result.seen_urns) == 990 and result.shortfall == 10
+    assert result.reason is StopReason.END_OF_LIST
+    assert result.complete
+
+
+async def test_a_shortfall_one_past_the_slack_is_not_complete() -> None:
+    """989 seen of the same claimed 1000: one connection short of what the slack allows."""
+    source = FakeConnectionsSource(_many(989), total=1000)
+
+    result, _, _ = await _run(source, page_size=40)
+
+    assert result.shortfall == 11
+    assert result.reason is StopReason.END_OF_LIST
+    assert not result.complete
+
+
+async def test_a_small_total_floors_the_slack_at_five() -> None:
+    """20 claimed: one percent of it is under one, so the slack is the floor of 5, not 1."""
+    source = FakeConnectionsSource(_many(15), total=20)
+
+    result, _, _ = await _run(source, page_size=4)
+
+    assert job.completion_slack(20) == 5
+    assert result.shortfall == 5
+    assert result.reason is StopReason.END_OF_LIST
+    assert result.complete
+
+
+async def test_a_small_total_one_past_the_floored_slack_is_not_complete() -> None:
+    source = FakeConnectionsSource(_many(14), total=20)
+
+    result, _, _ = await _run(source, page_size=4)
+
+    assert result.shortfall == 6
+    assert not result.complete
+
+
+async def test_the_slack_rounds_a_fractional_percent_up() -> None:
+    """622, the run's own claimed total (#31 run 8): one percent of it is 6.22, and the
+    slack rounds that up to 7, not down to 6 -- 615 seen is exactly at it."""
+    source = FakeConnectionsSource(_many(615), total=622)
+
+    result, _, _ = await _run(source, page_size=40)
+
+    assert job.completion_slack(622) == 7
+    assert result.shortfall == 7
+    assert result.complete
+
+
+async def test_the_slack_rounds_a_fractional_percent_up_and_stops_one_past_it() -> None:
+    source = FakeConnectionsSource(_many(614), total=622)
+
+    result, _, _ = await _run(source, page_size=40)
+
+    assert result.shortfall == 8
+    assert not result.complete
 
 
 # --- a short page in the middle of the list ------------------------------------------
