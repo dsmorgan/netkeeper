@@ -36,7 +36,7 @@ from flagship_site import (
 from run_fakes import fake_provider
 from voyager_pages import PEOPLE, Person
 
-from netkeeper.linkedin import page_connections
+from netkeeper.linkedin import flagship, page_connections
 from netkeeper.linkedin.browser import BrowserRun, BrowserUnavailable, ScrollOutcome
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import (
@@ -246,6 +246,42 @@ async def test_a_large_lists_slack_is_its_own_one_percent_at_the_end_of_the_list
     assert ends.result.reason is StopReason.END_OF_LIST and ends.result.complete
     stops = await sync(FlagshipSite(many(620), end="short", total=628))
     assert stops.result.outcome is Outcome.ROUTE_CHANGED and not stops.result.complete
+
+
+async def test_no_slack_when_no_answer_has_asked_for_a_next_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#208 review, M1: LinkedIn renames the next request's ``$type``, so the parser
+    reads no next page on any answer while the page keeps paging. Every full answer
+    then looks like a possible end. Without a next request seen earlier in the run,
+    the slack must not apply: 40 of 44 is not the end, and the run reads on to the
+    short last page and every person, rather than completing early without the tail."""
+    monkeypatch.setattr(flagship, "_next_start", lambda payload, *, endpoint: None)
+    people = many(44)
+    out = await sync(FlagshipSite(people, end="short"))
+    assert out.result.reason is StopReason.END_OF_LIST and out.result.complete
+    assert out.urns == [p.urn for p in people]
+
+
+async def test_no_slack_on_a_drifted_parser_with_hidden_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same drift at 620 visible of 624: with no next request ever read, the full
+    last answer proves nothing, and the run stops rather than complete."""
+    monkeypatch.setattr(flagship, "_next_start", lambda payload, *, endpoint: None)
+    out = await sync(FlagshipSite(many(620), end="short", total=624))
+    assert out.result.outcome is Outcome.ROUTE_CHANGED and not out.result.complete
+
+
+async def test_a_repeated_card_near_the_end_does_not_count_toward_the_slack() -> None:
+    """#208 review, L2: the list shifts near its end, so the last answer (start 30)
+    repeats person 29 and never shows person 39. 39 distinct people of 45 is one
+    short of the slack (5); counting the repeated card would make it 40 and end the
+    list early."""
+    people = many(40)
+    shifted = Answer(body=pagination_payload(people[29:39], start=30, next_start=None))
+    out = await sync(FlagshipSite(people, end="short", total=45, answers={30: shifted}))
+    assert out.result.outcome is Outcome.ROUTE_CHANGED and not out.result.complete
 
 
 async def test_seeing_the_total_does_not_make_a_stalled_page_the_end() -> None:
@@ -1043,6 +1079,20 @@ async def test_a_lost_full_last_answer_is_rescued_when_the_copy_and_the_total_pr
     out = await sync(site)
     assert out.result.reason is StopReason.END_OF_LIST and out.result.complete
     assert out.urns == [p.urn for p in people]
+
+
+async def test_a_copy_within_the_slack_but_short_of_the_total_is_not_used() -> None:
+    """#208 review, L1: the rescue stays strict. 40 visible under a total of 44; the
+    full last answer (30-39) is lost and the page goes quiet. Its copy asks for
+    nothing, and 40 is within completion_slack(44) of the total, but a copy must
+    account for every place the total names, so it is not used: the stall after the
+    loss stops the run as answer_lost."""
+    site = FlagshipSite(
+        many(40), end="short", total=44, tap=True, lost={30: Lost("silent", streamed="whole")}
+    )
+    out = await sync(site)
+    assert out.result.reason is StopReason.ANSWER_LOST and not out.result.complete
+    assert out.result.lost is not None and out.result.lost.start == 30
 
 
 async def test_the_places_of_an_answer_read_past_count_toward_a_stall_rescue() -> None:
