@@ -10,6 +10,7 @@ import threading
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from gmail_fakes import CLIENT_ID, CLIENT_SECRET, FAKE_EMAIL, FakeGoogle, MemoryKeyring
@@ -58,18 +59,20 @@ def _browser(fake: FakeGoogle, monkeypatch: pytest.MonkeyPatch, **consent: str) 
     """Replace the URL's presentation with a person who allows access. Returns the URLs shown."""
     shown: list[str] = []
 
-    def follow(redirect: str) -> None:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(redirect, timeout=5) as response:
-            response.read()
-
     def present(url: str) -> None:
         shown.append(url)
         answer = fake.deny(url) if consent.get("deny") else fake.consent(url, **consent)
-        threading.Thread(target=follow, args=(answer,), daemon=True).start()
+        threading.Thread(target=_follow, args=(answer,), daemon=True).start()
 
     monkeypatch.setattr(cli_module, "_present_authorization_url", present)
     return shown
+
+
+def _follow(redirect: str) -> None:
+    """Be the browser Google sends back to the loopback receiver."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(redirect, timeout=5) as response:
+        response.read()
 
 
 def test_client_stores_the_downloaded_file(
@@ -196,3 +199,53 @@ def test_a_second_account_is_refused(
     result = runner.invoke(cli, ["gmail", "login"])
     assert result.exit_code == 1
     assert f"gmail disconnect {FAKE_EMAIL}" in result.output
+
+
+def test_login_refuses_an_answer_for_another_login(
+    cli_db: sessionmaker[Session],
+    client_file: Path,
+    fake_google: FakeGoogle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redirect whose ``state`` is not this login's is never exchanged (#256)."""
+
+    def forged(url: str) -> None:
+        answer = fake_google.consent(url)
+        state = parse_qs(urlsplit(answer).query)["state"][0]
+        threading.Thread(
+            target=_follow, args=(answer.replace(state, "someone-elses-state"),), daemon=True
+        ).start()
+
+    monkeypatch.setattr(cli_module, "_present_authorization_url", forged)
+    result = runner.invoke(cli, ["gmail", "login", "--client-file", str(client_file)])
+    assert result.exit_code == 1
+    assert "(state)" in result.output
+    assert ("/token", "authorization_code") not in fake_google.requests
+    assert "no mailboxes" in runner.invoke(cli, ["gmail", "status"]).output
+
+
+def test_login_never_prints_the_code_or_a_token(
+    cli_db: sessionmaker[Session],
+    client_file: Path,
+    fake_google: FakeGoogle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answers: list[str] = []
+
+    def present(url: str) -> None:
+        answers.append(fake_google.consent(url))
+        threading.Thread(target=_follow, args=(answers[-1],), daemon=True).start()
+
+    monkeypatch.setattr(cli_module, "_present_authorization_url", present)
+    result = runner.invoke(cli, ["gmail", "login", "--client-file", str(client_file)])
+    assert result.exit_code == 0, result.output
+    [answer] = answers
+    [refresh_token] = fake_google.refresh_tokens
+    shown = (
+        parse_qs(urlsplit(answer).query)["code"][0],
+        refresh_token,
+        *fake_google.access_tokens,
+        CLIENT_SECRET,
+    )
+    for secret in shown:
+        assert secret not in result.output

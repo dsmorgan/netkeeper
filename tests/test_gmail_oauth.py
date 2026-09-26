@@ -1,8 +1,10 @@
 """The Gmail installed-app OAuth flow against a loopback fake of Google (#244, P3-01)."""
 
 import base64
+import dataclasses
 import hashlib
 import json
+import logging
 import threading
 import urllib.request
 from urllib.parse import parse_qs, urlsplit
@@ -260,3 +262,76 @@ def test_the_receiver_hands_back_the_redirects_query_and_ignores_other_paths() -
 def test_the_receiver_gives_up_after_its_timeout() -> None:
     with LoopbackReceiver() as receiver, pytest.raises(TimeoutError):
         receiver.wait(0.05)
+
+
+# --- nothing secret reaches a log (#256) ---------------------------------------------
+
+
+def test_the_receiver_listens_on_loopback_only() -> None:
+    with LoopbackReceiver() as receiver:
+        assert receiver._server.server_address[0] == "127.0.0.1"
+
+
+def test_the_receiver_never_logs_the_request_line(
+    capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The request line carries the code; a 404 goes through the same logger."""
+    caplog.set_level(logging.DEBUG)
+    with LoopbackReceiver() as receiver:
+
+        def browser() -> None:
+            _get(f"{receiver.redirect_uri}favicon.ico?code=secret-code-404")
+            _get(f"{receiver.redirect_uri}?state=s1&code=secret-code-200")
+
+        thread = threading.Thread(target=browser)
+        thread.start()
+        receiver.wait(5)
+        thread.join(5)
+    captured = capsys.readouterr()
+    for text in (captured.out, captured.err, caplog.text):
+        assert "secret-code" not in text
+
+
+def test_no_request_logs_a_code_a_token_or_the_client_secret(
+    fake_google: FakeGoogle, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every path through ``_send``: success, invalid_grant, another refusal, a 5xx, no answer.
+
+    The token endpoint carries a query here, so a log line that showed the whole
+    URL would show it too.
+    """
+    caplog.set_level(logging.DEBUG)
+    ends = dataclasses.replace(
+        fake_google.endpoints, token_uri=f"{fake_google.base}/token?key=secret-in-query"
+    )
+    authorization = gmail_oauth.begin(CLIENT, REDIRECT, endpoints=ends)
+    code = _query(fake_google.consent(authorization.url))["code"]
+    grant = gmail_oauth.exchange_code(CLIENT, authorization, code, endpoints=ends)
+    access = gmail_oauth.refresh_access_token(CLIENT, grant.refresh_token, endpoints=ends)
+    gmail_oauth.fetch_email(access, endpoints=ends)
+    wrong = OAuthClient(client_id=CLIENT_ID, client_secret="wrong-secret-value")
+    with pytest.raises(OAuthRefused):
+        gmail_oauth.refresh_access_token(wrong, grant.refresh_token, endpoints=ends)
+    fake_google.revoke_all()
+    with pytest.raises(InvalidGrant):
+        gmail_oauth.refresh_access_token(CLIENT, grant.refresh_token, endpoints=ends)
+    fake_google.token_status = 503
+    with pytest.raises(OAuthUnavailable):
+        gmail_oauth.refresh_access_token(CLIENT, grant.refresh_token, endpoints=ends)
+    fake_google.stop()
+    with pytest.raises(OAuthUnavailable):
+        gmail_oauth.refresh_access_token(CLIENT, grant.refresh_token, endpoints=ends)
+
+    assert any(record.name == gmail_oauth.__name__ for record in caplog.records)
+    secrets_seen = (
+        code,
+        authorization.verifier,
+        grant.refresh_token,
+        grant.access_token,
+        access,
+        CLIENT_SECRET,
+        "wrong-secret-value",
+        "secret-in-query",
+    )
+    for secret in secrets_seen:
+        assert secret not in caplog.text
