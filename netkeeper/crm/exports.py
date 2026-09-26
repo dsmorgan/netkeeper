@@ -217,7 +217,7 @@ def _sendable_email(contact: Contact) -> str | None:
     same decision: they are a copy of the data, not a send list.
     """
     for email in contact.emails:
-        if email.status is not EmailStatus.BOUNCED:
+        if email.status != EmailStatus.BOUNCED:
             return email.email
     return None
 
