@@ -27,6 +27,7 @@ Two traps this project keeps hitting, both guarded here:
 
 from __future__ import annotations
 
+import functools
 import importlib
 import math
 import os
@@ -751,7 +752,7 @@ def _callers_of(function: str, *, live_only: bool = True) -> set[Path]:
             continue
         if live is not None and path not in live:
             continue
-        if _calls(path.read_text(encoding="utf-8"), path, function):
+        if _file_calls(path, function):
             found.add(path)
     return found
 
@@ -790,7 +791,8 @@ def _module_file(name: str) -> Path | None:
     return None
 
 
-def _live_modules(also_unfollowed: frozenset[Path] = frozenset()) -> set[Path]:
+@functools.cache
+def _live_modules(also_unfollowed: frozenset[Path] = frozenset()) -> frozenset[Path]:
     """Every module an entry point reaches through imports, module-level or in a function.
 
     Liveness here is *import* reachability, not call reachability: an import
@@ -805,6 +807,9 @@ def _live_modules(also_unfollowed: frozenset[Path] = frozenset()) -> set[Path]:
     schedule, and ``netkeeper posture`` importing it reads constants. Neither makes
     the scheduler part of a live run. ``also_unfollowed`` adds modules to that
     set, for a test showing which path makes something live.
+
+    Cached: the package does not change while the suite runs, and the scan above
+    asks for the same walk once per protection (#210).
     """
     package = Path(browser_safety.PACKAGE)
     not_followed = _not_production(package) | also_unfollowed
@@ -822,7 +827,25 @@ def _live_modules(also_unfollowed: frozenset[Path] = frozenset()) -> set[Path]:
             target = _module_file(name)
             if target is not None and target not in reached:
                 queue.append(target)
-    return reached
+    return frozenset(reached)
+
+
+@functools.cache
+def _file_references(path: Path) -> frozenset[str]:
+    """:func:`_references` of the package file at ``path``, parsed once (#210)."""
+    return _references(path.read_text(encoding="utf-8"), path)
+
+
+def _references(source: str, path: Path) -> frozenset[str]:
+    module = call_targets.module_name(path, browser_safety.REPO_ROOT)
+    return frozenset(
+        call_targets.qualified_references(source, module, is_package=path.name == "__init__.py")
+    )
+
+
+def _file_calls(path: Path, function: str) -> bool:
+    """:func:`_calls` on the package file at ``path``, as it is on disk."""
+    return _uses(_file_references(path), path, function)
 
 
 def _calls(source: str, path: Path, function: str) -> bool:
@@ -842,13 +865,14 @@ def _calls(source: str, path: Path, function: str) -> bool:
     is followed transitively: a helper that happens to reach a key is not the
     key (see ``ENFORCED_BY`` on ``plan_enrichment``).
     """
+    return _uses(_references(source, path), path, function)
+
+
+def _uses(references: frozenset[str], path: Path, function: str) -> bool:
     function, reference = _split_key(function)
     module = call_targets.module_name(path, browser_safety.REPO_ROOT)
     if module == function.rpartition(".")[0]:
         return False
-    references = set(
-        call_targets.qualified_references(source, module, is_package=path.name == "__init__.py")
-    )
     return function in references and (reference is None or reference in references)
 
 
