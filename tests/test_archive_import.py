@@ -634,6 +634,16 @@ def test_a_row_with_no_profile_url_is_held_for_review_rather_than_duplicated(
     # letting a name and a company be a match. Pinned so the behavior is a
     # decision rather than a surprise.
     assert second.connections.needs_review == 1
+    # The row keeps who it might be, so a review can offer them (#217, M28).
+    assert second.run_id is not None
+    (held,) = [
+        row
+        for row in import_runs.get_run(writer, user, second.run_id).rows
+        if row.resolution is ImportResolution.CANDIDATE
+    ]
+    (fen,) = [contact for contact in _all_contacts(writer, user) if contact.first_name == "Fen"]
+    assert held.candidate_ids_json == [fen.id]
+    assert held.contact_id is None
 
 
 def test_a_no_op_reimport_does_not_restamp_every_contact(

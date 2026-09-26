@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.crm import identity, import_runs
+from netkeeper.crm import identity, import_runs, triage
 from netkeeper.crm.identity import CreateNew, MergeInto
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.crm.lists import add_members, create_list
@@ -28,6 +28,7 @@ from netkeeper.db import mark_for_write, session_scope
 from netkeeper.models import (
     Contact,
     ContactEmail,
+    ContactMet,
     ContactPhone,
     ContactSource,
     ContactTag,
@@ -351,6 +352,78 @@ def test_rolling_back_the_earlier_of_two_overlapping_runs_is_refused(
     assert fern.current_title == "Kite Director"
 
 
+def test_the_runs_to_undo_first_are_named_newest_first(writer: Session, user: User) -> None:
+    """#217 item 2 (M2): with two later runs over the same field, the newest comes first."""
+    seeded = seed_existing(writer, user)
+    first = import_sample(writer, user)
+    second = import_sample(writer, user, content=SECOND_FILE)
+    third = import_sample(writer, user, content=SECOND_FILE.replace("Kite Director", "Kite Tsar"))
+    assert seeded["fern"].current_title == "Kite Tsar"
+
+    with pytest.raises(import_runs.RunSuperseded) as raised:
+        import_runs.rollback(writer, user, first)
+
+    assert raised.value.run_ids == (third, second)
+    assert f"import run(s) {third}, {second}" in str(raised.value)
+
+
+def test_a_later_run_that_only_refreshed_the_ledger_still_supersedes(
+    writer: Session, user: User
+) -> None:
+    """#217 item 2 (M14): the same value, observed again, is a ``synced`` change only.
+
+    Undoing the first run would put back the ``synced_values`` entry from before
+    it, and the later run's rollback would then put back the first run's entry,
+    which nothing would back any more.
+    """
+    seeded = seed_existing(writer, user)
+    fern = seeded["fern"]
+    first = import_sample(writer, user)
+    same = SECOND_FILE.replace("Kite Director", fern.current_title or "")
+    later = import_sample(writer, user, content=same)
+    (row,) = import_runs.get_run(writer, user, later).rows
+    assert row.changes_json is not None
+    assert "current_title" not in row.changes_json["fields"]
+    assert "current_title" not in row.changes_json["sources"]
+    assert "current_title" in row.changes_json["synced"]
+
+    with pytest.raises(import_runs.RunSuperseded) as raised:
+        import_runs.rollback(writer, user, first)
+
+    assert raised.value.run_ids == (later,)
+
+
+@pytest.mark.parametrize("kind", ["sources", "synced"])
+def test_a_later_run_that_recorded_only_a_source_or_ledger_entry_supersedes(
+    writer: Session, user: User, kind: str
+) -> None:
+    """#217 item 2 (M14): each of the row's three records counts as writing the field.
+
+    A run that changes a field's source changes its ledger entry too, so a row
+    recording only a source cannot come from an import today; the later row is
+    narrowed to one record by hand, so the check does not depend on which.
+    """
+    seeded = seed_existing(writer, user)
+    first = import_sample(writer, user)
+    later = import_sample(writer, user, content=SECOND_FILE)
+    (row,) = import_runs.get_run(writer, user, later).rows
+    assert row.changes_json is not None
+    synced = row.changes_json["synced"]["current_title"]
+    row.changes_json = {
+        **row.changes_json,
+        "fields": {},
+        "sources": {"current_title": ContactSource.CSV.value} if kind == "sources" else {},
+        "synced": {"current_title": synced} if kind == "synced" else {},
+    }
+    writer.flush()
+
+    with pytest.raises(import_runs.RunSuperseded) as raised:
+        import_runs.rollback(writer, user, first)
+
+    assert raised.value.run_ids == (later,)
+    assert raised.value.contact_ids == (seeded["fern"].id,)
+
+
 def test_overlapping_runs_rolled_back_newest_first_end_where_they_began(
     writer: Session, user: User
 ) -> None:
@@ -502,6 +575,39 @@ def test_a_detail_added_after_the_import_is_counted(writer: Session, user: User)
         import_runs.rollback(writer, user, run_id)
 
     assert raised.value.acquired.children == 1
+
+
+def test_a_triage_decision_on_a_created_contact_is_counted(writer: Session, user: User) -> None:
+    """#217 item 2 (M8)."""
+    run_id, imogen = _created_imogen(writer, user)
+    triage.decide(writer, user, imogen.id, ContactMet.MET, at=NOW)
+    triage.decide(writer, user, imogen.id, ContactMet.NOT_MET, at=NOW)
+    writer.flush()
+
+    with pytest.raises(import_runs.CreatedContactsChanged) as raised:
+        import_runs.rollback(writer, user, run_id)
+
+    assert raised.value.acquired.triage_decisions == 2
+    assert "2 triage decisions" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"), [("met", ContactMet.MET), ("do_not_contact", True)]
+)
+def test_met_or_do_not_contact_on_a_created_contact_counts_as_an_edit(
+    writer: Session, user: User, attribute: str, value: object
+) -> None:
+    """#217 item 2 (M7): each of a person's own marks is an edit on its own."""
+    run_id, imogen = _created_imogen(writer, user)
+    setattr(imogen, attribute, value)
+    writer.flush()
+
+    with pytest.raises(import_runs.CreatedContactsChanged) as raised:
+        import_runs.rollback(writer, user, run_id)
+
+    acquired = raised.value.acquired
+    assert acquired.edited_contacts == 1
+    assert acquired.triage_decisions == acquired.enriched_contacts == 0
 
 
 def _sync_imogen(writer: Session, user: User, imogen: Contact) -> None:

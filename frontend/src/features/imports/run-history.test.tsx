@@ -109,6 +109,25 @@ describe('import history', () => {
     expect(screen.getByText('1–25 of 30')).toBeVisible()
   })
 
+  it('stops at a last page that is exactly full', async () => {
+    // 50 runs is two full pages: the second ends on the last run, so there is
+    // nothing older to ask for (#217, F8).
+    const calls: Call[] = []
+    mockFetch(historyBackend(manyRuns(50), calls))
+    await renderApp('/imports/runs')
+
+    expect(await screen.findByRole('link', { name: 'batch-01.csv' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Older' })).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Older' }))
+
+    expect(await screen.findByRole('link', { name: 'batch-50.csv' })).toBeVisible()
+    expect(screen.getByText('26–50 of 50')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Older' })).toBeDisabled()
+    const history = calls.filter((call) => call.path === '/api/v1/imports')
+    expect(history.every((call) => Number(call.query.get('offset') ?? 0) < 50)).toBe(true)
+  })
+
   it('shows no paging controls when one page holds everything', async () => {
     mockFetch(historyBackend(manyRuns(25)))
     await renderApp('/imports/runs')
