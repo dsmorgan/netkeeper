@@ -41,6 +41,7 @@
  *   nobody reviewed anything.
  */
 import type { ContactStats, ImportRunPage } from './api'
+import type { CrmSearch } from '@/features/crm/crm-tabs'
 import type { ListOut } from '@/features/crm/types'
 
 export type StepState = 'not_started' | 'in_progress' | 'done'
@@ -57,6 +58,8 @@ export interface SetupStep {
   to: StepRoute
   /** Only the import step ever resumes a specific run. */
   search?: { run: number }
+  /** The `/lists` tab the step's control is about, when it is not the first one. */
+  tab?: CrmSearch['tab']
   cta: string
 }
 
@@ -191,6 +194,8 @@ export function buildSetupSteps({
       detail: reviewDetail,
       state: reviewState,
       to: '/lists',
+      // The control names the rules, and "Run all rules now" is on this tab.
+      tab: 'tags',
       cta: reviewCta,
     },
     {

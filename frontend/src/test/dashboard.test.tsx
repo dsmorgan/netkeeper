@@ -141,7 +141,7 @@ describe('dashboard: a fresh install with nothing imported', () => {
         title: '2. Review what was tagged by a rule',
         detail: 'Nothing tagged yet',
         badge: 'Not started',
-        href: '/lists',
+        href: '/lists?tab=tags',
         cta: 'Review tags',
       },
       {
@@ -211,7 +211,7 @@ describe('dashboard: an account with contacts', () => {
         title: '2. Review what was tagged by a rule',
         detail: '4 contacts tagged by a rule',
         badge: null,
-        href: '/lists',
+        href: '/lists?tab=tags',
         cta: 'Review tags',
       },
       {
@@ -260,7 +260,7 @@ describe('dashboard: an account with contacts', () => {
       title: '2. Review what was tagged by a rule',
       detail: 'Nothing tagged yet',
       badge: 'Not started',
-      href: '/lists',
+      href: '/lists?tab=tags',
       cta: 'Run auto-tag rules',
     })
   })

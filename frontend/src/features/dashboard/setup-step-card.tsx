@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { crmSearch } from '@/features/crm/crm-tabs'
 import { cn } from '@/lib/utils'
 
 import type { SetupStep, StepState } from './setup-steps'
@@ -54,6 +55,14 @@ export function SetupStepCard({ step, index }: { step: SetupStep; index: number 
               size="sm"
               variant="outline"
               render={<Link to="/imports" search={step.search} />}
+            >
+              {step.cta}
+            </Button>
+          ) : step.to === '/lists' ? (
+            <Button
+              size="sm"
+              variant="outline"
+              render={<Link to="/lists" search={crmSearch(step.tab)} />}
             >
               {step.cta}
             </Button>
