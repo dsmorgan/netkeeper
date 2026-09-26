@@ -124,7 +124,7 @@ def import_sample(
 ) -> int:
     """Draft the sample, commit it skipping undecided candidates, and return the run id."""
     run = import_runs.create_run(session, user, filename="sample.csv", content=content, **kwargs)
-    import_runs.commit(session, user, run.id, skip_undecided=True)
+    import_runs.commit(session, user, run.id, undecided=import_runs.UndecidedPolicy.SKIP)
     return run.id
 
 
@@ -142,7 +142,7 @@ def test_committing_tags_the_contacts_it_wrote_and_counts_them(writer: Session, 
 
     run = import_runs.create_run(writer, user, filename="sample.csv", content=LINKEDHELPER)
     assert (run.tagged_contacts, run.tags_added) == (0, 0), "a draft writes nothing to tag"
-    committed = import_runs.commit(writer, user, run.id, skip_undecided=True)
+    committed = import_runs.commit(writer, user, run.id, undecided=import_runs.UndecidedPolicy.SKIP)
 
     # Every row that wrote a contact, counted per person: the file names Imogen
     # twice, and the second row matches the contact the first one created.
@@ -535,6 +535,83 @@ def test_a_create_new_decision_makes_a_second_contact(writer: Session, user: Use
     assert twins[1].current_title == "Senior Wobbler"
 
 
+# --- the undecided policy (#136) ----------------------------------------------
+
+
+def test_the_create_new_policy_decides_the_undecided_rows_in_the_commit(
+    writer: Session, user: User
+) -> None:
+    seeded = seed_existing(writer, user)
+    run = import_runs.create_run(writer, user, filename="sample.csv", content=LINKEDHELPER)
+    committed = import_runs.commit(
+        writer, user, run.id, undecided=import_runs.UndecidedPolicy.CREATE_NEW
+    )
+
+    twins = list(writer.scalars(scoped(user, Contact).where(Contact.last_name == "Fitzmaurice")))
+    assert sorted(twin.id for twin in twins)[0] == seeded["barnaby"].id
+    assert len(twins) == 2
+    assert committed.skipped_count == 0
+    rows, _ = import_runs.list_rows(writer, user, run.id)
+    row = {row.row_number: row for row in rows}[ROW_CANDIDATE]
+    assert row.resolution is ImportResolution.CREATED
+    assert row.decision_json == {"kind": "create_new", "contact_id": None}
+    assert row.candidate_ids_json == [seeded["barnaby"].id]
+
+
+def test_a_recorded_decision_wins_over_the_policy(writer: Session, user: User) -> None:
+    seeded = seed_existing(writer, user)
+    barnaby = seeded["barnaby"]
+    run = import_runs.create_run(writer, user, filename="sample.csv", content=LINKEDHELPER)
+    import_runs.commit(
+        writer,
+        user,
+        run.id,
+        decisions={ROW_CANDIDATE: MergeInto(barnaby.id)},
+        undecided=import_runs.UndecidedPolicy.CREATE_NEW,
+    )
+
+    assert barnaby.current_title == "Senior Wobbler"
+    twins = writer.scalars(scoped(user, Contact).where(Contact.last_name == "Fitzmaurice"))
+    assert [twin.id for twin in twins] == [barnaby.id]
+
+
+def test_the_policy_leaves_a_row_that_stopped_being_a_candidate_to_import_normally(
+    writer: Session, user: User
+) -> None:
+    """The window #136 closes: the row was a candidate when the draft was read, and is a
+    plain new contact by commit time. It must import as one, not be handed a decision
+    ``identity.apply()`` refuses for anything but a candidate and be skipped for it.
+    """
+    seeded = seed_existing(writer, user)
+    run = import_runs.create_run(writer, user, filename="sample.csv", content=LINKEDHELPER)
+    writer.delete(seeded["barnaby"])
+    writer.flush()
+
+    committed = import_runs.commit(
+        writer, user, run.id, undecided=import_runs.UndecidedPolicy.CREATE_NEW
+    )
+
+    rows, _ = import_runs.list_rows(writer, user, run.id)
+    row = {row.row_number: row for row in rows}[ROW_CANDIDATE]
+    assert row.resolution is ImportResolution.CREATED
+    assert row.error is None
+    assert row.decision_json is None
+    assert committed.skipped_count == 0
+
+
+def test_the_skip_policy_skips_and_counts_the_undecided_rows(writer: Session, user: User) -> None:
+    seed_existing(writer, user)
+    run = import_runs.create_run(writer, user, filename="sample.csv", content=LINKEDHELPER)
+    committed = import_runs.commit(writer, user, run.id, undecided=import_runs.UndecidedPolicy.SKIP)
+
+    rows, _ = import_runs.list_rows(writer, user, run.id)
+    row = {row.row_number: row for row in rows}[ROW_CANDIDATE]
+    assert row.resolution is ImportResolution.SKIPPED
+    assert row.decision_json is None
+    assert "waiting for a decision" in (row.error or "")
+    assert committed.skipped_count >= 1
+
+
 def test_a_decision_naming_a_row_the_run_does_not_have_is_an_error(
     writer: Session, user: User
 ) -> None:
@@ -616,7 +693,7 @@ def test_the_nine_column_preset_is_detected_from_the_header(writer: Session, use
 def test_a_run_cannot_be_committed_twice(writer: Session, user: User) -> None:
     run_id = import_sample(writer, user, content=NINE_COLUMN)
     with pytest.raises(import_runs.RunNotDraft):
-        import_runs.commit(writer, user, run_id, skip_undecided=True)
+        import_runs.commit(writer, user, run_id, undecided=import_runs.UndecidedPolicy.SKIP)
 
 
 # --- orphaned drafts: listing and deleting (#90) -----------------------------
