@@ -71,6 +71,7 @@ def export_contacts(
     preset: ExportPreset = "full",
     output_format: FormatParam = "json",
     headerless: bool = False,
+    spreadsheet_safe: bool = False,
     filter_: FilterParam = None,
     sort: SortParam = None,
 ) -> StreamingResponse:
@@ -78,7 +79,9 @@ def export_contacts(
 
     ``headerless`` drops the CSV header row (the mailing-tool variant of
     ``nine-column``; harmless, if unusual, on the other presets) and is ignored
-    by the other two formats.
+    by the other two formats. ``spreadsheet_safe`` prefixes ``'`` to CSV cells
+    a spreadsheet would evaluate as formulas: safe to open in a spreadsheet, not
+    safe to re-import (#76). Also CSV only.
     """
     tree = _parse_filter(filter_)
     sort_keys = _parse_sort(sort)
@@ -90,6 +93,7 @@ def export_contacts(
             preset=preset,
             output_format=output_format,
             headerless=headerless,
+            spreadsheet_safe=spreadsheet_safe,
             tree=tree,
             sort=sort_keys,
             now=now,

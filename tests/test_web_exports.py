@@ -103,6 +103,19 @@ async def test_headerless_drops_the_csv_header_row(
     assert "LinkedIn Profile URL" not in response.text.splitlines()[0]
 
 
+async def test_spreadsheet_safe_quotes_formula_cells_only_when_asked(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """#76: opt-in, CSV only; the default download stays byte-for-byte re-importable."""
+    with session_scope(_factory(running_app), write=True) as session:
+        factories.make_contact(session, _local_user(session), current_company="=1+1")
+    plain = await client.get("/api/v1/exports?preset=nine-column&format=csv")
+    safe = await client.get("/api/v1/exports?preset=nine-column&format=csv&spreadsheet_safe=true")
+    assert plain.status_code == safe.status_code == 200
+    assert next(csv.DictReader(io.StringIO(plain.text)))["Current Company"] == "=1+1"
+    assert next(csv.DictReader(io.StringIO(safe.text)))["Current Company"] == "'=1+1"
+
+
 async def test_vcard_download(client: httpx.AsyncClient, running_app: FastAPI) -> None:
     with session_scope(_factory(running_app), write=True) as session:
         factories.make_contact(session, _local_user(session))

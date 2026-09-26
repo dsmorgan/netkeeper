@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from netkeeper.crm import import_runs
 from netkeeper.crm.exports import (
+    FORMULA_TRIGGERS,
     FULL_FIELDS,
     LINKEDIN_ARCHIVE,
     NINE_COLUMN,
@@ -310,6 +311,83 @@ def test_full_csv_flattens_children(session: Session) -> None:
     rows = list(csv.DictReader(io.StringIO(text)))
     assert "one@example.test" in rows[0]["emails"]
     assert "two@example.test" in rows[0]["emails"]
+
+
+# --- spreadsheet_safe: opt-in formula quoting for CSV (#76) --------------------
+
+# The four values #76 verified pass straight through today, plus the two
+# whitespace triggers and the phone number the issue says must not be mangled
+# by default.
+_FORMULA_LOOKING = ("=1+1", "+41 name", "-2+3", "@SUM(A1)", "\tTAB", "\rCR")
+
+
+def test_formula_triggers_are_pinned() -> None:
+    """Safety-relevant constant: one test pins its literal value (CLAUDE.md)."""
+    assert FORMULA_TRIGGERS == ("=", "+", "-", "@", "\t", "\r")
+
+
+def test_csv_passes_formula_looking_values_through_by_default(session: Session) -> None:
+    """Off by default: the round trip is P1-11's deliverable, so the bytes stay the bytes."""
+    user = factories.make_user(session)
+    for value in _FORMULA_LOOKING:
+        factories.make_contact(session, user, current_company=value, phones=["+15551234567"])
+    text = _run(session, user, preset="nine-column", output_format="csv")
+    rows = list(csv.DictReader(io.StringIO(text, newline="")))
+    assert [row["Current Company"] for row in rows] == list(_FORMULA_LOOKING)
+    assert {row["Phone Number"] for row in rows} == {"+15551234567"}
+
+
+@pytest.mark.parametrize("value", _FORMULA_LOOKING)
+def test_spreadsheet_safe_quotes_every_formula_trigger(session: Session, value: str) -> None:
+    user = factories.make_user(session)
+    factories.make_contact(session, user, current_company=value)
+    text = _run(session, user, preset="nine-column", output_format="csv", spreadsheet_safe=True)
+    (row,) = csv.DictReader(io.StringIO(text, newline=""))
+    assert row["Current Company"] == "'" + value
+
+
+def test_spreadsheet_safe_leaves_ordinary_and_empty_cells_and_the_header_alone(
+    session: Session,
+) -> None:
+    user = factories.make_user(session)
+    factories.make_contact(
+        session, user, current_company="Acme Corp", current_title="", location="Austin, TX"
+    )
+    plain = _run(session, user, preset="nine-column", output_format="csv")
+    safe = _run(session, user, preset="nine-column", output_format="csv", spreadsheet_safe=True)
+    assert safe == plain
+
+
+def test_spreadsheet_safe_quotes_a_leading_plus_phone(session: Session) -> None:
+    """The cost #76 names: ``+1…`` gains a quote, which is why this is opt-in."""
+    user = factories.make_user(session)
+    factories.make_contact(session, user, phones=["+15551234567"])
+    text = _run(session, user, preset="nine-column", output_format="csv", spreadsheet_safe=True)
+    (row,) = csv.DictReader(io.StringIO(text))
+    assert row["Phone Number"] == "'+15551234567"
+
+
+@pytest.mark.parametrize("preset", ["linkedin-archive", "full", "campaign-audience"])
+def test_spreadsheet_safe_applies_to_every_csv_preset(session: Session, preset: str) -> None:
+    user = factories.make_user(session)
+    factories.make_contact(
+        session, user, emails=["a@example.test"], current_company="=HYPERLINK(1)"
+    )
+    text = _run(session, user, preset=preset, output_format="csv", spreadsheet_safe=True)
+    assert "'=HYPERLINK(1)" in text
+    assert ",=HYPERLINK" not in text
+
+
+@pytest.mark.parametrize("output_format", ["json", "vcard"])
+def test_spreadsheet_safe_is_ignored_outside_csv(session: Session, output_format: str) -> None:
+    user = factories.make_user(session)
+    factories.make_contact(session, user, current_company="=1+1")
+    plain = _run(session, user, preset="nine-column", output_format=output_format)
+    safe = _run(
+        session, user, preset="nine-column", output_format=output_format, spreadsheet_safe=True
+    )
+    assert safe == plain
+    assert "'=1+1" not in safe
 
 
 # --- campaign-audience: the merge fields plus the recipient email --------------

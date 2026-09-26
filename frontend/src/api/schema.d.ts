@@ -661,7 +661,9 @@ export interface paths {
          *
          *     ``headerless`` drops the CSV header row (the mailing-tool variant of
          *     ``nine-column``; harmless, if unusual, on the other presets) and is ignored
-         *     by the other two formats.
+         *     by the other two formats. ``spreadsheet_safe`` prefixes ``'`` to CSV cells
+         *     a spreadsheet would evaluate as formulas: safe to open in a spreadsheet, not
+         *     safe to re-import (#76). Also CSV only.
          */
         get: operations["export_contacts"];
         put?: never;
@@ -6186,6 +6188,7 @@ export interface operations {
                 preset?: "nine-column" | "linkedin-archive" | "full" | "campaign-audience";
                 format?: "csv" | "json" | "vcard";
                 headerless?: boolean;
+                spreadsheet_safe?: boolean;
                 /** @description A FilterTree (spec 10.4) as JSON. Omitted: every contact. */
                 filter?: string | null;
                 /** @description A list of SortKey as JSON. Omitted: id ascending. */
