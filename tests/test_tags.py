@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import itertools
 import re
+import string
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +15,7 @@ from typing import Any, cast
 
 import factories
 import pytest
+import regex
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 from typer.testing import CliRunner
@@ -446,6 +449,14 @@ NESTED_UNBOUNDED = [
     # without proof that the rest of the pattern can split a string that way.
     r"(ab|cd|a)+$",
     r"(ab|a|b)+$",
+    # #240: mutants that would make the guard unsound. The fixed prefix stops
+    # at the first element that is not one fixed character: an optional one
+    # (a?b), a group ((xy)z), or a zero-width assertion (\Bab) can each match
+    # something other than one character, so comparing past it would call
+    # branches different that can match the same text.
+    r"(?:a?b|ab)+$",
+    r"(?:(xy)z|xyz)+$",
+    r"(?:\Bab|ab)+$",
 ]
 NOT_NESTED = [
     r"(a+)",
@@ -486,6 +497,11 @@ UNAMBIGUOUS_NESTED = [
     # Two branches start alike but differ by their second character.
     r"(?:(senior|staff|lead)\s+)+engineer",
     r"(?:(vp|vice\s+president|svp)\s+of\s+)+sales",
+    # #240: branches whose first characters overlap only in part ([ab], [bc])
+    # but whose second ones differ, and an alternation followed by something
+    # neither branch starts with.
+    r"(?:[ab]x|[bc]y)+$",
+    r"((ab|cd)a)+$",
 ]
 
 
@@ -551,6 +567,68 @@ def test_the_slow_pattern_message_says_how_to_rewrite_it() -> None:
     assert "start differently" in str(caught.value)
 
 
+def _branches_under_plus(pairs: Sequence[str]) -> str:
+    return "(?:" + "|".join(pairs) + ")+"
+
+
+LARGE_ALTERNATIONS = [
+    # #240: 165 two-letter words, "aa" to "gi", sharing first letters; this took
+    # about 8 s to save when every pair of branches scanned every code point.
+    _branches_under_plus(
+        [a + b for a in string.ascii_lowercase for b in string.ascii_lowercase][:165]
+    ),
+    # 165 branches that share no character at all, so every literal is new.
+    _branches_under_plus([chr(0x4E00 + i) + chr(0x4E00 + 165 + i) for i in range(165)]),
+]
+
+
+@pytest.mark.parametrize(
+    "pattern", LARGE_ALTERNATIONS, ids=["shared-first-letters", "no-shared-characters"]
+)
+def test_a_large_alternation_under_a_repeat_saves_quickly(pattern: str) -> None:
+    assert len(pattern) <= svc.PATTERN_MAX_LENGTH
+    svc._every_character()  # built once per process, whatever the pattern
+    svc._CASE_CLASSES.clear()
+    svc._overlap.cache_clear()
+    started = time.perf_counter()
+    compile_pattern(pattern)
+    assert time.perf_counter() - started < 1.0
+
+
+CASE_TRAPS = "aAkK\u212asS\u017f\u00df\u1e9eiI\u0130\u0131\u03c3\u03c2\u03a3\u00b5\u03bc1"
+"""Literals whose case folding is not one lower and one upper letter: the Kelvin sign
+folds to k, the long s to s, final sigma to sigma, the micro sign to mu."""
+
+
+def test_the_fast_overlap_for_literals_agrees_with_the_full_scan() -> None:
+    """The fast path learns every literal's matches in one shared scan; this checks it
+    against a scan of every code point per literal, and a few pairs against the scan
+    :func:`svc._overlap` runs for anything but literals."""
+
+    def literal(char: str) -> str:
+        return f"\\U{ord(char):08x}"
+
+    everything = svc._every_character()
+    matches = {
+        c: {m.group() for m in regex.finditer(literal(c), everything, regex.IGNORECASE)}
+        for c in CASE_TRAPS
+    }
+    pairs = [(a,) for a in CASE_TRAPS] + list(itertools.pairwise(CASE_TRAPS))
+    for left in pairs:
+        for right in pairs:
+            either = set().union(*(matches[c] for c in left))
+            expected = not either.isdisjoint(set().union(*(matches[c] for c in right)))
+            a = frozenset(literal(c) for c in left)
+            b = frozenset(literal(c) for c in right)
+            assert svc._overlap(a, b) == expected, (left, right)
+    spot_checks = [("k", "\u212a"), ("s", "\u017f"), ("\u03c3", "\u03c2"), ("\u00b5", "\u03bc")]
+    for x, y in [*spot_checks, ("k", "s"), ("i", "\u0131")]:
+        a, b = frozenset({literal(x)}), frozenset({literal(y)})
+        assert svc._overlap(a, b) == svc._scan_overlap(a, b), (x, y)
+    assert svc._overlap(frozenset({literal("k")}), frozenset({literal("\u212a")}))
+    assert not svc._overlap(frozenset({literal("k")}), frozenset({literal("s")}))
+
+
 COMPILE_BOMBS = [
     r"(?:(?:a{100}){100}){100}",
     r"(?:a{40}){40}",
@@ -601,8 +679,8 @@ expand cheaply, but its alternation backtracks exponentially: the run-time timeo
 the guard here. ``(a|aa)+$``, the unbounded form, is refused at save since #233."""
 
 MATCHES_SLOWLY = "a" * 29 + "b" + "aa"
-"""``SLOW_PATTERN`` matches this, but only after about two thirds of a second of
-backtracking: thirteen times the shipped 50 ms budget, and the cost grows 2.6x per two
+"""``SLOW_PATTERN`` matches this, but only after several times the shipped 50 ms budget
+of backtracking (how many depends on the machine), and the cost grows 2.6x per two
 characters, so neither half of the comparison is close enough to the boundary to turn
 on machine speed."""
 
