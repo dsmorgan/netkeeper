@@ -4,9 +4,10 @@ import { meQuery } from '@/api/queries'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 
+import { type GmailOutcome, GmailSection } from './gmail-section'
 import { PostureSection } from './posture-section'
 
-export function SettingsPage() {
+export function SettingsPage({ gmail = {} }: { gmail?: GmailOutcome }) {
   const me = useQuery(meQuery)
 
   return (
@@ -19,13 +20,15 @@ export function SettingsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="flex items-center gap-2">
-          <Badge variant="outline">Phase 0</Badge>
+          <Badge variant="outline">Phase 3</Badge>
           <span className="text-muted-foreground">
-            Only the current user and posture are wired up. Each section arrives with its feature's
-            phase.
+            Gmail, the current user and posture are wired up. Each other section arrives with its
+            feature's phase.
           </span>
         </CardContent>
       </Card>
+
+      <GmailSection outcome={gmail} />
 
       <PostureSection />
 
