@@ -433,6 +433,83 @@ def test_contact_fields_map_the_contact_onto_the_spec_names(writer: Session, use
     assert contact_fields(contact, date(2026, 9, 27))["years_since_connected"] == 7
 
 
+TODAY = date(2026, 9, 26)
+
+
+def _last_change(writer: Session, user: User, *positions: dict[str, object]) -> object:
+    contact = factories.make_contact(writer, user, positions=positions)
+    return contact_fields(contact, TODAY)["last_position_change"]
+
+
+def test_last_position_change_counts_an_end_later_than_every_start(
+    writer: Session, user: User
+) -> None:
+    """A departure with nothing newer to go to is still a change (#232)."""
+    assert _last_change(
+        writer,
+        user,
+        {"title": "Lead", "started_on": date(2020, 1, 1), "ended_on": date(2026, 5, 1)},
+        {"title": "Engineer", "started_on": date(2016, 1, 1), "ended_on": date(2019, 12, 1)},
+    ) == date(2026, 5, 1)
+
+
+def test_last_position_change_sees_a_departure_from_the_main_job_under_an_old_side_role(
+    writer: Session, user: User
+) -> None:
+    """Leaving the main job while keeping an advisory role taken years ago: start
+    dates alone would report the advisory start."""
+    assert _last_change(
+        writer,
+        user,
+        {"title": "Advisor", "started_on": date(2019, 4, 1)},
+        {"title": "VP", "started_on": date(2021, 2, 1), "ended_on": date(2026, 8, 15)},
+    ) == date(2026, 8, 15)
+
+
+def test_last_position_change_counts_the_end_of_an_overlapping_side_role(
+    writer: Session, user: User
+) -> None:
+    """Only the side role ended; the main job is untouched. That still counts, which
+    #232 accepts as the rule's known limit."""
+    assert _last_change(
+        writer,
+        user,
+        {"title": "Engineer", "started_on": date(2018, 3, 1)},
+        {"title": "Board member", "started_on": date(2022, 1, 1), "ended_on": date(2026, 2, 1)},
+    ) == date(2026, 2, 1)
+
+
+def test_last_position_change_ignores_an_end_date_after_today(writer: Session, user: User) -> None:
+    """An announced departure has not happened yet."""
+    assert _last_change(
+        writer,
+        user,
+        {"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": date(2026, 12, 31)},
+    ) == date(2021, 6, 1)
+
+
+def test_last_position_change_counts_an_end_date_of_today(writer: Session, user: User) -> None:
+    assert (
+        _last_change(
+            writer,
+            user,
+            {"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": TODAY},
+        )
+        == TODAY
+    )
+
+
+def test_last_position_change_is_missing_when_no_position_has_a_date(
+    writer: Session, user: User
+) -> None:
+    assert _last_change(writer, user, {"title": "Engineer"}, {"title": "Intern"}) is None
+
+
+def test_last_position_change_is_missing_without_positions(writer: Session, user: User) -> None:
+    """Missing, so a template renders it empty with a warning (covered below)."""
+    assert _last_change(writer, user) is None
+
+
 def test_first_name_falls_back_when_there_is_no_preferred_name(writer: Session, user: User) -> None:
     contact = factories.make_contact(writer, user, first_name="Robert", preferred_name="")
     assert contact_fields(contact, date(2026, 9, 26))["first_name"] == "Robert"

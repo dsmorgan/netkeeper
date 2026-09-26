@@ -411,10 +411,16 @@ def contact_fields(contact: Contact, today: date) -> dict[str, object]:
     :data:`~netkeeper.campaigns.render.CONTACT_FIELDS`.
 
     ``first_name`` is the preferred name, falling back to the first name.
-    ``last_position_change`` is the latest start date among the contact's
-    positions. ``years_since_connected`` counts whole years to ``today``.
+    ``last_position_change`` is the latest of every start date and every end
+    date on or before ``today`` among the contact's positions: leaving a job is
+    a change just as starting one is, and an announced departure has not
+    happened yet (#232). ``years_since_connected`` counts whole years to
+    ``today``.
     """
-    started = [p.started_on for p in contact.positions if p.started_on is not None]
+    changes = [p.started_on for p in contact.positions if p.started_on is not None]
+    changes += [
+        p.ended_on for p in contact.positions if p.ended_on is not None and p.ended_on <= today
+    ]
     values: dict[str, object] = {
         "first_name": contact.preferred_name or contact.first_name,
         "last_name": contact.last_name,
@@ -425,7 +431,7 @@ def contact_fields(contact: Contact, today: date) -> dict[str, object]:
         "years_since_connected": (
             None if contact.connected_on is None else _whole_years(contact.connected_on, today)
         ),
-        "last_position_change": max(started) if started else None,
+        "last_position_change": max(changes) if changes else None,
     }
     return values
 
