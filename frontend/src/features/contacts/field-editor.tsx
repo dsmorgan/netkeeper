@@ -8,6 +8,7 @@ import { Input, Textarea } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 
 import { contactsKeys, patchContact, revertContactField, setNotes } from './api'
+import { WriteError } from './merged-notice'
 import { useContactWrite } from './use-contact-write'
 import type {
   ContactDetail,
@@ -143,11 +144,7 @@ export function FieldEditor({ contact, field, label, kind = 'text' }: FieldEdito
           synced={synced}
         />
       )}
-      {write.isError && (
-        <p role="alert" className="pl-40 text-destructive">
-          {write.error.message}
-        </p>
-      )}
+      <WriteError error={write.error} className="pl-40" />
     </div>
   )
 }
@@ -183,11 +180,7 @@ function RevertControl({
         Revert
       </Button>
       <span>{reason}</span>
-      {write.isError && (
-        <span role="alert" className="text-destructive">
-          {write.error.message}
-        </span>
-      )}
+      <WriteError error={write.error} />
     </div>
   )
 }
@@ -214,6 +207,7 @@ export function MetEditor({ contact }: { contact: ContactDetail }) {
           </option>
         ))}
       </Select>
+      <WriteError error={write.error} />
     </div>
   )
 }
@@ -233,6 +227,7 @@ export function DoNotContactEditor({ contact }: { contact: ContactDetail }) {
       >
         {contact.do_not_contact ? 'Do not contact' : 'Contact allowed'}
       </Button>
+      <WriteError error={write.error} />
     </div>
   )
 }
@@ -265,11 +260,7 @@ export function NotesEditor({ contact }: { contact: ContactDetail }) {
         <Button size="sm" disabled={!dirty || save.isPending} onClick={() => save.mutate(draft)}>
           Save notes
         </Button>
-        {save.isError && (
-          <span role="alert" className="text-destructive">
-            {save.error.message}
-          </span>
-        )}
+        <WriteError error={save.error} />
       </div>
     </div>
   )

@@ -2091,6 +2091,7 @@
           },
           "offset": {
             "default": 0,
+            "maximum": 1000000000.0,
             "minimum": 0.0,
             "title": "Offset",
             "type": "integer"

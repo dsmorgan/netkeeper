@@ -56,7 +56,7 @@ function windowFor(count: number, scrollTop: number, height: number): RowWindow 
  * handful of row mounts rather than a re-render per pixel, and a page below
  * {@link VIRTUALIZE_ABOVE} skips the whole mechanism.
  */
-function useRowWindow(count: number, enabled: boolean) {
+function useRowWindow(count: number, enabled: boolean, scrollKey: string) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const [scrolled, setScrolled] = useState<RowWindow>(() => windowFor(count, 0, FALLBACK_VIEWPORT))
 
@@ -80,6 +80,20 @@ function useRowWindow(count: number, enabled: boolean) {
     }
   }, [enabled, measure])
 
+  // New rows start at the top. Next, Previous, a new filter or sort, or a cached
+  // page coming back can all reuse this scroller, which would otherwise keep
+  // the old offset and open the new page somewhere in its middle (#88). Keyed on
+  // what was asked for, not on the rows: a row action refetches the same page,
+  // and that must leave the person where they were.
+  const shownKey = useRef(scrollKey)
+  useLayoutEffect(() => {
+    if (shownKey.current === scrollKey) return
+    shownKey.current = scrollKey
+    const node = viewportRef.current
+    if (node) node.scrollTop = 0
+    measure()
+  }, [scrollKey, measure])
+
   // A short page renders whole, and a page that shrank under a stale window is
   // clamped here rather than by a second render.
   const rowWindow: RowWindow = enabled
@@ -91,6 +105,11 @@ function useRowWindow(count: number, enabled: boolean) {
 
 export interface ContactsTableProps {
   rows: readonly ContactRow[]
+  /**
+   * What the rows are an answer to (filter, sort, page). A new key scrolls back
+   * to the top; the same key with new rows, after a row action, does not.
+   */
+  scrollKey: string
   columns: readonly ColumnSpec[]
   sort: readonly SortKey[]
   onSort: (field: SortField) => void
@@ -104,6 +123,7 @@ export interface ContactsTableProps {
 
 export function ContactsTable({
   rows,
+  scrollKey,
   columns,
   sort,
   onSort,
@@ -114,7 +134,7 @@ export function ContactsTable({
   actions,
 }: ContactsTableProps) {
   const virtualized = rows.length > VIRTUALIZE_ABOVE
-  const { viewportRef, rowWindow } = useRowWindow(rows.length, virtualized)
+  const { viewportRef, rowWindow } = useRowWindow(rows.length, virtualized, scrollKey)
   const visible = rows.slice(rowWindow.start, rowWindow.end)
   const padTop = rowWindow.start * ROW_HEIGHT
   const padBottom = (rows.length - rowWindow.end) * ROW_HEIGHT

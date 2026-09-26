@@ -7,6 +7,7 @@
 import { queryOptions } from '@tanstack/react-query'
 
 import { api } from '@/api/client'
+import { detailMessage } from '@/api/errors'
 
 import type { ColumnId } from './columns'
 import { requestedColumns } from './columns'
@@ -42,11 +43,7 @@ export class ApiFailure extends Error {
 }
 
 function fail(what: string, status: number, body: unknown): never {
-  const detail =
-    body && typeof body === 'object' && 'detail' in body && typeof body.detail === 'string'
-      ? body.detail
-      : `${status}`
-  throw new ApiFailure(status, body, `${what}: ${detail}`)
+  throw new ApiFailure(status, body, `${what}: ${detailMessage(body) ?? status}`)
 }
 
 // --- the table --------------------------------------------------------------
@@ -339,6 +336,15 @@ export async function deleteLink(contactId: number, linkId: number): Promise<voi
 }
 
 // --- bulk -------------------------------------------------------------------
+
+/**
+ * The most ids one bulk selection may name (`BulkSelection.ids`' `maxLength`).
+ *
+ * Picked rows survive paging, so a person could click past this; the table
+ * stops them here instead of letting the server refuse the whole action. More
+ * than this is what "select all matching this filter" is for.
+ */
+export const MAX_BULK_IDS = 1000
 
 /**
  * Everything a confirmation token binds: the selection, the action, and exactly

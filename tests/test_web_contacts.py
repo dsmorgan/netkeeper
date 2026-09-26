@@ -40,6 +40,7 @@ from netkeeper.models import (
 )
 from netkeeper.models.contacts import Contact
 from netkeeper.scoping import get_scoped
+from netkeeper.web.schemas import MAX_QUERY_OFFSET
 
 CSRF = {"X-Netkeeper-Client": "1"}
 AT = datetime(2026, 2, 1, 9, 30, tzinfo=UTC)
@@ -169,6 +170,27 @@ async def test_sort_and_pagination_walk_the_whole_list(
     assert _names(first) == ["Ada Quill"]  # Quill before Marsh, descending
     assert _names(second) == ["Bo Marsh"]
     assert first["total"] == second["total"] == 2
+
+
+async def test_the_highest_offset_is_pinned() -> None:
+    assert MAX_QUERY_OFFSET == 1_000_000_000
+
+
+async def test_an_offset_past_the_ceiling_is_a_422_not_a_500(
+    client: httpx.AsyncClient, people: list[int]
+) -> None:
+    # The ceiling itself is a page like any other, just an empty one.
+    page = await _query(client, offset=1_000_000_000)
+    assert page["items"] == []
+    assert page["total"] == 2
+
+    # 2**63 used to reach SQLite and fail there as an OverflowError (#88).
+    for offset in (1_000_000_001, 2**63):
+        response = await client.post(
+            "/api/v1/contacts/query", json={"offset": offset}, headers=CSRF
+        )
+        assert response.status_code == 422, response.text
+        assert "offset" in response.text
 
 
 async def test_columns_pick_what_a_row_carries(

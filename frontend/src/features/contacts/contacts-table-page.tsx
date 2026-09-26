@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
@@ -9,6 +9,7 @@ import {
   addListMembers,
   contactsKeys,
   contactsPageQuery,
+  MAX_BULK_IDS,
   patchContact,
   setArchived,
   tagContact,
@@ -23,7 +24,9 @@ import { ContactsTable } from './contacts-table'
 import { FilterBar } from './filter-bar'
 import {
   buildFilter,
+  filterBarCanShow,
   formatSort,
+  lastPage,
   pageOffset,
   pageSize,
   searchFromFilter,
@@ -42,8 +45,15 @@ const FILTER_KEYS = ['q', 'company', 'met', 'tags', 'dnc', 'archived'] as const
 
 export interface ContactsTablePageProps {
   search: ContactsSearch
-  /** Rewrites the URL; the table reads its whole state back from it. */
-  onNavigate: (update: (previous: ContactsSearch) => ContactsSearch) => void
+  /**
+   * Rewrites the URL; the table reads its whole state back from it. `replace`
+   * corrects the current entry instead of adding one, for a URL the table had to
+   * fix rather than one the person asked for.
+   */
+  onNavigate: (
+    update: (previous: ContactsSearch) => ContactsSearch,
+    options?: { replace?: boolean },
+  ) => void
 }
 
 export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps) {
@@ -67,14 +77,41 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
   // more than the filter bar can (P1-15's builder will say more still). Touching
   // any filter control drops `view`, and the bar takes over from there.
   const applied = views.data?.find((view) => view.id === search.view)
+  // Until `/views` answers, a `?view=` link cannot be read, and querying the
+  // bar's reading of it instead would show — and let you bulk-edit — a wider
+  // selection than the one the link names (#88). So the page waits for it.
+  const awaitingView = search.view !== undefined && !views.isSuccess
+  const viewFailed = search.view !== undefined && views.isError
+  const missingView = search.view !== undefined && views.isSuccess && applied === undefined
   const size = pageSize(search)
   const offset = pageOffset(search)
   const filter: FilterTree = applied?.filter ?? buildFilter(search)
   const sort = applied && applied.sort.length > 0 ? applied.sort : sortKeys(search)
 
-  const page = useQuery(contactsPageQuery({ filter, sort, limit: size, offset }, columnIds))
+  const page = useQuery({
+    ...contactsPageQuery({ filter, sort, limit: size, offset }, columnIds),
+    enabled: !awaitingView,
+  })
   const rows = useMemo(() => page.data?.items ?? EMPTY_ROWS, [page.data])
   const total = page.data?.total ?? 0
+
+  // A page past the last one — a hand-edited link, or rows that went away since
+  // the link was made — lands on the last page rather than on an empty table
+  // with Previous as the only way out.
+  const pastTheEnd = page.isSuccess && offset > 0 && offset >= total
+  const finalPage = lastPage(total, size)
+  useEffect(() => {
+    if (!pastTheEnd) return
+    onNavigate(
+      (previous) => {
+        const next = { ...previous }
+        if (finalPage > 1) next.page = finalPage
+        else delete next.page
+        return next
+      },
+      { replace: true },
+    )
+  }, [pastTheEnd, finalPage, onNavigate])
 
   const update = useCallback(
     (patch: Partial<ContactsSearch>) => {
@@ -141,6 +178,8 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
   const onSelect = useCallback((id: number, selected: boolean) => {
     setEverything(false)
     setPicked((current) => {
+      // Past the cap a pick is refused here; the bulk bar says why.
+      if (selected && !current.has(id) && current.size >= MAX_BULK_IDS) return current
       const next = new Set(current)
       if (selected) next.add(id)
       else next.delete(id)
@@ -224,6 +263,33 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
         </div>
       </div>
 
+      {viewFailed && (
+        <div role="alert" className="grid gap-2 rounded-xl bg-destructive/10 p-4 text-destructive">
+          <p>
+            The saved view in this link could not be loaded, so its contacts are not shown:{' '}
+            {views.error?.message}
+          </p>
+          <div>
+            <Button size="sm" variant="outline" onClick={() => void views.refetch()}>
+              Try again
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {missingView && (
+        <p role="status" className="rounded-lg bg-muted/60 px-3 py-2">
+          Saved view {search.view} no longer exists. The table shows the filter the link carried.
+        </p>
+      )}
+
+      {applied !== undefined && !filterBarCanShow(applied.filter) && (
+        <p role="note" className="rounded-lg bg-amber-500/10 px-3 py-2">
+          “{applied.name}” filters on more than the controls above can show. Changing any of them
+          replaces the view’s filter with only what they show, which may match more contacts.
+        </p>
+      )}
+
       {failure && (
         <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-destructive">
           {failure}
@@ -240,6 +306,7 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
         <BulkBar
           selection={selection}
           selectedCount={everything ? total : picked.size}
+          pickLimit={MAX_BULK_IDS}
           everything={everything}
           total={total}
           onSelectEverything={() => setEverything(true)}
@@ -259,7 +326,7 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
         />
       )}
 
-      {page.isPending && <p className="text-muted-foreground">Loading contacts…</p>}
+      {page.isPending && !viewFailed && <p className="text-muted-foreground">Loading contacts…</p>}
 
       {page.isError && (
         <div role="alert" className="grid gap-2 rounded-xl bg-destructive/10 p-4 text-destructive">
@@ -282,6 +349,7 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
       {page.isSuccess && rows.length > 0 && (
         <ContactsTable
           rows={rows}
+          scrollKey={JSON.stringify([filter, sort, size, offset])}
           columns={columns}
           sort={sort}
           onSort={onSort}

@@ -225,6 +225,48 @@ describe('contact detail', () => {
     )
   })
 
+  it('shows a merged 409 as a link from every field editor, not as raw text', async () => {
+    // The field, met, do-not-contact and notes editors used to print the error
+    // message, so a merge in another tab read as "save: merged" (#88).
+    serveContact(contactDetail(), (request) => {
+      const { pathname } = new URL(request.url)
+      if (pathname === '/api/v1/contacts/1' && request.method === 'PATCH') {
+        return jsonResponse({ detail: 'merged', merged_into_id: 42 }, 409)
+      }
+      if (pathname === '/api/v1/contacts/1/notes') {
+        return jsonResponse({ detail: 'merged', merged_into_id: 42 }, 409)
+      }
+      return undefined
+    })
+    await renderApp('/contacts/1')
+    await screen.findByRole('heading', { name: 'Ada Ventura' })
+
+    const expectSurvivorLink = async () => {
+      const alerts = await screen.findAllByRole('alert')
+      const alert = alerts[alerts.length - 1] as HTMLElement
+      expect(alert).toHaveTextContent('This contact was merged into another one.')
+      expect(alert).not.toHaveTextContent('save:')
+      expect(within(alert).getByRole('link', { name: 'Open contact 42' })).toHaveAttribute(
+        'href',
+        '/contacts/42',
+      )
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Headline' }))
+    fireEvent.change(screen.getByLabelText('Headline value'), { target: { value: 'Rigger' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save Headline' }))
+    await expectSurvivorLink()
+
+    fireEvent.change(screen.getByLabelText('Met'), { target: { value: 'met' } })
+    await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(2))
+    await expectSurvivorLink()
+
+    fireEvent.change(screen.getByLabelText('Notes'), { target: { value: 'Met at the fair.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save notes' }))
+    await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(3))
+    await expectSurvivorLink()
+  })
+
   it('adds and removes a tag', async () => {
     let carried: Array<{
       id: number

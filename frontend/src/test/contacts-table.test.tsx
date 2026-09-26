@@ -62,7 +62,8 @@ describe('contacts table', () => {
   })
 
   it('restores the filter from the URL, so a pasted link shows the same table', async () => {
-    const seen = serveTable(page(2))
+    // 52 matches, so page 2 exists; a total below the offset is clamped to the last page.
+    const seen = serveTable(page(2, 52))
     await renderApp('/contacts?q=grebe&met=met&archived=true&sort=current_company%3Adesc&page=2')
     await screen.findByText('Bo Quill')
 
@@ -434,6 +435,34 @@ describe('bulk actions', () => {
     expect(alert).toHaveTextContent(/expired/)
     expect(alert).toHaveTextContent(/Nothing was changed/)
     expect(dialog.getByRole('button', { name: 'Count again' })).toBeEnabled()
+  })
+
+  it('reads a schema refusal out of its validation-error list, not as a bare 422', async () => {
+    await pickOne((request) => {
+      const { pathname } = new URL(request.url)
+      if (pathname === '/api/v1/contacts/bulk/count') {
+        return jsonResponse(
+          {
+            detail: [
+              {
+                type: 'too_long',
+                loc: ['body', 'selection', 'ids'],
+                msg: 'List should have at most 1000 items after validation, not 1200',
+              },
+            ],
+          },
+          422,
+        )
+      }
+      return undefined
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Bulk actions/ }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Archive' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    const alert = await dialog.findByRole('alert')
+    expect(alert).toHaveTextContent('List should have at most 1000 items after validation')
+    expect(alert).not.toHaveTextContent('count: 422')
   })
 
   it('selects the whole filter, and sends the filter rather than a list of ids', async () => {

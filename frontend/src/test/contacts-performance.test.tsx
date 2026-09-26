@@ -84,6 +84,7 @@ function renderTable(rows: ReturnType<typeof contactRow>[], selected: ReadonlySe
   return render(
     <ContactsTable
       rows={rows}
+      scrollKey="page-1"
       columns={COLUMNS}
       sort={EMPTY_SORT}
       onSort={noop}
@@ -159,6 +160,7 @@ describe('contacts table responsiveness', () => {
     view.rerender(
       <ContactsTable
         rows={rows}
+        scrollKey="page-1"
         columns={COLUMNS}
         sort={EMPTY_SORT}
         onSort={noop}
