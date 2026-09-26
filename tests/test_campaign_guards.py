@@ -653,12 +653,13 @@ def test_a_bounced_address_row_is_what_the_facts_skip(writer: Session, user: Use
 # --- the #235 review ----------------------------------------------------------------------
 
 
-def test_a_step_a_merged_away_duplicate_was_sent_counts_against_the_survivor(
+def test_a_step_a_merged_away_duplicate_was_sent_is_never_sent_to_the_survivor_again(
     writer: Session, user: User, campaign: Campaign
 ) -> None:
     """Step 1 went to L; L merged into S; S's own step 1 must not go out a second time.
 
-    Only the firing enrollment's own messages are exempt, not the whole campaign's.
+    Since #242 the merge carries the record across: S's enrollment takes L's place
+    past step 1 and owns the message, so the next step to fire is step 2.
     """
     survivor = _contact(writer, user)
     loser = factories.make_contact(writer, user)
@@ -670,8 +671,30 @@ def test_a_step_a_merged_away_duplicate_was_sent_counts_against_the_survivor(
     )
     merge_contacts(writer, user, survivor.id, loser.id)
     writer.flush()
-    verdict = check_step(writer, user, to_survivor, campaign.steps[0], now=NOW)
-    assert Reason.CONTACTED_RECENTLY in verdict.reasons
+    writer.refresh(to_survivor)
+    writer.refresh(sent)
+    assert to_survivor.current_step == 1
+    assert (sent.contact_id, sent.enrollment_id) == (survivor.id, to_survivor.id)
+
+
+def test_another_enrollments_message_in_the_same_campaign_counts(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    """Only the firing enrollment's own messages are exempt, not the whole campaign's (#242).
+
+    A message naming this contact from another enrollment of this campaign (the
+    shape a merge's re-pointing produces for a moment) is recent contact, with or
+    without an interaction recording it.
+    """
+    contact = _contact(writer, user)
+    someone = factories.make_contact(writer, user)
+    ours = factories.make_enrollment(writer, campaign, contact)
+    theirs = factories.make_enrollment(writer, campaign, someone, current_step=1)
+    message = factories.make_message(writer, theirs, sent_at=NOW - timedelta(days=1))
+    message.contact_id = contact.id
+    writer.flush()
+    verdict = check_step(writer, user, ours, campaign.steps[0], now=NOW)
+    assert verdict.reasons == (Reason.CONTACTED_RECENTLY,)
 
 
 def test_a_sent_message_with_no_interaction_counts_unless_it_is_the_enrollments_own(
