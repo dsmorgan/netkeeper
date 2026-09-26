@@ -2,7 +2,7 @@
 PY := .venv/bin/python
 UV := uv
 
-.PHONY: install lint fmt typecheck test check serve dev build-ui gen-client changelog-draft backup reset chrome clean help
+.PHONY: install lint fmt typecheck test test-serial test-fast check serve dev build-ui gen-client changelog-draft backup reset chrome clean help
 
 install:            ## Create .venv and install the package with dev extras (from uv.lock)
 	$(UV) sync --all-extras
@@ -18,8 +18,14 @@ fmt:                ## Ruff format in place
 typecheck:          ## mypy --strict
 	$(PY) -m mypy
 
-test:               ## Offline test suite
+test:               ## Offline test suite, across every core (pytest-xdist)
+	$(PY) -m pytest -q -n auto --dist worksteal
+
+test-serial:        ## The same suite in one process: for a failure that only shows in parallel
 	$(PY) -m pytest -q
+
+test-fast:          ## For local iteration: skips the few `slow` week simulations. CI runs everything
+	$(PY) -m pytest -q -n auto --dist worksteal -m "not slow"
 
 check: lint typecheck test   ## Everything CI runs on the Python side
 
