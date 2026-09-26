@@ -6,8 +6,9 @@ with the default auto-tag rules seeded, installs the scope guard on the session
 factory, marks runs a stopped process left ``running`` as failed, and starts
 the event bus and the task runner, all kept on ``app.state``, along with the
 signer behind bulk count confirmations. Given an extractor (``netkeeper
-serve``), it also starts the scheduler (P2-10); scheduled LinkedIn runs fire
-only on an account a person armed. API
+serve``), it also starts the scheduler (P2-10), whose scheduled LinkedIn runs
+fire only on an account a person armed, and the mailbox poll (P3-01), which
+refreshes each Gmail token every ``[campaigns] reply_poll_minutes``. API
 modules under :mod:`netkeeper.web.api` are discovered, so adding an endpoint
 never edits this file.
 """
@@ -26,6 +27,7 @@ from fastapi import APIRouter, FastAPI
 from sqlalchemy import Engine
 
 from netkeeper import __version__, migrations
+from netkeeper.campaigns.gmail_oauth import GoogleEndpoints
 from netkeeper.config import Settings, load_settings
 from netkeeper.crm.confirmation import Signer
 from netkeeper.crm.lists import ensure_validated_list
@@ -35,6 +37,7 @@ from netkeeper.models.base import utcnow
 from netkeeper.scoping import install_scope_guard
 from netkeeper.services.events import EventBus
 from netkeeper.services.linkedin_accounts import ensure_account
+from netkeeper.services.mailboxes import MailboxMonitor, PendingAuthorizations
 from netkeeper.services.runs import fail_interrupted_runs
 from netkeeper.services.scheduled_runs import ServeExtractor, ServeScheduler, start_serve_scheduler
 from netkeeper.services.tasks import TaskRunner
@@ -55,6 +58,7 @@ def create_app(
     *,
     engine: Engine | None = None,
     extractor: ServeExtractor | None = None,
+    gmail: GoogleEndpoints | None = None,
 ) -> FastAPI:
     """Build the application without starting it.
 
@@ -66,7 +70,12 @@ def create_app(
     (``netkeeper.worker.serve_extractor``): with one, the lifespan builds the
     run executor and starts the scheduler, whose scheduled runs fire only on an
     account a person armed. Without one no scheduler starts and the runs API
-    answers ``503`` to a start; everything else works the same.
+    answers ``503`` to a start; everything else works the same. The mailbox poll
+    starts with the scheduler, for the same reason: only ``serve`` runs
+    background work.
+
+    ``gmail`` is where the Gmail OAuth flow sends its requests; None is Google
+    itself (``netkeeper.campaigns.gmail_oauth.GOOGLE``). Tests pass a loopback fake.
     """
     resolved = load_settings() if settings is None else settings
 
@@ -75,8 +84,10 @@ def create_app(
         active = engine if engine is not None else make_engine(database_url())
         tasks: TaskRunner | None = None
         serving: ServeScheduler | None = None
+        monitor: MailboxMonitor | None = None
         try:
             tasks = _start(app, active, resolved)
+            app.state.gmail_endpoints = gmail
             if extractor is not None:
                 serving = start_serve_scheduler(
                     extractor,
@@ -87,8 +98,18 @@ def create_app(
                 )
                 app.state.executor = serving.executor
                 app.state.scheduler = serving.scheduler
+                monitor = MailboxMonitor(
+                    app.state.session_factory,
+                    app.state.bus,
+                    interval_s=resolved.campaigns.reply_poll_minutes * 60,
+                    endpoints=gmail,
+                )
+                monitor.start()
+                app.state.mailbox_monitor = monitor
             yield
         finally:
+            if monitor is not None:
+                await monitor.stop()
             if serving is not None:
                 serving.stop()
             if tasks is not None:
@@ -144,6 +165,9 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     # One signing key per process, never written down: an outstanding bulk
     # confirmation does not survive a restart, and nothing has to be cleaned up.
     app.state.confirmations = Signer.generated()
+    # Gmail authorizations waiting for Google's redirect; like the signer, never written down.
+    app.state.pending_oauth = PendingAuthorizations()
+    app.state.mailbox_monitor = None
     return tasks
 
 

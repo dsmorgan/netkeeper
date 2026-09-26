@@ -1,4 +1,5 @@
-"""Command-line entry point: serve, db, config, backup, openapi, tags, import/export, version."""
+"""Command-line entry point: serve, db, config, backup, openapi, tags, import/export, gmail,
+version."""
 
 from __future__ import annotations
 
@@ -6,7 +7,8 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import Iterator, Sequence
+import secrets
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,6 +23,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from netkeeper import __version__, migrations
+from netkeeper.campaigns import gmail_oauth
 from netkeeper.config import ConfigError, Settings, load_settings, render_toml
 from netkeeper.crm import import_runs
 from netkeeper.crm.archive import ArchiveImport, import_archive
@@ -50,6 +53,8 @@ from netkeeper.models import (
     ImportResolution,
     ImportRun,
     ImportStatus,
+    Mailbox,
+    MailboxStatus,
     SyncRun,
     SyncRunKind,
     SyncRunStatus,
@@ -59,7 +64,8 @@ from netkeeper.models import (
 )
 from netkeeper.paths import CONFIG_ENV, data_dir
 from netkeeper.scoping import install_scope_guard
-from netkeeper.services import enrich_plan, route_breaker, runs
+from netkeeper.services import enrich_plan, keychain, route_breaker, runs
+from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.backup import (
     BACKUPS_DIRNAME,
     BackupError,
@@ -125,6 +131,11 @@ app.add_typer(import_app, name="import")
 app.add_typer(contacts_app, name="contacts")
 app.add_typer(browser_app, name="browser")
 app.add_typer(linkedin_app, name="linkedin")
+gmail_app = typer.Typer(
+    help="Connect the Gmail account campaigns send from (docs/gmail-setup.md).",
+    no_args_is_help=True,
+)
+app.add_typer(gmail_app, name="gmail")
 
 
 @dataclass(frozen=True, slots=True)
@@ -2053,6 +2064,233 @@ def _stats_rows(stats: ContactStats) -> list[tuple[str, str]]:
         ("tagged by rule", stats.tagged_by_rule),
     )
     return [(name, str(count)) for name, count in fields]
+
+
+# --- gmail (P3-01) -----------------------------------------------------------------
+
+#: How long ``gmail login`` waits for Google's redirect.
+GMAIL_LOGIN_TIMEOUT_S: Final = 300
+
+
+@gmail_app.command("client")
+def gmail_client(
+    path: Annotated[
+        Path,
+        typer.Argument(
+            help="The client JSON the Cloud console downloads for a Desktop app client."
+        ),
+    ],
+) -> None:
+    """Store the OAuth client (ID and secret) in the Keychain."""
+    client = _client_file_or_exit(path)
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+        _keychain_or_exit(lambda: mailbox_service.save_client(user, client))
+    finally:
+        engine.dispose()
+    typer.echo(f"stored OAuth client {client.client_id}")
+
+
+@gmail_app.command("login")
+def gmail_login(
+    ctx: typer.Context,
+    client_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--client-file", help="Store this client JSON first (as `gmail client` does)."
+        ),
+    ] = None,
+    timeout: Annotated[
+        int, typer.Option("--timeout", help="Seconds to wait for Google's redirect.", min=1)
+    ] = GMAIL_LOGIN_TIMEOUT_S,
+) -> None:
+    """Authorize Gmail: print Google's URL, wait for its redirect, store the token."""
+    state = ctx.ensure_object(CliState)
+    settings = _load_settings_or_exit(state)
+    client = None if client_file is None else _client_file_or_exit(client_file)
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            live = mailbox_service.live_mailbox(session, user)
+            hint = None if live is None else live.email
+        if client is not None:
+            stored = client
+            _keychain_or_exit(lambda: mailbox_service.save_client(user, stored))
+        else:
+            client = _keychain_or_exit(lambda: mailbox_service.load_client(user.id))
+            if client is None:
+                typer.echo(
+                    "error: no OAuth client is stored; pass --client-file or run"
+                    " `netkeeper gmail client <file>` (docs/gmail-setup.md)",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+        email, refresh_token = _authorize_or_exit(client, hint, timeout)
+        try:
+            with session_scope(factory, write=True) as session:
+                user = _local_user_or_exit(session)
+                mailbox = mailbox_service.connect(
+                    session,
+                    user,
+                    email,
+                    refresh_token,
+                    daily_cap=settings.campaigns.mailbox_daily_cap,
+                )
+                line = (
+                    f"connected {mailbox.email} (mailbox {mailbox.id}, cap {mailbox.daily_cap}/day)"
+                )
+        except mailbox_service.OtherMailboxConnected as exc:
+            typer.echo(f"error: {exc} (`netkeeper gmail disconnect {exc.connected}`)", err=True)
+            raise typer.Exit(code=1) from exc
+        except keychain.KeychainUnavailable as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+    finally:
+        engine.dispose()
+    typer.echo(line)
+
+
+@gmail_app.command("status")
+def gmail_status() -> None:
+    """List the mailboxes and their health, without asking Google."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            rows = [_mailbox_row(row) for row in mailbox_service.list_mailboxes(session, user)]
+        client = _keychain_or_exit(lambda: mailbox_service.load_client(user.id))
+    finally:
+        engine.dispose()
+    typer.echo(f"client: {'not set' if client is None else client.client_id}")
+    if not rows:
+        typer.echo("no mailboxes; run `netkeeper gmail login`")
+        return
+    typer.echo(_format_table(("ID", "EMAIL", "STATUS", "REASON", "CAP", "CHECKED"), rows), nl=False)
+
+
+@gmail_app.command("check")
+def gmail_check() -> None:
+    """Refresh every connected mailbox's token now, as `serve` does every poll."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory) as session:
+            _local_user_or_exit(session)
+        results = mailbox_service.poll_mailboxes(factory)
+    finally:
+        engine.dispose()
+    if not results:
+        typer.echo("no connected mailboxes to check")
+        return
+    for result in results:
+        reason = "" if result.reason is None else f" ({result.reason})"
+        typer.echo(f"mailbox {result.mailbox_id}: {result.status.value}{reason}")
+    if any(result.status is not MailboxStatus.OK for result in results):
+        raise typer.Exit(code=1)
+
+
+@gmail_app.command("disconnect")
+def gmail_disconnect(
+    email: Annotated[str, typer.Argument(help="The mailbox's address.")],
+) -> None:
+    """Forget a mailbox's token and disable it. Campaigns that named it keep the row."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            wanted = email.strip().lower()
+            found = [
+                row for row in mailbox_service.list_mailboxes(session, user) if row.email == wanted
+            ]
+            if not found:
+                typer.echo(f"error: no mailbox {wanted}", err=True)
+                raise typer.Exit(code=1)
+            try:
+                mailbox_service.disconnect(session, user, found[0])
+            except keychain.KeychainUnavailable as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+    finally:
+        engine.dispose()
+    typer.echo(f"disconnected {wanted}")
+
+
+def _authorize_or_exit(
+    client: gmail_oauth.OAuthClient, hint: str | None, timeout: int
+) -> tuple[str, str]:
+    """Run the loopback flow; the account's address and its refresh token."""
+    with gmail_oauth.LoopbackReceiver() as receiver:
+        authorization = gmail_oauth.begin(client, receiver.redirect_uri, login_hint=hint)
+        _present_authorization_url(authorization.url)
+        try:
+            answer = receiver.wait(timeout)
+        except TimeoutError as exc:
+            typer.echo(f"error: no answer from Google within {timeout} s; run it again", err=True)
+            raise typer.Exit(code=1) from exc
+    if not secrets.compare_digest(answer.get("state", ""), authorization.state):
+        typer.echo("error: the answer does not match this login (state); run it again", err=True)
+        raise typer.Exit(code=1)
+    if "error" in answer:
+        typer.echo(f"error: Google answered {answer['error']!r}; nothing was stored", err=True)
+        raise typer.Exit(code=1)
+    try:
+        grant = gmail_oauth.exchange_code(client, authorization, answer.get("code", ""))
+        return gmail_oauth.fetch_email(grant.access_token), grant.refresh_token
+    except gmail_oauth.OAuthError as exc:
+        typer.echo(f"error: {exc} ({exc.code})", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _present_authorization_url(url: str) -> None:
+    """Show the URL. netkeeper never opens a browser itself (ADR 0002); the person does."""
+    typer.echo("Open this URL in the browser signed in to the Gmail account, and allow access:")
+    typer.echo()
+    typer.echo(f"  {url}")
+    typer.echo()
+    typer.echo("Waiting for Google to send you back here...")
+
+
+def _client_file_or_exit(path: Path) -> gmail_oauth.OAuthClient:
+    try:
+        return gmail_oauth.parse_client_file(path.expanduser().read_text(encoding="utf-8"))
+    except OSError as exc:
+        typer.echo(f"error: cannot read {path}: {exc.strerror}", err=True)
+        raise typer.Exit(code=1) from exc
+    except gmail_oauth.ClientConfigError as exc:
+        typer.echo(f"error: {path}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _keychain_or_exit[T](action: Callable[[], T]) -> T:
+    try:
+        return action()
+    except keychain.KeychainUnavailable as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _mailbox_row(row: Mailbox) -> tuple[str, ...]:
+    checked = "-" if row.checked_at is None else row.checked_at.strftime("%Y-%m-%d %H:%M UTC")
+    return (
+        str(row.id),
+        row.email,
+        row.status.value,
+        row.status_reason or "-",
+        str(row.daily_cap),
+        checked,
+    )
 
 
 def _local_user_or_exit(session: Session) -> User:

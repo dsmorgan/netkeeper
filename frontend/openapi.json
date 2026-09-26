@@ -5522,6 +5522,137 @@
         "title": "Lte",
         "type": "object"
       },
+      "MailboxOut": {
+        "description": "A connected Gmail account. Never its token: that is in the Keychain.",
+        "properties": {
+          "checked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checked At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "daily_cap": {
+            "title": "Daily Cap",
+            "type": "integer"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "label_prefix": {
+            "title": "Label Prefix",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/MailboxProvider"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MailboxStatus"
+          },
+          "status_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Reason"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "provider",
+          "status",
+          "status_reason",
+          "daily_cap",
+          "label_prefix",
+          "checked_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "MailboxOut",
+        "type": "object"
+      },
+      "MailboxProvider": {
+        "description": "Who hosts the mailbox. Gmail only (ADR 0003).",
+        "enum": [
+          "gmail"
+        ],
+        "title": "MailboxProvider",
+        "type": "string"
+      },
+      "MailboxStatus": {
+        "description": "A mailbox's health (spec 8.5, 11.5).",
+        "enum": [
+          "ok",
+          "reauth_required",
+          "disabled"
+        ],
+        "title": "MailboxStatus",
+        "type": "string"
+      },
+      "MailboxStatusOut": {
+        "description": "What the Settings page and the re-auth banner read.",
+        "properties": {
+          "client_configured": {
+            "title": "Client Configured",
+            "type": "boolean"
+          },
+          "client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Id"
+          },
+          "mailboxes": {
+            "items": {
+              "$ref": "#/components/schemas/MailboxOut"
+            },
+            "title": "Mailboxes",
+            "type": "array"
+          },
+          "reauth_required": {
+            "title": "Reauth Required",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "client_configured",
+          "client_id",
+          "mailboxes",
+          "reauth_required"
+        ],
+        "title": "MailboxStatusOut",
+        "type": "object"
+      },
       "MergeIn": {
         "description": "Fold ``loser_id`` into the contact in the path (spec 8.2).",
         "properties": {
@@ -5712,6 +5843,59 @@
           "updated_at"
         ],
         "title": "NotesOut",
+        "type": "object"
+      },
+      "OAuthClientIn": {
+        "description": "The Desktop-app client from your Cloud project (docs/gmail-setup.md).",
+        "properties": {
+          "client_id": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Client Id",
+            "type": "string"
+          },
+          "client_secret": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Client Secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_id",
+          "client_secret"
+        ],
+        "title": "OAuthClientIn",
+        "type": "object"
+      },
+      "OAuthStartIn": {
+        "properties": {
+          "mailbox_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mailbox Id"
+          }
+        },
+        "title": "OAuthStartIn",
+        "type": "object"
+      },
+      "OAuthStartOut": {
+        "properties": {
+          "authorization_url": {
+            "title": "Authorization Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_url"
+        ],
+        "title": "OAuthStartOut",
         "type": "object"
       },
       "Or-Input": {
@@ -12528,6 +12712,304 @@
         "summary": "Remove List Member",
         "tags": [
           "lists"
+        ]
+      }
+    },
+    "/api/v1/mailboxes": {
+      "get": {
+        "description": "Every mailbox, disconnected ones included, oldest first.",
+        "operationId": "list_mailboxes_api_v1_mailboxes_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MailboxOut"
+                  },
+                  "title": "Response List Mailboxes Api V1 Mailboxes Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Mailboxes",
+        "tags": [
+          "mailboxes"
+        ]
+      }
+    },
+    "/api/v1/mailboxes/oauth/callback": {
+      "get": {
+        "description": "Where Google sends the browser back. Always redirects to the Settings page.",
+        "operationId": "mailbox_oauth_callback_api_v1_mailboxes_oauth_callback_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 200,
+              "title": "State",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "code",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 2000,
+              "title": "Code",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "error",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 200,
+              "title": "Error",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Back to the Settings page, with the outcome"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mailbox Oauth Callback",
+        "tags": [
+          "mailboxes"
+        ]
+      }
+    },
+    "/api/v1/mailboxes/oauth/client": {
+      "put": {
+        "description": "Store the OAuth client's ID and secret in the Keychain.",
+        "operationId": "set_oauth_client_api_v1_mailboxes_oauth_client_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthClientIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Not a usable Desktop-app OAuth client"
+          },
+          "503": {
+            "description": "The Keychain refused"
+          }
+        },
+        "summary": "Set Oauth Client",
+        "tags": [
+          "mailboxes"
+        ]
+      }
+    },
+    "/api/v1/mailboxes/oauth/start": {
+      "post": {
+        "description": "The Google URL to open. Valid for ten minutes, once.",
+        "operationId": "start_oauth_api_v1_mailboxes_oauth_start_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthStartIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthStartOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such mailbox for this user"
+          },
+          "409": {
+            "description": "No OAuth client is stored yet"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "The Keychain refused"
+          }
+        },
+        "summary": "Start Oauth",
+        "tags": [
+          "mailboxes"
+        ]
+      }
+    },
+    "/api/v1/mailboxes/status": {
+      "get": {
+        "description": "Whether a client is set, every mailbox, and whether any needs re-authorizing.",
+        "operationId": "mailbox_status_api_v1_mailboxes_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "503": {
+            "description": "The Keychain refused"
+          }
+        },
+        "summary": "Mailbox Status",
+        "tags": [
+          "mailboxes"
+        ]
+      }
+    },
+    "/api/v1/mailboxes/{mailbox_id}/check": {
+      "post": {
+        "description": "Refresh the token now, as the background poll does; answers the mailbox after.",
+        "operationId": "check_mailbox_api_v1_mailboxes__mailbox_id__check_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "mailbox_id",
+            "required": true,
+            "schema": {
+              "title": "Mailbox Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such mailbox for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "The Keychain refused"
+          }
+        },
+        "summary": "Check Mailbox",
+        "tags": [
+          "mailboxes"
+        ]
+      }
+    },
+    "/api/v1/mailboxes/{mailbox_id}/disconnect": {
+      "post": {
+        "description": "Forget the token and disable the mailbox. Its row stays for the campaigns naming it.",
+        "operationId": "disconnect_mailbox_api_v1_mailboxes__mailbox_id__disconnect_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "mailbox_id",
+            "required": true,
+            "schema": {
+              "title": "Mailbox Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such mailbox for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "The Keychain refused"
+          }
+        },
+        "summary": "Disconnect Mailbox",
+        "tags": [
+          "mailboxes"
         ]
       }
     },

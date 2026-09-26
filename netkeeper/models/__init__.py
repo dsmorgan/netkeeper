@@ -68,6 +68,7 @@ from netkeeper.models.lists import (
     ListMember,
     SavedView,
 )
+from netkeeper.models.mailboxes import Mailbox, MailboxProvider, MailboxStatus
 from netkeeper.models.runs import SyncRun, SyncRunKind, SyncRunStatus, SyncRunTrigger
 from netkeeper.models.settings import JsonValue, SettingKV
 from netkeeper.models.tags import (
@@ -145,6 +146,9 @@ __all__ = [
     "LinkedInAccount",
     "ListKind",
     "ListMember",
+    "Mailbox",
+    "MailboxProvider",
+    "MailboxStatus",
     "Message",
     "MessageDirection",
     "MessageStatus",

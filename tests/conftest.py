@@ -4,12 +4,15 @@ from pathlib import Path
 
 import factories
 import httpx
+import keyring
 import pytest
 from fastapi import FastAPI
+from gmail_fakes import FakeGoogle, MemoryKeyring
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper import migrations
+from netkeeper.campaigns import gmail_oauth
 from netkeeper.config import Settings
 from netkeeper.db import DATABASE_FILENAME, database_url, make_engine, make_session_factory
 from netkeeper.models import Base
@@ -43,6 +46,37 @@ def _clean_netkeeper_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("NETKEEPER_DATA", str(tmp_path / "netkeeper-data"))
+
+
+#: What ``gmail_oauth.GOOGLE`` is during a test: a scheme urllib cannot open, so a
+#: call that forgot its fake fails at once with ``OAuthUnavailable``, offline.
+NO_GOOGLE = gmail_oauth.GoogleEndpoints(
+    auth_uri="blocked-in-tests://google/auth",
+    token_uri="blocked-in-tests://google/token",
+    profile_uri="blocked-in-tests://google/profile",
+    use_system_proxy=False,
+)
+
+
+@pytest.fixture(autouse=True)
+def memory_keyring(monkeypatch: pytest.MonkeyPatch) -> Iterator[MemoryKeyring]:
+    """No test touches a real Keychain, and no test can reach Google (#244)."""
+    backend = MemoryKeyring()
+    previous = keyring.get_keyring()
+    keyring.set_keyring(backend)
+    monkeypatch.setattr(gmail_oauth, "GOOGLE", NO_GOOGLE)
+    yield backend
+    keyring.set_keyring(previous)
+
+
+@pytest.fixture
+def fake_google(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeGoogle]:
+    """Google's token endpoint and Gmail's profile call, faked on loopback, as ``GOOGLE``."""
+    fake = FakeGoogle()
+    fake.start()
+    monkeypatch.setattr(gmail_oauth, "GOOGLE", fake.endpoints)
+    yield fake
+    fake.stop()
 
 
 def _template(directory: Path, build: Callable[[Engine], None]) -> Path:

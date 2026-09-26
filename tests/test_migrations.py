@@ -1829,3 +1829,98 @@ def test_an_interaction_message_id_is_a_foreign_key_now(migration_engine: Engine
     with migration_engine.begin() as connection:
         assert _count(connection, "interactions") == 1
         connection.execute(text("UPDATE interactions SET message_id = 7 WHERE id = 1"))
+
+
+# --- mailboxes (0019, P3-01) -------------------------------------------------------------
+
+
+def _insert_mailbox(
+    connection: Connection,
+    *,
+    id: int,
+    user_id: int = 1,
+    email: str = "me@example.com",
+    status: str = "ok",
+    daily_cap: int = 80,
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO mailboxes (id, user_id, email, provider, keychain_ref, daily_cap,"
+            " status, label_prefix, created_at, updated_at)"
+            " VALUES (:id, :user_id, :email, 'gmail', :ref, :cap, :status, 'netkeeper', :t, :t)"
+        ),
+        {
+            "id": id,
+            "user_id": user_id,
+            "email": email,
+            "ref": f"gmail/mailbox/{id}",
+            "cap": daily_cap,
+            "status": status,
+            "t": STAMP,
+        },
+    )
+
+
+def test_a_mailbox_address_is_unique_per_user(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0019")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1, 2)
+        _insert_mailbox(connection, id=1, user_id=1)
+        _insert_mailbox(connection, id=2, user_id=2)  # another user's: fine
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_mailbox(connection, id=3, user_id=1)
+
+
+@pytest.mark.parametrize(
+    "values", [{"status": "paused"}, {"daily_cap": -1}], ids=["status", "daily_cap"]
+)
+def test_a_mailbox_refuses_what_it_cannot_mean(
+    migration_engine: Engine, values: dict[str, Any]
+) -> None:
+    migrations.upgrade(migration_engine, "0019")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_mailbox(connection, id=1, **values)
+
+
+def test_a_campaign_mailbox_id_is_a_foreign_key_now(migration_engine: Engine) -> None:
+    """0019 clears ids that pointed at nothing, then constrains the column (no ON DELETE)."""
+    migrations.upgrade(migration_engine, "0018")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_campaign(connection, id=1)
+        connection.execute(text("UPDATE campaigns SET mailbox_id = 7 WHERE id = 1"))
+
+    migrations.upgrade(migration_engine, "0019")
+    with migration_engine.begin() as connection:
+        stale = connection.execute(text("SELECT mailbox_id FROM campaigns WHERE id = 1"))
+        assert stale.scalar_one() is None
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(text("UPDATE campaigns SET mailbox_id = 7 WHERE id = 1"))
+
+    with migration_engine.begin() as connection:
+        _insert_mailbox(connection, id=1)
+        connection.execute(text("UPDATE campaigns SET mailbox_id = 1 WHERE id = 1"))
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM mailboxes WHERE id = 1"))  # a campaign names it
+
+    with migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM users WHERE id = 1"))
+        assert _count(connection, "mailboxes") == 0
+        assert _count(connection, "campaigns") == 0
+
+
+def test_0019_downgrades_to_campaigns_without_the_key(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0019")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_mailbox(connection, id=1)
+        _insert_campaign(connection, id=1)
+        connection.execute(text("UPDATE campaigns SET mailbox_id = 1 WHERE id = 1"))
+
+    migrations.downgrade(migration_engine, "0018")
+    assert "mailboxes" not in inspect(migration_engine).get_table_names()
+    with migration_engine.begin() as connection:
+        assert _count(connection, "campaigns") == 1
+        connection.execute(text("UPDATE campaigns SET mailbox_id = 7 WHERE id = 1"))

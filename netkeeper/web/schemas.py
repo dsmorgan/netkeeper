@@ -42,6 +42,8 @@ from netkeeper.models import (
     InteractionKind,
     LinkKind,
     ListKind,
+    MailboxProvider,
+    MailboxStatus,
     MetSource,
     PhoneKind,
     RuleField,
@@ -1955,3 +1957,56 @@ class TemplatePreviewOut(BaseModel):
     subject: str | None
     body: str
     issues: list[LintIssueOut]
+
+
+# --- mailboxes (P3-01) ------------------------------------------------------------
+
+
+class MailboxOut(BaseModel):
+    """A connected Gmail account. Never its token: that is in the Keychain."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: str
+    provider: MailboxProvider
+    status: MailboxStatus
+    """``reauth_required`` pauses email steps until someone authorizes again."""
+    status_reason: str | None
+    """A short code: ``invalid_grant``, ``token_missing``, ``client_missing``,
+    ``disconnected``, or another of Google's error codes. None while ``ok``."""
+    daily_cap: int
+    label_prefix: str
+    checked_at: datetime | None
+    """When a token refresh last succeeded."""
+    created_at: datetime
+    updated_at: datetime
+
+
+class MailboxStatusOut(BaseModel):
+    """What the Settings page and the re-auth banner read."""
+
+    client_configured: bool
+    """Whether an OAuth client ID and secret are stored."""
+    client_id: str | None
+    """The stored client ID (not secret), so the page can show which one."""
+    mailboxes: list[MailboxOut]
+    reauth_required: bool
+    """Whether any mailbox needs someone to authorize it again."""
+
+
+class OAuthClientIn(BaseModel):
+    """The Desktop-app client from your Cloud project (docs/gmail-setup.md)."""
+
+    client_id: str = Field(min_length=1, max_length=300)
+    client_secret: str = Field(min_length=1, max_length=300)
+
+
+class OAuthStartIn(BaseModel):
+    mailbox_id: int | None = None
+    """Re-authorizing a known mailbox preselects its account on Google's page."""
+
+
+class OAuthStartOut(BaseModel):
+    authorization_url: str
+    """Open this in the browser; Google sends it back to the callback."""

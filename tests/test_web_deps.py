@@ -109,6 +109,9 @@ def test_the_read_only_routes_are_the_ones_that_only_read() -> None:
         "count_bulk_contacts",
         "preview_autotag_rule",
         "lint_template",
+        "set_oauth_client",
+        "start_oauth",
+        "check_mailbox",
     }
 
 

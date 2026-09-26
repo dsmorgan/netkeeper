@@ -35,6 +35,7 @@ from netkeeper.models import (
 )
 from netkeeper.scoping import scoped
 from netkeeper.services import enrich_plan, runs
+from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.web.app import API_PREFIX
 
@@ -272,6 +273,18 @@ def _seed_views(session: Session, user: User) -> int:
     return 1
 
 
+def _seed_mailboxes(session: Session, user: User) -> int:
+    """One connected mailbox and one disconnected (still listed, #244)."""
+    old = mailbox_service.connect(
+        session, user, f"old{user.id}@example.com", f"rt-old-{user.id}", daily_cap=80
+    )
+    mailbox_service.disconnect(session, user, old)
+    mailbox_service.connect(
+        session, user, f"user{user.id}@example.com", f"rt-{user.id}", daily_cap=80
+    )
+    return 2
+
+
 def _seed_templates(session: Session, user: User) -> int:
     """Two templates, one of them in its second version: the older version is not listed.
 
@@ -433,4 +446,5 @@ REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/me/positions", _seed_positions, array_count),
     ListEndpoint(f"{API_PREFIX}/linkedin/runs", _seed_runs, paged_count),
     ListEndpoint(f"{API_PREFIX}/linkedin/pins", _seed_pins, array_count),
+    ListEndpoint(f"{API_PREFIX}/mailboxes", _seed_mailboxes, array_count),
 ]
