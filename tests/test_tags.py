@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -40,7 +41,7 @@ from netkeeper.crm.tags import (
     delete_tag,
     ensure_default_rules,
     find_tag,
-    has_nested_unbounded_repeat,
+    has_ambiguous_nested_repeat,
     list_rules,
     list_tags,
     preview_matches,
@@ -400,6 +401,18 @@ NESTED_UNBOUNDED = [
     r"x(?=(y+)+)",
     r"(?>a+)+",
     r"(?P<g>a)(?(g)b+|c)+",
+    # From #63's list of "harmless" patterns, and it is not: the optional \s*
+    # lets the next [\w&-] either extend the inner repeat or start another pass,
+    # so "VP of " and a long word with no end anchor splits 2^n ways. The regex
+    # package happens to cut that search short; the standard library's re takes
+    # a second at thirty-one characters, and the guard does not bet on a heuristic.
+    r"\b(VP|Head)\s+of\s+([\w&-]+\s*)+$",
+    # Case folding: [a-z] and [A-Z] are the same set once case is ignored.
+    r"([a-z]+[A-Z])+",
+    # What a backreference or a lookahead's contents match is not analyzed,
+    # so it counts as any character, and doubt rejects.
+    r"(?:(\w)+\1)+",
+    r"(?:(?=(\w+\s)+)x)+",
 ]
 NOT_NESTED = [
     r"(a+)",
@@ -414,13 +427,22 @@ NOT_NESTED = [
     r"(?:x|y+)",
     r"x(?=y+)",
 ]
+UNAMBIGUOUS_NESTED = [
+    # #63: nested, but nothing after the inner repeat can extend it, so the
+    # inner repeat always runs to the end of its run and adds no choice.
+    r"\b(senior|lead)\s+(\w+\s+)*engineer\b",
+    r"(?:[A-Z]\w+\s+)+Engineer",
+    r"^(\w+\W+){2,}Officer$",
+    r"(a+b)+",
+    r"(\d+,)*\d+$",
+]
 
 
 @pytest.mark.parametrize("pattern", NESTED_UNBOUNDED)
 def test_a_nested_unbounded_repeat_is_rejected_at_save_and_preview(
     writer: Session, user: User, pattern: str
 ) -> None:
-    assert has_nested_unbounded_repeat(_parser.parse(pattern, re.IGNORECASE))
+    assert has_ambiguous_nested_repeat(_parser.parse(pattern, re.IGNORECASE))
     vp = create_tag(writer, user, "vp")
     rule = create_rule(writer, user, vp.id, RuleField.TITLE, "ok")
     for attempt in (
@@ -434,10 +456,44 @@ def test_a_nested_unbounded_repeat_is_rejected_at_save_and_preview(
     assert rule.pattern == "ok"
 
 
-@pytest.mark.parametrize("pattern", NOT_NESTED)
+@pytest.mark.parametrize("pattern", NOT_NESTED + UNAMBIGUOUS_NESTED)
 def test_a_pattern_without_nesting_passes_the_static_check(pattern: str) -> None:
-    assert not has_nested_unbounded_repeat(_parser.parse(pattern, re.IGNORECASE))
+    assert not has_ambiguous_nested_repeat(_parser.parse(pattern, re.IGNORECASE))
     compile_pattern(pattern)
+
+
+NEAR_MISSES = ["senior " + "ab" * 12 + "!", "Ab" * 12 + "!", "a" * 24 + "!", "1" * 24 + "x"]
+"""Titles that make an ambiguous nested repeat try every split before failing."""
+
+
+@pytest.mark.parametrize("pattern", UNAMBIGUOUS_NESTED)
+def test_an_accepted_nested_pattern_does_not_backtrack_exponentially(pattern: str) -> None:
+    r"""Accepting a nested repeat is a claim that it cannot backtrack exponentially.
+
+    The ``regex`` package cuts many exponential searches short on its own, so a
+    search through it would pass for patterns the guard should refuse. The
+    standard library's ``re`` has no such shortcut: on these near misses the
+    ambiguous twin of each pattern here (``\s*`` for ``\s+``, ``,?`` for ``,``,
+    and so on) takes from 50 ms to 40 s, and the patterns themselves about
+    10 us, so a 50 ms bound is thousands of times either side of the line.
+    """
+    compiled = re.compile(pattern, re.IGNORECASE)
+    for title in NEAR_MISSES:
+        started = time.perf_counter()
+        compiled.search(title)
+        assert time.perf_counter() - started < 0.05, title
+
+
+def test_the_patterns_from_63_match_what_they_were_written_for() -> None:
+    assert svc.search(compile_pattern(UNAMBIGUOUS_NESTED[0]), "Senior Staff Software Engineer")
+    assert svc.search(compile_pattern(UNAMBIGUOUS_NESTED[1]), "Principal Data Engineer")
+    assert svc.search(compile_pattern(UNAMBIGUOUS_NESTED[2]), "Chief Revenue Officer")
+
+
+def test_the_slow_pattern_message_says_how_to_rewrite_it() -> None:
+    with pytest.raises(InvalidPattern) as caught:
+        compile_pattern(r"(\w+\s*)+$")
+    assert r"(\w+\s+)+" in str(caught.value)
 
 
 COMPILE_BOMBS = [
@@ -565,7 +621,7 @@ def test_a_search_that_times_out_is_no_match_and_is_counted(
 ) -> None:
     """``(a|aa)+$`` has no nested repeat, so it saves, but it backtracks exponentially."""
     slow = r"(a|aa)+$"
-    assert not has_nested_unbounded_repeat(_parser.parse(slow, re.IGNORECASE))
+    assert not has_ambiguous_nested_repeat(_parser.parse(slow, re.IGNORECASE))
     vp = create_tag(writer, user, "vp")
     rule = create_rule(writer, user, vp.id, RuleField.TITLE, slow)
     quick = contact_with_title(writer, user, "aa")
@@ -886,7 +942,7 @@ def test_default_patterns_are_the_spec_list_and_compile() -> None:
     assert DEFAULT_FIELDS == (RuleField.TITLE, RuleField.HEADLINE)
     for default in DEFAULTS:
         compile_pattern(default.pattern)
-        assert not has_nested_unbounded_repeat(_parser.parse(default.pattern, re.IGNORECASE)), (
+        assert not has_ambiguous_nested_repeat(_parser.parse(default.pattern, re.IGNORECASE)), (
             default.pattern
         )
     # Only "retired" reads the company, where the name is the statement rather
