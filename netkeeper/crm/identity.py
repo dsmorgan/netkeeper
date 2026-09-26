@@ -1087,6 +1087,11 @@ def _merge_tags(session: Session, user: User, survivor: Contact, loser: Contact)
         else:
             _keep_assignment(session, survivor, *assigned)
     session.flush()
+    # _drop deletes rows the loser's collection may still hold, and the survivor's
+    # read-only ``tags`` does not see an assignment appended to it; reload both on
+    # next access so a caller serializing either in this session reads what is stored.
+    for contact in (survivor, loser):
+        session.expire(contact, ["tag_assignments", "tags"])
 
 
 def _merge_list_members(session: Session, user: User, survivor: Contact, loser: Contact) -> None:
