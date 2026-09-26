@@ -4547,6 +4547,8 @@ export interface components {
             current: boolean;
             /** Id */
             id: number;
+            /** In Use */
+            in_use: boolean;
             /** Lint */
             lint: components["schemas"]["LintIssueOut"][];
             /** Name */

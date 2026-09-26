@@ -64,6 +64,7 @@ function template(overrides: Partial<TemplateOut> = {}): TemplateOut {
     version: 1,
     previous_id: null,
     current: true,
+    in_use: false,
     lint: [],
     created_at: '2026-09-01T10:00:00Z',
     updated_at: '2026-09-01T10:00:00Z',
@@ -226,23 +227,22 @@ describe('versions', () => {
   })
 
   it('says so when an edit to a template in use is saved as a new version', async () => {
+    const used = template({ in_use: true })
     const saved = template({ id: 9, version: 2, previous_id: 1, body: 'Yo {{ first_name }}' })
     const seen = mockApi(
-      routes([template(), saved], {
+      routes([used, saved], {
         // The list holds the newest version of each: the old one until the edit lands.
         'GET /api/v1/templates': ({ seen: all }) =>
-          jsonResponse(
-            requestsTo(all, 'PATCH', '/api/v1/templates/1').length ? [saved] : [template()],
-          ),
+          jsonResponse(requestsTo(all, 'PATCH', '/api/v1/templates/1').length ? [saved] : [used]),
         'PATCH /api/v1/templates/1': () => jsonResponse(saved),
       }),
     )
     await renderPage()
-    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^reconnect/ }))
     fireEvent.change(await screen.findByLabelText('Body'), {
       target: { value: 'Yo {{ first_name }}' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save as version 2' }))
 
     expect(await screen.findByText('Saved as version 2')).toBeInTheDocument()
     expect(screen.getByText(/Version 1 stays as it was for that campaign/)).toBeInTheDocument()
@@ -255,6 +255,39 @@ describe('versions', () => {
       subject: 'Hi {{ first_name }}',
       body: 'Yo {{ first_name }}',
     })
+  })
+})
+
+describe('in use', () => {
+  it('says before you save that an edit to a template in use makes a new version', async () => {
+    mockApi(
+      routes([
+        template({ id: 1, name: 'reconnect', version: 3, in_use: true }),
+        template({ id: 2, name: 'follow-up' }),
+      ]),
+    )
+    await renderPage()
+
+    const list = await screen.findByRole('list', { name: 'Templates' })
+    const [used, free] = within(list).getAllByRole('button')
+    expect(used).toHaveTextContent('reconnectIn use')
+    expect(free).toHaveTextContent(/^follow-up$/)
+
+    fireEvent.click(used!)
+    expect(await screen.findByText('A campaign uses this version')).toBeInTheDocument()
+    expect(
+      screen.getByText('Saving creates version 4. The campaign keeps sending version 3 as it is.'),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save as version 4' })).toBeInTheDocument()
+  })
+
+  it('says nothing of versions for a template no campaign uses', async () => {
+    mockApi(routes([template()]))
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+
+    expect(await screen.findByRole('button', { name: 'Save' })).toBeInTheDocument()
+    expect(screen.queryByText('A campaign uses this version')).not.toBeInTheDocument()
   })
 })
 

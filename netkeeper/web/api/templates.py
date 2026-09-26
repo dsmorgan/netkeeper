@@ -76,7 +76,7 @@ def _issue_out(issue: LintIssue) -> LintIssueOut:
     )
 
 
-def _template_out(row: Template, *, current: bool) -> TemplateOut:
+def _template_out(row: Template, *, current: bool, in_use: bool) -> TemplateOut:
     return TemplateOut(
         id=row.id,
         name=row.name,
@@ -86,6 +86,7 @@ def _template_out(row: Template, *, current: bool) -> TemplateOut:
         version=row.version,
         previous_id=row.previous_id,
         current=current,
+        in_use=in_use,
         lint=[_issue_out(LintIssue.from_json(item)) for item in row.lint_json],
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -95,7 +96,9 @@ def _template_out(row: Template, *, current: bool) -> TemplateOut:
 @router.get("/templates", operation_id="list_templates")
 def list_templates(user: CurrentUser, session: SessionDep) -> list[TemplateOut]:
     """Every template, the newest version of each, by name."""
-    return [_template_out(row, current=True) for row in service.list_templates(session, user)]
+    rows = service.list_templates(session, user)
+    in_use = service.in_use_ids(session, user, [row.id for row in rows])
+    return [_template_out(row, current=True, in_use=row.id in in_use) for row in rows]
 
 
 @router.post(
@@ -118,7 +121,7 @@ def create_template(
             body=body.body,
             me_keys=_me(request).keys(),
         )
-    return _template_out(row, current=True)
+    return _template_out(row, current=True, in_use=False)
 
 
 @router.post("/templates/lint", operation_id="lint_template", responses=INVALID)
@@ -141,7 +144,7 @@ def get_template(template_id: int, user: CurrentUser, session: SessionDep) -> Te
     with translate_errors():
         row = service.get_template(session, user, template_id)
         current = not service.is_superseded(session, user, row)
-    return _template_out(row, current=current)
+    return _template_out(row, current=current, in_use=service.is_in_use(session, user, row))
 
 
 @router.patch(
@@ -170,7 +173,7 @@ def update_template(
             subject=subject,
             body=body.body,
         )
-    return _template_out(row, current=True)
+    return _template_out(row, current=True, in_use=service.is_in_use(session, user, row))
 
 
 @router.delete(

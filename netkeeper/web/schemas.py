@@ -1914,6 +1914,9 @@ class TemplateOut(BaseModel):
     """The version this one replaced, if any."""
     current: bool
     """False for an older version: read-only, kept for the campaigns that still use it."""
+    in_use: bool
+    """True while a campaign past ``draft`` sends this version. Saving an edit to a
+    current version that is in use creates a new version instead of changing this one."""
     lint: list[LintIssueOut]
     """Lint as of the last save. Every issue here is an error, and any error blocks
     activation; activation lints again against the config of the moment."""

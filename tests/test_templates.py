@@ -321,6 +321,14 @@ def test_a_version_is_in_use_once_a_campaign_naming_it_leaves_draft(
     assert service.is_referenced(writer, user, row) is True
 
 
+def test_in_use_ids_answers_for_many_templates_at_once(writer: Session, user: User) -> None:
+    active, draft, free = (_create(writer, user, name) for name in ("active", "draft", "free"))
+    _use(writer, user, active, CampaignStatus.ACTIVE)
+    _use(writer, user, draft, CampaignStatus.DRAFT)
+    assert service.in_use_ids(writer, user, [active.id, draft.id, free.id]) == {active.id}
+    assert service.in_use_ids(writer, user, []) == set()
+
+
 def test_the_frozen_statuses_are_every_status_past_draft() -> None:
     assert {s.value for s in service.IN_USE_STATUSES} == {
         "reviewing",

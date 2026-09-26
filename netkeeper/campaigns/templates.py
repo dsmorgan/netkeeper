@@ -201,23 +201,35 @@ template's edits as they happen.
 """
 
 
+def in_use_ids(session: Session, user: User, template_ids: Collection[int]) -> set[int]:
+    """Which of ``template_ids`` a campaign past ``draft`` sends (:data:`IN_USE_STATUSES`).
+
+    One query for any number of ids, so the template list can say which of its
+    rows are in use without a query per row.
+    """
+    if not template_ids:
+        return set()
+    statement = (
+        scoped(user, CampaignStep)
+        .join(Campaign, Campaign.id == CampaignStep.campaign_id)
+        .where(
+            CampaignStep.template_id.in_(template_ids),
+            Campaign.user_id == user.id,
+            Campaign.status.in_(IN_USE_STATUSES),
+        )
+        .with_only_columns(CampaignStep.template_id)
+        .distinct()
+    )
+    return set(session.scalars(statement))
+
+
 def is_in_use(session: Session, user: User, row: Template) -> bool:
     """Whether a campaign past ``draft`` (:data:`IN_USE_STATUSES`) sends this version (spec 8.5).
 
     An edit of a version in use makes a new version and leaves this one to the
     campaigns that use it.
     """
-    statement = (
-        scoped(user, CampaignStep)
-        .join(Campaign, Campaign.id == CampaignStep.campaign_id)
-        .where(
-            CampaignStep.template_id == row.id,
-            Campaign.user_id == user.id,
-            Campaign.status.in_(IN_USE_STATUSES),
-        )
-        .limit(1)
-    )
-    return session.scalars(statement).first() is not None
+    return row.id in in_use_ids(session, user, [row.id])
 
 
 def is_referenced(session: Session, user: User, row: Template) -> bool:

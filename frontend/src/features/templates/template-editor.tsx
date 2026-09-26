@@ -87,11 +87,18 @@ export function TemplateEditor({
           {template === null ? 'New template' : `Editing version ${template.version}`}
         </CardTitle>
         <CardDescription>
-          Merge fields go in double braces, like {'{{ first_name }}'}. If a campaign uses this
-          template, saving creates a new version and the campaign keeps the one it has.
+          Merge fields go in double braces, like {'{{ first_name }}'}.
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-3">
+        {template?.in_use === true && (
+          <Callout tone="info" title="A campaign uses this version">
+            <p>
+              Saving creates version {template.version + 1}. The campaign keeps sending version{' '}
+              {template.version} as it is.
+            </p>
+          </Callout>
+        )}
         <form
           className="space-y-3"
           onSubmit={(event) => {
@@ -181,7 +188,13 @@ export function TemplateEditor({
               type="submit"
               disabled={save.isPending || unchanged || draft.name.trim() === ''}
             >
-              {save.isPending ? 'Saving…' : template === null ? 'Create template' : 'Save'}
+              {save.isPending
+                ? 'Saving…'
+                : template === null
+                  ? 'Create template'
+                  : template.in_use
+                    ? `Save as version ${template.version + 1}`
+                    : 'Save'}
             </Button>
             {template !== null && (
               <Button

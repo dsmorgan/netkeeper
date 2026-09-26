@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns import templates as service
 from netkeeper.db import session_scope
-from netkeeper.models import TemplateChannel, User, UserKind
+from netkeeper.models import CampaignStatus, TemplateChannel, User, UserKind
 
 CSRF = {"X-Netkeeper-Client": "1"}
 EMAIL = {"name": "reconnect", "channel": "email", "subject": "Hi {{ first_name }}",
@@ -126,6 +126,73 @@ async def test_an_edit_of_a_template_in_use_answers_with_the_new_version(
     assert (await client.delete(url, headers=CSRF)).status_code == 409
     newest = f"/api/v1/templates/{patched['id']}"
     assert (await client.delete(newest, headers=CSRF)).status_code == 409  # still in use
+
+
+def _use(app: FastAPI, template_id: int, status: CampaignStatus) -> None:
+    """A campaign in ``status`` whose one step sends template ``template_id``."""
+    with session_scope(_factory(app), write=True) as session:
+        user = session.scalars(select(User)).one()
+        campaign = factories.make_campaign(session, user, status=status)
+        campaign.steps[0].template_id = template_id
+
+
+def _in_use(rows: list[dict[str, Any]], *names: str) -> dict[str, bool]:
+    """``in_use`` by name, for ``names`` only: the campaign factory adds templates of its own."""
+    return {row["name"]: row["in_use"] for row in rows if row["name"] in names}
+
+
+async def test_in_use_says_which_templates_a_campaign_past_draft_sends(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    sent = await _create(client, name="sent")
+    drafted = await _create(client, name="drafted")
+    free = await _create(client, name="free")
+    assert (sent["in_use"], drafted["in_use"], free["in_use"]) == (False, False, False)
+    _use(running_app, sent["id"], CampaignStatus.ACTIVE)
+    _use(running_app, drafted["id"], CampaignStatus.DRAFT)
+
+    listed = (await client.get("/api/v1/templates")).json()
+    assert _in_use(listed, "sent", "drafted", "free") == {
+        "drafted": False,
+        "free": False,
+        "sent": True,
+    }
+    for row, expected in ((sent, True), (drafted, False), (free, False)):
+        assert (await client.get(f"/api/v1/templates/{row['id']}")).json()["in_use"] is expected
+
+
+async def test_in_use_moves_to_the_old_version_when_an_edit_makes_a_new_one(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    created = await _create(client)
+    _use(running_app, created["id"], CampaignStatus.PAUSED)
+    url = f"/api/v1/templates/{created['id']}"
+
+    patched = (await client.patch(url, json={"body": "Hey {{ first_name }}"}, headers=CSRF)).json()
+    assert (patched["previous_id"], patched["in_use"]) == (created["id"], False)
+    old = (await client.get(url)).json()
+    assert (old["current"], old["in_use"]) == (False, True)
+    listed = (await client.get("/api/v1/templates")).json()
+    assert _in_use(listed, EMAIL["name"]) == {EMAIL["name"]: False}
+
+    # The new version is not in use, so the next edit changes it in place.
+    again = f"/api/v1/templates/{patched['id']}"
+    edited = (await client.patch(again, json={"body": "Yo {{ first_name }}"}, headers=CSRF)).json()
+    assert (edited["id"], edited["in_use"]) == (patched["id"], False)
+
+
+async def test_in_use_ignores_another_users_campaign(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    created = await _create(client)
+    with session_scope(_factory(running_app), write=True) as session:
+        stranger = factories.make_user(session, kind=UserKind.HOSTED)
+        campaign = factories.make_campaign(session, stranger)
+        # A cross-user reference the service never makes; the scoped query must ignore it.
+        campaign.steps[0].template_id = created["id"]
+    listed = (await client.get("/api/v1/templates")).json()
+    assert _in_use(listed, EMAIL["name"]) == {EMAIL["name"]: False}
+    assert (await client.get(f"/api/v1/templates/{created['id']}")).json()["in_use"] is False
 
 
 async def test_a_concurrent_edit_of_a_version_in_use_is_409_not_500(

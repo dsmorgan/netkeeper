@@ -93,11 +93,14 @@ export function TemplatesPage() {
                         onClick={() => select(row.id)}
                       >
                         <span className="truncate">{row.name}</span>
-                        {row.lint.length > 0 && (
-                          <Badge variant="destructive" className="ml-auto">
-                            {row.lint.length} lint {row.lint.length === 1 ? 'error' : 'errors'}
-                          </Badge>
-                        )}
+                        <span className="ml-auto flex gap-1">
+                          {row.in_use && <Badge variant="outline">In use</Badge>}
+                          {row.lint.length > 0 && (
+                            <Badge variant="destructive">
+                              {row.lint.length} lint {row.lint.length === 1 ? 'error' : 'errors'}
+                            </Badge>
+                          )}
+                        </span>
                       </Button>
                     </li>
                   ))}

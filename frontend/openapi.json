@@ -7574,6 +7574,10 @@
             "title": "Id",
             "type": "integer"
           },
+          "in_use": {
+            "title": "In Use",
+            "type": "boolean"
+          },
           "lint": {
             "items": {
               "$ref": "#/components/schemas/LintIssueOut"
@@ -7626,6 +7630,7 @@
           "version",
           "previous_id",
           "current",
+          "in_use",
           "lint",
           "created_at",
           "updated_at"
