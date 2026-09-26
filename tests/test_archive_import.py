@@ -493,6 +493,23 @@ def test_text_after_an_unclosed_script_survives_on_every_python_patch(
     assert _html_to_text("<p>One</p><script>two &amp; three") == "One\ntwo & three"
 
 
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("cut off mid tag <a href='foo", "cut off mid tag"),
+        ("cut off mid comment <!-- note", "cut off mid comment"),
+        ("cut off mid end tag </spa", "cut off mid end tag"),
+        ("a trailing <", "a trailing <"),
+        ("a trailing </", "a trailing </"),
+        ("a trailing &amp", "a trailing &"),
+    ],
+)
+def test_the_end_of_a_body_is_read_the_same_on_every_python_patch(body: str, expected: str) -> None:
+    """#231: 3.12.11 alone emits an unterminated tag or comment at the very end as
+    text, where 3.12.3 and 3.12.12+ drop it; a bare ``<`` or ``</`` is text on all."""
+    assert _html_to_text(body) == expected
+
+
 def test_an_image_only_message_has_no_summary(writer: Session, user: User, tmp_path: Path) -> None:
     body = "<img src='https://example.test/x.png'>"
     assert _imported_summary(writer, user, tmp_path, body) is None
