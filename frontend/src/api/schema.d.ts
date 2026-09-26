@@ -1796,6 +1796,8 @@ export interface components {
             owner_public_id: string | null;
             /** Run Id */
             run_id: number | null;
+            /** Unfamiliar Message Files */
+            unfamiliar_message_files: string[];
         };
         /**
          * ArchiveInvitationCountsOut
@@ -1895,6 +1897,11 @@ export interface components {
             owner_by: string | null;
             /** Owner Public Id */
             owner_public_id: string | null;
+            /**
+             * Unfamiliar Message Files
+             * @default []
+             */
+            unfamiliar_message_files: string[];
         };
         /** AutotagRuleCreate */
         AutotagRuleCreate: {

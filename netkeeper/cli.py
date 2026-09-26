@@ -1515,6 +1515,12 @@ def import_archive_cmd(
 def _archive_report(report: ArchiveImport) -> str:
     c, p = report.connections, report.positions
     m, i, t = report.messages, report.invitations, report.tagging
+    unfamiliar = tuple(
+        f"warning: read {name} as message history, but it is not messages.csv; "
+        "if it is a LinkedIn assistant chat log, its conversations are counted above "
+        "but added nothing"
+        for name in report.unfamiliar_message_files
+    )
     return "\n".join(
         (
             f"connections: {c.rows} rows, {c.created} created, {c.updated} updated, "
@@ -1528,6 +1534,7 @@ def _archive_report(report: ArchiveImport) -> str:
             f"invitations: {i.rows} rows; {i.added} interactions added",
             f"auto-tag rules: {t.contacts} contacts examined, {t.added} tags added, "
             f"{t.removed} removed",
+            *unfamiliar,
             f"recorded as import run {report.run_id}; undo it with "
             f"`netkeeper import rollback {report.run_id}`",
         )

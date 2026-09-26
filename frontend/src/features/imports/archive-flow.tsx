@@ -353,8 +353,21 @@ function ConnectionsCard({ counts }: { counts: ArchiveConnectionCounts }) {
   )
 }
 
-/** `messages.csv`'s counts, only when the file carried any (`rows > 0`). */
-export function MessagesCard({ counts }: { counts: ArchiveMessageCounts }) {
+/**
+ * `messages.csv`'s counts, only when the file carried any (`rows > 0`).
+ *
+ * `unfamiliarFiles` names every file read as message history under another
+ * name (issue #74). It was imported, but LinkedIn exports its own assistants'
+ * chat logs in the same shape, and one netkeeper does not know by name reads
+ * as conversations that add nothing. The note says which file to look at.
+ */
+export function MessagesCard({
+  counts,
+  unfamiliarFiles = [],
+}: {
+  counts: ArchiveMessageCounts
+  unfamiliarFiles?: readonly string[]
+}) {
   if (counts.rows === 0) return null
   return (
     <Card>
@@ -384,6 +397,17 @@ export function MessagesCard({ counts }: { counts: ArchiveMessageCounts }) {
               {counts.no_owner} {plural(counts.no_owner, 'conversation')} could not be read because
               netkeeper could not tell which participant was you. The rest of the file was still
               read.
+            </p>
+          </Note>
+        )}
+        {unfamiliarFiles.length > 0 && (
+          <Note tone="warn" role="status">
+            <p>
+              Also read as message history, although{' '}
+              {plural(unfamiliarFiles.length, 'it is', 'they are')} not messages.csv:{' '}
+              {unfamiliarFiles.join(', ')}. If {plural(unfamiliarFiles.length, 'it is', 'one is')} a
+              LinkedIn assistant&rsquo;s chat log, its conversations are counted above but added
+              nothing, since an assistant is not a contact.
             </p>
           </Note>
         )}
@@ -467,7 +491,7 @@ function ArchiveResult({
       </Card>
 
       <ConnectionsCard counts={result.connections} />
-      <MessagesCard counts={result.messages} />
+      <MessagesCard counts={result.messages} unfamiliarFiles={result.unfamiliar_message_files} />
       <InvitationsCard counts={result.invitations} />
 
       {ignored.length > 0 && (

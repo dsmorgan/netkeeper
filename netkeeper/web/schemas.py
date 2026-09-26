@@ -1199,6 +1199,9 @@ class ArchiveReportOut(BaseModel):
     invitations: ArchiveInvitationCountsOut
     ignored_files: list[str]
     """Tables the archive carried that no importer reads yet."""
+    unfamiliar_message_files: list[str] = []
+    """Members read as message history although not named ``messages.csv`` (#74).
+    Empty for a run recorded before this was kept."""
 
 
 class ArchiveImportOut(BaseModel):
@@ -1225,6 +1228,11 @@ class ArchiveImportOut(BaseModel):
     invitations: ArchiveInvitationCountsOut
     ignored_files: list[str]
     """Tables the archive carried that no importer reads yet, such as ``Positions.csv``."""
+    unfamiliar_message_files: list[str]
+    """Members read as message history although not named ``messages.csv``: each
+    was imported, but may be an assistant chat log LinkedIn exports in the
+    same shape, whose conversations are then counted in ``messages`` but
+    produce no interactions (#74)."""
 
 
 class ArchiveRefusalOut(BaseModel):

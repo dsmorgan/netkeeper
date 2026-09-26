@@ -358,6 +358,7 @@ def archive_report_out(
             undirected=report.invitations.undirected,
         ),
         ignored_files=ignored_files,
+        unfamiliar_message_files=list(report.unfamiliar_message_files),
     )
 
 

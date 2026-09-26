@@ -120,6 +120,26 @@ def test_cli_import_archive_reports_the_known_counts(cli_db: sessionmaker[Sessio
         assert session.scalar(scoped_count(user, Interaction)) == 10
 
 
+def test_cli_import_archive_warns_about_a_messages_shaped_file_under_another_name(
+    cli_db: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """#74: a fourth assistant log is imported, and the summary says which file to look at."""
+    root = tmp_path / "export"
+    root.mkdir()
+    for source in FIXTURES_ARCHIVE.iterdir():
+        (root / source.name).write_bytes(source.read_bytes())
+    (root / "interview_prep_messages.csv").write_bytes(
+        (FIXTURES_ARCHIVE / "guide_messages.csv").read_bytes()
+    )
+    result = CliRunner().invoke(cli, ["import", "archive", str(root)])
+    assert result.exit_code == 0, result.output
+    assert (
+        "warning: read interview_prep_messages.csv as message history, but it is not messages.csv"
+    ) in result.output
+    plain = CliRunner().invoke(cli, ["import", "archive", str(FIXTURES_ARCHIVE)])
+    assert "warning:" not in plain.output
+
+
 def test_cli_import_archive_names_its_run_and_that_run_rolls_back(
     cli_db: sessionmaker[Session],
 ) -> None:

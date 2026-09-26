@@ -130,6 +130,15 @@ from netkeeper.scoping import scoped
 
 log = logging.getLogger(__name__)
 
+# The one name a real message history carries in LinkedIn's export. A member
+# recognized as the messages table under any other name is read all the same
+# (a renamed or moved table still imports), but reported, because LinkedIn
+# also exports its own assistants' chat logs with the messages header. The
+# known ones are skipped by name in netkeeper.linkedin.archive
+# (NOT_CONVERSATIONS); a new one would read as conversations with contacts,
+# and this is how that shows up instead of passing unnoticed (#74).
+MESSAGES_FILENAME: Final = "messages.csv"
+
 # How much of a message body an interaction's summary keeps. Triage reads it as
 # evidence, so it holds the message rather than a label, but a body is a CSV
 # field with no length limit and the timeline is not a mail reader.
@@ -320,6 +329,14 @@ class ArchiveImport:
     every row was recorded as observed. ``tagging`` is what the auto-tag rules
     did to the contacts this import created or enriched. ``run_id`` is the
     ``import_runs`` row that records the import (#132).
+
+    ``unfamiliar_message_files`` names every member read as the messages table
+    whose file name is not ``messages.csv`` (#74). Each was imported like any
+    other, but it may be an assistant chat log LinkedIn added after
+    :data:`netkeeper.linkedin.archive.NOT_CONVERSATIONS` was written, whose
+    rows then show up in the message counts (``no_counterpart`` or
+    ``no_owner``, since an assistant has no profile URL) and never as
+    interactions.
     """
 
     observed_at: datetime
@@ -331,6 +348,7 @@ class ArchiveImport:
     invitations: InvitationCounts = field(default_factory=InvitationCounts)
     positions: PositionCounts = field(default_factory=PositionCounts)
     tagging: RuleRun = field(default_factory=lambda: RuleRun(0, 0, 0, 0))
+    unfamiliar_message_files: list[str] = field(default_factory=list)
 
 
 def import_archive(
@@ -384,6 +402,7 @@ def import_archive(
     profile_name = archive.owner_name()
     for member in archive.members:
         if member.kind is ArchiveKind.MESSAGES:
+            _note_unfamiliar_messages(member.name, report)
             _import_messages(
                 archive.messages(member), owner_public_id, profile_name, written, report
             )
@@ -456,6 +475,7 @@ def report_json(report: ArchiveImport, *, ignored_files: Iterable[str] = ()) -> 
         "invitations": asdict(report.invitations),
         "positions": asdict(report.positions),
         "ignored_files": list(ignored_files),
+        "unfamiliar_message_files": list(report.unfamiliar_message_files),
     }
 
 
@@ -632,6 +652,25 @@ def _import_messages(
                     counts.inbound += 1
             else:
                 counts.already_present += 1
+
+
+def _note_unfamiliar_messages(name: str, report: ArchiveImport) -> None:
+    """Report a messages-shaped member not named ``messages.csv`` (#74).
+
+    Compared on the base name, case-folded, with either separator, the way
+    the reader's own skip list is: ``export/Messages.csv`` is the familiar
+    table in a subdirectory, ``interview_prep_messages.csv`` is not.
+    """
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    if base.casefold() == MESSAGES_FILENAME:
+        return
+    report.unfamiliar_message_files.append(name)
+    log.warning(
+        "archive: %s has the messages header but is not %s; importing it as message "
+        "history, which is wrong if it is an assistant chat log",
+        name,
+        MESSAGES_FILENAME,
+    )
 
 
 def _note_owner(owner: Owner, report: ArchiveImport) -> None:
