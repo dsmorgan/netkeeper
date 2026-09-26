@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import factories
@@ -494,6 +494,60 @@ def test_last_position_change_ignores_an_end_date_after_today(writer: Session, u
         user,
         {"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": date(2026, 12, 31)},
     ) == date(2021, 6, 1)
+
+
+def test_last_position_change_ignores_an_end_date_of_tomorrow(writer: Session, user: User) -> None:
+    """The boundary is today itself, not some grace period after it."""
+    assert _last_change(
+        writer,
+        user,
+        {
+            "title": "Engineer",
+            "started_on": date(2021, 6, 1),
+            "ended_on": TODAY + timedelta(days=1),
+        },
+    ) == date(2021, 6, 1)
+
+
+def test_last_position_change_counts_an_end_date_with_no_start_date(
+    writer: Session, user: User
+) -> None:
+    assert _last_change(
+        writer,
+        user,
+        {"title": "Engineer", "ended_on": date(2025, 11, 1)},
+    ) == date(2025, 11, 1)
+
+
+def test_last_position_change_ignores_a_start_date_after_today(writer: Session, user: User) -> None:
+    """An announced new job has not happened yet either (#255): "congrats on the
+    move" before the move is wrong."""
+    assert _last_change(
+        writer,
+        user,
+        {"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": date(2026, 8, 31)},
+        {"title": "Lead", "started_on": TODAY + timedelta(days=1)},
+    ) == date(2026, 8, 31)
+
+
+def test_last_position_change_counts_a_start_date_of_today(writer: Session, user: User) -> None:
+    assert _last_change(writer, user, {"title": "Lead", "started_on": TODAY}) == TODAY
+
+
+def test_last_position_change_measures_against_the_today_it_is_given(
+    writer: Session, user: User
+) -> None:
+    """Far from the real date, so reading the clock instead of ``today`` shows."""
+    contact = factories.make_contact(
+        writer,
+        user,
+        positions=[
+            {"title": "Engineer", "started_on": date(2010, 1, 1), "ended_on": date(2012, 5, 1)},
+            {"title": "Lead", "started_on": date(2012, 6, 1), "ended_on": date(2030, 1, 1)},
+        ],
+    )
+    assert contact_fields(contact, date(2012, 5, 15))["last_position_change"] == date(2012, 5, 1)
+    assert contact_fields(contact, date(2040, 1, 1))["last_position_change"] == date(2030, 1, 1)
 
 
 def test_last_position_change_counts_an_end_date_of_today(writer: Session, user: User) -> None:
