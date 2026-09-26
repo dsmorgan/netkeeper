@@ -4,7 +4,7 @@
  * `netkeeper.crm.filters.FilterTree` publishes each field's kind, label, the
  * ops it takes, and an enum's values under that extension key, but
  * `openapi-typescript` keeps only the types, so the builder needs the metadata
- * in a form it can iterate. `fields.test.ts` reads the extension straight out
+ * in a form it can iterate. `predicates.test.ts` reads the extension straight out
  * of `openapi.json` and fails when this table and the backend disagree, so the
  * duplication cannot drift silently.
  */
@@ -73,7 +73,7 @@ export function fieldSpec(name: string): FieldSpec | undefined {
 /**
  * Every column the contacts query offers, in the backend's own order.
  *
- * A saved view stores a subset of these. `fields.test.ts` compares the list
+ * A saved view stores a subset of these. `predicates.test.ts` compares the list
  * with the enum in `openapi.json`, so a column the backend adds does not go
  * quietly missing from the view editor.
  */

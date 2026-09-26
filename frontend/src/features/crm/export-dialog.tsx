@@ -121,6 +121,9 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
           <>
             <strong>{count.data.total.toLocaleString()}</strong> contacts selected —{' '}
             <span className="text-muted-foreground">{count.data.describe}</span>
+            {chosen?.dropsRows === true && (
+              <> The file may hold fewer: this preset leaves some out, as explained below.</>
+            )}
           </>
         )}
       </p>

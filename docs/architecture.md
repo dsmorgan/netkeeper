@@ -824,7 +824,7 @@ Cost controls: a per-day call cap, batch size limits, and a token estimate shown
 | `/` | Dashboard: the setup path (P1-24) |
 | `/contacts`, `/contacts/:id` | Table with saved views; detail with fields, tags, timeline, snapshots, messages, LLM brief |
 | `/triage` | Step 6 workflow |
-| `/lists` | Static and smart lists, filter builder |
+| `/lists` | Three tabs: static and smart lists with the filter builder; tags and their auto-tag rules (edited and reordered in place, with a live match count); and saved views, the same ones the Contacts table applies, built and edited with the same filter builder |
 | `/imports`, `/exports` | Mapping, review, presets |
 | `/imports/runs`, `/imports/runs/:id` | Import history, paged newest first; one run's counts (every file's, for an archive), its rows, finishing a draft, and rollback (P1-13, #132) |
 | `/linkedin` | Runs, live progress, budget and heat, pins, preflight, browser launch instructions |
