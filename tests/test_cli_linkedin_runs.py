@@ -191,38 +191,60 @@ def test_reset_breaker_on_a_clear_account_says_so_and_asks_nothing(
     assert "nothing to reset" in result.output
 
 
-def _lose_answers(factory: sessionmaker[Session], runs_in_a_row: int) -> int:
+def _lose_answers(
+    factory: sessionmaker[Session],
+    runs_in_a_row: int,
+    kind: SyncRunKind = SyncRunKind.CONNECTIONS_FULL,
+) -> int:
     with session_scope(factory, write=True) as session:
         user = _user(session)
         account_id = ensure_account(session, user).id
         for _ in range(runs_in_a_row):
             route_breaker.record_answer_lost(
-                session, user, account_id, answer_lost=True, clean_end=False, now=datetime.now(UTC)
+                session,
+                user,
+                account_id,
+                kind=kind,
+                answer_lost=True,
+                clean_end=False,
+                now=datetime.now(UTC),
             )
     return account_id
 
 
-def _answer_lost_count(factory: sessionmaker[Session], account_id: int) -> int:
+def _answer_lost_counts(factory: sessionmaker[Session], account_id: int) -> list[int]:
     with session_scope(factory) as session:
-        return route_breaker.answer_lost_state(session, _user(session), account_id).count
+        states = route_breaker.answer_lost_states(session, _user(session), account_id)
+    return [state.count for state in states.values()]
 
 
-def test_schedule_status_shows_both_counts(cli_db: sessionmaker[Session]) -> None:
-    """#199: `schedule status` shows the answer-lost count next to the breaker's."""
+def test_schedule_status_shows_every_count(cli_db: sessionmaker[Session]) -> None:
+    """#199: `schedule status` shows each kind's answer-lost count next to the
+    breaker's."""
     runner = CliRunner()
     clear = runner.invoke(cli, ["linkedin", "schedule", "status"])
     assert clear.exit_code == 0, clear.output
     assert "route-changed breaker: 0 of 2 route_changed connections runs in a row" in clear.output
-    assert "answer-lost limit: 0 of 3 answer_lost connections runs in a row" in clear.output
+    assert (
+        "answer-lost limit (connections_full): 0 of 3 answer_lost connections_full runs in a row"
+        in clear.output
+    )
+    assert (
+        "answer-lost limit (connections_incremental): 0 of 3 answer_lost"
+        " connections_incremental runs in a row" in clear.output
+    )
 
     _lose_answers(cli_db, 2)
     two = runner.invoke(cli, ["linkedin", "schedule", "status"]).output
-    assert "answer-lost limit: 2 of 3 answer_lost connections runs in a row" in two
+    assert "(connections_full): 2 of 3 answer_lost connections_full runs in a row" in two
     assert "tripped" not in two
 
-    _lose_answers(cli_db, 1)
+    _lose_answers(cli_db, 3, SyncRunKind.CONNECTIONS_INCREMENTAL)
     tripped = runner.invoke(cli, ["linkedin", "schedule", "status"]).output
-    assert "answer-lost limit: tripped, 3 of 3 answer_lost connections runs in a row" in tripped
+    assert (
+        "answer-lost limit (connections_incremental): tripped, 3 of 3 answer_lost"
+        " connections_incremental runs in a row" in tripped
+    )
     assert "reset-breaker" in tripped
 
 
@@ -232,29 +254,40 @@ def test_schedule_status_says_an_unreadable_answer_lost_row_is_tripped(
     with session_scope(cli_db, write=True) as session:
         user = _user(session)
         account_id = ensure_account(session, user).id
-        set_setting(session, user, f"linkedin.answer_lost_breaker.{account_id}", "garbage")
+        set_setting(
+            session, user, f"linkedin.answer_lost_breaker.connections_full.{account_id}", "garbage"
+        )
     out = CliRunner().invoke(cli, ["linkedin", "schedule", "status"]).output
-    assert "answer-lost limit: stored state unreadable, treated as tripped" in out
+    assert (
+        "answer-lost limit (connections_full): stored state unreadable, treated as tripped" in out
+    )
 
 
-def test_reset_breaker_clears_a_tripped_answer_lost_limit(cli_db: sessionmaker[Session]) -> None:
+def test_reset_breaker_clears_every_answer_lost_streak(cli_db: sessionmaker[Session]) -> None:
     account_id = _lose_answers(cli_db, 3)
+    _lose_answers(cli_db, 1, SyncRunKind.CONNECTIONS_INCREMENTAL)
     runner = CliRunner()
     declined = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="n\n")
     assert declined.exit_code == 1
-    assert "3 `answer_lost`" in declined.output
-    assert _answer_lost_count(cli_db, account_id) == 3
+    assert "3 `answer_lost` connections_full" in declined.output
+    assert "1 `answer_lost` connections_incremental" in declined.output
+    assert _answer_lost_counts(cli_db, account_id) == [3, 1]
 
     confirmed = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="y\n")
     assert confirmed.exit_code == 0, confirmed.output
-    assert _answer_lost_count(cli_db, account_id) == 0
+    assert _answer_lost_counts(cli_db, account_id) == [0, 0]
 
 
 def test_reset_breaker_clears_a_corrupt_answer_lost_row(cli_db: sessionmaker[Session]) -> None:
     with session_scope(cli_db, write=True) as session:
         user = _user(session)
         account_id = ensure_account(session, user).id
-        set_setting(session, user, f"linkedin.answer_lost_breaker.{account_id}", "garbage")
+        set_setting(
+            session,
+            user,
+            f"linkedin.answer_lost_breaker.connections_incremental.{account_id}",
+            "garbage",
+        )
     result = CliRunner().invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="y\n")
     assert result.exit_code == 0, result.output
     assert "unreadable" in result.output

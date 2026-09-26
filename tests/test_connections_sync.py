@@ -77,6 +77,7 @@ from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.linkedin_session import clear_session_flag, session_flag
 from netkeeper.services.pacing import profiles
 from netkeeper.services.posture import posture
+from netkeeper.services.settings_kv import set_setting
 
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
 SETTINGS = LinkedInSettings()
@@ -1544,12 +1545,17 @@ async def test_a_loss_the_run_read_on_past_never_bumps_the_breaker(
 
 # --- #199: the answer-lost limit, driven through a real sync ---------------------------------
 
+_FULL = SyncRunKind.CONNECTIONS_FULL
+_INCREMENTAL = SyncRunKind.CONNECTIONS_INCREMENTAL
 
-def _lost_streak(factory: sessionmaker[Session], user_id: int, account_id: int) -> int:
+
+def _lost_streak(
+    factory: sessionmaker[Session], user_id: int, account_id: int, kind: SyncRunKind = _FULL
+) -> int:
     with session_scope(factory) as session:
         user = session.get(User, user_id)
         assert user is not None
-        return route_breaker.answer_lost_state(session, user, account_id).count
+        return route_breaker.answer_lost_state(session, user, account_id, kind).count
 
 
 def _lost_tripped(factory: sessionmaker[Session], user_id: int, account_id: int) -> bool:
@@ -1582,11 +1588,12 @@ async def test_three_answer_lost_runs_in_a_row_trip_the_answer_lost_limit(
     )
     assert _lost_streak(session_factory, user_id, first.account_id) == 3
     assert _lost_tripped(session_factory, user_id, first.account_id)
-    # The route-changed breaker never moved.
+    # The route-changed breaker never moved, and the incremental streak is untouched.
     assert _breaker_count(session_factory, user_id, first.account_id) == 0
+    assert _lost_streak(session_factory, user_id, first.account_id, _INCREMENTAL) == 0
 
 
-async def test_a_run_that_completes_clears_the_answer_lost_streak(
+async def test_a_run_that_completes_clears_its_own_kinds_streak(
     session_factory: sessionmaker[Session], user_id: int
 ) -> None:
     first = await _sync(session_factory, user_id, _LosingSource(_many(99), lose_at=1))
@@ -1602,6 +1609,50 @@ async def test_a_run_that_completes_clears_the_answer_lost_streak(
     )
     assert _run_row(session_factory, user_id, report.run_id).status is SyncRunStatus.COMPLETED
     assert _lost_streak(session_factory, user_id, first.account_id) == 0
+
+
+async def test_clean_incrementals_do_not_clear_the_full_syncs_streak(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """#199 review, M2: losses that bite only the full sync's long read. Every daily
+    incremental completes, and the full sync's streak still reaches the limit."""
+    account_id = 0
+    for week in range(route_breaker.ANSWER_LOST_THRESHOLD):
+        report = await _sync(
+            session_factory,
+            user_id,
+            _LosingSource(_many(99), lose_at=1),
+            at=NOW + timedelta(days=7 * week),
+        )
+        account_id = report.account_id
+        incremental = await _sync(
+            session_factory,
+            user_id,
+            FakeConnectionsSource(_many(99)),
+            SyncMode.INCREMENTAL,
+            at=NOW + timedelta(days=7 * week + 1),
+        )
+        assert (
+            _run_row(session_factory, user_id, incremental.run_id).status is SyncRunStatus.COMPLETED
+        )
+    assert _lost_streak(session_factory, user_id, account_id) == 3
+    assert _lost_streak(session_factory, user_id, account_id, _INCREMENTAL) == 0
+    assert _lost_tripped(session_factory, user_id, account_id)
+
+
+async def test_an_incremental_answer_lost_run_counts_on_its_own_streak(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    await _sync(session_factory, user_id, FakeConnectionsSource(_many(160)))
+    report = await _sync(
+        session_factory,
+        user_id,
+        _ReadOnSource(_many(160), losses={0: (_lost(40),)}),
+        SyncMode.INCREMENTAL,
+        at=NOW + timedelta(days=1),
+    )
+    assert _lost_streak(session_factory, user_id, report.account_id, _INCREMENTAL) == 1
+    assert _lost_streak(session_factory, user_id, report.account_id) == 0
 
 
 async def test_a_route_changed_or_cancelled_run_leaves_the_answer_lost_streak(
@@ -1625,6 +1676,73 @@ async def test_a_route_changed_or_cancelled_run_leaves_the_answer_lost_streak(
     )
     assert cancelled.cancelled
     assert _lost_streak(session_factory, user_id, first.account_id) == 1
+
+
+async def test_a_cancelled_run_with_losses_does_not_count(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """#199 review, L4, pinned as designed: a run is counted by its recorded
+    ``stop_reason``. A cancel with losses is recorded ``cancelled``: it neither
+    counts nor clears."""
+    first = await _sync(session_factory, user_id, _LosingSource(_many(99), lose_at=1))
+    cancelled = await _sync(
+        session_factory,
+        user_id,
+        _ReadOnSource(_many(200), losses={0: (_lost(10),)}),
+        at=NOW + timedelta(days=1),
+        sleeps=CancelsOnFirstWait(session_factory, user_id),
+    )
+    assert cancelled.cancelled and cancelled.result.losses
+    assert _run_row(session_factory, user_id, cancelled.run_id).stop_reason == "cancelled"
+    assert _lost_streak(session_factory, user_id, first.account_id) == 1
+
+
+async def test_a_budget_stopped_run_with_losses_does_not_count(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """The same for a budget stop: recorded as the budget, so the streak stays."""
+    first = await _sync(session_factory, user_id, _LosingSource(_many(99), lose_at=1))
+    tight = replace(SETTINGS, budget=BudgetSettings(connection_pages_per_day=2))
+    report = await _sync(
+        session_factory,
+        user_id,
+        _ReadOnSource(_many(99), losses={1: (_lost(40),)}),
+        settings=tight,
+        at=NOW + timedelta(days=1),
+    )
+    assert report.result.reason is StopReason.PAGE_BUDGET and report.result.losses
+    assert _run_row(session_factory, user_id, report.run_id).stop_reason != "answer_lost"
+    assert _lost_streak(session_factory, user_id, first.account_id) == 1
+
+
+async def test_a_route_change_or_budget_stop_leaves_a_corrupt_row_corrupt(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """#199 review, L4: nothing but an answer_lost run or a completed one writes the
+    row, so a corrupt one stays corrupt, and still reads as tripped."""
+    with session_scope(session_factory, write=True) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        account_id = ensure_account(session, user).id
+        set_setting(
+            session, user, f"linkedin.answer_lost_breaker.connections_full.{account_id}", "x"
+        )
+    await _sync(
+        session_factory, user_id, FakeConnectionsSource(list(PEOPLE), script={0: UNRECOGNIZED})
+    )
+    tight = replace(SETTINGS, budget=BudgetSettings(connection_pages_per_day=2))
+    await _sync(
+        session_factory,
+        user_id,
+        FakeConnectionsSource(_many(99)),
+        settings=tight,
+        at=NOW + timedelta(days=1),
+    )
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        state = route_breaker.answer_lost_state(session, user, account_id, _FULL)
+    assert (state.readable, state.tripped) == (False, True)
 
 
 async def test_an_observation_failure_leaves_the_answer_lost_streak(

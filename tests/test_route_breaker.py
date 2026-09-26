@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.db import session_scope
-from netkeeper.models import User
+from netkeeper.models import SyncRunKind, User
 from netkeeper.services import route_breaker
 from netkeeper.services.settings_kv import set_setting
 
@@ -265,16 +265,28 @@ def test_a_route_changed_run_after_a_corrupt_row_keeps_it_tripped(
     assert route_breaker.tripped(writer, user, ACCOUNT)
 
 
-# --- #199: the answer-lost limit, a second, separate streak -------------------------
+# --- #199: the answer-lost limit, a streak per connections kind -------------------
 
 
-def _lost_key(account_id: int) -> str:
-    return f"linkedin.answer_lost_breaker.{account_id}"
+FULL = SyncRunKind.CONNECTIONS_FULL
+INCREMENTAL = SyncRunKind.CONNECTIONS_INCREMENTAL
 
 
-def _answer_lost(writer: Session, user: User, account_id: int = ACCOUNT) -> None:
+def _lost_key(account_id: int, kind: SyncRunKind = FULL) -> str:
+    return f"linkedin.answer_lost_breaker.{kind.value}.{account_id}"
+
+
+def _answer_lost(
+    writer: Session, user: User, account_id: int = ACCOUNT, kind: SyncRunKind = FULL
+) -> None:
     route_breaker.record_answer_lost(
-        writer, user, account_id, answer_lost=True, clean_end=False, now=NOW
+        writer, user, account_id, kind=kind, answer_lost=True, clean_end=False, now=NOW
+    )
+
+
+def _clean(writer: Session, user: User, kind: SyncRunKind) -> None:
+    route_breaker.record_answer_lost(
+        writer, user, ACCOUNT, kind=kind, answer_lost=False, clean_end=True, now=NOW
     )
 
 
@@ -282,33 +294,81 @@ def test_the_answer_lost_threshold_is_three() -> None:
     assert route_breaker.ANSWER_LOST_THRESHOLD == 3
 
 
+def test_the_answer_lost_kinds_are_the_two_connections_kinds() -> None:
+    assert route_breaker.ANSWER_LOST_KINDS == (
+        SyncRunKind.CONNECTIONS_FULL,
+        SyncRunKind.CONNECTIONS_INCREMENTAL,
+    )
+
+
+def test_enrichment_has_no_answer_lost_streak(writer: Session, user: User) -> None:
+    with pytest.raises(ValueError, match="connections runs only"):
+        route_breaker.record_answer_lost(
+            writer,
+            user,
+            ACCOUNT,
+            kind=SyncRunKind.ENRICH,
+            answer_lost=True,
+            clean_end=False,
+            now=NOW,
+        )
+
+
 def test_a_never_recorded_account_has_no_answer_lost_streak(writer: Session, user: User) -> None:
-    state = route_breaker.answer_lost_state(writer, user, ACCOUNT)
-    assert (state.count, state.since, state.tripped, state.threshold) == (0, None, False, 3)
+    for kind in (FULL, INCREMENTAL):
+        state = route_breaker.answer_lost_state(writer, user, ACCOUNT, kind)
+        assert (state.count, state.since, state.tripped, state.threshold) == (0, None, False, 3)
     assert not route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
 
 
-def test_three_answer_lost_runs_in_a_row_trip_the_limit_and_two_do_not(
-    writer: Session, user: User
+@pytest.mark.parametrize("kind", [FULL, INCREMENTAL])
+def test_three_answer_lost_runs_of_one_kind_trip_the_limit_and_two_do_not(
+    writer: Session, user: User, kind: SyncRunKind
 ) -> None:
-    _answer_lost(writer, user)
+    _answer_lost(writer, user, kind=kind)
     later = NOW + timedelta(days=1)
     route_breaker.record_answer_lost(
-        writer, user, ACCOUNT, answer_lost=True, clean_end=False, now=later
+        writer, user, ACCOUNT, kind=kind, answer_lost=True, clean_end=False, now=later
     )
-    state = route_breaker.answer_lost_state(writer, user, ACCOUNT)
+    state = route_breaker.answer_lost_state(writer, user, ACCOUNT, kind)
     assert (state.count, state.since, state.tripped) == (2, NOW, False)
-    _answer_lost(writer, user)
-    assert route_breaker.answer_lost_state(writer, user, ACCOUNT).count == 3
+    assert not route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+    _answer_lost(writer, user, kind=kind)
+    assert route_breaker.answer_lost_state(writer, user, ACCOUNT, kind).count == 3
     assert route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
 
 
-def test_a_clean_end_clears_the_answer_lost_streak(writer: Session, user: User) -> None:
+def test_the_kinds_count_separately(writer: Session, user: User) -> None:
+    """Two full and two incremental answer_lost runs are two of each, not four."""
+    for kind in (FULL, INCREMENTAL, FULL, INCREMENTAL):
+        _answer_lost(writer, user, kind=kind)
+    states = route_breaker.answer_lost_states(writer, user, ACCOUNT)
+    assert [(k, s.count) for k, s in states.items()] == [(FULL, 2), (INCREMENTAL, 2)]
+    assert not route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+
+
+def test_a_clean_incremental_does_not_clear_the_full_syncs_streak(
+    writer: Session, user: User
+) -> None:
+    """#199 review, M2: losses that bite only the weekly full sync's long read must
+    trip the limit even while every daily incremental completes."""
     for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
-        _answer_lost(writer, user)
-    updated = route_breaker.record_answer_lost(
-        writer, user, ACCOUNT, answer_lost=False, clean_end=True, now=NOW
-    )
+        _answer_lost(writer, user, kind=FULL)
+        _clean(writer, user, INCREMENTAL)
+    assert route_breaker.answer_lost_state(writer, user, ACCOUNT, FULL).count == 3
+    assert route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+
+
+def test_a_clean_run_clears_only_its_own_kind(writer: Session, user: User) -> None:
+    for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
+        _answer_lost(writer, user, kind=FULL)
+        _answer_lost(writer, user, kind=INCREMENTAL)
+    _clean(writer, user, FULL)
+    assert route_breaker.answer_lost_state(writer, user, ACCOUNT, FULL).count == 0
+    assert route_breaker.answer_lost_state(writer, user, ACCOUNT, INCREMENTAL).count == 3
+    assert route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+    _clean(writer, user, INCREMENTAL)
+    updated = route_breaker.answer_lost_state(writer, user, ACCOUNT, INCREMENTAL)
     assert (updated.count, updated.since, updated.tripped) == (0, None, False)
     assert not route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
 
@@ -318,9 +378,9 @@ def test_any_other_ending_leaves_the_answer_lost_streak_where_it_was(
 ) -> None:
     _answer_lost(writer, user)
     _answer_lost(writer, user)
-    before = route_breaker.answer_lost_state(writer, user, ACCOUNT)
+    before = route_breaker.answer_lost_state(writer, user, ACCOUNT, FULL)
     after = route_breaker.record_answer_lost(
-        writer, user, ACCOUNT, answer_lost=False, clean_end=False, now=NOW
+        writer, user, ACCOUNT, kind=FULL, answer_lost=False, clean_end=False, now=NOW
     )
     assert after == before and before.count == 2
 
@@ -328,7 +388,7 @@ def test_any_other_ending_leaves_the_answer_lost_streak_where_it_was(
 def test_a_run_cannot_both_lose_an_answer_and_end_cleanly(writer: Session, user: User) -> None:
     with pytest.raises(ValueError, match="both"):
         route_breaker.record_answer_lost(
-            writer, user, ACCOUNT, answer_lost=True, clean_end=True, now=NOW
+            writer, user, ACCOUNT, kind=FULL, answer_lost=True, clean_end=True, now=NOW
         )
 
 
@@ -341,31 +401,33 @@ def test_record_answer_lost_requires_a_writer_session(
     assert owner is not None
     with pytest.raises(RuntimeError, match="writer session"):
         route_breaker.record_answer_lost(
-            session, owner, ACCOUNT, answer_lost=True, clean_end=False, now=NOW
+            session, owner, ACCOUNT, kind=FULL, answer_lost=True, clean_end=False, now=NOW
         )
 
 
-def test_the_two_streaks_never_feed_each_other(writer: Session, user: User) -> None:
-    """Separate rows: route_changed runs never move the answer-lost count, and
+def test_the_streaks_never_feed_each_other(writer: Session, user: User) -> None:
+    """Separate rows: route_changed runs never move an answer-lost count, and
     answer_lost runs never move the route-changed one."""
     for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
         _answer_lost(writer, user)
     assert route_breaker.state(writer, user, ACCOUNT).count == 0
     route_breaker.record(writer, user, ACCOUNT, route_changed=True, succeeded=False, now=NOW)
-    assert route_breaker.answer_lost_state(writer, user, ACCOUNT).count == 3
+    assert route_breaker.answer_lost_state(writer, user, ACCOUNT, FULL).count == 3
     assert not route_breaker.tripped(writer, user, ACCOUNT)
     assert route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
 
 
-def test_reset_clears_the_answer_lost_limit_too(writer: Session, user: User) -> None:
-    """The same reset path as the breaker: one `reset-breaker` clears both."""
+def test_reset_clears_every_answer_lost_streak_too(writer: Session, user: User) -> None:
+    """The same reset path as the breaker: one `reset-breaker` clears them all."""
     for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
-        _answer_lost(writer, user)
+        _answer_lost(writer, user, kind=FULL)
+        _answer_lost(writer, user, kind=INCREMENTAL)
     for _ in range(route_breaker.THRESHOLD):
         route_breaker.record(writer, user, ACCOUNT, route_changed=True, succeeded=False, now=NOW)
     route_breaker.reset(writer, user, ACCOUNT)
     assert not route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
-    assert route_breaker.answer_lost_state(writer, user, ACCOUNT).count == 0
+    for kind in (FULL, INCREMENTAL):
+        assert route_breaker.answer_lost_state(writer, user, ACCOUNT, kind).count == 0
     assert not route_breaker.tripped(writer, user, ACCOUNT)
 
 
@@ -376,17 +438,46 @@ def test_the_answer_lost_limit_is_scoped_by_account_id(writer: Session, user: Us
     assert not route_breaker.answer_lost_tripped(writer, user, 2)
 
 
-def test_a_corrupt_answer_lost_row_reads_as_tripped_and_heals(writer: Session, user: User) -> None:
-    set_setting(writer, user, _lost_key(ACCOUNT), "not an object")
-    state = route_breaker.answer_lost_state(writer, user, ACCOUNT)
+@pytest.mark.parametrize("kind", [FULL, INCREMENTAL])
+def test_a_corrupt_answer_lost_row_reads_as_tripped_and_heals(
+    writer: Session, user: User, kind: SyncRunKind
+) -> None:
+    set_setting(writer, user, _lost_key(ACCOUNT, kind), "not an object")
+    state = route_breaker.answer_lost_state(writer, user, ACCOUNT, kind)
     assert (state.readable, state.tripped) == (False, True)
     assert route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
     # One more answer_lost run keeps it tripped rather than restarting at 1.
-    updated = route_breaker.record_answer_lost(
-        writer, user, ACCOUNT, answer_lost=True, clean_end=False, now=NOW
-    )
+    _answer_lost(writer, user, kind=kind)
+    updated = route_breaker.answer_lost_state(writer, user, ACCOUNT, kind)
     assert (updated.readable, updated.count, updated.tripped) == (True, 3, True)
-    route_breaker.record_answer_lost(
-        writer, user, ACCOUNT, answer_lost=False, clean_end=True, now=NOW
-    )
+    _clean(writer, user, kind)
     assert not route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+
+
+def test_any_other_ending_leaves_a_corrupt_answer_lost_row_corrupt(
+    writer: Session, user: User
+) -> None:
+    """#199 review, L4: a budget stop or a route change writes nothing, so a corrupt
+    row stays corrupt -- and so still reads as tripped."""
+    set_setting(writer, user, _lost_key(ACCOUNT), "not an object")
+    route_breaker.record_answer_lost(
+        writer, user, ACCOUNT, kind=FULL, answer_lost=False, clean_end=False, now=NOW
+    )
+    state = route_breaker.answer_lost_state(writer, user, ACCOUNT, FULL)
+    assert (state.readable, state.tripped) == (False, True)
+
+
+# --- a negative count is corrupt, in both kinds of row (#199 review, nit) ----------
+
+
+def test_a_negative_route_changed_count_reads_as_tripped(writer: Session, user: User) -> None:
+    set_setting(writer, user, _key(ACCOUNT), {"count": -5, "since": None})
+    state = route_breaker.state(writer, user, ACCOUNT)
+    assert (state.readable, state.tripped) == (False, True)
+
+
+def test_a_negative_answer_lost_count_reads_as_tripped(writer: Session, user: User) -> None:
+    set_setting(writer, user, _lost_key(ACCOUNT, INCREMENTAL), {"count": -1, "since": None})
+    state = route_breaker.answer_lost_state(writer, user, ACCOUNT, INCREMENTAL)
+    assert (state.readable, state.tripped) == (False, True)
+    assert route_breaker.answer_lost_tripped(writer, user, ACCOUNT)

@@ -41,15 +41,19 @@ whether the run stopped for it or read on to the end without them (#197, #200)
 -- moves the route-changed streak neither way: a lost answer is not a changed
 route. Nothing else would then stop LinkedIn's client superseding every
 pagination fetch from costing page views on every scheduled fire, forever.
-:data:`ANSWER_LOST_THRESHOLD` consecutive connections runs ending
-``answer_lost`` trip it, and the scheduler (and the worker's second check)
-skip scheduled connections fires as ``"answer_lost_breaker"``, exactly the
-way the route-changed breaker skips them. It clears the same two ways: a
-connections run that reaches a natural end with nothing lost
-(:func:`record_answer_lost`), or :func:`reset`, which clears both streaks
-(``netkeeper linkedin schedule reset-breaker``). Every other ending (a route
-change, a budget stop, a cancel, a checkpoint) leaves its count where it was.
-The two counters never feed each other: each is its own ``settings_kv`` row.
+Each connections kind (full, incremental) keeps its own streak, because
+losses may bite only the weekly full sync's long read while the daily
+incremental keeps completing; a shared streak would then be cleared every day
+and never trip (#199 review, M2). :data:`ANSWER_LOST_THRESHOLD` consecutive
+runs of one kind ending ``answer_lost`` trip the limit, and the scheduler (and
+the worker's second check) then skip scheduled fires of *both* connections
+kinds as ``"answer_lost_breaker"``, exactly the way the route-changed breaker
+skips them. A kind's streak clears only when a run of that same kind ends
+``completed`` (a natural end with nothing lost; :func:`record_answer_lost`);
+:func:`reset` clears every streak at once (``netkeeper linkedin schedule
+reset-breaker``). Every other ending (a route change, a budget stop, a cancel,
+a checkpoint, even with losses) leaves the count where it was. The counters
+never feed each other: each is its own ``settings_kv`` row.
 
 Persisted like :mod:`netkeeper.services.heat`: a ``settings_kv`` row keyed by
 account id, read and written through a session and a ``User`` -- the
@@ -67,7 +71,7 @@ from typing import Any, Final
 from sqlalchemy.orm import Session
 
 from netkeeper.db import is_writer
-from netkeeper.models import User
+from netkeeper.models import SyncRunKind, User
 from netkeeper.services.settings_kv import get_setting, set_setting
 
 log = logging.getLogger(__name__)
@@ -91,6 +95,9 @@ _ANSWER_LOST_KEY_PREFIX: Final = "linkedin.answer_lost_breaker"
 #: already reads on past up to five, so it takes three whole runs in a row, none
 #: reaching a clean end, before scheduled runs stop spending page views on it.
 ANSWER_LOST_THRESHOLD: Final = 3
+
+#: The run kinds that each keep their own answer-lost streak (#199 review, M2).
+ANSWER_LOST_KINDS: Final = (SyncRunKind.CONNECTIONS_FULL, SyncRunKind.CONNECTIONS_INCREMENTAL)
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,17 +181,27 @@ def record(
     return updated
 
 
-def answer_lost_state(session: Session, user: User, account_id: int) -> BreakerState:
-    """The answer-lost streak (#199): how many consecutive connections runs have
-    ended ``answer_lost``, and when the streak started. Read-only."""
-    return _load(session, user, account_id, answer_lost=True)
+def answer_lost_state(
+    session: Session, user: User, account_id: int, kind: SyncRunKind
+) -> BreakerState:
+    """One kind's answer-lost streak (#199): how many consecutive connections runs of
+    ``kind`` have ended ``answer_lost``, and when the streak started. Read-only."""
+    return _load(session, user, account_id, lost_kind=_lost_kind(kind))
+
+
+def answer_lost_states(
+    session: Session, user: User, account_id: int
+) -> dict[SyncRunKind, BreakerState]:
+    """Every kind's answer-lost streak, in :data:`ANSWER_LOST_KINDS` order. Read-only."""
+    return {kind: answer_lost_state(session, user, account_id, kind) for kind in ANSWER_LOST_KINDS}
 
 
 def answer_lost_tripped(session: Session, user: User, account_id: int) -> bool:
-    """Whether the answer-lost limit is tripped: the streak is at or above
-    :data:`ANSWER_LOST_THRESHOLD`. Read-only. The scheduler and the worker ask it
-    before a scheduled connections run, next to :func:`tripped`."""
-    return _load(session, user, account_id, answer_lost=True).tripped
+    """Whether the answer-lost limit is tripped: either kind's streak is at or above
+    :data:`ANSWER_LOST_THRESHOLD`, or unreadable (fail closed). Read-only. The
+    scheduler and the worker ask it before a scheduled connections run of either
+    kind, next to :func:`tripped`."""
+    return any(state.tripped for state in answer_lost_states(session, user, account_id).values())
 
 
 def record_answer_lost(
@@ -192,24 +209,29 @@ def record_answer_lost(
     user: User,
     account_id: int,
     *,
+    kind: SyncRunKind,
     answer_lost: bool,
     clean_end: bool,
     now: datetime,
 ) -> BreakerState:
-    """Record one connections run's outcome on the answer-lost streak (#199). Needs a
-    writer session.
+    """Record one connections run's outcome on its own kind's answer-lost streak
+    (#199). Needs a writer session.
 
     ``answer_lost`` (the run's ``stop_reason`` was ``answer_lost``: it stopped for
-    a lost answer, or read to the end without some) extends the streak by one.
-    ``clean_end`` (the run reached a natural end and lost nothing) clears it,
-    whatever the trigger. Neither leaves the count where it was: a route change,
-    a budget stop, a cancel or a checkpoint says nothing about whether the page's
-    answers can be read.
+    a lost answer, or read to the end without some) extends ``kind``'s streak by
+    one. ``clean_end`` (the run ended ``completed``: a natural end, nothing lost)
+    clears it, whatever the trigger. Only ``kind``'s streak moves: a clean daily
+    incremental says nothing about whether the weekly full sync's long read can
+    finish, so it must not clear that streak (#199 review, M2). Neither flag
+    leaves the count where it was: a route change, a budget stop, a cancel or a
+    checkpoint says nothing about whether the page's answers can be read, and a
+    corrupt row stays as it is (still read as tripped).
     """
     _require_writer(session, "route_breaker.record_answer_lost")
     if answer_lost and clean_end:
         raise ValueError("a run cannot both lose an answer and end cleanly")
-    current = _load(session, user, account_id, answer_lost=True)
+    lost_kind = _lost_kind(kind)
+    current = _load(session, user, account_id, lost_kind=lost_kind)
     if clean_end:
         updated = BreakerState(count=0, since=None, threshold=ANSWER_LOST_THRESHOLD)
     elif answer_lost:
@@ -221,46 +243,59 @@ def record_answer_lost(
         )
     else:
         return current
-    _store(session, user, account_id, updated, answer_lost=True)
+    _store(session, user, account_id, updated, lost_kind=lost_kind)
     return updated
 
 
 def reset(session: Session, user: User, account_id: int) -> BreakerState:
     """Clear the breaker directly (``netkeeper linkedin schedule reset-breaker``),
-    and the answer-lost limit with it (#199): one command clears whatever skips
+    and every answer-lost streak with it (#199): one command clears whatever skips
     scheduled connections runs. Needs a writer session. Idempotent. Returns the
     route-changed breaker's cleared state."""
     _require_writer(session, "route_breaker.reset")
     cleared = BreakerState(count=0, since=None)
     _store(session, user, account_id, cleared)
-    _store(
-        session,
-        user,
-        account_id,
-        BreakerState(count=0, since=None, threshold=ANSWER_LOST_THRESHOLD),
-        answer_lost=True,
-    )
+    for kind in ANSWER_LOST_KINDS:
+        _store(
+            session,
+            user,
+            account_id,
+            BreakerState(count=0, since=None, threshold=ANSWER_LOST_THRESHOLD),
+            lost_kind=kind,
+        )
     return cleared
 
 
-def _key(account_id: int, *, answer_lost: bool = False) -> str:
-    prefix = _ANSWER_LOST_KEY_PREFIX if answer_lost else _KEY_PREFIX
-    return f"{prefix}.{account_id}"
+def _lost_kind(kind: SyncRunKind) -> SyncRunKind:
+    if kind not in ANSWER_LOST_KINDS:
+        raise ValueError(f"the answer-lost limit counts connections runs only, not {kind}")
+    return kind
+
+
+def _key(account_id: int, *, lost_kind: SyncRunKind | None = None) -> str:
+    if lost_kind is None:
+        return f"{_KEY_PREFIX}.{account_id}"
+    return f"{_ANSWER_LOST_KEY_PREFIX}.{lost_kind.value}.{account_id}"
 
 
 def _load(
-    session: Session, user: User, account_id: int, *, answer_lost: bool = False
+    session: Session, user: User, account_id: int, *, lost_kind: SyncRunKind | None = None
 ) -> BreakerState:
-    threshold = ANSWER_LOST_THRESHOLD if answer_lost else THRESHOLD
-    raw = get_setting(session, user, _key(account_id, answer_lost=answer_lost))
+    threshold = THRESHOLD if lost_kind is None else ANSWER_LOST_THRESHOLD
+    raw = get_setting(session, user, _key(account_id, lost_kind=lost_kind))
     if raw is None:
         return BreakerState(count=0, since=None, threshold=threshold)
     try:
         if not isinstance(raw, dict):
             raise TypeError(f"not an object: {raw!r}")
         since_raw = raw.get("since")
+        count = int(_field(raw, "count"))
+        if count < 0:
+            # A negative count would read as clear however far below zero; nothing
+            # this module writes is ever negative, so it is corrupt (fail closed).
+            raise ValueError(f"a negative count: {count}")
         return BreakerState(
-            count=int(_field(raw, "count")),
+            count=count,
             since=None if since_raw is None else datetime.fromisoformat(str(since_raw)),
             threshold=threshold,
         )
@@ -271,7 +306,9 @@ def _load(
         # `posture()` turns this into a warning a person actually sees.
         log.error(
             "%s state for account %d is corrupt: %s",
-            "answer-lost limit" if answer_lost else "route-changed breaker",
+            "route-changed breaker"
+            if lost_kind is None
+            else f"answer-lost limit ({lost_kind.value})",
             account_id,
             exc,
         )
@@ -290,12 +327,12 @@ def _store(
     account_id: int,
     state: BreakerState,
     *,
-    answer_lost: bool = False,
+    lost_kind: SyncRunKind | None = None,
 ) -> None:
     set_setting(
         session,
         user,
-        _key(account_id, answer_lost=answer_lost),
+        _key(account_id, lost_kind=lost_kind),
         {
             "count": state.count,
             "since": None if state.since is None else state.since.isoformat(),

@@ -649,7 +649,13 @@ async def test_the_worker_refuses_a_scheduled_connections_run_with_the_answer_lo
         arm_scheduled_runs(session, user, now=START)
         for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
             route_breaker.record_answer_lost(
-                session, user, account.id, answer_lost=True, clean_end=False, now=START
+                session,
+                user,
+                account.id,
+                kind=SyncRunKind.CONNECTIONS_FULL,
+                answer_lost=True,
+                clean_end=False,
+                now=START,
             )
         run = SyncRun(
             user_id=user.id,
@@ -677,6 +683,49 @@ async def test_the_worker_refuses_a_scheduled_connections_run_with_the_answer_lo
         )
 
 
+async def test_the_worker_refuses_a_scheduled_run_with_a_corrupt_answer_lost_row(
+    session_factory: Any, settings: Settings
+) -> None:
+    """#199 review, L4: the worker asks ``answer_lost_tripped``, which fails closed."""
+    import factories
+
+    from netkeeper.services.settings_kv import set_setting
+    from netkeeper.worker import BrowserWorker
+
+    provider, connector = fake_provider()
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        account = ensure_account(session, user)
+        arm_scheduled_runs(session, user, now=START)
+        set_setting(
+            session,
+            user,
+            f"linkedin.answer_lost_breaker.connections_full.{account.id}",
+            "not an object",
+        )
+        run = SyncRun(
+            user_id=user.id,
+            linkedin_account_id=account.id,
+            kind=SyncRunKind.CONNECTIONS_FULL,
+            trigger=SyncRunTrigger.SCHEDULED,
+            started_at=START,
+        )
+        session.add(run)
+        session.flush()
+        run_id, user_id = run.id, user.id
+    worker = BrowserWorker(provider, session_factory, settings.linkedin)
+
+    outcome = await worker.execute(run_id, user_id)
+
+    assert outcome is runs.RunOutcome.DONE
+    assert connector.attaches == 0
+    with session_scope(session_factory) as session:
+        owner = session.get(User, user_id)
+        assert owner is not None
+        stored = runs.get_run(session, owner, run_id)
+        assert stored.stop_reason == "answer_lost_breaker"
+
+
 async def test_the_worker_attaches_a_manual_run_with_the_answer_lost_limit_tripped(
     session_factory: Any, settings: Settings
 ) -> None:
@@ -692,7 +741,13 @@ async def test_the_worker_attaches_a_manual_run_with_the_answer_lost_limit_tripp
         account = ensure_account(session, user)
         for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
             route_breaker.record_answer_lost(
-                session, user, account.id, answer_lost=True, clean_end=False, now=START
+                session,
+                user,
+                account.id,
+                kind=SyncRunKind.CONNECTIONS_FULL,
+                answer_lost=True,
+                clean_end=False,
+                now=START,
             )
         run = SyncRun(
             user_id=user.id,

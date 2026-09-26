@@ -1168,7 +1168,7 @@ def linkedin_schedule_status() -> None:
             armed_at = None if account is None else account.scheduled_runs_armed_at
             account_id = account_id_for(session, user)
             route = route_breaker.state(session, user, account_id)
-            lost = route_breaker.answer_lost_state(session, user, account_id)
+            lost = route_breaker.answer_lost_states(session, user, account_id)
     finally:
         engine.dispose()
     if armed_at is None:
@@ -1179,17 +1179,27 @@ def linkedin_schedule_status() -> None:
     else:
         typer.echo(f"armed since {armed_at:%Y-%m-%d %H:%M UTC}: scheduled runs fire when due")
     typer.echo(_streak_line("route-changed breaker", "route_changed", route))
-    typer.echo(_streak_line("answer-lost limit", "answer_lost", lost))
+    for kind, streak in lost.items():
+        typer.echo(_streak_line("answer-lost limit", "answer_lost", streak, kind=kind))
 
 
-def _streak_line(name: str, stop_reason: str, streak: route_breaker.BreakerState) -> str:
+def _streak_line(
+    name: str,
+    stop_reason: str,
+    streak: route_breaker.BreakerState,
+    *,
+    kind: SyncRunKind | None = None,
+) -> str:
     """One line of `schedule status` for a streak that skips scheduled connections runs."""
+    runs_of = "connections" if kind is None else kind.value
+    if kind is not None:
+        name = f"{name} ({kind.value})"
     if not streak.readable:
         return (
             f"{name}: stored state unreadable, treated as tripped; scheduled connections"
             " runs are skipped (`netkeeper linkedin schedule reset-breaker`)"
         )
-    counted = f"{streak.count} of {streak.threshold} {stop_reason} connections runs in a row"
+    counted = f"{streak.count} of {streak.threshold} {stop_reason} {runs_of} runs in a row"
     if streak.tripped:
         return (
             f"{name}: tripped, {counted}; scheduled connections runs are skipped"
@@ -1266,9 +1276,10 @@ def linkedin_schedule_reset_breaker(
     way, without this command -- that is how you check whether the wall is
     still there.
 
-    Three connections runs in a row ending `answer_lost` trip the answer-lost
-    limit (#199) the same way; this clears both. A manual run that completes
-    with nothing lost clears it too.
+    Three runs in a row of one connections kind (full or incremental) ending
+    `answer_lost` trip the answer-lost limit (#199) the same way; this clears
+    every count. A manual run of that kind that completes with nothing lost
+    clears its kind's count too.
     """
     engine = make_engine(database_url())
     try:
@@ -1278,8 +1289,12 @@ def linkedin_schedule_reset_breaker(
             user = _local_user_or_exit(session)
             account_id = account_id_for(session, user)
             current = route_breaker.state(session, user, account_id)
-            lost = route_breaker.answer_lost_state(session, user, account_id)
-        if current.readable and current.count == 0 and lost.readable and lost.count == 0:
+            lost = route_breaker.answer_lost_states(session, user, account_id)
+        if (
+            current.readable
+            and current.count == 0
+            and all(s.readable and s.count == 0 for s in lost.values())
+        ):
             typer.echo(
                 "neither the route-changed breaker nor the answer-lost limit has a count;"
                 " nothing to reset"
@@ -1288,15 +1303,25 @@ def linkedin_schedule_reset_breaker(
         # A corrupt row reads as tripped (fail closed), and posture tells the
         # person to run this command, so this command must be able to clear it
         # (#191 review N1). It clears the answer-lost limit too (#199).
-        counts = (
-            f"{current.count} `route_changed`" if current.readable else "route_changed unreadable"
-        ) + (f", {lost.count} `answer_lost`" if lost.readable else ", answer_lost unreadable")
+        counts = ", ".join(
+            [
+                f"{current.count} `route_changed`"
+                if current.readable
+                else "route_changed unreadable",
+                *(
+                    f"{s.count} `answer_lost` {kind.value}"
+                    if s.readable
+                    else f"answer_lost {kind.value} unreadable"
+                    for kind, s in lost.items()
+                ),
+            ]
+        )
         question = (
             f"reset the route-changed breaker and the answer-lost limit ({counts} connections"
             " run(s) in a row)? scheduled connections runs will be allowed to fire again"
-            if current.readable and lost.readable
+            if current.readable and all(s.readable for s in lost.values())
             else f"a stored breaker state is unreadable, so it reads as tripped ({counts})."
-            " reset both? scheduled connections runs will be allowed to fire again"
+            " reset them all? scheduled connections runs will be allowed to fire again"
         )
         if not yes and not typer.confirm(question):
             typer.echo("cancelled: the breaker stays as it is")
