@@ -51,7 +51,10 @@ never gave it: interactions, tags or lists a person added, triage decisions,
 their own edits, child rows from a later import, fields a sync or another source
 filled in. Deleting it would take all of
 that with it, so such a run is refused (:class:`CreatedContactsChanged`),
-saying what would be lost, unless the caller passes ``force``.
+saying what would be lost, unless the caller passes ``force``. A campaign
+message is the one thing ``force`` never deletes (#242): the database refuses
+to lose the record of what was sent (spec 8), so a run whose created contacts
+have a message is refused outright (:class:`CreatedContactsMessaged`).
 
 Every function that writes needs a writer session (CLAUDE.md): each reads before
 it writes, and on SQLite an unmarked read-then-write fails at once with
@@ -117,6 +120,7 @@ from netkeeper.models import (
     ContactSnapshot,
     ContactSource,
     ContactTag,
+    Enrollment,
     FieldChange,
     ImportDecisionKind,
     ImportResolution,
@@ -126,6 +130,7 @@ from netkeeper.models import (
     ImportStatus,
     Interaction,
     ListMember,
+    Message,
     RefusedField,
     RowChanges,
     RowDecision,
@@ -248,7 +253,8 @@ class Acquired:
     contacts whose ``field_sources`` or ``synced_values`` name an automated
     source other than the run's own, such as a sync that filled in a URN and a
     headline (#217); ``later_imports`` counts other committed runs that changed
-    one of them.
+    one of them; ``enrollments`` counts their places in campaigns, which a
+    forced rollback deletes with them while nothing has been sent (#242).
     """
 
     contact_ids: tuple[int, ...]
@@ -260,6 +266,7 @@ class Acquired:
     edited_contacts: int = 0
     enriched_contacts: int = 0
     later_imports: int = 0
+    enrollments: int = 0
 
     def __bool__(self) -> bool:
         return any(count for count, _, _ in self._parts())
@@ -269,6 +276,7 @@ class Acquired:
             (self.interactions, "interaction", "interactions"),
             (self.tags, "tag added by hand", "tags added by hand"),
             (self.list_memberships, "list membership", "list memberships"),
+            (self.enrollments, "campaign enrollment", "campaign enrollments"),
             (self.triage_decisions, "triage decision", "triage decisions"),
             (self.children, "detail added later", "details added later"),
             (self.edited_contacts, "contact with your own edits", "contacts with your own edits"),
@@ -288,6 +296,28 @@ class Acquired:
         """``"3 interactions, 1 tag added by hand"``: the non-zero parts, in words."""
         return ", ".join(
             f"{count} {one if count == 1 else many}" for count, one, many in self._parts() if count
+        )
+
+
+class CreatedContactsMessaged(ImportRunError, ValueError):
+    """Contacts the run created have campaign messages, which nothing may delete (#242).
+
+    ``force`` does not override it: a message's contact and enrollment are foreign
+    keys with no ``ON DELETE`` action (spec 8, "contacts are archived, never
+    deleted, because messages reference them"), so the delete would fail anyway.
+    """
+
+    def __init__(self, contact_ids: Sequence[int], messages: int) -> None:
+        self.contact_ids = tuple(contact_ids)
+        self.messages = messages
+        count = len(self.contact_ids)
+        shown = ", ".join(str(contact_id) for contact_id in self.contact_ids[:10])
+        more = "" if count <= 10 else f" and {count - 10} more"
+        noun = "message" if messages == 1 else "messages"
+        super().__init__(
+            f"{count} contact(s) this run created ({shown}{more}) have {messages} campaign "
+            f"{noun} on record, and a message is never deleted, so this run cannot be rolled "
+            "back, with force or without. Archive the contacts instead."
         )
 
 
@@ -1199,7 +1229,9 @@ def rollback(session: Session, user: User, run_id: int, *, force: bool = False) 
     value would leave a person's own edit in place marked as nobody's, and the
     next import would overwrite it.
 
-    Refused, with nothing undone: ``RunMerged`` when a merge has drawn in a
+    Refused, with nothing undone: ``CreatedContactsMessaged`` when a contact
+    the run created has a campaign message, which nothing may delete, ``force``
+    or not (#242); ``RunMerged`` when a merge has drawn in a
     contact the run created, because deleting that contact would take rows the
     run never made; ``RunSuperseded`` when a later committed run wrote over a
     field this run wrote, because undoing this one first would leave that run's
@@ -1223,7 +1255,11 @@ def rollback(session: Session, user: User, run_id: int, *, force: bool = False) 
         and row.changes_json["created_contact"]
     }
     # Checked before the first write, as apply() checks before its own: a refusal
-    # leaves the run exactly as it was rather than half undone.
+    # leaves the run exactly as it was rather than half undone. Messages first: it
+    # is the one refusal nothing the person can undo will ever clear.
+    messaged, messages = _messaged(session, user, created_ids)
+    if messaged:
+        raise CreatedContactsMessaged(messaged, messages)
     merged = _merged_since(session, user, created_ids)
     if merged:
         raise RunMerged(merged)
@@ -1346,6 +1382,33 @@ def _restore(
         result = cast("CursorResult[Any]", session.execute(_unsynchronized(statement)))
         deleted += result.rowcount
     return restored, deleted
+
+
+def _messaged(session: Session, user: User, contact_ids: Iterable[int]) -> tuple[list[int], int]:
+    """The contacts the run created that a campaign message names, ascending, and the count.
+
+    A message names a contact twice over, as its own ``contact_id`` and through
+    its enrollment's. Either one stops the delete, so both are read.
+    """
+    ids = sorted(contact_ids)
+    if not ids:
+        return [], 0
+    rows = session.execute(
+        scoped(user, Message)
+        .with_only_columns(Message.id, Message.contact_id, Enrollment.contact_id)
+        .join(Enrollment, Enrollment.id == Message.enrollment_id)
+        .where(
+            Enrollment.user_id == user.id,
+            or_(Message.contact_id.in_(ids), Enrollment.contact_id.in_(ids)),
+        )
+    ).tuples()
+    created = set(ids)
+    named: set[int] = set()
+    messages = 0
+    for _, contact_id, enrolled_id in rows:
+        messages += 1
+        named.update({contact_id, enrolled_id} & created)
+    return sorted(named), messages
 
 
 def _merged_since(session: Session, user: User, contact_ids: Iterable[int]) -> list[int]:
@@ -1511,6 +1574,7 @@ def _acquired_since(
         list_memberships=count(
             scoped_count(user, ListMember).where(ListMember.contact_id.in_(ids))
         ),
+        enrollments=count(scoped_count(user, Enrollment).where(Enrollment.contact_id.in_(ids))),
         triage_decisions=count(
             scoped_count(user, TriageDecision).where(TriageDecision.contact_id.in_(ids))
         ),

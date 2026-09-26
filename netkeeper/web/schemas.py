@@ -1095,9 +1095,14 @@ class ImportRollbackOut(BaseModel):
     children_deleted: int
 
 
-RollbackRefusalCode = Literal["merged", "superseded", "created_contacts_changed"]
+RollbackRefusalCode = Literal[
+    "created_contacts_messaged", "merged", "superseded", "created_contacts_changed"
+]
 """Why a rollback was refused (#78); what a client switches on rather than the wording.
 
+``created_contacts_messaged``: a contact the run created has a campaign
+message, which is never deleted (#242); the run cannot be rolled back, and
+``force`` does not change that.
 ``merged``: a merge has drawn in a contact the run created; undo the merge.
 ``superseded``: a later run wrote over fields this one wrote; roll back
 ``run_ids`` first, newest first. ``created_contacts_changed``: contacts the run
@@ -1117,6 +1122,7 @@ class RollbackAcquiredOut(BaseModel):
     edited_contacts: int
     enriched_contacts: int
     later_imports: int
+    enrollments: int
 
 
 class RollbackRefusalOut(BaseModel):

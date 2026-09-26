@@ -918,12 +918,14 @@ export interface paths {
          *     provenance with it.
          *
          *     Refused with ``409`` and nothing undone, the body's ``code`` saying why
-         *     (#78): ``merged`` when a merge has since drawn in a contact the run created,
+         *     (#78): ``created_contacts_messaged`` when a contact the run created has a
+         *     campaign message, which is never deleted, so ``force`` does not override it
+         *     (#242); ``merged`` when a merge has since drawn in a contact the run created,
          *     because deleting it would take rows the run never created; ``superseded``
          *     when a later run wrote over fields this one wrote, naming the runs to roll
          *     back first; ``created_contacts_changed`` when contacts the run created have
-         *     gained interactions, tags, lists, edits, another source's data or later
-         *     imports, counted in
+         *     gained interactions, tags, lists, campaign enrollments, edits, another
+         *     source's data or later imports, counted in
          *     ``acquired``, which ``force`` overrides.
          */
         post: operations["rollback_import_run"];
@@ -4055,6 +4057,8 @@ export interface components {
             edited_contacts: number;
             /** Enriched Contacts */
             enriched_contacts: number;
+            /** Enrollments */
+            enrollments: number;
             /** Interactions */
             interactions: number;
             /** Later Imports */
@@ -4076,7 +4080,7 @@ export interface components {
              * Code
              * @enum {string}
              */
-            code: "merged" | "superseded" | "created_contacts_changed";
+            code: "created_contacts_messaged" | "merged" | "superseded" | "created_contacts_changed";
             /** Contact Ids */
             contact_ids?: number[];
             /** Detail */
@@ -7066,7 +7070,7 @@ export interface operations {
     rollback_import_run: {
         parameters: {
             query?: {
-                /** @description Roll back even though contacts the run created have gained things since; they are deleted with them. Never overrides a merge or a later run. */
+                /** @description Roll back even though contacts the run created have gained things since; they are deleted with them. Never overrides a campaign message, a merge or a later run. */
                 force?: boolean;
             };
             header?: never;
@@ -7093,7 +7097,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The run is not committed, or rolling it back is refused: a merge drew in a contact it created, a later run wrote over it, or contacts it created have gained things since (unless force) */
+            /** @description The run is not committed, or rolling it back is refused: a contact it created has a campaign message, a merge drew in a contact it created, a later run wrote over it, or contacts it created have gained things since (unless force) */
             409: {
                 headers: {
                     [name: string]: unknown;

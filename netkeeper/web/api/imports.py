@@ -560,9 +560,9 @@ def commit_import_run(
 ROLLBACK_REFUSED: Responses = {
     409: {
         "model": RollbackRefusalOut,
-        "description": "The run is not committed, or rolling it back is refused: a merge "
-        "drew in a contact it created, a later run wrote over it, or contacts it created "
-        "have gained things since (unless force)",
+        "description": "The run is not committed, or rolling it back is refused: a contact "
+        "it created has a campaign message, a merge drew in a contact it created, a later run "
+        "wrote over it, or contacts it created have gained things since (unless force)",
     }
 }
 
@@ -570,7 +570,11 @@ ROLLBACK_REFUSED: Responses = {
 def rollback_refusal(exc: service.ImportRunError) -> ApiError:
     """A rollback refusal as a ``409`` carrying a ``code`` a client can act on (#78)."""
     body: RollbackRefusalOut
-    if isinstance(exc, service.RunMerged):
+    if isinstance(exc, service.CreatedContactsMessaged):
+        body = RollbackRefusalOut(
+            detail=str(exc), code="created_contacts_messaged", contact_ids=list(exc.contact_ids)
+        )
+    elif isinstance(exc, service.RunMerged):
         body = RollbackRefusalOut(detail=str(exc), code="merged", contact_ids=list(exc.contact_ids))
     elif isinstance(exc, service.RunSuperseded):
         body = RollbackRefusalOut(
@@ -595,6 +599,7 @@ def rollback_refusal(exc: service.ImportRunError) -> ApiError:
                 edited_contacts=acquired.edited_contacts,
                 enriched_contacts=acquired.enriched_contacts,
                 later_imports=acquired.later_imports,
+                enrollments=acquired.enrollments,
             ),
         )
     return ApiError(409, body.model_dump(mode="json"))
@@ -612,7 +617,7 @@ def rollback_import_run(
     force: bool = Query(
         False,
         description="Roll back even though contacts the run created have gained things since; "
-        "they are deleted with them. Never overrides a merge or a later run.",
+        "they are deleted with them. Never overrides a campaign message, a merge or a later run.",
     ),
 ) -> ImportRollbackOut:
     """Undo a committed run, and only what that run did.
@@ -623,18 +628,25 @@ def rollback_import_run(
     provenance with it.
 
     Refused with ``409`` and nothing undone, the body's ``code`` saying why
-    (#78): ``merged`` when a merge has since drawn in a contact the run created,
+    (#78): ``created_contacts_messaged`` when a contact the run created has a
+    campaign message, which is never deleted, so ``force`` does not override it
+    (#242); ``merged`` when a merge has since drawn in a contact the run created,
     because deleting it would take rows the run never created; ``superseded``
     when a later run wrote over fields this one wrote, naming the runs to roll
     back first; ``created_contacts_changed`` when contacts the run created have
-    gained interactions, tags, lists, edits, another source's data or later
-    imports, counted in
+    gained interactions, tags, lists, campaign enrollments, edits, another
+    source's data or later imports, counted in
     ``acquired``, which ``force`` overrides.
     """
     try:
         with translate_errors():
             result = service.rollback(session, user, run_id, force=force)
-    except (service.RunMerged, service.RunSuperseded, service.CreatedContactsChanged) as exc:
+    except (
+        service.CreatedContactsMessaged,
+        service.RunMerged,
+        service.RunSuperseded,
+        service.CreatedContactsChanged,
+    ) as exc:
         raise rollback_refusal(exc) from exc
     return ImportRollbackOut(
         run_id=result.run_id,

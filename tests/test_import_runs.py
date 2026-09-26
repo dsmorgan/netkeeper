@@ -26,12 +26,15 @@ from netkeeper.crm.provenance import may_overwrite, set_manual_field
 from netkeeper.crm.tags import create_rule, create_tag, tag_contact
 from netkeeper.db import mark_for_write, session_scope
 from netkeeper.models import (
+    CampaignStatus,
     Contact,
     ContactEmail,
     ContactMet,
     ContactPhone,
     ContactSource,
     ContactTag,
+    Enrollment,
+    EnrollmentStatus,
     ImportResolution,
     ImportRow,
     ImportStatus,
@@ -560,6 +563,97 @@ def test_a_later_import_that_changed_a_created_contact_is_counted(
         import_runs.rollback(writer, user, run_id)
 
     assert raised.value.acquired.later_imports == 1
+
+
+# --- campaign rows on a created contact (#242) -------------------------------------
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_a_campaign_message_on_a_created_contact_refuses_the_rollback_even_with_force(
+    writer: Session, user: User, force: bool
+) -> None:
+    """A message is never deleted (spec 8); without this the delete hit its FK and a 500."""
+    seeded = seed_existing(writer, user)
+    run_id, imogen = _created_imogen_after(writer, user)
+    campaign = factories.make_campaign(writer, user)
+    enrollment = factories.make_enrollment(writer, campaign, imogen, current_step=1)
+    factories.make_message(writer, enrollment)
+
+    with pytest.raises(import_runs.CreatedContactsMessaged) as raised:
+        import_runs.rollback(writer, user, run_id, force=force)
+
+    assert raised.value.contact_ids == (imogen.id,)
+    assert raised.value.messages == 1
+    assert "1 campaign message" in str(raised.value)
+    assert "with force or without" in str(raised.value)
+    # Refused before the first write.
+    assert import_runs.get_run(writer, user, run_id).status is ImportStatus.COMMITTED
+    assert seeded["fern"].current_title == "Head of Kites"
+    assert writer.get(Contact, imogen.id) is not None
+
+
+def test_a_message_naming_a_created_contact_only_through_its_enrollment_refuses(
+    writer: Session, user: User
+) -> None:
+    """Deleting the contact cascades to the enrollment, which the message's FK keeps."""
+    seed_existing(writer, user)
+    run_id, imogen = _created_imogen_after(writer, user)
+    elsewhere = factories.make_contact(writer, user)
+    campaign = factories.make_campaign(writer, user)
+    enrollment = factories.make_enrollment(writer, campaign, imogen, current_step=1)
+    message = factories.make_message(writer, enrollment)
+    message.contact_id = elsewhere.id  # a row the service never writes, but the FK allows
+    writer.flush()
+
+    with pytest.raises(import_runs.CreatedContactsMessaged) as raised:
+        import_runs.rollback(writer, user, run_id, force=True)
+
+    assert raised.value.contact_ids == (imogen.id,)
+
+
+def test_another_users_message_is_never_counted(writer: Session, user: User) -> None:
+    seed_existing(writer, user)
+    run_id, _ = _created_imogen_after(writer, user)
+    stranger = factories.make_user(writer)
+    theirs = factories.make_contact(writer, stranger)
+    campaign = factories.make_campaign(writer, stranger)
+    factories.make_message(writer, factories.make_enrollment(writer, campaign, theirs))
+
+    result = import_runs.rollback(writer, user, run_id)
+
+    assert result.contacts_deleted >= 1
+
+
+def test_an_enrollment_with_nothing_sent_is_counted_and_force_deletes_it(
+    writer: Session, user: User
+) -> None:
+    """A place in a campaign is something a person did; it goes only with force."""
+    seed_existing(writer, user)
+    run_id, imogen = _created_imogen_after(writer, user)
+    imogen_id = imogen.id
+    campaign = factories.make_campaign(writer, user, status=CampaignStatus.DRAFT)
+    factories.make_enrollment(writer, campaign, imogen, status=EnrollmentStatus.PENDING)
+
+    with pytest.raises(import_runs.CreatedContactsChanged) as raised:
+        import_runs.rollback(writer, user, run_id)
+
+    acquired = raised.value.acquired
+    assert acquired.enrollments == 1
+    assert acquired.interactions == acquired.list_memberships == acquired.edited_contacts == 0
+    assert "1 campaign enrollment" in str(raised.value)
+
+    result = import_runs.rollback(writer, user, run_id, force=True)
+
+    assert result.contacts_deleted >= 1
+    assert writer.scalars(scoped(user, Contact).where(Contact.id == imogen_id)).first() is None
+    assert writer.scalars(scoped(user, Enrollment)).first() is None
+
+
+def _created_imogen_after(writer: Session, user: User) -> tuple[int, Contact]:
+    """Like :func:`_created_imogen`, for a caller that seeded the existing contacts itself."""
+    run_id = import_sample(writer, user)
+    imogen = writer.scalars(scoped(user, Contact).where(Contact.last_name == "Thistlewhite")).one()
+    return run_id, imogen
 
 
 def test_a_detail_added_after_the_import_is_counted(writer: Session, user: User) -> None:

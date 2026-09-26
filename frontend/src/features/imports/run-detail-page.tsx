@@ -253,7 +253,8 @@ function RollbackCard({ run, onDone }: { run: ImportRun; onDone: (r: RollbackRes
  *
  * `superseded` and `merged` need something else undone first; only
  * `created_contacts_changed` can be overridden here, and the button says what
- * that costs. A 409 without a code is the older, merge-only refusal.
+ * that costs. `created_contacts_messaged` has no way on: a campaign message is
+ * never deleted (#242). A 409 without a code is the older, merge-only refusal.
  */
 function RollbackRefusal({
   error,
@@ -266,6 +267,15 @@ function RollbackRefusal({
 }) {
   if (!isConflict(error)) return <ErrorNote>{message(error)}</ErrorNote>
   const code = error instanceof ApiError ? error.code : null
+  if (code === 'created_contacts_messaged') {
+    return (
+      <Note tone="warn">
+        <p className="font-medium">This import can no longer be rolled back.</p>
+        <p>{message(error)}</p>
+        <p>Nothing was changed. Archive the contacts named above if you no longer want them.</p>
+      </Note>
+    )
+  }
   if (code === 'superseded') {
     return (
       <Note tone="warn">
