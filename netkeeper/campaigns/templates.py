@@ -204,6 +204,20 @@ def _check_name_free(
         raise DuplicateTemplateName(f"a template named {name!r} already exists")
 
 
+def lint_draft(
+    channel: TemplateChannel, subject: str | None, body: str, me_keys: Collection[str]
+) -> list[LintIssue]:
+    """Lint text that is not saved yet, exactly as a save of it would (P3-10's editor).
+
+    A blank subject is no subject here too, so the editor shows the lint the saved
+    row would carry. Values a save would refuse (too long) raise
+    :class:`InvalidTemplateValue`, as the save would.
+    """
+    cleaned_subject = _clean_subject(subject)
+    _check_body(body)
+    return lint(channel, cleaned_subject, body, me_keys)
+
+
 # --- writes -----------------------------------------------------------------
 
 

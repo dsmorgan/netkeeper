@@ -7337,6 +7337,37 @@
         "title": "TemplateCreate",
         "type": "object"
       },
+      "TemplateLintIn": {
+        "description": "Text to lint without saving it: the editor's lint as you type (P3-10).",
+        "properties": {
+          "body": {
+            "maxLength": 20000,
+            "title": "Body",
+            "type": "string"
+          },
+          "channel": {
+            "$ref": "#/components/schemas/TemplateChannel"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          }
+        },
+        "required": [
+          "channel",
+          "body"
+        ],
+        "title": "TemplateLintIn",
+        "type": "object"
+      },
       "TemplateOut": {
         "properties": {
           "body": {
@@ -12961,6 +12992,45 @@
           }
         },
         "summary": "Create Template",
+        "tags": [
+          "templates"
+        ]
+      }
+    },
+    "/api/v1/templates/lint": {
+      "post": {
+        "description": "Lint a template's text without saving it, as a save of it would.\n\nThe editor calls this as you type, so a lint error shows before you save. It\nstores nothing and reads no rows; ``user`` is there so the route authenticates\nlike every other.",
+        "operationId": "lint_template",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TemplateLintIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/LintIssueOut"
+                  },
+                  "title": "Response Lint Template",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "A value that cannot be stored or rendered"
+          }
+        },
+        "summary": "Lint Template",
         "tags": [
           "templates"
         ]

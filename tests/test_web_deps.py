@@ -108,6 +108,7 @@ def test_the_read_only_routes_are_the_ones_that_only_read() -> None:
         "query_contacts",
         "count_bulk_contacts",
         "preview_autotag_rule",
+        "lint_template",
     }
 
 

@@ -1927,6 +1927,14 @@ class TemplateCreate(BaseModel):
     body: TemplateBody
 
 
+class TemplateLintIn(BaseModel):
+    """Text to lint without saving it: the editor's lint as you type (P3-10)."""
+
+    channel: TemplateChannel
+    subject: TemplateSubject | None = None
+    body: TemplateBody
+
+
 class TemplatePatch(BaseModel):
     """Fields left out are left alone; ``subject: null`` clears it.
 

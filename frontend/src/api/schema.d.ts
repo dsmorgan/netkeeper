@@ -1522,6 +1522,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/templates/lint": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Lint Template
+         * @description Lint a template's text without saving it, as a save of it would.
+         *
+         *     The editor calls this as you type, so a lint error shows before you save. It
+         *     stores nothing and reads no rows; ``user`` is there so the route authenticates
+         *     like every other.
+         */
+        post: operations["lint_template"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/templates/{template_id}": {
         parameters: {
             query?: never;
@@ -4278,6 +4302,17 @@ export interface components {
             channel: components["schemas"]["TemplateChannel"];
             /** Name */
             name: string;
+            /** Subject */
+            subject?: string | null;
+        };
+        /**
+         * TemplateLintIn
+         * @description Text to lint without saving it: the editor's lint as you type (P3-10).
+         */
+        TemplateLintIn: {
+            /** Body */
+            body: string;
+            channel: components["schemas"]["TemplateChannel"];
             /** Subject */
             subject?: string | null;
         };
@@ -8126,6 +8161,37 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description A value that cannot be stored or rendered */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    lint_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TemplateLintIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LintIssueOut"][];
+                };
             };
             /** @description A value that cannot be stored or rendered */
             422: {

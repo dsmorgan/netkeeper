@@ -223,3 +223,37 @@ async def test_state_changing_routes_need_the_csrf_header(client: httpx.AsyncCli
     assert (await client.post("/api/v1/templates", json=EMAIL)).status_code == 403
     assert (await client.patch(url, json={"body": "x"})).status_code == 403
     assert (await client.delete(url)).status_code == 403
+    assert (await client.post("/api/v1/templates/lint", json=EMAIL)).status_code == 403
+
+
+async def test_lint_of_unsaved_text_matches_what_a_save_would_store(
+    client: httpx.AsyncClient,
+) -> None:
+    """P3-10: the editor lints as you type, so an error shows before you save."""
+    draft = {"channel": "email", "subject": "   ", "body": "{% for x in y %}{% endfor %}"}
+    response = await client.post("/api/v1/templates/lint", json=draft, headers=CSRF)
+    assert response.status_code == 200, response.text
+    linted = response.json()
+    assert [(i["rule"], i["part"], i["field"]) for i in linted] == [
+        ("missing_subject", "subject", None),
+        ("unsupported", "body", "for"),
+        ("no_contact_field", "body", None),
+    ]
+    assert linted[1]["message"].startswith("line 1: ")
+    assert (await client.get("/api/v1/templates")).json() == []  # nothing was saved
+
+    saved = await _create(client, **draft)
+    assert saved["lint"] == linted
+
+    clean = {"channel": "linkedin", "body": "Hi {{ first_name }}"}
+    assert (await client.post("/api/v1/templates/lint", json=clean, headers=CSRF)).json() == []
+
+
+async def test_lint_of_unsaved_text_refuses_what_a_save_would(client: httpx.AsyncClient) -> None:
+    for draft in (
+        {"channel": "fax", "body": "x"},
+        {"channel": "email", "subject": "s" * 501, "body": "x"},
+        {"channel": "email", "body": "b" * 20_001},
+    ):
+        response = await client.post("/api/v1/templates/lint", json=draft, headers=CSRF)
+        assert response.status_code == 422, draft
