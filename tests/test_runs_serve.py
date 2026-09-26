@@ -917,3 +917,17 @@ async def test_a_run_that_fails_inside_its_runner_is_recorded_once(
 
 async def _no_wait(seconds: float) -> None:
     await asyncio.sleep(0)
+
+
+def test_a_live_worker_reads_profiles_through_the_live_source() -> None:
+    """#210's seam: the offline tests hand the worker a short landing wait, but the
+    worker ``serve`` and the CLI build still reads through ``profile_source``, whose
+    landing wait is PageProfiles' live 20 s."""
+    import inspect
+
+    from netkeeper.linkedin.page_profiles import LANDING_WAIT_S
+    from netkeeper.worker import BrowserWorker, profile_source
+
+    assert inspect.signature(BrowserWorker).parameters["profiles"].default is profile_source
+    assert inspect.signature(profile_source).parameters.keys() == {"run", "sleep"}
+    assert LANDING_WAIT_S == 20.0

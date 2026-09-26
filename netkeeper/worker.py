@@ -49,7 +49,7 @@ import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
@@ -67,6 +67,7 @@ from netkeeper.linkedin.browser import (
     BrowserUnavailable,
 )
 from netkeeper.linkedin.connections import ConnectionsSource, SyncMode
+from netkeeper.linkedin.enrich import ProfileSource
 from netkeeper.linkedin.page_connections import PageConnections
 from netkeeper.linkedin.page_profiles import PageProfiles
 from netkeeper.logging_setup import setup_logging
@@ -123,6 +124,12 @@ def profile_source(run: BrowserRun, *, sleep: Sleep = asyncio.sleep) -> PageProf
     return PageProfiles(run, sleep=sleep)
 
 
+class ProfileSourceFactory(Protocol):
+    """Builds an enrichment run's :class:`ProfileSource`: :func:`profile_source`'s shape."""
+
+    def __call__(self, run: BrowserRun, *, sleep: Sleep) -> ProfileSource: ...
+
+
 _MODE: Final[dict[SyncRunKind, SyncMode]] = {
     SyncRunKind.CONNECTIONS_FULL: SyncMode.FULL,
     SyncRunKind.CONNECTIONS_INCREMENTAL: SyncMode.INCREMENTAL,
@@ -157,6 +164,7 @@ class BrowserWorker:
         clock: Clock = _utcnow,
         sleep: Sleep = asyncio.sleep,
         rng: random.Random | None = None,
+        profiles: ProfileSourceFactory = profile_source,
     ) -> None:
         self.provider = provider
         self._factory = factory
@@ -165,6 +173,10 @@ class BrowserWorker:
         self._clock = clock
         self._sleep = sleep
         self._rng = rng
+        # A test seam (#210): the offline suite passes PageProfiles with a short
+        # landing wait, since its fake Chrome serves no profile screen and would
+        # otherwise sit out the live 20 s wait on every visit. Always the default live.
+        self._profiles = profiles
 
     async def execute(self, run_id: int, user_id: int) -> runs.RunOutcome:
         """Run ``run_id`` to its end and record how it ended. See the module docstring."""
@@ -212,7 +224,7 @@ class BrowserWorker:
             await enrich_contacts(
                 self._factory,
                 user_id,
-                profile_source(browser, sleep=self._sleep),
+                self._profiles(browser, sleep=self._sleep),
                 settings=self._settings,
                 run_id=run_id,
                 on_progress=progress,

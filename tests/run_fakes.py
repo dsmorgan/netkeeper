@@ -25,7 +25,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from voyager_pages import PEOPLE, Person
 
 from netkeeper.config import Settings
-from netkeeper.linkedin.browser import ActivityLocks, AttachBrowserProvider
+from netkeeper.linkedin.browser import ActivityLocks, AttachBrowserProvider, BrowserRun
+from netkeeper.linkedin.enrich import ProfileSource
+from netkeeper.linkedin.page_profiles import PageProfiles
 from netkeeper.services import runs
 from netkeeper.services.events import EventBus
 from netkeeper.services.scheduled_runs import ServeExtractor
@@ -74,6 +76,18 @@ async def no_sleep(seconds: float) -> None:
     await asyncio.sleep(0)
 
 
+#: How long a fake visit waits for a profile screen. The fake pages here answer as
+#: the tab navigates, so anything that is coming has already arrived; the live 20 s
+#: wait would only be sat out, in real time, on every visit to a page with no
+#: screen (#210: 400 s of one test).
+FAKE_LANDING_WAIT_S = 0.05
+
+
+def fast_profiles(run: BrowserRun, *, sleep: Callable[[float], Awaitable[None]]) -> ProfileSource:
+    """``netkeeper.worker.profile_source`` with :data:`FAKE_LANDING_WAIT_S`."""
+    return PageProfiles(run, sleep=sleep, landing_wait_s=FAKE_LANDING_WAIT_S)
+
+
 def worker_extractor(
     provider: AttachBrowserProvider,
     settings: Settings,
@@ -86,7 +100,14 @@ def worker_extractor(
 
     def executor(factory: sessionmaker[Session], bus: EventBus) -> runs.RunExecutor:
         return BrowserWorker(
-            provider, factory, settings.linkedin, bus=bus, clock=clock, sleep=sleep, rng=rng
+            provider,
+            factory,
+            settings.linkedin,
+            bus=bus,
+            clock=clock,
+            sleep=sleep,
+            rng=rng,
+            profiles=fast_profiles,
         )
 
     return ServeExtractor(executor=executor, clock=clock, rng=rng or random.Random(0))

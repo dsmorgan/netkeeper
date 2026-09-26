@@ -9,12 +9,13 @@ attaches to a real one and nothing leaves this machine.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from run_fakes import ConnectionsContext, fake_provider
+from run_fakes import ConnectionsContext, fake_provider, fast_profiles, no_sleep
 from sqlalchemy.orm import Session, sessionmaker
 from typer.testing import CliRunner
 
@@ -35,6 +36,7 @@ from netkeeper.services.linkedin_accounts import (
 from netkeeper.services.linkedin_session import flag_session
 from netkeeper.services.settings_kv import set_setting
 from netkeeper.services.users import ensure_local_user
+from netkeeper.worker import BrowserWorker
 
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
 
@@ -69,6 +71,13 @@ def fake_chrome(monkeypatch: pytest.MonkeyPatch) -> ConnectionsContext:
     context = ConnectionsContext()
     provider, _ = fake_provider(context)
     monkeypatch.setattr(cli_module, "_provider", lambda settings: provider)
+    # The run's pauses are the pacing tests' subject, not these: sat out in real
+    # time they cost seconds a run (#210).
+    monkeypatch.setattr(
+        cli_module,
+        "BrowserWorker",
+        functools.partial(BrowserWorker, sleep=no_sleep, profiles=fast_profiles),
+    )
     return context
 
 
