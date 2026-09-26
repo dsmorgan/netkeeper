@@ -242,6 +242,42 @@ def test_a_new_template_cannot_take_the_name_of_a_versioned_one(
         _create(writer, user)
 
 
+def test_a_renamed_versioned_template_frees_its_old_name(
+    writer: Session, user: User, in_use: set[int]
+) -> None:
+    """The old name stays on the superseded row, which lists nowhere, so it is free again."""
+    old = _create(writer, user, "reconnect")
+    in_use.add(old.id)
+    renamed = update_template(writer, user, old.id, me_keys=ME_KEYS, name="catch up")
+    assert (renamed.name, old.name) == ("catch up", "reconnect")
+
+    reused = _create(writer, user, "reconnect")
+    assert reused.version == 1 and reused.previous_id is None
+    assert [row.name for row in list_templates(writer, user)] == ["catch up", "reconnect"]
+    assert versions(writer, user, renamed) == [renamed, old]
+    assert versions(writer, user, reused) == [reused]
+
+
+def test_two_edits_of_one_version_in_use_the_second_is_superseded(
+    writer: Session, user: User, in_use: set[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both edits can pass is_superseded() before either inserts (PostgreSQL's concurrent
+    writers). UNIQUE(user_id, previous_id) lets one win; the other is a 409, not a 500."""
+    old = _create(writer, user)
+    in_use.add(old.id)
+    first = update_template(writer, user, old.id, me_keys=ME_KEYS, body="Hey {{ first_name }}")
+    # The second edit read the row before the first one's insert, so it saw no successor.
+    monkeypatch.setattr(service, "is_superseded", lambda _session, _user, _row: False)
+    with pytest.raises(TemplateSuperseded, match="replaced by another edit just now"):
+        update_template(writer, user, old.id, me_keys=ME_KEYS, body="Yo {{ first_name }}")
+
+    # The savepoint kept the session usable, and the first edit stands.
+    monkeypatch.undo()
+    assert list_templates(writer, user) == [first]
+    assert versions(writer, user, first) == [first, old]
+    assert _create(writer, user, "after").id is not None
+
+
 # --- delete -----------------------------------------------------------------
 
 

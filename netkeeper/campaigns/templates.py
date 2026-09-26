@@ -35,6 +35,7 @@ from datetime import date
 from typing import Final
 
 from sqlalchemy import ColumnElement, exists
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
 from netkeeper.campaigns.render import (
@@ -286,8 +287,18 @@ def update_template(
             version=row.version + 1,
             previous_id=row.id,
         )
-        session.add(replacement)
-        session.flush()
+        # Two edits of the same in-use version can both pass is_superseded() before either
+        # inserts; UNIQUE(user_id, previous_id) lets one win. The savepoint keeps the
+        # caller's session usable for the loser, which gets a 409 like any other stale edit.
+        try:
+            with session.begin_nested():
+                session.add(replacement)
+                session.flush()
+        except IntegrityError as exc:
+            raise TemplateSuperseded(
+                f"template {template_id} was replaced by another edit just now; "
+                "edit the newest version instead"
+            ) from exc
         log.info("template %d is in use; saved the edit as version %d", row.id, replacement.version)
         return replacement
 
