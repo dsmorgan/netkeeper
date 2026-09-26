@@ -7,6 +7,8 @@ sample is invented from end to end; see ``tests/test_linkedin_archive.py``.
 
 from __future__ import annotations
 
+import logging
+import shutil
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -21,6 +23,7 @@ from netkeeper.crm.archive import (
     ArchiveImport,
     _html_to_text,
     import_archive,
+    report_json,
 )
 from netkeeper.crm.interactions import INVITATION_SUMMARY, add_interaction
 from netkeeper.crm.provenance import SOURCE_RANK, revert_to_synced, set_manual_field
@@ -845,3 +848,77 @@ def test_the_first_of_two_imports_of_one_archive_rolls_back_after_the_second(
     import_runs.rollback(writer, user, first.run_id)
 
     assert _all_contacts(writer, user) == []
+
+
+# --- a messages-shaped member under another name (#74) -------------------------
+
+
+def _sample_with(tmp_path: Path, extra: dict[str, Path]) -> Path:
+    """The sample directory, plus fixture files copied in under other names."""
+    root = tmp_path / "export"
+    shutil.copytree(FIXTURES, root)
+    for name, source in extra.items():
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+    return root
+
+
+def test_the_sample_names_no_unfamiliar_message_file(
+    writer: Session, user: User, archive: Archive
+) -> None:
+    report = _run(writer, user, archive)
+    assert report.unfamiliar_message_files == []
+    assert report_json(report)["unfamiliar_message_files"] == []
+
+
+def test_an_unknown_assistant_log_is_imported_but_named(
+    writer: Session, user: User, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A fourth assistant log reads as messages; the report says so instead of hiding it.
+
+    An assistant has no profile URL, so its conversations never become
+    interactions: on its own, as here, the log cannot even say whose archive it
+    is (``no_owner``); beside traffic that names the owner they would land in
+    ``no_counterpart``. Either way the counts grow and nothing is written, as
+    #74 describes. The warning is what makes that visible.
+    """
+    root = _sample_with(tmp_path, {"interview_prep_messages.csv": FIXTURES / "guide_messages.csv"})
+    with (
+        caplog.at_level(logging.WARNING, logger="netkeeper.crm.archive"),
+        open_archive(root) as opened,
+    ):
+        report = _run(writer, user, opened)
+    assert report.unfamiliar_message_files == ["interview_prep_messages.csv"]
+    assert report_json(report)["unfamiliar_message_files"] == ["interview_prep_messages.csv"]
+    assert report.messages.conversations == 8  # the sample's seven, and the log's one
+    assert report.messages.no_owner == 1  # the log's, read as a table of its own
+    assert report.messages.added == 8  # the sample's, and nothing more
+    assert "interview_prep_messages.csv" in caplog.text
+    assert "An assistant's chat log" not in caplog.text  # never a body in the log
+
+
+def test_the_familiar_name_in_a_subdirectory_or_another_case_is_not_named(
+    writer: Session, user: User, tmp_path: Path
+) -> None:
+    root = tmp_path / "export"
+    shutil.copytree(FIXTURES, root, ignore=shutil.ignore_patterns("messages.csv"))
+    (root / "inbox").mkdir()
+    shutil.copyfile(FIXTURES / "messages.csv", root / "inbox" / "MESSAGES.CSV")
+    with open_archive(root) as opened:
+        report = _run(writer, user, opened)
+    assert report.messages.rows == 13  # the sample's table, found where it moved
+    assert report.unfamiliar_message_files == []
+
+
+def test_a_renamed_message_history_is_imported_and_named(
+    writer: Session, user: User, tmp_path: Path
+) -> None:
+    """A renamed table still imports (the reader goes by header), and is still reported."""
+    root = tmp_path / "export"
+    shutil.copytree(FIXTURES, root, ignore=shutil.ignore_patterns("messages.csv"))
+    shutil.copyfile(FIXTURES / "messages.csv", root / "my inbox.csv")
+    with open_archive(root) as opened:
+        report = _run(writer, user, opened)
+    assert report.messages.added == 8
+    assert report.unfamiliar_message_files == ["my inbox.csv"]

@@ -900,6 +900,44 @@ describe('the archive shape: a zip, or a lone message/invitation file (P1-21)', 
     expect(screen.queryByText(/the rest of the export/)).toBeNull()
   })
 
+  it('names a file read as message history that is not messages.csv (issue #74)', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/archive': () =>
+          jsonResponse(
+            { ...ARCHIVE_RESULT, unfamiliar_message_files: ['interview_prep_messages.csv'] },
+            201,
+          ),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(zipFile())
+    await screen.findByText('Recognized: a LinkedIn data archive')
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+    await screen.findByText(/^Imported/)
+
+    const note = screen.getByText(/Also read as message history, although it is not messages\.csv/)
+    expect(note).toBeVisible()
+    expect(note).toHaveTextContent('interview_prep_messages.csv')
+    expect(note).toHaveTextContent(/assistant.s chat log/)
+  })
+
+  it('says nothing about unfamiliar message files when there are none', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/archive': () => jsonResponse(ARCHIVE_RESULT, 201),
+      }),
+    )
+    await renderApp('/imports')
+    await chooseArchive(zipFile())
+    await screen.findByText('Recognized: a LinkedIn data archive')
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }))
+    await screen.findByText(/^Imported/)
+    expect(screen.queryByText(/Also read as message history/)).toBeNull()
+  })
+
   it('recognizes a lone messages.csv and imports it with no mapping step', async () => {
     const calls: Call[] = []
     const messagesOnly = {

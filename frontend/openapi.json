@@ -153,6 +153,13 @@
               }
             ],
             "title": "Run Id"
+          },
+          "unfamiliar_message_files": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unfamiliar Message Files",
+            "type": "array"
           }
         },
         "required": [
@@ -164,7 +171,8 @@
           "connections",
           "messages",
           "invitations",
-          "ignored_files"
+          "ignored_files",
+          "unfamiliar_message_files"
         ],
         "title": "ArchiveImportOut",
         "type": "object"
@@ -362,6 +370,14 @@
               }
             ],
             "title": "Owner Public Id"
+          },
+          "unfamiliar_message_files": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Unfamiliar Message Files",
+            "type": "array"
           }
         },
         "required": [

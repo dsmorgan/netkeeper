@@ -339,6 +339,7 @@ describe('one import run', () => {
       messages: ARCHIVE_RESULT.messages,
       invitations: ARCHIVE_RESULT.invitations,
       ignored_files: ARCHIVE_RESULT.ignored_files,
+      unfamiliar_message_files: ['interview_prep_messages.csv'],
     }
     const archiveRun = {
       ...COMMITTED_RUN,
@@ -354,6 +355,8 @@ describe('one import run', () => {
     expect(await screen.findByText(/from a LinkedIn data archive/)).toBeVisible()
     expect(screen.getByText('messages.csv')).toBeVisible()
     expect(screen.getByText('Invitations.csv')).toBeVisible()
+    // The run keeps what the upload said about an unfamiliar messages file (issue #74).
+    expect(screen.getByText(/interview_prep_messages\.csv/)).toBeVisible()
     expect(screen.getByRole('button', { name: 'Roll back this import' })).toBeVisible()
   })
 

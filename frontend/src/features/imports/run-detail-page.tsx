@@ -84,7 +84,10 @@ function RunDetail({ run }: { run: ImportRun }) {
 
       {run.archive != null && (
         <>
-          <MessagesCard counts={run.archive.messages} />
+          <MessagesCard
+            counts={run.archive.messages}
+            unfamiliarFiles={run.archive.unfamiliar_message_files}
+          />
           <InvitationsCard counts={run.archive.invitations} />
         </>
       )}
