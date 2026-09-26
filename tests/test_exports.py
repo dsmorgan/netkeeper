@@ -360,12 +360,21 @@ def _field_names(text: str, output_format: str) -> set[str]:
     return {name.strip().lower().replace(" ", "_").replace("-", "_") for name in names}
 
 
-@pytest.mark.parametrize("output_format", ["csv", "json", "vcard"])
-@pytest.mark.parametrize("preset", ["nine-column", "linkedin-archive", "full", "campaign-audience"])
+@pytest.mark.parametrize(
+    ("preset", "output_format"),
+    [
+        *(
+            (preset, output_format)
+            for preset in ("nine-column", "linkedin-archive", "full", "campaign-audience")
+            for output_format in ("csv", "json", "vcard")
+        ),
+        ("macos-contacts", "vcard"),  # vCard only (#249)
+    ],
+)
 def test_no_preset_or_format_leaks_internal_fields(
     session: Session, preset: str, output_format: str
 ) -> None:
-    """All 12 preset/format combinations, by field name and by planted value (#77)."""
+    """All 13 preset/format combinations, by field name and by planted value (#77)."""
     user = factories.make_user(session, id=_PLANTED_USER_ID)
     contact = factories.make_contact(
         session,

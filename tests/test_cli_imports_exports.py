@@ -1094,6 +1094,35 @@ def test_cli_export_writes_to_a_file_and_reports_it(
     assert "LinkedIn Profile URL" not in content  # --headerless
 
 
+def test_cli_export_macos_contacts_writes_vcard_3_with_crlf(
+    cli_db: sessionmaker[Session], tmp_path: Path
+) -> None:
+    with session_scope(cli_db, write=True) as session:
+        user = ensure_local_user(session)
+        factories.make_contact(session, user, first_name="Zoë", preferred_name="Zoë")
+
+    out = tmp_path / "contacts.vcf"
+    result = CliRunner().invoke(
+        cli, ["export", "--preset", "macos-contacts", "--format", "vcard", "--out", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    raw = out.read_bytes()  # untranslated, so a lost "\r\n" would show
+    assert raw.startswith(b"BEGIN:VCARD\r\nVERSION:3.0\r\n")
+    assert "FN:Zoë Last".encode() in raw
+
+
+def test_cli_export_macos_contacts_as_csv_is_refused_before_writing(
+    cli_db: sessionmaker[Session], tmp_path: Path
+) -> None:
+    out = tmp_path / "contacts.csv"
+    result = CliRunner().invoke(
+        cli, ["export", "--preset", "macos-contacts", "--format", "csv", "--out", str(out)]
+    )
+    assert result.exit_code == 1
+    assert "vCard only" in result.stderr
+    assert not out.exists()
+
+
 def test_cli_export_spreadsheet_safe_quotes_formula_cells(
     cli_db: sessionmaker[Session], tmp_path: Path
 ) -> None:

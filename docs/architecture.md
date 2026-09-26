@@ -678,7 +678,7 @@ The archive zip's upload does not go through steps 2-5 above: `POST /imports/arc
 
 ### 10.6 Export
 
-Presets: `nine-column`, `linkedin-archive`, `full`, `campaign-audience`. `campaign-audience` never includes a `do_not_contact` contact or one waiting for review (#184). Formats: CSV, JSON, vCard 4.0. Exports respect the current filter and strip internal counters. A list exports its own members through `list_member` (10.4): the same people its page shows, except for a smart list that sets `include_archived` itself, whose archived members need the export's filter to ask for them too.
+Presets: `nine-column`, `linkedin-archive`, `full`, `campaign-audience`, `macos-contacts`. `campaign-audience` never includes a `do_not_contact` contact or one waiting for review (#184). Formats: CSV, JSON, vCard 4.0. `macos-contacts` (P6-02, #249) is vCard only, and 3.0 rather than 4.0: a card per contact with a stable `UID` and its tags in `CATEGORIES`, then a group card per tag (`X-ADDRESSBOOKSERVER-KIND:group`), and no `do_not_contact` contact. [macos-contacts.md](macos-contacts.md) has the import steps. Exports respect the current filter and strip internal counters. A list exports its own members through `list_member` (10.4): the same people its page shows, except for a smart list that sets `include_archived` itself, whose archived members need the export's filter to ask for them too.
 
 An export is streamed, so everything that can refuse it has to happen before the first chunk: the filter is parsed and compiled while the request can still become a `422`. Once a `200` is on the wire a failure can only truncate the file, which is worse than an error because nothing about it looks like one (P1-27).
 

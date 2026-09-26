@@ -26,7 +26,7 @@ from netkeeper.crm import import_runs
 from netkeeper.crm.archive import ArchiveImport, import_archive
 from netkeeper.crm.archive_check import open_checked_archive
 from netkeeper.crm.contacts import ContactStats, contact_stats
-from netkeeper.crm.exports import ExportFormat, ExportPreset, export_stream
+from netkeeper.crm.exports import ExportError, ExportFormat, ExportPreset, export_stream
 from netkeeper.crm.filters import FilterError, FilterTree, SortKey, parse_filter, parse_sort
 from netkeeper.crm.lists import ListCount, list_lists, list_views, member_counts
 from netkeeper.crm.tags import ensure_default_rules, list_tags, run_rules
@@ -1971,6 +1971,10 @@ def export_cmd(
                 # compiler will not take shows up, and export_stream() does it
                 # before it yields anything (#95). Same message the API's 422
                 # carries, rather than a traceback over a half-written file.
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            except ExportError as exc:
+                # macos-contacts asked for as CSV or JSON: refused before --out is opened.
                 typer.echo(f"error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
             if out is not None:

@@ -28,6 +28,7 @@ from fastapi.responses import StreamingResponse
 
 from netkeeper.crm.exports import (
     MEDIA_TYPES,
+    ExportError,
     ExportFormat,
     ExportPreset,
     export_stream,
@@ -62,7 +63,7 @@ FormatParam = Annotated[ExportFormat, Query(alias="format")]
                 "text/vcard": {"schema": {"type": "string"}},
             },
         },
-        422: {"description": "An invalid filter or sort"},
+        422: {"description": "An invalid filter or sort, or a vCard-only preset as CSV or JSON"},
     },
 )
 def export_contacts(
@@ -81,7 +82,8 @@ def export_contacts(
     ``nine-column``; harmless, if unusual, on the other presets) and is ignored
     by the other two formats. ``spreadsheet_safe`` prefixes ``'`` to CSV cells
     a spreadsheet would evaluate as formulas: safe to open in a spreadsheet, not
-    safe to re-import (#76). Also CSV only.
+    safe to re-import (#76). Also CSV only. ``macos-contacts`` is vCard only
+    (vCard 3.0 with a group per tag, for macOS Contacts); any other format is a 422.
     """
     tree = _parse_filter(filter_)
     sort_keys = _parse_sort(sort)
@@ -101,6 +103,9 @@ def export_contacts(
     except FilterError as exc:
         # export_stream() compiles before it returns its iterator, so this is
         # still an ordinary response: nothing has been sent (#95).
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    except ExportError as exc:
+        # A vCard-only preset (macos-contacts) asked for as CSV or JSON.
         raise HTTPException(status_code=422, detail=str(exc)) from None
     response = StreamingResponse(body, media_type=MEDIA_TYPES[output_format])
     response.headers["Content-Disposition"] = (
