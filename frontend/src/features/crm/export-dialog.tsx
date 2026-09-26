@@ -1,5 +1,5 @@
 /**
- * The export dialog: four presets, three formats, and the caveats spelled out.
+ * The export dialog: five presets, three formats, and the caveats spelled out.
  *
  * Two of the caveats are the difference between a useful file and a surprise.
  *
@@ -22,6 +22,9 @@
  * profiles, so `=HYPERLINK(…)` is attacker-chosen text a spreadsheet would run.
  * It stays opt-in because it changes the bytes: the file no longer re-imports,
  * and every `+1…` phone number gains a leading quote.
+ *
+ * `macos-contacts` is vCard only (the backend answers 422 to anything else), so
+ * picking it switches the format to vCard and disables the other two.
  */
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -113,11 +116,15 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
   })
 
   const chosen = EXPORT_PRESETS.find((candidate) => candidate.value === preset)
-  const chosenFormat = FORMATS.find((candidate) => candidate.value === format)
-  const isCsv = format === 'csv'
+  const allowed = chosen?.formats ?? FORMATS.map((candidate) => candidate.value)
+  // Derived rather than stored, so the format picked for another preset comes
+  // back when you switch away from a vCard-only one.
+  const effectiveFormat = allowed.includes(format) ? format : (allowed[0] ?? format)
+  const chosenFormat = FORMATS.find((candidate) => candidate.value === effectiveFormat)
+  const isCsv = effectiveFormat === 'csv'
   const href = exportUrl({
     preset,
-    format,
+    format: effectiveFormat,
     headerless: headerless && isCsv,
     spreadsheetSafe: spreadsheetSafe && isCsv,
     filter,
@@ -176,11 +183,15 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
         <Select
           id="export-format"
           className="w-full"
-          value={format}
+          value={effectiveFormat}
           onChange={(event) => setFormat(event.target.value as ExportFormat)}
         >
           {FORMATS.map((candidate) => (
-            <option key={candidate.value} value={candidate.value}>
+            <option
+              key={candidate.value}
+              value={candidate.value}
+              disabled={!allowed.includes(candidate.value)}
+            >
               {candidate.label}
             </option>
           ))}
