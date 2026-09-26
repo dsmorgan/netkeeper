@@ -594,7 +594,7 @@ def test_an_alternation_needing_too_many_scans_is_refused_quickly() -> None:
     svc._every_character()  # built once per process, whatever the pattern
     svc._overlap.cache_clear()
     started = time.perf_counter()
-    with pytest.raises(InvalidPattern, match="may run slowly"):
+    with pytest.raises(InvalidPattern, match="too many alternatives"):
         compile_pattern(pattern)
     assert time.perf_counter() - started < 1.0
 
@@ -640,6 +640,47 @@ def test_the_scan_cap_counts_pairs_compared_in_the_fixed_prefixes() -> None:
     assert not _refused_by_the_cap(
         [b[: b.index("]") + 1] + chr(0x5000 + i) for i, b in enumerate(branches)]
     )
+
+
+def _alternation_at_the_cap(k: int) -> str:
+    """4 class branches and 6 literal ones: 6 class pairs and 24 mixed, 30 in all, each
+    alternation (numbered ``k``) in characters no other one uses."""
+    chars = [chr(0x6000 + 20 * k + i) for i in range(20)]
+    classes = [f"[{chars[2 * i]}{chars[2 * i + 1]}]" for i in range(4)]
+    literals = [chars[8 + 2 * i] + chars[9 + 2 * i] for i in range(6)]
+    return "(?:" + "|".join(classes + literals) + ")"
+
+
+def test_one_alternation_at_the_scan_cap_is_accepted() -> None:
+    compile_pattern(_alternation_at_the_cap(0) + "+")
+
+
+def test_the_scan_cap_is_one_budget_for_the_whole_pattern() -> None:
+    """Twelve alternations each at the cap under one ``+``: 360 scans took two to five
+    seconds to save when every alternation had a budget of its own."""
+    pattern = "(?:" + "".join(_alternation_at_the_cap(k) for k in range(12)) + ")+"
+    assert len(pattern) == 497 <= svc.PATTERN_MAX_LENGTH
+    svc._every_character()  # built once per process, whatever the pattern
+    svc._CASE_CLASSES.clear()
+    svc._overlap.cache_clear()
+    started = time.perf_counter()
+    with pytest.raises(InvalidPattern, match="too many alternatives"):
+        compile_pattern(pattern)
+    assert time.perf_counter() - started < 1.0
+    assert has_ambiguous_nested_repeat(_parser.parse(pattern, re.IGNORECASE))
+    # Two alternations at the cap are 60 pairs between them.
+    with pytest.raises(InvalidPattern, match="too many alternatives"):
+        compile_pattern(_alternation_at_the_cap(0) + "+" + _alternation_at_the_cap(1) + "+")
+    compile_pattern(_alternation_at_the_cap(0) + "+" + _alternation_at_the_cap(1) + "?")
+
+
+def test_the_scan_cap_message_says_to_split_the_rule() -> None:
+    with pytest.raises(InvalidPattern) as caught:
+        compile_pattern(_branches_under_plus(CLASS_BRANCHES))
+    message = str(caught.value)
+    assert "character class" in message
+    assert "split it into several rules" in message
+    assert "may run slowly" not in message
 
 
 def test_the_scan_cap_counts_each_distinct_pair_once() -> None:
