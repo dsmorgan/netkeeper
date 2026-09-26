@@ -413,6 +413,23 @@ NESTED_UNBOUNDED = [
     # so it counts as any character, and doubt rejects.
     r"(?:(\w)+\1)+",
     r"(?:(?=(\w+\s)+)x)+",
+    # #224: a count that can vary is a choice too, one copy at a time. Each of
+    # these takes from a tenth of a second to minutes under the standard
+    # library's re on 30-40 characters of a near miss.
+    r"(a{1,2})+$",
+    r"(a{1,3})+$",
+    r"(x{2,4})+y",
+    r"(a{0,2})+$",
+    r"(a{1,2}b?)+$",
+    r"(?:a{1,2}|b)+$",
+    # An optional one leaves the pass empty only when nothing else in it can
+    # match a character; otherwise skipping it is a second way to split.
+    r"(aa?)+$",
+    r"(a?a)+$",
+    r"(a?b?)+$",
+    r"(a?b?a?)+$",
+    r"(a(a?))+$",
+    r"((a?){1,3})+$",
 ]
 NOT_NESTED = [
     r"(a+)",
@@ -435,6 +452,13 @@ UNAMBIGUOUS_NESTED = [
     r"^(\w+\W+){2,}Officer$",
     r"(a+b)+",
     r"(\d+,)*\d+$",
+    # #224: a variable count nothing after it can continue, a fixed count, and
+    # an optional one alone in its pass (an empty pass ends the repeat).
+    r"(x(a{1,2})y)+$",
+    r"(ba?)+$",
+    r"(a{2})+$",
+    r"(\ba?)+$",
+    r"(a?)+$",
 ]
 
 

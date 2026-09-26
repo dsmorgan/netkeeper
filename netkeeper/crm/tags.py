@@ -28,8 +28,9 @@ What this module decides
   lock for everyone, so a pattern that backtracks catastrophically (``(a+)+$``
   takes about a minute on a thirty-character title) is guarded twice. At save
   and preview time the pattern's parse tree is refused when an unbounded
-  repeat (``+``, ``*``, ``{n,}``) contains another one that some character
-  could either extend or end, the shape behind exponential backtracking
+  repeat (``+``, ``*``, ``{n,}``) contains another one, or one whose count can
+  vary (``{1,2}``), that some character could either extend or end, the shape
+  behind exponential backtracking
   (:func:`has_ambiguous_nested_repeat`), and when its counted repeats
   multiply out past :data:`MAX_EXPANSION`, because ``regex`` expands those at compile time and
   a twenty-four character pattern can ask for gigabytes. At run time every
@@ -331,9 +332,9 @@ def compile_pattern(pattern: str) -> regex.Pattern[str]:
         raise InvalidPattern(f"invalid regular expression: {exc}") from exc
     if has_ambiguous_nested_repeat(tree):
         raise InvalidPattern(
-            "pattern may run slowly: an unbounded repeat (+, *, {n,}) inside another one, "
-            "where the same character could continue the inner repeat or come after it, "
-            r"as in (a+)+ or (\w+\s*)+, can take exponential time; put something neither "
+            "pattern may run slowly: a repeat inside an unbounded one (+, *, {n,}), where "
+            "the same character could continue the inner repeat or come after it, as in "
+            r"(a+)+, (a{1,2})+ or (\w+\s*)+, can take exponential time; put something neither "
             r"can match between them, as in (\w+\s+)+, or rewrite it without the nesting"
         )
     if expansion(tree) > MAX_EXPANSION:
@@ -383,44 +384,72 @@ def has_ambiguous_nested_repeat(tree: Any) -> bool:
     cannot see into (a backreference, a conditional, a lookaround's contents)
     counts as any character, so doubt rejects. A bounded outer repeat
     (``(\\w+[\\s-]+){1,2}``) never triggers it, and neither does ``a+b+``.
+
+    A bounded repeat whose count can vary offers the same choice, a copy at a
+    time, so inside an unbounded one it is checked the same way (#224):
+    ``(a{1,2})+`` splits a run of ``a`` into ones and twos as many ways as
+    ``(a|aa)+``, which is exponential. A fixed count (``(a{2})+``) is not. The
+    optional ``?`` (``{0,1}``) is the one variable count that can be safe: its
+    only other choice is no copy at all, and when nothing else in the pass can
+    match a character, that leaves the pass empty, which ends the outer
+    repeat rather than splitting the text another way. So ``(a?)+`` passes,
+    while ``(aa?)+``, ``(a?a)+`` and ``(a?b?)+`` do not.
     """
-    return _ambiguous(tree, frozenset(), inside_unbounded=False)
+    return _ambiguous(tree, frozenset(), inside_unbounded=False, alone_in_pass=False)
 
 
-def _ambiguous(tree: Any, follow: _Chars, *, inside_unbounded: bool) -> bool:
-    """:func:`has_ambiguous_nested_repeat` for a sequence that ``follow`` can come after."""
+def _ambiguous(tree: Any, follow: _Chars, *, inside_unbounded: bool, alone_in_pass: bool) -> bool:
+    """:func:`has_ambiguous_nested_repeat` for a sequence that ``follow`` can come after.
+
+    ``alone_in_pass``: nothing in the innermost unbounded repeat's pass outside
+    this sequence can match a character, so an element here that matches
+    nothing may leave the pass empty.
+    """
+    elements = list(tree)
+    silent = [not _first([element])[0] for element in elements]
     after = follow
-    for op, args in reversed(list(tree)):
+    for index in reversed(range(len(elements))):
+        op, args = elements[index]
+        alone = alone_in_pass and all(silent[:index] + silent[index + 1 :])
         if op in _REPEATS:
-            _low, high, body = args
+            low, high, body = args
             unbounded = high == _parser.MAXREPEAT
             starts, _ = _first(body)
-            if unbounded and inside_unbounded and _overlap(starts, after):
+            # Whether stopping after some number of copies, and letting what
+            # follows take the next character, is a real second way to match.
+            choice = unbounded or (low < high and (high > 1 or not alone))
+            if choice and inside_unbounded and _overlap(starts, after):
                 return True
             loop = starts | after if high > 1 else after
-            if _ambiguous(body, loop, inside_unbounded=inside_unbounded or unbounded):
+            if _ambiguous(
+                body,
+                loop,
+                inside_unbounded=inside_unbounded or unbounded,
+                alone_in_pass=True if unbounded else alone and high <= 1,
+            ):
                 return True
         elif op is _parser.SUBPATTERN:
-            if _ambiguous(args[3], after, inside_unbounded=inside_unbounded):
+            if _ambiguous(args[3], after, inside_unbounded=inside_unbounded, alone_in_pass=alone):
                 return True
         elif op is _parser.ATOMIC_GROUP:
-            if _ambiguous(args, after, inside_unbounded=inside_unbounded):
+            if _ambiguous(args, after, inside_unbounded=inside_unbounded, alone_in_pass=alone):
                 return True
         elif op is _parser.BRANCH:
             if any(
-                _ambiguous(branch, after, inside_unbounded=inside_unbounded) for branch in args[1]
+                _ambiguous(branch, after, inside_unbounded=inside_unbounded, alone_in_pass=alone)
+                for branch in args[1]
             ):
                 return True
         elif op in (_parser.ASSERT, _parser.ASSERT_NOT):
             # What a lookaround's contents are followed by is not this sequence.
             unknown = frozenset({_ANY_CHAR})
-            if _ambiguous(args[1], unknown, inside_unbounded=inside_unbounded):
+            if _ambiguous(args[1], unknown, inside_unbounded=inside_unbounded, alone_in_pass=False):
                 return True
         elif op is _parser.GROUPREF_EXISTS:
             _group, yes, no = args
             for branch in (yes, no):
                 if branch is not None and _ambiguous(
-                    branch, after, inside_unbounded=inside_unbounded
+                    branch, after, inside_unbounded=inside_unbounded, alone_in_pass=alone
                 ):
                     return True
         starts, nullable = _first([(op, args)])
