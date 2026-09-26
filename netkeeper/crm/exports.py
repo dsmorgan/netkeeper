@@ -570,13 +570,17 @@ def _vcard_escape(value: str) -> str:
 
 
 def _vcard_escape_uri(value: str) -> str:
-    """Escape a URI value (``URL``): backslash and newline only, never comma or semicolon.
+    """Escape a URI value (``URL``): percent-encode ``,`` and ``;``, escape backslash and newline.
 
-    RFC 6350 §3.4's comma and semicolon escaping applies to TEXT values. ``URL``
-    is a URI, where ``,`` and ``;`` are ordinary characters and a parser
-    following the RFC would read ``\\,`` as a literal backslash (#77). A
-    newline still has to be escaped, or it would end the content line.
+    RFC 6350 §3.4's backslash escaping of ``,`` and ``;`` is for TEXT values;
+    in a URI a strict parser reads ``\\,`` as a literal backslash (#77). Left
+    bare, though, they are not safe either: vobject splits the value at the
+    first ``,`` and keeps only what precedes it (#215 review). ``%2C`` and
+    ``%3B`` are ordinary URI characters, so a strict parser and vobject read
+    the same URL. A newline still has to be escaped, or it would end the
+    content line.
     """
+    value = value.replace(",", "%2C").replace(";", "%3B")
     value = value.replace("\\", "\\\\")
     return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
 
