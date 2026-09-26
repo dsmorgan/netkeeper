@@ -53,6 +53,8 @@ export function ContactTimeline({ contact }: { contact: ContactDetail }) {
               {entry.kind === 'interaction' ? (
                 <div>
                   <span className="font-medium">{entry.interaction.kind.replace(/_/g, ' ')}</span>
+                  {/* A text child, never markup: a message summary is someone else's
+                      words and can still carry tag-shaped text (issue #75). */}
                   {entry.interaction.summary ? ` · ${entry.interaction.summary}` : ''}
                 </div>
               ) : (

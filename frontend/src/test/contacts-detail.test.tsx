@@ -117,6 +117,41 @@ describe('contact detail', () => {
     expect(await screen.findByText('No tags.')).toBeInTheDocument()
   })
 
+  it('renders a message summary in the timeline as text, whatever it contains (issue #75)', async () => {
+    // Someone else wrote this. The archive importer strips only the tags
+    // LinkedIn's own editor emits and keeps any other bracketed text verbatim,
+    // so a summary can still arrive tag-shaped: the timeline has to escape it.
+    const body = 'See <img src=x onerror="alert(1)"> and <script>alert(2)</script> soon'
+    serveContact(
+      contactDetail({
+        timeline: [
+          {
+            kind: 'interaction',
+            at: '2026-02-02T09:00:00Z',
+            interaction: {
+              id: 15,
+              contact_id: 1,
+              kind: 'li_in',
+              at: '2026-02-02T09:00:00Z',
+              summary: body,
+              message_id: null,
+              source: 'archive',
+              created_at: '2026-02-02T09:00:00Z',
+              updated_at: '2026-02-02T09:00:00Z',
+            },
+          },
+        ],
+      }),
+    )
+    const { container } = await renderApp('/contacts/1')
+
+    const entry = (await screen.findByText(body, { exact: false })).closest('li')
+    expect(entry).not.toBeNull()
+    expect(entry).toHaveTextContent(body)
+    expect(container.querySelector('img')).toBeNull()
+    expect(container.querySelector('script')).toBeNull()
+  })
+
   it('edits a field, marks it an override, and reverts it to the synced value', async () => {
     const overridden = contactDetail({
       current_company: 'Pellucid Foods',
