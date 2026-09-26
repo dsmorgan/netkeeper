@@ -457,6 +457,11 @@ NESTED_UNBOUNDED = [
     r"(?:a?b|ab)+$",
     r"(?:(xy)z|xyz)+$",
     r"(?:\Bab|ab)+$",
+    # The literals' case classes are learned in one shared scan, which must find
+    # every literal's matches (c here, learned alongside a, b and d), over every
+    # plane (U+10400 and U+10428 are a Deseret case pair).
+    r"(cd|ab|c)+$",
+    "(\U00010400b|\U00010428)+$",
 ]
 NOT_NESTED = [
     r"(a+)",
@@ -571,6 +576,41 @@ def _branches_under_plus(pairs: Sequence[str]) -> str:
     return "(?:" + "|".join(pairs) + ")+"
 
 
+def test_the_scanned_pairs_cap_is_thirty() -> None:
+    assert svc.MAX_SCANNED_PAIRS == 30
+
+
+CLASS_BRANCHES = [
+    f"[{chr(0x4E00 + 3 * i)}{chr(0x4E01 + 3 * i)}]{chr(0x4E02 + 3 * i)}" for i in range(82)
+]
+"""82 branches like ``[xy]z`` with no character in common: every pair of first
+characters includes a class, so each needs a scan of every code point. The 82 of them
+under ``+`` took about 20 s to decide before #240's cap."""
+
+
+def test_an_alternation_needing_too_many_scans_is_refused_quickly() -> None:
+    pattern = _branches_under_plus(CLASS_BRANCHES)
+    assert len(pattern) <= svc.PATTERN_MAX_LENGTH
+    svc._every_character()  # built once per process, whatever the pattern
+    svc._overlap.cache_clear()
+    started = time.perf_counter()
+    with pytest.raises(InvalidPattern, match="may run slowly"):
+        compile_pattern(pattern)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_the_scan_cap_counts_distinct_pairs_of_classes() -> None:
+    def refused(branches: list[str]) -> bool:
+        tree = _parser.parse(_branches_under_plus(branches), re.IGNORECASE)
+        return has_ambiguous_nested_repeat(tree)
+
+    # Eight branches are 28 pairs, nine are 36: the cap is 30.
+    assert not refused(CLASS_BRANCHES[:8])
+    assert refused(CLASS_BRANCHES[:9])
+    # Literals cost no scan, however many there are.
+    assert not refused([chr(0x4E00 + i) + "x" for i in range(100)])
+
+
 LARGE_ALTERNATIONS = [
     # #240: 165 two-letter words, "aa" to "gi", sharing first letters; this took
     # about 8 s to save when every pair of branches scanned every code point.
@@ -595,9 +635,13 @@ def test_a_large_alternation_under_a_repeat_saves_quickly(pattern: str) -> None:
     assert time.perf_counter() - started < 1.0
 
 
-CASE_TRAPS = "aAkK\u212asS\u017f\u00df\u1e9eiI\u0130\u0131\u03c3\u03c2\u03a3\u00b5\u03bc1"
+CASE_TRAPS = (
+    "aAkK\u212asS\u017f\u00df\u1e9eiI\u0130\u0131\u03c3\u03c2\u03a3\u00b5\u03bc1"
+    "\uff21\uff41\U00010400\U00010428"
+)
 """Literals whose case folding is not one lower and one upper letter: the Kelvin sign
-folds to k, the long s to s, final sigma to sigma, the micro sign to mu."""
+folds to k, the long s to s, final sigma to sigma, the micro sign to mu. Then a
+fullwidth pair, and a Deseret pair outside the Basic Multilingual Plane."""
 
 
 def test_the_fast_overlap_for_literals_agrees_with_the_full_scan() -> None:
@@ -609,6 +653,10 @@ def test_the_fast_overlap_for_literals_agrees_with_the_full_scan() -> None:
         return f"\\U{ord(char):08x}"
 
     everything = svc._every_character()
+    # Learn every trap in one call, so the shared scan must find each one's matches.
+    svc._CASE_CLASSES.clear()
+    svc._overlap.cache_clear()
+    svc._learn_case_classes(frozenset(literal(c) for c in CASE_TRAPS))
     matches = {
         c: {m.group() for m in regex.finditer(literal(c), everything, regex.IGNORECASE)}
         for c in CASE_TRAPS

@@ -63,7 +63,7 @@ import functools
 import logging
 import re
 import sys
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 # ``re.compile``'s own parser (``sre_parse`` is its deprecated alias, and importing
@@ -105,6 +105,10 @@ MATCH_TIMEOUT_GIVE_UP: Final = 20
 """How many contacts one rule may time out on before the rest of the run skips it."""
 MAX_EXPANSION: Final = 1000
 """The largest product of counted repeats a pattern may expand to (see :func:`expansion`)."""
+MAX_SCANNED_PAIRS: Final = 30
+"""How many pairs of character sets one alternation under an unbounded repeat may need
+compared by a scan of every code point, a few milliseconds each, before the guard
+refuses it rather than spend seconds deciding (#240, see :func:`_ambiguous_branches`)."""
 PREVIEW_SAMPLE: Final = 10
 """How many matching contact ids a preview returns alongside the count."""
 BATCH_SIZE: Final = 500
@@ -486,22 +490,55 @@ def _ambiguous_branches(branches: Any, after: _Chars, *, alone: bool) -> bool:
     ambiguous without proof: ``(ab|cd|a)+`` is refused, because doubt rejects.
     (``(ab|a)+`` is not an example: the parser rewrites it as ``a(?:b|)``, an
     empty branch alone in its pass, which is accepted.)
+
+    Comparing two plain literals is cheap, but a pair where either side is a
+    class (``[xy]``, ``\\w``) takes a scan of every code point. Past
+    :data:`MAX_SCANNED_PAIRS` distinct such pairs the alternation is refused
+    unexamined, because doubt rejects: eighty branches like ``[xy]z`` would
+    otherwise take twenty seconds to save (#240). The count does not depend on
+    what earlier patterns left in the caches, so neither does the answer.
     """
     firsts = [_first(branch) for branch in branches]
     prefixes = [_fixed_prefix(branch) for branch in branches]
-    # One scan for every literal the comparisons below can meet, not one per pair.
+    # _overlap would learn each literal's case class anyway, a scan of every code
+    # point per pair of new literals; learning them all here takes one scan.
     _learn_case_classes(
         frozenset().union(*(starts for starts, _ in firsts), *(c for p in prefixes for c in p))
     )
-    for index, (starts, _) in enumerate(firsts):
-        for other in range(index + 1, len(firsts)):
-            if _overlap(starts, firsts[other][0]) and not _differ(prefixes[index], prefixes[other]):
-                return True
+    scanned: set[frozenset[_Chars]] = set()
+
+    def overlap(a: _Chars, b: _Chars) -> bool:
+        if a and b and not all(_is_literal(c) for c in a | b):
+            scanned.add(frozenset({a, b}))
+            if len(scanned) > MAX_SCANNED_PAIRS:
+                raise _TooManyScans
+        return _overlap(a, b)
+
+    try:
+        for index, (starts, _) in enumerate(firsts):
+            for other in range(index + 1, len(firsts)):
+                if overlap(starts, firsts[other][0]) and not _differ(
+                    prefixes[index], prefixes[other], overlap
+                ):
+                    return True
+    except _TooManyScans:
+        return True
     empty = sum(1 for _, nullable in firsts if nullable)
     if not empty or alone:
         return False
     consuming = frozenset().union(*(starts for starts, _ in firsts))
     return empty > 1 or _overlap(consuming, after)
+
+
+def _differ(
+    a: Sequence[_Chars], b: Sequence[_Chars], overlap: Callable[[_Chars, _Chars], bool]
+) -> bool:
+    """Whether no character matches both ``a`` and ``b`` at some position both fix."""
+    return any(not overlap(x, y) for x, y in zip(a, b, strict=False))
+
+
+class _TooManyScans(Exception):
+    """An alternation needs more than :data:`MAX_SCANNED_PAIRS` full scans to decide."""
 
 
 _ONE_CHAR: Final[frozenset[Any]] = frozenset(
@@ -517,11 +554,6 @@ def _fixed_prefix(tree: Any) -> list[_Chars]:
             break
         prefix.append(_first_of(op, args)[0])
     return prefix
-
-
-def _differ(a: Sequence[_Chars], b: Sequence[_Chars]) -> bool:
-    """Whether no character matches both ``a`` and ``b`` at some position both fix."""
-    return any(not _overlap(x, y) for x, y in zip(a, b, strict=False))
 
 
 def _first(tree: Any) -> tuple[_Chars, bool]:
