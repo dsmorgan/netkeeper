@@ -73,15 +73,15 @@ Four presets:
   carries a LinkedIn URL, and a bounce leaves the contact eligible for LinkedIn
   steps (spec 11.5).
 
-``spreadsheet_safe`` (CSV only, off by default, #76) prefixes ``'`` to any
-cell whose first character is one a spreadsheet reads as the start of a formula
-(:data:`FORMULA_TRIGGERS`). Names, headlines, titles, and companies come from
-other people's profiles, so a cell like ``=HYPERLINK(...)`` is attacker-chosen
-text that Excel, Sheets, or LibreOffice would otherwise evaluate on open. It is
-opt-in because it changes the bytes: a spreadsheet-safe file no longer
-round-trips through the importer, and every ``+1 …`` phone number gains a
-leading quote. Safe to open in a spreadsheet, not safe to re-import. JSON and
-vCard ignore it; neither is opened as a grid.
+``spreadsheet_safe`` (CSV only, off by default, #76) prefixes ``'`` to any cell
+whose first character, or first after leading whitespace, is one a spreadsheet
+reads as the start of a formula (:data:`FORMULA_TRIGGERS`). Names, headlines,
+titles, and companies come from other people's profiles, so a cell like
+``=HYPERLINK(...)`` is attacker-chosen text that Excel, Sheets, or LibreOffice
+would otherwise evaluate on open. It is opt-in because it changes the bytes: a
+spreadsheet-safe file no longer round-trips through the importer, and every
+``+1 …`` phone number gains a leading quote. Safe to open in a spreadsheet, not
+safe to re-import. JSON and vCard ignore it; neither is opened as a grid.
 
 Every export goes through :func:`netkeeper.crm.filters.compile_filter` and
 :func:`netkeeper.crm.filters.apply_sort` — the same compiler the contacts
@@ -363,8 +363,17 @@ def _is_identified(columns: tuple[_Column, ...], contact: Contact, today: date) 
 
 
 def _spreadsheet_safe(value: str) -> str:
-    """``value`` with a leading ``'`` if a spreadsheet would read it as a formula."""
-    return "'" + value if value.startswith(FORMULA_TRIGGERS) else value
+    """``value`` with a leading ``'`` if a spreadsheet would read it as a formula.
+
+    Checked as written and after ``lstrip()``: some importers trim leading
+    whitespace, so `` =1+1`` or a leading newline still reaches ``=`` (#215
+    review). The raw check stays because ``lstrip()`` also removes the tab and
+    carriage-return triggers themselves. The quote goes before the value
+    unchanged; its whitespace is kept.
+    """
+    if value.startswith(FORMULA_TRIGGERS) or value.lstrip().startswith(FORMULA_TRIGGERS):
+        return "'" + value
+    return value
 
 
 def _as_is(value: str) -> str:
