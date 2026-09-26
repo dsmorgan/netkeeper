@@ -919,7 +919,8 @@ export interface paths {
          *     because deleting it would take rows the run never created; ``superseded``
          *     when a later run wrote over fields this one wrote, naming the runs to roll
          *     back first; ``created_contacts_changed`` when contacts the run created have
-         *     gained interactions, tags, lists, edits or later imports, counted in
+         *     gained interactions, tags, lists, edits, another source's data or later
+         *     imports, counted in
          *     ``acquired``, which ``force`` overrides.
          */
         post: operations["rollback_import_run"];
@@ -3710,6 +3711,8 @@ export interface components {
             children: number;
             /** Edited Contacts */
             edited_contacts: number;
+            /** Enriched Contacts */
+            enriched_contacts: number;
             /** Interactions */
             interactions: number;
             /** Later Imports */

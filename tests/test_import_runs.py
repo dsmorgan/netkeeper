@@ -504,6 +504,83 @@ def test_a_detail_added_after_the_import_is_counted(writer: Session, user: User)
     assert raised.value.acquired.children == 1
 
 
+def _sync_imogen(writer: Session, user: User, imogen: Contact) -> None:
+    """A sync that fills in the URN, headline and location: no job field, so no snapshot."""
+    incoming = identity.IncomingContact(
+        source=ContactSource.SYNC,
+        observed_at=datetime.now(UTC),  # after the run's own observation
+        li_urn="urn:li:fsd_profile:ACoAAImogenQZ",
+        li_public_id=imogen.li_public_id,
+        headline="Brine whisperer",
+        location="Farland",
+    )
+    identity.apply(writer, user, incoming, identity.resolve(writer, user, incoming), snapshot=False)
+    writer.flush()
+
+
+def test_a_sync_that_enriched_a_created_contact_is_counted(writer: Session, user: User) -> None:
+    """#217 item 1: a rollback never deletes what an enrichment added later."""
+    run_id, imogen = _created_imogen(writer, user)
+    _sync_imogen(writer, user, imogen)
+    assert imogen.li_urn == "urn:li:fsd_profile:ACoAAImogenQZ"
+
+    with pytest.raises(import_runs.CreatedContactsChanged) as raised:
+        import_runs.rollback(writer, user, run_id)
+
+    acquired = raised.value.acquired
+    assert imogen.id in acquired.contact_ids
+    assert acquired.enriched_contacts == 1
+    assert acquired.children == acquired.edited_contacts == acquired.later_imports == 0
+    assert "1 contact another source filled in since" in str(raised.value)
+    assert import_runs.get_run(writer, user, run_id).status is ImportStatus.COMMITTED
+    assert writer.get(Contact, imogen.id) is not None
+
+
+def test_a_synced_value_the_live_column_refused_still_counts(writer: Session, user: User) -> None:
+    """A sync's observation is kept in ``synced_values`` even where the column refused it."""
+    run_id, imogen = _created_imogen(writer, user)
+    set_manual_field(imogen, "headline", "Pickles, mostly")
+    writer.flush()
+    incoming = identity.IncomingContact(
+        source=ContactSource.SYNC,
+        observed_at=datetime.now(UTC),  # after the run's own observation
+        li_public_id=imogen.li_public_id,
+        headline="Brine whisperer",
+    )
+    identity.apply(writer, user, incoming, identity.resolve(writer, user, incoming), snapshot=False)
+    writer.flush()
+    assert imogen.headline == "Pickles, mostly"
+    assert imogen.field_sources["headline"] == ContactSource.MANUAL.value
+    assert imogen.synced_values["headline"]["source"] == ContactSource.SYNC.value
+
+    with pytest.raises(import_runs.CreatedContactsChanged) as raised:
+        import_runs.rollback(writer, user, run_id)
+
+    assert raised.value.acquired.enriched_contacts == 1
+    assert raised.value.acquired.edited_contacts == 1
+
+
+def test_the_runs_own_source_is_not_counted_as_enrichment(writer: Session, user: User) -> None:
+    """Every field a CSV run fills is recorded as ``csv``; that alone is no reason to refuse."""
+    run_id, imogen = _created_imogen(writer, user)
+    assert set(imogen.field_sources.values()) == {ContactSource.CSV.value}
+    assert {entry["source"] for entry in imogen.synced_values.values()} == {ContactSource.CSV.value}
+
+    result = import_runs.rollback(writer, user, run_id)
+
+    assert result.contacts_deleted >= 1
+
+
+def test_force_deletes_a_contact_a_sync_enriched(writer: Session, user: User) -> None:
+    run_id, imogen = _created_imogen(writer, user)
+    imogen_id = imogen.id
+    _sync_imogen(writer, user, imogen)
+
+    import_runs.rollback(writer, user, run_id, force=True)
+
+    assert writer.scalars(scoped(user, Contact).where(Contact.id == imogen_id)).first() is None
+
+
 # --- the snapshot is not an N+1 (#78 item 4) ------------------------------------
 
 

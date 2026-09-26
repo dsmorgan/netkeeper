@@ -6027,6 +6027,10 @@
             "title": "Edited Contacts",
             "type": "integer"
           },
+          "enriched_contacts": {
+            "title": "Enriched Contacts",
+            "type": "integer"
+          },
           "interactions": {
             "title": "Interactions",
             "type": "integer"
@@ -6055,6 +6059,7 @@
           "triage_decisions",
           "children",
           "edited_contacts",
+          "enriched_contacts",
           "later_imports"
         ],
         "title": "RollbackAcquiredOut",
@@ -11074,7 +11079,7 @@
     },
     "/api/v1/imports/{run_id}/rollback": {
       "post": {
-        "description": "Undo a committed run, and only what that run did.\n\nA contact the run created is deleted; a contact it only enriched keeps the\nvalues it had before the run, and the child rows the run added are removed. A\nfield something changed after the import keeps that later value, and its\nprovenance with it.\n\nRefused with ``409`` and nothing undone, the body's ``code`` saying why\n(#78): ``merged`` when a merge has since drawn in a contact the run created,\nbecause deleting it would take rows the run never created; ``superseded``\nwhen a later run wrote over fields this one wrote, naming the runs to roll\nback first; ``created_contacts_changed`` when contacts the run created have\ngained interactions, tags, lists, edits or later imports, counted in\n``acquired``, which ``force`` overrides.",
+        "description": "Undo a committed run, and only what that run did.\n\nA contact the run created is deleted; a contact it only enriched keeps the\nvalues it had before the run, and the child rows the run added are removed. A\nfield something changed after the import keeps that later value, and its\nprovenance with it.\n\nRefused with ``409`` and nothing undone, the body's ``code`` saying why\n(#78): ``merged`` when a merge has since drawn in a contact the run created,\nbecause deleting it would take rows the run never created; ``superseded``\nwhen a later run wrote over fields this one wrote, naming the runs to roll\nback first; ``created_contacts_changed`` when contacts the run created have\ngained interactions, tags, lists, edits, another source's data or later\nimports, counted in\n``acquired``, which ``force`` overrides.",
         "operationId": "rollback_import_run",
         "parameters": [
           {

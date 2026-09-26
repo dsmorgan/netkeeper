@@ -593,6 +593,7 @@ def rollback_refusal(exc: service.ImportRunError) -> ApiError:
                 triage_decisions=acquired.triage_decisions,
                 children=acquired.children,
                 edited_contacts=acquired.edited_contacts,
+                enriched_contacts=acquired.enriched_contacts,
                 later_imports=acquired.later_imports,
             ),
         )
@@ -626,7 +627,8 @@ def rollback_import_run(
     because deleting it would take rows the run never created; ``superseded``
     when a later run wrote over fields this one wrote, naming the runs to roll
     back first; ``created_contacts_changed`` when contacts the run created have
-    gained interactions, tags, lists, edits or later imports, counted in
+    gained interactions, tags, lists, edits, another source's data or later
+    imports, counted in
     ``acquired``, which ``force`` overrides.
     """
     try:

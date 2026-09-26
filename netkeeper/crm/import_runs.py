@@ -48,7 +48,8 @@ later, still committed run has written over, on any field of any contact it
 enriched, is therefore refused (:class:`RunSuperseded`), naming the runs to
 undo first. And a contact the run created may since have gained things the run
 never gave it: interactions, tags or lists a person added, triage decisions,
-their own edits, child rows from a later import. Deleting it would take all of
+their own edits, child rows from a later import, fields a sync or another source
+filled in. Deleting it would take all of
 that with it, so such a run is refused (:class:`CreatedContactsChanged`),
 saying what would be lost, unless the caller passes ``force``.
 
@@ -243,8 +244,11 @@ class Acquired:
     Counts across all of them. ``edited_contacts`` counts contacts carrying a
     person's own edit (a manual field, notes, a met decision, do-not-contact);
     ``children`` counts emails, phones, links, positions, snapshots and aliases
-    added after the run ("details added later"); ``later_imports`` counts other committed runs that
-    changed one of them.
+    added after the run ("details added later"); ``enriched_contacts`` counts
+    contacts whose ``field_sources`` or ``synced_values`` name an automated
+    source other than the run's own, such as a sync that filled in a URN and a
+    headline (#217); ``later_imports`` counts other committed runs that changed
+    one of them.
     """
 
     contact_ids: tuple[int, ...]
@@ -254,6 +258,7 @@ class Acquired:
     triage_decisions: int = 0
     children: int = 0
     edited_contacts: int = 0
+    enriched_contacts: int = 0
     later_imports: int = 0
 
     def __bool__(self) -> bool:
@@ -267,6 +272,11 @@ class Acquired:
             (self.triage_decisions, "triage decision", "triage decisions"),
             (self.children, "detail added later", "details added later"),
             (self.edited_contacts, "contact with your own edits", "contacts with your own edits"),
+            (
+                self.enriched_contacts,
+                "contact another source filled in since",
+                "contacts another source filled in since",
+            ),
             (
                 self.later_imports,
                 "later import that changed them",
@@ -1438,6 +1448,13 @@ def _acquired_since(
     Rule-assigned tags are not counted: the rules would assign them again to
     anybody who still matched, so nothing a person did is lost with them. Nor
     are the interactions the run itself wrote (an archive run's messages).
+
+    A contact counts as enriched when its ``field_sources`` or ``synced_values``
+    name an automated source other than the run's own (#217). A sync that sets a
+    URN, a headline and a location changes no job field, so it writes no
+    snapshot and no child row; its provenance entries are the only trace it
+    left, and deleting the contact would delete what it added. ``manual`` is
+    left to ``edited_contacts``.
     """
     ids = sorted(created_ids)
     if not ids:
@@ -1463,15 +1480,20 @@ def _acquired_since(
             children += count(
                 scoped_count(user, model).where(model.contact_id.in_(ids), model.created_at > since)
             )
-    edited = 0
+    edited = enriched = 0
+    ours = {run.source_kind.value, ContactSource.MANUAL.value}
     for contact in session.scalars(scoped(user, Contact).where(Contact.id.in_(ids))):
+        sources = set((contact.field_sources or {}).values())
         if (
-            ContactSource.MANUAL.value in (contact.field_sources or {}).values()
+            ContactSource.MANUAL.value in sources
             or (contact.notes or "").strip()
             or contact.met is not ContactMet.UNKNOWN
             or contact.do_not_contact
         ):
             edited += 1
+        sources.update(entry["source"] for entry in (contact.synced_values or {}).values())
+        if sources - ours:
+            enriched += 1
     later_imports = {
         row.run_id
         for row in _later_rows(session, user, run, ids)
@@ -1494,6 +1516,7 @@ def _acquired_since(
         ),
         children=children,
         edited_contacts=edited,
+        enriched_contacts=enriched,
         later_imports=len(later_imports),
     )
 
