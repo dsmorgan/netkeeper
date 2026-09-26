@@ -339,6 +339,10 @@ _DONE_PAGE = (
 )
 
 
+#: The longest the CLI's receiver gives one connection to send its request.
+CONNECTION_TIMEOUT_S: Final = 10.0
+
+
 class LoopbackReceiver:
     """A one-shot HTTP server on ``127.0.0.1`` and a free port, for ``netkeeper gmail login``.
 
@@ -346,12 +350,18 @@ class LoopbackReceiver:
     query (``code`` and ``state``, or ``error``). Other paths (a browser's
     ``/favicon.ico``) get a 404 and are ignored. Bound on construction, so the
     port is known before the URL is shown; close it with :meth:`close` or ``with``.
+
+    The server handles one connection at a time, so each connection gets at most
+    ``connection_timeout_s`` (and never past :meth:`wait`'s deadline): a socket
+    a browser opens and never uses (a preconnect) cannot hold the wait open.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, connection_timeout_s: float = CONNECTION_TIMEOUT_S) -> None:
         received: dict[str, str] = {}
 
         class Handler(BaseHTTPRequestHandler):
+            timeout = connection_timeout_s
+
             def do_GET(self) -> None:
                 parts = urlsplit(self.path)
                 if parts.path != "/":
@@ -369,6 +379,8 @@ class LoopbackReceiver:
                 """Silent: the request line carries the code."""
 
         self._received = received
+        self._handler = Handler
+        self._connection_timeout_s = connection_timeout_s
         self._server = HTTPServer(("127.0.0.1", 0), Handler)
 
     @property
@@ -376,13 +388,17 @@ class LoopbackReceiver:
         return f"http://127.0.0.1:{self._server.server_address[1]}/"
 
     def wait(self, timeout_s: float) -> dict[str, str]:
-        """The redirect's query once it arrives; :class:`TimeoutError` after ``timeout_s``."""
+        """The redirect's query once it arrives; :class:`TimeoutError` after ``timeout_s``.
+
+        A hard bound: an idle connection is dropped at the deadline, not after it.
+        """
         deadline = time.monotonic() + timeout_s
         while not self._received:
             left = deadline - time.monotonic()
             if left <= 0:
                 raise TimeoutError("no answer from Google's page in time")
             self._server.timeout = left
+            self._handler.timeout = min(self._connection_timeout_s, left)
             self._server.handle_request()
         return dict(self._received)
 
