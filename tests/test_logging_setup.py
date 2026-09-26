@@ -4,7 +4,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from netkeeper.logging_setup import HANDLER_NAME, setup_logging
+from netkeeper.logging_setup import HANDLER_NAME, RedactQueryFilter, setup_logging
 
 
 @pytest.fixture(autouse=True)
@@ -116,3 +116,36 @@ def test_records_below_level_are_dropped(capsys: pytest.CaptureFixture[str]) -> 
     setup_logging("WARNING")
     logging.getLogger("netkeeper.example").info("quiet")
     assert capsys.readouterr().err == ""
+
+
+def _access_record(path: str) -> logging.LogRecord:
+    return logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:5", "GET", path, "1.1", 303),
+        None,
+    )
+
+
+def test_the_oauth_callbacks_query_never_reaches_the_access_log() -> None:
+    """The query carries Google's authorization code (#244)."""
+    record = _access_record("/api/v1/mailboxes/oauth/callback?state=s&code=4/secret")
+    assert RedactQueryFilter().filter(record)
+    assert "secret" not in record.getMessage()
+    assert "/api/v1/mailboxes/oauth/callback?<redacted>" in record.getMessage()
+
+
+def test_other_queries_are_logged_as_they_were() -> None:
+    record = _access_record("/api/v1/contacts?q=x")
+    assert RedactQueryFilter().filter(record)
+    assert "/api/v1/contacts?q=x" in record.getMessage()
+
+
+def test_setup_installs_the_redaction_on_the_access_log_once() -> None:
+    setup_logging("INFO")
+    setup_logging("INFO")
+    access = logging.getLogger("uvicorn.access")
+    assert sum(isinstance(item, RedactQueryFilter) for item in access.filters) == 1

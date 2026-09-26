@@ -1,4 +1,9 @@
-"""Process-wide logging: one line per record, level from ``NETKEEPER_LOG_LEVEL``."""
+"""Process-wide logging: one line per record, level from ``NETKEEPER_LOG_LEVEL``.
+
+The access log never shows the query string of a path in
+:data:`REDACTED_QUERY_PATHS`: the Gmail OAuth callback carries the authorization
+code there, and a code is a credential until it is spent (CLAUDE.md "Secrets").
+"""
 
 from __future__ import annotations
 
@@ -10,6 +15,10 @@ from typing import TextIO
 LEVEL_ENV = "NETKEEPER_LOG_LEVEL"
 HANDLER_NAME = "netkeeper"
 DEFAULT_LEVEL = logging.INFO
+
+#: Paths whose query string the access log replaces with ``?<redacted>``.
+REDACTED_QUERY_PATHS = frozenset({"/api/v1/mailboxes/oauth/callback"})
+ACCESS_LOGGER = "uvicorn.access"
 
 _FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 _DATEFMT = "%Y-%m-%d %H:%M:%S"
@@ -33,6 +42,22 @@ class _StderrHandler(logging.StreamHandler[TextIO]):
         """Ignore the stream the base class assigns; the property always reads sys.stderr."""
 
 
+class RedactQueryFilter(logging.Filter):
+    """Rewrites an access-log record's path when its query string must not be logged.
+
+    uvicorn's access records carry ``(client, method, path, http_version, status)``
+    as ``args``; only the path is touched.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            path, sep, _ = args[2].partition("?")
+            if sep and path in REDACTED_QUERY_PATHS:
+                record.args = (*args[:2], f"{path}?<redacted>", *args[3:])
+        return True
+
+
 def setup_logging(level: str | int | None = None) -> None:
     """Configure the root logger. Safe to call more than once.
 
@@ -48,6 +73,9 @@ def setup_logging(level: str | int | None = None) -> None:
         handler.setFormatter(logging.Formatter(_FORMAT, _DATEFMT))
         root.addHandler(handler)
     root.setLevel(resolved)
+    access = logging.getLogger(ACCESS_LOGGER)
+    if not any(isinstance(item, RedactQueryFilter) for item in access.filters):
+        access.addFilter(RedactQueryFilter())
     if complaint is not None:
         log.warning("%s", complaint)
 

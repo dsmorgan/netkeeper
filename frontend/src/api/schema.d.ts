@@ -1330,6 +1330,146 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/mailboxes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Mailboxes
+         * @description Every mailbox, disconnected ones included, oldest first.
+         */
+        get: operations["list_mailboxes_api_v1_mailboxes_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mailboxes/oauth/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Mailbox Oauth Callback
+         * @description Where Google sends the browser back. Always redirects to the Settings page.
+         */
+        get: operations["mailbox_oauth_callback_api_v1_mailboxes_oauth_callback_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mailboxes/oauth/client": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Oauth Client
+         * @description Store the OAuth client's ID and secret in the Keychain.
+         */
+        put: operations["set_oauth_client_api_v1_mailboxes_oauth_client_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mailboxes/oauth/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Oauth
+         * @description The Google URL to open. Valid for ten minutes, once.
+         */
+        post: operations["start_oauth_api_v1_mailboxes_oauth_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mailboxes/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Mailbox Status
+         * @description Whether a client is set, every mailbox, and whether any needs re-authorizing.
+         */
+        get: operations["mailbox_status_api_v1_mailboxes_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mailboxes/{mailbox_id}/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check Mailbox
+         * @description Refresh the token now, as the background poll does; answers the mailbox after.
+         */
+        post: operations["check_mailbox_api_v1_mailboxes__mailbox_id__check_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mailboxes/{mailbox_id}/disconnect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disconnect Mailbox
+         * @description Forget the token and disable the mailbox. Its row stays for the campaigns naming it.
+         */
+        post: operations["disconnect_mailbox_api_v1_mailboxes__mailbox_id__disconnect_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me": {
         parameters: {
             query?: never;
@@ -3559,6 +3699,62 @@ export interface components {
             value: string | number | boolean;
         };
         /**
+         * MailboxOut
+         * @description A connected Gmail account. Never its token: that is in the Keychain.
+         */
+        MailboxOut: {
+            /** Checked At */
+            checked_at: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Daily Cap */
+            daily_cap: number;
+            /** Email */
+            email: string;
+            /** Id */
+            id: number;
+            /** Label Prefix */
+            label_prefix: string;
+            provider: components["schemas"]["MailboxProvider"];
+            status: components["schemas"]["MailboxStatus"];
+            /** Status Reason */
+            status_reason: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * MailboxProvider
+         * @description Who hosts the mailbox. Gmail only (ADR 0003).
+         * @enum {string}
+         */
+        MailboxProvider: "gmail";
+        /**
+         * MailboxStatus
+         * @description A mailbox's health (spec 8.5, 11.5).
+         * @enum {string}
+         */
+        MailboxStatus: "ok" | "reauth_required" | "disabled";
+        /**
+         * MailboxStatusOut
+         * @description What the Settings page and the re-auth banner read.
+         */
+        MailboxStatusOut: {
+            /** Client Configured */
+            client_configured: boolean;
+            /** Client Id */
+            client_id: string | null;
+            /** Mailboxes */
+            mailboxes: components["schemas"]["MailboxOut"][];
+            /** Reauth Required */
+            reauth_required: boolean;
+        };
+        /**
          * MergeIn
          * @description Fold ``loser_id`` into the contact in the path (spec 8.2).
          */
@@ -3644,6 +3840,26 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+        };
+        /**
+         * OAuthClientIn
+         * @description The Desktop-app client from your Cloud project (docs/gmail-setup.md).
+         */
+        OAuthClientIn: {
+            /** Client Id */
+            client_id: string;
+            /** Client Secret */
+            client_secret: string;
+        };
+        /** OAuthStartIn */
+        OAuthStartIn: {
+            /** Mailbox Id */
+            mailbox_id?: number | null;
+        };
+        /** OAuthStartOut */
+        OAuthStartOut: {
+            /** Authorization Url */
+            authorization_url: string;
         };
         /** Or */
         "Or-Input": {
@@ -7741,6 +7957,266 @@ export interface operations {
             };
             /** @description A name, kind/filter combination, or member request that cannot be stored */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_mailboxes_api_v1_mailboxes_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailboxOut"][];
+                };
+            };
+        };
+    };
+    mailbox_oauth_callback_api_v1_mailboxes_oauth_callback_get: {
+        parameters: {
+            query?: {
+                state?: string;
+                code?: string;
+                error?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Back to the Settings page, with the outcome */
+            303: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_oauth_client_api_v1_mailboxes_oauth_client_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OAuthClientIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailboxStatusOut"];
+                };
+            };
+            /** @description Not a usable Desktop-app OAuth client */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The Keychain refused */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    start_oauth_api_v1_mailboxes_oauth_start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OAuthStartIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthStartOut"];
+                };
+            };
+            /** @description No such mailbox for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No OAuth client is stored yet */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description The Keychain refused */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    mailbox_status_api_v1_mailboxes_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailboxStatusOut"];
+                };
+            };
+            /** @description The Keychain refused */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    check_mailbox_api_v1_mailboxes__mailbox_id__check_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                mailbox_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailboxOut"];
+                };
+            };
+            /** @description No such mailbox for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description The Keychain refused */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    disconnect_mailbox_api_v1_mailboxes__mailbox_id__disconnect_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                mailbox_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailboxOut"];
+                };
+            };
+            /** @description No such mailbox for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description The Keychain refused */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

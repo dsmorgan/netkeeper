@@ -203,10 +203,9 @@ class Campaign(UserOwned, TimestampMixin, Base):
     filter_json: Mapped[dict[str, Any] | None] = mapped_column(
         JSON(none_as_null=True), nullable=True
     )
-    # The ``mailbox`` table (spec 8.5) arrives with the Gmail work (P3-07). Until then this
-    # is a plain integer with no foreign key, as ``interactions.message_id`` was until
-    # this table existed; the migration that adds ``mailbox`` adds the constraint.
-    mailbox_id: Mapped[int | None] = mapped_column(Integer)
+    # No ON DELETE: a mailbox is never deleted, only disconnected (``mailboxes`` since
+    # 0019, P3-01), so a campaign never loses the account it sent from.
+    mailbox_id: Mapped[int | None] = mapped_column(ForeignKey("mailboxes.id"), index=True)
     # The campaign's own send window and cap (spec 11.4); NULL for the config's.
     send_window_json: Mapped[dict[str, Any] | None] = mapped_column(
         JSON(none_as_null=True), nullable=True
