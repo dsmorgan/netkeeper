@@ -115,7 +115,7 @@ export function CommitStep({
 
       <div className="flex flex-wrap items-center gap-2">
         <Button variant="outline" onClick={onBack} disabled={pending}>
-          Back to the candidates
+          {candidateTotal > 0 ? 'Back to the candidates' : 'Back to the preview'}
         </Button>
         <Button onClick={onCommit} disabled={pending || blocked}>
           {pending ? 'Committing…' : `Commit ${run.total_rows} rows`}

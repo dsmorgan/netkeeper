@@ -23,14 +23,37 @@ const ROLLED_BACK_RUN = {
 
 const HISTORY_DRAFT = { ...DRAFT_RUN, id: 8, filename: 'half-finished.csv' }
 
+/** `limit` and `offset` from a call, with the backend's own defaults. */
+function page(call: Call, defaultLimit: number): { limit: number; offset: number } {
+  return {
+    limit: Number(call.query.get('limit') ?? defaultLimit),
+    offset: Number(call.query.get('offset') ?? 0),
+  }
+}
+
+/** Pages the way the real endpoint does, so the paging controls actually run (#94). */
 function historyBackend(
   runs = [COMMITTED_RUN, HISTORY_DRAFT, ROLLED_BACK_RUN],
   calls: Call[] = [],
 ) {
   return backend(
-    { 'GET /api/v1/imports': () => jsonResponse({ items: runs, total: runs.length }) },
+    {
+      'GET /api/v1/imports': (call) => {
+        const { limit, offset } = page(call, 50)
+        return jsonResponse({ items: runs.slice(offset, offset + limit), total: runs.length })
+      },
+    },
     calls,
   )
+}
+
+/** `count` committed runs, newest (highest id) first, as the backend lists them. */
+function manyRuns(count: number) {
+  return Array.from({ length: count }, (_, index) => ({
+    ...COMMITTED_RUN,
+    id: 1000 - index,
+    filename: `batch-${String(index + 1).padStart(2, '0')}.csv`,
+  }))
 }
 
 describe('import history', () => {
@@ -62,6 +85,38 @@ describe('import history', () => {
     expect(screen.getByText('Rolled back')).toBeVisible()
   })
 
+  it('pages through a long history, newest first', async () => {
+    const calls: Call[] = []
+    mockFetch(historyBackend(manyRuns(30), calls))
+    await renderApp('/imports/runs')
+
+    expect(await screen.findByRole('link', { name: 'batch-01.csv' })).toBeVisible()
+    expect(screen.getByText('1–25 of 30')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Newer' })).toBeDisabled()
+    expect(screen.queryByRole('link', { name: 'batch-26.csv' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Older' }))
+
+    expect(await screen.findByRole('link', { name: 'batch-26.csv' })).toBeVisible()
+    expect(screen.getByText('26–30 of 30')).toBeVisible()
+    expect(screen.queryByRole('link', { name: 'batch-01.csv' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Older' })).toBeDisabled()
+    const history = calls.filter((call) => call.path === '/api/v1/imports')
+    expect(history.at(-1)?.query.get('offset')).toBe('25')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Newer' }))
+    expect(await screen.findByRole('link', { name: 'batch-01.csv' })).toBeVisible()
+    expect(screen.getByText('1–25 of 30')).toBeVisible()
+  })
+
+  it('shows no paging controls when one page holds everything', async () => {
+    mockFetch(historyBackend(manyRuns(25)))
+    await renderApp('/imports/runs')
+
+    expect(await screen.findByRole('link', { name: 'batch-25.csv' })).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Older' })).toBeNull()
+  })
+
   it('reports a backend that will not answer', async () => {
     mockFetch(backend({ 'GET /api/v1/imports': () => jsonResponse({ detail: 'nope' }, 500) }))
     await renderApp('/imports/runs')
@@ -78,6 +133,7 @@ function detailBackend(
   run = COMMITTED_RUN,
   calls: Call[] = [],
   rollback?: (call: Call) => Response | undefined,
+  rows = COMMITTED_ROWS,
 ) {
   let undone = false
   return backend(
@@ -86,8 +142,10 @@ function detailBackend(
         jsonResponse(
           undone ? { ...run, status: 'rolled_back', rolled_back_at: '2026-09-20T11:30:00Z' } : run,
         ),
-      [`GET /api/v1/imports/${run.id}/rows`]: () =>
-        jsonResponse({ items: COMMITTED_ROWS, total: COMMITTED_ROWS.length }),
+      [`GET /api/v1/imports/${run.id}/rows`]: (call) => {
+        const { limit, offset } = page(call, 100)
+        return jsonResponse({ items: rows.slice(offset, offset + limit), total: rows.length })
+      },
       [`POST /api/v1/imports/${run.id}/rollback`]: (call) => {
         const refused = rollback?.(call)
         if (refused !== undefined) return refused
@@ -272,7 +330,7 @@ describe('one import run', () => {
     expect(rollbacks()[1]?.query.get('force')).toBe('true')
   })
 
-  it('shows an archive import with every file\'s counts, and offers to roll it back', async () => {
+  it("shows an archive import with every file's counts, and offers to roll it back", async () => {
     const report = {
       observed_at: ARCHIVE_RESULT.observed_at,
       owner_public_id: ARCHIVE_RESULT.owner_public_id,
@@ -297,6 +355,72 @@ describe('one import run', () => {
     expect(screen.getByText('messages.csv')).toBeVisible()
     expect(screen.getByText('Invitations.csv')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Roll back this import' })).toBeVisible()
+  })
+
+  it('pages through a run with more rows than one page', async () => {
+    const template = COMMITTED_ROWS[0]!
+    const rows = Array.from({ length: 60 }, (_, index) => ({
+      ...template,
+      id: 5000 + index,
+      row_number: index + 1,
+      raw: { ...template.raw, 'First Name': `Person${index + 1}`, 'Last Name': 'Paged' },
+      error: null,
+      refused: [],
+    }))
+    const calls: Call[] = []
+    mockFetch(detailBackend(COMMITTED_RUN, calls, undefined, rows))
+    await renderApp('/imports/runs/7')
+
+    expect(await screen.findByText('1–50 of 60')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
+    expect(screen.getByText('Person1 Paged')).toBeVisible()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    expect(await screen.findByText('51–60 of 60')).toBeVisible()
+    expect(screen.getByText('Person60 Paged')).toBeVisible()
+    expect(screen.queryByText('Person1 Paged')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    const fetched = calls.filter((call) => call.path === '/api/v1/imports/7/rows')
+    expect(fetched.at(-1)?.query.get('offset')).toBe('50')
+  })
+
+  it('shows a dropped cell on a row that landed in amber, and a skipped row in red', async () => {
+    const template = COMMITTED_ROWS[0]!
+    const rows = [
+      {
+        ...template,
+        id: 1,
+        row_number: 1,
+        resolution: 'created' as const,
+        refused: [],
+        error: 'Email dropped: not an address',
+      },
+      {
+        ...template,
+        id: 2,
+        row_number: 2,
+        resolution: 'skipped' as const,
+        refused: [],
+        error: 'names nobody',
+      },
+    ]
+    mockFetch(detailBackend(COMMITTED_RUN, [], undefined, rows))
+    await renderApp('/imports/runs/7')
+
+    const dropped = await screen.findByText('Dropped: Email dropped: not an address')
+    expect(dropped).toHaveClass('text-amber-700')
+    expect(screen.getByText('names nobody')).toHaveClass('text-destructive')
+  })
+
+  it('says a run id that is not a number is not a run, without asking the backend', async () => {
+    const calls: Call[] = []
+    mockFetch(detailBackend(COMMITTED_RUN, calls))
+    await renderApp('/imports/runs/abc')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('“abc” is not an import run')
+    expect(screen.queryByText(/valid integer/)).toBeNull()
+    expect(calls.some((call) => call.path.startsWith('/api/v1/imports/'))).toBe(false)
   })
 
   it('warns beforehand that a merge can make a rollback impossible', async () => {

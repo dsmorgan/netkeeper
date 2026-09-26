@@ -511,6 +511,31 @@ describe('a draft whose meaning has changed since it was read', () => {
   })
 })
 
+describe('the commit step with no candidates (#94)', () => {
+  it('goes back to the preview, and says so', async () => {
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'GET /api/v1/imports/7': () =>
+          jsonResponse({ ...DRAFT_RUN, candidate_count: 0, matched_count: 3 }),
+        'POST /api/v1/imports/7/preview': () =>
+          jsonResponse(PREVIEW_ROWS.filter((row) => row.resolution !== 'candidate')),
+        'GET /api/v1/imports/7/rows': () => jsonResponse({ items: [], total: 0 }),
+      }),
+    )
+    await renderApp('/imports?run=7')
+    await screen.findByText('The first 3 rows')
+    fireEvent.click(screen.getByRole('button', { name: 'Go to commit' }))
+    await screen.findByText('Commit the import')
+
+    expect(screen.queryByRole('button', { name: 'Back to the candidates' })).toBeNull()
+    expect(screen.queryByText(/Of \d+ candidates?,/)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the preview' }))
+
+    expect(await screen.findByText('The first 3 rows')).toBeVisible()
+  })
+})
+
 describe('finishing a draft from the history', () => {
   it('picks a draft up at the preview without asking for the file again', async () => {
     mockFetch(

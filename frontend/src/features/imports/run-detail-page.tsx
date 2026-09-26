@@ -39,6 +39,20 @@ export function RunDetailPage({ runId }: { runId: number }) {
   return <RunDetail run={run.data} />
 }
 
+/** What `/imports/runs/<not a number>` shows instead of a backend validation error. */
+export function NoSuchRun({ runId }: { runId: string }) {
+  return (
+    <div className="flex max-w-5xl flex-col gap-4">
+      <ErrorNote>“{runId}” is not an import run. Import runs are numbered.</ErrorNote>
+      <p>
+        <Link to="/imports/runs" className="underline underline-offset-2">
+          See every import
+        </Link>
+      </p>
+    </div>
+  )
+}
+
 function RunDetail({ run }: { run: ImportRun }) {
   const mapping = run.mapping as ColumnMapping
   // The result outlives the card that produced it: rolling back flips the run
@@ -255,8 +269,8 @@ function RollbackRefusal({
         <p className="font-medium">A later import has to be undone first.</p>
         <p>{message(error)}</p>
         <p>
-          Nothing was changed. Roll back the later imports named above, newest first, then come
-          back here.
+          Nothing was changed. Roll back the later imports named above, newest first, then come back
+          here.
         </p>
       </Note>
     )
@@ -359,7 +373,14 @@ function RowsCard({ run, mapping }: { run: ImportRun; mapping: ColumnMapping }) 
                       )}
                     </td>
                     <td className="py-2">
-                      {row.error !== null && <p className="text-destructive">{row.error}</p>}
+                      {row.error !== null &&
+                        (row.resolution === 'skipped' ? (
+                          <p className="text-destructive">{row.error}</p>
+                        ) : (
+                          // The row landed and only a cell was dropped: the preview's
+                          // amber, not the red of a row that failed (#94).
+                          <p className="text-amber-700 dark:text-amber-300">Dropped: {row.error}</p>
+                        ))}
                       {row.refused.length > 0 && (
                         <ul className="space-y-0.5 text-destructive">
                           {row.refused.map((refused) => (

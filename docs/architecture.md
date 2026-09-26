@@ -824,6 +824,7 @@ Cost controls: a per-day call cap, batch size limits, and a token estimate shown
 | `/triage` | Step 6 workflow |
 | `/lists` | Static and smart lists, filter builder |
 | `/imports`, `/exports` | Mapping, review, presets |
+| `/imports/runs`, `/imports/runs/:id` | Import history, paged newest first; one run's counts (every file's, for an archive), its rows, finishing a draft, and rollback (P1-13, #132) |
 | `/linkedin` | Runs, live progress, budget and heat, pins, preflight, browser launch instructions |
 | `/templates` | Editor with lint and live preview against a chosen contact |
 | `/campaigns`, `/campaigns/:id` | Builder, review gate, progress per step, replies, waiting-for-you prefill list |

@@ -103,6 +103,16 @@ function startsWith(bytes: Uint8Array, ...prefix: number[]): boolean {
   return prefix.every((byte, index) => bytes[index] === byte)
 }
 
+/** True when `buffer` decodes as `encoding` without a byte the decoder had to replace. */
+function decodesCleanly(buffer: ArrayBuffer, encoding: Encoding): boolean {
+  try {
+    new TextDecoder(encoding, { fatal: true }).decode(buffer)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** True when `bytes` decode as UTF-8 with nothing left over. */
 function isUtf8(bytes: Uint8Array): boolean {
   try {
@@ -180,6 +190,16 @@ export async function readCsvFile(file: File, as?: Encoding): Promise<FileRead> 
   if (buffer.byteLength === 0) {
     return { ok: false, reason: `${file.name} is empty.` }
   }
+  // Before the UTF-16 check, which a UTF-32LE mark (ff fe 00 00) would also
+  // pass: TextDecoder has no UTF-32, so no choice on the mapping screen could
+  // read it either (#94).
+  const head = new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 4))
+  if (startsWith(head, 0xff, 0xfe, 0x00, 0x00) || startsWith(head, 0x00, 0x00, 0xfe, 0xff)) {
+    return {
+      ok: false,
+      reason: `${file.name} is saved as UTF-32, which the importer cannot read. Save it as UTF-8 and choose it again.`,
+    }
+  }
 
   const sniffed =
     as === undefined ? sniffEncoding(buffer) : { encoding: as, reason: 'chosen' as const }
@@ -206,9 +226,19 @@ export async function readCsvFile(file: File, as?: Encoding): Promise<FileRead> 
     }
   }
 
+  // Checked on the decoded text, not the bytes: a file that is nothing but a
+  // byte-order mark (two bytes, for UTF-16) decodes to nothing at all (#94).
+  if (content.trim() === '') {
+    return { ok: false, reason: `${file.name} is empty.` }
+  }
+
+  // A clean strict decode means every U+FFFD in the text was in the file, not
+  // put there by the decoder: a UTF-8 file may carry one legitimately (#94).
   let replacements = 0
-  for (const character of content) {
-    if (character === REPLACEMENT) replacements += 1
+  if (!decodesCleanly(buffer, sniffed.encoding)) {
+    for (const character of content) {
+      if (character === REPLACEMENT) replacements += 1
+    }
   }
 
   // Only the fallback is a guess worth second-guessing: every other branch was
