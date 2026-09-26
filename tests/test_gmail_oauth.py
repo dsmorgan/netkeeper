@@ -415,3 +415,61 @@ def test_a_refusal_cut_off_part_way_is_never_read_as_a_dead_grant(fake_google: F
         gmail_oauth.refresh_access_token(CLIENT, token)
     assert not isinstance(caught.value, InvalidGrant)
     assert caught.value.code == "http_400"
+
+
+# --- which refusals mean authorize again (#256) --------------------------------------
+
+HTML_403 = "<!doctype html><title>Forbidden</title><p>Your proxy says no.</p>"
+
+
+def test_the_codes_that_mean_authorize_again_are_pinned() -> None:
+    assert frozenset({"invalid_grant", "invalid_client", "unauthorized_client"}) == (
+        gmail_oauth.REAUTH_CODES
+    )
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 408, 429])
+def test_a_server_error_saying_invalid_grant_is_still_unavailable(
+    fake_google: FakeGoogle, status: int
+) -> None:
+    """The status is read before the body, so a 5xx is never a dead grant."""
+    fake_google.token_answer = (status, {"error": "invalid_grant"})
+    with pytest.raises(OAuthUnavailable):
+        gmail_oauth.refresh_access_token(CLIENT, "rt")
+
+
+@pytest.mark.parametrize(
+    ("answer", "code", "reauth"),
+    [
+        ((400, {"error": "invalid_grant"}), "invalid_grant", True),
+        ((401, {"error": "invalid_client"}), "invalid_client", True),
+        ((400, {"error": "unauthorized_client"}), "unauthorized_client", True),
+        ((400, {"error": "invalid_request"}), "invalid_request", False),
+        ((400, {"error": "unsupported_grant_type"}), "unsupported_grant_type", False),
+        ((407, "<html>Proxy Authentication Required</html>"), "http_407", False),
+        ((403, HTML_403), "http_403", False),
+        ((404, "<html>Not Found</html>"), "http_404", False),
+        ((401, {"error": {"code": 401, "status": "UNAUTHENTICATED"}}), "http_401", False),
+        ((200, {"token_type": "Bearer"}), "no_access_token", False),
+    ],
+)
+def test_only_a_dead_grant_or_client_needs_reauthorization(
+    fake_google: FakeGoogle,
+    answer: tuple[int, dict[str, object] | str],
+    code: str,
+    reauth: bool,
+) -> None:
+    fake_google.token_answer = answer
+    with pytest.raises((InvalidGrant, OAuthRefused)) as caught:
+        gmail_oauth.refresh_access_token(CLIENT, "rt")
+    assert caught.value.code == code
+    assert gmail_oauth.needs_reauthorization(caught.value) is reauth
+
+
+def test_unavailable_and_setup_errors_never_need_reauthorization() -> None:
+    for error in (
+        OAuthUnavailable("down", code="invalid_grant"),
+        ClientConfigError("bad", code="invalid_client"),
+        ScopeNotGranted("unticked", code="scope_not_granted"),
+    ):
+        assert not gmail_oauth.needs_reauthorization(error)

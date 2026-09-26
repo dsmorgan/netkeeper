@@ -106,11 +106,13 @@ While `netkeeper serve` runs, it refreshes every connected mailbox's token every
 
 ## When Google stops accepting the token
 
-This happens when you revoke netkeeper's access in your Google Account, after seven days in Testing mode, or when the OAuth client is deleted or its secret is reset. Within one poll, netkeeper:
+This happens when you revoke netkeeper's access in your Google Account, after seven days in Testing mode, or when the OAuth client is deleted or its secret is reset. Google says so with `invalid_grant`, `invalid_client` or `unauthorized_client`. Within one poll, netkeeper:
 
 1. marks the mailbox **needs re-authorizing** (`reauth_required`),
 2. pauses every email step, and
 3. shows a banner on every page, naming the mailbox and why.
+
+Any other failure changes nothing, because it says nothing certain about the token: Google being down or slow, a network or proxy error, or an answer netkeeper can't read. The next poll tries again.
 
 To fix it, choose **Re-authorize** on the banner or in Settings, or run `netkeeper gmail login`. Google preselects the same account. The mailbox keeps its history and campaigns.
 
@@ -130,6 +132,7 @@ The Settings page and `netkeeper gmail status` show a short reason code:
 |---|---|---|
 | `invalid_grant` | Google refused the token: it was revoked, or it's seven days old in Testing | Authorize again (step 6). Consider publishing (step 3). |
 | `invalid_client` | Google doesn't know the client: it was deleted, or its secret was reset | Create a client (step 4), save it (step 5), and authorize again |
+| `unauthorized_client` | Google won't let the client use the token: it isn't a Desktop app client, or the token was issued to a different client | Create a Desktop app client (step 4), save it (step 5), and authorize again |
 | `token_missing` | The Keychain has no token for the mailbox | Authorize again |
 | `client_missing` | The Keychain has no OAuth client | Save the client (step 5), then authorize again |
 | `gmail_api_refused` | The token works, but the Gmail API is off in the project | Enable it (step 2), then authorize again |
