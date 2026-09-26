@@ -19,7 +19,7 @@ A ``campaigns`` row is a sequence (spec 11.2) of ``campaign_steps``, sent to
 the contacts it has ``enrollments`` for (spec 11.3). ``messages`` is every
 message a step produced for an enrollment, and every reply detected to one.
 Who may be enrolled, and who may be sent the next step, is decided by
-:mod:`netkeeper.campaigns.guards` (spec 11.9).
+:mod:`netkeeper.services.campaign_guards` (spec 11.9).
 
 What the database refuses to lose (spec 8, "contacts are archived, never
 deleted, because messages reference them"): a message's contact, enrollment,

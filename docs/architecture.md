@@ -820,6 +820,15 @@ Checked at enrollment and again at every step fire, because state changes betwee
 - No outbound message on any channel within `contacted_within_days_guard` (default 30) unless the message is the next step of this same campaign.
 - Mailbox healthy and under cap; browser healthy and under budget for LinkedIn steps.
 
+*As built (P3-05):* `netkeeper/services/campaign_guards.py`. Each guard is a pure function over a snapshot of one contact (`ContactFacts`) and gives a reason to exclude, or nothing. `load_facts` reads the snapshots in a few scoped queries and never writes. `check_enrollment` and `check_step` are the two moments above. A guard that cannot decide excludes: a contact nobody found, or a channel with no guard for its address. How each bullet above is decided:
+
+- **Channel address.** An email step needs an address that is neither bounced nor invalid. It reuses `crm.contacts.sendable_email`, which the `campaign-audience` export also uses; the export refuses bounces only. A LinkedIn step needs a URN or a public id. Only the channel being sent on is checked, and enrollment checks the first step's channel.
+- **Another campaign.** A live enrollment (pending, active or paused) in another campaign that is reviewing, active or paused. At a step fire, only an enrollment older than this one counts, so two campaigns that enrolled the same person never block each other at the same time. "Configurable to allow" is a `GuardPolicy` flag, but where the setting is stored is still open, so nothing turns it on yet.
+- **Recent contact.** The newest outbound interaction (`email_out`, `li_out`, `call` or `meeting`) or sent campaign message is within `contacted_within_days_guard` days. Anything recording this campaign's own messages doesn't count. A window of 0 turns the guard off.
+- **Mailbox and browser.** `check_channel` works over a `ChannelState` its caller fills in, and anything left unknown excludes. The mailbox table and the code that fills the state come with P3-06 and P3-07.
+
+`excluded_summary` writes the 11.8 line from the verdicts. Each excluded contact counts once, under its first reason, so the parts add up to the number excluded.
+
 ## 12. LLM module (optional)
 
 Disabled until `[llm] api_key` is in Keychain. Uses the `anthropic` SDK, `claude-sonnet-5` by default, `claude-haiku-4-5-20251001` for bulk classification. The system prompt is cached.

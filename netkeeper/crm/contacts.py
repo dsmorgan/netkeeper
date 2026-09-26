@@ -28,7 +28,7 @@ write=True)``, or a non-GET request's session).
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Final, Literal, cast
@@ -346,6 +346,22 @@ def live_contact(session: Session, user: User, contact_id: int) -> Contact:
     if contact.merged_into_id is not None:
         raise Merged(contact.id, resolve_survivor(session, user, contact.id).id)
     return contact
+
+
+def sendable_email(
+    contact: Contact, *, refuse: Collection[EmailStatus] = (EmailStatus.BOUNCED,)
+) -> ContactEmail | None:
+    """The first of ``contact``'s addresses whose status is not in ``refuse``, primary first.
+
+    ``Contact.emails`` is ordered ``is_primary DESC, id ASC``, so this is the
+    primary unless the primary is refused. The one reader of "which address can
+    a message go to": the ``campaign-audience`` export refuses bounces only
+    (#77, #215), and the campaign guards refuse invalid addresses too (#226).
+    """
+    for email in contact.emails:
+        if email.status not in refuse:
+            return email
+    return None
 
 
 # --- editing one contact ----------------------------------------------------
