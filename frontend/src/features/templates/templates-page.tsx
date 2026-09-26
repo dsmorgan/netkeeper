@@ -82,7 +82,7 @@ export function TemplatesPage() {
                         <span className="truncate">{row.name}</span>
                         {row.lint.length > 0 && (
                           <Badge variant="destructive" className="ml-auto">
-                            {row.lint.length} lint
+                            {row.lint.length} lint {row.lint.length === 1 ? 'error' : 'errors'}
                           </Badge>
                         )}
                       </Button>
@@ -190,14 +190,8 @@ function Workspace({ current, versions, onSaved, onDeleted }: WorkspaceProps) {
           templateId={viewingId}
           unsaved={older === undefined && current !== null && !sameDraft(draft, draftOf(current))}
         />
-        {current !== null && viewingId !== null && (
-          <VersionHistory
-            versions={versions}
-            pending={versions === undefined}
-            error={null}
-            viewingId={viewingId}
-            onView={setViewingId}
-          />
+        {versions !== undefined && viewingId !== null && (
+          <VersionHistory versions={versions} viewingId={viewingId} onView={setViewingId} />
         )}
       </div>
     </div>
