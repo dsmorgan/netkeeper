@@ -430,6 +430,22 @@ NESTED_UNBOUNDED = [
     r"(a?b?a?)+$",
     r"(a(a?))+$",
     r"((a?){1,3})+$",
+    # #233: alternation branches that overlap are a choice per pass, like a
+    # variable count. These hang the standard library's re on a near miss of
+    # about thirty characters. The parser factors out a shared prefix first, so
+    # (a|aa) arrives as a(?:|a) and (a|a) as a(?:|): an empty branch next to
+    # one whose first character could also come after the alternation.
+    r"(a?|a)+$",
+    r"(a?|aa)+$",
+    r"(a|a)+$",
+    r"(a|aa)+$",
+    r"((a|)a)+$",
+    r"((a?|b?)c)+$",
+    r"(\w+\s+|and\s+)+$",
+    # One branch a prefix of another: "ab" is one pass or two. Refused
+    # without proof that the rest of the pattern can split a string that way.
+    r"(ab|cd|a)+$",
+    r"(ab|a|b)+$",
 ]
 NOT_NESTED = [
     r"(a+)",
@@ -459,6 +475,17 @@ UNAMBIGUOUS_NESTED = [
     r"(a{2})+$",
     r"(\ba?)+$",
     r"(a?)+$",
+    # #233: branches that start differently, and an empty branch alone in its
+    # pass (an empty pass ends the repeat, as with (a?)+).
+    r"(ab|ac)+$",
+    r"(a|b)+$",
+    r"(a|)+$",
+    r"(a|b|)+$",
+    r"(a?|b?)+$",
+    r"((x|)z)+$",
+    # Two branches start alike but differ by their second character.
+    r"(?:(senior|staff|lead)\s+)+engineer",
+    r"(?:(vp|vice\s+president|svp)\s+of\s+)+sales",
 ]
 
 
@@ -518,6 +545,10 @@ def test_the_slow_pattern_message_says_how_to_rewrite_it() -> None:
     with pytest.raises(InvalidPattern) as caught:
         compile_pattern(r"(\w+\s*)+$")
     assert r"(\w+\s+)+" in str(caught.value)
+    with pytest.raises(InvalidPattern) as caught:
+        compile_pattern(r"(a?|aa)+$")
+    assert "alternation" in str(caught.value)
+    assert "start differently" in str(caught.value)
 
 
 COMPILE_BOMBS = [
@@ -564,13 +595,16 @@ def test_a_pattern_that_expands_cheaply_is_accepted(pattern: str) -> None:
     compile_pattern(pattern)
 
 
-SLOW_PATTERN = r"(a|aa)+$"
-"""No nested unbounded repeat, so it saves, but its alternation backtracks exponentially."""
+SLOW_PATTERN = r"(a|aa){1,40}$"
+"""Saves, because the static check looks inside unbounded repeats only, and forty copies
+expand cheaply, but its alternation backtracks exponentially: the run-time timeout is
+the guard here. ``(a|aa)+$``, the unbounded form, is refused at save since #233."""
 
-MATCHES_SLOWLY = "a" * 30 + "b" + "aa"
-"""``SLOW_PATTERN`` matches this, but only after about half a second of backtracking:
-ten times the shipped 50 ms budget, and the cost grows 2.6x per two characters, so
-neither half of the comparison is close enough to the boundary to turn on machine speed."""
+MATCHES_SLOWLY = "a" * 29 + "b" + "aa"
+"""``SLOW_PATTERN`` matches this, but only after about two thirds of a second of
+backtracking: thirteen times the shipped 50 ms budget, and the cost grows 2.6x per two
+characters, so neither half of the comparison is close enough to the boundary to turn
+on machine speed."""
 
 NEVER_MATCHES = "a" * 40 + "b"
 """About a minute of backtracking, then no match. Always a timeout, on any machine."""
@@ -643,8 +677,8 @@ def test_a_rule_skipped_after_its_give_up_still_removes_nothing(
 def test_a_search_that_times_out_is_no_match_and_is_counted(
     writer: Session, user: User, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """``(a|aa)+$`` has no nested repeat, so it saves, but it backtracks exponentially."""
-    slow = r"(a|aa)+$"
+    """``SLOW_PATTERN`` passes the static check, but it backtracks exponentially."""
+    slow = SLOW_PATTERN
     assert not has_ambiguous_nested_repeat(_parser.parse(slow, re.IGNORECASE))
     vp = create_tag(writer, user, "vp")
     rule = create_rule(writer, user, vp.id, RuleField.TITLE, slow)
@@ -667,7 +701,7 @@ def test_a_search_that_times_out_is_no_match_and_is_counted(
 
 
 def test_the_timeout_is_read_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
-    compiled = compile_pattern(r"(a|aa)+$")
+    compiled = compile_pattern(SLOW_PATTERN)
     assert svc.search(compiled, "aa") is True
     assert svc.search(compiled, "a" * 40 + "b") is None  # 50 ms is not enough
     monkeypatch.setattr(svc, "MATCH_TIMEOUT_S", 30.0)
