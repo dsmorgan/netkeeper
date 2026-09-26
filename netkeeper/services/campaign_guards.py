@@ -74,6 +74,8 @@ from netkeeper.scoping import scoped
 class Reason(enum.StrEnum):
     """Why a contact is excluded. The order here is :data:`REASON_ORDER`."""
 
+    CAMPAIGN_NOT_ACTIVE = "campaign_not_active"
+    ENROLLMENT_NOT_ACTIVE = "enrollment_not_active"
     UNKNOWN_CONTACT = "unknown_contact"
     MERGED = "merged"
     ARCHIVED = "archived"
@@ -90,7 +92,8 @@ class Reason(enum.StrEnum):
 
 
 REASON_ORDER: Final[tuple[Reason, ...]] = tuple(Reason)
-"""Most fundamental first: a merged contact is reported as merged, not as having no email."""
+"""Most fundamental first: a merged contact is reported as merged, not as having no email.
+The two step-fire reasons (:func:`enrollment_state`) come before anything about the contact."""
 
 
 class ChannelReason(enum.StrEnum):
@@ -133,7 +136,7 @@ class ContactFacts:
     the contact has a live enrollment in (:data:`LIVE_ENROLLMENT_STATUSES`), other
     than this one, whose enrollment came first. ``last_outbound_at`` is the newest
     time anyone contacted them, counting every outbound interaction and every
-    sent campaign message, except this campaign's own.
+    sent campaign message, except the firing enrollment's own.
     """
 
     contact_id: int
@@ -248,7 +251,7 @@ def not_in_another_campaign(
 def not_contacted_recently(
     facts: ContactFacts, channel: TemplateChannel, policy: GuardPolicy, now: datetime
 ) -> Reason | None:
-    """No outbound contact within ``contacted_within_days``, other than this campaign's own.
+    """No outbound contact within ``contacted_within_days``, other than this enrollment's own.
 
     Outbound means any :data:`~netkeeper.crm.interactions.OUTBOUND_KINDS`
     interaction (an email, a LinkedIn message, a call, a meeting) or a sent
@@ -290,6 +293,22 @@ def check_contact(
         return Verdict(contact_id, (Reason.UNKNOWN_CONTACT,))
     found = {guard(facts, channel, policy, now) for guard in GUARDS}
     return Verdict(contact_id, tuple(r for r in REASON_ORDER if r in found))
+
+
+def enrollment_state(enrollment: EnrollmentStatus, campaign: CampaignStatus) -> tuple[Reason, ...]:
+    """Why a step may not fire for an enrollment in this state; empty when it may.
+
+    Only an ``active`` enrollment (spec 11.3: a pending one becomes active when
+    its campaign is activated) of an ``active`` campaign is sent to. A paused,
+    replied, completed, bounced, opted-out, or removed enrollment, and any
+    enrollment of a campaign that is not active, is excluded with a reason.
+    """
+    reasons: list[Reason] = []
+    if campaign is not CampaignStatus.ACTIVE:
+        reasons.append(Reason.CAMPAIGN_NOT_ACTIVE)
+    if enrollment is not EnrollmentStatus.ACTIVE:
+        reasons.append(Reason.ENROLLMENT_NOT_ACTIVE)
+    return tuple(reasons)
 
 
 # --- the channel ------------------------------------------------------------------
@@ -365,6 +384,8 @@ def reason_label(reason: Reason, *, contacted_within_days: int) -> str:
 
 
 _LABELS: Final[Mapping[Reason, str]] = {
+    Reason.CAMPAIGN_NOT_ACTIVE: "campaign not active",
+    Reason.ENROLLMENT_NOT_ACTIVE: "enrollment not active",
     Reason.UNKNOWN_CONTACT: "not found",
     Reason.MERGED: "merged into another contact",
     Reason.ARCHIVED: "archived",
@@ -419,20 +440,35 @@ def load_facts(
     """The facts for each of ``contact_ids`` that is ``user``'s, keyed by contact id.
 
     A contact missing from the result is one nobody could find; :func:`check_contact`
-    excludes it. ``campaign_id`` is the campaign asking, whose own enrollments and
-    messages do not count against it (``None`` for a campaign not saved yet).
-    ``enrollment_id`` is the enrollment a step is firing for: another campaign's
-    enrollment counts against it only if it came first, so two campaigns that
-    enrolled the same person never exclude each other both at once. Reads only.
+    excludes it. ``campaign_id`` is the campaign asking: its own enrollments are not
+    "another campaign" (``None`` for a campaign not saved yet). ``enrollment_id`` is
+    the enrollment a step is firing for (``None`` at enrollment time). Two things
+    hang on it:
+
+    - Recent contact ignores that enrollment's own messages and nothing else: not
+      the rest of this campaign's. After a merge, the survivor holds the merged-away
+      contact's interactions, and a step 1 that went to the other row must still
+      count against the survivor's own step 1 (#235 review). At enrollment time
+      nothing is ignored.
+    - Another campaign's enrollment counts only if it came first, so two campaigns
+      that enrolled the same person never exclude each other both at once.
+
+    The contacts and their addresses are read fresh, never taken from the
+    session's identity map: sessions here keep their objects across commits
+    (``expire_on_commit=False``), and a do-not-contact flag or a bounce another
+    session committed must not be missed (#235 review). Reads only.
     """
     ids = sorted(set(contact_ids))
     if not ids:
         return {}
     contacts = session.scalars(
-        scoped(user, Contact).where(Contact.id.in_(ids)).options(selectinload(Contact.emails))
+        scoped(user, Contact)
+        .where(Contact.id.in_(ids))
+        .options(selectinload(Contact.emails))
+        .execution_options(populate_existing=True)
     ).all()
     others = _other_campaigns(session, user, ids, campaign_id, enrollment_id)
-    last_out = _last_outbound(session, user, ids, campaign_id)
+    last_out = _last_outbound(session, user, ids, enrollment_id)
     facts: dict[int, ContactFacts] = {}
     for contact in contacts:
         email = sendable_email(contact, refuse=UNSENDABLE_EMAIL_STATUSES)
@@ -480,52 +516,36 @@ def _other_campaigns(
 
 
 def _last_outbound(
-    session: Session, user: User, ids: Sequence[int], campaign_id: int | None
+    session: Session, user: User, ids: Sequence[int], enrollment_id: int | None
 ) -> dict[int, datetime]:
-    """Per contact, the newest outbound interaction or sent message not of ``campaign_id``."""
+    """Per contact, the newest outbound interaction or sent message, not ``enrollment_id``'s."""
     interactions = (
         scoped(user, Interaction)
         .with_only_columns(Interaction.contact_id, func.max(Interaction.at))
         .where(Interaction.contact_id.in_(ids), Interaction.kind.in_(OUTBOUND_KINDS))
         .group_by(Interaction.contact_id)
     )
-    if campaign_id is not None:
-        # An interaction recording one of this campaign's own messages does not count.
+    if enrollment_id is not None:
+        # An interaction recording one of this enrollment's own messages does not count.
         message = aliased(Message)
-        enrollment = aliased(Enrollment)
-        interactions = (
-            interactions.outerjoin(
-                message, and_(message.id == Interaction.message_id, message.user_id == user.id)
-            )
-            .outerjoin(
-                enrollment,
-                and_(enrollment.id == message.enrollment_id, enrollment.user_id == user.id),
-            )
-            .where(
-                or_(
-                    Interaction.message_id.is_(None),
-                    enrollment.id.is_(None),
-                    enrollment.campaign_id != campaign_id,
-                )
-            )
-        )
+        interactions = interactions.outerjoin(
+            message, and_(message.id == Interaction.message_id, message.user_id == user.id)
+        ).where(or_(message.id.is_(None), message.enrollment_id != enrollment_id))
     newest: dict[int, datetime] = {}
     for contact_id, at in session.execute(interactions).tuples():
         newest[contact_id] = at
     messages = (
         scoped(user, Message)
         .with_only_columns(Message.contact_id, func.max(Message.sent_at))
-        .join(Enrollment, Enrollment.id == Message.enrollment_id)
         .where(
-            Enrollment.user_id == user.id,
             Message.contact_id.in_(ids),
             Message.direction == MessageDirection.OUT,
             Message.sent_at.is_not(None),
         )
         .group_by(Message.contact_id)
     )
-    if campaign_id is not None:
-        messages = messages.where(Enrollment.campaign_id != campaign_id)
+    if enrollment_id is not None:
+        messages = messages.where(Message.enrollment_id != enrollment_id)
     for contact_id, sent_at in session.execute(messages).tuples():
         if sent_at is not None and (contact_id not in newest or sent_at > newest[contact_id]):
             newest[contact_id] = sent_at
@@ -575,8 +595,16 @@ def check_step(
 ) -> Verdict:
     """The verdict for firing ``step`` for ``enrollment`` now. Reads only.
 
-    This campaign's own earlier steps never count as recent contact: spec
+    This enrollment's own earlier steps never count as recent contact: spec
     11.9's "unless the message is the next step of this same campaign".
+    Anything else does, a step this campaign sent to a contact since merged
+    into this one included.
+
+    A step fires only for an ``active`` enrollment of an ``active`` campaign:
+    anything else is :attr:`Reason.ENROLLMENT_NOT_ACTIVE` or
+    :attr:`Reason.CAMPAIGN_NOT_ACTIVE` (:func:`enrollment_state`), so a
+    finished, paused, or removed enrollment is never sent to by a caller that
+    forgot to filter it out.
     """
     if enrollment.user_id != user.id or step.user_id != user.id:
         raise ValueError("an enrollment and its step must be the user's")
@@ -589,10 +617,23 @@ def check_step(
         campaign_id=enrollment.campaign_id,
         enrollment_id=enrollment.id,
     )
-    return check_contact(
+    # Read fresh, like the contact: the caller's objects may be from before a commit
+    # another session made (expire_on_commit=False).
+    state = session.execute(
+        scoped(user, Enrollment)
+        .with_only_columns(Enrollment.status, Campaign.status, Campaign.contacted_within_days_guard)
+        .join(Campaign, Campaign.id == Enrollment.campaign_id)
+        .where(Enrollment.id == enrollment.id, Campaign.user_id == user.id)
+    ).one_or_none()
+    if state is None:  # deleted since: nothing to send to
+        return Verdict(enrollment.contact_id, (Reason.ENROLLMENT_NOT_ACTIVE,))
+    enrollment_status, campaign_status, window = state
+    verdict = check_contact(
         facts.get(enrollment.contact_id),
         enrollment.contact_id,
         step.channel,
-        _policy(enrollment.campaign),
+        GuardPolicy(contacted_within_days=window),
         now=now,
     )
+    found = {*enrollment_state(enrollment_status, campaign_status), *verdict.reasons}
+    return Verdict(verdict.contact_id, tuple(r for r in REASON_ORDER if r in found))

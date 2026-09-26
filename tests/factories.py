@@ -175,11 +175,9 @@ def make_enrollment(
     session: Session, campaign: Campaign, contact: Contact, **overrides: Any
 ) -> Enrollment:
     """A flushed enrollment of ``contact`` in ``campaign``, active unless overridden."""
-    fields: dict[str, Any] = {"status": EnrollmentStatus.ACTIVE}
+    fields: dict[str, Any] = {"status": EnrollmentStatus.ACTIVE, "user_id": campaign.user_id}
     fields.update(overrides)
-    enrollment = Enrollment(
-        user_id=campaign.user_id, campaign_id=campaign.id, contact_id=contact.id, **fields
-    )
+    enrollment = Enrollment(campaign_id=campaign.id, contact_id=contact.id, **fields)
     session.add(enrollment)
     session.flush()
     return enrollment
