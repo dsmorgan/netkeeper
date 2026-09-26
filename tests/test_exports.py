@@ -660,26 +660,36 @@ def test_full_vcard_contains_begin_end_and_crlf_line_endings(session: Session) -
     assert "NOTE:Line one\\,\\nline two\\; done" in text
 
 
-def test_vcard_uri_escape_leaves_comma_and_semicolon_alone() -> None:
-    """``URL`` is a URI, not TEXT: only backslash and newline are escaped (#77)."""
-    assert _vcard_escape_uri("https://example.test/p?q=a,b;c") == "https://example.test/p?q=a,b;c"
+def test_vcard_uri_escape_percent_encodes_comma_and_semicolon() -> None:
+    """``URL`` is a URI: ``,``/``;`` become ``%2C``/``%3B``, never ``\\,`` (#77, #215)."""
+    assert (
+        _vcard_escape_uri("https://example.test/p?q=a,b;c") == "https://example.test/p?q=a%2Cb%3Bc"
+    )
     assert _vcard_escape_uri("https://example.test/a\\b") == "https://example.test/a\\\\b"
     assert _vcard_escape_uri("https://example.test/\r\nx") == "https://example.test/\\nx"
+    # Already-encoded text is left alone rather than double-encoded.
+    assert _vcard_escape_uri("https://example.test/?q=a%2Cb") == "https://example.test/?q=a%2Cb"
 
 
 @pytest.mark.parametrize("preset", ["nine-column", "full"])
-def test_vcard_url_is_not_text_escaped(session: Session, preset: str) -> None:
+def test_vcard_url_with_comma_and_semicolon_is_percent_encoded(
+    session: Session, preset: str
+) -> None:
+    """vobject cuts a URL at a bare ``,``; a strict parser reads ``\\,`` literally (#215)."""
     user = factories.make_user(session)
     contact = factories.make_contact(session, user, li_url="https://example.test/in/a,b;c")
     contact.links.append(
-        ContactLink(user_id=user.id, url="https://example.test/p?q=a,b", kind=LinkKind.WEBSITE)
+        ContactLink(user_id=user.id, url="https://example.test/p?q=a,b;c", kind=LinkKind.WEBSITE)
     )
     session.commit()
     text = _run(session, user, preset=preset, output_format="vcard")
-    assert "URL:https://example.test/in/a,b;c\r\n" in text
-    assert "\\," not in text.split("URL:", 1)[1].split("\r\n", 1)[0]
+    url_lines = [line for line in text.split("\r\n") if line.startswith("URL:")]
+    assert "URL:https://example.test/in/a%2Cb%3Bc" in url_lines
     if preset == "full":
-        assert "URL:https://example.test/p?q=a,b\r\n" in text
+        assert "URL:https://example.test/p?q=a%2Cb%3Bc" in url_lines
+    for line in url_lines:
+        value = line.removeprefix("URL:")
+        assert "," not in value and ";" not in value and "\\" not in value, line
 
 
 def test_full_vcard_fn_keeps_the_surname_with_a_preferred_name(session: Session) -> None:
