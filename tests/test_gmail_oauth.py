@@ -5,7 +5,9 @@ import dataclasses
 import hashlib
 import json
 import logging
+import socket
 import threading
+import time
 import urllib.request
 from urllib.parse import parse_qs, urlsplit
 
@@ -335,3 +337,58 @@ def test_no_request_logs_a_code_a_token_or_the_client_secret(
     )
     for secret in secrets_seen:
         assert secret not in caplog.text
+
+
+def test_the_receivers_connection_timeout_is_pinned() -> None:
+    assert gmail_oauth.CONNECTION_TIMEOUT_S == 10.0
+
+
+def _wait_in_thread(
+    receiver: LoopbackReceiver, timeout_s: float
+) -> tuple[dict[str, str] | TimeoutError, float]:
+    """``receiver.wait`` off the test's thread, so a wait that never ends fails, not hangs."""
+    outcome: list[dict[str, str] | TimeoutError] = []
+
+    def wait() -> None:
+        try:
+            outcome.append(receiver.wait(timeout_s))
+        except TimeoutError as exc:
+            outcome.append(exc)
+
+    started = time.monotonic()
+    thread = threading.Thread(target=wait, daemon=True)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive(), "the wait outlived its timeout"
+    [result] = outcome
+    return result, time.monotonic() - started
+
+
+@pytest.mark.parametrize("connection_timeout_s", [0.1, 10.0])
+def test_a_silent_connection_cannot_hold_the_wait_past_its_timeout(
+    connection_timeout_s: float,
+) -> None:
+    """A browser's preconnect opens a socket and sends nothing (#256).
+
+    With a long per-connection timeout the wait still ends at its own deadline;
+    with a short one the silent socket is dropped and the wait goes on to it.
+    """
+    with LoopbackReceiver(connection_timeout_s=connection_timeout_s) as receiver:
+        port = int(urlsplit(receiver.redirect_uri).port or 0)
+        with socket.create_connection(("127.0.0.1", port), timeout=5):
+            result, elapsed = _wait_in_thread(receiver, 0.4)
+    assert isinstance(result, TimeoutError)
+    assert elapsed < 2
+
+
+def test_the_redirect_after_a_silent_connection_still_arrives() -> None:
+    with LoopbackReceiver(connection_timeout_s=0.1) as receiver:
+        port = int(urlsplit(receiver.redirect_uri).port or 0)
+        with socket.create_connection(("127.0.0.1", port), timeout=5):
+            browser = threading.Thread(
+                target=_get, args=(f"{receiver.redirect_uri}?state=s1&code=c1",), daemon=True
+            )
+            browser.start()
+            result, _ = _wait_in_thread(receiver, 4)
+            browser.join(5)
+    assert result == {"state": "s1", "code": "c1"}
