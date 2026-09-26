@@ -227,14 +227,19 @@ class _TextExtractor(HTMLParser):
         self._parts.append(data)
 
     def close(self) -> None:
-        # An unclosed <script> or <style> leaves the parser in CDATA mode with the
-        # rest of the message buffered as that element's content. CPython 3.12.12+
-        # flushes that buffer as data on close; 3.12.0-3.12.11 drop it, which would
-        # lose everything after the tag (#231). Flush it here so every supported
-        # interpreter keeps it, raw, as the newer ones do.
-        if self.cdata_elem is not None and self.rawdata:
-            self.handle_data(self.rawdata)
-            self.rawdata = ""
+        # Whatever is still buffered at the end of input is settled here, not by
+        # HTMLParser.close(), whose handling of it changed across 3.12 patch
+        # releases (#231). This matches the newest ones (3.12.12+, 3.13): an
+        # unclosed <script> or <style> keeps the rest of the message, raw, as its
+        # text (3.12.0-3.12.11 drop it); an unterminated tag, comment or
+        # declaration is never emitted (3.12.11 alone emits it as text). A bare
+        # "<" or "</" stays text on every release, so super() gets those, and any
+        # tail that is not markup at all, such as a pending "&amp".
+        tail, self.rawdata = self.rawdata, ""
+        if self.cdata_elem is not None:
+            self.handle_data(tail)
+        elif not tail.startswith("<") or tail in ("<", "</"):
+            self.rawdata = tail
         super().close()
 
     def text(self) -> str:
