@@ -20,7 +20,9 @@ from netkeeper.crm.triage import (
     InvalidDecision,
     NotFound,
     NothingToUndo,
+    NotInQueue,
     UndoConflict,
+    UndoRaced,
 )
 from netkeeper.db import session_scope
 from netkeeper.models import (
@@ -37,7 +39,7 @@ from netkeeper.models import (
     TriageDecisionKind,
     User,
 )
-from netkeeper.scoping import scoped
+from netkeeper.scoping import scoped, scoped_update
 
 NOW = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 EARLIER = NOW - timedelta(days=30)
@@ -726,6 +728,135 @@ def test_a_forced_undo_restores_anyway_and_says_so(writer: Session, user: User) 
     assert undone.forced == [contact.id]
     assert contact.met is ContactMet.UNKNOWN
     assert _open_decisions(writer, user) == 0
+
+
+# --- liveness on write, and a racing undo (#83) -------------------------------
+
+
+def test_deciding_an_archived_contact_is_refused_and_writes_nothing(
+    writer: Session, user: User
+) -> None:
+    """The queue never serves one, so only a hand-written request gets here."""
+    contact = factories.make_contact(writer, user)
+    contact.archived_at = NOW
+    writer.flush()
+    with pytest.raises(NotInQueue) as caught:
+        module.decide(writer, user, contact.id, ContactMet.MET, at=NOW)
+    assert caught.value.survivor_id is None
+    assert "archived" in str(caught.value)
+    assert (_met(contact), contact.triaged_at) == (ContactMet.UNKNOWN, None)
+    assert writer.scalars(scoped(user, TriageDecision)).all() == []
+
+
+def test_deciding_a_merged_away_contact_is_refused_and_names_the_survivor(
+    writer: Session, user: User
+) -> None:
+    """Writing ``met`` onto the tombstone would leave the survivor untouched."""
+    survivor, loser = _contacts(writer, user, 2)
+    merge(writer, user, survivor.id, loser.id)
+    with pytest.raises(NotInQueue) as caught:
+        module.decide(writer, user, loser.id, ContactMet.MET, at=NOW)
+    assert caught.value.survivor_id == survivor.id
+    assert (_met(loser), loser.triaged_at) == (ContactMet.UNKNOWN, None)
+    assert (_met(survivor), survivor.triaged_at) == (ContactMet.UNKNOWN, None)
+    assert writer.scalars(scoped(user, TriageDecision)).all() == []
+
+
+def test_a_chain_of_merges_names_the_final_survivor(writer: Session, user: User) -> None:
+    first, second, third = _contacts(writer, user, 3)
+    merge(writer, user, second.id, first.id)
+    merge(writer, user, third.id, second.id)
+    with pytest.raises(NotInQueue) as caught:
+        module.decide(writer, user, first.id, ContactMet.SKIP)
+    assert caught.value.survivor_id == third.id
+
+
+def test_naming_an_archived_or_merged_away_contact_is_refused(writer: Session, user: User) -> None:
+    survivor, loser, archived = _contacts(writer, user, 3, first_name="Robert")
+    merge(writer, user, survivor.id, loser.id)
+    archived.archived_at = NOW
+    writer.flush()
+    for contact in (loser, archived):
+        with pytest.raises(NotInQueue):
+            module.set_preferred_name(writer, user, contact.id, "Bob")
+        assert contact.preferred_name != "Bob"
+    assert writer.scalars(scoped(user, TriageDecision)).all() == []
+
+
+def test_a_live_contact_decided_before_it_was_archived_still_undoes_by_force(
+    writer: Session, user: User
+) -> None:
+    """The liveness check is on writing a decision, not on the log: undo keeps its own rules."""
+    contact = factories.make_contact(writer, user)
+    module.decide(writer, user, contact.id, ContactMet.MET, at=NOW)
+    contact.archived_at = NOW
+    writer.flush()
+    with pytest.raises(NotInQueue):
+        module.decide(writer, user, contact.id, ContactMet.NOT_MET)
+    assert module.undo(writer, user, force=True).forced == [contact.id]
+
+
+def _spent_by_another_request(monkeypatch: pytest.MonkeyPatch, writer: Session, user: User) -> None:
+    """Spend every open decision between undo's read and its write, as a concurrent undo would.
+
+    What a second undo at READ COMMITTED sees on PostgreSQL: it read the same
+    newest decision before the first committed. SQLite's ``BEGIN IMMEDIATE``
+    never lets this happen, so the test puts the other request's write where it
+    would land.
+    """
+    real = module._contacts_by_id
+
+    def racing(session: Session, owner: User, ids: Sequence[int]) -> dict[int, Contact]:
+        writer.execute(
+            scoped_update(user, TriageDecision)
+            .where(TriageDecision.undone_at.is_(None))
+            .values(undone_at=NOW)
+            .execution_options(synchronize_session=False)
+        )
+        return real(session, owner, ids)
+
+    monkeypatch.setattr(module, "_contacts_by_id", racing)
+
+
+def test_an_undo_that_loses_a_race_writes_nothing(
+    writer: Session, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contact = factories.make_contact(writer, user)
+    decision = module.decide(writer, user, contact.id, ContactMet.MET, at=NOW)
+    _spent_by_another_request(monkeypatch, writer, user)
+    with pytest.raises(UndoRaced) as caught:
+        module.undo(writer, user)
+    assert caught.value.decision_id == decision.id
+    assert (_met(contact), contact.triaged_at) == (ContactMet.MET, NOW)
+
+
+def test_a_batch_undo_that_loses_a_race_writes_nothing(
+    writer: Session, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second = _contacts(writer, user, 2)
+    _message(writer, user, first)
+    _message(writer, user, second)
+    module.apply_suggestion(writer, user, module.SUGGESTION_MET_WITH_MESSAGES, at=NOW)
+    _spent_by_another_request(monkeypatch, writer, user)
+    with pytest.raises(UndoRaced):
+        module.undo(writer, user, force=True)  # force never gets past a race
+    assert (_met(first), _met(second)) == (ContactMet.MET, ContactMet.MET)
+
+
+def test_undo_spends_exactly_the_rows_it_restored(writer: Session, user: User) -> None:
+    """The conditional spend marks the batch, and never an older decision beside it."""
+    earlier, first, second = _contacts(writer, user, 3)
+    module.decide(writer, user, earlier.id, ContactMet.SKIP, at=EARLIER)
+    _message(writer, user, first)
+    _message(writer, user, second)
+    applied = module.apply_suggestion(writer, user, module.SUGGESTION_MET_WITH_MESSAGES, at=NOW)
+    undone = module.undo(writer, user)
+    assert undone.decisions == 2
+    rows = writer.scalars(scoped(user, TriageDecision).order_by(TriageDecision.id)).all()
+    spent = {row.id for row in rows if row.undone_at is not None}
+    assert spent == {row.id for row in rows if row.batch_id == applied.batch_id}
+    assert _open_decisions(writer, user) == 1
+    assert _met(earlier) is ContactMet.SKIP
 
 
 def test_undo_never_reaches_another_user_s_decisions(writer: Session, user: User) -> None:

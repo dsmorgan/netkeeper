@@ -12623,6 +12623,9 @@
           "404": {
             "description": "No such contact"
           },
+          "409": {
+            "description": "The contact is archived (`{\"detail\": \"archived\"}`) or merged into another (`{\"detail\": \"merged\", \"merged_into_id\": <survivor>}`)"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -12708,6 +12711,9 @@
           },
           "404": {
             "description": "No such contact"
+          },
+          "409": {
+            "description": "The contact is archived (`{\"detail\": \"archived\"}`) or merged into another (`{\"detail\": \"merged\", \"merged_into_id\": <survivor>}`)"
           },
           "422": {
             "content": {
@@ -13126,7 +13132,7 @@
             "description": "No triage decision left to undo"
           },
           "409": {
-            "description": "The contact changed after the decision; retry with `force`"
+            "description": "The contact changed after the decision; retry with `force`. Or another undo took the same decision back first, and nothing changed"
           },
           "422": {
             "content": {

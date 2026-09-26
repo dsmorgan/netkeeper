@@ -7915,6 +7915,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The contact is archived (`{"detail": "archived"}`) or merged into another (`{"detail": "merged", "merged_into_id": <survivor>}`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -7955,6 +7962,13 @@ export interface operations {
             };
             /** @description No such contact */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The contact is archived (`{"detail": "archived"}`) or merged into another (`{"detail": "merged", "merged_into_id": <survivor>}`) */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8168,7 +8182,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The contact changed after the decision; retry with `force` */
+            /** @description The contact changed after the decision; retry with `force`. Or another undo took the same decision back first, and nothing changed */
             409: {
                 headers: {
                     [name: string]: unknown;
