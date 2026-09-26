@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
+from jinja2 import nodes
+from jinja2.exceptions import SecurityError
 
+from netkeeper.campaigns import render as render_module
 from netkeeper.campaigns.render import (
+    ALLOWED_FILTERS,
+    ALLOWED_NODES,
+    ALLOWED_TESTS,
     CONTACT_FIELDS,
+    MAX_INT_BITS,
+    MAX_LITERAL_CHARS,
+    MAX_NESTING,
     MAX_OUTPUT_CHARS,
-    MAX_POWER_BITS,
+    MAX_TRUNCATE_LENGTH,
     ME_FIELDS,
     LintIssue,
     LintRule,
@@ -52,9 +62,13 @@ def test_a_template_naming_every_merge_field_lints_clean() -> None:
     me = " ".join(f"{{{{ me.{name} }}}}" for name in ME_FIELDS)
     body = (
         f"{contact} {me} {{{{ campaign.name }}}} {{{{ step.number }}}} "
-        "{{ previous_send_date | ago }} {{ personal_line }} {{ me['name'] }}"
-        "{% if company %}at {{ company | upper }}{% endif %}{{ first_name[0] }}"
-        "{{ years_since_connected + 1 }}{% filter upper %}{{ title }}{% endfilter %}"
+        "{{ previous_send_date | ago }} {{ personal_line }}"
+        "{% if company %}at {{ company | upper }}{% elif title %}!{% else %}?{% endif %}"
+        "{{ years_since_connected + 1 }} {{ step.number * 2 }} {{ first_name ~ '!' }}"
+        "{{ 'x' if company else 'y' }} {{ first_name in 'Ann Bob' }} {{ not company }}"
+        "{{ company and title or location }} {{ connected_year is even }}"
+        "{{ first_name | default('there') | trim | title | lower | capitalize }}"
+        "{{ company | truncate(10, true, end='..', leeway=0) }} {{ none }} {{ true }}"
     )
     assert lint(EMAIL, "Hello {{ first_name }}", body, ME.keys()) == []
     assert not has_errors([])
@@ -87,7 +101,7 @@ def test_undefined_variables_are_errors() -> None:
 
 
 def test_a_group_of_fields_used_whole_or_computed_is_an_error() -> None:
-    body = "{{ first_name }} {{ me }} {{ me|length }} {{ me[first_name] }}"
+    body = "{{ first_name }} {{ me }} {{ me | upper }} {{ me[first_name] }}"
     issues = lint(LINKEDIN, None, body, ME.keys())
     assert [(issue.rule, issue.field, issue.message) for issue in issues] == [
         (
@@ -95,12 +109,16 @@ def test_a_group_of_fields_used_whole_or_computed_is_an_error() -> None:
             "me",
             "`me` is a group of fields; name one, like `me.name`",
         ),
-        (LintRule.UNDEFINED_VARIABLE, "me", "`me[...]` needs the field name written out"),
+        (
+            LintRule.UNSUPPORTED,
+            "subscript",
+            "line 1: `subscript` is not available in a message template",
+        ),
     ]
 
 
 def test_the_globals_jinja_ships_are_not_merge_fields() -> None:
-    body = "{{ first_name }}{{ range(3) }}{{ cycler }}{{ lipsum() }}"
+    body = "{{ first_name }}{{ range }}{{ cycler }}{{ lipsum }}"
     assert {name for _, name in _rules(lint(LINKEDIN, None, body, ME.keys()))} == {
         "range",
         "cycler",
@@ -178,8 +196,8 @@ def test_bad_links_in_the_subject_are_reported_against_it() -> None:
     assert [(i.rule, i.part) for i in issues] == [(LintRule.BAD_LINK, Part.SUBJECT)]
 
 
-def test_a_template_that_does_not_compile_is_a_syntax_error() -> None:
-    for body in ["{{ first_name ", "{% if first_name %}", "{{ first_name | no_such_filter }}"]:
+def test_a_template_that_does_not_parse_is_a_syntax_error() -> None:
+    for body in ["{{ first_name ", "{% if first_name %}", "{{ first_name | }}"]:
         issues = lint(LINKEDIN, None, body, ME.keys())
         assert [issue.rule for issue in issues] == [LintRule.SYNTAX], body
         assert issues[0].message.startswith("line 1: ")
@@ -229,42 +247,38 @@ ESCAPES = [
     "{{ me['__class__'] }}",
     "{{ first_name | attr('__class__') }}",
     "{{ (first_name|attr('upper')).__self__ }}",
+    "{{ first_name | attr('_' ~ '_class__') }}",
+    "{{ me['_' ~ '_class__'] }}",
+    "{{ [1].append(2) }}",
 ]
 
 
 @pytest.mark.parametrize("escape", ESCAPES)
-def test_underscore_names_fail_lint(escape: str) -> None:
-    issues = lint(LINKEDIN, None, f"{{{{ first_name }}}} {escape}", ME.keys())
-    assert LintRule.UNSAFE_ATTRIBUTE in {issue.rule for issue in issues}
-    assert has_errors(issues)
-
-
-@pytest.mark.parametrize("escape", ESCAPES)
-def test_underscore_names_fail_the_render(escape: str) -> None:
+def test_escapes_fail_lint_and_the_render(escape: str) -> None:
+    body = f"{{{{ first_name }}}} {escape}"
+    rules = {issue.rule for issue in lint(LINKEDIN, None, body, ME.keys())}
+    assert rules & {LintRule.UNSAFE_ATTRIBUTE, LintRule.UNSUPPORTED, LintRule.ATTRIBUTE_ACCESS}
     with pytest.raises(TemplateRenderError):
-        render(LINKEDIN, None, f"{{{{ first_name }}}} {escape}", _values(first_name="A"),
-               today=TODAY)  # fmt: skip
+        render(LINKEDIN, None, body, _values(first_name="A"), today=TODAY)
 
 
 @pytest.mark.parametrize(
-    "escape",
+    ("source", "message"),
     [
-        # The name is computed, so lint cannot see its underscores.
-        "{{ first_name | attr('_' ~ '_class__') }}",
-        "{{ me['_' ~ '_class__'] }}",
+        ("{{ ''.__class__ }}", "unsafe"),
+        ("{{ first_name.upper }}", "unsafe"),
+        ("{{ first_name * 3 }}", "whole numbers only"),
+        ("{{ first_name + '!' }}", "whole numbers only"),
+        ("{{ 2 * big }}", "bits"),
+        ("{{ first_name ~ first_name }}", "past 100000 characters"),
     ],
 )
-def test_the_sandbox_itself_refuses_what_lint_cannot_see(escape: str) -> None:
-    body = "{{ first_name }} " + escape
-    assert LintRule.UNSAFE_ATTRIBUTE not in {i.rule for i in lint(LINKEDIN, None, body, ())}
-    with pytest.raises(TemplateRenderError, match="sandbox"):
-        render(LINKEDIN, None, body, _values(first_name="A"), today=TODAY)
-
-
-def test_a_method_that_mutates_is_refused() -> None:
-    body = "{{ [1].append(2) }}{{ first_name }}"
-    with pytest.raises(TemplateRenderError, match="sandbox"):
-        render(LINKEDIN, None, body, _values(first_name="A"), today=TODAY)
+def test_the_sandbox_bounds_a_template_on_its_own(source: str, message: str) -> None:
+    """The second line of defense: the environment refuses these even without lint."""
+    env = render_module._environment(TODAY)
+    context = {"first_name": "a" * 60_000, "big": 1 << MAX_INT_BITS}
+    with pytest.raises(SecurityError, match=message):
+        env.from_string(source).render(context)
 
 
 def test_merge_values_are_data_never_template_source() -> None:
@@ -282,8 +296,8 @@ def test_autoescape_is_off_for_plain_text() -> None:
 
 
 def test_an_error_inside_the_template_is_a_render_error_not_a_crash() -> None:
-    with pytest.raises(TemplateRenderError, match="TypeError"):
-        render(LINKEDIN, None, "{{ first_name + 1 }}", _values(first_name="A"), today=TODAY)
+    with pytest.raises(TemplateRenderError, match="ago needs a date"):
+        render(LINKEDIN, None, "{{ first_name | ago }}", _values(first_name="A"), today=TODAY)
     with pytest.raises(TemplateRenderError, match=r"^body: line 1: "):
         render(LINKEDIN, None, "{{ first_name ", _values(first_name="A"), today=TODAY)
 
@@ -421,98 +435,191 @@ def test_ago_of_nothing_is_empty_and_of_a_non_date_is_an_error() -> None:
 # --- a missing field never raises (#227 review) ----------------------------------------
 
 
+FULL = {"first_name": "Bo", "company": "Acme", "connected_year": 2019, "years_since_connected": 7}
+
+
 @pytest.mark.parametrize(
     ("shape", "missing", "present"),
     [
-        # The shapes the review found raising, then the other operators on the same path.
         ("{% if years_since_connected > 5 %}old{% endif %}", "", "old"),
         ("{{ years_since_connected + 1 }}", "", "8"),
-        ("{{ connected_year - 1 }}", "", "2018"),
-        ("{{ company.upper() }}", "", "ACME"),
-        ("{{ first_name.strip() }}", "", "Bo"),
-        ("{{ first_name|int + 1 }}", "1", "1"),
-        ("{{ years_since_connected|round }}", "", "7"),
+        ("{{ 1 + years_since_connected }}", "", "8"),
+        ("{{ connected_year * 2 }}", "", "4038"),
         ("{{ 5 < years_since_connected }}", "False", "True"),
         ("{{ years_since_connected >= 1 }}", "False", "True"),
-        ("{{ -years_since_connected }}", "", "-7"),
-        ("{{ +years_since_connected }}", "", "7"),
-        ("{{ connected_year * 2 }}", "", "4038"),
-        ("{{ 2 * connected_year }}", "", "4038"),
-        ("{{ connected_year / 2 }}", "", "1009.5"),
-        ("{{ connected_year // 2 }}", "", "1009"),
-        ("{{ connected_year % 2 }}", "", "1"),
-        ("{{ connected_year ** 1 }}", "", "2019"),
-        ("{{ 1 - connected_year }}", "", "-2018"),
-        ("{{ years_since_connected|abs }}", "0", "7"),
-        ("{{ years_since_connected|float }}", "0.0", "7.0"),
+        ("{{ years_since_connected == 7 }}", "False", "True"),
+        ("{{ years_since_connected != 7 }}", "True", "False"),
+        ("{{ 1 < years_since_connected < 9 }}", "False", "True"),
+        # in, with the missing field on either side (#227 review, round 2)
+        ("{% if first_name in 'Ann Bob' %}yes{% else %}no{% endif %}", "no", "yes"),
+        ("{{ 'B' in first_name }}", "False", "True"),
+        ("{{ first_name not in 'Ann' }}", "True", "True"),
+        ("{{ 'x' not in company }}", "True", "True"),
+        ("{{ company | upper }}", "", "ACME"),
+        ("{{ first_name | trim | title }}", "", "Bo"),
+        ("{{ company | truncate(3, leeway=0) }}", "", "..."),
+        ("{{ company | default('your team') }}", "your team", "Acme"),
+        ("{{ first_name ~ '!' }}", "!", "Bo!"),
+        ("{{ 'x' if company else 'y' }}", "y", "x"),
+        ("{{ not company }}", "True", "False"),
+        ("{{ company and first_name }}", "", "Bo"),
+        ("{{ years_since_connected is even }}", "False", "False"),
         ("{{ years_since_connected is divisibleby 7 }}", "False", "True"),
-        ("{{ company.upper().strip() }}", "", "ACME"),
-        ("{{ company|center(6) }}", "", " Acme "),
-        ("{{ company|replace('A', 'a') }}", "", "acme"),
-        ("{{ company|truncate(3, leeway=0) }}", "", "..."),
+        ("{{ years_since_connected is defined }}", "False", "True"),
     ],
 )
 def test_a_missing_field_never_raises_whatever_the_template_does(
     shape: str, missing: str, present: str
 ) -> None:
+    assert lint(LINKEDIN, None, shape, ME.keys()) == []
     empty = render(LINKEDIN, None, shape, _values(), today=TODAY)
     assert empty.body == missing
-    assert {i.rule for i in empty.issues if i.severity is Severity.WARNING} == {
-        LintRule.MISSING_VALUE
+    assert {i.rule for i in empty.issues} == {LintRule.MISSING_VALUE}
+    assert render(LINKEDIN, None, shape, _values(**FULL), today=TODAY).body == present
+
+
+# --- the allowlist (#227 review, round 2) -----------------------------------------------
+
+
+# One template per node type the parser can produce that is off the allowlist. Each is
+# refused where it stands or inside something refused, which the walk does not enter.
+REFUSED_SAMPLES: dict[type[nodes.Node], str] = {
+    nodes.For: "{% for x in first_name %}{% endfor %}",
+    nodes.Macro: "{% macro m() %}{% endmacro %}",
+    nodes.CallBlock: "{% call first_name() %}{% endcall %}",
+    nodes.FilterBlock: "{% filter upper %}x{% endfilter %}",
+    nodes.With: "{% with a = 1 %}{% endwith %}",
+    nodes.Block: "{% block b %}{% endblock %}",
+    nodes.Include: "{% include 'other' %}",
+    nodes.Import: "{% import 'macros' as m %}",
+    nodes.FromImport: "{% from 'macros' import greet %}",
+    nodes.Extends: "{% extends 'base' %}",
+    nodes.Assign: "{% set a = 1 %}",
+    nodes.AssignBlock: "{% set a %}x{% endset %}",
+    nodes.NSRef: "{% set ns.a = 1 %}",
+    nodes.ScopedEvalContextModifier: "{% autoescape true %}x{% endautoescape %}",
+    nodes.Getitem: "{{ first_name[0] }}",
+    nodes.Slice: "{{ first_name[1:] }}",
+    nodes.Call: "{{ first_name() }}",
+    nodes.List: "{{ [first_name] }}",
+    nodes.Tuple: "{{ (first_name, 1) }}",
+    nodes.Dict: "{{ {'a': first_name} }}",
+    nodes.Pair: "{{ {'a': first_name} }}",
+    nodes.Sub: "{{ connected_year - 1 }}",
+    nodes.Div: "{{ connected_year / 2 }}",
+    nodes.FloorDiv: "{{ connected_year // 2 }}",
+    nodes.Mod: "{{ connected_year % 2 }}",
+    nodes.Pow: "{{ connected_year ** 2 }}",
+    nodes.Neg: "{{ -connected_year }}",
+    nodes.Pos: "{{ +connected_year }}",
+}
+# Node types only extensions or the compiler make; no template source parses into them.
+NEVER_PARSED: set[type[nodes.Node]] = {
+    nodes.ExprStmt,  # {% do %}, an extension
+    nodes.Break,  # {% break %}, an extension
+    nodes.Continue,
+    nodes.EvalContextModifier,
+    nodes.InternalName,
+    nodes.MarkSafe,
+    nodes.MarkSafeIfAutoescape,
+    nodes.ContextReference,
+    nodes.DerivedContextReference,
+    nodes.EnvironmentAttribute,
+    nodes.ExtensionAttribute,
+    nodes.ImportedName,
+    nodes.Scope,
+    nodes.OverlayScope,
+}
+
+
+def _concrete_node_types() -> set[type[nodes.Node]]:
+    return {
+        cls
+        for _, cls in inspect.getmembers(nodes, inspect.isclass)
+        if issubclass(cls, nodes.Node) and not cls.abstract and cls.__module__ == nodes.__name__
     }
-    full = _values(first_name="Bo", company="Acme", connected_year=2019, years_since_connected=7)
-    assert render(LINKEDIN, None, shape, full, today=TODAY).body == present
 
 
-# --- attribute access and self (#227 review) ------------------------------------------
+def test_every_node_type_is_allowed_sampled_or_never_parsed() -> None:
+    """A Jinja release that adds a node type fails here until someone decides about it."""
+    concrete = _concrete_node_types()
+    assert concrete == ALLOWED_NODES | set(REFUSED_SAMPLES) | NEVER_PARSED
+    assert not ALLOWED_NODES & (set(REFUSED_SAMPLES) | NEVER_PARSED)
 
 
 @pytest.mark.parametrize(
-    ("body", "name"),
+    "node_type",
+    [pytest.param(cls, id=cls.__name__) for cls in sorted(REFUSED_SAMPLES, key=str)],
+)
+def test_every_node_type_off_the_allowlist_is_refused(node_type: type[nodes.Node]) -> None:
+    body = "{{ first_name }}" + REFUSED_SAMPLES[node_type]
+    tree = render_module._environment(TODAY).parse(body)
+    assert any(type(node) is node_type for node in tree.find_all(nodes.Node))
+    issues = lint(LINKEDIN, None, body, ME.keys())
+    assert LintRule.UNSUPPORTED in {issue.rule for issue in issues}
+    with pytest.raises(TemplateRenderError, match="is not available in a message template"):
+        render(LINKEDIN, None, body, _values(first_name="Bo"), today=TODAY)
+
+
+@pytest.mark.parametrize(
+    ("shape", "why"),
     [
-        ("{{ first_name.format }}", "first_name.format"),
-        ("{{ last_position_change.max }} {{ first_name }}", "last_position_change.max"),
-        ("{{ company.upper() }}", "company.upper"),
-        ("{{ first_name['upper'] }}", "first_name.upper"),
-        ("{{ first_name }} {{ me.name.upper() }}", "upper"),
-        ("{{ first_name }} {{ 'x'.center(5) }}", "center"),
-        ("{{ first_name|attr('upper') }}", "attr"),
+        # Round 1 let these through as missing-field shapes; the allowlist refuses them.
+        ("{{ company.upper() }}", LintRule.UNSUPPORTED),  # refused as a call
+        ("{{ first_name.strip() }}", LintRule.UNSUPPORTED),
+        ("{{ first_name.format }}", LintRule.ATTRIBUTE_ACCESS),
+        ("{{ last_position_change.max }}", LintRule.ATTRIBUTE_ACCESS),
+        ("{{ me.name.upper }}", LintRule.ATTRIBUTE_ACCESS),
+        ("{{ first_name | int }}", LintRule.UNSUPPORTED),
+        ("{{ years_since_connected | round }}", LintRule.UNSUPPORTED),
+        ("{{ first_name | tojson }}", LintRule.UNSUPPORTED),
+        ("{{ first_name | pprint }}", LintRule.UNSUPPORTED),
+        ("{{ first_name | attr('upper') }}", LintRule.UNSUPPORTED),
+        ("{{ first_name | center(9) }}", LintRule.UNSUPPORTED),
+        ("{{ first_name is sameas first_name }}", LintRule.UNSUPPORTED),
+        ("{{ first_name | upper(*a) }}", LintRule.UNSUPPORTED),
+        ("{{ first_name * 2 }}", LintRule.UNSUPPORTED),
+        ("{{ 'ab' + first_name }}", LintRule.UNSUPPORTED),
+        ("{{ company | truncate(1000000000) }}", LintRule.UNSUPPORTED),
+        ("{{ company | truncate(length=first_name) }}", LintRule.UNSUPPORTED),
+        ("{{ 1.5 }}", LintRule.UNSUPPORTED),
+        ("{{ '" + "a" * (MAX_LITERAL_CHARS + 1) + "' }}", LintRule.UNSUPPORTED),
+        ("{{ self }}", LintRule.UNSUPPORTED),
     ],
 )
-def test_attributes_of_anything_but_a_group_are_errors(body: str, name: str) -> None:
-    issues = lint(LINKEDIN, None, body, ME.keys())
-    assert [(i.rule, i.field) for i in issues] == [(LintRule.ATTRIBUTE_ACCESS, name)]
-    assert has_errors(issues)
+def test_expressions_off_the_allowlist_are_refused_even_for_a_missing_field(
+    shape: str, why: LintRule
+) -> None:
+    body = "{{ first_name }}" + shape
+    assert why in {issue.rule for issue in lint(LINKEDIN, None, body, ME.keys())}
+    for values in (_values(), _values(**FULL)):
+        with pytest.raises(TemplateRenderError):  # a refused template, never a crash
+            render(LINKEDIN, None, body, values, today=TODAY)
 
 
-def test_an_index_of_a_value_is_not_attribute_access() -> None:
-    assert lint(LINKEDIN, None, "{{ first_name[0] }}. {{ first_name[1:] }}", ME.keys()) == []
-
-
-def test_self_is_refused() -> None:
-    body = "{{ first_name }} {{ self }}"
-    issues = lint(LINKEDIN, None, body, ME.keys())
-    assert _rules(issues) == [(LintRule.UNSUPPORTED, "self")]
-    with pytest.raises(TemplateRenderError, match="`self` is not available"):
-        render(LINKEDIN, None, body, _values(first_name="A"), today=TODAY)
-
-
-def test_a_method_a_render_allows_cannot_widen_a_value() -> None:
-    """Lint refuses every method; a preview of a template with lint errors still renders, so
-    the render allows only methods whose result is no larger than the value."""
-    values = _values(first_name="bo")
-    assert render(LINKEDIN, None, "{{ first_name.title() }}", values, today=TODAY).body == "Bo"
-    for widening in ("ljust(10)", "center(10)", "zfill(10)", "expandtabs(10)", "join('ab')"):
-        with pytest.raises(TemplateRenderError, match="unsafe"):
-            render(LINKEDIN, None, f"{{{{ first_name.{widening} }}}}", values, today=TODAY)
-
-
-# --- bounded work (#227 review) ---------------------------------------------------------
+def test_the_allowlists_are_pinned() -> None:
+    assert {
+        "default", "upper", "lower", "title", "capitalize", "trim", "truncate", "ago",
+    } == ALLOWED_FILTERS  # fmt: skip
+    assert {
+        "defined", "undefined", "none", "number", "string", "even", "odd", "divisibleby",
+    } == ALLOWED_TESTS  # fmt: skip
+    assert {cls.__name__ for cls in ALLOWED_NODES} == {
+        "Template", "Output", "TemplateData", "Name", "Const", "Getattr", "Filter", "Test",
+        "Keyword", "If", "CondExpr", "Compare", "Operand", "And", "Or", "Not", "Concat",
+        "Mul", "Add",
+    }  # fmt: skip
 
 
 def test_the_limits_are_pinned() -> None:
     assert MAX_OUTPUT_CHARS == 100_000
-    assert MAX_POWER_BITS == 10_000
+    assert MAX_INT_BITS == 10_000
+    assert MAX_LITERAL_CHARS == 1_000
+    assert MAX_TRUNCATE_LENGTH == 1_000
+    assert MAX_NESTING == 50
+
+
+# --- bounded work (#227 review) ---------------------------------------------------------
 
 
 def _fails_fast(body: str, values: MergeValues | None = None) -> TemplateRenderError:
@@ -523,78 +630,91 @@ def _fails_fast(body: str, values: MergeValues | None = None) -> TemplateRenderE
     return caught.value
 
 
+def test_the_review_probes_are_refused_fast() -> None:
+    """Round 2's three bypasses, each gigabytes in the web process before the allowlist."""
+    doubling = (
+        "{{ first_name }}{% with a = first_name %}"
+        + "{% with a = a ~ a %}" * 40
+        + "{{ a }}"
+        + "{% endwith %}" * 41
+    )
+    tojson = "{{ first_name | tojson(indent=1000000000) }}"
+    nested = "{{ [[first_name] * 40000] * 40000 }}"
+    for body, refused in ((doubling, "with"), (tojson, "tojson"), (nested, "list")):
+        assert (LintRule.UNSUPPORTED, refused) in _rules(lint(LINKEDIN, None, body, ME.keys()))
+        assert "is not available in a message template" in str(_fails_fast(body))
+
+
 @pytest.mark.parametrize(
-    "amplifier",
+    "body",
     [
         "{{ 'a' * 10**9 }}",
-        "{{ 10**9 * 'a' }}",
-        "{{ [0] * 10**9 }}",
-        "{{ 'a'|center(1000000000) }}",
-        "{{ ('a' * 1000)|replace('a', 'a' * 1000)|replace('a', 'a' * 1000) }}",
-        "{{ 'a'|replace('', 'b' * 1000) * 1 }}{{ ('a' * 999)|replace('', 'b' * 1000) }}",
-        "{{ ('a\n' * 1000)|indent(1000) }}",
-        "{{ 'a'|indent(1000000000, first=true) }}",
-        "{{ ('a' * 1000)|join('b' * 1000) }}",
-        "{{ ('a' * 50000)|wordwrap(1, wrapstring='xxxxx') }}",
-        "{{ 'a' * 60000 }}{{ 'a' * 60000 }}",  # each under the limit, together over it
+        "{{ 'a' | center(1000000000) }}",
+        "{{ ('a' * 1000) | replace('a', 'a' * 1000) | replace('a', 'a' * 1000) }}",
+        "{% for a in 'ab' %}{% for b in 'cd' %}x{% endfor %}{% endfor %}",
+        "{% macro m() %}{{ m() }}{% endmacro %}{{ m() }}",
+        "{{ 2 ** 100000000 }}",
+        "{{ '%999999999d' % 1 }}",
+        "{{ '{:>999999999}'.format(1) }}",
+        "{{ 'a' | batch(1000000000, 'x') | list }}",
     ],
 )
-def test_amplifying_operations_share_one_bounded_budget(amplifier: str) -> None:
-    assert "past 100000 characters" in str(_fails_fast("{{ first_name }}" + amplifier))
+def test_round_one_probes_stay_refused(body: str) -> None:
+    _fails_fast("{{ first_name }}" + body)
+
+
+def test_text_built_with_tilde_counts_against_the_budget_as_it_grows() -> None:
+    values = _values(first_name="a" * 200)
+    body = "{{ first_name }}" + "{{ first_name ~ first_name ~ first_name }}" * 200
+    assert "past 100000 characters" in str(_fails_fast(body, values))
+
+
+def test_filter_results_count_against_the_budget() -> None:
+    values = _values(first_name="a" * 900)
+    body = "{{ first_name }}" + "{{ first_name | upper | lower | title }}" * 60
+    assert "past 100000 characters" in str(_fails_fast(body, values))
+
+
+def test_numbers_stay_small() -> None:
+    big = "9" * MAX_LITERAL_CHARS  # about 3,300 bits; four of them pass 10,000
+    body = "{{ first_name }}{{ " + " * ".join([big] * 4) + " }}"
+    assert lint(LINKEDIN, None, body, ME.keys()) == []
+    assert "bits" in str(_fails_fast(body))
 
 
 @pytest.mark.parametrize(
-    ("body", "message"),
-    [
-        ("{{ 2 ** 100000000 }}", "power larger than 10000 bits"),
-        ("{{ '%999999999d' % 1 }}", "% string formatting"),
-        ("{{ '{:>999999999}'.format(1) }}", "str.format"),
-        ("{{ first_name.format(1) }}", "str.format"),
-        ("{{ 'a'.ljust(1000000000) }}", "unsafe"),
-    ],
+    ("digits", "rule"),
+    [(4_000, LintRule.UNSUPPORTED), (5_000, LintRule.SYNTAX)],  # 5,000 is past int()'s limit
 )
-def test_formatting_and_huge_powers_are_refused(body: str, message: str) -> None:
-    assert message in str(_fails_fast("{{ first_name }}" + body))
-
-
-@pytest.mark.parametrize("name", ["batch", "slice", "format"])
-def test_filters_that_pad_or_format_to_a_chosen_size_are_gone(name: str) -> None:
-    body = f"{{{{ first_name }}}}{{{{ 'a'|{name}(1000000000) }}}}"
-    assert [i.rule for i in lint(LINKEDIN, None, body, ME.keys())] == [LintRule.SYNTAX]
+def test_a_huge_number_literal_is_refused_not_a_crash(digits: int, rule: LintRule) -> None:
+    body = "{{ first_name }}{{ " + "9" * digits + " }}"
+    assert rule in {issue.rule for issue in lint(LINKEDIN, None, body, ME.keys())}
     _fails_fast(body)
 
 
 @pytest.mark.parametrize(
-    ("body", "tag"),
+    "deep",
     [
-        ("{% for a in 'ab' %}{% for b in 'cd' %}x{% endfor %}{% endfor %}", "for"),
-        ("{% macro m() %}{{ m() }}{% endmacro %}{{ m() }}", "macro"),
-        ("{% call first_name() %}x{% endcall %}", "call"),
-        ("{% set x = 1 %}", "set"),
-        ("{% set x %}x{% endset %}", "set"),
-        ("{% block b %}{{ self.b() }}{% endblock %}", "block"),
+        " * ".join(["9"] * 600),  # Python's compiler refuses this with a SyntaxError
+        "(" * 600 + "1" + ")" * 600,
+        " and ".join(["first_name"] * 600),
+        "{% if first_name %}" * 100 + "x" + "{% endif %}" * 100,
     ],
+    ids=["product", "parentheses", "and", "if"],
 )
-def test_loops_definitions_and_recursion_are_refused(body: str, tag: str) -> None:
-    issues = lint(LINKEDIN, None, "{{ first_name }}" + body, ME.keys())
-    assert (LintRule.UNSUPPORTED, tag) in _rules(issues)
-    assert f"`{tag}` is not available" in str(_fails_fast("{{ first_name }}" + body))
+def test_deep_nesting_is_refused_fast_not_a_crash(deep: str) -> None:
+    body = "{{ first_name }}" + (deep if deep.startswith("{%") else "{{ " + deep + " }}")
+    start = time.perf_counter()
+    issues = lint(LINKEDIN, None, body, ME.keys())
+    assert time.perf_counter() - start < 1.0
+    assert has_errors(issues)
+    assert {issue.rule for issue in issues} <= {LintRule.UNSUPPORTED, LintRule.SYNTAX}
+    _fails_fast(body)
 
 
 def test_the_output_stops_at_the_limit() -> None:
     long = _values(first_name="a" * (MAX_OUTPUT_CHARS + 1))
     assert "longer than 100000 characters" in str(_fails_fast("{{ first_name }}", long))
-
-
-def test_ordinary_use_of_the_bounded_operations_renders() -> None:
-    values = _values(first_name="Bo", company="Acme")
-    body = (
-        "{{ first_name }} {{ '-' * 3 }} {{ company|center(8) }} {{ ['a', 'b']|join(', ') }} "
-        "{{ company|replace('A', 'a') }} {{ 2 ** 10 }} {{ company|truncate(10) }}"
-    )
-    assert render(LINKEDIN, None, body, values, today=TODAY).body == (
-        "Bo ---   Acme   a, b acme 1024 Acme"
-    )
 
 
 # --- the subject is one line (#227 review) ----------------------------------------------
