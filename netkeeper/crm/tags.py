@@ -28,9 +28,10 @@ What this module decides
   lock for everyone, so a pattern that backtracks catastrophically (``(a+)+$``
   takes about a minute on a thirty-character title) is guarded twice. At save
   and preview time the pattern's parse tree is refused when an unbounded
-  repeat (``+``, ``*``, ``{n,}``) contains another one, the shape behind
-  exponential backtracking, and when its counted repeats multiply out past
-  :data:`MAX_EXPANSION`, because ``regex`` expands those at compile time and
+  repeat (``+``, ``*``, ``{n,}``) contains another one that some character
+  could either extend or end, the shape behind exponential backtracking
+  (:func:`has_ambiguous_nested_repeat`), and when its counted repeats
+  multiply out past :data:`MAX_EXPANSION`, because ``regex`` expands those at compile time and
   a twenty-four character pattern can ask for gigabytes. At run time every
   search goes through the ``regex`` package with a :data:`MATCH_TIMEOUT_S`
   timeout. A timed-out search means "not known", not "does not match": it
@@ -56,8 +57,10 @@ with those contacts' ids.
 from __future__ import annotations
 
 import enum
+import functools
 import logging
 import re
+import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -314,7 +317,7 @@ def compile_pattern(pattern: str) -> regex.Pattern[str]:
     """``pattern`` compiled for a case-insensitive search, or :class:`InvalidPattern` saying why.
 
     The standard library's parser checks the syntax and provides the tree that
-    :func:`has_nested_unbounded_repeat` walks; the ``regex`` package does the
+    :func:`has_ambiguous_nested_repeat` walks; the ``regex`` package does the
     compiling, because its ``search`` takes a timeout (see :func:`search`).
     """
     if not pattern.strip():
@@ -326,10 +329,12 @@ def compile_pattern(pattern: str) -> regex.Pattern[str]:
     except (re.error, OverflowError) as exc:
         # A repeat count at or above MAXREPEAT raises OverflowError, which is not an re.error.
         raise InvalidPattern(f"invalid regular expression: {exc}") from exc
-    if has_nested_unbounded_repeat(tree):
+    if has_ambiguous_nested_repeat(tree):
         raise InvalidPattern(
             "pattern may run slowly: an unbounded repeat (+, *, {n,}) inside another one, "
-            "as in (a+)+, can take exponential time; rewrite it without the nesting"
+            "where the same character could continue the inner repeat or come after it, "
+            r"as in (a+)+ or (\w+\s*)+, can take exponential time; put something neither "
+            r"can match between them, as in (\w+\s+)+, or rewrite it without the nesting"
         )
     if expansion(tree) > MAX_EXPANSION:
         raise InvalidPattern(
@@ -345,48 +350,158 @@ def compile_pattern(pattern: str) -> regex.Pattern[str]:
 _REPEATS: Final[frozenset[Any]] = frozenset(
     {_parser.MAX_REPEAT, _parser.MIN_REPEAT, _parser.POSSESSIVE_REPEAT}
 )
+_ANY_CHAR: Final = r"[\s\S]"
+_CATEGORIES: Final[dict[Any, str]] = {
+    _parser.CATEGORY_DIGIT: r"\d",
+    _parser.CATEGORY_NOT_DIGIT: r"\D",
+    _parser.CATEGORY_SPACE: r"\s",
+    _parser.CATEGORY_NOT_SPACE: r"\S",
+    _parser.CATEGORY_WORD: r"\w",
+    _parser.CATEGORY_NOT_WORD: r"\W",
+}
+
+_Chars = frozenset[str]
+"""A set of characters, as the texts of single-character regular expressions."""
 
 
-def has_nested_unbounded_repeat(tree: Any, *, inside_unbounded: bool = False) -> bool:
-    """True when a repeat with no upper bound contains another one, anywhere below it.
+def has_ambiguous_nested_repeat(tree: Any) -> bool:
+    """True when an unbounded repeat inside another one could stop at more than one place.
 
     ``tree`` is what ``re._parser.parse`` returns: a sequence of ``(opcode,
-    arguments)`` pairs. ``(a+)+``, ``(a*)*``, ``(a+)*``, ``(a*)+``, and
-    ``(a{2,})+`` are the shapes; a bounded outer repeat (``(\\w+\\s+){1,2}``) is
-    not, and neither is ``a+b+``. The walk looks through groups, alternations,
-    lookarounds, atomic groups, and conditionals.
+    arguments)`` pairs. Exponential backtracking needs a string that the inner
+    repeat and whatever follows it can split between them in more than one
+    way: in ``(a+)+`` the next ``a`` can extend ``a+`` or start the outer
+    repeat's next pass. When no character can do both, the inner repeat always
+    runs to the end of its run of characters, however the engine backtracks,
+    so the nesting adds no choice: ``(\\w+\\s+)+`` is refused by neither ``\\w+``
+    (followed by ``\\s``) nor ``\\s+`` (followed by ``\\w``, the next pass).
+
+    So for each unbounded repeat (``+``, ``*``, ``{n,}``) with another one
+    around it, the characters it can start with are checked against the ones
+    that can come right after it: the rest of its own sequence, the next pass
+    of every repeat around it, and what follows those. Anything the analysis
+    cannot see into (a backreference, a conditional, a lookaround's contents)
+    counts as any character, so doubt rejects. A bounded outer repeat
+    (``(\\w+[\\s-]+){1,2}``) never triggers it, and neither does ``a+b+``.
     """
-    for op, args in tree:
+    return _ambiguous(tree, frozenset(), inside_unbounded=False)
+
+
+def _ambiguous(tree: Any, follow: _Chars, *, inside_unbounded: bool) -> bool:
+    """:func:`has_ambiguous_nested_repeat` for a sequence that ``follow`` can come after."""
+    after = follow
+    for op, args in reversed(list(tree)):
         if op in _REPEATS:
             _low, high, body = args
             unbounded = high == _parser.MAXREPEAT
-            if unbounded and inside_unbounded:
+            starts, _ = _first(body)
+            if unbounded and inside_unbounded and _overlap(starts, after):
                 return True
-            if has_nested_unbounded_repeat(body, inside_unbounded=inside_unbounded or unbounded):
+            loop = starts | after if high > 1 else after
+            if _ambiguous(body, loop, inside_unbounded=inside_unbounded or unbounded):
                 return True
         elif op is _parser.SUBPATTERN:
-            if has_nested_unbounded_repeat(args[3], inside_unbounded=inside_unbounded):
+            if _ambiguous(args[3], after, inside_unbounded=inside_unbounded):
+                return True
+        elif op is _parser.ATOMIC_GROUP:
+            if _ambiguous(args, after, inside_unbounded=inside_unbounded):
                 return True
         elif op is _parser.BRANCH:
             if any(
-                has_nested_unbounded_repeat(branch, inside_unbounded=inside_unbounded)
-                for branch in args[1]
+                _ambiguous(branch, after, inside_unbounded=inside_unbounded) for branch in args[1]
             ):
                 return True
         elif op in (_parser.ASSERT, _parser.ASSERT_NOT):
-            if has_nested_unbounded_repeat(args[1], inside_unbounded=inside_unbounded):
-                return True
-        elif op is _parser.ATOMIC_GROUP:
-            if has_nested_unbounded_repeat(args, inside_unbounded=inside_unbounded):
+            # What a lookaround's contents are followed by is not this sequence.
+            unknown = frozenset({_ANY_CHAR})
+            if _ambiguous(args[1], unknown, inside_unbounded=inside_unbounded):
                 return True
         elif op is _parser.GROUPREF_EXISTS:
             _group, yes, no = args
             for branch in (yes, no):
-                if branch is not None and has_nested_unbounded_repeat(
-                    branch, inside_unbounded=inside_unbounded
+                if branch is not None and _ambiguous(
+                    branch, after, inside_unbounded=inside_unbounded
                 ):
                     return True
+        starts, nullable = _first([(op, args)])
+        after = starts | after if nullable else starts
     return False
+
+
+def _first(tree: Any) -> tuple[_Chars, bool]:
+    """The characters ``tree`` can start with, and whether it can match the empty string."""
+    chars: set[str] = set()
+    for op, args in tree:
+        starts, nullable = _first_of(op, args)
+        chars |= starts
+        if not nullable:
+            return frozenset(chars), False
+    return frozenset(chars), True
+
+
+def _first_of(op: Any, args: Any) -> tuple[_Chars, bool]:
+    """:func:`_first` for one ``(opcode, arguments)`` pair."""
+    if op is _parser.LITERAL:
+        return frozenset({f"\\U{args:08x}"}), False
+    if op is _parser.NOT_LITERAL:
+        return frozenset({f"[^\\U{args:08x}]"}), False
+    if op is _parser.ANY:
+        return frozenset({_ANY_CHAR}), False
+    if op is _parser.IN:
+        return frozenset({_charset(args)}), False
+    if op in (_parser.AT, _parser.ASSERT, _parser.ASSERT_NOT):
+        return frozenset(), True  # zero width; ignoring a lookahead only widens the set
+    if op in _REPEATS:
+        low, _high, body = args
+        starts, nullable = _first(body)
+        return starts, nullable or low == 0
+    if op is _parser.SUBPATTERN:
+        return _first(args[3])
+    if op is _parser.ATOMIC_GROUP:
+        return _first(args)
+    if op is _parser.BRANCH:
+        firsts = [_first(branch) for branch in args[1]]
+        return frozenset().union(*(s for s, _ in firsts)), any(n for _, n in firsts)
+    # A backreference, a conditional, or anything newer: could be any character, or none.
+    return frozenset({_ANY_CHAR}), True
+
+
+def _charset(items: Any) -> str:
+    """A ``[...]`` class matching what the parser's ``IN`` items match."""
+    parts: list[str] = []
+    for op, arg in items:
+        if op is _parser.NEGATE:
+            parts.insert(0, "^")
+        elif op is _parser.LITERAL:
+            parts.append(f"\\U{arg:08x}")
+        elif op is _parser.RANGE:
+            parts.append(f"\\U{arg[0]:08x}-\\U{arg[1]:08x}")
+        elif op is _parser.CATEGORY and arg in _CATEGORIES:
+            parts.append(_CATEGORIES[arg])
+        else:
+            return _ANY_CHAR
+    return f"[{''.join(parts)}]"
+
+
+@functools.cache
+def _every_character() -> str:
+    """Every code point once, for :func:`_overlap` to search (about 4 MB, built on first use)."""
+    return "".join(map(chr, range(sys.maxunicode + 1)))
+
+
+@functools.lru_cache(maxsize=256)
+def _overlap(a: _Chars, b: _Chars) -> bool:
+    """Whether some character matches one of ``a`` and one of ``b``, ignoring case.
+
+    The ``regex`` package decides, over every code point, so the answer uses the
+    same ``\\w``, ``\\s``, and case folding as the searches the guard protects.
+    """
+    if not a or not b:
+        return False
+    either = "|".join(sorted(a))
+    other = "|".join(sorted(b))
+    probe = regex.compile(f"(?=(?:{either}))(?:{other})", regex.IGNORECASE)
+    return probe.search(_every_character()) is not None
 
 
 def expansion(tree: Any) -> int:
@@ -396,7 +511,7 @@ def expansion(tree: Any) -> int:
     memory as their product: ``(?:(?:a{300}){300}){300}`` is twenty-four
     characters and needs about six gigabytes, which :data:`MATCH_TIMEOUT_S`
     does not bound because it is spent before the first search. Unbounded
-    repeats are not counted here; :func:`has_nested_unbounded_repeat` owns
+    repeats are not counted here; :func:`has_ambiguous_nested_repeat` owns
     those. The result saturates at :data:`MAX_EXPANSION` so a deep tree cannot
     build a huge integer on the way to being refused.
     """
