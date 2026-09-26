@@ -1466,6 +1466,8 @@ def _archive_report(report: ArchiveImport) -> str:
             f"invitations: {i.rows} rows; {i.added} interactions added",
             f"auto-tag rules: {t.contacts} contacts examined, {t.added} tags added, "
             f"{t.removed} removed",
+            f"recorded as import run {report.run_id}; undo it with "
+            f"`netkeeper import rollback {report.run_id}`",
         )
     )
 

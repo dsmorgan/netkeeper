@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 
 import { ApiError, importKeys, rollbackRun, rowsQuery, runQuery } from './api'
+import { InvitationsCard, MessagesCard } from './archive-flow'
 import { RESOLUTION_LABELS, fieldLabel, formatWhen, rowLabel } from './fields'
 import { ErrorNote, Note, OutcomeBadge, RunStatusBadge } from './notes'
 import { RunCounts } from './run-counts'
@@ -52,8 +53,12 @@ function RunDetail({ run }: { run: ImportRun }) {
             <RunStatusBadge status={run.status} />
           </CardTitle>
           <CardDescription>
-            Read {formatWhen(run.created_at)} with{' '}
-            {run.preset === null ? 'a mapping of its own' : `the ${run.preset} preset`}
+            Read {formatWhen(run.created_at)}{' '}
+            {run.source_kind === 'archive'
+              ? 'from a LinkedIn data archive'
+              : run.preset === null
+                ? 'with a mapping of its own'
+                : `with the ${run.preset} preset`}
             {run.committed_at !== null && ` · committed ${formatWhen(run.committed_at)}`}
             {run.rolled_back_at !== null && ` · rolled back ${formatWhen(run.rolled_back_at)}`}
           </CardDescription>
@@ -62,6 +67,13 @@ function RunDetail({ run }: { run: ImportRun }) {
           <RunCounts run={run} tense={run.status === 'draft' ? 'plan' : 'done'} />
         </CardContent>
       </Card>
+
+      {run.archive != null && (
+        <>
+          <MessagesCard counts={run.archive.messages} />
+          <InvitationsCard counts={run.archive.invitations} />
+        </>
+      )}
 
       {run.status === 'draft' && (
         <Card>

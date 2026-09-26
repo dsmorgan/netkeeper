@@ -360,7 +360,7 @@ function ConnectionsCard({ counts }: { counts: ArchiveConnectionCounts }) {
 }
 
 /** `messages.csv`'s counts, only when the file carried any (`rows > 0`). */
-function MessagesCard({ counts }: { counts: ArchiveMessageCounts }) {
+export function MessagesCard({ counts }: { counts: ArchiveMessageCounts }) {
   if (counts.rows === 0) return null
   return (
     <Card>
@@ -399,7 +399,7 @@ function MessagesCard({ counts }: { counts: ArchiveMessageCounts }) {
 }
 
 /** `Invitations.csv`'s counts, only when the file carried any (`rows > 0`). */
-function InvitationsCard({ counts }: { counts: ArchiveInvitationCounts }) {
+export function InvitationsCard({ counts }: { counts: ArchiveInvitationCounts }) {
   if (counts.rows === 0) return null
   return (
     <Card>
@@ -429,14 +429,9 @@ function InvitationsCard({ counts }: { counts: ArchiveInvitationCounts }) {
  * traces back to Connections.csv rather than reading as one opaque total
  * (spec 10.5, P1-21 item 4).
  *
- * There is no run behind this the way a CSV import has one: the archive
- * endpoint writes straight into the database in its own transaction and never
- * creates an `import_run` row, so there is nothing here to open from history
- * or roll back later — this screen, right now, is the only record of it. The
- * screen says so directly (review finding 6, tracked as #132 for the gap
- * itself): the Imports page puts a History tab right above this result, and
- * finding this import isn't in it is a worse way to learn that than being
- * told up front.
+ * The import is recorded as a run like a CSV import (#132), so the result
+ * links to it: the run's page keeps these counts, lists every connection row
+ * with what it did, and is where the import is rolled back.
  */
 function ArchiveResult({
   result,
@@ -464,14 +459,23 @@ function ArchiveResult({
           </CardTitle>
           <CardDescription>{summary(result)}</CardDescription>
         </CardHeader>
-        <CardContent>
-          <Note>
-            <p>
-              Unlike a CSV import, this doesn&rsquo;t appear on the History tab and can&rsquo;t be
-              rolled back from there — this screen is the only record of what it did.
-            </p>
-          </Note>
-        </CardContent>
+        {result.run_id !== null && (
+          <CardContent>
+            <Note>
+              <p>
+                This import is in your import history, row by row, and can be rolled back from
+                there.{' '}
+                <Link
+                  to="/imports/runs/$runId"
+                  params={{ runId: String(result.run_id) }}
+                  className="underline underline-offset-2"
+                >
+                  Open this import
+                </Link>
+              </p>
+            </Note>
+          </CardContent>
+        )}
       </Card>
 
       <ConnectionsCard counts={result.connections} />

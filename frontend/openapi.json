@@ -142,10 +142,22 @@
               }
             ],
             "title": "Owner Public Id"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
           }
         },
         "required": [
           "filename",
+          "run_id",
           "observed_at",
           "owner_public_id",
           "owner_by",
@@ -303,6 +315,65 @@
           "code"
         ],
         "title": "ArchiveRefusalOut",
+        "type": "object"
+      },
+      "ArchiveReportOut": {
+        "description": "Every table's counts from one archive import, as its run keeps them (#132).",
+        "properties": {
+          "connections": {
+            "$ref": "#/components/schemas/ArchiveConnectionCountsOut"
+          },
+          "ignored_files": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ignored Files",
+            "type": "array"
+          },
+          "invitations": {
+            "$ref": "#/components/schemas/ArchiveInvitationCountsOut"
+          },
+          "messages": {
+            "$ref": "#/components/schemas/ArchiveMessageCountsOut"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "owner_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner By"
+          },
+          "owner_public_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner Public Id"
+          }
+        },
+        "required": [
+          "observed_at",
+          "owner_public_id",
+          "owner_by",
+          "connections",
+          "messages",
+          "invitations",
+          "ignored_files"
+        ],
+        "title": "ArchiveReportOut",
         "type": "object"
       },
       "AutotagRuleCreate": {
@@ -4558,6 +4629,16 @@
       },
       "ImportRunOut": {
         "properties": {
+          "archive": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArchiveReportOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "candidate_count": {
             "title": "Candidate Count",
             "type": "integer"

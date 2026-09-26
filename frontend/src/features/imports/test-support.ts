@@ -395,6 +395,7 @@ export function zipFile(
 /** What `POST /imports/archive` answers for a successful archive import (P1-20). Invented. */
 export const ARCHIVE_RESULT: ArchiveImportResult = {
   filename: 'export.zip',
+  run_id: 12,
   observed_at: '2026-09-20T10:00:00Z',
   owner_public_id: 'petronella-quill',
   owner_by: 'traffic',

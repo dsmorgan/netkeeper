@@ -24,8 +24,9 @@ itself, uploaded and run straight through
 :func:`netkeeper.crm.archive.import_archive` in this request's one transaction —
 no draft, no preview, no candidate review, because that pipeline has none; a
 connection row that resolves to a candidate is counted and left for a later
-CSV import to resolve instead (see that module's docstring). It shares nothing
-with the run-based screens above except the router and the CSRF guard.
+CSV import to resolve instead (see that module's docstring). It does record a
+committed run (#132), whose id it answers with, so the import appears in the
+history and ``POST /imports/{id}/rollback`` undoes it like any other.
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ from netkeeper.web.schemas import (
     ArchiveInvitationCountsOut,
     ArchiveMessageCountsOut,
     ArchiveRefusalOut,
+    ArchiveReportOut,
     ImportChangeOut,
     ImportCommitIn,
     ImportDecisionIn,
@@ -146,6 +148,11 @@ def run_out(run: ImportRun) -> ImportRunOut:
         rolled_back_at=run.rolled_back_at,
         created_at=run.created_at,
         updated_at=run.updated_at,
+        archive=(
+            ArchiveReportOut.model_validate(run.report_json)
+            if run.report_json is not None
+            else None
+        ),
     )
 
 
@@ -311,6 +318,7 @@ def archive_report_out(
 ) -> ArchiveImportOut:
     return ArchiveImportOut(
         filename=filename,
+        run_id=report.run_id,
         observed_at=report.observed_at,
         owner_public_id=report.owner_public_id,
         owner_by=report.owner_by,

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from sqlalchemy import JSON, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -159,6 +159,13 @@ class ImportRun(UserOwned, TimestampMixin, Base):
     tags_removed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     committed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     rolled_back_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # An archive run's per-table counts, as its import reported them (#132): the
+    # CSV counts above cover only ``Connections.csv``. NULL on a CSV run.
+    report_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    # Rows the run created that no ``import_rows`` row accounts for, by table
+    # name: an archive run's interactions, which belong to a contact rather than
+    # to one connection row (#132). A rollback deletes them by id. NULL when none.
+    created_json: Mapped[dict[str, list[int]] | None] = mapped_column(JSON)
 
     rows: Mapped[list[ImportRow]] = relationship(
         back_populates="run",
