@@ -9,10 +9,11 @@
  * and the row lied about it too — a `<select>` whose value is not one of its
  * options displays the first one.
  *
- * This walks every ordered pair of filterable columns, which is every kind
- * transition there is, and after each switch asserts three things: the tree
- * validates, the field picker shows the field the tree holds, and an enum's
- * value picker shows the value the tree holds.
+ * This walks every ordered pair of a representative sample of the filterable
+ * columns (see `SAMPLE`), which is every kind transition there is, and after
+ * each switch asserts three things: the tree validates, the field picker shows
+ * the field the tree holds, and an enum's value picker shows the value the tree
+ * holds. `NETKEEPER_EXHAUSTIVE=1 pnpm test` walks every column instead.
  */
 import { useState } from 'react'
 import { fireEvent, render, screen } from '@testing-library/react'
@@ -23,7 +24,7 @@ import { jsonResponse } from '@/test/fetch'
 
 import { FilterBuilder } from './filter-builder'
 import { FIELDS } from './fields'
-import type { FieldSpec } from './fields'
+import type { FieldKind, FieldSpec } from './fields'
 import { mockApi } from './harness'
 import { validateTree } from './tree'
 import type { FilterTree } from './types'
@@ -49,7 +50,7 @@ function validValue(spec: FieldSpec): string | number | boolean {
 function Harness({ initial }: { initial: FilterTree }) {
   const [value, setValue] = useState(initial)
   // The count is off: this test is about the tree, and a query per switch
-  // would be four hundred requests to say nothing.
+  // would be dozens of requests to say nothing.
   return (
     <>
       <FilterBuilder value={value} onChange={setValue} tags={[]} showCount={false} />
@@ -72,51 +73,104 @@ function renderHarness(initial: FilterTree) {
 }
 
 /**
- * The runner's patience for the walk below, which is not a budget: it checks
- * the tree, not the clock. Every ordered pair of fields is a few hundred
- * renders, about 2.8 s alone and up to 6.3 s with the backend suite competing
- * for a 4-core machine (#220), past vitest's default five seconds.
+ * The columns the walk switches between.
+ *
+ * Whether a value survives a switch is `valueFits(to, value)`, and the answer
+ * depends only on the destination's kind and, for an enum, its values: two
+ * columns of the same non-enum kind are interchangeable, and each enum is a
+ * class of its own. So the sample is every enum plus the first two columns of
+ * each other kind — one to stand for the kind, a second so the walk also
+ * crosses between two different columns of it, which is the carry the kind
+ * rule exists to keep. It is derived from `FIELDS`, so a new kind or a new
+ * enum joins the walk without editing this.
+ *
+ * Every ordered pair of all twenty-two columns was 484 switches, about 2.8 s
+ * alone and over vitest's five seconds under a loaded full suite (#130). The
+ * sample is about a fifth of that and makes every class transition the full
+ * walk made, which the first test below checks.
  */
-const WALK_TIMEOUT_MS = 20_000
+function representativeSample(fields: readonly FieldSpec[]): FieldSpec[] {
+  const taken = new Map<FieldKind, number>()
+  return fields.filter((spec) => {
+    if (spec.kind === 'enum') return true
+    const seen = taken.get(spec.kind) ?? 0
+    taken.set(spec.kind, seen + 1)
+    return seen < 2
+  })
+}
+
+const EXHAUSTIVE = import.meta.env.NETKEEPER_EXHAUSTIVE === '1'
+const SAMPLE: readonly FieldSpec[] = EXHAUSTIVE ? FIELDS : representativeSample(FIELDS)
+
+/** What `valueFits` can tell apart about a column: its kind, or which enum. */
+function carryClass(spec: FieldSpec): string {
+  return spec.kind === 'enum' ? `enum:${spec.name}` : spec.kind
+}
+
+/** Every `from → to` class transition among `fields`, marking a switch between two columns of one class. */
+function transitions(fields: readonly FieldSpec[]): Set<string> {
+  const out = new Set<string>()
+  for (const from of fields) {
+    for (const to of fields) {
+      const across = from.name === to.name ? 'same column' : 'other column'
+      out.add(`${carryClass(from)} → ${carryClass(to)} (${across})`)
+    }
+  }
+  return out
+}
+
+describe('the representative sample', () => {
+  it('makes every class transition the full walk makes', () => {
+    expect([...transitions(representativeSample(FIELDS))].sort()).toEqual(
+      [...transitions(FIELDS)].sort(),
+    )
+  })
+})
 
 describe('changing the column of a comparison', () => {
-  it('never leaves a value of the wrong kind behind', { timeout: WALK_TIMEOUT_MS }, () => {
-    mockApi({})
-    const broken: string[] = []
+  // The full walk is about 2.8 s alone, so it gets the room it needs; the
+  // sample stays well inside vitest's default.
+  it(
+    'never leaves a value of the wrong kind behind',
+    { timeout: EXHAUSTIVE ? 20_000 : undefined },
+    () => {
+      mockApi({})
+      const broken: string[] = []
 
-    for (const from of FIELDS) {
-      const { unmount } = renderHarness({
-        include_archived: false,
-        where: { op: 'eq', field: from.name, value: validValue(from) } as FilterTree['where'],
-      })
+      for (const from of SAMPLE) {
+        const { unmount } = renderHarness({
+          include_archived: false,
+          where: { op: 'eq', field: from.name, value: validValue(from) } as FilterTree['where'],
+        })
 
-      // Every switch starts from the same valid value, so the pair under test
-      // is `from → to` and not whatever the previous iteration left behind.
-      for (const to of FIELDS) {
-        fireEvent.change(screen.getByLabelText('Field'), { target: { value: from.name } })
-        fireEvent.change(screen.getByLabelText('Field'), { target: { value: to.name } })
-        const where = tree().where
+        // Every switch starts from the same valid value, so the pair under test
+        // is `from → to` and not whatever the previous iteration left behind.
+        for (const to of SAMPLE) {
+          fireEvent.change(screen.getByLabelText('Field'), { target: { value: from.name } })
+          fireEvent.change(screen.getByLabelText('Field'), { target: { value: to.name } })
+          const where = tree().where
 
-        // An empty box the person still has to fill is fine and expected. A
-        // value the server would refuse is the bug this guards.
-        const refused = validateTree(tree()).filter((issue) => issue.kind === 'invalid')
-        if (refused.length > 0) {
-          broken.push(`${from.name} → ${to.name}: ${refused.map((i) => i.message).join('; ')}`)
-          continue
+          // An empty box the person still has to fill is fine and expected. A
+          // value the server would refuse is the bug this guards.
+          const refused = validateTree(tree()).filter((issue) => issue.kind === 'invalid')
+          if (refused.length > 0) {
+            broken.push(`${from.name} → ${to.name}: ${refused.map((i) => i.message).join('; ')}`)
+            continue
+          }
+
+          // The row must read back what the tree holds, not what a select fell
+          // back to displaying.
+          expect(screen.getByLabelText('Field')).toHaveValue(to.name)
+          if (to.kind === 'enum' && where !== null && where !== undefined && 'value' in where) {
+            expect(screen.getByLabelText('Value')).toHaveValue(String(where.value))
+          }
         }
-
-        // The row must read back what the tree holds, not what a select fell
-        // back to displaying.
-        expect(screen.getByLabelText('Field')).toHaveValue(to.name)
-        if (to.kind === 'enum' && where !== null && where !== undefined && 'value' in where) {
-          expect(screen.getByLabelText('Value')).toHaveValue(String(where.value))
-        }
+        unmount()
       }
-      unmount()
-    }
 
-    expect(broken).toEqual([])
-  })
+      expect(broken).toEqual([])
+    },
+  )
 
   it('keeps the value when the new column is of the same kind', () => {
     mockApi({})
