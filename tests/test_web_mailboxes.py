@@ -95,8 +95,14 @@ async def test_nothing_is_set_up_at_first(client: httpx.AsyncClient, running_app
 async def test_the_client_goes_to_the_keychain(
     client: httpx.AsyncClient, memory_keyring: MemoryKeyring
 ) -> None:
-    await _set_client(client)
+    response = await client.put(
+        "/api/v1/mailboxes/oauth/client",
+        json={"client_id": f" {CLIENT_ID} ", "client_secret": CLIENT_SECRET},
+        headers=CSRF,
+    )
+    assert response.status_code == 200
     status = await _status(client)
+    assert response.json() == status
     assert (status["client_configured"], status["client_id"]) == (True, CLIENT_ID)
     [(key, value)] = memory_keyring.entries.items()
     assert key[1].endswith("/gmail/oauth_client")
@@ -358,24 +364,28 @@ async def test_the_app_sends_the_flow_where_it_is_told(
         fake.stop()
 
 
+@pytest.mark.parametrize(("minutes", "seconds"), [(7, 420), (0, 60)])
 async def test_only_serve_polls_the_mailboxes(
     bare_engine: Engine,
     tmp_path: Path,
     _migrated_template: Path,
     monkeypatch: pytest.MonkeyPatch,
+    minutes: int,
+    seconds: int,
 ) -> None:
+    """Every reply_poll_minutes, and a nonsense 0 polls every minute rather than failing."""
     extractor = ServeExtractor(executor=lambda factory, bus: object())  # type: ignore[arg-type,return-value]
     served = _app(
         bare_engine,
         tmp_path,
         _migrated_template,
         monkeypatch,
-        Settings(campaigns=CampaignSettings(reply_poll_minutes=7)),
+        Settings(campaigns=CampaignSettings(reply_poll_minutes=minutes)),
         extractor=extractor,
     )
     async with served.router.lifespan_context(served):
         monitor = served.state.mailbox_monitor
         assert isinstance(monitor, mailbox_service.MailboxMonitor)
-        assert monitor._interval_s == 7 * 60
+        assert monitor._interval_s == seconds
         assert monitor._task is not None and not monitor._task.done()
     assert monitor._task is None

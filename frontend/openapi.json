@@ -12804,7 +12804,7 @@
     },
     "/api/v1/mailboxes/oauth/client": {
       "put": {
-        "description": "Store the OAuth client's ID and secret in the Keychain.",
+        "description": "Store the OAuth client's ID and secret in the Keychain; answers the status after.",
         "operationId": "set_oauth_client_api_v1_mailboxes_oauth_client_put",
         "requestBody": {
           "content": {

@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.campaigns import gmail_oauth
 from netkeeper.config import Settings
 from netkeeper.db import session_scope
-from netkeeper.models import Mailbox, MailboxStatus
+from netkeeper.models import Mailbox, MailboxStatus, User
 from netkeeper.services import keychain
 from netkeeper.services import mailboxes as service
 from netkeeper.services.events import Event, EventBus
@@ -102,6 +102,21 @@ def list_mailboxes(session: SessionDep, user: CurrentUser) -> list[Mailbox]:
 @router.get("/mailboxes/status", responses=NO_KEYCHAIN)
 def mailbox_status(session: SessionDep, user: CurrentUser) -> MailboxStatusOut:
     """Whether a client is set, every mailbox, and whether any needs re-authorizing."""
+    return _status(session, user)
+
+
+@router.put("/mailboxes/oauth/client", responses={**INVALID, **NO_KEYCHAIN})
+@read_only  # writes the Keychain, never the database
+def set_oauth_client(
+    body: OAuthClientIn, session: SessionDep, user: CurrentUser
+) -> MailboxStatusOut:
+    """Store the OAuth client's ID and secret in the Keychain; answers the status after."""
+    with translate_errors():
+        service.save_client(user, gmail_oauth.validate_client(body.client_id, body.client_secret))
+    return _status(session, user)
+
+
+def _status(session: Session, user: User) -> MailboxStatusOut:
     with translate_errors():
         client = service.load_client(user.id)
     rows = service.list_mailboxes(session, user)
@@ -110,20 +125,6 @@ def mailbox_status(session: SessionDep, user: CurrentUser) -> MailboxStatusOut:
         client_id=None if client is None else client.client_id,
         mailboxes=[MailboxOut.model_validate(row) for row in rows],
         reauth_required=any(row.status is MailboxStatus.REAUTH_REQUIRED for row in rows),
-    )
-
-
-@router.put("/mailboxes/oauth/client", responses={**INVALID, **NO_KEYCHAIN})
-@read_only  # writes the Keychain, never the database
-def set_oauth_client(body: OAuthClientIn, user: CurrentUser) -> MailboxStatusOut:
-    """Store the OAuth client's ID and secret in the Keychain."""
-    with translate_errors():
-        service.save_client(user, gmail_oauth.validate_client(body.client_id, body.client_secret))
-    return MailboxStatusOut(
-        client_configured=True,
-        client_id=body.client_id.strip(),
-        mailboxes=[],
-        reauth_required=False,
     )
 
 

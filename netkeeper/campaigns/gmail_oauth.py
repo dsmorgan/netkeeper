@@ -16,8 +16,8 @@ the same refresh token and client.
 :class:`InvalidGrant`: the grant is dead (revoked, or seven days old on a
 consent screen still in Testing) and only a person authorizing again fixes it.
 Any other refusal is :class:`OAuthRefused` with Google's error code (a wrong
-client secret is ``invalid_client``). A network failure, a timeout, or a 5xx is
-:class:`OAuthUnavailable`: nothing is known about the grant, so nothing is
+client secret is ``invalid_client``). A network failure, a timeout, a 5xx, a
+``408`` or a ``429`` is :class:`OAuthUnavailable`: nothing is known about the grant, so nothing is
 marked. No message carries a token, a code, or the client secret.
 
 **Endpoints.** Every call takes :class:`GoogleEndpoints`, defaulting to
@@ -399,6 +399,10 @@ class LoopbackReceiver:
 # --- HTTP --------------------------------------------------------------------------
 
 
+#: Statuses that say "not now" rather than anything about the grant.
+_TRY_LATER: Final = frozenset({408, 429})
+
+
 def _require_loopback(redirect_uri: str) -> None:
     parts = urlsplit(redirect_uri)
     if parts.scheme != "http" or parts.hostname not in {"127.0.0.1", "localhost", "::1"}:
@@ -440,8 +444,8 @@ def _send(ends: GoogleEndpoints, request: Request) -> dict[str, Any]:
                 " Testing); authorize again",
                 code=INVALID_GRANT,
             ) from exc
-        if exc.code >= 500:
-            raise OAuthUnavailable(f"Google failed with {exc.code}", code="unavailable") from exc
+        if exc.code >= 500 or exc.code in _TRY_LATER:
+            raise OAuthUnavailable(f"Google answered {exc.code}", code="unavailable") from exc
         code = error or f"http_{exc.code}"
         raise OAuthRefused(f"Google refused the request: {code}", code=code) from exc
     except (URLError, TimeoutError, OSError) as exc:
