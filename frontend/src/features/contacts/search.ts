@@ -18,6 +18,16 @@ export const DEFAULT_PAGE_SIZE = 50
 /** The API's ceiling on `limit` (`ContactQuery.limit`); the picker offers no more. */
 export const MAX_PAGE_SIZE = 200
 export const PAGE_SIZES = [25, 50, 100, 200] as const
+/**
+ * The highest page a URL may ask for.
+ *
+ * Far past any real network, and low enough that `(page - 1) * MAX_PAGE_SIZE`
+ * stays an exact integer and inside the API's own ceiling on `offset`
+ * (`MAX_QUERY_OFFSET`, 1,000,000,000), so a hand-edited `?page=` can never ask
+ * for an offset the server refuses. The table also clamps a page past the last
+ * one to the last one, once it knows the total.
+ */
+export const MAX_PAGE = 1_000_000
 
 export interface ContactsSearch {
   /** Free text across the name, company, title, headline, and location columns. */
@@ -102,7 +112,7 @@ function tagList(value: unknown): string[] | undefined {
  */
 export function validateContactsSearch(input: Record<string, unknown>): ContactsSearch {
   const met = MET_VALUES.find((value) => value === input.met)
-  const page = input.page === undefined ? undefined : positive(input.page, 1)
+  const page = input.page === undefined ? undefined : positive(input.page, 1, MAX_PAGE)
   const size =
     input.size === undefined ? undefined : positive(input.size, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE)
   const sort = parseSort(text(input.sort))
@@ -244,4 +254,58 @@ export function pageSize(search: ContactsSearch): number {
 
 export function pageOffset(search: ContactsSearch): number {
   return ((search.page ?? 1) - 1) * pageSize(search)
+}
+
+/** The last page `total` rows fill at `size` a page; page one when there are none. */
+export function lastPage(total: number, size: number): number {
+  return Math.max(1, Math.ceil(total / size))
+}
+
+/** A JSON reading of a value with object keys sorted, so key order never makes two trees differ. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+/**
+ * A filter tree with its incidental differences taken out: a missing `where` is
+ * `null`, and the children of an `and` or `or` are put in one order, since
+ * neither cares which comes first.
+ */
+function normalized(filter: FilterTree | FilterTreeOut | null | undefined): string {
+  const node = (value: unknown): unknown => {
+    if (value === null || typeof value !== 'object') return value
+    const record = value as Record<string, unknown>
+    if ((record.op === 'and' || record.op === 'or') && Array.isArray(record.children)) {
+      const children = record.children.map(node).sort((a, b) => {
+        const left = canonical(a)
+        const right = canonical(b)
+        return left < right ? -1 : left > right ? 1 : 0
+      })
+      return { ...record, children }
+    }
+    return record
+  }
+  return canonical({
+    include_archived: filter?.include_archived ?? false,
+    where: node(filter?.where ?? null),
+  })
+}
+
+/**
+ * Whether the filter bar can say everything a stored filter says.
+ *
+ * When it can, touching a filter control after applying the view only changes
+ * what the control changes. When it cannot, the table is running the view's
+ * own tree, and the first touch replaces that tree with the bar's reading of it
+ * — a wider selection than the one on screen (#88), which the page warns about.
+ */
+export function filterBarCanShow(filter: FilterTree | FilterTreeOut | null | undefined): boolean {
+  return normalized(buildFilter(searchFromFilter(filter, []))) === normalized(filter)
 }

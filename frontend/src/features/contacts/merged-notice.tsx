@@ -1,5 +1,7 @@
 import { Link } from '@tanstack/react-router'
 
+import { cn } from '@/lib/utils'
+
 import { mergedInto } from './api'
 
 /**
@@ -9,11 +11,11 @@ import { mergedInto } from './api'
  * survivor (spec 8.2). That is not an error to shrug at: it says where the
  * person went, so it renders as a link to them.
  */
-export function WriteError({ error }: { error: Error | null }) {
+export function WriteError({ error, className }: { error: Error | null; className?: string }) {
   if (!error) return null
   const survivor = mergedInto(error)
   return (
-    <p role="alert" className="text-destructive">
+    <p role="alert" className={cn('text-destructive', className)}>
       {survivor === null ? (
         error.message
       ) : (

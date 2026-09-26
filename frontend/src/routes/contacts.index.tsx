@@ -15,9 +15,10 @@ function ContactsRoute() {
   return (
     <ContactsTablePage
       search={search}
-      onNavigate={(update: (previous: ContactsSearch) => ContactsSearch) =>
-        void navigate({ search: update })
-      }
+      onNavigate={(
+        update: (previous: ContactsSearch) => ContactsSearch,
+        options?: { replace?: boolean },
+      ) => void navigate({ search: update, replace: options?.replace })}
     />
   )
 }

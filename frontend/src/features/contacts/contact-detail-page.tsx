@@ -144,20 +144,12 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
           instead.
         </p>
       )}
-      {contact.merged_into_id !== null && (
-        <p role="status" className="rounded-lg bg-muted/60 px-3 py-2">
-          This contact was merged into{' '}
-          <Link
-            to="/contacts/$contactId"
-            params={{ contactId: String(contact.merged_into_id) }}
-            className="underline underline-offset-4"
-          >
-            contact {contact.merged_into_id}
-          </Link>
-          .
-        </p>
-      )}
-      {contact.needs_review_at !== null && contact.merged_into_id === null && (
+      {/* No "merged into" banner: `GET /contacts/{id}` resolves a merged-away id
+          through the whole chain to its final survivor, so the contact shown here
+          always has `merged_into_id` null, and `resolved_from` above is how a
+          merge is announced. A merge that happens in another tab surfaces on the
+          next write, as `WriteError`'s link to the survivor. */}
+      {contact.needs_review_at !== null && (
         <NeedsReviewNotice
           name={name}
           archived={archived}

@@ -52,6 +52,8 @@ export interface BulkBarProps {
   selection: BulkSelection
   /** How many rows are picked, or the filter's total when the filter is selected. */
   selectedCount: number
+  /** The most rows that can be picked one by one; past it, only the whole filter. */
+  pickLimit: number
   everything: boolean
   /** Rows matching the filter, so "select all of them" can say how many. */
   total: number
@@ -73,6 +75,7 @@ export interface BulkBarProps {
 export function BulkBar({
   selection,
   selectedCount,
+  pickLimit,
   everything,
   total,
   onSelectEverything,
@@ -96,6 +99,12 @@ export function BulkBar({
         <Button variant="link" size="sm" onClick={onSelectEverything}>
           Select all {total.toLocaleString()} matching this filter
         </Button>
+      )}
+      {!everything && selectedCount >= pickLimit && (
+        <span role="status" className="text-muted-foreground">
+          {pickLimit.toLocaleString()} is the most you can pick one by one. To act on more, select
+          all matching this filter.
+        </span>
       )}
       <Menu>
         <MenuTrigger

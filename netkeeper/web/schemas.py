@@ -392,6 +392,15 @@ ProvenanceField = Literal[
 """The LinkedIn fields with per-field provenance; the same set as ``PROVENANCE_ORDER``."""
 
 
+MAX_QUERY_OFFSET = 1_000_000_000
+"""The highest ``offset`` ``POST /contacts/query`` accepts.
+
+Far past any real network, and inside a 32-bit integer so SQLite and PostgreSQL
+both take it as a bind parameter; without a ceiling, ``2**63`` reached SQLite as
+an ``OverflowError`` and a 500 (#88).
+"""
+
+
 class ContactQuery(BaseModel):
     """The body of ``POST /contacts/query``: a filter, a sort, a page, and the columns wanted.
 
@@ -405,7 +414,7 @@ class ContactQuery(BaseModel):
     filter: FilterTree | None = None
     sort: list[SortKey] = Field(default_factory=list)
     limit: int = Field(50, ge=1, le=200)
-    offset: int = Field(0, ge=0)
+    offset: int = Field(0, ge=0, le=MAX_QUERY_OFFSET)
     columns: list[ContactColumn] | None = None
 
 
