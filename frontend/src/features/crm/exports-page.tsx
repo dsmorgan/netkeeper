@@ -27,7 +27,7 @@ export function ExportsPage() {
     <div className="grid gap-4 lg:grid-cols-[1fr_24rem]">
       <Card>
         <CardHeader>
-          <CardTitle>Who to export</CardTitle>
+          <CardTitle level={2}>Who to export</CardTitle>
           <CardDescription>
             No conditions means every live contact. The export runs this filter through the same
             compiler the contacts table and smart lists use.
@@ -41,7 +41,7 @@ export function ExportsPage() {
       <div className="space-y-4">
         <Card>
           <CardHeader>
-            <CardTitle>The file</CardTitle>
+            <CardTitle level={2}>The file</CardTitle>
           </CardHeader>
           <CardContent>
             <ExportForm filter={filter} />
@@ -50,7 +50,7 @@ export function ExportsPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>What each preset holds</CardTitle>
+            <CardTitle level={2}>What each preset holds</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             {EXPORT_PRESETS.map((preset) => (

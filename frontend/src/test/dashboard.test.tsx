@@ -121,6 +121,23 @@ function renderedSteps() {
 }
 
 describe('dashboard: a fresh install with nothing imported', () => {
+  it('gives every setup step a real heading, so a screen reader can move between them', async () => {
+    serveDashboard({ stats: statsBody() })
+    await renderApp('/')
+    const main = within(screen.getByRole('main'))
+    await main.findByText('Start here')
+
+    const headings = main.getAllByRole('heading', { level: 2 }).map((node) => node.textContent)
+    expect(headings).toEqual([
+      'Start here',
+      '1. Import your data',
+      '2. Review what was tagged by a rule',
+      '3. Triage',
+      '4. Build a list',
+      '5. Export',
+    ])
+  })
+
   it('says exactly what to do first, and renders all five real steps correctly', async () => {
     serveDashboard({ stats: statsBody() })
     await renderApp('/')

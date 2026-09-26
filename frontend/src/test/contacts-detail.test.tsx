@@ -197,6 +197,17 @@ describe('contact detail', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it('puts its cards in the outline under the contact’s name', async () => {
+    serveContact(contactDetail())
+    await renderApp('/contacts/1')
+    await screen.findByRole('heading', { name: 'Ada Ventura', level: 2 })
+    const main = within(screen.getByRole('main'))
+    const cards = main.getAllByRole('heading', { level: 3 }).map((node) => node.textContent)
+    expect(cards).toEqual(
+      expect.arrayContaining(['Fields', 'Tags', 'Record', 'Notes', 'Contact details', 'Timeline']),
+    )
+  })
+
   it('says so when a merged-away id brought you to the survivor', async () => {
     serveContact(contactDetail({ id: 1, resolved_from: 77 }))
     await renderApp('/contacts/77')

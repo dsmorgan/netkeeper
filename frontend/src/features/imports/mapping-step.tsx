@@ -91,7 +91,7 @@ export function MappingStep({
     <div className="flex max-w-4xl flex-col gap-4">
       <Card>
         <CardHeader>
-          <CardTitle>Map the columns</CardTitle>
+          <CardTitle level={2}>Map the columns</CardTitle>
           <CardDescription>
             {filename} · {inspection.row_count} data {inspection.row_count === 1 ? 'row' : 'rows'} ·{' '}
             {headers.length} columns
@@ -246,7 +246,7 @@ export function MappingStep({
 
       <Card>
         <CardHeader>
-          <CardTitle>Columns</CardTitle>
+          <CardTitle level={2}>Columns</CardTitle>
         </CardHeader>
         <CardContent>
           <table className="w-full text-left">
@@ -307,7 +307,7 @@ export function MappingStep({
 
       <Card>
         <CardHeader>
-          <CardTitle>Save this mapping</CardTitle>
+          <CardTitle level={2}>Save this mapping</CardTitle>
           <CardDescription>
             A saved preset is offered the next time a file has these columns.
           </CardDescription>

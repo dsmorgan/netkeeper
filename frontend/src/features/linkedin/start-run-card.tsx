@@ -2,13 +2,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { INPUT_CLASS, SELECT_CLASS } from '@/features/imports/styles'
 import { cn } from '@/lib/utils'
 
 import { budgetQuery, linkedinKeys, startRun } from './api'
-import { SectionTitle } from './section-title'
 import { RUNNABLE_KINDS, RUN_KIND_LABELS, type RunKind } from './types'
 
 function message(error: unknown): string {
@@ -84,7 +83,7 @@ export function StartRunCard({ onStarted }: { onStarted: (runId: number) => void
   return (
     <Card size="sm">
       <CardHeader>
-        <SectionTitle>Start a run</SectionTitle>
+        <CardTitle level={2}>Start a run</CardTitle>
         <CardDescription>A manual sync or enrichment, outside the schedule.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">

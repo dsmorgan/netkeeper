@@ -38,7 +38,7 @@ export function DashboardPage() {
     return (
       <Card size="sm" className="max-w-xl" role="alert">
         <CardHeader>
-          <CardTitle>Backend unreachable</CardTitle>
+          <CardTitle level={2}>Backend unreachable</CardTitle>
         </CardHeader>
         <CardContent>
           <p>
@@ -83,7 +83,7 @@ export function DashboardPage() {
       {!hasContacts && (
         <Card size="sm" className="border-primary/40">
           <CardHeader>
-            <CardTitle>Start here</CardTitle>
+            <CardTitle level={2}>Start here</CardTitle>
             <CardDescription>
               Nothing is imported yet. Bring in a CSV or your LinkedIn archive first — every other
               step needs contacts to work with.

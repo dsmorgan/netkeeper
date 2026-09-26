@@ -44,7 +44,7 @@ export function SavedViewsPanel() {
     <div className="grid gap-4 lg:grid-cols-[20rem_1fr]">
       <Card>
         <CardHeader>
-          <CardTitle>Saved views</CardTitle>
+          <CardTitle level={2}>Saved views</CardTitle>
           <CardDescription>
             Columns, sort, and a filter, saved so the contacts table can restore them.
           </CardDescription>
@@ -149,7 +149,7 @@ function ViewEditor({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{view === null ? 'New view' : view.name}</CardTitle>
+        <CardTitle level={2}>{view === null ? 'New view' : view.name}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid max-w-sm gap-1">

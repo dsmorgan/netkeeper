@@ -139,7 +139,7 @@ export function DraftReview({ run, mapping, onBackToMapping, onRestart }: DraftR
     return (
       <Card className="max-w-2xl">
         <CardHeader>
-          <CardTitle>This import is already {run.status.replace('_', ' ')}</CardTitle>
+          <CardTitle level={2}>This import is already {run.status.replace('_', ' ')}</CardTitle>
         </CardHeader>
         <CardContent>
           <p className="text-muted-foreground">

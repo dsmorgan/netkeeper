@@ -76,7 +76,7 @@ function TagList({ tags }: { tags: ReturnType<typeof useQuery<TagOut[]>> }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Tags</CardTitle>
+        <CardTitle level={2}>Tags</CardTitle>
         <CardDescription>
           A tag you add by hand is never removed by a rule. Deleting a tag deletes its assignments
           and its rules with it.
@@ -194,7 +194,7 @@ function RuleList({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Auto-tag rules</CardTitle>
+        <CardTitle level={2}>Auto-tag rules</CardTitle>
         <CardDescription>
           Each rule searches one field for a regular expression, without regard to case. Rules run
           on every contact create and enrichment, and on demand. When two rules for the same tag

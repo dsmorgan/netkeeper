@@ -14,7 +14,7 @@ export function PlaceholderPage({ title, phase, purpose }: PlaceholderPageProps)
   return (
     <Card size="sm" className="max-w-xl">
       <CardHeader>
-        <CardTitle>{title}</CardTitle>
+        <CardTitle level={2}>{title}</CardTitle>
         <CardDescription>{purpose}</CardDescription>
       </CardHeader>
       <CardContent className="flex items-center gap-2">

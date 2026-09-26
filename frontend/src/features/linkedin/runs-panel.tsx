@@ -2,13 +2,12 @@ import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { SELECT_CLASS } from '@/features/imports/styles'
 import { cn } from '@/lib/utils'
 
 import { runsQuery } from './api'
 import { formatWhen, RUN_STATUS_CLASSES, summarizeFields } from './fields'
-import { SectionTitle } from './section-title'
 import {
   RUNNABLE_KINDS,
   RUN_KIND_LABELS,
@@ -48,7 +47,7 @@ export function RunsPanel({
   return (
     <Card size="sm">
       <CardHeader>
-        <SectionTitle>Runs</SectionTitle>
+        <CardTitle level={2}>Runs</CardTitle>
         <CardDescription>Every sync and enrichment, newest first.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">

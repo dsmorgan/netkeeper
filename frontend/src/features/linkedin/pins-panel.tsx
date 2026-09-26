@@ -2,14 +2,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { contactsPageQuery } from '@/features/contacts/api'
 import { buildFilter, DEFAULT_SORT } from '@/features/contacts/search'
 import { INPUT_CLASS } from '@/features/imports/styles'
 import { cn } from '@/lib/utils'
 
 import { linkedinKeys, pinContact, pinsQuery, unpinContact } from './api'
-import { SectionTitle } from './section-title'
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -54,7 +53,7 @@ export function PinsPanel() {
   return (
     <Card size="sm">
       <CardHeader>
-        <SectionTitle>Pins</SectionTitle>
+        <CardTitle level={2}>Pins</CardTitle>
         <CardDescription>
           At the front of the next enrichment run, up to {MAX_PINS} at a time.
         </CardDescription>

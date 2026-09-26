@@ -32,9 +32,29 @@ function CardHeader({ className, ...props }: React.ComponentProps<'div'>) {
   )
 }
 
-function CardTitle({ className, ...props }: React.ComponentProps<'div'>) {
+/**
+ * The heading levels a card title can take. The top bar owns the page's `<h1>`,
+ * so a card starts at `<h2>`; a card under another heading goes a level down.
+ */
+type CardTitleLevel = 2 | 3 | 4
+
+/**
+ * A card's title, as a real heading (#135).
+ *
+ * `level` is required rather than defaulted, because only the page knows where
+ * a card sits in its outline: a card on its own is an `<h2>`, and a card under
+ * a heading of its own (a contact's name, a step's result) is an `<h3>`. A
+ * screen reader user moving by heading finds every card this way, which a
+ * `<div>` styled to look like a heading never let them do.
+ */
+function CardTitle({
+  level,
+  className,
+  ...props
+}: React.ComponentProps<'h2'> & { level: CardTitleLevel }) {
+  const Heading = `h${level}` as const
   return (
-    <div
+    <Heading
       data-slot="card-title"
       className={cn(
         'font-heading text-base leading-snug font-medium group-data-[size=sm]/card:text-sm',

@@ -62,7 +62,7 @@ function RunDetail({ run }: { run: ImportRun }) {
     <div className="flex max-w-5xl flex-col gap-4">
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
+          <CardTitle level={2} className="flex items-center gap-2">
             {run.filename}
             <RunStatusBadge status={run.status} />
           </CardTitle>
@@ -92,7 +92,7 @@ function RunDetail({ run }: { run: ImportRun }) {
       {run.status === 'draft' && (
         <Card>
           <CardHeader>
-            <CardTitle>Never committed</CardTitle>
+            <CardTitle level={2}>Never committed</CardTitle>
             <CardDescription>
               This file was read and resolved, but nothing was written. The rows are still here, so
               it can be finished without choosing the file again.
@@ -139,7 +139,7 @@ function RollbackSummary({ result }: { result: RollbackResult }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Rolled back</CardTitle>
+        <CardTitle level={2}>Rolled back</CardTitle>
       </CardHeader>
       <CardContent>
         <p role="status">
@@ -176,7 +176,7 @@ function RollbackCard({ run, onDone }: { run: ImportRun; onDone: (r: RollbackRes
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Undo this import</CardTitle>
+        <CardTitle level={2}>Undo this import</CardTitle>
         <CardDescription>Reverses what this run did, and only what this run did.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -304,7 +304,7 @@ function RowsCard({ run, mapping }: { run: ImportRun; mapping: ColumnMapping }) 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Rows</CardTitle>
+        <CardTitle level={2}>Rows</CardTitle>
         <CardDescription>
           Every row as it was read, with what happened to it. Cells from columns the mapping left
           out are kept here and nowhere else.

@@ -97,7 +97,7 @@ export function CandidatesStep({
       <div className="flex max-w-4xl flex-col gap-4">
         <Card>
           <CardHeader>
-            <CardTitle>No candidates</CardTitle>
+            <CardTitle level={2}>No candidates</CardTitle>
             <CardDescription>
               Every row of {run.filename} either matches one contact or is plainly a new person, so
               there is nothing to decide.
@@ -118,7 +118,7 @@ export function CandidatesStep({
     <div className="flex max-w-4xl flex-col gap-4">
       <Card>
         <CardHeader>
-          <CardTitle>Decide the candidates</CardTitle>
+          <CardTitle level={2}>Decide the candidates</CardTitle>
           <CardDescription>
             These rows look like someone you already have, but not closely enough to be sure. Each
             one needs a decision before the import can be committed.
@@ -156,7 +156,7 @@ export function CandidatesStep({
         return (
           <Card key={row.row_number}>
             <CardHeader>
-              <CardTitle>
+              <CardTitle level={3}>
                 Row {row.row_number}: {rowLabel(row.raw, mapping)}
               </CardTitle>
             </CardHeader>

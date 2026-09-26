@@ -55,7 +55,7 @@ export function CommitStep({
     <div className="flex max-w-3xl flex-col gap-4">
       <Card>
         <CardHeader>
-          <CardTitle>Commit the import</CardTitle>
+          <CardTitle level={2}>Commit the import</CardTitle>
           <CardDescription>
             {run.filename} · every row lands in one transaction, or none of them does.
           </CardDescription>
@@ -136,7 +136,7 @@ export function CommitResult({ run, onRestart }: { run: ImportRun; onRestart: ()
     <div className="flex max-w-3xl flex-col gap-4">
       <Card>
         <CardHeader>
-          <CardTitle>Imported {run.filename}</CardTitle>
+          <CardTitle level={2}>Imported {run.filename}</CardTitle>
           <CardDescription>
             {run.created_count} new {run.created_count === 1 ? 'contact' : 'contacts'},{' '}
             {run.matched_count} updated. Undo it from this run&rsquo;s page if it was not what you

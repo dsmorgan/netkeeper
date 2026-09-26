@@ -2,13 +2,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { cn } from '@/lib/utils'
 
 import { cancelRun, linkedinKeys, resumeRun, runQuery } from './api'
 import { formatFields, formatWhen, RUN_STATUS_CLASSES, type Field } from './fields'
-import { SectionTitle } from './section-title'
 import { RUN_KIND_LABELS, RUN_STATUS_LABELS } from './types'
 
 function message(error: unknown): string {
@@ -73,7 +72,7 @@ export function RunDetail({
   return (
     <Card size="sm">
       <CardHeader>
-        <SectionTitle className="flex items-center gap-2">
+        <CardTitle level={2} className="flex items-center gap-2">
           {RUN_KIND_LABELS[data.kind]}
           <span
             className={cn(
@@ -83,7 +82,7 @@ export function RunDetail({
           >
             {RUN_STATUS_LABELS[data.status]}
           </span>
-        </SectionTitle>
+        </CardTitle>
         <CardDescription>
           Started {formatWhen(data.started_at)}
           {data.completed_at !== null && ` · ended ${formatWhen(data.completed_at)}`}

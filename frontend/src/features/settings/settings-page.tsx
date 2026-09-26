@@ -13,7 +13,7 @@ export function SettingsPage() {
     <div className="grid max-w-3xl gap-4">
       <Card size="sm">
         <CardHeader>
-          <CardTitle>Settings</CardTitle>
+          <CardTitle level={2}>Settings</CardTitle>
           <CardDescription>
             Gmail auth, pacing, budgets, send windows, LLM, [me] merge fields, backups.
           </CardDescription>
@@ -31,7 +31,7 @@ export function SettingsPage() {
 
       <Card size="sm">
         <CardHeader>
-          <CardTitle>Current user</CardTitle>
+          <CardTitle level={2}>Current user</CardTitle>
           <CardDescription>
             Raw <code className="font-mono">GET /api/v1/me</code> payload.
           </CardDescription>
