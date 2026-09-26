@@ -481,6 +481,18 @@ def test_a_script_element_is_folded_away_and_keeps_its_text(
     assert _html_to_text("<style>p { color: red }</style>After") == "p { color: red }After"
 
 
+def test_text_after_an_unclosed_script_survives_on_every_python_patch(
+    writer: Session, user: User, tmp_path: Path
+) -> None:
+    """#231: CPython 3.12.0-3.12.11 drop whatever an unclosed ``<script>`` or ``<style>``
+    left buffered when the parser closes; 3.12.12+ keep it. ``requires-python`` admits
+    both, so the importer flushes the buffer itself rather than lose the message tail."""
+    assert _imported_summary(writer, user, tmp_path, "Hi Ada,<style>see you Tuesday") == (
+        "Hi Ada,see you Tuesday"
+    )
+    assert _html_to_text("<p>One</p><script>two &amp; three") == "One\ntwo & three"
+
+
 def test_an_image_only_message_has_no_summary(writer: Session, user: User, tmp_path: Path) -> None:
     body = "<img src='https://example.test/x.png'>"
     assert _imported_summary(writer, user, tmp_path, body) is None

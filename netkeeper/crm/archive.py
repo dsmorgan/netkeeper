@@ -226,6 +226,17 @@ class _TextExtractor(HTMLParser):
     def handle_data(self, data: str) -> None:
         self._parts.append(data)
 
+    def close(self) -> None:
+        # An unclosed <script> or <style> leaves the parser in CDATA mode with the
+        # rest of the message buffered as that element's content. CPython 3.12.12+
+        # flushes that buffer as data on close; 3.12.0-3.12.11 drop it, which would
+        # lose everything after the tag (#231). Flush it here so every supported
+        # interpreter keeps it, raw, as the newer ones do.
+        if self.cdata_elem is not None and self.rawdata:
+            self.handle_data(self.rawdata)
+            self.rawdata = ""
+        super().close()
+
     def text(self) -> str:
         return "".join(self._parts)
 
