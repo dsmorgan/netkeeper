@@ -3,6 +3,7 @@
 import base64
 import dataclasses
 import hashlib
+import http.client
 import json
 import logging
 import socket
@@ -392,3 +393,25 @@ def test_the_redirect_after_a_silent_connection_still_arrives() -> None:
             result, _ = _wait_in_thread(receiver, 4)
             browser.join(5)
     assert result == {"state": "s1", "code": "c1"}
+
+
+# --- an answer cut off part way (#256) ----------------------------------------------
+
+
+def test_an_answer_cut_off_part_way_is_unavailable(fake_google: FakeGoogle) -> None:
+    """``http.client.IncompleteRead`` is not an ``OSError``; it used to escape as a 500."""
+    token = fake_google.issue_refresh_token()
+    fake_google.truncate = True
+    with pytest.raises(OAuthUnavailable) as caught:
+        gmail_oauth.refresh_access_token(CLIENT, token)
+    assert isinstance(caught.value.__cause__, http.client.IncompleteRead)
+
+
+def test_a_refusal_cut_off_part_way_is_never_read_as_a_dead_grant(fake_google: FakeGoogle) -> None:
+    token = fake_google.issue_refresh_token()
+    fake_google.revoke_all()
+    fake_google.truncate = True
+    with pytest.raises(OAuthRefused) as caught:
+        gmail_oauth.refresh_access_token(CLIENT, token)
+    assert not isinstance(caught.value, InvalidGrant)
+    assert caught.value.code == "http_400"

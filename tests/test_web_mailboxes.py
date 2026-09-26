@@ -272,6 +272,24 @@ async def test_a_revoked_token_shows_as_reauth_required_after_one_check(
     ]
 
 
+async def test_an_answer_cut_off_part_way_is_not_a_server_error(
+    client: httpx.AsyncClient, fake_google: FakeGoogle
+) -> None:
+    """The check answers the mailbox unchanged, and the callback names the outcome (#256)."""
+    await _set_client(client)
+    await _connect(client, fake_google)
+    [mailbox] = (await client.get("/api/v1/mailboxes")).json()
+    fake_google.truncate = True
+    response = await client.post(f"/api/v1/mailboxes/{mailbox['id']}/check", headers=CSRF)
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    url = await _start(client, mailbox["id"])
+    assert await _follow(client, fake_google.consent(url)) == {
+        "gmail": "error",
+        "reason": "unavailable",
+    }
+
+
 async def test_reauthorizing_preselects_the_account_and_heals_it(
     client: httpx.AsyncClient, fake_google: FakeGoogle
 ) -> None:
