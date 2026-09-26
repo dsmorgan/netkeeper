@@ -1513,7 +1513,9 @@ def import_csv_cmd(
             "--on-candidate",
             help="How to resolve a row that matches more than one contact: "
             "new (a separate contact) or skip (leave it out). Applies to every ambiguous "
-            "row in the file at once, not one at a time. Omitted: refuse and say which rows.",
+            "row in the file at once, not one at a time, and to each row on its own: with "
+            "new, a person listed twice in the file becomes two new contacts. "
+            "Omitted: refuse and say which rows.",
         ),
     ] = None,
 ) -> None:
@@ -1713,7 +1715,9 @@ def import_resume_cmd(
             "--on-candidate",
             help="How to resolve a row that matches more than one contact: "
             "new (a separate contact) or skip (leave it out). Applies to every row still "
-            "undecided in the run at once, not one at a time. Omitted: refuse and say which rows.",
+            "undecided in the run at once, not one at a time, and to each row on its own: with "
+            "new, a person listed twice in the file becomes two new contacts. "
+            "Omitted: refuse and say which rows.",
         ),
     ] = None,
 ) -> None:
