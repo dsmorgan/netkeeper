@@ -634,6 +634,84 @@ async def test_the_worker_refuses_a_scheduled_connections_run_with_the_breaker_t
         )
 
 
+async def test_the_worker_refuses_a_scheduled_connections_run_with_the_answer_lost_limit_tripped(
+    session_factory: Any, settings: Settings
+) -> None:
+    """#199: the same second, independent check for the answer-lost limit."""
+    import factories
+
+    from netkeeper.worker import BrowserWorker
+
+    provider, connector = fake_provider()
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        account = ensure_account(session, user)
+        arm_scheduled_runs(session, user, now=START)
+        for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
+            route_breaker.record_answer_lost(
+                session, user, account.id, answer_lost=True, clean_end=False, now=START
+            )
+        run = SyncRun(
+            user_id=user.id,
+            linkedin_account_id=account.id,
+            kind=SyncRunKind.CONNECTIONS_INCREMENTAL,
+            trigger=SyncRunTrigger.SCHEDULED,
+            started_at=START,
+        )
+        session.add(run)
+        session.flush()
+        run_id, user_id = run.id, user.id
+    worker = BrowserWorker(provider, session_factory, settings.linkedin)
+
+    outcome = await worker.execute(run_id, user_id)
+
+    assert outcome is runs.RunOutcome.DONE
+    assert connector.attaches == 0
+    with session_scope(session_factory) as session:
+        owner = session.get(User, user_id)
+        assert owner is not None
+        stored = runs.get_run(session, owner, run_id)
+        assert (stored.status, stored.stop_reason) == (
+            SyncRunStatus.FAILED,
+            "answer_lost_breaker",
+        )
+
+
+async def test_the_worker_attaches_a_manual_run_with_the_answer_lost_limit_tripped(
+    session_factory: Any, settings: Settings
+) -> None:
+    """Manual runs are never refused for it: a run by hand is how a person checks."""
+    import factories
+
+    from netkeeper.linkedin.browser import BrowserUnavailable
+    from netkeeper.worker import BrowserWorker
+
+    provider, connector = fake_provider(error=BrowserUnavailable("Chrome is not running"))
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        account = ensure_account(session, user)
+        for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
+            route_breaker.record_answer_lost(
+                session, user, account.id, answer_lost=True, clean_end=False, now=START
+            )
+        run = SyncRun(
+            user_id=user.id,
+            linkedin_account_id=account.id,
+            kind=SyncRunKind.CONNECTIONS_FULL,
+            trigger=SyncRunTrigger.MANUAL,
+            started_at=START,
+        )
+        session.add(run)
+        session.flush()
+        run_id, user_id = run.id, user.id
+    worker = BrowserWorker(provider, session_factory, settings.linkedin)
+
+    outcome = await worker.execute(run_id, user_id)
+
+    assert connector.attaches == 1
+    assert outcome is runs.RunOutcome.RETRY_LATER
+
+
 async def test_the_worker_does_not_refuse_a_tripped_breaker_for_enrichment(
     session_factory: Any, settings: Settings
 ) -> None:

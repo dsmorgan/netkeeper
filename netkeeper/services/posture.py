@@ -418,6 +418,7 @@ def posture(
         _scheduled_jobs(scheduler),
         _scheduled_runs_armed(session, user, account_id),
         _route_changed_breaker(session, user, account_id),
+        _answer_lost_limit(session, user, account_id),
         _network_aging(session, user),
     ]
     return PostureReport(
@@ -1227,6 +1228,59 @@ def _route_changed_breaker(session: Session, user: User, account_id: int) -> Pro
             " scheduled connections runs are skipped until this clears. Run one by hand"
             " (`netkeeper linkedin sync`) to check whether the wall is still there, or"
             " clear it directly with `netkeeper linkedin schedule reset-breaker`",
+        ),
+    )
+
+
+def _answer_lost_limit(session: Session, user: User, account_id: int) -> Protection:
+    """The answer-lost limit's count (#199): consecutive connections runs recorded
+    ``answer_lost`` -- the page's answers arrived with no body the browser could
+    hand over. That moves neither heat nor the route-changed breaker, so this is
+    what stops scheduled runs spending page views on it once it reaches
+    :data:`~netkeeper.services.route_breaker.ANSWER_LOST_THRESHOLD`. Reported
+    the way :func:`_route_changed_breaker` reports its own streak, unreadable
+    row included.
+    """
+    current = route_breaker.answer_lost_state(session, user, account_id)
+    since = f" (since {current.since:%Y-%m-%d %H:%M UTC})" if current.since is not None else ""
+    if not current.readable:
+        return Protection(
+            name="answer-lost limit",
+            status=Status.UNKNOWN,
+            value="stored state unreadable; treated as tripped",
+            warnings=(
+                "the answer-lost limit's stored state is corrupt and could not be read."
+                " Scheduled connections runs are skipped until it is next written (fail"
+                " closed) -- run one by hand (`netkeeper linkedin sync`) to check and"
+                " repair it, or clear it directly with"
+                " `netkeeper linkedin schedule reset-breaker`",
+            ),
+        )
+    if current.count == 0:
+        return Protection(
+            name="answer-lost limit",
+            status=Status.ON,
+            value="clear: no consecutive connections runs have ended answer_lost",
+        )
+    if not current.tripped:
+        return Protection(
+            name="answer-lost limit",
+            status=Status.ON,
+            value=(
+                f"{current.count} of {route_breaker.ANSWER_LOST_THRESHOLD} answer_lost"
+                f" connections runs in a row{since}"
+            ),
+        )
+    return Protection(
+        name="answer-lost limit",
+        status=Status.ON,
+        value=f"tripped: {current.count} answer_lost connections runs in a row{since}",
+        warnings=(
+            f"{current.count} connections runs in a row ended answer_lost{since}: the"
+            " page's answers keep arriving unreadable, and scheduled connections runs are"
+            " skipped until this clears. Run one by hand (`netkeeper linkedin sync`) to"
+            " check whether they still do, or clear it directly with"
+            " `netkeeper linkedin schedule reset-breaker`",
         ),
     )
 

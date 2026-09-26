@@ -99,7 +99,8 @@ gate is on by default at every entry point (:data:`DEFAULT_ARM_GATE`); only
 passes, turns it off. For the two connections kinds, :func:`poll_and_fire`
 also asks :mod:`netkeeper.services.route_breaker` (#189 item 1): once two
 connections runs in a row have ended ``route_changed``, a due fire is skipped
-as ``"route_changed_breaker"`` the same way, with no off switch at all. A
+as ``"route_changed_breaker"`` the same way, with no off switch at all, and
+once three in a row have ended ``answer_lost`` (#199), as ``"answer_lost_breaker"``. A
 handler that could not reach the browser answers
 :attr:`JobOutcome.RETRY_LATER`, and :func:`park_retry` parks one retry 20 to 50
 minutes out (spec 9.9).
@@ -859,7 +860,9 @@ async def poll_and_fire(
     ``CONNECTIONS_INCREMENTAL``) whose route-changed breaker is tripped
     (:mod:`netkeeper.services.route_breaker`, #189 item 1 -- two connections
     runs in a row ended ``route_changed``) it is skipped as
-    ``"route_changed_breaker"``; that check is unconditional, with no
+    ``"route_changed_breaker"``, and one whose answer-lost limit is tripped
+    (#199 -- three connections runs in a row ended ``answer_lost``) as
+    ``"answer_lost_breaker"``; those checks are unconditional, with no
     "disabled" escape hatch. Either way the cadence still
     advances, so the scheduler does not spin retrying the same fire on every
     heartbeat, and a skipped fire has not *run*: a ``run_on_first_setup`` kind
@@ -925,6 +928,13 @@ async def poll_and_fire(
             # served in place raises no heat and sets no flag, so this is what stops
             # a scheduled sync from loading it again at every interval.
             skipped_reason = "route_changed_breaker"
+        elif kind in _ROUTE_BREAKER_KINDS and route_breaker.answer_lost_tripped(
+            session, user, account_id
+        ):
+            # Three connections runs in a row ended answer_lost (#199): the page's
+            # answers keep arriving unreadable, which moves neither heat nor the
+            # route-changed breaker, so this stops scheduled runs spending page views.
+            skipped_reason = "answer_lost_breaker"
         next_due = record_fired(
             session,
             user,

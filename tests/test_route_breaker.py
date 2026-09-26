@@ -263,3 +263,130 @@ def test_a_route_changed_run_after_a_corrupt_row_keeps_it_tripped(
     assert updated.readable is True
     assert updated.count == 2
     assert route_breaker.tripped(writer, user, ACCOUNT)
+
+
+# --- #199: the answer-lost limit, a second, separate streak -------------------------
+
+
+def _lost_key(account_id: int) -> str:
+    return f"linkedin.answer_lost_breaker.{account_id}"
+
+
+def _answer_lost(writer: Session, user: User, account_id: int = ACCOUNT) -> None:
+    route_breaker.record_answer_lost(
+        writer, user, account_id, answer_lost=True, clean_end=False, now=NOW
+    )
+
+
+def test_the_answer_lost_threshold_is_three() -> None:
+    assert route_breaker.ANSWER_LOST_THRESHOLD == 3
+
+
+def test_a_never_recorded_account_has_no_answer_lost_streak(writer: Session, user: User) -> None:
+    state = route_breaker.answer_lost_state(writer, user, ACCOUNT)
+    assert (state.count, state.since, state.tripped, state.threshold) == (0, None, False, 3)
+    assert not route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+
+
+def test_three_answer_lost_runs_in_a_row_trip_the_limit_and_two_do_not(
+    writer: Session, user: User
+) -> None:
+    _answer_lost(writer, user)
+    later = NOW + timedelta(days=1)
+    route_breaker.record_answer_lost(
+        writer, user, ACCOUNT, answer_lost=True, clean_end=False, now=later
+    )
+    state = route_breaker.answer_lost_state(writer, user, ACCOUNT)
+    assert (state.count, state.since, state.tripped) == (2, NOW, False)
+    _answer_lost(writer, user)
+    assert route_breaker.answer_lost_state(writer, user, ACCOUNT).count == 3
+    assert route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+
+
+def test_a_clean_end_clears_the_answer_lost_streak(writer: Session, user: User) -> None:
+    for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
+        _answer_lost(writer, user)
+    updated = route_breaker.record_answer_lost(
+        writer, user, ACCOUNT, answer_lost=False, clean_end=True, now=NOW
+    )
+    assert (updated.count, updated.since, updated.tripped) == (0, None, False)
+    assert not route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+
+
+def test_any_other_ending_leaves_the_answer_lost_streak_where_it_was(
+    writer: Session, user: User
+) -> None:
+    _answer_lost(writer, user)
+    _answer_lost(writer, user)
+    before = route_breaker.answer_lost_state(writer, user, ACCOUNT)
+    after = route_breaker.record_answer_lost(
+        writer, user, ACCOUNT, answer_lost=False, clean_end=False, now=NOW
+    )
+    assert after == before and before.count == 2
+
+
+def test_a_run_cannot_both_lose_an_answer_and_end_cleanly(writer: Session, user: User) -> None:
+    with pytest.raises(ValueError, match="both"):
+        route_breaker.record_answer_lost(
+            writer, user, ACCOUNT, answer_lost=True, clean_end=True, now=NOW
+        )
+
+
+def test_record_answer_lost_requires_a_writer_session(
+    session: Session, session_factory: sessionmaker[Session]
+) -> None:
+    with session_scope(session_factory, write=True) as setup:
+        user_id = factories.make_user(setup).id
+    owner = session.get(User, user_id)
+    assert owner is not None
+    with pytest.raises(RuntimeError, match="writer session"):
+        route_breaker.record_answer_lost(
+            session, owner, ACCOUNT, answer_lost=True, clean_end=False, now=NOW
+        )
+
+
+def test_the_two_streaks_never_feed_each_other(writer: Session, user: User) -> None:
+    """Separate rows: route_changed runs never move the answer-lost count, and
+    answer_lost runs never move the route-changed one."""
+    for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
+        _answer_lost(writer, user)
+    assert route_breaker.state(writer, user, ACCOUNT).count == 0
+    route_breaker.record(writer, user, ACCOUNT, route_changed=True, succeeded=False, now=NOW)
+    assert route_breaker.answer_lost_state(writer, user, ACCOUNT).count == 3
+    assert not route_breaker.tripped(writer, user, ACCOUNT)
+    assert route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+
+
+def test_reset_clears_the_answer_lost_limit_too(writer: Session, user: User) -> None:
+    """The same reset path as the breaker: one `reset-breaker` clears both."""
+    for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
+        _answer_lost(writer, user)
+    for _ in range(route_breaker.THRESHOLD):
+        route_breaker.record(writer, user, ACCOUNT, route_changed=True, succeeded=False, now=NOW)
+    route_breaker.reset(writer, user, ACCOUNT)
+    assert not route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+    assert route_breaker.answer_lost_state(writer, user, ACCOUNT).count == 0
+    assert not route_breaker.tripped(writer, user, ACCOUNT)
+
+
+def test_the_answer_lost_limit_is_scoped_by_account_id(writer: Session, user: User) -> None:
+    for _ in range(route_breaker.ANSWER_LOST_THRESHOLD):
+        _answer_lost(writer, user, 1)
+    assert route_breaker.answer_lost_tripped(writer, user, 1)
+    assert not route_breaker.answer_lost_tripped(writer, user, 2)
+
+
+def test_a_corrupt_answer_lost_row_reads_as_tripped_and_heals(writer: Session, user: User) -> None:
+    set_setting(writer, user, _lost_key(ACCOUNT), "not an object")
+    state = route_breaker.answer_lost_state(writer, user, ACCOUNT)
+    assert (state.readable, state.tripped) == (False, True)
+    assert route_breaker.answer_lost_tripped(writer, user, ACCOUNT)
+    # One more answer_lost run keeps it tripped rather than restarting at 1.
+    updated = route_breaker.record_answer_lost(
+        writer, user, ACCOUNT, answer_lost=True, clean_end=False, now=NOW
+    )
+    assert (updated.readable, updated.count, updated.tripped) == (True, 3, True)
+    route_breaker.record_answer_lost(
+        writer, user, ACCOUNT, answer_lost=False, clean_end=True, now=NOW
+    )
+    assert not route_breaker.answer_lost_tripped(writer, user, ACCOUNT)

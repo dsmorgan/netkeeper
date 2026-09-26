@@ -44,6 +44,11 @@ logic; it decides what the job may do and what happens after it stops:
   on past (#200) never bumps it either; how the run *ended* is judged as before, so
   a run that reached the end of the list clears the streak, and a stall or a gap
   with no answer pending still counts as ``route_changed``.
+* **The answer-lost limit** (#199, in the same module). A run recorded with
+  ``stop_reason = "answer_lost"`` extends a second, separate streak; three in a
+  row skip scheduled connections fires the way the breaker does, until a run
+  ends ``completed`` (a natural end with nothing lost) or a person runs
+  ``reset-breaker``. Recorded in the breaker's writer session.
 * **Lost answers** (#200). A run that lost any of the page's answers is never
   complete, so it ages nobody; it is recorded ``aborted`` with ``stop_reason =
   "answer_lost"`` even when it read on to the end of the list, every lost start
@@ -422,6 +427,19 @@ async def sync_connections(
                 succeeded=result.reason in _NATURAL_ENDS,
                 now=clock(),
             )
+            # #199: the answer-lost limit, its own streak beside the breaker's. A run
+            # recorded ``answer_lost`` (stopped for a lost answer, or read to the end
+            # without some) extends it; a run recorded ``completed`` clears it.
+            route_breaker.record_answer_lost(
+                session,
+                _load_user(session, user_id),
+                account_id,
+                answer_lost=(
+                    _stop_reason(result, cancelled=gate.cancelled) == StopReason.ANSWER_LOST.value
+                ),
+                clean_end=_clean_end(result, cancelled=gate.cancelled),
+                now=clock(),
+            )
 
         aging: mapping.AgingCounts | None = None
         with session_scope(factory, write=True) as session:
@@ -453,7 +471,7 @@ async def sync_connections(
                 run_id,
                 status=(
                     SyncRunStatus.COMPLETED
-                    if result.reason in _NATURAL_ENDS and not gate.cancelled and not result.losses
+                    if _clean_end(result, cancelled=gate.cancelled)
                     else SyncRunStatus.ABORTED
                 ),
                 now=clock(),
@@ -473,6 +491,11 @@ _KIND_OF: dict[SyncMode, SyncRunKind] = {
     SyncMode.FULL: SyncRunKind.CONNECTIONS_FULL,
     SyncMode.INCREMENTAL: SyncRunKind.CONNECTIONS_INCREMENTAL,
 }
+
+
+def _clean_end(result: SyncResult, *, cancelled: bool) -> bool:
+    """Whether the run reached a natural end with nothing lost: a ``completed`` run."""
+    return result.reason in _NATURAL_ENDS and not cancelled and not result.losses
 
 
 def _stop_reason(result: SyncResult, *, cancelled: bool) -> str:

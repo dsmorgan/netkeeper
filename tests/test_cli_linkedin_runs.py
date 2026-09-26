@@ -191,6 +191,77 @@ def test_reset_breaker_on_a_clear_account_says_so_and_asks_nothing(
     assert "nothing to reset" in result.output
 
 
+def _lose_answers(factory: sessionmaker[Session], runs_in_a_row: int) -> int:
+    with session_scope(factory, write=True) as session:
+        user = _user(session)
+        account_id = ensure_account(session, user).id
+        for _ in range(runs_in_a_row):
+            route_breaker.record_answer_lost(
+                session, user, account_id, answer_lost=True, clean_end=False, now=datetime.now(UTC)
+            )
+    return account_id
+
+
+def _answer_lost_count(factory: sessionmaker[Session], account_id: int) -> int:
+    with session_scope(factory) as session:
+        return route_breaker.answer_lost_state(session, _user(session), account_id).count
+
+
+def test_schedule_status_shows_both_counts(cli_db: sessionmaker[Session]) -> None:
+    """#199: `schedule status` shows the answer-lost count next to the breaker's."""
+    runner = CliRunner()
+    clear = runner.invoke(cli, ["linkedin", "schedule", "status"])
+    assert clear.exit_code == 0, clear.output
+    assert "route-changed breaker: 0 of 2 route_changed connections runs in a row" in clear.output
+    assert "answer-lost limit: 0 of 3 answer_lost connections runs in a row" in clear.output
+
+    _lose_answers(cli_db, 2)
+    two = runner.invoke(cli, ["linkedin", "schedule", "status"]).output
+    assert "answer-lost limit: 2 of 3 answer_lost connections runs in a row" in two
+    assert "tripped" not in two
+
+    _lose_answers(cli_db, 1)
+    tripped = runner.invoke(cli, ["linkedin", "schedule", "status"]).output
+    assert "answer-lost limit: tripped, 3 of 3 answer_lost connections runs in a row" in tripped
+    assert "reset-breaker" in tripped
+
+
+def test_schedule_status_says_an_unreadable_answer_lost_row_is_tripped(
+    cli_db: sessionmaker[Session],
+) -> None:
+    with session_scope(cli_db, write=True) as session:
+        user = _user(session)
+        account_id = ensure_account(session, user).id
+        set_setting(session, user, f"linkedin.answer_lost_breaker.{account_id}", "garbage")
+    out = CliRunner().invoke(cli, ["linkedin", "schedule", "status"]).output
+    assert "answer-lost limit: stored state unreadable, treated as tripped" in out
+
+
+def test_reset_breaker_clears_a_tripped_answer_lost_limit(cli_db: sessionmaker[Session]) -> None:
+    account_id = _lose_answers(cli_db, 3)
+    runner = CliRunner()
+    declined = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="n\n")
+    assert declined.exit_code == 1
+    assert "3 `answer_lost`" in declined.output
+    assert _answer_lost_count(cli_db, account_id) == 3
+
+    confirmed = runner.invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="y\n")
+    assert confirmed.exit_code == 0, confirmed.output
+    assert _answer_lost_count(cli_db, account_id) == 0
+
+
+def test_reset_breaker_clears_a_corrupt_answer_lost_row(cli_db: sessionmaker[Session]) -> None:
+    with session_scope(cli_db, write=True) as session:
+        user = _user(session)
+        account_id = ensure_account(session, user).id
+        set_setting(session, user, f"linkedin.answer_lost_breaker.{account_id}", "garbage")
+    result = CliRunner().invoke(cli, ["linkedin", "schedule", "reset-breaker"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "unreadable" in result.output
+    with session_scope(cli_db) as session:
+        assert not route_breaker.answer_lost_tripped(session, _user(session), account_id)
+
+
 def test_a_sync_by_hand_runs_while_disarmed_and_reports_itself(
     cli_db: sessionmaker[Session], fake_chrome: ConnectionsContext
 ) -> None:
