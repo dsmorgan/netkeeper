@@ -10,7 +10,10 @@ export const Route = createFileRoute('/contacts/')({
 })
 
 function ContactsRoute() {
-  const search = Route.useSearch()
+  // Read again rather than trusted: the router lays a route's validated search
+  // over the raw one, so a parameter validation dropped (`?met=bogus`,
+  // `?page=0`) would otherwise reach the table as typed and break it.
+  const search = validateContactsSearch(Route.useSearch())
   const navigate = Route.useNavigate()
   return (
     <ContactsTablePage
