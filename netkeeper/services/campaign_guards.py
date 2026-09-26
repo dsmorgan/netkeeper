@@ -555,10 +555,6 @@ def _last_outbound(
 # --- the two moments ----------------------------------------------------------------
 
 
-def _policy(campaign: Campaign) -> GuardPolicy:
-    return GuardPolicy(contacted_within_days=campaign.contacted_within_days_guard)
-
-
 def check_enrollment(
     session: Session,
     user: User,
@@ -572,17 +568,35 @@ def check_enrollment(
     Checked against the first step's channel, the one the enrollment will send
     first; each later step is checked again when it fires (:func:`check_step`).
     A campaign with no steps has nothing to check a channel against, so every
-    contact gets :attr:`Reason.UNKNOWN_CHANNEL`. Reads only.
+    contact gets :attr:`Reason.UNKNOWN_CHANNEL`; a campaign deleted since gets
+    :attr:`Reason.CAMPAIGN_NOT_ACTIVE`.
+
+    The recency window and the first step are read fresh, like the contacts:
+    the caller's ``campaign`` may be from before a commit another session made
+    (``expire_on_commit=False``; #242). Reads only.
     """
     if campaign.user_id != user.id:
         raise ValueError("a campaign can only enroll its own user's contacts")
     ids = sorted(set(contact_ids))
-    first = min(campaign.steps, key=lambda step: step.position, default=None)
-    facts = load_facts(session, user, ids, campaign_id=campaign.id)
+    window = session.scalar(
+        scoped(user, Campaign)
+        .with_only_columns(Campaign.contacted_within_days_guard)
+        .where(Campaign.id == campaign.id)
+    )
+    if window is None:  # deleted since: nobody to enroll in it
+        return [Verdict(i, (Reason.CAMPAIGN_NOT_ACTIVE,)) for i in ids]
+    first = session.scalar(
+        scoped(user, CampaignStep)
+        .with_only_columns(CampaignStep.channel)
+        .where(CampaignStep.campaign_id == campaign.id)
+        .order_by(CampaignStep.position)
+        .limit(1)
+    )
     if first is None:
         return [Verdict(i, (Reason.UNKNOWN_CHANNEL,)) for i in ids]
-    policy = _policy(campaign)
-    return [check_contact(facts.get(i), i, first.channel, policy, now=now) for i in ids]
+    facts = load_facts(session, user, ids, campaign_id=campaign.id)
+    policy = GuardPolicy(contacted_within_days=window)
+    return [check_contact(facts.get(i), i, first, policy, now=now) for i in ids]
 
 
 def check_step(
