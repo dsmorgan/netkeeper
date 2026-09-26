@@ -1,0 +1,198 @@
+"""``/templates``: message templates, their lint, and previews (spec 8.5, 11.1; item P3-03).
+
+A template that is not the current user's answers ``404``, never a status that
+would confirm the id exists for someone else. Lint runs on every save and
+never blocks one; it blocks activation instead
+(:func:`netkeeper.campaigns.templates.activation_errors`). The ``me.<key>``
+fields a template may name come from ``[me]`` in the config the app started
+with.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Annotated, Any
+
+from fastapi import APIRouter, HTTPException, Query, Request
+
+from netkeeper.campaigns import templates as service
+from netkeeper.campaigns.render import LintIssue, TemplateRenderError, me_fields
+from netkeeper.config import Settings
+from netkeeper.models import Contact, Template
+from netkeeper.scoping import get_scoped
+from netkeeper.web.deps import CurrentUser, SessionDep
+from netkeeper.web.schemas import (
+    LintIssueOut,
+    TemplateCreate,
+    TemplateOut,
+    TemplatePatch,
+    TemplatePreviewOut,
+)
+
+router = APIRouter(tags=["templates"])
+
+Responses = dict[int | str, dict[str, Any]]
+NOT_FOUND: Responses = {404: {"description": "No such template or contact for this user"}}
+CONFLICT: Responses = {
+    409: {
+        "description": "A template by that name already exists, the template is an older "
+        "version, or a campaign uses it"
+    }
+}
+INVALID: Responses = {422: {"description": "A value that cannot be stored or rendered"}}
+
+
+@contextmanager
+def translate_errors() -> Iterator[None]:
+    """Map the service's exceptions to HTTP statuses: 404, 409, 422."""
+    try:
+        yield
+    except service.TemplateNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (
+        service.DuplicateTemplateName,
+        service.TemplateSuperseded,
+        service.TemplateInUse,
+    ) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (service.InvalidTemplateValue, TemplateRenderError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _me(request: Request) -> dict[str, str]:
+    settings: Settings = request.app.state.settings
+    return me_fields(settings.me)
+
+
+def _issue_out(issue: LintIssue) -> LintIssueOut:
+    return LintIssueOut(
+        rule=issue.rule,
+        severity=issue.severity,
+        part=issue.part,
+        message=issue.message,
+        field=issue.field,
+    )
+
+
+def _template_out(row: Template, *, current: bool) -> TemplateOut:
+    return TemplateOut(
+        id=row.id,
+        name=row.name,
+        channel=row.channel,
+        subject=row.subject,
+        body=row.body,
+        version=row.version,
+        previous_id=row.previous_id,
+        current=current,
+        lint=[_issue_out(LintIssue.from_json(item)) for item in row.lint_json],
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+@router.get("/templates", operation_id="list_templates")
+def list_templates(user: CurrentUser, session: SessionDep) -> list[TemplateOut]:
+    """Every template, the newest version of each, by name."""
+    return [_template_out(row, current=True) for row in service.list_templates(session, user)]
+
+
+@router.post(
+    "/templates",
+    operation_id="create_template",
+    status_code=201,
+    responses={**CONFLICT, **INVALID},
+)
+def create_template(
+    body: TemplateCreate, request: Request, user: CurrentUser, session: SessionDep
+) -> TemplateOut:
+    """Save a new template with its lint. Lint errors are reported, not refused."""
+    with translate_errors():
+        row = service.create_template(
+            session,
+            user,
+            name=body.name,
+            channel=body.channel,
+            subject=body.subject,
+            body=body.body,
+            me_keys=_me(request).keys(),
+        )
+    return _template_out(row, current=True)
+
+
+@router.get("/templates/{template_id}", operation_id="get_template", responses=NOT_FOUND)
+def get_template(template_id: int, user: CurrentUser, session: SessionDep) -> TemplateOut:
+    """One template, any version."""
+    with translate_errors():
+        row = service.get_template(session, user, template_id)
+        current = not service.is_superseded(session, user, row)
+    return _template_out(row, current=current)
+
+
+@router.patch(
+    "/templates/{template_id}",
+    operation_id="update_template",
+    responses={**NOT_FOUND, **CONFLICT, **INVALID},
+)
+def update_template(
+    template_id: int,
+    body: TemplatePatch,
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+) -> TemplateOut:
+    """Edit a template. Answers with the row that now holds it: the same one, or a new
+    version when a campaign uses the old one (spec 8.5). An older version is read-only."""
+    subject = body.subject if "subject" in body.model_fields_set else service.UNSET
+    with translate_errors():
+        row = service.update_template(
+            session,
+            user,
+            template_id,
+            me_keys=_me(request).keys(),
+            name=body.name,
+            channel=body.channel,
+            subject=subject,
+            body=body.body,
+        )
+    return _template_out(row, current=True)
+
+
+@router.delete(
+    "/templates/{template_id}",
+    operation_id="delete_template",
+    status_code=204,
+    responses={**NOT_FOUND, **CONFLICT},
+)
+def delete_template(template_id: int, user: CurrentUser, session: SessionDep) -> None:
+    """Delete a template and its earlier versions. Refused for an older version, and while
+    a campaign uses any of them."""
+    with translate_errors():
+        service.delete_template(session, user, template_id)
+
+
+@router.get(
+    "/templates/{template_id}/preview",
+    operation_id="preview_template",
+    responses={**NOT_FOUND, **INVALID},
+)
+def preview_template(
+    template_id: int,
+    contact_id: Annotated[int, Query(description="The contact to render the template for.")],
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+) -> TemplatePreviewOut:
+    """Render a template for one contact. Missing contact data is a warning on the result;
+    ``422`` only for a template that does not compile or reaches past the sandbox."""
+    with translate_errors():
+        row = service.get_template(session, user, template_id)
+        contact = get_scoped(session, user, Contact, contact_id)
+        if contact is None:
+            raise HTTPException(status_code=404, detail=f"no contact {contact_id}")
+        rendered = service.render_preview(row, contact, me=_me(request))
+    return TemplatePreviewOut(
+        subject=rendered.subject,
+        body=rendered.body,
+        issues=[_issue_out(issue) for issue in rendered.issues],
+    )

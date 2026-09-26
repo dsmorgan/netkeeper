@@ -10,6 +10,7 @@ from typing import Any
 import factories
 from sqlalchemy.orm import Session
 
+from netkeeper.campaigns import templates as template_service
 from netkeeper.crm import import_runs as import_service
 from netkeeper.crm import lists as list_service
 from netkeeper.crm import positions as position_service
@@ -28,6 +29,8 @@ from netkeeper.models import (
     SyncRunKind,
     SyncRunStatus,
     SyncRunTrigger,
+    Template,
+    TemplateChannel,
     User,
 )
 from netkeeper.scoping import scoped
@@ -269,6 +272,47 @@ def _seed_views(session: Session, user: User) -> int:
     return 1
 
 
+def _seed_templates(session: Session, user: User) -> int:
+    """Two templates, one of them in its second version: the older version is not listed.
+
+    The second version is written directly, as a campaign's use of the first would
+    make it (P3-04 wires that up), so the list's "nothing replaced it" subquery is
+    under the crossed call too.
+    """
+    body = "Hi {{ first_name }}"
+    first = template_service.create_template(
+        session,
+        user,
+        name="reconnect",
+        channel=TemplateChannel.EMAIL,
+        subject="Hello",
+        body=body,
+        me_keys=(),
+    )
+    session.add(
+        Template(
+            user_id=user.id,
+            name=first.name,
+            channel=first.channel,
+            subject=first.subject,
+            body=body + "!",
+            version=2,
+            previous_id=first.id,
+        )
+    )
+    template_service.create_template(
+        session,
+        user,
+        name="nudge",
+        channel=TemplateChannel.LINKEDIN,
+        subject=None,
+        body=body,
+        me_keys=(),
+    )
+    session.flush()
+    return 2
+
+
 def _seed_triage_suggestions(session: Session, user: User) -> int:
     """A contact with message history, which is what the bulk suggestion offers to mark met.
 
@@ -378,6 +422,7 @@ REGISTRY: list[ListEndpoint] = [
         path_params=own_list,
     ),
     ListEndpoint(f"{API_PREFIX}/views", _seed_views, array_count),
+    ListEndpoint(f"{API_PREFIX}/templates", _seed_templates, array_count),
     ListEndpoint(f"{API_PREFIX}/triage/suggestions", _seed_triage_suggestions, array_count),
     ListEndpoint(
         f"{API_PREFIX}/triage/suggestions/{{key}}/contacts",

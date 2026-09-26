@@ -5171,6 +5171,56 @@
         "title": "LinkedInStatusOut",
         "type": "object"
       },
+      "LintIssueOut": {
+        "description": "One lint finding. ``field`` names the merge field or link it is about, if any.",
+        "properties": {
+          "field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "part": {
+            "$ref": "#/components/schemas/Part"
+          },
+          "rule": {
+            "$ref": "#/components/schemas/LintRule"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Severity"
+          }
+        },
+        "required": [
+          "rule",
+          "severity",
+          "part",
+          "message"
+        ],
+        "title": "LintIssueOut",
+        "type": "object"
+      },
+      "LintRule": {
+        "enum": [
+          "syntax",
+          "unsafe_attribute",
+          "undefined_variable",
+          "no_contact_field",
+          "missing_subject",
+          "bad_link",
+          "missing_value"
+        ],
+        "title": "LintRule",
+        "type": "string"
+      },
       "ListCreate": {
         "properties": {
           "filter": {
@@ -5754,6 +5804,15 @@
         ],
         "title": "OverlapOut",
         "type": "object"
+      },
+      "Part": {
+        "description": "Which text of the template an issue is about.",
+        "enum": [
+          "subject",
+          "body"
+        ],
+        "title": "Part",
+        "type": "string"
       },
       "PeriodBudgetOut": {
         "properties": {
@@ -6652,6 +6711,14 @@
         "title": "ScheduledJobOut",
         "type": "object"
       },
+      "Severity": {
+        "enum": [
+          "error",
+          "warning"
+        ],
+        "title": "Severity",
+        "type": "string"
+      },
       "SharedCompanyOut": {
         "description": "A company this contact is at or was at, and the overlap with the address book.\n\nOverlap with **the rest of your contacts**, not with you: ``contact_count``\nis how many *other* live contacts are at that company now and ``met_count``\nhow many of those you have already marked met, so the reading is \"you know\nfour people there, three of whom you have met\". This is **not** \"you both\nworked at X\" -- that claim is :class:`OverlapOut`, a separate field with a\nseparate name, and a panel must never confuse the two (spec 10.2, #84).\n\nEvery company the contact has is returned, including one where nobody else\nis, as ``contact_count: 0``; a client that only wants overlap filters those.",
         "properties": {
@@ -7220,6 +7287,221 @@
           "finished_at"
         ],
         "title": "TaskOut",
+        "type": "object"
+      },
+      "TemplateChannel": {
+        "description": "Where a template's message goes (spec 8.5).",
+        "enum": [
+          "email",
+          "linkedin"
+        ],
+        "title": "TemplateChannel",
+        "type": "string"
+      },
+      "TemplateCreate": {
+        "properties": {
+          "body": {
+            "maxLength": 20000,
+            "title": "Body",
+            "type": "string"
+          },
+          "channel": {
+            "$ref": "#/components/schemas/TemplateChannel"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          }
+        },
+        "required": [
+          "name",
+          "channel",
+          "body"
+        ],
+        "title": "TemplateCreate",
+        "type": "object"
+      },
+      "TemplateOut": {
+        "properties": {
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "channel": {
+            "$ref": "#/components/schemas/TemplateChannel"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "current": {
+            "title": "Current",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "lint": {
+            "items": {
+              "$ref": "#/components/schemas/LintIssueOut"
+            },
+            "title": "Lint",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "previous_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Id"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "channel",
+          "subject",
+          "body",
+          "version",
+          "previous_id",
+          "current",
+          "lint",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "TemplateOut",
+        "type": "object"
+      },
+      "TemplatePatch": {
+        "description": "Fields left out are left alone; ``subject: null`` clears it.\n\nEditing a template an active campaign uses answers with a new version, one up,\nand leaves the old one as it was (spec 8.5); the response's ``id`` says which.",
+        "properties": {
+          "body": {
+            "anyOf": [
+              {
+                "maxLength": 20000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body"
+          },
+          "channel": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplateChannel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          }
+        },
+        "title": "TemplatePatch",
+        "type": "object"
+      },
+      "TemplatePreviewOut": {
+        "description": "A template rendered for one contact, and every issue: lint's errors, then warnings for\nfields with no value and links that came out broken.",
+        "properties": {
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/LintIssueOut"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          }
+        },
+        "required": [
+          "subject",
+          "body",
+          "issues"
+        ],
+        "title": "TemplatePreviewOut",
         "type": "object"
       },
       "TimelineInteraction": {
@@ -12617,6 +12899,254 @@
         "summary": "Get Task",
         "tags": [
           "tasks"
+        ]
+      }
+    },
+    "/api/v1/templates": {
+      "get": {
+        "description": "Every template, the newest version of each, by name.",
+        "operationId": "list_templates",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TemplateOut"
+                  },
+                  "title": "Response List Templates",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Templates",
+        "tags": [
+          "templates"
+        ]
+      },
+      "post": {
+        "description": "Save a new template with its lint. Lint errors are reported, not refused.",
+        "operationId": "create_template",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TemplateCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "A template by that name already exists, the template is an older version, or a campaign uses it"
+          },
+          "422": {
+            "description": "A value that cannot be stored or rendered"
+          }
+        },
+        "summary": "Create Template",
+        "tags": [
+          "templates"
+        ]
+      }
+    },
+    "/api/v1/templates/{template_id}": {
+      "delete": {
+        "description": "Delete a template and its earlier versions. Refused for an older version, and while\na campaign uses any of them.",
+        "operationId": "delete_template",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such template or contact for this user"
+          },
+          "409": {
+            "description": "A template by that name already exists, the template is an older version, or a campaign uses it"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Template",
+        "tags": [
+          "templates"
+        ]
+      },
+      "get": {
+        "description": "One template, any version.",
+        "operationId": "get_template",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such template or contact for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Template",
+        "tags": [
+          "templates"
+        ]
+      },
+      "patch": {
+        "description": "Edit a template. Answers with the row that now holds it: the same one, or a new\nversion when a campaign uses the old one (spec 8.5). An older version is read-only.",
+        "operationId": "update_template",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TemplatePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such template or contact for this user"
+          },
+          "409": {
+            "description": "A template by that name already exists, the template is an older version, or a campaign uses it"
+          },
+          "422": {
+            "description": "A value that cannot be stored or rendered"
+          }
+        },
+        "summary": "Update Template",
+        "tags": [
+          "templates"
+        ]
+      }
+    },
+    "/api/v1/templates/{template_id}/preview": {
+      "get": {
+        "description": "Render a template for one contact. Missing contact data is a warning on the result;\n``422`` only for a template that does not compile or reaches past the sandbox.",
+        "operationId": "preview_template",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The contact to render the template for.",
+            "in": "query",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "description": "The contact to render the template for.",
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplatePreviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such template or contact for this user"
+          },
+          "422": {
+            "description": "A value that cannot be stored or rendered"
+          }
+        },
+        "summary": "Preview Template",
+        "tags": [
+          "templates"
         ]
       }
     },

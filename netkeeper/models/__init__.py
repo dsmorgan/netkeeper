@@ -1,6 +1,13 @@
 """ORM models. Importing this package registers every table on ``Base.metadata``."""
 
 from netkeeper.models.base import Base, TimestampMixin, UserOwned, UTCDateTime, string_enum
+from netkeeper.models.campaigns import (
+    TEMPLATE_NAME_MAX_LENGTH,
+    TEMPLATE_SUBJECT_MAX_LENGTH,
+    TEMPLATE_TABLES,
+    Template,
+    TemplateChannel,
+)
 from netkeeper.models.contacts import (
     CONTACT_CHILDREN,
     Contact,
@@ -82,6 +89,9 @@ __all__ = [
     "REASON_MAX_LENGTH",
     "TAG_NAME_MAX_LENGTH",
     "TAG_TABLES",
+    "TEMPLATE_NAME_MAX_LENGTH",
+    "TEMPLATE_SUBJECT_MAX_LENGTH",
+    "TEMPLATE_TABLES",
     "VIEW_NAME_MAX_LENGTH",
     "AutotagRule",
     "Base",
@@ -131,6 +141,8 @@ __all__ = [
     "TagKind",
     "TagMetSignal",
     "TagSource",
+    "Template",
+    "TemplateChannel",
     "TimestampMixin",
     "TriageDecision",
     "TriageDecisionKind",

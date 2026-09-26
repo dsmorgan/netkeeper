@@ -400,6 +400,7 @@ Merging two contacts is a first-class operation that re-points every child row a
 
 - `mailbox` (`email`, `provider` gmail, `keychain_ref`, `daily_cap`, `status` ok/reauth_required/disabled, `label_prefix`). One row in v1.
 - `template` (`name`, `channel` email/linkedin, `subject` nullable, `body`, `lint_json`, `updated_at`). Versioned: editing a template used by an active campaign creates a new row and the campaign keeps pointing at the old one until you choose to upgrade.
+  *As built (P3-03):* the table is `templates`, with `version` and `previous_id` (the row it replaced; unique per user, so a chain never forks; `ON DELETE SET NULL`). The newest row of a chain is the template; older rows are read-only. Names are unique among a user's newest rows, in the service rather than the schema, since versions share a name. Deleting a template deletes its chain. Whether a version is in use is `netkeeper.campaigns.templates.is_in_use`, which answers false until P3-04 gives it campaigns to look at.
 - `campaign` (`name`, `status` draft/reviewing/active/paused/completed/archived, `source_list_id` or `filter_json`, `mailbox_id`, `send_window_json`, `daily_cap`, `contacted_within_days_guard`, `approved_at`, `test_sent_at`).
 - `campaign_step` (`campaign_id`, `position`, `channel`, `template_id`, `delay_days`, `mode` draft/send/prefill/auto_send, `condition` no_reply/always, `same_thread` boolean).
 - `enrollment` (`campaign_id`, `contact_id`, `status`, `current_step`, `next_action_at`, `exit_reason`, `replied_at`, `channel_ids_json`). Unique on (`campaign_id`, `contact_id`).
@@ -685,6 +686,8 @@ Jinja2 in a sandboxed environment with autoescape off for plain-text email and o
 - Optional LLM: `{{ personal_line }}` (section 12), rendered at preview time and stored with the message.
 
 Template lint at save time: undefined variables, a body with no per-contact merge field (identical bulk mail is a spam signal), missing subject on email, links that do not parse. Lint results are shown in the editor and block activation for errors.
+
+*As built (P3-03):* `netkeeper/campaigns/render.py`. All four save-time rules are errors, as are a template that does not compile and a `_`-prefixed name. The sandbox has no globals (`range`, `cycler` and the rest are undefined), and an unsafe attribute fails the render instead of printing as empty. A field with no value renders as an empty string and adds a warning to the preview. `connected_year` and `years_since_connected` (whole years) come from `connected_on`, and `last_position_change` is the latest `started_on` among the contact's positions. `ago` counts whole UTC days: today, yesterday, N days ago, last week (7 to 13 days), N weeks ago, last month (28 to 59), N months ago, last year (365 to 729), N years ago. Activation lints again rather than reading `lint_json`, because the `me.*` keys can change with the config. Autoescape is off: every template is plain text until HTML email exists.
 
 ### 11.2 Sequences
 

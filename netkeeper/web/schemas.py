@@ -14,6 +14,8 @@ from pydantic import (
     model_validator,
 )
 
+from netkeeper.campaigns.render import LintRule, Part, Severity
+from netkeeper.campaigns.templates import TEMPLATE_BODY_MAX_LENGTH
 from netkeeper.crm.confirmation import InvalidReason
 from netkeeper.crm.filters import FilterTree, SortKey
 from netkeeper.crm.importer import ImportField
@@ -24,6 +26,8 @@ from netkeeper.linkedin.archive import ArchiveRefusalCode
 from netkeeper.models import (
     LIST_NAME_MAX_LENGTH,
     TAG_NAME_MAX_LENGTH,
+    TEMPLATE_NAME_MAX_LENGTH,
+    TEMPLATE_SUBJECT_MAX_LENGTH,
     VIEW_NAME_MAX_LENGTH,
     ContactMet,
     ContactSnapshot,
@@ -47,6 +51,7 @@ from netkeeper.models import (
     TagKind,
     TagMetSignal,
     TagSource,
+    TemplateChannel,
     TriageDecisionKind,
     UserKind,
 )
@@ -1877,3 +1882,68 @@ class BrowserLaunchOut(BaseModel):
     launch_command: list[str]
     remote_host_note: str | None
     check_command: str
+
+
+# --- templates (spec 8.5, 11.1; P3-03) ----------------------------------------
+
+TemplateName = Annotated[str, Field(min_length=1, max_length=TEMPLATE_NAME_MAX_LENGTH)]
+TemplateSubject = Annotated[str, Field(max_length=TEMPLATE_SUBJECT_MAX_LENGTH)]
+TemplateBody = Annotated[str, Field(max_length=TEMPLATE_BODY_MAX_LENGTH)]
+
+
+class LintIssueOut(BaseModel):
+    """One lint finding. ``field`` names the merge field or link it is about, if any."""
+
+    rule: LintRule
+    severity: Severity
+    part: Part
+    message: str
+    field: str | None = None
+
+
+class TemplateOut(BaseModel):
+    id: int
+    name: str
+    channel: TemplateChannel
+    subject: str | None
+    body: str
+    version: int
+    previous_id: int | None
+    """The version this one replaced, if any."""
+    current: bool
+    """False for an older version: read-only, kept for the campaigns that still use it."""
+    lint: list[LintIssueOut]
+    """Lint as of the last save. Every issue here is an error, and any error blocks
+    activation; activation lints again against the config of the moment."""
+    created_at: datetime
+    updated_at: datetime
+
+
+class TemplateCreate(BaseModel):
+    name: TemplateName
+    channel: TemplateChannel
+    subject: TemplateSubject | None = None
+    """Blank is stored as no subject. An email template without one fails lint."""
+    body: TemplateBody
+
+
+class TemplatePatch(BaseModel):
+    """Fields left out are left alone; ``subject: null`` clears it.
+
+    Editing a template an active campaign uses answers with a new version, one up,
+    and leaves the old one as it was (spec 8.5); the response's ``id`` says which.
+    """
+
+    name: TemplateName | None = None
+    channel: TemplateChannel | None = None
+    subject: TemplateSubject | None = None
+    body: TemplateBody | None = None
+
+
+class TemplatePreviewOut(BaseModel):
+    """A template rendered for one contact, and every issue: lint's errors, then warnings for
+    fields with no value and links that came out broken."""
+
+    subject: str | None
+    body: str
+    issues: list[LintIssueOut]
