@@ -1,1 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#262626"/><path d="M9 24V8h3l8 11V8h3v16h-3l-8-11v11z" fill="#fafafa"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- netkeeper: a lowercase "n" whose two feet are nodes, joined by the link that keeps them warm. -->
+  <!-- Teal is the theme's primary, oklch(0.47 0.085 195), as sRGB. -->
+  <rect width="32" height="32" rx="7" fill="#00696a"/>
+  <path d="M10 9.5V23M10 15.5a6 6 0 0 1 12 0V23" fill="none" stroke="#f9fcff" stroke-width="3.2" stroke-linecap="round"/>
+  <circle cx="10" cy="23" r="3" fill="#f9fcff"/>
+  <circle cx="22" cy="23" r="3" fill="#f9fcff"/>
+</svg>

@@ -31,5 +31,8 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
+    // Vitest stubs CSS to an empty string, `?raw` included. `theme.test.ts`
+    // reads the tokens out of this one stylesheet, so it goes through Vite.
+    css: { include: [/src\/index\.css/] },
   },
 })
