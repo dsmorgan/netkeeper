@@ -21,8 +21,9 @@ lists this module among the browser's few callers on purpose).
 the worker re-checks, from the database, the things that would make the run
 refuse anyway: a scheduled run on a disarmed account (the third check, after
 the scheduler's arm gate and ``runs.create_run``), a scheduled connections run
-whose route-changed breaker is tripped (the second independent check for that
-gate, matching the arming design; #191 review F6), the session flag, and heat
+whose route-changed breaker or answer-lost limit is tripped (the second
+independent check for those gates, matching the arming design; #191 review F6,
+#199), the session flag, and heat
 over its skip threshold. A refused run is recorded ``failed`` and the browser
 is never touched. And the connections page a sync reads is loaded by its
 source's first ``fetch_page``, after the runner's own checks, not before them.
@@ -301,6 +302,22 @@ class BrowserWorker:
                 return (
                     "route_changed_breaker",
                     "the route-changed breaker is tripped for this account",
+                )
+            if (
+                facts.trigger is SyncRunTrigger.SCHEDULED
+                and facts.kind in _ROUTE_BREAKER_KINDS
+                and route_breaker.answer_lost_tripped(session, user, facts.account_id)
+            ):
+                # #199: the same second, independent check for the answer-lost limit.
+                log.error(
+                    "scheduled run %d reached the worker with the answer-lost limit"
+                    " tripped for account %d",
+                    run_id,
+                    facts.account_id,
+                )
+                return (
+                    "answer_lost_breaker",
+                    "the answer-lost limit is tripped for this account",
                 )
             try:
                 runs.refuse_if_flagged_or_hot(

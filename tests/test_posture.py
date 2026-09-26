@@ -57,6 +57,7 @@ from netkeeper.models import SettingKV, User
 from netkeeper.scoping import unscoped
 from netkeeper.services import heat as heat_rows
 from netkeeper.services import posture as posture_module
+from netkeeper.services import route_breaker
 from netkeeper.services import scheduler as scheduler_module
 from netkeeper.services.budgets import ActionClass, consume
 from netkeeper.services.linkedin_session import flag_session
@@ -231,6 +232,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "scheduled jobs",
         "scheduled runs",
         "route-changed breaker",
+        "answer-lost limit",
         "network aging",
     ]
 
@@ -1658,6 +1660,47 @@ def test_a_corrupt_route_changed_breaker_row_warns_unknown(writer: Session, user
     report = _report(writer, user)
     row = _row(report, "route-changed breaker")
 
+    assert row.status is Status.UNKNOWN
+    assert row.warnings
+    assert not report.ok
+
+
+# --- #199: the answer-lost limit ------------------------------------------------------
+
+
+def _lose_answers(writer: Session, user: User, runs: int) -> None:
+    for _ in range(runs):
+        route_breaker.record_answer_lost(
+            writer, user, ACCOUNT, answer_lost=True, clean_end=False, now=NOW
+        )
+
+
+def test_a_clear_answer_lost_limit_shows_no_warning(writer: Session, user: User) -> None:
+    row = _row(_report(writer, user), "answer-lost limit")
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value.startswith("clear")
+
+
+def test_an_answer_lost_streak_below_the_limit_shows_its_count(writer: Session, user: User) -> None:
+    _lose_answers(writer, user, 2)
+    row = _row(_report(writer, user), "answer-lost limit")
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value.startswith("2 of 3 answer_lost connections runs in a row")
+
+
+def test_a_tripped_answer_lost_limit_warns(writer: Session, user: User) -> None:
+    _lose_answers(writer, user, 3)
+    row = _row(_report(writer, user), "answer-lost limit")
+    assert row.status is Status.ON
+    assert row.value.startswith("tripped: 3 answer_lost connections runs in a row")
+    assert len(row.warnings) == 1
+    assert "skipped" in row.warnings[0] and "reset-breaker" in row.warnings[0]
+
+
+def test_a_corrupt_answer_lost_row_warns_unknown(writer: Session, user: User) -> None:
+    set_setting(writer, user, f"linkedin.answer_lost_breaker.{ACCOUNT}", "not an object")
+    report = _report(writer, user)
+    row = _row(report, "answer-lost limit")
     assert row.status is Status.UNKNOWN
     assert row.warnings
     assert not report.ok

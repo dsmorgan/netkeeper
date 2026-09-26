@@ -753,6 +753,95 @@ async def test_the_route_changed_breaker_does_not_skip_enrichment(
     assert result.fired is True
 
 
+# --- answer-lost limit skip: connections kinds only (#199) ------------------------
+
+
+def _answer_lost_runs(session_factory: sessionmaker[Session], owner: User, runs: int) -> None:
+    with session_scope(session_factory, write=True) as session:
+        for _ in range(runs):
+            route_breaker.record_answer_lost(
+                session, owner, ACCOUNT, answer_lost=True, clean_end=False, now=NOW
+            )
+
+
+async def _fire_after_answer_lost_runs(
+    session_factory: sessionmaker[Session], kind: scheduler.JobKind, runs: int
+) -> tuple[scheduler.FireResult | None, int]:
+    schedule = DEFAULT_SCHEDULES[kind]
+    calls: list[scheduler.JobContext] = []
+
+    async def recording_handler(ctx: scheduler.JobContext) -> None:
+        calls.append(ctx)
+
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+        scheduler.establish_schedule(
+            session,
+            owner,
+            ACCOUNT,
+            kind,
+            now=NOW,
+            schedule=schedule,
+            rng=Random(0),
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        )
+    _answer_lost_runs(session_factory, owner, runs)
+    result = await scheduler.poll_and_fire(
+        session_factory,
+        owner,
+        ACCOUNT,
+        kind,
+        now=NOW + schedule.interval,
+        schedule=schedule,
+        registry={kind: recording_handler},
+        tz="UTC",
+        active_start=ALL_DAY[0],
+        active_end=ALL_DAY[1],
+        armed=scheduler.ARMING_NOT_REQUIRED,
+        heat_settings=scheduler.HEAT_SKIP_DISABLED,
+    )
+    return result, len(calls)
+
+
+@pytest.mark.parametrize(
+    "kind", [scheduler.JobKind.CONNECTIONS_FULL, scheduler.JobKind.CONNECTIONS_INCREMENTAL]
+)
+async def test_the_answer_lost_limit_skips_a_connections_fire_when_tripped(
+    session_factory: sessionmaker[Session], kind: scheduler.JobKind
+) -> None:
+    result, calls = await _fire_after_answer_lost_runs(
+        session_factory, kind, route_breaker.ANSWER_LOST_THRESHOLD
+    )
+    assert calls == 0
+    assert result is not None and result.fired is False
+    assert result.skipped_reason == "answer_lost_breaker"
+    # the cadence still advances -- a skip is not a stall
+    assert result.next_due is not None
+    assert result.next_due > NOW + DEFAULT_SCHEDULES[kind].interval
+
+
+async def test_an_answer_lost_streak_below_the_threshold_does_not_skip(
+    session_factory: sessionmaker[Session],
+) -> None:
+    result, calls = await _fire_after_answer_lost_runs(
+        session_factory, scheduler.JobKind.CONNECTIONS_FULL, route_breaker.ANSWER_LOST_THRESHOLD - 1
+    )
+    assert calls == 1
+    assert result is not None and result.fired is True
+
+
+async def test_the_answer_lost_limit_does_not_skip_enrichment(
+    session_factory: sessionmaker[Session],
+) -> None:
+    result, calls = await _fire_after_answer_lost_runs(
+        session_factory, scheduler.JobKind.ENRICH, route_breaker.ANSWER_LOST_THRESHOLD
+    )
+    assert calls == 1
+    assert result is not None and result.fired is True
+
+
 # --- poll_and_fire: not-yet-due and never-established are both no-ops -------
 
 

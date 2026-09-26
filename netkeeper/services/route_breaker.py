@@ -34,6 +34,23 @@ is deliberate: once the breaker trips, a manual run is how a person checks
 whether the wall is still being served, the same way the first supervised run
 after arming confirms what a genuine one looks like (ADR 0006's follow-up).
 
+**The answer-lost limit** (#199) lives here too, as a second, separate
+streak. A connections run whose ``stop_reason`` is ``answer_lost`` -- the page
+kept answering, but answers arrived with no body the browser could hand over,
+whether the run stopped for it or read on to the end without them (#197, #200)
+-- moves the route-changed streak neither way: a lost answer is not a changed
+route. Nothing else would then stop LinkedIn's client superseding every
+pagination fetch from costing page views on every scheduled fire, forever.
+:data:`ANSWER_LOST_THRESHOLD` consecutive connections runs ending
+``answer_lost`` trip it, and the scheduler (and the worker's second check)
+skip scheduled connections fires as ``"answer_lost_breaker"``, exactly the
+way the route-changed breaker skips them. It clears the same two ways: a
+connections run that reaches a natural end with nothing lost
+(:func:`record_answer_lost`), or :func:`reset`, which clears both streaks
+(``netkeeper linkedin schedule reset-breaker``). Every other ending (a route
+change, a budget stop, a cancel, a checkpoint) leaves its count where it was.
+The two counters never feed each other: each is its own ``settings_kv`` row.
+
 Persisted like :mod:`netkeeper.services.heat`: a ``settings_kv`` row keyed by
 account id, read and written through a session and a ``User`` -- the
 extractor boundary (ADR 0005, spec 9.10) keeps this off the ``linkedin/``
@@ -66,6 +83,15 @@ _KEY_PREFIX: Final = "linkedin.route_changed_breaker"
 #: genuine shape change -- still being there.
 THRESHOLD: Final = 2
 
+_ANSWER_LOST_KEY_PREFIX: Final = "linkedin.answer_lost_breaker"
+
+#: Consecutive connections runs ending ``answer_lost`` that trip the answer-lost
+#: limit (#199). Pinned literally. One more than :data:`THRESHOLD`: a single lost
+#: answer is common (#200 saw about one in 5 to 10 on supervised runs) and a run
+#: already reads on past up to five, so it takes three whole runs in a row, none
+#: reaching a clean end, before scheduled runs stop spending page views on it.
+ANSWER_LOST_THRESHOLD: Final = 3
+
 
 @dataclass(frozen=True, slots=True)
 class BreakerState:
@@ -85,10 +111,13 @@ class BreakerState:
     count: int
     since: datetime | None
     readable: bool = True
+    #: The count that trips this streak: :data:`THRESHOLD` for the route-changed
+    #: breaker, :data:`ANSWER_LOST_THRESHOLD` for the answer-lost limit.
+    threshold: int = THRESHOLD
 
     @property
     def tripped(self) -> bool:
-        return (not self.readable) or self.count >= THRESHOLD
+        return (not self.readable) or self.count >= self.threshold
 
 
 def state(session: Session, user: User, account_id: int) -> BreakerState:
@@ -145,23 +174,87 @@ def record(
     return updated
 
 
+def answer_lost_state(session: Session, user: User, account_id: int) -> BreakerState:
+    """The answer-lost streak (#199): how many consecutive connections runs have
+    ended ``answer_lost``, and when the streak started. Read-only."""
+    return _load(session, user, account_id, answer_lost=True)
+
+
+def answer_lost_tripped(session: Session, user: User, account_id: int) -> bool:
+    """Whether the answer-lost limit is tripped: the streak is at or above
+    :data:`ANSWER_LOST_THRESHOLD`. Read-only. The scheduler and the worker ask it
+    before a scheduled connections run, next to :func:`tripped`."""
+    return _load(session, user, account_id, answer_lost=True).tripped
+
+
+def record_answer_lost(
+    session: Session,
+    user: User,
+    account_id: int,
+    *,
+    answer_lost: bool,
+    clean_end: bool,
+    now: datetime,
+) -> BreakerState:
+    """Record one connections run's outcome on the answer-lost streak (#199). Needs a
+    writer session.
+
+    ``answer_lost`` (the run's ``stop_reason`` was ``answer_lost``: it stopped for
+    a lost answer, or read to the end without some) extends the streak by one.
+    ``clean_end`` (the run reached a natural end and lost nothing) clears it,
+    whatever the trigger. Neither leaves the count where it was: a route change,
+    a budget stop, a cancel or a checkpoint says nothing about whether the page's
+    answers can be read.
+    """
+    _require_writer(session, "route_breaker.record_answer_lost")
+    if answer_lost and clean_end:
+        raise ValueError("a run cannot both lose an answer and end cleanly")
+    current = _load(session, user, account_id, answer_lost=True)
+    if clean_end:
+        updated = BreakerState(count=0, since=None, threshold=ANSWER_LOST_THRESHOLD)
+    elif answer_lost:
+        # Fail closed as record() does: a corrupt row reads as tripped, and one more
+        # answer_lost run keeps it tripped rather than restarting at 1.
+        count = current.count + 1 if current.readable else ANSWER_LOST_THRESHOLD
+        updated = BreakerState(
+            count=count, since=current.since or now, threshold=ANSWER_LOST_THRESHOLD
+        )
+    else:
+        return current
+    _store(session, user, account_id, updated, answer_lost=True)
+    return updated
+
+
 def reset(session: Session, user: User, account_id: int) -> BreakerState:
-    """Clear the breaker directly (``netkeeper linkedin schedule reset-breaker``).
-    Needs a writer session. Idempotent."""
+    """Clear the breaker directly (``netkeeper linkedin schedule reset-breaker``),
+    and the answer-lost limit with it (#199): one command clears whatever skips
+    scheduled connections runs. Needs a writer session. Idempotent. Returns the
+    route-changed breaker's cleared state."""
     _require_writer(session, "route_breaker.reset")
     cleared = BreakerState(count=0, since=None)
     _store(session, user, account_id, cleared)
+    _store(
+        session,
+        user,
+        account_id,
+        BreakerState(count=0, since=None, threshold=ANSWER_LOST_THRESHOLD),
+        answer_lost=True,
+    )
     return cleared
 
 
-def _key(account_id: int) -> str:
-    return f"{_KEY_PREFIX}.{account_id}"
+def _key(account_id: int, *, answer_lost: bool = False) -> str:
+    prefix = _ANSWER_LOST_KEY_PREFIX if answer_lost else _KEY_PREFIX
+    return f"{prefix}.{account_id}"
 
 
-def _load(session: Session, user: User, account_id: int) -> BreakerState:
-    raw = get_setting(session, user, _key(account_id))
+def _load(
+    session: Session, user: User, account_id: int, *, answer_lost: bool = False
+) -> BreakerState:
+    threshold = ANSWER_LOST_THRESHOLD if answer_lost else THRESHOLD
+    raw = get_setting(session, user, _key(account_id, answer_lost=answer_lost))
     if raw is None:
-        return BreakerState(count=0, since=None)
+        return BreakerState(count=0, since=None, threshold=threshold)
     try:
         if not isinstance(raw, dict):
             raise TypeError(f"not an object: {raw!r}")
@@ -169,14 +262,20 @@ def _load(session: Session, user: User, account_id: int) -> BreakerState:
         return BreakerState(
             count=int(_field(raw, "count")),
             since=None if since_raw is None else datetime.fromisoformat(str(since_raw)),
+            threshold=threshold,
         )
     except (TypeError, ValueError) as exc:
         # #191 review F7: a posture report, or the scheduler's gate, is the last
         # thing that should crash on a corrupt row -- fail closed instead
         # (BreakerState.tripped reads true when unreadable) and say so in the log;
         # `posture()` turns this into a warning a person actually sees.
-        log.error("route-changed breaker state for account %d is corrupt: %s", account_id, exc)
-        return BreakerState(count=0, since=None, readable=False)
+        log.error(
+            "%s state for account %d is corrupt: %s",
+            "answer-lost limit" if answer_lost else "route-changed breaker",
+            account_id,
+            exc,
+        )
+        return BreakerState(count=0, since=None, readable=False, threshold=threshold)
 
 
 def _field(raw: dict[str, Any], name: str) -> Any:
@@ -185,11 +284,18 @@ def _field(raw: dict[str, Any], name: str) -> Any:
     return raw[name]
 
 
-def _store(session: Session, user: User, account_id: int, state: BreakerState) -> None:
+def _store(
+    session: Session,
+    user: User,
+    account_id: int,
+    state: BreakerState,
+    *,
+    answer_lost: bool = False,
+) -> None:
     set_setting(
         session,
         user,
-        _key(account_id),
+        _key(account_id, answer_lost=answer_lost),
         {
             "count": state.count,
             "since": None if state.since is None else state.since.isoformat(),

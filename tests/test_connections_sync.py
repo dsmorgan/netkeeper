@@ -1540,3 +1540,102 @@ async def test_a_loss_the_run_read_on_past_never_bumps_the_breaker(
         at=NOW + timedelta(days=2),
     )
     assert _breaker_count(session_factory, user_id, report.account_id) == 1
+
+
+# --- #199: the answer-lost limit, driven through a real sync ---------------------------------
+
+
+def _lost_streak(factory: sessionmaker[Session], user_id: int, account_id: int) -> int:
+    with session_scope(factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        return route_breaker.answer_lost_state(session, user, account_id).count
+
+
+def _lost_tripped(factory: sessionmaker[Session], user_id: int, account_id: int) -> bool:
+    with session_scope(factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        return route_breaker.answer_lost_tripped(session, user, account_id)
+
+
+async def test_three_answer_lost_runs_in_a_row_trip_the_answer_lost_limit(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """A run that stops for a lost answer and one that reads on to the end without
+    some are both recorded ``answer_lost``, and both count."""
+    first = await _sync(session_factory, user_id, _LosingSource(_many(99), lose_at=1))
+    assert _lost_streak(session_factory, user_id, first.account_id) == 1
+    await _sync(
+        session_factory,
+        user_id,
+        _ReadOnSource(_many(99), losses={1: (_lost(40),)}),
+        at=NOW + timedelta(days=1),
+    )
+    assert _lost_streak(session_factory, user_id, first.account_id) == 2
+    assert not _lost_tripped(session_factory, user_id, first.account_id)
+    await _sync(
+        session_factory,
+        user_id,
+        _LosingSource(_many(99), lose_at=0),
+        at=NOW + timedelta(days=2),
+    )
+    assert _lost_streak(session_factory, user_id, first.account_id) == 3
+    assert _lost_tripped(session_factory, user_id, first.account_id)
+    # The route-changed breaker never moved.
+    assert _breaker_count(session_factory, user_id, first.account_id) == 0
+
+
+async def test_a_run_that_completes_clears_the_answer_lost_streak(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    first = await _sync(session_factory, user_id, _LosingSource(_many(99), lose_at=1))
+    await _sync(
+        session_factory,
+        user_id,
+        _LosingSource(_many(99), lose_at=1),
+        at=NOW + timedelta(days=1),
+    )
+    assert _lost_streak(session_factory, user_id, first.account_id) == 2
+    report = await _sync(
+        session_factory, user_id, FakeConnectionsSource(_many(99)), at=NOW + timedelta(days=2)
+    )
+    assert _run_row(session_factory, user_id, report.run_id).status is SyncRunStatus.COMPLETED
+    assert _lost_streak(session_factory, user_id, first.account_id) == 0
+
+
+async def test_a_route_changed_or_cancelled_run_leaves_the_answer_lost_streak(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """Neither says whether the page's answers can be read: the count stays."""
+    first = await _sync(session_factory, user_id, _LosingSource(_many(99), lose_at=1))
+    await _sync(
+        session_factory,
+        user_id,
+        FakeConnectionsSource(list(PEOPLE), script={0: UNRECOGNIZED}),
+        at=NOW + timedelta(days=1),
+    )
+    assert _lost_streak(session_factory, user_id, first.account_id) == 1
+    cancelled = await _sync(
+        session_factory,
+        user_id,
+        FakeConnectionsSource(_many(200)),
+        at=NOW + timedelta(days=2),
+        sleeps=CancelsOnFirstWait(session_factory, user_id),
+    )
+    assert cancelled.cancelled
+    assert _lost_streak(session_factory, user_id, first.account_id) == 1
+
+
+async def test_an_observation_failure_leaves_the_answer_lost_streak(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    first = await _sync(session_factory, user_id, _LosingSource(_many(99), lose_at=1))
+    with pytest.raises(ObservationFailed):
+        await _sync(
+            session_factory,
+            user_id,
+            _RaisingSource(ObservationFailed("an answer of the page could not be kept")),
+            at=NOW + timedelta(days=1),
+        )
+    assert _lost_streak(session_factory, user_id, first.account_id) == 1
