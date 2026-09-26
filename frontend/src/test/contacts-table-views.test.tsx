@@ -157,6 +157,23 @@ describe('a page past the end', () => {
   })
 })
 
+describe('a hand-edited link', () => {
+  it('drops what it cannot read instead of breaking the table', async () => {
+    const seen = mockApi((request) => {
+      const { pathname } = new URL(request.url)
+      if (pathname === '/api/v1/contacts/query') return jsonResponse(contactPage(rows(2)))
+      return undefined
+    })
+    // `met` is no value the API knows, `page=0` is no page, and `size` is past the cap.
+    await renderApp('/contacts?met=bogus&page=0&size=5000')
+    await screen.findByRole('table')
+    const query = lastQuery(seen)
+    expect(query.offset).toBe(0)
+    expect(query.limit).toBe(200)
+    expect(JSON.stringify(query.filter)).not.toContain('bogus')
+  })
+})
+
 describe('the row window', () => {
   const noop = () => undefined
   const NO_ACTIONS: RowActions = {
