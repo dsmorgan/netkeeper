@@ -145,6 +145,7 @@ class EnrichRunReport:
             "unreadable": self.result.unreadable,
             "mismatched": self.result.mismatched,
             "lost": len(self.result.lost),
+            "copied": len(self.result.copied),
             "skipped": self.skipped,
             "visit_budget": self.visit_budget,
             "harvests": dataclasses.asdict(self.harvests),
@@ -439,7 +440,11 @@ async def resume_enrichment(
 
 
 def _lost_notes(result: EnrichResult) -> tuple[str, ...]:
-    """#197: each unreadable visit whose answer's body was lost, in fixed words."""
-    if not result.lost:
-        return ()
-    return (f"unreadable answers: {'; '.join(result.lost)}.",)
+    """#197: each unreadable visit whose answer's body was lost, in fixed words; and
+    #207 review: each visit whose Contact info came from a streamed copy instead."""
+    notes: list[str] = []
+    if result.lost:
+        notes.append(f"unreadable answers: {'; '.join(result.lost)}.")
+    if result.copied:
+        notes.append(f"read from streamed copies: {'; '.join(result.copied)}.")
+    return tuple(notes)

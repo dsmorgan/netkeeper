@@ -27,6 +27,7 @@ from netkeeper.crm.provenance import set_manual_field
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.enrich import ProfileHarvest
+from netkeeper.linkedin.voyager import ContactInfo
 from netkeeper.models import (
     Contact,
     ContactAlias,
@@ -692,3 +693,61 @@ def test_a_website_that_is_not_http_is_never_stored(
     assert [link.url for link in contact.links] == ["https://mateo.example.test/"]
     assert caplog.text.count("skipped a website that is not an http or https url") == 2
     assert "javascript" not in caplog.text
+
+
+# --- #207 review: Contact info from a streamed copy ---------------------------------------
+
+
+def _from_copy(contact: Contact, profile: Profile, info: ContactInfo) -> ProfileHarvest:
+    return replace(_harvest(contact, profile), contact_info=info, contact_info_from_copy=True)
+
+
+def test_a_thin_copy_is_written_but_the_contact_stays_due(writer: Session, user: User) -> None:
+    """A copy with no email and no phone may be one cut short that passed every check:
+    what it holds is written, and the contact is visited again next cycle."""
+    contact = _stored(writer, user, PRIYA, enrich_priority=5)
+    counts = HarvestCounts()
+    thin = ContactInfo(websites=("https://priya.example.test/",))
+    result = apply_harvest(writer, user, _from_copy(contact, PRIYA, thin), counts)
+    assert result is HarvestResult.APPLIED
+    assert [link.url for link in contact.links] == ["https://priya.example.test/"]
+    assert contact.headline == details_of(PRIYA).headline
+    assert (contact.enrich_priority, contact.last_enriched_at) == (5, None)
+    assert contact.li_enrich_attempted_at == NOW
+    assert (counts.applied, counts.kept_due) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "info",
+    [ContactInfo(emails=("priya@example.test",)), ContactInfo(phones=("+1 555 0100",))],
+)
+def test_a_copy_with_an_address_or_a_number_is_applied_as_usual(
+    writer: Session, user: User, info: ContactInfo
+) -> None:
+    contact = _stored(writer, user, PRIYA, enrich_priority=5)
+    counts = HarvestCounts()
+    apply_harvest(writer, user, _from_copy(contact, PRIYA, info), counts)
+    assert (contact.enrich_priority, contact.last_enriched_at) == (0, NOW)
+    assert counts.kept_due == 0
+
+
+def test_a_thin_overlay_read_from_its_own_body_is_applied_as_usual(
+    writer: Session, user: User
+) -> None:
+    contact = _stored(writer, user, PRIYA, enrich_priority=5)
+    harvest = replace(_harvest(contact, PRIYA), contact_info=ContactInfo())
+    apply_harvest(writer, user, harvest)
+    assert (contact.enrich_priority, contact.last_enriched_at) == (0, NOW)
+
+
+def test_a_harvest_without_contact_info_cannot_claim_a_copy() -> None:
+    with pytest.raises(ValueError, match="copy"):
+        ProfileHarvest(
+            contact_ref=1,
+            requested_public_id="x",
+            outcome=Outcome.OK,
+            observed_at=NOW,
+            details=details_of(PRIYA),
+            contact_info=None,
+            contact_info_from_copy=True,
+        )

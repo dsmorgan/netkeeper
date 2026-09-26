@@ -238,6 +238,9 @@ class ProfileHarvest:
     may differ from ``details.public_id`` after a vanity-url change; deciding
     whether the profile found is the contact asked for is the core's, against
     the URN it holds. ``observed_at`` is when the visit finished, aware.
+    ``contact_info_from_copy`` is true when the Contact info was read from the body
+    tap's streamed copy of the overlay's answer, not its own body (#207 review): the
+    copy passed every check, but the core may still trust a thin one less.
     """
 
     contact_ref: int
@@ -246,11 +249,14 @@ class ProfileHarvest:
     observed_at: datetime
     details: ProfileDetails | None = None
     contact_info: ContactInfo | None = None
+    contact_info_from_copy: bool = False
 
     def __post_init__(self) -> None:
         if self.outcome is Outcome.OK:
             if self.details is None:
                 raise ValueError("an Ok harvest carries the profile's details")
+            if self.contact_info_from_copy and self.contact_info is None:
+                raise ValueError("a harvest without contact info did not read it from a copy")
         elif self.outcome in (Outcome.NOT_FOUND, Outcome.ROUTE_CHANGED):
             if self.details is not None or self.contact_info is not None:
                 raise ValueError(f"a {self.outcome.value} harvest carries nothing")
@@ -294,8 +300,10 @@ class EnrichResult:
     per visit in order, ``None`` for a visit that clicked nothing; ``clicks``
     how many clicks the run asked for, never more than one per visit;
     ``mismatched`` how many profiles answered under another id than the contact's;
-    and ``lost`` one fixed line per unreadable visit whose answer's body the browser
-    could not hand over (#197), naming the visit by its number in this run.
+    ``lost`` one fixed line per unreadable visit whose answer's body the browser
+    could not hand over (#197), naming the visit by its number in this run; and
+    ``copied`` one fixed line per visit whose Contact info was read from the body
+    tap's streamed copy instead (#207 review).
     """
 
     reason: StopReason
@@ -311,6 +319,7 @@ class EnrichResult:
     clicks: int = 0
     mismatched: int = 0
     lost: tuple[str, ...] = ()
+    copied: tuple[str, ...] = ()
 
 
 # --- the source seam ---------------------------------------------------------
@@ -328,7 +337,8 @@ class Answer[T]:
     the answer came from, with the profile's own path segment masked out.
     ``lost`` is set on an unparsed answer whose body the browser could not hand
     over (#197): which answer it was and why, in fixed words, never the
-    exception's message.
+    exception's message. ``from_copy`` marks an ``Ok`` value read from the body tap's
+    streamed copy of an answer whose own body was lost (#203).
     """
 
     outcome: Outcome
@@ -336,6 +346,7 @@ class Answer[T]:
     value: T | None = None
     unparsed: bool = False
     lost: str | None = None
+    from_copy: bool = False
 
 
 class ProfileSource(Protocol):
@@ -467,6 +478,7 @@ async def run_enrichment(
     completed: list[int] = []
     pauses: list[float | None] = []
     lost: list[str] = []
+    copied: list[str] = []
     visits = harvested = not_found = unreadable = unreadable_in_a_row = clicks = mismatched = 0
 
     def progress(stopped: StopReason | None = None) -> ProgressEvent:
@@ -507,6 +519,7 @@ async def run_enrichment(
             clicks=clicks,
             mismatched=mismatched,
             lost=tuple(lost),
+            copied=tuple(copied),
         )
 
     for index, step in enumerate(plan.steps):
@@ -589,7 +602,10 @@ async def run_enrichment(
                 observed_at=clock(),
                 details=details.value,
                 contact_info=None if info is None else info.value,
+                contact_info_from_copy=info is not None and info.from_copy,
             )
+            if info is not None and info.from_copy:
+                copied.append(f"visit {visits}: the Contact info was read from a streamed copy")
         else:
             harvest = ProfileHarvest(
                 contact_ref=target.contact_ref,

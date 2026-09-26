@@ -62,10 +62,12 @@ same wall check; any other navigation error still ends the run, and a lost tab i
 tap (:mod:`netkeeper.linkedin.body_tap`), narrowed to the lazy cards and the overlay's
 answer: the page's own client can abort those after reading them, and Chrome then has
 no body to hand over. A lost lazy card or overlay is read from the copy Chrome streamed
-as it arrived only when the copy is whole: the tap ended it as finished or as the
-page's own cancel, and it parses as flight with every row it names (a copy cut short at
-a row boundary names a row it never got). It is then read as strictly as a body. Any
-other copy leaves the answer lost, as above.
+as it arrived only when the copy is whole: the tap ended it as finished or cancelled
+(``net::ERR_ABORTED``, which a cancel mid-stream gives too, so it proves nothing on its
+own), and it parses as flight with its root, every row the root reaches, and no other
+(a copy cut short at a row boundary lacks one). It is then read as strictly as a body.
+Any other copy leaves the answer lost, as above. A harvest whose Contact info came from
+a copy says so (:attr:`~netkeeper.linkedin.enrich.ProfileHarvest.contact_info_from_copy`).
 
 **The click.** Only after the profile read whole, and only when the job has found its id
 to be the contact's (:mod:`netkeeper.linkedin.enrich`). If the control is missing, not
@@ -117,7 +119,7 @@ from netkeeper.linkedin.flagship_profile import (
     profile_slug,
     same_slug,
 )
-from netkeeper.linkedin.flight import parse_flight, references_resolve
+from netkeeper.linkedin.flight import is_whole, parse_flight
 from netkeeper.linkedin.observe import (
     FAILURE_REDIRECT,
     FAILURE_UNREADABLE,
@@ -617,7 +619,7 @@ class PageProfiles:
             except RouteChanged:
                 log.warning("enrichment: the overlay answered in a shape the parser does not know")
                 return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
-            return Answer(Outcome.OK, self._url, info)
+            return Answer(Outcome.OK, self._url, info, from_copy=response.body is None)
 
     # --- the tab ----------------------------------------------------------------------
 
@@ -719,18 +721,20 @@ def _lost_cause(response: ObservedResponse) -> str:
 def _whole_copy(response: ObservedResponse, *, endpoint: str) -> bytes | None:
     """The body tap's streamed copy of a lost answer, when it is whole (#203), else ``None``.
 
-    The tap hands over only a copy whose stream finished, or that the page's own client
-    cancelled (``net::ERR_ABORTED``), within the body limit (#202). Here it must also
-    parse as flight and name no row it does not hold: a flight answer refers forward to
-    rows streamed after, so a copy cut short at a line boundary names a row it lacks.
-    The caller then reads it as strictly as a body.
+    The tap hands over only a copy whose stream finished, or was cancelled with
+    ``net::ERR_ABORTED`` (#202), within the body limit. That cancel does not prove the
+    copy is whole: the page's own client cancelling after it read everything gives it,
+    and so do a cancel mid-stream and a navigation. So the copy must also parse as
+    flight and be whole by its own structure (:func:`~netkeeper.linkedin.flight.is_whole`:
+    its root, and every row the root reaches, and no row it does not). The caller then
+    reads it as strictly as a body.
     """
     streamed = response.streamed
     if streamed is None:
         return None
     try:
         payload = parse_flight(streamed, endpoint=endpoint)
-        whole = references_resolve(payload, endpoint=endpoint)
+        whole = is_whole(payload, endpoint=endpoint)
     except RouteChanged:
         whole = False
     if not whole:

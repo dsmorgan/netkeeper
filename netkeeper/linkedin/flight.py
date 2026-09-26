@@ -41,6 +41,16 @@ from netkeeper.linkedin.voyager import RouteChanged
 #: own markers (``$undefined``, ``$Sreact.suspense``, ``$@1``) never read as one.
 _REF: Final = re.compile(r"\$L?([0-9a-f]+)")
 
+#: The root row of every answer: the model the page renders from.
+ROOT_ROW: Final = "0"
+
+#: A string that names another row by id, as React's flight client reads one: ``$<id>``,
+#: or ``$`` and one marker letter and the id -- ``L`` (lazy), ``@`` (a promise), ``Q``
+#: (a map), ``W`` (a set), ``K`` (form data), ``B`` (a blob), ``F`` (a server
+#: reference), ``R``/``r`` (a stream), ``X``/``x`` (an async iterable), ``h`` (a hint)
+#: -- optionally followed by ``:`` and a path into that row (#207 review).
+_ROW_MARKER: Final = re.compile(r"\$[@QWKBFRrXxhL]?([0-9a-f]+)(?::.*)?", re.DOTALL)
+
 #: A row id. LinkedIn's are lower-case hex; a hint row has none.
 _ROW_ID: Final = re.compile(rb"[0-9a-f]*")
 
@@ -110,25 +120,36 @@ class FlightPayload:
             yield from self.walk(row, follow=False, endpoint=endpoint)
 
 
-def references_resolve(payload: FlightPayload, *, endpoint: str) -> bool:
-    """Whether every row reference in ``payload`` names a row it holds (#203).
+def is_whole(payload: FlightPayload, *, endpoint: str) -> bool:
+    """Whether ``payload`` holds a whole answer: its root and every row the root reaches.
 
-    A flight answer's rows refer forward to rows streamed after them, so an answer cut
-    short at a line boundary still parses but leaves a reference to a row it never got.
-    A reference may name a model row, an ``I`` import, or a ``T`` text row.
+    A copy of an answer can be cut short at a row boundary and still parse (#203). The
+    rows arrive in no order a reader can rely on -- a child before the row that refers
+    to it, as React's ``outlineModel`` writes them, or after -- so a cut copy is told
+    apart by what it lacks: row ``0``, the root, is required; every id-bearing
+    reference reachable from it (:data:`_ROW_MARKER`) must name a model row, an ``I``
+    import, or a ``T`` text row the copy holds; and every model row must be reachable
+    from the root, since a whole answer sends none that nothing uses (#207 review).
     """
-    for node in payload.nodes(endpoint=endpoint):
-        if isinstance(node, str):
-            match = _REF.fullmatch(node)
-            if match is not None:
-                row = match.group(1)
-                if (
-                    row not in payload.rows
-                    and row not in payload.modules
-                    and row not in payload.texts
-                ):
-                    return False
-    return True
+    if ROOT_ROW not in payload.rows:
+        return False
+    reached = {ROOT_ROW}
+    stack = [ROOT_ROW]
+    while stack:
+        for node in payload.walk(payload.rows[stack.pop()], follow=False, endpoint=endpoint):
+            if not isinstance(node, str):
+                continue
+            match = _ROW_MARKER.fullmatch(node)
+            if match is None:
+                continue
+            row = match.group(1)
+            if row in payload.rows:
+                if row not in reached:
+                    reached.add(row)
+                    stack.append(row)
+            elif row not in payload.modules and row not in payload.texts:
+                return False
+    return reached == set(payload.rows)
 
 
 def is_element(node: object) -> bool:

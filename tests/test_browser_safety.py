@@ -137,6 +137,8 @@ TAP_OBSERVERS = frozenset(
         (LINKEDIN / "page_profiles.py", "PageProfiles.open_profile"),
     }
 )
+#: The one place the tap's opener is reached from: the observation that asked for it.
+TAP_OPENER = (LINKEDIN / "browser.py", "BrowserRun.observe")
 
 # ADR 0006: netkeeper reads what the page loads and never touches a request. These are
 # Playwright's ways to hold one and answer it -- a routed request's `continue_`,
@@ -759,10 +761,8 @@ def test_the_one_cdp_session_is_read_only() -> None:
         )
 
 
-def tap_observations(source: str, path: Path = MEMORY) -> Iterator[Input]:
-    """Every ``observe(...)`` call that could open a body tap: one that passes ``tap``,
-    or passes keywords through ``**`` where a ``tap`` could hide."""
-    tree = ast.parse(source)
+def _scoped(tree: ast.AST) -> dict[int, str]:
+    """Each node's enclosing ``Class.method`` (or function) name, by node id."""
     scopes: dict[int, str] = {}
 
     def enclose(node: ast.AST, name: str) -> None:
@@ -776,44 +776,116 @@ def tap_observations(source: str, path: Path = MEMORY) -> Iterator[Input]:
                 enclose(child, name)
 
     enclose(tree, "")
+    return scopes
+
+
+def name_reaches(source: str, name: str, path: Path = MEMORY) -> Iterator[tuple[Input, bool]]:
+    """Every reach of the attribute ``name`` in ``source``, the way :func:`reached_names`
+    reads one -- an attribute, called or held; a ``from`` import; a literal handed to
+    ``getattr``, ``attrgetter``, or ``methodcaller`` -- each with whether it is a direct
+    call that passes no ``tap`` and no ``**`` keywords (the one harmless way to reach
+    ``observe``)."""
+    tree = ast.parse(source)
+    scopes = _scoped(tree)
+    calls = {
+        id(node.func): node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "observe"
-            and any(keyword.arg in ("tap", None) for keyword in node.keywords)
-        ):
-            yield Input(path, node.lineno, scopes.get(id(node), ""), "observe")
+        where = scopes.get(id(node), "")
+        if isinstance(node, ast.Attribute) and node.attr == name:
+            call = calls.get(id(node))
+            plain = call is not None and all(
+                keyword.arg not in ("tap", None) for keyword in call.keywords
+            )
+            yield Input(path, node.lineno, where, name), plain
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == name:
+                    yield Input(path, node.lineno, where, name), False
+        elif isinstance(node, ast.Call):
+            for arg in _attribute_name_arguments(node):
+                if (
+                    isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, str)
+                    and name in arg.value.split(".")
+                ):
+                    yield Input(path, node.lineno, where, name), False
+
+
+def tap_observations(source: str, path: Path = MEMORY) -> Iterator[Input]:
+    """Every reach of ``observe`` that could open a body tap: a call that passes ``tap``
+    or ``**`` keywords, and any reach that is not a direct call at all -- a held method,
+    ``functools.partial``, ``getattr`` or ``methodcaller`` -- whose keywords nobody can
+    read off the line (#207 review)."""
+    for item, plain in name_reaches(source, "observe", path):
+        if not plain:
+            yield item
 
 
 def test_only_the_named_observations_open_the_body_tap() -> None:
     """ADR 0006's amendment: the body tap opens for the connections sync (#200) and for
-    each enrichment visit (#203), at one call each, and nowhere else."""
-    found = [
-        item
+    each enrichment visit (#203), at one call each, and nowhere else; and the tap's
+    opener is reached only from ``BrowserRun.observe``, once."""
+    files = [
+        path
         for root in BROWSER_ROOTS
         for path in ([root] if root.is_file() else python_files(root))
-        for item in tap_observations(path.read_text(encoding="utf-8"), path)
+    ]
+    found = [
+        item for path in files for item in tap_observations(path.read_text(encoding="utf-8"), path)
     ]
     sites = sorted((item.path, item.function) for item in found)
     assert sites == sorted(TAP_OBSERVERS), "a body tap opened somewhere new:\n" + "\n".join(
         str(item) for item in found
     )
+    openers = [
+        item
+        for path in files
+        for item, _ in name_reaches(path.read_text(encoding="utf-8"), "_open_body_tap", path)
+    ]
+    assert [(i.path, i.function) for i in openers] == [TAP_OPENER], "\n".join(
+        str(i) for i in openers
+    )
 
 
 def test_the_tap_observation_scanner_sees_a_tap_and_a_hidden_one() -> None:
     source = (
+        "import functools, operator\n"
         "class PageProfiles:\n"
         "    async def open_profile(self, run, match, extra):\n"
         "        await run.observe(match, tap=True)\n"
         "        await run.observe(match, **extra)\n"
         "        await run.observe(match, limits=None)\n"
+        "        held = run.observe\n"
+        "        await getattr(run, 'observe')(match, tap=True)\n"
+        "        await functools.partial(run.observe, tap=True)(match)\n"
+        "        await operator.methodcaller('observe', match, tap=True)(run)\n"
     )
-    found = list(tap_observations(source))
-    assert [(i.line, i.function) for i in found] == [
-        (3, "PageProfiles.open_profile"),
-        (4, "PageProfiles.open_profile"),
-    ]
+    found = sorted((i.line, i.function) for i in tap_observations(source))
+    assert found == [(line, "PageProfiles.open_profile") for line in (4, 5, 7, 8, 9, 10)]
+
+
+def test_the_tap_opener_scanner_sees_every_way_to_reach_it() -> None:
+    source = (
+        "import functools\n"
+        "class PageProfiles:\n"
+        "    async def open_profile(self, run, page, match):\n"
+        "        await run._open_body_tap(page, match, 1)\n"
+        "        opener = run._open_body_tap\n"
+        "        await getattr(run, '_open_body_tap')(page, match, 1)\n"
+        "        await functools.partial(run._open_body_tap, page)(match, 1)\n"
+        "        from netkeeper.linkedin.browser import _open_body_tap\n"
+    )
+    found = sorted(i.line for i, _ in name_reaches(source, "_open_body_tap"))
+    assert found == [4, 5, 6, 7, 8]
+
+
+def test_a_held_observe_is_a_reach_even_where_no_tap_is_named() -> None:
+    """A held ``observe`` is refused on its own: nothing on the line says ``tap``."""
+    source = "def later(run):\n    return run.observe\n"
+    assert [(i.line, i.function) for i in tap_observations(source)] == [(2, "later")]
 
 
 def test_the_cdp_send_scanner_catches_a_mutating_method_or_a_hidden_one() -> None:
