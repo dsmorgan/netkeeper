@@ -4,7 +4,9 @@
  * Lint runs on the text in front of you, debounced, through `POST
  * /templates/lint`, so an error shows before you save. Lint never blocks a
  * save; every issue it reports is an error that blocks activating a campaign
- * with the template, and the editor says so.
+ * with the template, and the editor says so. While the result on screen is
+ * for older text (during the debounce, and while the request is out), the list
+ * is dimmed and marked busy, and says it is checking.
  */
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query'
 import { useId, useMemo, useState } from 'react'
@@ -17,6 +19,7 @@ import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Callout, ErrorNote } from '@/features/crm/controls'
 import { useDebounced } from '@/features/crm/use-debounced'
+import { cn } from '@/lib/utils'
 
 import { createTemplate, deleteTemplate, lintDraft, templateKeys, updateTemplate } from './api'
 import type { TemplateChannel, TemplateDraft, TemplateOut } from './api'
@@ -61,6 +64,10 @@ export function TemplateEditor({
     retry: false,
   })
   const issues = lint.data ?? []
+  // The text on screen has moved on from what `issues` describes: still debouncing, or the
+  // answer for the new text is not in yet and `keepPreviousData` is showing the old one.
+  const stale = text !== linted || lint.isPlaceholderData
+  const checking = !lint.isError && (stale || lint.data === undefined)
   const partHasError = (part: 'subject' | 'body') =>
     issues.some((issue) => issue.part === part && issue.severity === 'error')
 
@@ -156,26 +163,36 @@ export function TemplateEditor({
             />
           </div>
 
-          <section aria-label="Lint" className="space-y-2">
-            {lint.isError ? (
-              <ErrorNote label="Could not lint the template" error={lint.error} />
-            ) : lint.data === undefined ? null : issues.length === 0 ? (
-              <p role="status" className="text-sm text-muted-foreground">
-                No lint issues.
+          <section aria-label="Lint" aria-busy={checking || undefined} className="space-y-2">
+            {checking && (
+              <p role="status" className="text-xs text-muted-foreground">
+                Checking…
               </p>
-            ) : (
-              <>
-                {hasErrors(issues) && (
-                  <Callout tone="warning">
-                    <p>
-                      You can save with lint errors, but a campaign can't use this template until
-                      they're fixed.
-                    </p>
-                  </Callout>
-                )}
-                <LintList issues={issues} label="Lint issues" />
-              </>
             )}
+            <div
+              data-stale={(stale && lint.data !== undefined) || undefined}
+              className={cn('space-y-2 transition-opacity', stale && 'opacity-50')}
+            >
+              {lint.isError ? (
+                <ErrorNote label="Could not lint the template" error={lint.error} />
+              ) : lint.data === undefined ? null : issues.length === 0 ? (
+                <p role="status" className="text-sm text-muted-foreground">
+                  No lint issues.
+                </p>
+              ) : (
+                <>
+                  {hasErrors(issues) && (
+                    <Callout tone="warning">
+                      <p>
+                        You can save with lint errors, but a campaign can't use this template until
+                        they're fixed.
+                      </p>
+                    </Callout>
+                  )}
+                  <LintList issues={issues} label="Lint issues" />
+                </>
+              )}
+            </div>
           </section>
 
           {save.isError && <ErrorNote label="Could not save the template" error={save.error} />}

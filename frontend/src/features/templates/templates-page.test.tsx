@@ -138,6 +138,108 @@ describe('lint', () => {
   })
 })
 
+/**
+ * A lint route that holds each answer until the test releases it, by the body text it
+ * was asked about, so a test can decide the order answers arrive in.
+ */
+function heldLint() {
+  const held = new Map<string, (issues: LintIssue[]) => void>()
+  const route: RouteHandler = ({ body }) =>
+    new Promise((resolve) => {
+      held.set((body as { body: string }).body, (issues) => resolve(jsonResponse(issues)))
+    })
+  /** Resolves once a lint request for `text` has gone out. */
+  const asked = (text: string) => waitFor(() => expect(held.has(text)).toBe(true), WAIT)
+  const release = async (text: string, issues: LintIssue[]) => {
+    await asked(text)
+    act(() => held.get(text)?.(issues))
+  }
+  return { route, asked, release }
+}
+
+describe('lint while you type', () => {
+  it('dims the old result and says it is checking until the new one is in', async () => {
+    const lint = heldLint()
+    mockApi(
+      routes([template({ body: '{% for x in y %}{% endfor %}' })], {
+        'POST /api/v1/templates/lint': lint.route,
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    expect(await screen.findByText('Checking…')).toBeInTheDocument()
+    await lint.release('{% for x in y %}{% endfor %}', [LOOP])
+    const issues = await screen.findByRole('list', { name: 'Lint issues' })
+    await waitFor(() => expect(screen.queryByText('Checking…')).not.toBeInTheDocument())
+    const section = screen.getByRole('region', { name: 'Lint' })
+    expect(section).not.toHaveAttribute('aria-busy')
+    expect(issues.closest('[data-stale]')).toBeNull()
+
+    fireEvent.change(screen.getByLabelText('Body'), { target: { value: 'Hi {{ first_name }}' } })
+    // The loop is gone from the text, but its answer is still on screen: dimmed, and busy.
+    expect(screen.getByText('Checking…')).toBeInTheDocument()
+    expect(section).toHaveAttribute('aria-busy', 'true')
+    expect(screen.getByRole('list', { name: 'Lint issues' }).closest('[data-stale]')).not.toBeNull()
+
+    // Past the debounce, with the request out: still the old answer, so still stale.
+    await lint.asked('Hi {{ first_name }}')
+    expect(screen.getByText('Checking…')).toBeInTheDocument()
+    expect(screen.getByRole('list', { name: 'Lint issues' }).closest('[data-stale]')).not.toBeNull()
+
+    await lint.release('Hi {{ first_name }}', [])
+    expect(await screen.findByText('No lint issues.', undefined, WAIT)).toBeInTheDocument()
+    expect(screen.queryByText('Checking…')).not.toBeInTheDocument()
+    expect(section).not.toHaveAttribute('aria-busy')
+    expect(screen.getByText('No lint issues.').closest('[data-stale]')).toBeNull()
+  })
+
+  it('shows the answer for the latest text when an older answer arrives after it', async () => {
+    const lint = heldLint()
+    mockApi(routes([], { 'POST /api/v1/templates/lint': lint.route }))
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'New template' }))
+    await lint.release('', [])
+
+    const looped = 'Hi {{ first_name }}\n{% for x in y %}{% endfor %}'
+    fireEvent.change(screen.getByLabelText('Body'), { target: { value: looped } })
+    // The loop's request goes out; fix the text before it answers.
+    await lint.asked(looped)
+    const fixed = 'Hi {{ first_name }}'
+    fireEvent.change(screen.getByLabelText('Body'), { target: { value: fixed } })
+
+    await lint.release(fixed, [])
+    await lint.release(looped, [LOOP]) // late, and for text that is gone
+
+    expect(await screen.findByText('No lint issues.', undefined, WAIT)).toBeInTheDocument()
+    // Give the late answer every chance to land before checking it changed nothing.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(screen.getByText('No lint issues.')).toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Lint issues' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Body')).not.toHaveAttribute('aria-invalid')
+    expect(screen.queryByText('Checking…')).not.toBeInTheDocument()
+  })
+
+  it('shows a 422 from lint, the text being too long, as the server said it', async () => {
+    mockApi(
+      routes([], {
+        'POST /api/v1/templates/lint': () =>
+          jsonResponse({ detail: 'body is longer than 20000 characters' }, 422),
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'New template' }))
+    fireEvent.change(screen.getByLabelText('Body'), { target: { value: 'x'.repeat(20_001) } })
+
+    const alert = await screen.findByRole('alert', undefined, WAIT)
+    expect(alert).toHaveTextContent('Could not lint the template')
+    expect(alert).toHaveTextContent('body is longer than 20000 characters')
+    expect(screen.queryByText('Checking…')).not.toBeInTheDocument()
+    // Lint never blocks a save; the save answers for itself.
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'long' } })
+    expect(screen.getByRole('button', { name: 'Create template' })).toBeEnabled()
+  })
+})
+
 describe('preview', () => {
   it('renders a missing field as empty text with a warning, not an error', async () => {
     const seen = mockApi(
