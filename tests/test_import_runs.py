@@ -42,6 +42,7 @@ from netkeeper.models import (
     InteractionKind,
     ListKind,
     RuleField,
+    TemplateChannel,
     User,
 )
 from netkeeper.scoping import scoped, unscoped
@@ -607,6 +608,63 @@ def test_a_message_naming_a_created_contact_only_through_its_enrollment_refuses(
 
     with pytest.raises(import_runs.CreatedContactsMessaged) as raised:
         import_runs.rollback(writer, user, run_id, force=True)
+
+    assert raised.value.contact_ids == (imogen.id,)
+
+
+def test_a_message_naming_a_created_contact_itself_refuses_whoever_its_enrollment_names(
+    writer: Session, user: User
+) -> None:
+    """The other half: the message's own ``contact_id`` is the created contact (#242 review)."""
+    seed_existing(writer, user)
+    run_id, imogen = _created_imogen_after(writer, user)
+    elsewhere = factories.make_contact(writer, user)
+    campaign = factories.make_campaign(writer, user)
+    enrollment = factories.make_enrollment(writer, campaign, elsewhere, current_step=1)
+    message = factories.make_message(writer, enrollment)
+    message.contact_id = imogen.id  # a row the service never writes, but the FK allows
+    writer.flush()
+
+    with pytest.raises(import_runs.CreatedContactsMessaged) as raised:
+        import_runs.rollback(writer, user, run_id, force=True)
+
+    assert raised.value.contact_ids == (imogen.id,)
+    assert raised.value.messages == 1
+
+
+def test_every_message_and_every_messaged_contact_is_counted(writer: Session, user: User) -> None:
+    seed_existing(writer, user)
+    run_id, imogen = _created_imogen_after(writer, user)
+    crispin = by_slug(writer, user, "crispin-vandermolen-qz")
+    assert crispin is not None
+    campaign = factories.make_campaign(
+        writer, user, channels=(TemplateChannel.EMAIL, TemplateChannel.EMAIL)
+    )
+    to_imogen = factories.make_enrollment(writer, campaign, imogen, current_step=2)
+    factories.make_message(writer, to_imogen, position=1)
+    factories.make_message(writer, to_imogen, position=2)
+    factories.make_message(writer, factories.make_enrollment(writer, campaign, crispin))
+
+    with pytest.raises(import_runs.CreatedContactsMessaged) as raised:
+        import_runs.rollback(writer, user, run_id)
+
+    assert raised.value.contact_ids == tuple(sorted([imogen.id, crispin.id]))
+    assert raised.value.messages == 3
+    assert "2 contact(s) this run created" in str(raised.value)
+    assert "3 campaign messages" in str(raised.value)
+
+
+def test_messages_are_refused_before_a_merge_is(writer: Session, user: User) -> None:
+    """A merge could be undone; a message never can, so it is the refusal to report."""
+    seed_existing(writer, user)
+    run_id, imogen = _created_imogen_after(writer, user)
+    older = _older_record(writer, user)
+    identity.merge(writer, user, imogen.id, older.id)
+    campaign = factories.make_campaign(writer, user)
+    factories.make_message(writer, factories.make_enrollment(writer, campaign, imogen))
+
+    with pytest.raises(import_runs.CreatedContactsMessaged) as raised:
+        import_runs.rollback(writer, user, run_id)
 
     assert raised.value.contact_ids == (imogen.id,)
 

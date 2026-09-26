@@ -1388,26 +1388,35 @@ def _messaged(session: Session, user: User, contact_ids: Iterable[int]) -> tuple
     """The contacts the run created that a campaign message names, ascending, and the count.
 
     A message names a contact twice over, as its own ``contact_id`` and through
-    its enrollment's. Either one stops the delete, so both are read.
+    its enrollment's. Either one stops the delete, so both are read. Each read
+    is its own scoped statement, so the owner check on the enrollments is the
+    scoping helper's, not a join condition that could go missing.
     """
     ids = sorted(contact_ids)
     if not ids:
         return [], 0
+    enrolled = {
+        enrollment_id: contact_id
+        for enrollment_id, contact_id in session.execute(
+            scoped(user, Enrollment)
+            .with_only_columns(Enrollment.id, Enrollment.contact_id)
+            .where(Enrollment.contact_id.in_(ids))
+        ).tuples()
+    }
     rows = session.execute(
         scoped(user, Message)
-        .with_only_columns(Message.id, Message.contact_id, Enrollment.contact_id)
-        .join(Enrollment, Enrollment.id == Message.enrollment_id)
-        .where(
-            Enrollment.user_id == user.id,
-            or_(Message.contact_id.in_(ids), Enrollment.contact_id.in_(ids)),
-        )
+        .with_only_columns(Message.contact_id, Message.enrollment_id)
+        .where(or_(Message.contact_id.in_(ids), Message.enrollment_id.in_(sorted(enrolled))))
     ).tuples()
     created = set(ids)
     named: set[int] = set()
     messages = 0
-    for _, contact_id, enrolled_id in rows:
+    for contact_id, enrollment_id in rows:
         messages += 1
-        named.update({contact_id, enrolled_id} & created)
+        if contact_id in created:
+            named.add(contact_id)
+        if enrollment_id in enrolled:
+            named.add(enrolled[enrollment_id])
     return sorted(named), messages
 
 
