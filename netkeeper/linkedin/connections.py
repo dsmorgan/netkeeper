@@ -252,10 +252,11 @@ def completion_slack(total: int) -> int:
     serves (a deactivated account, for instance), so a run that reaches a natural
     end need not match the total exactly. A small network gets the floor of 5
     rather than a fraction of a person; a large one gets roughly its own one
-    percent. Only :attr:`SyncResult.complete` reads this -- the end-of-list rule
-    for a short final page (the module docstring's "The end of the list") is
-    unchanged: a page short of a full page still reads on past the total exactly
-    as before, and only the completion decision at the end gets this slack.
+    percent. :attr:`SyncResult.complete` reads this, and so does the page source's
+    end-of-list rule for a *full* last answer that asks for no next page (#208):
+    that answer ends the list once the run is within this slack of the total, so a
+    visible list that is a multiple of ten under a total counting hidden members
+    still ends. A short final page is unchanged: it ends the list on its own.
     """
     return max(5, math.ceil(total * 0.01))
 

@@ -23,7 +23,8 @@ that brought nothing.
 (:attr:`~netkeeper.linkedin.flagship.ConnectionsChunk.ends_list`): a connections
 answer with no cards, or a short answer that asks for no next page -- and a full
 answer that asks for none once the run has seen as many distinct people as the first
-screen's total (a list whose length is a multiple of ten). A page that simply stops
+screen's total, less :func:`~netkeeper.linkedin.connections.completion_slack` (a list
+whose visible length is a multiple of ten; #208). A page that simply stops
 loading more is not an end: after :data:`MAX_IDLE_SCROLLS` scrolls that
 brought nothing, the call answers ``RouteChanged``, so the run stops and ages nobody.
 A short slice is returned only once the end is proven, which is what lets the job's
@@ -114,7 +115,7 @@ from urllib.parse import urlsplit
 
 from netkeeper.linkedin.browser import BrowserRun, BrowserUnavailable, PageLike
 from netkeeper.linkedin.classify import Outcome, classify
-from netkeeper.linkedin.connections import AnswerLost, LostAnswer, SourcePage
+from netkeeper.linkedin.connections import AnswerLost, LostAnswer, SourcePage, completion_slack
 from netkeeper.linkedin.flagship import (
     CONNECTIONS_PAGE_PATH,
     CONNECTIONS_SCREEN_PATH,
@@ -582,12 +583,18 @@ class PageConnections:
         self._cards.extend(chunk.cards)
         if chunk.ends_list:
             self._ended = True
-        elif chunk.next_start is None and 0 < self._total <= self._distinct() + self._lost_cards:
+        elif (
+            chunk.next_start is None
+            and self._total > 0
+            and self._distinct() + self._lost_cards >= self._total - completion_slack(self._total)
+        ):
             # A full answer that asks for no next page is the end of a list whose length
             # is a multiple of ten -- but only once the run has seen as many distinct
             # people as the first screen's total, counting the places of the answers it
-            # lost (#200). Short of that it proves nothing, and the page stopping there
-            # still ends the run as RouteChanged.
+            # lost (#200), less the completion slack a full sync is allowed anyway
+            # (#204): the total can count members the list never shows, so a visible
+            # list of 620 under a total of 624 ends here (#208). Short of that it proves
+            # nothing, and the page stopping there still ends the run as RouteChanged.
             self._ended = True
         self._next_start = (
             chunk.next_start if chunk.next_start is not None else chunk.start + len(chunk.cards)

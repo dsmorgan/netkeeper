@@ -212,6 +212,42 @@ async def test_a_full_last_page_that_asks_for_nothing_proves_nothing_short_of_th
     assert out.result.outcome is Outcome.ROUTE_CHANGED and not out.result.complete
 
 
+async def test_a_full_last_page_ends_the_list_when_hidden_members_are_within_the_slack() -> None:
+    """#208: 620 visible under a stated total of 624. The last answer is full and asks
+    for no next page; 620 is within completion_slack(624) == 7 of the total, so that
+    is the end, and the run completes with a shortfall of 4 (the #204 slack)."""
+    people = many(620)
+    out = await sync(FlagshipSite(people, end="short", total=624))
+    assert out.result.reason is StopReason.END_OF_LIST and out.result.complete
+    assert out.result.shortfall == 4
+    assert out.urns == [p.urn for p in people]
+
+
+async def test_a_full_last_page_ends_the_list_at_exactly_the_slack() -> None:
+    """The boundary: 40 visible of 45 is exactly completion_slack(45) == 5 short."""
+    out = await sync(FlagshipSite(many(40), end="short", total=45))
+    assert out.result.reason is StopReason.END_OF_LIST and out.result.complete
+    assert out.result.shortfall == 5
+
+
+async def test_a_full_last_page_one_past_the_slack_proves_nothing() -> None:
+    """One more than the slack: 40 visible of 46 is 6 short of a slack of 5. The page
+    stops loading, the source gives up, and nobody ages."""
+    out = await sync(FlagshipSite(many(40), end="short", total=46))
+    assert out.result.reason is StopReason.RESPONSE
+    assert out.result.outcome is Outcome.ROUTE_CHANGED and not out.result.complete
+
+
+async def test_a_large_lists_slack_is_its_own_one_percent_at_the_end_of_the_list() -> None:
+    """The slack scales with the total: 620 of 627 is 7 short, completion_slack(627)
+    == 7, so the list ends; 620 of 628 is 8 short of the same slack, so it does not.
+    A fixed floor of 5 would refuse the first."""
+    ends = await sync(FlagshipSite(many(620), end="short", total=627))
+    assert ends.result.reason is StopReason.END_OF_LIST and ends.result.complete
+    stops = await sync(FlagshipSite(many(620), end="short", total=628))
+    assert stops.result.outcome is Outcome.ROUTE_CHANGED and not stops.result.complete
+
+
 async def test_seeing_the_total_does_not_make_a_stalled_page_the_end() -> None:
     """The last answer asks for a next page the page never requests: however many
     people the run has seen, that is a stall, never the end."""
@@ -281,6 +317,14 @@ async def test_a_page_that_stops_loading_is_not_the_end_and_the_scroll_is_bounde
 async def test_a_list_with_no_stated_total_is_never_complete() -> None:
     out = await sync(FlagshipSite(many(15), total=None))
     assert out.result.reason is StopReason.END_OF_LIST and not out.result.complete
+
+
+async def test_a_full_last_page_never_ends_a_list_with_no_stated_total() -> None:
+    """#208: the slack is measured from a stated total. With none, a full answer that
+    asks for no next page proves nothing, however small the list (0 - 5 is no bar)."""
+    out = await sync(FlagshipSite(many(20), end="short", total=None))
+    assert out.result.reason is StopReason.RESPONSE
+    assert out.result.outcome is Outcome.ROUTE_CHANGED and not out.result.complete
 
 
 async def test_a_total_a_little_larger_than_the_list_still_completes() -> None:
