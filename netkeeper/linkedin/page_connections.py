@@ -249,6 +249,11 @@ class PageConnections:
         self._unreported: list[LostAnswer] = []
         #: The cards the lost answers held: the gap each left in the list's indexes.
         self._lost_cards = 0
+        #: Whether any answer read in this run asked for a next page (#208 review, M1).
+        #: The completion slack at a full last answer is allowed only once one has:
+        #: a parser that stopped reading the next request (a renamed ``$type``) would
+        #: otherwise make every full answer look like a possible end.
+        self._asked_next = False
         #: The body size of the last pagination answer that read, for the diagnostics.
         self._last_bytes: int | None = None
         #: Answers read from the body tap's streamed copy instead (#200).
@@ -581,20 +586,30 @@ class PageConnections:
 
     def _take(self, chunk: ConnectionsChunk) -> None:
         self._cards.extend(chunk.cards)
+        # The slack is judged against the answers *before* this one: this answer's own
+        # missing next request is what is being weighed as the end.
+        slack = completion_slack(self._total) if self._asked_next else 0
+        if chunk.next_start is not None:
+            self._asked_next = True
         if chunk.ends_list:
             self._ended = True
         elif (
             chunk.next_start is None
             and self._total > 0
-            and self._distinct() + self._lost_cards >= self._total - completion_slack(self._total)
+            and self._distinct() + self._lost_cards >= self._total - slack
         ):
             # A full answer that asks for no next page is the end of a list whose length
             # is a multiple of ten -- but only once the run has seen as many distinct
             # people as the first screen's total, counting the places of the answers it
             # lost (#200), less the completion slack a full sync is allowed anyway
             # (#204): the total can count members the list never shows, so a visible
-            # list of 620 under a total of 624 ends here (#208). Short of that it proves
-            # nothing, and the page stopping there still ends the run as RouteChanged.
+            # list of 620 under a total of 624 ends here (#208). The slack applies only
+            # once an earlier answer in this run asked for a next page (#208 review,
+            # M1): if the parser never sees a next request (LinkedIn renamed its
+            # ``$type``), every full answer would look like the end, and the slack would
+            # end the run early, as complete, missing the same oldest tail every week.
+            # Short of that it proves nothing, and the page stopping there still ends
+            # the run as RouteChanged.
             self._ended = True
         self._next_start = (
             chunk.next_start if chunk.next_start is not None else chunk.start + len(chunk.cards)
