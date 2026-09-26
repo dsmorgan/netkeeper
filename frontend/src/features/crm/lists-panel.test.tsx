@@ -20,6 +20,7 @@ const STATIC_LIST = {
   kind: 'static',
   filter: null,
   member_count: 2,
+  builtin: false,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 }
@@ -30,6 +31,7 @@ const SMART_LIST = {
   kind: 'smart',
   filter: { where: { op: 'has_email' }, include_archived: false },
   member_count: 40,
+  builtin: false,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 }

@@ -3376,6 +3376,8 @@ export interface components {
         ListOut: {
             /** Broken */
             broken?: string | null;
+            /** Builtin */
+            builtin: boolean;
             /**
              * Created At
              * Format: date-time

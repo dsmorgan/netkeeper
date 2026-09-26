@@ -49,11 +49,30 @@ async def test_validated_list_is_seeded_at_startup(
         "include_archived": False,
     }
     assert validated["member_count"] == 2  # met_a, met_b
+    assert validated["builtin"] is True
 
     members = await client.get(f"/api/v1/lists/{validated['id']}/members")
     assert members.status_code == 200
     ids = {item["id"] for item in members.json()["items"]}
     assert ids == {contact_ids["met_a"], contact_ids["met_b"]}
+
+
+async def test_the_builtin_mark_survives_a_rename_and_protects_nothing(
+    client: httpx.AsyncClient,
+) -> None:
+    """Provenance, not protection (#133): the person may still rename, edit, or delete it."""
+    validated = (await _lists_by_name(client))["Validated"]
+    url = f"/api/v1/lists/{validated['id']}"
+    renamed = await client.patch(
+        url,
+        json={"name": "Met", "filter": {"where": {"op": "has_email"}}},
+        headers=CSRF,
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["builtin"] is True
+    assert (await _lists_by_name(client))["Met"]["builtin"] is True
+    assert (await client.delete(url, headers=CSRF)).status_code == 204
+    assert await _lists_by_name(client) == {}
 
 
 async def test_state_changing_routes_need_the_csrf_header(client: httpx.AsyncClient) -> None:
@@ -78,6 +97,7 @@ async def test_list_crud(client: httpx.AsyncClient) -> None:
     assert created.status_code == 201, created.text
     row = created.json()
     assert row["kind"] == "static" and row["filter"] is None and row["member_count"] == 0
+    assert row["builtin"] is False
 
     dup = await client.post(
         "/api/v1/lists", json={"name": "First 100", "kind": "static"}, headers=CSRF

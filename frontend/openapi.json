@@ -5293,6 +5293,10 @@
             ],
             "title": "Broken"
           },
+          "builtin": {
+            "title": "Builtin",
+            "type": "boolean"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -5335,6 +5339,7 @@
           "kind",
           "filter",
           "member_count",
+          "builtin",
           "created_at",
           "updated_at"
         ],
