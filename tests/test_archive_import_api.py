@@ -25,6 +25,7 @@ from fastapi import FastAPI, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.crm.archive_check import check_zip_directory
 from netkeeper.db import session_scope
 from netkeeper.linkedin import archive as linkedin_archive
 from netkeeper.linkedin.archive import ArchiveRefusalCode
@@ -521,6 +522,55 @@ async def test_a_damaged_central_directory_is_refused_rather_than_read_partly(
     body = response.json()
     assert body["code"] == ArchiveRefusalCode.DAMAGED.value
     assert said in body["detail"]
+    assert _counts(running_app.state.session_factory) == (0, 0)
+
+
+def _mislabeled_utf8_zip_bytes(tmp_path: Path) -> bytes:
+    """The fixture archive plus a member whose name is flagged UTF-8 but is Latin-1.
+
+    Both headers carry the same bytes, as a zip writer that sets the flag and
+    then writes names in another encoding would leave them, so no comparison of
+    the two names can tell anything is wrong (#217 item 3).
+    """
+    placeholder, latin1 = b"Resume-X.csv", "Resume-\xe9.csv".encode("latin-1")
+    assert len(placeholder) == len(latin1)
+    raw = bytearray(_zipped(tmp_path, extra={placeholder.decode(): "First Name\nAda\n"}))
+    for signature, flags_at in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        at = 0
+        while (at := raw.find(signature, at)) != -1:
+            name_at = at + (30 if signature == b"PK\x03\x04" else 46)
+            if raw[name_at : name_at + len(placeholder)] == placeholder:
+                (flags,) = struct.unpack_from("<H", raw, at + flags_at)
+                struct.pack_into("<H", raw, at + flags_at, flags | 0x800)
+                raw[name_at : name_at + len(latin1)] = latin1
+            at += 4
+    return bytes(raw)
+
+
+def test_a_name_flagged_utf8_that_is_not_is_caught_where_the_names_agree(
+    tmp_path: Path,
+) -> None:
+    """#217 item 3: the UTF-8 check covers a case the local-header comparison cannot."""
+    data = _mislabeled_utf8_zip_bytes(tmp_path)
+    # Unchecked, zipfile itself fails with an error no caller expects.
+    with pytest.raises(UnicodeDecodeError):
+        zipfile.ZipFile(io.BytesIO(data))
+
+    with pytest.raises(linkedin_archive.ArchiveFormatError) as raised:
+        check_zip_directory(io.BytesIO(data), "export.zip")
+
+    assert raised.value.code is ArchiveRefusalCode.DAMAGED
+    assert "a file name it marks as UTF-8 is not" in str(raised.value)
+    assert "no longer match" not in str(raised.value)
+
+
+async def test_a_mislabeled_utf8_name_is_refused_not_a_500(
+    client: httpx.AsyncClient, running_app: FastAPI, tmp_path: Path
+) -> None:
+    response = await _upload(client, _mislabeled_utf8_zip_bytes(tmp_path))
+
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == ArchiveRefusalCode.DAMAGED.value
     assert _counts(running_app.state.session_factory) == (0, 0)
 
 

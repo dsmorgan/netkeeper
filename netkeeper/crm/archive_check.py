@@ -12,7 +12,14 @@ with a :class:`UnicodeDecodeError` no caller expects.
 does, reading only the fixed part and the name of each record, and compares
 the number of records it finds with the number the End Of Central Directory
 record declares. When they disagree, or a name cannot be decoded, the archive
-is refused as ``damaged`` with both numbers in the message. No member is
+is refused as ``damaged`` with both numbers in the message.
+
+Garbling a name in the central directory is caught by comparing it with the
+name the member's local file header carries; the UTF-8 check is not redundant
+with that comparison (#217). A zip writer that sets the UTF-8 flag but writes
+its names in another encoding (``Résumé.csv`` in Latin-1, say) produces names
+that agree in both headers and still cannot be decoded, and :mod:`zipfile`
+raises :class:`UnicodeDecodeError` on opening it. No member is
 decompressed, which keeps the guarantee :mod:`netkeeper.linkedin.archive`'s
 guards give: a hostile archive is refused on declared metadata alone. Anything
 else wrong with the zip is left for :func:`~netkeeper.linkedin.archive.open_archive`
@@ -88,7 +95,7 @@ def check_zip_directory(handle: IO[bytes], name: str) -> None:
     are fewer or more than the record count declared, when a record's name is
     not the one its local header carries (a garbled name that no longer ends
     in ``.csv`` would be skipped as noise), or when a name flagged UTF-8 is
-    not. Returns quietly for anything it is not the one
+    not, even one both headers agree on. Returns quietly for anything it is not the one
     to judge: a file that is not a zip, a zip64 archive (far past every size
     and member limit a LinkedIn export is held to, so refused on those
     grounds), or a directory declaring more members than
@@ -110,12 +117,17 @@ def check_zip_directory(handle: IO[bytes], name: str) -> None:
             f"{found_text}, so some would be silently left out. Download the export again.",
             ArchiveRefusalCode.DAMAGED,
         )
-    if found.undecodable or found.mismatched:
-        broken = max(found.mismatched, 1)
+    if found.mismatched:
         raise ArchiveFormatError(
-            f"{name}: the zip's directory is damaged: {broken} of its {read} file names no "
-            "longer match the files they point at, so those files would be silently left "
-            "out. Download the export again.",
+            f"{name}: the zip's directory is damaged: {found.mismatched} of its {read} file "
+            "names no longer match the files they point at, so those files would be silently "
+            "left out. Download the export again.",
+            ArchiveRefusalCode.DAMAGED,
+        )
+    if found.undecodable:
+        raise ArchiveFormatError(
+            f"{name}: the zip's directory is damaged: a file name it marks as UTF-8 is not, "
+            "so the zip cannot be read. Download the export again.",
             ArchiveRefusalCode.DAMAGED,
         )
 
