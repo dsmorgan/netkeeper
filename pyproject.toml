@@ -41,6 +41,7 @@ dev = [
   "psycopg[binary]>=3.2",
   "towncrier>=24.8",
   "types-regex>=2026.9.10.20260911",
+  "pytest-xdist>=3.6",
 ]
 
 [project.scripts]
