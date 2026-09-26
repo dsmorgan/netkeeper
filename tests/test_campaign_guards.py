@@ -17,6 +17,7 @@ from netkeeper.db import session_scope
 from netkeeper.models import (
     Campaign,
     CampaignStatus,
+    CampaignStep,
     Contact,
     ContactEmail,
     EmailStatus,
@@ -818,3 +819,163 @@ def test_an_enrollment_row_naming_another_users_campaign_never_counts(
     factories.make_enrollment(writer, theirs, contact, user_id=user.id)
     [verdict] = check_enrollment(writer, user, campaign, [contact.id], now=NOW)
     assert verdict.eligible
+
+
+# --- #242: the test gaps from the second #235 review --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kind", [InteractionKind.EMAIL_OUT, InteractionKind.CALL, InteractionKind.MEETING]
+)
+def test_a_logged_outbound_interaction_blocks_a_step_fire(
+    writer: Session, user: User, campaign: Campaign, kind: InteractionKind
+) -> None:
+    """One logged by hand has no ``message_id``; at step-fire time it must still count."""
+    contact = _contact(writer, user)
+    enrollment = factories.make_enrollment(writer, campaign, contact, current_step=1)
+    add_interaction(writer, user, contact.id, kind, NOW - timedelta(days=2))
+    verdict = check_step(writer, user, enrollment, campaign.steps[1], now=NOW)
+    assert verdict.reasons == (Reason.CONTACTED_RECENTLY,)
+
+
+def test_an_enrollment_another_session_paused_never_fires(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The enrollment's status is read fresh too, not only the campaign's."""
+    with session_scope(session_factory, write=True) as setup:
+        user = factories.make_user(setup)
+        campaign = factories.make_campaign(setup, user)
+        enrollment = factories.make_enrollment(setup, campaign, _contact(setup, user))
+        ids = (user.id, enrollment.id)
+
+    with session_factory() as a:
+        user_a = a.get_one(User, ids[0])
+        enrollment_a = a.scalars(scoped(user_a, Enrollment).where(Enrollment.id == ids[1])).one()
+        step_a = enrollment_a.campaign.steps[0]
+        assert check_step(a, user_a, enrollment_a, step_a, now=NOW).eligible
+        a.commit()
+
+        with session_scope(session_factory, write=True) as b:
+            user_b = b.get_one(User, ids[0])
+            row = b.scalars(scoped(user_b, Enrollment).where(Enrollment.id == ids[1])).one()
+            row.status = EnrollmentStatus.PAUSED
+
+        assert enrollment_a.status is EnrollmentStatus.ACTIVE  # the caller's copy is stale
+        verdict = check_step(a, user_a, enrollment_a, step_a, now=NOW)
+        assert verdict.reasons == (Reason.ENROLLMENT_NOT_ACTIVE,)
+
+
+def test_a_recency_window_another_session_widened_is_the_one_used(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """At the step and at enrollment, the window is read fresh, not off the caller's campaign."""
+    with session_scope(session_factory, write=True) as setup:
+        user = factories.make_user(setup)
+        campaign = factories.make_campaign(setup, user, contacted_within_days_guard=0)
+        contact = _contact(setup, user)
+        enrollment = factories.make_enrollment(setup, campaign, contact)
+        add_interaction(setup, user, contact.id, InteractionKind.CALL, NOW - timedelta(days=5))
+        ids = (user.id, campaign.id, contact.id, enrollment.id)
+
+    with session_factory() as a:
+        user_a = a.get_one(User, ids[0])
+        campaign_a = a.scalars(scoped(user_a, Campaign).where(Campaign.id == ids[1])).one()
+        enrollment_a = a.scalars(scoped(user_a, Enrollment).where(Enrollment.id == ids[3])).one()
+        step_a = campaign_a.steps[0]
+        assert check_step(a, user_a, enrollment_a, step_a, now=NOW).eligible
+        a.commit()
+
+        with session_scope(session_factory, write=True) as b:
+            user_b = b.get_one(User, ids[0])
+            row = b.scalars(scoped(user_b, Campaign).where(Campaign.id == ids[1])).one()
+            row.contacted_within_days_guard = 30
+
+        assert campaign_a.contacted_within_days_guard == 0  # the caller's copy is stale
+        at_step = check_step(a, user_a, enrollment_a, step_a, now=NOW)
+        [at_enrollment] = check_enrollment(a, user_a, campaign_a, [ids[2]], now=NOW)
+        assert at_step.reasons == at_enrollment.reasons == (Reason.CONTACTED_RECENTLY,)
+
+
+def test_enrollment_checks_the_first_step_as_it_is_now(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Step 1 deleted in another session: the channel checked is the new first step's."""
+    with session_scope(session_factory, write=True) as setup:
+        user = factories.make_user(setup)
+        campaign = factories.make_campaign(setup, user, channels=(EMAIL, LINKEDIN))
+        email_only = _contact(setup, user, li_urn=None, li_public_id=None)
+        ids = (user.id, campaign.id, email_only.id)
+
+    with session_factory() as a:
+        user_a = a.get_one(User, ids[0])
+        campaign_a = a.scalars(scoped(user_a, Campaign).where(Campaign.id == ids[1])).one()
+        assert [s.channel for s in campaign_a.steps] == [EMAIL, LINKEDIN]
+        [before] = check_enrollment(a, user_a, campaign_a, [ids[2]], now=NOW)
+        assert before.eligible
+        a.commit()
+
+        with session_scope(session_factory, write=True) as b:
+            user_b = b.get_one(User, ids[0])
+            first = b.scalars(
+                scoped(user_b, CampaignStep).where(
+                    CampaignStep.campaign_id == ids[1], CampaignStep.position == 1
+                )
+            ).one()
+            b.delete(first)
+
+        assert len(campaign_a.steps) == 2  # the caller's copy is stale
+        [after] = check_enrollment(a, user_a, campaign_a, [ids[2]], now=NOW)
+        assert after.reasons == (Reason.NO_LINKEDIN,)
+
+
+def test_enrolling_in_a_campaign_deleted_since_excludes_everyone(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    contact = _contact(writer, user)
+    writer.delete(campaign)
+    writer.flush()
+    [verdict] = check_enrollment(writer, user, campaign, [contact.id], now=NOW)
+    assert verdict.reasons == (Reason.CAMPAIGN_NOT_ACTIVE,)
+
+
+def test_a_step_whose_enrollment_names_another_users_campaign_never_fires(
+    writer: Session, user: User
+) -> None:
+    """The step-fire state query checks the campaign's owner, not only the enrollment's.
+
+    Rows the service never writes: the user's enrollment and step, under another
+    user's active campaign. Read without the owner check, that campaign's status
+    and window would let the step fire.
+    """
+    stranger = factories.make_user(writer)
+    theirs = factories.make_campaign(writer, stranger)
+    step = theirs.steps[0]
+    step.user_id = user.id
+    contact = _contact(writer, user)
+    enrollment = factories.make_enrollment(writer, theirs, contact, user_id=user.id)
+    writer.flush()
+    verdict = check_step(writer, user, enrollment, step, now=NOW)
+    assert verdict.reasons == (Reason.ENROLLMENT_NOT_ACTIVE,)
+
+
+def test_another_users_message_never_exempts_an_interaction(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    """The interactions side joins only the user's own messages.
+
+    A row the service never writes: another user's message claiming this
+    enrollment. Joined without the owner check, the user's own interaction
+    recording it would pass as this enrollment's and stop counting.
+    """
+    contact = _contact(writer, user)
+    enrollment = factories.make_enrollment(writer, campaign, contact, current_step=1)
+    stranger = factories.make_user(writer)
+    foreign = factories.make_message(writer, enrollment, sent_at=NOW - timedelta(days=200))
+    add_interaction(
+        writer, user, contact.id, InteractionKind.EMAIL_OUT, NOW - timedelta(days=1), None,
+        foreign.id,
+    )  # fmt: skip
+    foreign.user_id = stranger.id  # after: add_interaction refuses another user's message
+    writer.flush()
+    verdict = check_step(writer, user, enrollment, campaign.steps[1], now=NOW)
+    assert verdict.reasons == (Reason.CONTACTED_RECENTLY,)
