@@ -1,4 +1,5 @@
-from collections.abc import AsyncIterator, Iterator
+import shutil
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 
 import factories
@@ -8,8 +9,9 @@ from fastapi import FastAPI
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper import migrations
 from netkeeper.config import Settings
-from netkeeper.db import database_url, make_engine, make_session_factory
+from netkeeper.db import DATABASE_FILENAME, database_url, make_engine, make_session_factory
 from netkeeper.models import Base
 from netkeeper.scoping import install_scope_guard
 from netkeeper.web.app import create_app
@@ -40,15 +42,57 @@ def _clean_netkeeper_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     monkeypatch.setenv("NETKEEPER_DATA", str(tmp_path / "netkeeper-data"))
 
 
+def _template(directory: Path, build: Callable[[Engine], None]) -> Path:
+    """A SQLite file under ``directory`` that ``build`` filled, closed and checkpointed.
+
+    Built straight from a path, never through ``database_url``: a session fixture runs
+    before ``_clean_netkeeper_env`` could clear a ``NETKEEPER_DATABASE_URL``.
+    """
+    file = directory / DATABASE_FILENAME
+    engine = make_engine(f"sqlite:///{file}")
+    try:
+        build(engine)
+    finally:
+        engine.dispose()  # the last close checkpoints WAL into the file and removes it
+    assert not file.with_name(f"{file.name}-wal").exists(), "the template is not one file"
+    return file
+
+
+def _copy_template(template: Path, data_dir: Path) -> None:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(template, data_dir / DATABASE_FILENAME)
+
+
+@pytest.fixture(scope="session")
+def _schema_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The models' schema, built once per run (once per xdist worker) (#210).
+
+    ``create_all`` costs about 40 ms and a thousand tests ask for it; a copy of the
+    file costs well under one.
+    """
+    return _template(tmp_path_factory.mktemp("schema-template"), Base.metadata.create_all)
+
+
+@pytest.fixture(scope="session")
+def _migrated_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """An empty database the migrations have run on, built once per run (#210).
+
+    The app's startup migrates its database; from empty that costs about 130 ms, and
+    on this copy it finds nothing to do. Migrating from empty is tests/test_migrations.py's
+    subject, and tests that need it take ``bare_engine``.
+    """
+    return _template(tmp_path_factory.mktemp("migrated-template"), migrations.upgrade)
+
+
 @pytest.fixture
-def engine(tmp_path: Path) -> Iterator[Engine]:
+def engine(tmp_path: Path, _schema_template: Path) -> Iterator[Engine]:
     """A fresh SQLite database under tmp_path with the schema built from the models.
 
     Tests that need the schema as the migrations create it use ``migration_engine``
     in tests/test_migrations.py instead.
     """
+    _copy_template(_schema_template, tmp_path)
     engine = make_engine(database_url(tmp_path))
-    Base.metadata.create_all(engine)
     yield engine
     engine.dispose()
 
@@ -77,8 +121,18 @@ def bare_engine(tmp_path: Path) -> Iterator[Engine]:
 
 
 @pytest.fixture
-def app(bare_engine: Engine, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FastAPI:
-    """The application on ``bare_engine`` with no frontend build, not yet started."""
+def app(
+    bare_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    _migrated_template: Path,
+) -> FastAPI:
+    """The application on ``bare_engine`` with no frontend build, not yet started.
+
+    ``bare_engine``'s file starts as a copy of the migrated template, so the startup
+    migration finds nothing to do (#210); everything else startup does, it still does.
+    """
+    _copy_template(_migrated_template, tmp_path / "bare")
     monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", str(tmp_path / "no-dist"))
     return create_app(Settings(), engine=bare_engine)
 
