@@ -16,6 +16,12 @@
  * producing a mail-merge file is a send path by proxy once the file leaves the
  * tool. Its row count is therefore lower than the count beside the filter, and
  * the dialog explains the gap instead of letting it read as a miscount.
+ *
+ * "Safe to open in a spreadsheet" (CSV only, off by default, #76) quotes any cell
+ * that starts like a formula. Names and companies come from other people's
+ * profiles, so `=HYPERLINK(…)` is attacker-chosen text a spreadsheet would run.
+ * It stays opt-in because it changes the bytes: the file no longer re-imports,
+ * and every `+1…` phone number gains a leading quote.
  */
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -91,6 +97,7 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
   const [preset, setPreset] = useState<ExportPreset>('nine-column')
   const [format, setFormat] = useState<ExportFormat>('csv')
   const [headerless, setHeaderless] = useState(false)
+  const [spreadsheetSafe, setSpreadsheetSafe] = useState(false)
 
   const tree = filter ?? emptyTree()
   // An unfinished filter would come back as a 422 on a download the browser
@@ -107,7 +114,14 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
 
   const chosen = EXPORT_PRESETS.find((candidate) => candidate.value === preset)
   const chosenFormat = FORMATS.find((candidate) => candidate.value === format)
-  const href = exportUrl({ preset, format, headerless: headerless && format === 'csv', filter })
+  const isCsv = format === 'csv'
+  const href = exportUrl({
+    preset,
+    format,
+    headerless: headerless && isCsv,
+    spreadsheetSafe: spreadsheetSafe && isCsv,
+    filter,
+  })
 
   return (
     <div className="space-y-3">
@@ -174,17 +188,33 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
         <p className="text-xs text-muted-foreground">{chosenFormat?.note}</p>
       </div>
 
-      {format === 'csv' ? (
-        <Label className="gap-2">
-          <Checkbox
-            checked={headerless}
-            onCheckedChange={(checked) => setHeaderless(checked === true)}
-          />
-          Leave out the header row
-        </Label>
+      {isCsv ? (
+        <div className="grid gap-2">
+          <Label className="gap-2">
+            <Checkbox
+              checked={headerless}
+              onCheckedChange={(checked) => setHeaderless(checked === true)}
+            />
+            Leave out the header row
+          </Label>
+          <div className="grid gap-0.5">
+            <Label className="gap-2">
+              <Checkbox
+                checked={spreadsheetSafe}
+                onCheckedChange={(checked) => setSpreadsheetSafe(checked === true)}
+              />
+              Safe to open in a spreadsheet
+            </Label>
+            <p className="pl-6 text-xs text-muted-foreground">
+              Quotes cells starting with = + - @ so a spreadsheet shows them instead of running
+              them. Safe to open in a spreadsheet, not safe to re-import: phone numbers like +1…
+              gain a leading quote too.
+            </p>
+          </div>
+        </div>
       ) : (
         <p className="text-xs text-muted-foreground">
-          The header option applies to CSV only; {chosenFormat?.label} ignores it.
+          The header and spreadsheet options apply to CSV only; {chosenFormat?.label} ignores them.
         </p>
       )}
 

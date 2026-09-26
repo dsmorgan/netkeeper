@@ -1922,6 +1922,16 @@ def export_cmd(
     headerless: Annotated[
         bool, typer.Option("--headerless", help="Drop the CSV header row (ignored otherwise).")
     ] = False,
+    spreadsheet_safe: Annotated[
+        bool,
+        typer.Option(
+            "--spreadsheet-safe",
+            help=(
+                "Quote CSV cells a spreadsheet would run as formulas. Safe to open in a "
+                "spreadsheet, not safe to re-import (ignored otherwise)."
+            ),
+        ),
+    ] = False,
     filter_: Annotated[
         str | None,
         typer.Option("--filter", help="A FilterTree (spec 10.4) as JSON. Omitted: every contact."),
@@ -1951,6 +1961,7 @@ def export_cmd(
                     preset=preset,
                     output_format=output_format,
                     headerless=headerless,
+                    spreadsheet_safe=spreadsheet_safe,
                     tree=tree,
                     sort=sort_keys,
                     now=now,

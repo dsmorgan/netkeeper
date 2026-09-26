@@ -70,7 +70,26 @@ describe('the export form', () => {
 
     fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'json' } })
     expect(new URL(downloadHref(), 'http://localhost').searchParams.get('headerless')).toBeNull()
-    expect(screen.getByText(/applies to CSV only/)).toBeInTheDocument()
+    expect(screen.getByText(/apply to CSV only/)).toBeInTheDocument()
+  })
+
+  it('sends spreadsheet_safe only when ticked, only for CSV, and says the file will not re-import', () => {
+    mockApi(countRoute())
+    renderWithClient(<ExportForm filter={FILTER} />)
+    const param = () =>
+      new URL(downloadHref(), 'http://localhost').searchParams.get('spreadsheet_safe')
+
+    expect(param()).toBeNull()
+    expect(
+      screen.getByText(/Safe to open in a spreadsheet, not safe to re-import/),
+    ).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /safe to open in a spreadsheet/i }))
+    expect(param()).toBe('true')
+
+    fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'vcard' } })
+    expect(param()).toBeNull()
+    expect(screen.queryByRole('checkbox', { name: /safe to open in a spreadsheet/i })).toBeNull()
   })
 
   it('exports every contact when there is no filter', () => {

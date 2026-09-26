@@ -374,6 +374,8 @@ export interface ExportRequest {
   preset: ExportPreset
   format: ExportFormat
   headerless: boolean
+  /** Quote CSV cells a spreadsheet would run as formulas; the file no longer re-imports (#76). */
+  spreadsheetSafe?: boolean
   filter: FilterTree | null
   sort?: SortKey[]
 }
@@ -388,6 +390,7 @@ export interface ExportRequest {
 export function exportUrl(request: ExportRequest): string {
   const params = new URLSearchParams({ preset: request.preset, format: request.format })
   if (request.headerless) params.set('headerless', 'true')
+  if (request.spreadsheetSafe === true) params.set('spreadsheet_safe', 'true')
   if (request.filter !== null) params.set('filter', JSON.stringify(request.filter))
   if (request.sort !== undefined && request.sort.length > 0) {
     params.set('sort', JSON.stringify(request.sort))

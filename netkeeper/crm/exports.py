@@ -67,6 +67,16 @@ Four presets:
   contact waiting for review (``needs_review_at``, #184): one read off a
   connections-page card is not somebody to reach until it is confirmed.
 
+``spreadsheet_safe`` (CSV only, off by default, #76) prefixes ``'`` to any
+cell whose first character is one a spreadsheet reads as the start of a formula
+(:data:`FORMULA_TRIGGERS`). Names, headlines, titles, and companies come from
+other people's profiles, so a cell like ``=HYPERLINK(...)`` is attacker-chosen
+text that Excel, Sheets, or LibreOffice would otherwise evaluate on open. It is
+opt-in because it changes the bytes: a spreadsheet-safe file no longer
+round-trips through the importer, and every ``+1 …`` phone number gains a
+leading quote. Safe to open in a spreadsheet, not safe to re-import. JSON and
+vCard ignore it; neither is opened as a grid.
+
 Every export goes through :func:`netkeeper.crm.filters.compile_filter` and
 :func:`netkeeper.crm.filters.apply_sort` — the same compiler the contacts
 table and smart lists use — and fetches in bounded batches with
@@ -106,6 +116,11 @@ MEDIA_TYPES: Final[dict[ExportFormat, str]] = {
 }
 
 _BATCH_SIZE = 200
+
+FORMULA_TRIGGERS: Final[tuple[str, ...]] = ("=", "+", "-", "@", "\t", "\r")
+"""A cell starting with one of these is read as a formula by at least one of
+Excel, Sheets, and LibreOffice (#76). Tab and carriage return are on the list
+because some importers strip leading whitespace before looking for ``=``."""
 
 
 def filename_for(preset: ExportPreset, output_format: ExportFormat) -> str:
@@ -324,6 +339,15 @@ def _is_identified(columns: tuple[_Column, ...], contact: Contact, today: date) 
     )
 
 
+def _spreadsheet_safe(value: str) -> str:
+    """``value`` with a leading ``'`` if a spreadsheet would read it as a formula."""
+    return "'" + value if value.startswith(FORMULA_TRIGGERS) else value
+
+
+def _as_is(value: str) -> str:
+    return value
+
+
 class _Echo:
     """A write-only file-like object that hands the string straight back.
 
@@ -336,13 +360,18 @@ class _Echo:
 
 
 def _columns_csv(
-    columns: tuple[_Column, ...], rows: Iterable[Contact], *, headerless: bool, today: date
+    columns: tuple[_Column, ...],
+    rows: Iterable[Contact],
+    *,
+    headerless: bool,
+    today: date,
+    cell: Callable[[str], str],
 ) -> Iterator[str]:
     writer = csv.writer(_Echo())
     if not headerless:
         yield writer.writerow([column.header for column in columns])
     for contact in rows:
-        yield writer.writerow([column.get(contact, today) or "" for column in columns])
+        yield writer.writerow([cell(column.get(contact, today) or "") for column in columns])
 
 
 def _columns_json(
@@ -460,13 +489,15 @@ def _flatten_full_row(row: dict[str, Any]) -> dict[str, str]:
     return flat
 
 
-def _full_csv(rows: Iterable[Contact], *, headerless: bool) -> Iterator[str]:
+def _full_csv(
+    rows: Iterable[Contact], *, headerless: bool, cell: Callable[[str], str]
+) -> Iterator[str]:
     writer = csv.writer(_Echo())
     if not headerless:
         yield writer.writerow(list(FULL_FIELDS))
     for contact in rows:
         flat = _flatten_full_row(_full_row(contact))
-        yield writer.writerow([flat[key] for key in FULL_FIELDS])
+        yield writer.writerow([cell(flat[key]) for key in FULL_FIELDS])
 
 
 def _full_vcard(contact: Contact) -> str:
@@ -590,13 +621,15 @@ def export_stream(
     tree: FilterTree,
     sort: Sequence[SortKey],
     now: datetime,
+    spreadsheet_safe: bool = False,
 ) -> Iterator[str]:
     """The exported file for ``preset``/``output_format``, one chunk at a time.
 
     ``tree`` and ``sort`` are what :mod:`netkeeper.crm.filters` compiles and
     orders by; ``now`` is the instant relative fields (``years_since_connected``,
     and the filter's own relative windows) are computed from, fixed once per
-    call so a long export is internally consistent.
+    call so a long export is internally consistent. ``spreadsheet_safe``
+    quotes formula-looking CSV cells (see the module docstring; #76).
 
     **Not a generator.** It compiles ``tree`` and returns the iterator over the
     rendered file, so a filter that cannot compile raises
@@ -621,6 +654,7 @@ def export_stream(
         output_format=output_format,
         headerless=headerless,
         today=today,
+        cell=_spreadsheet_safe if spreadsheet_safe else _as_is,
     )
 
 
@@ -632,13 +666,17 @@ def _render(
     output_format: ExportFormat,
     headerless: bool,
     today: date,
+    cell: Callable[[str], str],
 ) -> Iterator[str]:
-    """:func:`export_stream`'s body, once everything that can fail early has."""
+    """:func:`export_stream`'s body, once everything that can fail early has.
+
+    ``cell`` transforms each CSV cell after rendering; the other formats never see it.
+    """
     contacts = _iter_contacts(session, base)
     columns = _COLUMN_PRESETS[preset]
     if columns is None:  # "full"
         if output_format == "csv":
-            yield from _full_csv(contacts, headerless=headerless)
+            yield from _full_csv(contacts, headerless=headerless, cell=cell)
         elif output_format == "json":
             yield from _json_stream(_full_row(contact) for contact in contacts)
         else:
@@ -648,7 +686,7 @@ def _render(
     if preset in _REIMPORTABLE_PRESETS:
         contacts = (c for c in contacts if _is_identified(columns, c, today))
     if output_format == "csv":
-        yield from _columns_csv(columns, contacts, headerless=headerless, today=today)
+        yield from _columns_csv(columns, contacts, headerless=headerless, today=today, cell=cell)
     elif output_format == "json":
         yield from _json_stream(_columns_json(columns, contacts, today=today))
     else:
