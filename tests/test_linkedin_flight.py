@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from netkeeper.linkedin import flight
-from netkeeper.linkedin.flight import element_props, is_element, parse_flight
+from netkeeper.linkedin.flight import element_props, is_element, parse_flight, references_resolve
 from netkeeper.linkedin.voyager import RouteChanged
 
 E = "test/flight"
@@ -99,3 +99,22 @@ def test_elements_are_four_item_lists_with_dict_props() -> None:
 
 def test_the_max_nodes_bound_is_pinned() -> None:
     assert flight.MAX_NODES == 2_000_000
+
+
+# --- whole or cut short (#203) ---------------------------------------------------------------
+
+
+def test_references_resolve_to_rows_imports_and_texts() -> None:
+    body = (
+        b'1:I["chunk",[],"TriggerButton"]\n'
+        b"2:T5,hello\n"
+        b'3:["$","p",null,{"children":["$2"]}]\n'
+        b'0:["$","$L1",null,{"children":"$L3","x":"$undefined","y":"$@4","z":"$Sreact.suspense"}]\n'
+    )
+    assert references_resolve(parse_flight(body, endpoint="t"), endpoint="t")
+
+
+@pytest.mark.parametrize("ref", ["$L9", "$9", "$1f"])
+def test_a_reference_to_a_row_it_never_got_is_not_whole(ref: str) -> None:
+    body = b'0:["$","div",null,{"children":"' + ref.encode() + b'"}]\n'
+    assert not references_resolve(parse_flight(body, endpoint="t"), endpoint="t")

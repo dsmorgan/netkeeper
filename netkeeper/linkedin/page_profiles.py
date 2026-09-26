@@ -58,6 +58,15 @@ an unreadable visit the same way, with the cause :data:`NAVIGATION_TIMED_OUT`, a
 same wall check; any other navigation error still ends the run, and a lost tab is still
 :class:`~netkeeper.linkedin.browser.BrowserUnavailable`.
 
+**The streamed copy** (#203, ADR 0006's amendment). Each visit observes with the body
+tap (:mod:`netkeeper.linkedin.body_tap`), narrowed to the lazy cards and the overlay's
+answer: the page's own client can abort those after reading them, and Chrome then has
+no body to hand over. A lost lazy card or overlay is read from the copy Chrome streamed
+as it arrived only when the copy is whole: the tap ended it as finished or as the
+page's own cancel, and it parses as flight with every row it names (a copy cut short at
+a row boundary names a row it never got). It is then read as strictly as a body. Any
+other copy leaves the answer lost, as above.
+
 **The click.** Only after the profile read whole, and only when the job has found its id
 to be the contact's (:mod:`netkeeper.linkedin.enrich`). If the control is missing, not
 alone, or points at another profile's overlay, nothing is clicked and the visit is
@@ -95,7 +104,9 @@ from netkeeper.linkedin.flagship import (
     rehydration_payload,
 )
 from netkeeper.linkedin.flagship_profile import (
+    COMPONENT_ENDPOINT,
     COMPONENT_PATH,
+    CONTACT_INFO_ENDPOINT,
     PROFILE_ENDPOINT,
     PROFILE_PAGE_PREFIX,
     PROFILE_SCREEN_PREFIX,
@@ -106,6 +117,7 @@ from netkeeper.linkedin.flagship_profile import (
     profile_slug,
     same_slug,
 )
+from netkeeper.linkedin.flight import parse_flight, references_resolve
 from netkeeper.linkedin.observe import (
     FAILURE_REDIRECT,
     FAILURE_UNREADABLE,
@@ -223,7 +235,14 @@ class PageProfiles:
                 ResponseRule("POST", NAVIGATION_PATH),
             ),
         )
-        self._observation = await self._run.observe(match, limits=self._limits)
+        # #203: the lazy cards and the overlay's answer are streamed answers the page may
+        # abort after reading them; the body tap keeps a read-only copy of those two, and
+        # of nothing else the visit observes (ADR 0006's amendment).
+        tapped = ResponseMatch(
+            origin=self._origin,
+            rules=(ResponseRule("POST", COMPONENT_PATH), ResponseRule("POST", NAVIGATION_PATH)),
+        )
+        self._observation = await self._run.observe(match, limits=self._limits, tap=tapped)
         try:
             page = await self._run.goto(self.profile_url(public_id))
         except Exception as exc:
@@ -516,22 +535,27 @@ class PageProfiles:
             return Answer(outcome, masked(response.url))
         if not keep or _path(response.url) != _path(COMPONENT_PATH) or outcome is not Outcome.OK:
             return None
-        if response.body is None:
+        body = response.body
+        if body is None:
             # #197: a lazy card whose body the browser could not hand over is skipped
-            # like a card that failed: one card is not the profile.
+            # like a card that failed: one card is not the profile. #203: unless the
+            # body tap's streamed copy of it is whole.
+            cause = _lost_cause(response)
+            body = _whole_copy(response, endpoint=COMPONENT_ENDPOINT)
+            if body is None:
+                log.info("enrichment: skipped a lazy card that could not be read (%s)", cause)
+                return None
             log.info(
-                "enrichment: skipped a lazy card that could not be read (%s)",
-                _lost_cause(response),
+                "enrichment: read a lazy card from the copy streamed as it arrived (%d bytes)",
+                len(body),
             )
-            return None
         if not _names_only(response.request_body, self._slug, None):
             log.info("enrichment: skipped a lazy card that names another member")
             return None
         if len(self._components) >= MAX_COMPONENTS:
             log.warning("enrichment: more lazy cards than a profile loads; unreadable")
             return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
-        assert response.body is not None
-        self._components.append((response.body, response.request_body))
+        self._components.append((body, response.request_body))
         return None
 
     async def _read_overlay(self) -> Answer[ContactInfo]:
@@ -572,15 +596,24 @@ class PageProfiles:
                 # Never NotFound by guess: nothing captured says how a missing
                 # profile's overlay answers.
                 return Answer(Outcome.ROUTE_CHANGED, masked(response.url), unparsed=True)
-            if response.body is None:
+            body = response.body
+            if body is None:
                 # #197: the overlay answered, but its body could not be handed over.
                 # No contact info for this person on this visit, and no second click:
                 # the visit is unreadable (read_contact_info checks the tab for a wall).
+                # #203: unless the body tap's streamed copy of it is whole.
                 lost = f"the Contact info answer could not be read ({_lost_cause(response)})"
-                log.info("enrichment: %s; not clicking again", lost)
-                return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True, lost=lost)
+                body = _whole_copy(response, endpoint=CONTACT_INFO_ENDPOINT)
+                if body is None:
+                    log.info("enrichment: %s; not clicking again", lost)
+                    return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True, lost=lost)
+                log.info(
+                    "enrichment: read the Contact info answer from the copy streamed as it"
+                    " arrived (%d bytes)",
+                    len(body),
+                )
             try:
-                info = parse_contact_info(response.body, slug=self._slug)
+                info = parse_contact_info(body, slug=self._slug)
             except RouteChanged:
                 log.warning("enrichment: the overlay answered in a shape the parser does not know")
                 return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
@@ -681,6 +714,29 @@ def _lost_cause(response: ObservedResponse) -> str:
     if response.failure != FAILURE_UNREADABLE:
         raise ObservationFailed(f"an answer of the page could not be kept: {response.failure}")
     return response.cause or "unknown"
+
+
+def _whole_copy(response: ObservedResponse, *, endpoint: str) -> bytes | None:
+    """The body tap's streamed copy of a lost answer, when it is whole (#203), else ``None``.
+
+    The tap hands over only a copy whose stream finished, or that the page's own client
+    cancelled (``net::ERR_ABORTED``), within the body limit (#202). Here it must also
+    parse as flight and name no row it does not hold: a flight answer refers forward to
+    rows streamed after, so a copy cut short at a line boundary names a row it lacks.
+    The caller then reads it as strictly as a body.
+    """
+    streamed = response.streamed
+    if streamed is None:
+        return None
+    try:
+        payload = parse_flight(streamed, endpoint=endpoint)
+        whole = references_resolve(payload, endpoint=endpoint)
+    except RouteChanged:
+        whole = False
+    if not whole:
+        log.info("enrichment: the streamed copy of a lost answer is not whole; not used")
+        return None
+    return streamed
 
 
 def _answer_slug(response: ObservedResponse) -> str | None:

@@ -802,7 +802,7 @@ class BrowserRun:
         match: ResponseMatch,
         *,
         limits: ObservationLimits | None = None,
-        tap: bool = False,
+        tap: bool | ResponseMatch = False,
     ) -> Observation:
         """Start keeping the responses this run's tab receives that ``match`` names (ADR 0006).
 
@@ -821,14 +821,20 @@ class BrowserRun:
 
         ``tap`` also opens the read-only body tap for this observation (#200,
         :meth:`_open_body_tap`), so an answer whose body Chrome could not keep can
-        still come with the copy streamed as it arrived. Without a tap, or when one
-        cannot start, the observation reads exactly as before.
+        still come with the copy streamed as it arrived. ``True`` taps every answer
+        ``match`` names; a :class:`~netkeeper.linkedin.observe.ResponseMatch` taps only
+        the answers it names, and must be a narrowing of ``match`` (the same origin,
+        rules among ``match``'s) or this raises ``ValueError`` before anything opens
+        (#203: enrichment taps its lazy cards and overlay, not the profile's document).
+        Without a tap, or when one cannot start, the observation reads exactly as
+        before.
         """
+        tapped = _tap_match(match, tap)
         page = cast(_ObservablePage, await self.ensure_page())
         body_tap = None
-        if tap:
+        if tapped is not None:
             body_tap = await self._open_body_tap(
-                page, match, (limits or ObservationLimits()).max_body_bytes
+                page, tapped, (limits or ObservationLimits()).max_body_bytes
             )
         observation = Observation(match, page, limits, body_tap)
         observation.start()
@@ -1265,3 +1271,16 @@ def is_navigation_timeout(exc: BaseException) -> bool:
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
     return isinstance(exc, PlaywrightTimeoutError)
+
+
+def _tap_match(match: ResponseMatch, tap: bool | ResponseMatch) -> ResponseMatch | None:
+    """What an observation's body tap streams: nothing, all of ``match``, or a narrowing.
+
+    A narrower match must name the same origin and only rules ``match`` names, so a tap
+    never streams an answer its observation does not keep.
+    """
+    if isinstance(tap, bool):
+        return match if tap else None
+    if tap.origin != match.origin or not set(tap.rules) <= set(match.rules):
+        raise ValueError("a body tap may only narrow its observation's match")
+    return tap

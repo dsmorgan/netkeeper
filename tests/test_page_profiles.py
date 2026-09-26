@@ -42,6 +42,7 @@ from profile_site import (
     ProfileTab,
     Stale,
     navigation_timeout,
+    streamed_copy,
 )
 from run_fakes import fake_provider
 from voyager_pages import PEOPLE, Person
@@ -58,8 +59,15 @@ from netkeeper.linkedin.enrich import (
     StopReason,
     run_enrichment,
 )
-from netkeeper.linkedin.flagship import CONTACT_DETAILS_SCREEN_ID
-from netkeeper.linkedin.observe import ObservationFailed, ObservationLimits
+from netkeeper.linkedin.flagship import CONTACT_DETAILS_SCREEN_ID, NAVIGATION_PATH
+from netkeeper.linkedin.flagship_profile import COMPONENT_PATH
+from netkeeper.linkedin.flight import parse_flight, references_resolve
+from netkeeper.linkedin.observe import (
+    ObservationFailed,
+    ObservationLimits,
+    ResponseMatch,
+    ResponseRule,
+)
 from netkeeper.linkedin.pacing import ScrollPlan, ScrollStep, human_delay, plan_enrichment
 from netkeeper.linkedin.page_profiles import PageProfiles
 
@@ -1177,3 +1185,153 @@ async def test_a_linkedin_website_keeps_the_visit_and_the_rest_of_the_overlay() 
     assert harvest.contact_info.websites == (
         "https://www.linkedin.com/company/fictional-robotics-co/",
     )
+
+
+# --- #203: the body tap, for the lazy cards and the overlay -----------------------------------
+
+LAZY_ROLES = (Role("Staff Engineer", "Fictional Robotics Co", "Full-time", "Aug 2021 - Present"),)
+
+
+def _lazy_page(how: str, **extra: Any) -> ProfilePage:
+    """Priya's profile with her experience in a lazy card whose body is lost."""
+    return ProfilePage(
+        PRIYA,
+        screen=profile_payload(PRIYA, location=LOCATION, experience_inline=False),
+        components=((experience_payload(LAZY_ROLES), None),),
+        component_error=LOST,
+        component_streamed=how,
+        **extra,
+    )
+
+
+async def test_a_lost_lazy_card_reads_from_its_whole_streamed_copy(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="netkeeper")
+    site = ProfileSite([_lazy_page("whole")], tap=True)
+    out = await visit(site, [target(PRIYA)])
+    (harvest,) = out.harvests
+    assert harvest.outcome is Outcome.OK and harvest.details is not None
+    assert [p.title for p in harvest.details.positions] == ["Staff Engineer"]
+    assert "read a lazy card from the copy streamed as it arrived" in caplog.text
+    assert "fake-lost-slug" not in caplog.text
+
+
+@pytest.mark.parametrize("how", ["half", "rows", "none"])
+async def test_a_lost_lazy_card_without_a_whole_copy_is_still_skipped(
+    how: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="netkeeper")
+    site = ProfileSite([_lazy_page(how)], tap=True)
+    out = await visit(site, [target(PRIYA)])
+    (harvest,) = out.harvests
+    assert harvest.outcome is Outcome.OK and harvest.details is not None
+    assert harvest.details.positions == ()
+    assert "skipped a lazy card that could not be read" in caplog.text
+    assert "read a lazy card from the copy" not in caplog.text
+    not_whole = "the streamed copy of a lost answer is not whole; not used"
+    assert (not_whole in caplog.text) is (how != "none")
+
+
+def test_a_copy_cut_at_a_row_still_parses_and_so_needs_the_reference_check() -> None:
+    """The ``rows`` copy is what the reference check is for: flight that parses whole,
+    short of a row it names."""
+    copy = streamed_copy(experience_payload(LAZY_ROLES), "rows")
+    assert copy is not None
+    payload = parse_flight(copy, endpoint="test")
+    assert not references_resolve(payload, endpoint="test")
+    whole = parse_flight(experience_payload(LAZY_ROLES), endpoint="test")
+    assert references_resolve(whole, endpoint="test")
+
+
+async def test_a_lost_overlay_reads_from_its_whole_streamed_copy() -> None:
+    site = ProfileSite(
+        [ProfilePage(PRIYA, overlay_error=LOST, overlay_streamed="whole"), ProfilePage(MATEO)],
+        tap=True,
+    )
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.outcomes == [Outcome.OK, Outcome.OK] and out.result.lost == ()
+    info = out.harvests[0].contact_info
+    assert info is not None and info.emails == (f"{PRIYA.slug}@example.test",)
+    assert [slug for slug, _, _ in site.clicks] == [PRIYA.slug, MATEO.slug]
+
+
+@pytest.mark.parametrize("how", ["half", "rows", "none"])
+async def test_a_lost_overlay_without_a_whole_copy_is_still_unreadable(how: str) -> None:
+    site = ProfileSite([ProfilePage(PRIYA, overlay_error=LOST, overlay_streamed=how)], tap=True)
+    out = await visit(site, [target(PRIYA)])
+    assert out.outcomes == [Outcome.ROUTE_CHANGED]
+    assert out.result.lost == (
+        f"visit 1: the Contact info answer could not be read ({LOST_CAUSE})",
+    )
+    assert [slug for slug, _, _ in site.clicks] == [PRIYA.slug]  # never clicked again
+
+
+async def test_a_whole_copy_of_another_profiles_overlay_is_still_refused() -> None:
+    """A copy is read as strictly as a body: it must name this profile."""
+    other = contact_info_payload(PRIYA, emails=["x@example.test"], profile_slug=MATEO.slug)
+    site = ProfileSite(
+        [ProfilePage(PRIYA, overlay=other, overlay_error=LOST, overlay_streamed="whole")],
+        tap=True,
+    )
+    out = await visit(site, [target(PRIYA)])
+    assert out.outcomes == [Outcome.ROUTE_CHANGED] and out.harvests[0].contact_info is None
+
+
+async def test_the_tap_streams_only_lazy_cards_and_the_overlay() -> None:
+    """Never the profile's document or screen: the tap's match is narrower than the
+    visit's. The session sends the two read-only methods only, and is detached."""
+    site = ProfileSite([_lazy_page("whole", landing="screen")], tap=True)
+    await visit(site, [target(PRIYA)])
+    assert site.cdp is not None and site.cdp.detached
+    assert {method for method, _ in site.cdp.sent} == {
+        "Network.enable",
+        "Network.streamResourceContent",
+    }
+    asked = {
+        request_id: path
+        for request_id, (_, path, _) in zip(
+            (f"fake.{n}" for n in range(1, len(site.requests) + 1)), site.requests, strict=True
+        )
+    }
+    streamed = {urlsplit(asked[request_id]).path for request_id in site.streamed_ids}
+    assert streamed == {COMPONENT_PATH, NAVIGATION_PATH}
+    assert any(path.startswith("/flagship-web/in/") for path in asked.values())
+    assert any(path.startswith("/in/") for path in asked.values())
+
+
+async def test_a_browser_without_cdp_sessions_reads_as_before() -> None:
+    site = ProfileSite([_lazy_page("whole")])
+    out = await visit(site, [target(PRIYA)])
+    assert out.outcomes == [Outcome.OK] and out.harvests[0].details is not None
+    assert out.harvests[0].details.positions == ()
+
+
+@pytest.mark.parametrize(
+    "tapped",
+    [
+        ResponseMatch(origin="http://127.0.0.1:9", rules=(ResponseRule("POST", COMPONENT_PATH),)),
+        ResponseMatch(origin=ORIGIN, rules=(ResponseRule("POST", "/flagship-web/other"),)),
+        ResponseMatch(origin=ORIGIN, rules=(ResponseRule("GET", COMPONENT_PATH),)),
+    ],
+)
+async def test_a_tap_may_only_narrow_its_observation(tapped: ResponseMatch) -> None:
+    site = ProfileSite(tap=True)
+    provider, _ = fake_provider(site)
+    match = ResponseMatch(
+        origin=ORIGIN,
+        rules=(ResponseRule("POST", COMPONENT_PATH), ResponseRule("POST", NAVIGATION_PATH)),
+    )
+    async with provider.run("account-1") as run:
+        untapped = await run.observe(match)
+        await untapped.close()
+        with pytest.raises(ValueError, match="only narrow"):
+            await run.observe(match, tap=tapped)
+        before = site.cdp
+        assert before is None  # no tap asked for, then one refused before it opened
+        narrower = ResponseMatch(origin=ORIGIN, rules=(ResponseRule("POST", NAVIGATION_PATH),))
+        observation = await run.observe(match, tap=narrower)
+        opened = site.cdp
+        assert opened is not None
+        await observation.close()
+        assert opened.detached

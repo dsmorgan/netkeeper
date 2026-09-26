@@ -128,6 +128,15 @@ READ_ONLY_CDP_METHODS: dict[str, frozenset[str]] = {
 }
 #: The one function whose ``send`` calls reach a CDP session, and how many it makes.
 CDP_SENDERS = {(LINKEDIN / "browser.py", "BrowserRun._open_body_tap"): 2}
+#: The only observations that open the body tap, each once (ADR 0006's amendment):
+#: the connections sync's (#200) and each enrichment visit's, whose tap streams only
+#: its lazy cards and the Contact info overlay (#203).
+TAP_OBSERVERS = frozenset(
+    {
+        (LINKEDIN / "page_connections.py", "PageConnections._land"),
+        (LINKEDIN / "page_profiles.py", "PageProfiles.open_profile"),
+    }
+)
 
 # ADR 0006: netkeeper reads what the page loads and never touches a request. These are
 # Playwright's ways to hold one and answer it -- a routed request's `continue_`,
@@ -748,6 +757,63 @@ def test_the_one_cdp_session_is_read_only() -> None:
             f"{site[1]} makes {len(hits)} send calls, not {count}; if it moved, point"
             " CDP_SENDERS at its new home"
         )
+
+
+def tap_observations(source: str, path: Path = MEMORY) -> Iterator[Input]:
+    """Every ``observe(...)`` call that could open a body tap: one that passes ``tap``,
+    or passes keywords through ``**`` where a ``tap`` could hide."""
+    tree = ast.parse(source)
+    scopes: dict[int, str] = {}
+
+    def enclose(node: ast.AST, name: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+                inner = f"{name}.{child.name}" if name else child.name
+                scopes[id(child)] = inner
+                enclose(child, inner)
+            else:
+                scopes[id(child)] = name
+                enclose(child, name)
+
+    enclose(tree, "")
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "observe"
+            and any(keyword.arg in ("tap", None) for keyword in node.keywords)
+        ):
+            yield Input(path, node.lineno, scopes.get(id(node), ""), "observe")
+
+
+def test_only_the_named_observations_open_the_body_tap() -> None:
+    """ADR 0006's amendment: the body tap opens for the connections sync (#200) and for
+    each enrichment visit (#203), at one call each, and nowhere else."""
+    found = [
+        item
+        for root in BROWSER_ROOTS
+        for path in ([root] if root.is_file() else python_files(root))
+        for item in tap_observations(path.read_text(encoding="utf-8"), path)
+    ]
+    sites = sorted((item.path, item.function) for item in found)
+    assert sites == sorted(TAP_OBSERVERS), "a body tap opened somewhere new:\n" + "\n".join(
+        str(item) for item in found
+    )
+
+
+def test_the_tap_observation_scanner_sees_a_tap_and_a_hidden_one() -> None:
+    source = (
+        "class PageProfiles:\n"
+        "    async def open_profile(self, run, match, extra):\n"
+        "        await run.observe(match, tap=True)\n"
+        "        await run.observe(match, **extra)\n"
+        "        await run.observe(match, limits=None)\n"
+    )
+    found = list(tap_observations(source))
+    assert [(i.line, i.function) for i in found] == [
+        (3, "PageProfiles.open_profile"),
+        (4, "PageProfiles.open_profile"),
+    ]
 
 
 def test_the_cdp_send_scanner_catches_a_mutating_method_or_a_hidden_one() -> None:
