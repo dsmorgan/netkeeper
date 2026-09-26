@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import struct
 import threading
 import zipfile
 from collections import Counter
@@ -1407,3 +1408,28 @@ def test_import_help_lists_archive_csv_and_rollback() -> None:
     plain = _plain(result.stdout)
     for name in ("archive", "csv", "rollback", "resume", "runs", "rm"):
         assert name in plain
+
+
+def test_cli_import_archive_refuses_a_damaged_central_directory(
+    cli_db: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """#138 through the CLI's path argument: refused cleanly, and nothing imported."""
+    path = tmp_path / "export.zip"
+    with zipfile.ZipFile(path, "w") as zf:
+        for source in sorted(FIXTURES_ARCHIVE.iterdir()):
+            zf.write(source, arcname=source.name)
+    raw = bytearray(path.read_bytes())
+    eocd = raw.rfind(b"PK\x05\x06")
+    (offset,) = struct.unpack_from("<I", raw, eocd + 16)
+    for index in range(offset + 154, offset + 254):
+        raw[index] ^= 0xFF
+    path.write_bytes(bytes(raw))
+
+    result = CliRunner().invoke(cli, ["import", "archive", str(path)])
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "the zip's directory is damaged: it declares 6 files" in result.output
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        assert session.scalar(scoped_count(user, Contact)) == 0

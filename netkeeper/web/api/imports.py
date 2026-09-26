@@ -40,9 +40,10 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from netkeeper.crm import import_runs as service
 from netkeeper.crm.archive import ArchiveImport
 from netkeeper.crm.archive import import_archive as run_archive_import
+from netkeeper.crm.archive_check import open_checked_archive
 from netkeeper.crm.identity import CreateNew, Decision, MergeInto
 from netkeeper.crm.importer import PRESETS
-from netkeeper.linkedin.archive import ArchiveFormatError, ArchiveRefusalCode, open_archive
+from netkeeper.linkedin.archive import ArchiveFormatError, ArchiveRefusalCode
 from netkeeper.models import (
     ContactSource,
     ImportDecisionKind,
@@ -309,7 +310,9 @@ runs, and nothing in this app puts a ceiling on that — see the endpoint
 docstring below. What guards an upload that *is* a zip (total uncompressed
 size, member count, compression ratio, member paths) lives in
 :mod:`netkeeper.linkedin.archive`, so the CLI's ``import archive`` gets the
-same protection against a hostile archive that this endpoint does.
+same protection against a hostile archive that this endpoint does. Both also
+refuse a zip whose central directory lost entries, which would otherwise import
+partly and silently (:mod:`netkeeper.crm.archive_check`, #138).
 """
 
 
@@ -407,7 +410,7 @@ def import_archive(
                 "code": ArchiveRefusalCode.TOO_LARGE.value,
             },
         )
-    with translate_errors(), open_archive(file.file, filename=name) as archive:
+    with translate_errors(), open_checked_archive(file.file, filename=name) as archive:
         report = run_archive_import(session, user, archive)
         ignored_files = list(archive.ignored)
     return archive_report_out(report, filename=name, ignored_files=ignored_files)
