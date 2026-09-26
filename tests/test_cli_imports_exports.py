@@ -387,7 +387,7 @@ def test_cli_import_csv_refuses_undecided_candidates_and_still_leaves_a_draft(
         "skip`) -- re-running `import csv` would read the file into a second draft and "
         "leave run 1 behind as an orphan"
     ) in result.output
-    # _refuse_undecided runs before _commit_draft is ever called, so no commit
+    # _refuse_undecided runs before _commit_run is ever called, so no commit
     # is attempted and nothing is rolled back; the draft it names comes from its
     # own, already-committed transaction (POST /imports vs. POST
     # /imports/{id}/commit), so it is really there to decide, in the app or with
@@ -516,9 +516,7 @@ def test_cli_import_resume_without_on_candidate_refuses_again_naming_the_same_ru
 def test_cli_import_resume_on_candidate_skip_matches_what_commit_would_do(
     cli_db: sessionmaker[Session],
 ) -> None:
-    """The one of the three `--on-candidate` paths that was already correct before this fix:
-    `skip_undecided=True` passes no decisions and lets `commit()` re-resolve on its own.
-    """
+    """`--on-candidate skip` passes no decisions and lets `commit()` re-resolve on its own."""
     _seed_candidate(cli_db)
     draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
     assert draft.exit_code == 0, draft.output
@@ -840,17 +838,13 @@ def test_cli_import_resume_reports_a_clean_error_on_a_write_lock_race(
         assert import_runs.get_run(session, user, run_id).status.value == "draft"
 
 
-def test_cli_import_resume_on_candidate_new_refuses_cleanly_when_the_retry_is_still_undecided(
+def test_cli_import_resume_on_candidate_new_is_one_commit_with_the_policy(
     cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The regression this pins: the retry commit() -- deciding exactly the rows the first
-    attempt found undecided -- sat inside the `except UndecidedCandidates` block handling
-    that first attempt. If the database moved again in between and the retry itself found a
-    row still undecided (a narrow race: its own issue, since the real fix is giving
-    commit() the bulk policy so one transaction does both), the old code let that second
-    UndecidedCandidates escape uncaught -- a raw traceback. Mocking commit() to keep
-    finding a row undecided on the second call reproduces that without a genuine
-    two-process race.
+    """#136: `--on-candidate new` used to run `commit()` twice -- once to learn which rows
+    were undecided, again with decisions built from that answer -- and a row that left
+    candidacy in between was silently skipped. The policy now goes to `commit()` itself,
+    so one call, in one transaction, both finds the undecided rows and decides them.
     """
     _seed_candidate(cli_db)
     draft = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE), "--dry-run"])
@@ -858,22 +852,25 @@ def test_cli_import_resume_on_candidate_new_refuses_cleanly_when_the_retry_is_st
     run_id = _run_id(draft.output, "draft")
 
     real_commit = import_runs.commit
-    calls = 0
+    calls: list[dict[str, Any]] = []
 
-    def flaky_commit(*args: Any, **kwargs: Any) -> Any:
-        nonlocal calls
-        calls += 1
-        if calls >= 2:
-            raise import_runs.UndecidedCandidates([3])
+    def counting_commit(*args: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs)
         return real_commit(*args, **kwargs)
 
-    monkeypatch.setattr(import_runs, "commit", flaky_commit)
+    monkeypatch.setattr(import_runs, "commit", counting_commit)
 
     result = CliRunner().invoke(cli, ["import", "resume", str(run_id), "--on-candidate", "new"])
-    assert result.exit_code == 1
-    assert "Traceback" not in result.output
-    assert f"import run {run_id}" in result.output
-    assert calls == 2  # the first attempt, then the retry that is still undecided
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0]["undecided"] is import_runs.UndecidedPolicy.CREATE_NEW
+    assert "decisions" not in calls[0]
+    with cli_db() as session:
+        user = ensure_local_user(session)
+        rows, _ = import_runs.list_rows(session, user, run_id)
+        decided = {row.row_number: row.decision_json for row in rows if row.decision_json}
+        # The row the policy decided says so, as a person's decision would.
+        assert decided == {3: {"kind": "create_new", "contact_id": None}}
 
 
 def test_cli_import_csv_of_an_unusable_file_reports_a_clean_error(

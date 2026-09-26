@@ -531,7 +531,11 @@ def commit_import_run(
             user,
             run_id,
             decisions=decisions_of(body.decisions),
-            skip_undecided=body.skip_undecided,
+            undecided=(
+                service.UndecidedPolicy.SKIP
+                if body.skip_undecided
+                else service.UndecidedPolicy.REFUSE
+            ),
         )
     return run_out(run)
 

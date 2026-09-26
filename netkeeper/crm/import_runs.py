@@ -48,6 +48,7 @@ caller; nothing here commits.
 
 from __future__ import annotations
 
+import enum
 import logging
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -140,6 +141,23 @@ _CHILD_RELATIONSHIPS: Final[dict[str, str]] = {
 
 
 # --- errors -----------------------------------------------------------------
+
+
+class UndecidedPolicy(enum.StrEnum):
+    """What :func:`commit` does with a candidate row nobody has decided (#136).
+
+    Applied inside the commit's own transaction, to exactly the rows that
+    commit resolves as candidates, so a row that stopped being a candidate
+    since the draft was read is never handed a decision it cannot take. A
+    row's own recorded decision always wins over the policy.
+    """
+
+    REFUSE = "refuse"
+    """Raise :class:`UndecidedCandidates` and commit nothing."""
+    SKIP = "skip"
+    """Leave the row out, counted as skipped."""
+    CREATE_NEW = "new"
+    """Decide :class:`~netkeeper.crm.identity.CreateNew` for the row: a separate contact."""
 
 
 class ImportRunError(Exception):
@@ -421,11 +439,14 @@ def _process_row(
     observed_at: datetime,
     decision: Decision | None,
     apply_row: bool,
+    undecided: Decision | None = None,
 ) -> _Outcome:
     """Resolve one row, and apply it when ``apply_row`` and it needs no decision.
 
     The single path the draft pass, the preview, and the commit all take, so what
-    a preview promises is what a commit does.
+    a preview promises is what a commit does. ``undecided`` is the decision a
+    candidate row with no ``decision`` of its own takes (#136); without one, such
+    a row comes back as a candidate and is not applied.
     """
     cells = dict(raw)
     mapped = map_row(raw, mapping, observed_at=observed_at)
@@ -446,6 +467,8 @@ def _process_row(
             outcome.changes = _plan(None, mapped)
         case Candidate(contact_ids=contact_ids):
             outcome.candidate_ids = contact_ids
+            if decision is None:
+                decision = undecided
             match decision:
                 case None:
                     outcome.resolution = ImportResolution.CANDIDATE
@@ -799,7 +822,7 @@ def commit(
     run_id: int,
     *,
     decisions: Mapping[int, Decision] | None = None,
-    skip_undecided: bool = False,
+    undecided: UndecidedPolicy = UndecidedPolicy.REFUSE,
 ) -> ImportRun:
     """Apply every row of a draft run, in the caller's transaction.
 
@@ -808,10 +831,19 @@ def commit(
     moved since the draft was read, and then applied; what each row changed is
     written to its ``changes_json``, with the values that were there before, so
     :func:`rollback` can put them back. A row that resolves to a candidate and
-    has no decision stops the commit (``UndecidedCandidates``) unless
-    ``skip_undecided``, in which case it is skipped and counted. Nothing is
-    committed here: the caller's transaction makes the whole file land or none of
-    it. ``RunNotDraft`` for a run that was already committed or rolled back.
+    has no decision is handled by ``undecided``: by default it stops the commit
+    (``UndecidedCandidates``); :attr:`UndecidedPolicy.SKIP` skips and counts it;
+    :attr:`UndecidedPolicy.CREATE_NEW` decides a new contact for it and records
+    that decision on the row. The policy is applied to the rows this commit
+    finds undecided, in this transaction, so no row can leave candidacy between
+    being found and being decided (#136).
+
+    ``CREATE_NEW`` decides each row on its own: a person listed twice in the file
+    whose rows are both candidates becomes two new contacts, because the second
+    row's candidates now include the first one's new contact and are still
+    ambiguous (#90). Nothing is committed here: the caller's transaction makes
+    the whole file land or none of it. ``RunNotDraft`` for a run that was
+    already committed or rolled back.
     """
     _require_writer(session)
     run = get_run(session, user, run_id)
@@ -825,8 +857,10 @@ def commit(
     mapping = mapping_from_json(run.mapping_json, _mapping_headers(rows, run))
     observed_at = utcnow()
     outcomes: list[_Outcome] = []
-    undecided: list[int] = []
+    waiting: list[int] = []
+    fallback: Decision | None = CreateNew() if undecided is UndecidedPolicy.CREATE_NEW else None
     for row in rows:
+        decision = _decision_of(row)
         outcome = _process_row(
             session,
             user,
@@ -834,13 +868,17 @@ def commit(
             row.raw_json,
             mapping,
             observed_at=observed_at,
-            decision=_decision_of(row),
+            decision=decision,
             apply_row=True,
+            undecided=fallback,
         )
         if outcome.resolution is ImportResolution.CANDIDATE:
-            undecided.append(row.row_number)
+            waiting.append(row.row_number)
             outcome.resolution = ImportResolution.SKIPPED
             outcome.problem = _join(outcome.problem, "waiting for a decision")
+        elif decision is None and outcome.decision is not None:
+            # The policy decided this row; the row says so, as a person's decision would.
+            row.decision_json = outcome.decision
         row.resolution = outcome.resolution
         row.contact_id = outcome.contact_id
         row.matched_by = outcome.matched_by
@@ -848,8 +886,8 @@ def commit(
         row.changes_json = outcome.effect
         row.error = outcome.problem
         outcomes.append(outcome)
-    if undecided and not skip_undecided:
-        raise UndecidedCandidates(undecided)
+    if waiting and undecided is UndecidedPolicy.REFUSE:
+        raise UndecidedCandidates(waiting)
     _recount(run, outcomes)
     run.status = ImportStatus.COMMITTED
     run.committed_at = utcnow()
@@ -1226,6 +1264,7 @@ __all__ = [
     "RunNotDraft",
     "RunNotFound",
     "UndecidedCandidates",
+    "UndecidedPolicy",
     "UnknownPreset",
     "UnknownRow",
     "commit",
