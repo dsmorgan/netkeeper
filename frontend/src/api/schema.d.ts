@@ -912,9 +912,15 @@ export interface paths {
          *     A contact the run created is deleted; a contact it only enriched keeps the
          *     values it had before the run, and the child rows the run added are removed. A
          *     field something changed after the import keeps that later value, and its
-         *     provenance with it. A run whose created contacts a merge has since drawn in
-         *     answers ``409`` and is not undone at all: deleting one of those contacts
-         *     would take rows the run never created.
+         *     provenance with it.
+         *
+         *     Refused with ``409`` and nothing undone, the body's ``code`` saying why
+         *     (#78): ``merged`` when a merge has since drawn in a contact the run created,
+         *     because deleting it would take rows the run never created; ``superseded``
+         *     when a later run wrote over fields this one wrote, naming the runs to roll
+         *     back first; ``created_contacts_changed`` when contacts the run created have
+         *     gained interactions, tags, lists, edits or later imports, counted in
+         *     ``acquired``, which ``force`` overrides.
          */
         post: operations["rollback_import_run"];
         delete?: never;
@@ -3662,6 +3668,44 @@ export interface components {
              * @enum {string}
              */
             field: "li_urn" | "li_public_id" | "li_url" | "first_name" | "last_name" | "headline" | "current_title" | "current_company" | "location" | "connected_on";
+        };
+        /**
+         * RollbackAcquiredOut
+         * @description What the contacts a run created gained since, none of it from the run (#78).
+         */
+        RollbackAcquiredOut: {
+            /** Children */
+            children: number;
+            /** Edited Contacts */
+            edited_contacts: number;
+            /** Interactions */
+            interactions: number;
+            /** Later Imports */
+            later_imports: number;
+            /** List Memberships */
+            list_memberships: number;
+            /** Tags */
+            tags: number;
+            /** Triage Decisions */
+            triage_decisions: number;
+        };
+        /**
+         * RollbackRefusalOut
+         * @description The ``409`` body of a refused rollback: why, and what to do about it (#78).
+         */
+        RollbackRefusalOut: {
+            acquired?: components["schemas"]["RollbackAcquiredOut"] | null;
+            /**
+             * Code
+             * @enum {string}
+             */
+            code: "merged" | "superseded" | "created_contacts_changed";
+            /** Contact Ids */
+            contact_ids?: number[];
+            /** Detail */
+            detail: string;
+            /** Run Ids */
+            run_ids?: number[];
         };
         /**
          * RuleField
@@ -6550,7 +6594,10 @@ export interface operations {
     };
     rollback_import_run: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Roll back even though contacts the run created have gained things since; they are deleted with them. Never overrides a merge or a later run. */
+                force?: boolean;
+            };
             header?: never;
             path: {
                 run_id: number;
@@ -6575,12 +6622,14 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The run's state forbids this, candidate rows are undecided, or a merge has drawn in a contact the run created */
+            /** @description The run is not committed, or rolling it back is refused: a merge drew in a contact it created, a later run wrote over it, or contacts it created have gained things since (unless force) */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["RollbackRefusalOut"];
+                };
             };
             /** @description Validation Error */
             422: {

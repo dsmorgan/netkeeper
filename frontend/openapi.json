@@ -5913,6 +5913,98 @@
         "title": "RevertFieldIn",
         "type": "object"
       },
+      "RollbackAcquiredOut": {
+        "description": "What the contacts a run created gained since, none of it from the run (#78).",
+        "properties": {
+          "children": {
+            "title": "Children",
+            "type": "integer"
+          },
+          "edited_contacts": {
+            "title": "Edited Contacts",
+            "type": "integer"
+          },
+          "interactions": {
+            "title": "Interactions",
+            "type": "integer"
+          },
+          "later_imports": {
+            "title": "Later Imports",
+            "type": "integer"
+          },
+          "list_memberships": {
+            "title": "List Memberships",
+            "type": "integer"
+          },
+          "tags": {
+            "title": "Tags",
+            "type": "integer"
+          },
+          "triage_decisions": {
+            "title": "Triage Decisions",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "interactions",
+          "tags",
+          "list_memberships",
+          "triage_decisions",
+          "children",
+          "edited_contacts",
+          "later_imports"
+        ],
+        "title": "RollbackAcquiredOut",
+        "type": "object"
+      },
+      "RollbackRefusalOut": {
+        "description": "The ``409`` body of a refused rollback: why, and what to do about it (#78).",
+        "properties": {
+          "acquired": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RollbackAcquiredOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "code": {
+            "enum": [
+              "merged",
+              "superseded",
+              "created_contacts_changed"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "contact_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Contact Ids",
+            "type": "array"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "run_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Run Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "detail",
+          "code"
+        ],
+        "title": "RollbackRefusalOut",
+        "type": "object"
+      },
       "RuleField": {
         "description": "The contact field a rule's pattern is searched in (spec 8.3).",
         "enum": [
@@ -10879,7 +10971,7 @@
     },
     "/api/v1/imports/{run_id}/rollback": {
       "post": {
-        "description": "Undo a committed run, and only what that run did.\n\nA contact the run created is deleted; a contact it only enriched keeps the\nvalues it had before the run, and the child rows the run added are removed. A\nfield something changed after the import keeps that later value, and its\nprovenance with it. A run whose created contacts a merge has since drawn in\nanswers ``409`` and is not undone at all: deleting one of those contacts\nwould take rows the run never created.",
+        "description": "Undo a committed run, and only what that run did.\n\nA contact the run created is deleted; a contact it only enriched keeps the\nvalues it had before the run, and the child rows the run added are removed. A\nfield something changed after the import keeps that later value, and its\nprovenance with it.\n\nRefused with ``409`` and nothing undone, the body's ``code`` saying why\n(#78): ``merged`` when a merge has since drawn in a contact the run created,\nbecause deleting it would take rows the run never created; ``superseded``\nwhen a later run wrote over fields this one wrote, naming the runs to roll\nback first; ``created_contacts_changed`` when contacts the run created have\ngained interactions, tags, lists, edits or later imports, counted in\n``acquired``, which ``force`` overrides.",
         "operationId": "rollback_import_run",
         "parameters": [
           {
@@ -10889,6 +10981,18 @@
             "schema": {
               "title": "Run Id",
               "type": "integer"
+            }
+          },
+          {
+            "description": "Roll back even though contacts the run created have gained things since; they are deleted with them. Never overrides a merge or a later run.",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Roll back even though contacts the run created have gained things since; they are deleted with them. Never overrides a merge or a later run.",
+              "title": "Force",
+              "type": "boolean"
             }
           }
         ],
@@ -10907,7 +11011,14 @@
             "description": "No such import run, row, contact, or preset"
           },
           "409": {
-            "description": "The run's state forbids this, candidate rows are undecided, or a merge has drawn in a contact the run created"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RollbackRefusalOut"
+                }
+              }
+            },
+            "description": "The run is not committed, or rolling it back is refused: a merge drew in a contact it created, a later run wrote over it, or contacts it created have gained things since (unless force)"
           },
           "422": {
             "content": {

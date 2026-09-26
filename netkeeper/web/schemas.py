@@ -1073,6 +1073,42 @@ class ImportRollbackOut(BaseModel):
     children_deleted: int
 
 
+RollbackRefusalCode = Literal["merged", "superseded", "created_contacts_changed"]
+"""Why a rollback was refused (#78); what a client switches on rather than the wording.
+
+``merged``: a merge has drawn in a contact the run created; undo the merge.
+``superseded``: a later run wrote over fields this one wrote; roll back
+``run_ids`` first, newest first. ``created_contacts_changed``: contacts the run
+created have gained what ``acquired`` counts; roll back with ``force`` to
+delete them anyway.
+"""
+
+
+class RollbackAcquiredOut(BaseModel):
+    """What the contacts a run created gained since, none of it from the run (#78)."""
+
+    interactions: int
+    tags: int
+    list_memberships: int
+    triage_decisions: int
+    children: int
+    edited_contacts: int
+    later_imports: int
+
+
+class RollbackRefusalOut(BaseModel):
+    """The ``409`` body of a refused rollback: why, and what to do about it (#78)."""
+
+    detail: str
+    code: RollbackRefusalCode
+    run_ids: list[int] = Field(default_factory=list)
+    """For ``superseded``: the later runs to roll back first, newest first."""
+    contact_ids: list[int] = Field(default_factory=list)
+    """The contacts the refusal is about."""
+    acquired: RollbackAcquiredOut | None = None
+    """For ``created_contacts_changed``: what a forced rollback would delete."""
+
+
 class ImportPresetOut(BaseModel):
     name: str
     builtin: bool

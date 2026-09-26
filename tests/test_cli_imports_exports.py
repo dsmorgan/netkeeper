@@ -462,6 +462,27 @@ def test_cli_import_csv_on_candidate_new_makes_a_repeated_person_two_contacts(
     assert "a person listed twice in the file becomes two new contacts" in help_text.output
 
 
+def test_cli_import_rollback_refuses_then_forces_when_a_created_contact_gained_a_note(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """#78 item 2 from the CLI: the refusal says what would be lost; --force goes ahead."""
+    committed = CliRunner().invoke(cli, ["import", "csv", str(NINE_COLUMN_SAMPLE)])
+    assert committed.exit_code == 0, committed.output
+    with session_scope(cli_db, write=True) as session:
+        user = ensure_local_user(session)
+        fern = session.scalars(scoped(user, Contact).where(Contact.first_name == "Fern")).one()
+        fern.notes = "Flies kites on Thursdays."
+
+    refused = CliRunner().invoke(cli, ["import", "rollback", "1"])
+    assert refused.exit_code == 1
+    assert "Traceback" not in refused.output
+    assert "1 contact with your own edits" in refused.output
+
+    forced = CliRunner().invoke(cli, ["import", "rollback", "1", "--force"])
+    assert forced.exit_code == 0, forced.output
+    assert "3 contact(s) deleted" in forced.output
+
+
 # --- import resume, runs, rm (#90) -------------------------------------------
 
 

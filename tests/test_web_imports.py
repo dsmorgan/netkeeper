@@ -441,9 +441,73 @@ async def test_a_rollback_across_a_merge_is_refused(
     response = await client.post(f"/api/v1/imports/{run['id']}/rollback", headers=CSRF)
 
     assert response.status_code == 409
-    assert "merge" in response.json()["detail"]
+    body = response.json()
+    assert "merge" in body["detail"]
+    assert body["code"] == "merged"
     assert contact_by_slug(running_app, "imogen-thistlewhite-qz") is not None
     assert (await client.get(f"/api/v1/imports/{run['id']}")).json()["status"] == "committed"
+
+
+async def test_rolling_back_a_run_a_later_one_wrote_over_names_the_later_run(
+    client: httpx.AsyncClient, seeded: dict[str, int]
+) -> None:
+    """#78 item 1: refused with ``superseded`` and the runs to roll back first."""
+    first = await draft(client)
+    await client.post(
+        f"/api/v1/imports/{first['id']}/commit", headers=CSRF, json={"skip_undecided": True}
+    )
+    later_file = (
+        "Profile Url,First Name,Last Name,Position\n"
+        "https://www.linkedin.com/in/fern-oglethorpe-qz/,Fern,Oglethorpe,Kite Director\n"
+    )
+    second = await draft(client, content=later_file)
+    await client.post(f"/api/v1/imports/{second['id']}/commit", headers=CSRF, json={})
+
+    response = await client.post(f"/api/v1/imports/{first['id']}/rollback", headers=CSRF)
+    assert response.status_code == 409, response.text
+    body = response.json()
+    assert body["code"] == "superseded"
+    assert body["run_ids"] == [second["id"]]
+    assert body["contact_ids"] == [seeded["fern"]]
+    # force never overrides this one: it would strand a value.
+    forced = await client.post(
+        f"/api/v1/imports/{first['id']}/rollback", headers=CSRF, params={"force": "true"}
+    )
+    assert forced.status_code == 409
+    assert forced.json()["code"] == "superseded"
+
+
+async def test_rolling_back_a_created_contact_that_gained_things_needs_force(
+    client: httpx.AsyncClient, running_app: FastAPI, seeded: object
+) -> None:
+    """#78 item 2: say what would be lost; ``force`` deletes it anyway."""
+    run = await draft(client)
+    await client.post(
+        f"/api/v1/imports/{run['id']}/commit", headers=CSRF, json={"skip_undecided": True}
+    )
+    imogen = contact_by_slug(running_app, "imogen-thistlewhite-qz")
+    assert imogen is not None
+    note = await client.post(
+        f"/api/v1/contacts/{imogen.id}/interactions",
+        headers=CSRF,
+        json={"kind": "note", "at": "2026-09-01T12:00:00Z", "summary": "coffee"},
+    )
+    assert note.status_code == 201, note.text
+
+    refused = await client.post(f"/api/v1/imports/{run['id']}/rollback", headers=CSRF)
+    assert refused.status_code == 409, refused.text
+    body = refused.json()
+    assert body["code"] == "created_contacts_changed"
+    assert imogen.id in body["contact_ids"]
+    assert body["acquired"]["interactions"] == 1
+    assert "1 interaction" in body["detail"]
+    assert contact_by_slug(running_app, "imogen-thistlewhite-qz") is not None
+
+    forced = await client.post(
+        f"/api/v1/imports/{run['id']}/rollback", headers=CSRF, params={"force": "true"}
+    )
+    assert forced.status_code == 200, forced.text
+    assert contact_by_slug(running_app, "imogen-thistlewhite-qz") is None
 
 
 async def test_a_saved_preset_maps_a_later_file_missing_one_of_its_columns(

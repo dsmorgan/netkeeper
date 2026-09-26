@@ -134,7 +134,7 @@ function RollbackCard({ run, onDone }: { run: ImportRun; onDone: (r: RollbackRes
   const queryClient = useQueryClient()
 
   const rollback = useMutation({
-    mutationFn: () => rollbackRun(run.id),
+    mutationFn: (force: boolean) => rollbackRun(run.id, force),
     onSuccess: (undone) => {
       onDone(undone)
       setAsking(false)
@@ -174,21 +174,19 @@ function RollbackCard({ run, onDone }: { run: ImportRun; onDone: (r: RollbackRes
             refused whole rather than half done: deleting that contact would take rows the import
             never created.
           </li>
+          <li>
+            If a later import wrote over the same fields, undo that one first. If a contact this
+            import created has since gained notes, tags, lists or interactions, you are told what
+            would go with it before anything is deleted.
+          </li>
         </ul>
-        {rollback.isError &&
-          !asking &&
-          (isConflict(rollback.error) ? (
-            <Note tone="warn">
-              <p className="font-medium">This import cannot be undone as it stands.</p>
-              <p>{message(rollback.error)}</p>
-              <p>
-                Nothing was changed. Undo the merge on the contacts named above, then come back
-                here.
-              </p>
-            </Note>
-          ) : (
-            <ErrorNote>{message(rollback.error)}</ErrorNote>
-          ))}
+        {rollback.isError && !asking && (
+          <RollbackRefusal
+            error={rollback.error}
+            pending={rollback.isPending}
+            onForce={() => rollback.mutate(true)}
+          />
+        )}
         <Button variant="destructive" onClick={() => setAsking(true)}>
           Roll back this import
         </Button>
@@ -205,7 +203,7 @@ function RollbackCard({ run, onDone }: { run: ImportRun; onDone: (r: RollbackRes
         }
         pending={rollback.isPending}
         error={rollback.isError ? message(rollback.error) : null}
-        onConfirm={() => rollback.mutate()}
+        onConfirm={() => rollback.mutate(false)}
       >
         <p>
           This deletes the {run.created_count} {run.created_count === 1 ? 'contact' : 'contacts'}{' '}
@@ -218,6 +216,57 @@ function RollbackCard({ run, onDone }: { run: ImportRun; onDone: (r: RollbackRes
         </p>
       </ConfirmDialog>
     </Card>
+  )
+}
+
+/**
+ * Why the backend refused a rollback, keyed off its `code` (#78), and the way on.
+ *
+ * `superseded` and `merged` need something else undone first; only
+ * `created_contacts_changed` can be overridden here, and the button says what
+ * that costs. A 409 without a code is the older, merge-only refusal.
+ */
+function RollbackRefusal({
+  error,
+  pending,
+  onForce,
+}: {
+  error: Error
+  pending: boolean
+  onForce: () => void
+}) {
+  if (!isConflict(error)) return <ErrorNote>{message(error)}</ErrorNote>
+  const code = error instanceof ApiError ? error.code : null
+  if (code === 'superseded') {
+    return (
+      <Note tone="warn">
+        <p className="font-medium">A later import has to be undone first.</p>
+        <p>{message(error)}</p>
+        <p>
+          Nothing was changed. Roll back the later imports named above, newest first, then come
+          back here.
+        </p>
+      </Note>
+    )
+  }
+  if (code === 'created_contacts_changed') {
+    return (
+      <Note tone="warn">
+        <p className="font-medium">Rolling back would delete more than this import added.</p>
+        <p>{message(error)}</p>
+        <p>Nothing was changed yet.</p>
+        <Button variant="destructive" disabled={pending} onClick={onForce}>
+          Delete them anyway and roll back
+        </Button>
+      </Note>
+    )
+  }
+  return (
+    <Note tone="warn">
+      <p className="font-medium">This import cannot be undone as it stands.</p>
+      <p>{message(error)}</p>
+      <p>Nothing was changed. Undo the merge on the contacts named above, then come back here.</p>
+    </Note>
   )
 }
 
