@@ -1379,7 +1379,7 @@ export interface paths {
         get?: never;
         /**
          * Set Oauth Client
-         * @description Store the OAuth client's ID and secret in the Keychain.
+         * @description Store the OAuth client's ID and secret in the Keychain; answers the status after.
          */
         put: operations["set_oauth_client_api_v1_mailboxes_oauth_client_put"];
         post?: never;

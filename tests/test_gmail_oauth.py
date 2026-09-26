@@ -205,9 +205,12 @@ def test_a_wrong_client_secret_is_refused_with_googles_code(fake_google: FakeGoo
     assert "not-it" not in str(caught.value)
 
 
-def test_a_server_error_is_unavailable_not_a_dead_grant(fake_google: FakeGoogle) -> None:
+@pytest.mark.parametrize("status", [500, 503, 408, 429])
+def test_a_server_error_or_try_later_is_unavailable_not_a_dead_grant(
+    fake_google: FakeGoogle, status: int
+) -> None:
     token = fake_google.issue_refresh_token()
-    fake_google.token_status = 503
+    fake_google.token_status = status
     with pytest.raises(OAuthUnavailable):
         gmail_oauth.refresh_access_token(CLIENT, token)
 

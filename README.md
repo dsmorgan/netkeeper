@@ -26,7 +26,7 @@ The workflow is a five-stage reconnect method: validate your network, enrich it,
 
 - macOS 14 or later. Linux works through the container image, but the LinkedIn steps need Chrome on the same host as the backend, so a Mac runs netkeeper natively.
 - Google Chrome, or any Chromium-based browser. Firefox and Safari have no DevTools protocol and cannot be used for the LinkedIn steps.
-- A Gmail account and your own Google Cloud OAuth client for the email steps. The spec explains the setup.
+- A Gmail account and your own Google Cloud OAuth client for the email steps. [docs/gmail-setup.md](docs/gmail-setup.md) walks through the setup.
 - Optional: an Anthropic API key for the LLM features. They are off unless you configure one.
 
 ## Running

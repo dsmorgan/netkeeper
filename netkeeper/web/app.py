@@ -101,7 +101,7 @@ def create_app(
                 monitor = MailboxMonitor(
                     app.state.session_factory,
                     app.state.bus,
-                    interval_s=resolved.campaigns.reply_poll_minutes * 60,
+                    interval_s=_poll_minutes(resolved) * 60,
                     endpoints=gmail,
                 )
                 monitor.start()
@@ -169,6 +169,15 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     app.state.pending_oauth = PendingAuthorizations()
     app.state.mailbox_monitor = None
     return tasks
+
+
+def _poll_minutes(settings: Settings) -> int:
+    """``[campaigns] reply_poll_minutes``, at least one."""
+    minutes = settings.campaigns.reply_poll_minutes
+    if minutes < 1:
+        log.warning("[campaigns] reply_poll_minutes = %d is not a poll; using 1", minutes)
+        return 1
+    return minutes
 
 
 def discover_routers(package: ModuleType = api_package) -> list[tuple[str, APIRouter]]:
