@@ -611,6 +611,45 @@ def test_the_scan_cap_counts_distinct_pairs_of_classes() -> None:
     assert not refused([chr(0x4E00 + i) + "x" for i in range(100)])
 
 
+LITERAL_BRANCHES = [chr(0x5000 + 2 * i) + chr(0x5001 + 2 * i) for i in range(20)]
+"""Two-character literal branches sharing no character with each other or with
+:data:`CLASS_BRANCHES`: a pair of them costs no scan, a pair with a class costs one."""
+
+
+def _refused_by_the_cap(branches: list[str]) -> bool:
+    tree = _parser.parse(_branches_under_plus(branches), re.IGNORECASE)
+    return has_ambiguous_nested_repeat(tree)
+
+
+def test_the_scan_cap_is_exact_and_counts_pairs_of_a_class_and_a_literal() -> None:
+    # 3 class branches and 9 literal ones: 3 class pairs and 27 mixed, exactly 30.
+    assert not _refused_by_the_cap(CLASS_BRANCHES[:3] + LITERAL_BRANCHES[:9])
+    # 2 class branches and 15 literal ones: 1 class pair and 30 mixed, 31.
+    assert _refused_by_the_cap(CLASS_BRANCHES[:2] + LITERAL_BRANCHES[:15])
+
+
+def test_the_scan_cap_counts_pairs_compared_in_the_fixed_prefixes() -> None:
+    # Every first class holds "a", so all 28 pairs of branches go on to compare
+    # their second classes, which share nothing: 28 pairs of first characters,
+    # under the cap alone, plus 28 of second ones.
+    branches = [
+        f"[a{chr(0x4E00 + 3 * i)}][{chr(0x4E01 + 3 * i)}{chr(0x4E02 + 3 * i)}]" for i in range(8)
+    ]
+    assert _refused_by_the_cap(branches)
+    # The same first classes with literal second characters are the 28 pairs alone.
+    assert not _refused_by_the_cap(
+        [b[: b.index("]") + 1] + chr(0x5000 + i) for i, b in enumerate(branches)]
+    )
+
+
+def test_the_scan_cap_counts_each_distinct_pair_once() -> None:
+    # 780 comparisons, but of only three distinct pairs of first characters:
+    # [ab] with [ab], [ab] with [ba], and [ba] with [ba]. The second characters
+    # are literals, which cost no scan.
+    branches = [f"[{'ab' if i % 2 else 'ba'}]{chr(0x4E00 + i)}" for i in range(40)]
+    assert not _refused_by_the_cap(branches)
+
+
 LARGE_ALTERNATIONS = [
     # #240: 165 two-letter words, "aa" to "gi", sharing first letters; this took
     # about 8 s to save when every pair of branches scanned every code point.
