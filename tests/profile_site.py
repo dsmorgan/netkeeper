@@ -36,7 +36,7 @@ from flagship_pages import (
     document_html,
     profile_payload,
 )
-from flagship_site import SHELL, FakeResponse
+from flagship_site import SHELL, FakeCdpSession, FakeResponse
 from voyager_pages import Person
 
 from netkeeper.linkedin.browser import PageLike
@@ -127,6 +127,12 @@ class ProfilePage:
     #: #197: the same for the overlay's answer, and for every lazy card.
     overlay_error: Exception | None = None
     component_error: Exception | None = None
+    #: #203: what the body tap's session receives as a lost overlay or lazy card
+    #: streams in, on a site built with ``tap``: ``"whole"`` (the page's own copy),
+    #: ``"half"`` (cut mid-row), ``"rows"`` (cut at a row boundary, so it still parses
+    #: but names a row it never got), or ``"none"`` (Chrome refuses to stream it).
+    overlay_streamed: str = "none"
+    component_streamed: str = "none"
     #: #197: the navigation to this profile raises this after the page's answers
     #: arrived (Playwright's ``TimeoutError``: the document broke off and ``load`` never
     #: fired). ``tab_after_goto``, when set, is where the tab is by then; the first
@@ -275,9 +281,14 @@ class ProfileSite(FakeContext):
         origin: str = ORIGIN,
         stale: Sequence[Stale] = (),
         extra: Mapping[str, ProfilePage] | None = None,
+        tap: bool = False,
     ) -> None:
         super().__init__()
         self.origin = origin
+        #: Whether a body tap's CDP session can be opened here (#203), and the one that was.
+        self.tap = tap
+        self.cdp: FakeCdpSession | None = None
+        self._request_ids = 0
         self.profiles: dict[str, ProfilePage] = {p.person.slug.casefold(): p for p in pages}
         self.profiles.update({k.casefold(): v for k, v in (extra or {}).items()})
         self.tabs: list[ProfileTab] = []
@@ -285,6 +296,23 @@ class ProfileSite(FakeContext):
         self.requests: list[tuple[str, str, str | None]] = []
         self.lookups: list[str] = []
         self.clicks: list[tuple[str, float | None, float | None]] = []
+
+    async def new_cdp_session(self, page: object) -> FakeCdpSession:
+        """Only when the site was built with ``tap``: otherwise, like a browser without it."""
+        if not self.tap:
+            raise RuntimeError("this fake browser has no CDP sessions")
+        self.cdp = FakeCdpSession()
+        return self.cdp
+
+    @property
+    def streamed_ids(self) -> list[str]:
+        """The request ids the body tap asked Chrome to stream, in order."""
+        assert self.cdp is not None
+        return [
+            str(params["requestId"])
+            for method, params in self.cdp.sent
+            if method == "Network.streamResourceContent"
+        ]
 
     async def new_page(self) -> PageLike:
         self.new_page_calls += 1
@@ -392,6 +420,7 @@ class ProfileSite(FakeContext):
                 "fetch",
                 request,
                 body_error=page.component_error,
+                streamed=streamed_copy(body, page.component_streamed),
             )
         if page.tab_after_scroll is not None:
             tab._url = page.tab_after_scroll
@@ -432,6 +461,7 @@ class ProfileSite(FakeContext):
                 "fetch",
                 request,
                 body_error=page.overlay_error,
+                streamed=streamed_copy(page.overlay_body(), page.overlay_streamed),
             )
         if page.tab_after_click is not None:
             tab._url = page.tab_after_click
@@ -448,9 +478,23 @@ class ProfileSite(FakeContext):
         *,
         headers: Mapping[str, str] | None = None,
         body_error: Exception | None = None,
+        streamed: bytes | None = None,
     ) -> None:
         self.requests.append((method, urlsplit(url).path, post_data))
         request = SiteRequest(method, url, resource_type, post_data)
+        cdp = self.cdp
+        request_id = ""
+        if cdp is not None:
+            # What the tap's session hears, as Chrome sends it for every answer.
+            self._request_ids += 1
+            request_id = f"fake.{self._request_ids}"
+            asked: dict[str, Any] = {"url": url, "method": method}
+            if post_data is not None:
+                asked["postData"] = post_data
+            cdp.emit("Network.requestWillBeSent", {"requestId": request_id, "request": asked})
+            cdp.emit("Network.responseReceived", {"requestId": request_id})
+            if streamed is not None:
+                cdp.bodies[request_id] = streamed
         response = FakeResponse(
             url,
             status,
@@ -460,3 +504,30 @@ class ProfileSite(FakeContext):
             body_error=body_error,
         )
         tab.emit(response, request)
+        if cdp is not None:
+            if body_error is None:
+                cdp.emit("Network.loadingFinished", {"requestId": request_id})
+            else:
+                # The page's own client cancelled it after reading it (#200).
+                cdp.emit(
+                    "Network.loadingFailed",
+                    {"requestId": request_id, "canceled": True, "errorText": "net::ERR_ABORTED"},
+                )
+
+
+def streamed_copy(body: bytes, how: str) -> bytes | None:
+    """What a body tap would have received of ``body`` (see ``ProfilePage``)."""
+    if how == "whole":
+        return body
+    if how == "half":
+        return body[: len(body) // 2]
+    if how == "rows":
+        # A real flight answer streams row 0 first and the rows it refers to after it;
+        # the fixtures write row 0 last. Put it first, then lose the last row.
+        lines = [line for line in body.split(b"\n") if line]
+        ordered = [line for line in lines if line.startswith(b"0:")] + [
+            line for line in lines if not line.startswith(b"0:")
+        ]
+        return b"\n".join(ordered[:-1]) + b"\n"
+    assert how == "none", how
+    return None

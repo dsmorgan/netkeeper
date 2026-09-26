@@ -16,8 +16,9 @@ through the one function it is given to ask Chrome to stream an answer it matche
 Nothing here sends, holds, changes, answers, or cancels a request: the session it
 listens on enables the Network domain (events only) and asks for a matched answer's
 data. What it keeps is used only when the page's own copy could not be read, and
-only after the caller checks it against what the page asked for next
-(:mod:`netkeeper.linkedin.page_connections`).
+only after the caller checks it: against what the page asked for next
+(:mod:`netkeeper.linkedin.page_connections`), or, for enrichment's lazy cards and
+overlay, for being whole (:mod:`netkeeper.linkedin.page_profiles`, #203).
 
 **Bounded.** At most :data:`MAX_STREAMS` answers are held at once (the oldest is
 dropped), each at most the observation's body limit; an answer that grows past it is

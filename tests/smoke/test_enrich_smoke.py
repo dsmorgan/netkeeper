@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import random
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -107,7 +109,22 @@ _SCRIPT = """
       method: 'POST',
       headers: {'content-type': 'application/json', 'x-replica-marker': marker},
       body: body,
-    }).then((answer) => answer.arrayBuffer());
+    }).then(async (answer) => {
+      const keep = answer.headers.get('x-replica-abort-after');
+      if (keep === null) { return answer.arrayBuffer(); }
+      // #203: a streamed answer the page reads what it needs from, then aborts while
+      // the stream is still open -- the page has its data, and Chrome keeps no body
+      // for anyone else.
+      const reader = answer.body.getReader();
+      let read = 0;
+      while (read < parseInt(keep, 10)) {
+        const part = await reader.read();
+        if (part.done) { break; }
+        read += part.value.length;
+      }
+      window.__aborted = (window.__aborted || 0) + 1;
+      await reader.cancel();
+    });
   }
   if (CONFIG.screen) { send(CONFIG.screen, '{}').catch(() => {}); }
   let asked = false;
@@ -146,6 +163,9 @@ class _Replica(BaseHTTPRequestHandler):
     #: Serve an HTML shell and let the page fetch the profile screen itself, the way an
     #: in-app navigation does, instead of carrying the screen in the document.
     screen_by_request: ClassVar[bool] = False
+    #: #203: answers streamed and held open, which the page aborts once it has read
+    #: them: ``"component"`` for the lazy card, ``"overlay:<slug>"`` for the overlay.
+    abort: ClassVar[set[str]] = set()
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
@@ -224,7 +244,11 @@ class _Replica(BaseHTTPRequestHandler):
                 return
             self._send(200, screen, "application/octet-stream")
         elif path == COMPONENT_PATH:
-            self._send(200, experience_payload(ROLES), "application/octet-stream")
+            card = experience_payload(ROLES)
+            if "component" in self.abort:
+                self._stream_then_hold(card)
+                return
+            self._send(200, card, "application/octet-stream")
         elif path == NAVIGATION_PATH:
             slug = json.loads(body)["clientArguments"]["payload"]["vanityName"]
             person = self.people[slug]
@@ -236,9 +260,37 @@ class _Replica(BaseHTTPRequestHandler):
             if self._dropping(f"overlay:{slug}"):
                 self._break_off(answer, "application/octet-stream")
                 return
+            if f"overlay:{slug}" in self.abort:
+                self._stream_then_hold(answer)
+                return
             self._send(200, answer, "application/octet-stream")
         else:
             self._send(404, b"", "text/plain")
+
+    def _stream_then_hold(self, body: bytes) -> None:
+        """Stream the whole answer in chunks, then keep the stream open (#203, as #200).
+
+        The page reads every byte, then aborts the fetch while the stream is still
+        open: the page has its data, the request ends ``net::ERR_ABORTED``, and Chrome
+        answers ``Network.getResponseBody`` with "No data found".
+        """
+        self.protocol_version = "HTTP/1.1"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/x-component")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("x-replica-abort-after", str(len(body)))
+        self.end_headers()
+        try:
+            for index in range(0, len(body), 1024):
+                part = body[index : index + 1024]
+                self.wfile.write(f"{len(part):x}\r\n".encode() + part + b"\r\n")
+                self.wfile.flush()
+            time.sleep(1.0)
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except OSError:
+            pass  # the page aborted: the connection is gone
+        self.close_connection = True
 
     def _send(self, status: int, body: bytes, content_type: str) -> None:
         self.send_response(status)
@@ -258,6 +310,7 @@ def site() -> Iterator[str]:
     _Replica.received = []
     _Replica.drop = set()
     _Replica.screen_by_request = False
+    _Replica.abort = set()
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Replica)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -328,7 +381,8 @@ async def _page_log(run: BrowserRun) -> dict[str, Any]:
     # test code on a loopback page, never something netkeeper does.
     page = await run.ensure_page()
     log: dict[str, Any] = await page.evaluate(
-        "({sent: window.__sent, clicks: window.__clicks, keys: window.__keys})"
+        "({sent: window.__sent, clicks: window.__clicks, keys: window.__keys,"
+        " aborted: window.__aborted || 0})"
     )
     return log
 
@@ -449,3 +503,31 @@ async def test_a_profile_document_that_breaks_off_is_one_unreadable_visit(
     assert result.lost == ("visit 1: the profile could not be opened (navigation timed out)",)
     assert log["clicks"] == [{"trusted": True, "text": "Contact info"}]  # Mateo's only
     assert harvests[1].contact_info is not None
+
+
+# --- #203: the page aborts a streamed answer after reading it -------------------------------
+
+
+async def test_answers_the_page_aborts_after_reading_are_read_from_their_streamed_copies(
+    provider: AttachBrowserProvider, site: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The lazy card and the overlay are streamed and held open, and the page's own
+    client aborts each once it has read every byte: Chrome keeps no body for either.
+    The body tap's session received both as they streamed, both copies are whole, and
+    the visit reads whole, with one click and nothing sent but what the page sent."""
+    caplog.set_level(logging.INFO, logger="netkeeper")
+    _Replica.abort = {"component", f"overlay:{PRIYA.slug}"}
+    result, harvests, sent, log = await _visit(provider, site, [_target(PRIYA)])
+
+    assert log["aborted"] == 2  # the page did read both, then abort them
+    assert "read a lazy card from the copy streamed as it arrived" in caplog.text
+    assert "read the Contact info answer from the copy streamed as it arrived" in caplog.text
+    assert result.reason is StopReason.END_OF_PLAN and result.clicks == 1 and result.lost == ()
+    (harvest,) = harvests
+    assert harvest.outcome is Outcome.OK and harvest.details is not None
+    assert [p.title for p in harvest.details.positions] == ["Staff Engineer"]
+    assert harvest.contact_info is not None
+    assert harvest.contact_info.emails == (f"{PRIYA.slug}@example.test",)
+    received = [(r["path"], r["body"], r["marker"]) for r in _Replica.received]
+    assert received == [(urlsplit(s["path"]).path, s["body"], s["marker"]) for s in sent]
+    assert [path for path, _, _ in received] == [COMPONENT_PATH, NAVIGATION_PATH]

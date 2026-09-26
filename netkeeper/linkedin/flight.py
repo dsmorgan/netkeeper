@@ -110,6 +110,27 @@ class FlightPayload:
             yield from self.walk(row, follow=False, endpoint=endpoint)
 
 
+def references_resolve(payload: FlightPayload, *, endpoint: str) -> bool:
+    """Whether every row reference in ``payload`` names a row it holds (#203).
+
+    A flight answer's rows refer forward to rows streamed after them, so an answer cut
+    short at a line boundary still parses but leaves a reference to a row it never got.
+    A reference may name a model row, an ``I`` import, or a ``T`` text row.
+    """
+    for node in payload.nodes(endpoint=endpoint):
+        if isinstance(node, str):
+            match = _REF.fullmatch(node)
+            if match is not None:
+                row = match.group(1)
+                if (
+                    row not in payload.rows
+                    and row not in payload.modules
+                    and row not in payload.texts
+                ):
+                    return False
+    return True
+
+
 def is_element(node: object) -> bool:
     """Whether ``node`` is a rendered element: ``["$", type, key, props]`` with dict props."""
     return (

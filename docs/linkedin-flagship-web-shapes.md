@@ -158,6 +158,8 @@ Added by #190, from the structure above and nothing else. **Captured** means the
 | Connected since | The text after a `Connected since` run | Captured | An unknown phrasing leaves it unknown; it is not stored either way |
 | The Contact info control | A link whose accessible name is exactly `Contact info`, alone on the page, whose `href` is the profile's `overlay/contact-info/` | The link and its url: captured. That it renders as an `<a>` with that `href`: **assumed** | None, two, or pointing elsewhere: nothing is clicked, and the visit is unreadable |
 
+A lazy card or an overlay answer the page aborted after reading it, which Chrome then has no body for, is read from the body tap's streamed copy when that copy is whole: its stream finished or was the page's own cancel, it parses as flight, and every row it refers to is in it (#203, ADR 0006's amendment). Otherwise the card is skipped, or the overlay makes the visit unreadable.
+
 Two unreadable visits in a row, or three in a run, stop the run as `route_changed` (spec 9.7), so a shape that moved costs a handful of visits and writes nothing. A profile whose id is not the contact's URN gets no click and counts toward the same limits: one is a vanity url that changed hands, several are an id read from the wrong place.
 
 The smoke replicas and the rehearsal replica copy flagship-web's layout as #192 found it on the first live run: a fixed header at the top left, and the content scrolling inside its own container rather than the window.
