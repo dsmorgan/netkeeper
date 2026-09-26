@@ -360,6 +360,89 @@ describe('versions', () => {
   })
 })
 
+describe('save and delete', () => {
+  it('saves an edit in place when no campaign uses the template, with no version notice', async () => {
+    let saved = template()
+    const seen = mockApi(
+      routes([], {
+        'GET /api/v1/templates': () => jsonResponse([saved]),
+        'GET /api/v1/templates/1': () => jsonResponse(saved),
+        'PATCH /api/v1/templates/1': () => {
+          saved = template({ body: 'Yo {{ first_name }}', updated_at: '2026-09-02T10:00:00Z' })
+          return jsonResponse(saved)
+        },
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    fireEvent.change(await screen.findByLabelText('Body'), {
+      target: { value: 'Yo {{ first_name }}' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    // Saved, and the saved text is the draft again: nothing left to save.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled(), WAIT)
+    expect(requestsTo(seen, 'PATCH', '/api/v1/templates/1')).toHaveLength(1)
+    expect(screen.getByRole('heading', { name: 'Editing version 1' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Body')).toHaveValue('Yo {{ first_name }}')
+    expect(screen.queryByText(/Saved as version/)).not.toBeInTheDocument()
+    const history = screen.getByRole('list', { name: 'Versions' })
+    expect(within(history).getAllByRole('listitem')).toHaveLength(1)
+
+    // Nothing is unsaved any more, so starting another template does not ask.
+    fireEvent.click(screen.getByRole('button', { name: 'New template' }))
+    expect(await screen.findByRole('heading', { name: 'New template' })).toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('deletes a template after you confirm, without asking about the draft', async () => {
+    let deleted = false
+    const seen = mockApi(
+      routes([template()], {
+        'GET /api/v1/templates': () => jsonResponse(deleted ? [] : [template()]),
+        'DELETE /api/v1/templates/1': () => {
+          deleted = true
+          return new Response(null, { status: 204 })
+        },
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    fireEvent.change(await screen.findByLabelText('Body'), { target: { value: 'Unsaved' } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete “reconnect”?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete template' }))
+
+    expect(await screen.findByText('No template open', undefined, WAIT)).toBeInTheDocument()
+    expect(await screen.findByText('No templates yet', undefined, WAIT)).toBeInTheDocument()
+    expect(requestsTo(seen, 'DELETE', '/api/v1/templates/1')).toHaveLength(1)
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('keeps the template and shows why when a campaign uses it (409)', async () => {
+    mockApi(
+      routes([template()], {
+        'DELETE /api/v1/templates/1': () =>
+          jsonResponse({ detail: 'a campaign uses template 1' }, 409),
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete “reconnect”?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete template' }))
+
+    expect(await within(dialog).findByRole('alert', undefined, WAIT)).toHaveTextContent(
+      'a campaign uses template 1',
+    )
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    expect(screen.getByRole('heading', { name: 'Editing version 1' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^reconnect/ })).toBeInTheDocument()
+  })
+})
+
 describe('in use', () => {
   it('says before you save that an edit to a template in use makes a new version', async () => {
     mockApi(
