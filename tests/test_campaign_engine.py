@@ -17,6 +17,7 @@ from campaign_fakes import ALWAYS_OPEN, LATENCY, NOW, SETTINGS, FakeSender, make
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.campaigns import schedule
 from netkeeper.campaigns.compose import message_id_for
 from netkeeper.config import CampaignSettings, Settings
 from netkeeper.crm.contacts import merge_contacts
@@ -1755,3 +1756,80 @@ async def test_stop_holds_every_claim_and_start_lifts_it(world: World) -> None:
     finally:
         await engine.stop()
     assert len(world.messages(enrollment_id)) == 1
+
+
+# --- #280: spacing after an unknown outcome is taken from Gmail's send time ----------------
+
+
+def _settle_sent_at(
+    world: World,
+    message_id: int,
+    at: datetime,
+    *,
+    expect: tuple[MessageStatus, ...] = (MessageStatus.SCHEDULED,),
+    seed: int = 3,
+) -> bool:
+    return world.write(
+        lambda s: engine_module.settle_sent(
+            s,
+            world.user,
+            SETTINGS,
+            message_id,
+            expect=expect,
+            at=at,
+            gmail_message_id="gm-late",
+            gmail_thread_id="th-late",
+            rng=random.Random(seed),
+        )
+    )
+
+
+def _next_send(world: World) -> datetime | None:
+    return world.read(lambda s: engine_module.next_send_at(s, world.user, world.mailbox.id))
+
+
+def test_an_unknown_outcome_settled_sent_spaces_the_mailbox_from_gmails_time(
+    world: World,
+) -> None:
+    """#280: the record of an unknown outcome spaced the mailbox from the claim. Gmail's
+    real send time, found later, can be after that, and the next send is spaced from it."""
+    enrollment_id = world.enroll_new()
+    world.sender.outcome = SendOutcome.UNKNOWN
+    world.tick()
+    [message] = world.messages(enrollment_id)
+    assert message.status is MessageStatus.SCHEDULED
+    spaced_from_claim = _next_send(world)
+    assert spaced_from_claim is not None
+
+    gmail_sent = spaced_from_claim + timedelta(minutes=5)  # later than the claim's spacing
+    assert _settle_sent_at(world, message.id, gmail_sent) is True
+    gap = schedule.spacing_delay(
+        random.Random(3),
+        median_s=SETTINGS.campaigns.send_spacing_median_s,
+        floor_s=SETTINGS.campaigns.send_spacing_floor_s,
+    )
+    assert _next_send(world) == gmail_sent + gap
+    assert gap >= timedelta(seconds=SETTINGS.campaigns.send_spacing_floor_s)
+
+
+def test_settling_sent_never_moves_the_mailbox_spacing_earlier(world: World) -> None:
+    enrollment_id = world.enroll_new()
+    world.sender.outcome = SendOutcome.UNKNOWN
+    world.tick()
+    [message] = world.messages(enrollment_id)
+    before = _next_send(world)
+    assert _settle_sent_at(world, message.id, NOW - timedelta(hours=1)) is True
+    assert _next_send(world) == before
+
+
+def test_a_draft_seen_sent_leaves_the_mailbox_spacing_as_it_is(world: World) -> None:
+    """Only a leftover's settle re-spaces: a draft the person sent is not the engine's send."""
+    enrollment_id = world.enroll_new()
+    world.sender.outcome = SendOutcome.DRAFTED
+    world.tick()
+    [message] = world.messages(enrollment_id)
+    assert message.status is MessageStatus.DRAFTED
+    before = _next_send(world)
+    later = NOW + timedelta(days=1)
+    assert _settle_sent_at(world, message.id, later, expect=(MessageStatus.DRAFTED,)) is True
+    assert _next_send(world) == before
