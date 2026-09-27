@@ -462,6 +462,9 @@ def test_a_server_error_saying_invalid_grant_is_still_unavailable(
         ((403, HTML_403), "http_403", False),
         ((404, "<html>Not Found</html>"), "http_404", False),
         ((401, {"error": {"code": 401, "status": "UNAUTHENTICATED"}}), "http_401", False),
+        ((407, {"error": "invalid_grant"}), "http_407", False),
+        ((404, {"error": "invalid_grant"}), "http_404", False),
+        ((403, {"error": "invalid_client"}), "http_403", False),
         ((200, {"token_type": "Bearer"}), "no_access_token", False),
     ],
 )

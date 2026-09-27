@@ -18,9 +18,9 @@ an answer cut off part way, a 5xx, a ``408`` or a ``429`` is
 grant. Otherwise a refresh or exchange Google refuses with ``invalid_grant``
 raises :class:`InvalidGrant`: the grant is dead (revoked, or seven days old on
 a consent screen still in Testing). Any other refusal is :class:`OAuthRefused`
-with Google's error code (a wrong client secret is ``invalid_client``), or
-``http_<status>`` when the body has none. Only the codes in
-:data:`REAUTH_CODES` mean a person has to authorize again
+with Google's error code (a wrong client secret is ``invalid_client``), read
+only from a ``400`` or ``401`` as RFC 6749 specifies, or ``http_<status>``.
+Only the codes in :data:`REAUTH_CODES` mean a person has to authorize again
 (:func:`needs_reauthorization`); any other refusal (a proxy's ``407``, an HTML
 ``403``, ``invalid_request``) says nothing certain about the grant. No message
 carries a token, a code, or the client secret.
@@ -446,6 +446,10 @@ class LoopbackReceiver:
 #: Statuses that say "not now" rather than anything about the grant.
 _TRY_LATER: Final = frozenset({408, 429})
 
+#: The statuses RFC 6749 5.2 gives a token endpoint's error body. Any other
+#: status's body is not read for a code: a proxy's 407 or a 404 page could say anything.
+_OAUTH_ERROR_STATUSES: Final = frozenset({400, 401})
+
 
 def _require_loopback(redirect_uri: str) -> None:
     parts = urlsplit(redirect_uri)
@@ -484,7 +488,7 @@ def _send(ends: GoogleEndpoints, request: Request) -> dict[str, Any]:
             # Before the body: a 5xx is never read as a dead grant, whatever it says.
             log.info("%s %s answered %d", request.get_method(), where, exc.code)
             raise OAuthUnavailable(f"Google answered {exc.code}", code="unavailable") from exc
-        error = _error_code(exc)
+        error = _error_code(exc) if exc.code in _OAUTH_ERROR_STATUSES else None
         log.info("%s %s answered %d (%s)", request.get_method(), where, exc.code, error)
         if error == INVALID_GRANT:
             raise InvalidGrant(
