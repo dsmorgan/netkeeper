@@ -1833,3 +1833,31 @@ def test_a_draft_seen_sent_leaves_the_mailbox_spacing_as_it_is(world: World) -> 
     later = NOW + timedelta(days=1)
     assert _settle_sent_at(world, message.id, later, expect=(MessageStatus.DRAFTED,)) is True
     assert _next_send(world) == before
+
+
+# --- #280: tests for mutants that survived the P3-07 verification --------------------------
+
+
+def test_settle_drafted_stores_the_thread_snapshot(world: World) -> None:
+    """T11: the Gmail ids the draft's thread held when it was found are kept, so the drafts
+    poll never reads one of them as the draft sent."""
+    [message_id] = _leftovers(world, 1, at=NOW)
+    settled = world.write(
+        lambda s: engine_module.settle_drafted(
+            s,
+            world.user,
+            SETTINGS,
+            message_id,
+            gmail_message_id="gm-draft",
+            gmail_thread_id="th-1",
+            gmail_draft_id="d-1",
+            thread_known=("gm-note", "gm-earlier"),
+        )
+    )
+    assert settled is True
+    [message] = world.messages()
+    assert message.status is MessageStatus.DRAFTED
+    assert message.thread_known_json == ["gm-earlier", "gm-note"]
+    work = world.read(lambda s: engine_module.reconcile_work(s, world.user, now=NOW))
+    [tracked] = work.drafts
+    assert tracked.thread_known == {"gm-earlier", "gm-note"}
