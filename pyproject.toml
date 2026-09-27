@@ -40,6 +40,9 @@ dependencies = [
   "google-auth>=2.30",
   "google-auth-httplib2>=0.2",
   "httplib2>=0.22",
+  # A recipient domain written in Unicode goes into To as IDNA 2008 (#280). Already
+  # installed through httpx; imported directly by netkeeper/campaigns/compose.py.
+  "idna>=3.7",
 ]
 
 [project.optional-dependencies]

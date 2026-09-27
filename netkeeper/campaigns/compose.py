@@ -21,6 +21,18 @@ when it cites a message of that thread and its subject matches once ``Re:``
 and ``Fwd:`` are stripped; otherwise it silently starts a new thread (the
 fake's rule, :mod:`netkeeper.campaigns.gmail_fake`).
 
+**The recipient** is one bare address (#269). A domain written in Unicode
+(``a@bücher.example``) goes into ``To`` as IDNA, ``a@xn--bcher-kva.example``
+(IDNA 2008 with UTS 46 mapping, what browsers and mail providers use): the
+header's own encoding would have made it ``a@=?utf-8?q?...?=.example``, which is
+no address (#280). A local part outside ASCII needs SMTPUTF8, which a campaign
+does not use, so it is refused.
+
+**The subject** is one line of text. A line separator of any kind (not only CR
+and LF: VT, FF, NEL, U+2028 ...), any other control character but tab, and
+anything shaped like an RFC 2047 encoded word (``=?charset?q?...?=``, which
+the header would decode instead of showing) are refused (#280).
+
 **From** is left out. Gmail fills it in with the account's address and the
 name the person set in Gmail, which is the sender the recipient knows.
 """
@@ -29,10 +41,13 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from email.message import EmailMessage
 from typing import Final
+
+import idna
 
 from netkeeper.models.contacts import single_address
 
@@ -48,6 +63,7 @@ REFERENCES_MAX: Final = 20
 
 _REPLY_PREFIX: Final = re.compile(r"^\s*re\s*:", re.IGNORECASE)
 _MSGID: Final = re.compile(r"^<[^<>\s@]+@[^<>\s@]+>$")
+_ENCODED_WORD: Final = re.compile(r"=\?[^?]*\?[^?]*\?[^?]*\?=")
 
 
 class ComposeError(ValueError):
@@ -93,33 +109,72 @@ def build_message(
     """A plain-text message for Gmail's ``raw``, with ``message_id`` as its Message-ID.
 
     :class:`ComposeError` for a ``to`` that is not one bare address (a list, a
-    group or a display name would send to someone else too, #269), a header
-    value with a line break in it, or a Message-ID that is not one: nothing a
-    merge value holds can add a header or a recipient (spec 11.1).
+    group or a display name would send to someone else too, #269; see
+    :func:`recipient`), a subject that is not one line of text
+    (:func:`check_subject`), or a Message-ID that is not one: nothing a merge
+    value holds can add a header or a recipient (spec 11.1). Whatever else the
+    email package refuses is a :class:`ComposeError` too, so a message that
+    cannot be built fails at once and never reads as an unknown outcome (#280).
     """
-    try:
-        address = single_address(to.strip())
-    except ValueError:
-        raise ComposeError("a campaign message needs exactly one bare recipient address") from None
-    if "\r" in subject or "\n" in subject:
-        raise ComposeError("a header value is one line")
+    address = recipient(to)
+    check_subject(subject)
     cited = [*references, *([in_reply_to] if in_reply_to else [])]
     for value in (message_id, *cited):
         if not is_message_id(value):
             raise ComposeError("a Message-ID is <local@domain>")
     message = EmailMessage()
-    message["To"] = address
-    message["Subject"] = subject
-    message["Message-ID"] = message_id
-    if in_reply_to is not None:
-        message["In-Reply-To"] = in_reply_to
-    if references:
-        cites = list(references)
-        if len(cites) > REFERENCES_MAX:  # the first and the newest (RFC 5322, 3.6.4)
-            cites = [cites[0], *cites[-(REFERENCES_MAX - 1) :]]
-        message["References"] = " ".join(cites)
-    message.set_content(body)
+    try:
+        message["To"] = address
+        message["Subject"] = subject
+        message["Message-ID"] = message_id
+        if in_reply_to is not None:
+            message["In-Reply-To"] = in_reply_to
+        if references:
+            cites = list(references)
+            if len(cites) > REFERENCES_MAX:  # the first and the newest (RFC 5322, 3.6.4)
+                cites = [cites[0], *cites[-(REFERENCES_MAX - 1) :]]
+            message["References"] = " ".join(cites)
+        message.set_content(body)
+    except ValueError as exc:  # the email package's own refusal: never an unknown outcome
+        raise ComposeError(f"the email package refused it ({type(exc).__name__})") from None
     return message
+
+
+def recipient(to: str) -> str:
+    """``to`` as it goes into ``To``: one bare address, its domain in IDNA (see the module).
+
+    :class:`ComposeError` for anything else, a local part outside ASCII, or a
+    domain IDNA refuses.
+    """
+    refused = "a campaign message needs exactly one bare recipient address"
+    try:
+        address = single_address(to.strip())
+    except ValueError:
+        raise ComposeError(refused) from None
+    local, _, domain = address.rpartition("@")
+    if not local.isascii():
+        raise ComposeError("a recipient address outside ASCII before the @ cannot be sent")
+    if domain.isascii():
+        return address
+    try:
+        encoded = idna.encode(domain, uts46=True).decode("ascii")
+    except idna.IDNAError:
+        raise ComposeError("the recipient's domain is not a valid internationalized name") from None
+    try:
+        return single_address(f"{local}@{encoded}")
+    except ValueError:
+        raise ComposeError(refused) from None
+
+
+def check_subject(subject: str) -> None:
+    """:class:`ComposeError` unless ``subject`` is one line of text fit for the header."""
+    for ch in subject:
+        if ch == "\t":
+            continue
+        if ch in "\u2028\u2029" or unicodedata.category(ch) == "Cc":
+            raise ComposeError("a subject is one line, with no control characters")
+    if _ENCODED_WORD.search(subject):
+        raise ComposeError("a subject cannot hold an encoded word (=?...?=)")
 
 
 def campaign_label(prefix: str, campaign_name: str) -> str:
