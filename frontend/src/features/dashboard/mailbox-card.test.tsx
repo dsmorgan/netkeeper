@@ -137,6 +137,58 @@ describe('MailboxCard', () => {
     expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual(['GET /api/v1/mailboxes'])
   })
 
+  it('shows the live mailbox, not a disabled one, when both are in the list', async () => {
+    renderCard(() =>
+      status({
+        mailboxes: [
+          mailbox({ id: 1, email: 'old@example.com', status: 'disabled' }),
+          mailbox({ id: 2, email: 'sender@example.com', status: 'ok' }),
+        ],
+      }),
+    )
+    expect(await screen.findByText('sender@example.com')).toBeInTheDocument()
+    expect(screen.getByText('connected')).toBeInTheDocument()
+    expect(screen.queryByText('old@example.com')).not.toBeInTheDocument()
+  })
+
+  it('shows an alert when the mailbox list could not be fetched', async () => {
+    renderCard(() => status({ mailboxes: [] }), {
+      'GET /api/v1/mailboxes': () => jsonResponse({ detail: 'boom' }, 500),
+    })
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Mailbox status could not be checked.',
+    )
+  })
+
+  it('formats the token refresh time for a person, not as a raw UTC timestamp', async () => {
+    const checkedAt = '2026-03-14T09:30:00Z'
+    renderCard(() => status({ mailboxes: [mailbox({ checked_at: checkedAt })] }))
+    const expected = new Date(checkedAt).toLocaleString()
+    expect(await screen.findByText(`Token last refreshed ${expected}`)).toBeInTheDocument()
+  })
+
+  it('shows a checking state while the mailbox list is still loading', () => {
+    mockFetch(() => new Promise<Response>(() => {}))
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <EventStreamContext value={{ status: 'disconnected', source: null }}>
+          <MailboxCard />
+        </EventStreamContext>
+      </QueryClientProvider>,
+    )
+    expect(screen.getByRole('status')).toHaveTextContent('Checking…')
+  })
+
+  it('shows an error when re-authorizing fails', async () => {
+    renderCard(() => status({ mailboxes: [mailbox({ status: 'reauth_required' })] }), {
+      'POST /api/v1/mailboxes/oauth/start': () => jsonResponse({ detail: 'Google refused' }, 500),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Re-authorize' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Google refused')
+  })
+
   it('changes status on the mailbox.status server event, without a reload', async () => {
     let current = status({ mailboxes: [mailbox()] })
     const { calls, source } = renderCard(() => current)
