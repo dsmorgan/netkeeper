@@ -22,7 +22,7 @@ import json
 import logging
 import pkgutil
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from types import ModuleType
 
 from fastapi import APIRouter, FastAPI
@@ -42,7 +42,7 @@ from netkeeper.services.events import EventBus
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.mailboxes import MailboxMonitor, PendingAuthorizations
 from netkeeper.services.runs import fail_interrupted_runs
-from netkeeper.services.scheduled_runs import ServeExtractor, ServeScheduler, start_serve_scheduler
+from netkeeper.services.scheduled_runs import ServeExtractor, start_serve_scheduler
 from netkeeper.services.tasks import TaskRunner
 from netkeeper.services.users import ensure_local_user
 from netkeeper.web import api as api_package
@@ -90,12 +90,16 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         active = engine if engine is not None else make_engine(database_url())
-        tasks: TaskRunner | None = None
-        serving: ServeScheduler | None = None
-        monitor: MailboxMonitor | None = None
-        campaigns: CampaignEngine | None = None
-        try:
+        # Each teardown is pushed as its piece starts, so shutdown runs them in
+        # reverse: the campaign engine, the mailbox poll, the scheduler, the
+        # runs, then the engine. The stack runs every one even when an earlier
+        # one raises or is cancelled (the campaign engine can wait 45 s for a
+        # send, long enough for a cancel to land there), then re-raises.
+        async with AsyncExitStack() as teardown:
+            if engine is None:
+                teardown.callback(active.dispose)
             tasks = _start(app, active, resolved)
+            teardown.push_async_callback(tasks.cancel_all)
             app.state.gmail_endpoints = gmail
             if extractor is not None:
                 serving = start_serve_scheduler(
@@ -105,6 +109,7 @@ def create_app(
                     tasks,
                     resolved.linkedin,
                 )
+                teardown.callback(serving.stop)
                 app.state.executor = serving.executor
                 app.state.scheduler = serving.scheduler
                 monitor = MailboxMonitor(
@@ -113,23 +118,14 @@ def create_app(
                     interval_s=_poll_minutes(resolved) * 60,
                     endpoints=gmail,
                 )
+                teardown.push_async_callback(monitor.stop)
                 monitor.start()
                 app.state.mailbox_monitor = monitor
                 campaigns = CampaignEngine(app.state.session_factory, resolved, campaign_sender)
+                teardown.push_async_callback(campaigns.stop)
                 campaigns.start()
                 app.state.campaign_engine = campaigns
             yield
-        finally:
-            if campaigns is not None:
-                await campaigns.stop()
-            if monitor is not None:
-                await monitor.stop()
-            if serving is not None:
-                serving.stop()
-            if tasks is not None:
-                await tasks.cancel_all()
-            if engine is None:
-                active.dispose()
 
     app = FastAPI(
         title="netkeeper",

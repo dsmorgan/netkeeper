@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import factories
 import httpx
@@ -18,7 +20,9 @@ from netkeeper.config import Settings
 from netkeeper.db import SQLITE_BUSY_TIMEOUT_MS, session_scope
 from netkeeper.models import MessageStatus, StepMode, User, UserKind
 from netkeeper.services.campaign_engine import CampaignEngine
-from netkeeper.services.scheduled_runs import ServeExtractor
+from netkeeper.services.mailboxes import MailboxMonitor
+from netkeeper.services.scheduled_runs import ServeExtractor, ServeScheduler
+from netkeeper.services.tasks import TaskRunner
 from netkeeper.web.app import create_app
 
 CLIENT = {"X-Netkeeper-Client": "1"}
@@ -51,6 +55,73 @@ async def test_serve_starts_and_stops_the_engine_with_its_sender(
         assert campaigns._interval_s == 60.0
         assert campaigns._task is not None and not campaigns._task.done()
     assert campaigns._task is None
+
+
+@pytest.mark.parametrize("failure", [asyncio.CancelledError, RuntimeError])
+async def test_every_teardown_runs_when_the_engine_stop_fails(
+    bare_engine: Engine,
+    tmp_path: Path,
+    _migrated_template: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: type[BaseException],
+) -> None:
+    """``CampaignEngine.stop`` can wait 45 s for a send, so a cancel can land in it. The
+    mailbox poll, the scheduler, the runs and the engine still stop, in the same order,
+    and the failure still comes out of the lifespan afterwards."""
+    import conftest
+
+    conftest._copy_template(_migrated_template, tmp_path / "bare")
+    monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", str(tmp_path / "no-dist"))
+    # No engine passed in: the lifespan builds one (this one) and must dispose of it.
+    monkeypatch.setattr("netkeeper.web.app.make_engine", lambda url: bare_engine)
+    stopped: list[str] = []
+    dispose = bare_engine.dispose
+
+    def spied_dispose() -> None:
+        stopped.append("engine")
+        dispose()
+
+    monkeypatch.setattr(bare_engine, "dispose", spied_dispose)
+
+    engine_stop = CampaignEngine.stop
+
+    async def failing_stop(self: CampaignEngine) -> bool:
+        await engine_stop(self)
+        stopped.append("campaigns")
+        raise failure
+
+    def spy(name: str, method: Callable[..., Any]) -> Callable[..., Any]:
+        if asyncio.iscoroutinefunction(method):
+
+            async def async_spy(self: object) -> Any:
+                stopped.append(name)
+                return await method(self)
+
+            return async_spy
+
+        def sync_spy(self: object) -> Any:
+            stopped.append(name)
+            return method(self)
+
+        return sync_spy
+
+    monkeypatch.setattr(CampaignEngine, "stop", failing_stop)
+    monkeypatch.setattr(MailboxMonitor, "stop", spy("monitor", MailboxMonitor.stop))
+    monkeypatch.setattr(ServeScheduler, "stop", spy("scheduler", ServeScheduler.stop))
+    monkeypatch.setattr(TaskRunner, "cancel_all", spy("tasks", TaskRunner.cancel_all))
+
+    extractor = ServeExtractor(executor=lambda factory, bus: object())  # type: ignore[arg-type,return-value]
+    served = create_app(Settings(), extractor=extractor, campaign_sender=FakeSender())
+    with pytest.raises(failure):
+        async with served.router.lifespan_context(served):
+            monitor = served.state.mailbox_monitor
+            scheduler = served.state.scheduler
+            assert isinstance(monitor, MailboxMonitor) and scheduler.running
+
+    assert stopped == ["campaigns", "monitor", "scheduler", "tasks", "engine"]
+    assert monitor._task is None
+    await asyncio.sleep(0)  # AsyncIOScheduler shuts down on the loop's next turn
+    assert not scheduler.running
 
 
 def _due_enrollment_and_a_contact(app: FastAPI) -> int:
