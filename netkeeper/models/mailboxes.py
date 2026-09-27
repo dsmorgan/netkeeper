@@ -24,7 +24,7 @@ import enum
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import CheckConstraint, Integer, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, Integer, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from netkeeper.models.base import Base, TimestampMixin, UserOwned, UTCDateTime, string_enum
@@ -86,3 +86,9 @@ class Mailbox(UserOwned, TimestampMixin, Base):
     )
     # When a token refresh last succeeded.
     checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # How many times it has been authorized; every authorization adds one. A
+    # health check records its answer only if this has not moved while it asked
+    # Google, since ``keychain_ref`` stays the same across a re-authorization.
+    generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
