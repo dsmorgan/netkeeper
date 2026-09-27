@@ -245,6 +245,24 @@ def test_a_discarded_draft_is_gone_with_its_message(gmail: FakeGmail) -> None:
     assert gmail.drafts() == {}
 
 
+def test_list_drafts_names_every_draft_and_its_message(gmail: FakeGmail) -> None:
+    first = gmail.create_draft(_mail(), purpose="draft step 1")
+    second = gmail.create_draft(_mail("Other", msgid="<s2@example.com>"), purpose="draft step 1")
+    gmail.send_draft(first.id)
+    assert gmail.list_drafts(purpose="drafts poll") == [second]
+
+
+def test_delete_draft_removes_it_and_a_second_delete_is_not_found(gmail: FakeGmail) -> None:
+    draft = gmail.create_draft(_mail(), purpose="draft step 1")
+    gmail.delete_draft(draft.id, purpose="delete a discarded draft")
+    assert gmail.drafts() == {}
+    with pytest.raises(GmailNotFound):
+        gmail.get_message(draft.message.id, purpose="read it")
+    with pytest.raises(GmailNotFound):
+        gmail.delete_draft(draft.id, purpose="delete a discarded draft")
+    assert gmail.sent() == []
+
+
 # --- inbound, replies, bounces ----------------------------------------------------
 
 

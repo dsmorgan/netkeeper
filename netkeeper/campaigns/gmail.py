@@ -259,6 +259,15 @@ class Gmail(Protocol):
         """``drafts.get``: :class:`GmailNotFound` once it is sent or discarded."""
         ...
 
+    def list_drafts(self, *, purpose: str) -> list[Draft]:
+        """``drafts.list``, every page: each draft the mailbox holds, with its message."""
+        ...
+
+    def delete_draft(self, draft_id: str, *, purpose: str) -> None:
+        """``drafts.delete``: :class:`GmailNotFound` once it is sent or discarded.
+        The draft is deleted for good, not moved to Trash."""
+        ...
+
     def get_message(self, message_id: str, *, purpose: str) -> Message: ...
 
     def get_thread(self, thread_id: str, *, purpose: str) -> Thread: ...
@@ -509,6 +518,21 @@ class GmailClient:
     def get_draft(self, draft_id: str, *, purpose: str) -> Draft:
         request = self._users.drafts().get(userId="me", id=draft_id, format="minimal")
         return _draft(self._run("drafts.get", purpose, request))
+
+    def list_drafts(self, *, purpose: str) -> list[Draft]:
+        found: list[Draft] = []
+        token: str | None = None
+        while True:
+            request = self._users.drafts().list(userId="me", maxResults=_PAGE_MAX, pageToken=token)
+            body = self._run("drafts.list", purpose, request)
+            found.extend(_draft(item) for item in body.get("drafts", []))
+            token = body.get("nextPageToken")
+            if not token:
+                return found
+
+    def delete_draft(self, draft_id: str, *, purpose: str) -> None:
+        request = self._users.drafts().delete(userId="me", id=draft_id)
+        self._run("drafts.delete", purpose, request, writes=True)
 
     def get_message(self, message_id: str, *, purpose: str) -> Message:
         request = self._users.messages().get(

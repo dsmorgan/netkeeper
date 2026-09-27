@@ -185,6 +185,21 @@ class FakeGmail:
         stored = self._messages[message_id]
         return Draft(id=draft_id, message=MessageRef(stored.id, stored.thread_id))
 
+    def list_drafts(self, *, purpose: str) -> list[Draft]:
+        self._call("drafts.list", purpose)
+        return [
+            Draft(id=draft_id, message=MessageRef(message_id, self._messages[message_id].thread_id))
+            for draft_id, message_id in self._drafts.items()
+        ]
+
+    def delete_draft(self, draft_id: str, *, purpose: str) -> None:
+        self._call("drafts.delete", purpose)
+        message_id = self._drafts.pop(draft_id, None)
+        if message_id is None:
+            raise GmailNotFound("no such draft", code="notFound")
+        self._remove(self._messages[message_id])
+        self._bump()
+
     def get_message(self, message_id: str, *, purpose: str) -> Message:
         self._call("messages.get", purpose)
         return self._view(self._get(message_id))
