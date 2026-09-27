@@ -100,6 +100,18 @@ def test_pasted_values_are_checked(client_id: str, secret: str, code: str) -> No
     assert caught.value.code == code
 
 
+def test_the_longest_client_values_are_pinned() -> None:
+    assert gmail_oauth.CLIENT_FIELD_MAX_LENGTH == 300
+    gmail_oauth.validate_client(CLIENT_ID, "s" * 300)
+    with pytest.raises(ClientConfigError) as caught:
+        gmail_oauth.validate_client(CLIENT_ID, "s" * 301)
+    assert caught.value.code == "bad_secret"
+    assert "s" * 301 not in str(caught.value)
+    with pytest.raises(ClientConfigError) as caught:
+        gmail_oauth.validate_client("x" * 300 + gmail_oauth.CLIENT_ID_SUFFIX, CLIENT_SECRET)
+    assert caught.value.code == "bad_client_id"
+
+
 def test_pasted_values_are_trimmed() -> None:
     assert gmail_oauth.validate_client(f"  {CLIENT_ID}\n", f" {CLIENT_SECRET} ") == CLIENT
 

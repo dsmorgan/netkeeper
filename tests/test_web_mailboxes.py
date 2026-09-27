@@ -119,6 +119,22 @@ async def test_a_bad_client_id_is_refused(client: httpx.AsyncClient) -> None:
     assert "apps.googleusercontent.com" in response.json()["detail"]
 
 
+async def test_a_long_client_secret_is_refused_without_being_echoed(
+    client: httpx.AsyncClient, memory_keyring: MemoryKeyring
+) -> None:
+    """A schema max_length would answer 422 with the secret in ``input`` (#256)."""
+    secret = "long-secret-" + "x" * 300
+    response = await client.put(
+        "/api/v1/mailboxes/oauth/client",
+        json={"client_id": CLIENT_ID, "client_secret": secret},
+        headers=CSRF,
+    )
+    assert response.status_code == 422
+    assert "over 300 characters" in response.json()["detail"]
+    assert "long-secret-" not in response.text
+    assert memory_keyring.entries == {}
+
+
 async def test_a_locked_keychain_answers_503(
     client: httpx.AsyncClient, memory_keyring: MemoryKeyring
 ) -> None:
