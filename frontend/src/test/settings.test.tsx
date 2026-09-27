@@ -32,6 +32,7 @@ describe('settings', () => {
           verdict: 'NOT clear: no protection is disabled, but 1 warning needs reading',
         })
       }
+      if (pathname === '/api/v1/mailboxes') return jsonResponse([])
       if (pathname === '/api/v1/mailboxes/status') {
         return jsonResponse({
           client_configured: false,

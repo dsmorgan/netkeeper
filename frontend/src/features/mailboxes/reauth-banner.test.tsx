@@ -33,6 +33,19 @@ describe('ReauthBanner', () => {
     expect(banner).toHaveTextContent('Email steps are paused until it is authorized again.')
   })
 
+  it('shows while the Keychain is locked, never asking for the status', async () => {
+    const { calls } = renderWithBackend(
+      <ReauthBanner />,
+      () => status({ mailboxes: [mailbox({ status: 'reauth_required' })] }),
+      {
+        'GET /api/v1/mailboxes/status': () =>
+          jsonResponse({ detail: 'the Keychain is locked' }, 503),
+      },
+    )
+    expect(await screen.findByRole('alert')).toHaveTextContent('sender@example.com')
+    expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual(['GET /api/v1/mailboxes'])
+  })
+
   it('re-authorizes that mailbox on Google’s page', async () => {
     const assign = vi.spyOn(navigation, 'assign').mockImplementation(() => {})
     const { calls } = renderWithBackend(
