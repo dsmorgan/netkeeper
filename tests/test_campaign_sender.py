@@ -1434,3 +1434,31 @@ def test_a_paused_enrollment_gets_a_new_due_time_after_not_sent(mail: Mail) -> N
     assert enrollment.next_action_at == NOW + engine_module.RETRY_AFTER
     assert enrollment.not_sent_count == 1
     assert mail.messages(enrollment_id) == []
+
+
+# --- #280: tests for mutants that survived the P3-07 verification --------------------------
+
+
+@pytest.mark.parametrize(
+    ("before_claim", "status"),
+    [(timedelta(0), MessageStatus.SENT), (timedelta(microseconds=1), MessageStatus.DRAFTED)],
+    ids=["at-the-claim", "just-before"],
+)
+def test_a_sent_draft_with_a_new_id_counts_from_the_claim_itself(
+    drafts: Mail, before_claim: timedelta, status: MessageStatus
+) -> None:
+    """T3: the date check is ``>=``. A sent copy with a new id dated exactly at the claim is
+    the draft; one a microsecond older is not (it waits, marked missing, as a note would)."""
+    enrollment_id = drafts.enroll()
+    drafts.tick()
+    [message] = drafts.messages(enrollment_id)
+    assert message.scheduled_at == NOW
+    [draft_id] = drafts.gmail.drafts()
+    sent = drafts.gmail.send_draft(draft_id, at=NOW - before_claim, keep_id=False)
+    drafts.tick(NOW + timedelta(hours=1))
+    [message] = drafts.messages(enrollment_id)
+    assert message.status is status
+    if status is MessageStatus.SENT:
+        assert (message.sent_at, message.gmail_message_id) == (NOW, sent.id)
+    else:
+        assert message.error == DRAFT_MISSING
