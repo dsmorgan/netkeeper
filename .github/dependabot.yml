@@ -1,6 +1,7 @@
-# Keeps the workflow's pinned action majors current, one grouped pull request a
-# week. pip and npm are left out until uv.lock and pnpm-lock.yaml settle; add
-# their ecosystems here when they do.
+# Routine version updates, weekly. Each ecosystem's minor and patch bumps come
+# as one grouped pull request; a major bump comes on its own, so it can be read
+# separately. Security updates are enabled in the repository settings and don't
+# depend on this file.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -10,3 +11,23 @@ updates:
     groups:
       github-actions:
         patterns: ["*"]
+
+  # pyproject.toml and uv.lock.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-patch:
+        update-types: [minor, patch]
+
+  # frontend/package.json and pnpm-lock.yaml (the npm ecosystem reads pnpm lockfiles).
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      frontend-minor-patch:
+        update-types: [minor, patch]
