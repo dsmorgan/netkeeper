@@ -15,9 +15,11 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.crm import import_runs as import_service
+from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
-from netkeeper.models import User, UserKind
+from netkeeper.models import InteractionKind, User, UserKind
+from netkeeper.models.base import utcnow
 from netkeeper.services.linkedin_session import flag_session
 from netkeeper.web.app import API_PREFIX
 from netkeeper.web.security import CLIENT_HEADER, CLIENT_HEADER_VALUE
@@ -206,3 +208,20 @@ async def test_posture_is_isolated(running_app: FastAPI) -> None:
     # the one unavoidable warning here (no browser probe, spec 9.1) is the
     # only thing keeping it False, not anything of A's.
     assert all("checkpoint" not in warning for warning in b_report["warnings"])
+
+
+async def test_inbound_this_week_is_isolated(running_app: FastAPI) -> None:
+    """``GET /dashboard/inbound`` is a count, not a list, so it is not in ``REGISTRY``;
+    it counts one user's interactions, so it gets the two-user treatment here."""
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        a = User(kind=UserKind.HOSTED, display_name="A")
+        b = User(kind=UserKind.HOSTED, display_name="B")
+        session.add_all([a, b])
+        session.flush()
+        contact = factories.make_contact(session, a)
+        add_interaction(session, a, contact.id, InteractionKind.EMAIL_IN, utcnow(), "a message in")
+        a_id, b_id = a.id, b.id
+
+    assert (await _get(running_app, a_id, "/dashboard/inbound"))["count"] == 1
+    assert (await _get(running_app, b_id, "/dashboard/inbound"))["count"] == 0

@@ -901,6 +901,61 @@ def _linkedin_due(session: Session, user: User, now: datetime) -> list[int]:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class UpcomingFire:
+    """One enrollment the tick will consider when its ``next_action_at`` comes (P3-12)."""
+
+    enrollment: Enrollment
+    due: datetime
+    campaign: Campaign
+    step: CampaignStep | None
+    contact: Contact
+
+
+def upcoming(session: Session, user: User, *, limit: int) -> tuple[list[UpcomingFire], int]:
+    """The next ``limit`` fires, soonest first, and how many there are in all.
+
+    A read for the dashboard: nothing here changes a row. It selects what
+    :func:`_selected` selects, with no bound on the due time, so a row already
+    due is the next tick's and is listed first. As in :func:`_next_due`, a row
+    whose next step is on LinkedIn is left out: the tick never fires it (P4).
+    Selection is on status, never on the due time alone (#242 review): a held
+    pause keeps its ``next_action_at`` and is not listed.
+    """
+    statement = (
+        scoped(user, Enrollment)
+        .join(Campaign, Campaign.id == Enrollment.campaign_id)
+        .outerjoin(CampaignStep, _next_step_join(user))
+        .join(Contact, Contact.id == Enrollment.contact_id)
+        .where(
+            Campaign.user_id == user.id,
+            Contact.user_id == user.id,
+            Campaign.status == CampaignStatus.ACTIVE,
+            Enrollment.status == EnrollmentStatus.ACTIVE,
+            Enrollment.next_action_at.is_not(None),
+            or_(CampaignStep.id.is_(None), CampaignStep.channel != TemplateChannel.LINKEDIN),
+        )
+    )
+    total = session.scalar(statement.with_only_columns(func.count(Enrollment.id)).order_by(None))
+    rows = session.execute(
+        statement.add_columns(Campaign, CampaignStep, Contact)
+        .order_by(Enrollment.next_action_at, Enrollment.id)
+        .limit(limit)
+    ).tuples()
+    fires = [
+        UpcomingFire(
+            enrollment=enrollment,
+            due=enrollment.next_action_at,
+            campaign=campaign,
+            step=step,
+            contact=contact,
+        )
+        for enrollment, campaign, step, contact in rows
+        if enrollment.next_action_at is not None  # the query's own condition
+    ]
+    return fires, total or 0
+
+
 def _next_due(session: Session, user: User, now: datetime) -> datetime | None:
     return session.scalar(
         scoped(user, Enrollment)

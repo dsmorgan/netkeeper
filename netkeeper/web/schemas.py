@@ -2032,3 +2032,60 @@ class OAuthStartIn(BaseModel):
 class OAuthStartOut(BaseModel):
     authorization_url: str
     """Open this in the browser; Google sends it back to the callback."""
+
+
+# --- dashboard (P3-12) -------------------------------------------------------------------
+
+
+class NextFireOut(BaseModel):
+    """One campaign step the minute tick will consider at ``due`` (spec 11.4).
+
+    The contact is named and nothing more: no address, no message text. ``due``
+    in the past means the next tick's. ``step_position`` is null only for an
+    enrollment with no next step, which the tick completes rather than sends.
+    """
+
+    enrollment_id: int
+    due: datetime
+    campaign_id: int
+    campaign_name: str
+    step_position: int | None
+    channel: str | None
+    contact_id: int
+    contact_name: str
+
+
+class NextFirePage(BaseModel):
+    items: list[NextFireOut]
+    total: int
+
+
+class ChangedJobOut(BaseModel):
+    """A live contact whose position changed recently: a reason to reconnect (spec 9.8)."""
+
+    contact_id: int
+    contact_name: str
+    current_title: str | None
+    current_company: str | None
+    changed_on: date
+    """``last_position_change``: the latest start or end date on or before today."""
+
+
+class ChangedJobPage(BaseModel):
+    items: list[ChangedJobOut]
+    total: int
+    days: int
+    """The window: a change on or after ``today - days`` is listed."""
+
+
+class InboundOut(BaseModel):
+    """Inbound messages logged in the last seven days, and whether replies are detected.
+
+    ``reply_detection`` is false until P3-08: ``count`` is then every inbound
+    interaction (``email_in``, ``li_in``) in the window, however it was recorded
+    (by hand, or an archive import), not replies to a campaign.
+    """
+
+    count: int
+    since: datetime
+    reply_detection: bool
