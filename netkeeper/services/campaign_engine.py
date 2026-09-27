@@ -1736,16 +1736,25 @@ def settle_sent(
     at: datetime,
     gmail_message_id: str,
     gmail_thread_id: str,
+    rng: random.Random | None = None,
 ) -> bool:
     """Gmail has the message as sent: ``sent`` at ``at``, and the next step scheduled
     from it (spec 11.3). For a leftover found by its Message-ID, a draft seen sent,
-    and a discarded draft the person sent anyway. False when the message moved on."""
+    and a discarded draft the person sent anyway. False when the message moved on.
+
+    A leftover (``scheduled``) also moves its mailbox's next send time to no sooner
+    than a new spacing gap (drawn with ``rng``) after ``at``: the record of an
+    unknown outcome spaced the mailbox from the claim, and Gmail may have sent it
+    later than that (#280). Never earlier than it already is.
+    """
     _require_writer(session, "settle_sent")
     if at.tzinfo is None or at.utcoffset() is None:
         raise ValueError("at must be timezone-aware")
     message = _tracked_message(session, user, message_id, expect)
     if message is None:
         return False
+    if message.status is MessageStatus.SCHEDULED:
+        _space_after(session, user, settings, message, at, rng)
     message.status = MessageStatus.SENT
     message.sent_at = at
     message.error = None
@@ -1755,6 +1764,30 @@ def settle_sent(
     _after_settling(session, user, settings, message, fired=True)
     log.info("message %d is sent (found in Gmail)", message_id)
     return True
+
+
+def _space_after(
+    session: Session,
+    user: User,
+    settings: Settings,
+    message: Message,
+    at: datetime,
+    rng: random.Random | None,
+) -> None:
+    """The mailbox's next send time, no sooner than a spacing gap after ``at``."""
+    enrollment = _enrollment(session, user, message.enrollment_id)
+    campaign = _campaign(session, user, enrollment.campaign_id)
+    if campaign.mailbox_id is None:
+        return
+    draw = rng if rng is not None else random.Random()  # noqa: S311 -- spacing, not crypto
+    try:
+        after = at + _spacing_gap(settings, draw)
+    except ValueError:  # run_tick refuses to send with it; the record must not fail on it
+        log.error("the send spacing is not one; mailbox %d is not re-spaced", campaign.mailbox_id)
+        return
+    stored = next_send_at(session, user, campaign.mailbox_id)
+    if stored is None or after > stored:
+        _set_next_send_at(session, user, campaign.mailbox_id, after)
 
 
 def settle_drafted(
