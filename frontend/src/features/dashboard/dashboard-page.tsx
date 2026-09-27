@@ -6,6 +6,7 @@ import { useEventStreamStatus } from '@/features/events/event-stream-context'
 import { cn } from '@/lib/utils'
 
 import { openImportsQuery, statsQuery } from './api'
+import { MailboxCard } from './mailbox-card'
 import { SetupStepCard } from './setup-step-card'
 import { buildSetupSteps } from './setup-steps'
 
@@ -79,6 +80,8 @@ export function DashboardPage() {
           </span>
         </span>
       </div>
+
+      <MailboxCard />
 
       {!hasContacts && (
         <Card size="sm" className="border-primary/40">

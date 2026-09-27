@@ -74,10 +74,12 @@ function serveDashboard({
   stats,
   drafts = { items: [], total: 0 },
   lists = [seededValidatedList()],
+  mailboxes = [],
 }: {
   stats: ReturnType<typeof statsBody>
   drafts?: { items: ReturnType<typeof draftRun>[]; total: number }
   lists?: unknown[]
+  mailboxes?: unknown[]
 }) {
   const seen: Request[] = []
   mockFetch((request) => {
@@ -90,6 +92,7 @@ function serveDashboard({
       return jsonResponse(drafts)
     }
     if (url.pathname === '/api/v1/lists') return jsonResponse(lists)
+    if (url.pathname === '/api/v1/mailboxes') return jsonResponse(mailboxes)
     return new Response('not found', { status: 404 })
   })
   return seen
@@ -129,6 +132,7 @@ describe('dashboard: a fresh install with nothing imported', () => {
 
     const headings = main.getAllByRole('heading', { level: 2 }).map((node) => node.textContent)
     expect(headings).toEqual([
+      'Mailbox',
       'Start here',
       '1. Import your data',
       '2. Review what was tagged by a rule',
