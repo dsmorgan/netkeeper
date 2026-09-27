@@ -351,13 +351,28 @@ def test_a_dead_grant_is_an_auth_error_and_sends_nothing() -> None:
     assert http.requests == []
 
 
-def test_any_refusal_of_the_client_is_an_auth_error() -> None:
+@pytest.mark.parametrize("code", ["invalid_client", "unauthorized_client"])
+def test_a_dead_client_is_an_auth_error(code: str) -> None:
     tokens = Tokens()
-    tokens.error = gmail_oauth.OAuthRefused("refused", code="invalid_client")
+    tokens.error = gmail_oauth.OAuthRefused("refused", code=code)
     failures: list[GmailAuthError] = []
     with pytest.raises(GmailAuthError, match="refused"):
         _client(RecordingHttp(), tokens, failures).list_labels(purpose="labels")
-    assert [failure.code for failure in failures] == ["invalid_client"]
+    assert [failure.code for failure in failures] == [code]
+
+
+@pytest.mark.parametrize("code", ["invalid_request", "http_407", "http_403", "no_access_token"])
+def test_a_refusal_that_says_nothing_about_the_grant_is_transient(code: str) -> None:
+    """Only ``REAUTH_CODES`` pause the mailbox; anything else is tried again later (#256)."""
+    tokens = Tokens()
+    tokens.error = gmail_oauth.OAuthRefused("refused", code=code)
+    failures: list[GmailAuthError] = []
+    http = RecordingHttp()
+    with pytest.raises(GmailTransient) as caught:
+        _client(http, tokens, failures).send(_message(), purpose=PURPOSE)
+    assert (caught.value.code, caught.value.outcome_unknown) == (code, False)
+    assert failures == []
+    assert http.requests == []
 
 
 def test_google_unreachable_for_the_token_is_transient_and_nothing_was_sent() -> None:

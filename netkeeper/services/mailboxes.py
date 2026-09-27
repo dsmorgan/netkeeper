@@ -353,30 +353,36 @@ def check_mailbox(
         log.warning("mailbox %d not checked: %s", mailbox_id, exc)
         return CheckResult(mailbox_id, user_id, MailboxStatus.OK, None, False)
 
-    return _record(factory, user_id, mailbox_id, ref, reason, clock)
+    return _record(factory, user_id, mailbox_id, generation, reason, clock)
 
 
 def mark_reauth_required(
-    factory: sessionmaker[Session], user_id: int, mailbox_id: int, ref: str, reason: str
+    factory: sessionmaker[Session], user_id: int, mailbox_id: int, generation: int, reason: str
 ) -> CheckResult | None:
     """Set the mailbox ``reauth_required`` for ``reason``, as a failed check would.
 
-    ``ref`` is the ``keychain_ref`` the caller's token came from: a mailbox a
-    person disconnected or re-authorized since then is left alone. None when
-    the user or mailbox is gone. Opens a writer, so call it with no session open.
+    ``generation`` is the mailbox's ``generation`` when the caller read its
+    token: a mailbox a person disconnected or re-authorized since then is left
+    alone. None when the user or mailbox is gone. Opens a writer, so call it
+    with no session open.
     """
-    return _record(factory, user_id, mailbox_id, ref, reason, utcnow)
+    return _record(factory, user_id, mailbox_id, generation, reason, utcnow)
 
 
 def _record(
     factory: sessionmaker[Session],
     user_id: int,
     mailbox_id: int,
-    ref: str,
+    generation: int,
     reason: str | None,
     clock: Callable[[], datetime],
 ) -> CheckResult | None:
-    """Write what a check found: ``checked_at`` when ``reason`` is None, else the pause."""
+    """Write what a check found: ``checked_at`` when ``reason`` is None, else the pause.
+
+    Only while the mailbox is still ``ok`` at ``generation``, the one the check
+    asked Google about; ``keychain_ref`` cannot tell, since it survives a
+    re-authorization.
+    """
     with session_scope(factory, write=True) as session:
         user = session.get(User, user_id)
         mailbox = None if user is None else get_scoped(session, user, Mailbox, mailbox_id)
@@ -434,18 +440,12 @@ def open_gmail(
         if mailbox.status is not MailboxStatus.OK:
             raise MailboxNotReady(mailbox_id, mailbox.status.value)
         ref = mailbox.keychain_ref
+        generation = mailbox.generation
 
-    def mark(reason: str, used: str | None = None) -> None:
-        if used is not None:
-            try:
-                current = keychain.get_secret(user_id, ref)
-            except keychain.KeychainUnavailable:
-                current = used  # cannot tell; pausing is the safe side
-            if current != used:
-                # Re-authorized since this client read its token: the new grant is fine.
-                log.info("mailbox %d was re-authorized meanwhile; not marked", mailbox_id)
-                return
-        result = mark_reauth_required(factory, user_id, mailbox_id, ref, reason)
+    def mark(reason: str) -> None:
+        # Left alone if re-authorized (or disconnected) since this client read its
+        # token: the generation has moved, and the new grant is not the one refused.
+        result = mark_reauth_required(factory, user_id, mailbox_id, generation, reason)
         if result is not None and result.changed and on_status_change is not None:
             on_status_change(result)
 
@@ -468,7 +468,7 @@ def open_gmail(
     return GmailClient(
         refresh,
         mailbox_id=mailbox_id,
-        on_auth_failure=lambda error: mark(error.code, token),
+        on_auth_failure=lambda error: mark(error.code),
         http=http,
     )
 

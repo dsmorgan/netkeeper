@@ -33,9 +33,13 @@ Nothing here retries a request by itself.
 **Auth.** :class:`GmailClient` never refreshes a token itself: it is given a
 ``refresh`` function (``services.mailboxes.open_gmail`` passes P3-01's
 :func:`~netkeeper.campaigns.gmail_oauth.refresh_access_token`), calls it for the
-first token and again on a 401. ``invalid_grant`` or any other refusal from the
-refresh raises :class:`GmailAuthError` and calls ``on_auth_failure``, which
-``open_gmail`` points at the mailbox's ``reauth_required`` path.
+first token and again on a 401. A refresh Google refuses with a code in
+:data:`~netkeeper.campaigns.gmail_oauth.REAUTH_CODES` (``invalid_grant``,
+``invalid_client``, ``unauthorized_client``) raises :class:`GmailAuthError` and
+calls ``on_auth_failure``, which ``open_gmail`` points at the mailbox's
+``reauth_required`` path. Any other refusal of the refresh (a proxy's ``407``,
+an HTML ``403``, ``invalid_request``) says nothing certain about the grant: it
+is a :class:`GmailTransient`, and nothing is marked.
 
 **Blocking.** Every call blocks on the network. Call it off the event loop, and
 never with a database session open. A client is not thread-safe (``httplib2``
@@ -481,11 +485,15 @@ class GmailClient:
             return request.execute(num_retries=0)
         except HttpError as exc:
             error = _from_http(exc, writes=writes)
-        except (gmail_oauth.InvalidGrant, gmail_oauth.OAuthRefused) as exc:
-            error = GmailAuthError("the mailbox's grant was refused", code=exc.code)
         except gmail_oauth.OAuthUnavailable as exc:
             # The token could not be renewed, so nothing was sent.
             error = GmailTransient("could not renew the access token", code=exc.code)
+        except gmail_oauth.OAuthError as exc:
+            if gmail_oauth.needs_reauthorization(exc):
+                error = GmailAuthError("the mailbox's grant was refused", code=exc.code)
+            else:
+                # Refused, but not in a way that says the grant is dead. Nothing was sent.
+                error = GmailTransient("Google refused to renew the access token", code=exc.code)
         except (OSError, httplib2.HttpLib2Error) as exc:
             error = GmailTransient(
                 f"could not reach Gmail ({type(exc).__name__})",

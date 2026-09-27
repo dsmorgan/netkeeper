@@ -221,15 +221,73 @@ def test_a_locked_keychain_changes_nothing(
     assert _row(session_factory, mailbox.id).status is MailboxStatus.OK
 
 
-def test_mark_reauth_required_leaves_a_re_keyed_mailbox_alone(
+def test_mark_reauth_required_leaves_a_re_authorized_mailbox_alone(
     session_factory: sessionmaker[Session], connected: tuple[User, Mailbox]
 ) -> None:
+    """Only the generation the caller read may be paused (#256)."""
     user, mailbox = connected
-    assert service.mark_reauth_required(session_factory, user.id, mailbox.id, "other", "x") == (
+    stale = mailbox.generation - 1
+    assert service.mark_reauth_required(session_factory, user.id, mailbox.id, stale, "x") == (
         service.CheckResult(mailbox.id, user.id, MailboxStatus.OK, None, False)
     )
-    result = service.mark_reauth_required(
-        session_factory, user.id, mailbox.id, mailbox.keychain_ref, "invalid_grant"
+    assert service.mark_reauth_required(
+        session_factory, user.id, mailbox.id, mailbox.generation, "invalid_grant"
+    ) == service.CheckResult(
+        mailbox.id, user.id, MailboxStatus.REAUTH_REQUIRED, "invalid_grant", True
     )
-    assert result is not None and result.changed
-    assert service.mark_reauth_required(session_factory, user.id, 9999, "r", "x") is None
+    assert service.mark_reauth_required(session_factory, user.id, 9999, 1, "x") is None
+
+
+def test_a_re_authorization_is_seen_without_the_keychain(
+    session_factory: sessionmaker[Session],
+    fake_google: FakeGoogle,
+    connected: tuple[User, Mailbox],
+    memory_keyring: MemoryKeyring,
+) -> None:
+    """The guard is the generation, so a locked Keychain cannot turn it into a pause (#256).
+
+    The token the client holds is refused, a person has re-authorized meanwhile,
+    and the Keychain is locked when the refusal is recorded.
+    """
+    user, mailbox = connected
+    old_token = memory_keyring.entries[("netkeeper", f"{user.id}/{mailbox.keychain_ref}")]
+    client = service.open_gmail(session_factory, user.id, mailbox.id, http=RecordingHttp())
+    with session_scope(session_factory, write=True) as session:
+        reloaded = session.get(User, user.id)
+        assert reloaded is not None
+        service.connect(
+            session, reloaded, "sender@example.com", fake_google.issue_refresh_token(), daily_cap=80
+        )
+    fake_google.revoked.add(old_token)
+    memory_keyring.broken = True
+
+    with pytest.raises(GmailAuthError):
+        client.list_labels(purpose="labels")
+    row = _row(session_factory, mailbox.id)
+    assert (row.status, row.generation) == (MailboxStatus.OK, mailbox.generation + 1)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (407, "<html>Proxy Authentication Required</html>"),
+        (403, "<html>Forbidden</html>"),
+        (400, {"error": "invalid_request"}),
+    ],
+)
+def test_a_refusal_that_says_nothing_about_the_grant_does_not_pause(
+    session_factory: sessionmaker[Session],
+    fake_google: FakeGoogle,
+    connected: tuple[User, Mailbox],
+    answer: tuple[int, dict[str, object] | str],
+) -> None:
+    user, mailbox = connected
+    changes: list[service.CheckResult] = []
+    client = service.open_gmail(
+        session_factory, user.id, mailbox.id, http=RecordingHttp(), on_status_change=changes.append
+    )
+    fake_google.token_answer = answer
+    with pytest.raises(GmailTransient):
+        client.list_labels(purpose="labels")
+    assert _row(session_factory, mailbox.id).status is MailboxStatus.OK
+    assert changes == []
