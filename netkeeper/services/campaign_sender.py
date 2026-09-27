@@ -26,9 +26,13 @@ Sending
 - **Labels.** The campaign's label (``<label prefix>/<campaign name>``) is
   created when missing and applied to each sent message. A draft gets it once
   it is seen sent. A label failure never fails a send that went out.
-- **Outcomes.** Nothing sent is ``failed`` with a one-line reason: a mailbox
-  that is not ready, a thread that is gone, a message that cannot be built,
-  or any Gmail refusal. A write whose answer never came
+- **Outcomes.** Nothing sent, for a reason that may pass, is ``not_sent``,
+  and the engine gives the claim back to try again later: a rate limit, Gmail
+  unavailable before the write, an authorization error, a mailbox that is not
+  ready, a thread that could not be read (#273 review). Nothing sent, for a
+  reason a retry would not change, is ``failed`` with a one-line reason: a
+  thread that is gone, a message that cannot be built, a Gmail refusal. A
+  write whose answer never came
   (:attr:`~netkeeper.campaigns.gmail.GmailTransient.outcome_unknown`) is
   looked up by its Message-ID at once. Found, it is ``sent`` or ``drafted``;
   not found (yet), it is ``unknown``, and the engine leaves it ``scheduled`` for
@@ -40,15 +44,22 @@ Each tick, before anything is chosen, :meth:`GmailSender.reconcile` looks up wha
 :func:`~netkeeper.services.campaign_engine.reconcile_work` lists:
 
 - **Leftovers** (``scheduled`` after a crash or an unknown outcome): a search
-  for ``rfc822msgid:``, in every folder. Sent, drafted, or not in Gmail at all.
+  for ``rfc822msgid:``, in every folder. Sent, drafted, or not found. Not found
+  is counted, and only several misses spread over hours rule it out, since
+  Gmail's search can lag a send
+  (:func:`~netkeeper.services.campaign_engine.settle_not_sent`).
 - **Drafts** (the drafts poll, every :data:`DRAFTS_POLL_EVERY`): a draft gone
   from ``drafts.list`` with a new sent message in its thread is ``sent`` at the
-  message's internal date, and the next step is scheduled from it. A draft gone
-  with nothing sent is ``discarded`` and its enrollment ``removed``, on the
-  second poll that finds it gone, not the first (undo send).
-- **Discarded drafts** (#269): a message a merge discarded while its Gmail
-  draft was waiting. The draft is deleted. If the person sent it already, the
-  message is ``sent`` after all.
+  message's internal date, and the next step is scheduled from it. A sent
+  message counts only when it is the draft's own message id kept, or is no
+  older than the draft's claim and is not one the thread held when the draft
+  was made: an earlier step, or a note the person sent before, is never the
+  draft (#273 review). A draft gone with nothing sent is ``discarded`` and its
+  enrollment ``removed``, on the second poll that finds it gone, not the first
+  (undo send).
+
+netkeeper deletes nothing in Gmail (ADR 0003). A draft whose message a merge
+discarded stays in Gmail for the person (#273, question 2).
 
 A Gmail failure leaves the message as it is for the next tick; nothing here
 raises for one.
@@ -72,8 +83,11 @@ from netkeeper.campaigns.compose import (
 )
 from netkeeper.campaigns.gmail import (
     Gmail,
+    GmailAuthError,
     GmailError,
     GmailNotFound,
+    GmailRateLimited,
+    GmailRejected,
     GmailTransient,
     Message,
     ensure_label,
@@ -105,7 +119,12 @@ _DRAFT: Final = "DRAFT"
 
 
 class _NotSent(Exception):
-    """Nothing was sent, and why, in one line fit for ``messages.error``."""
+    """Nothing was sent, and why, in one line fit for ``messages.error``. ``retry`` when
+    the reason may pass (``not_sent``), not when a retry would change nothing (``failed``)."""
+
+    def __init__(self, reason: str, *, retry: bool = False) -> None:
+        super().__init__(reason)
+        self.retry = retry
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +133,7 @@ class _Threading:
     subject: str
     in_reply_to: str | None = None
     references: tuple[str, ...] = ()
+    known: tuple[str, ...] = ()  # every Gmail message id the thread held when it was read
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,7 +218,7 @@ class GmailSender:
                 references=threading_.references,
             )
         except _NotSent as exc:
-            return _failed(firing, str(exc))
+            return _not_sent(firing, str(exc)) if exc.retry else _failed(firing, str(exc))
         except ComposeError as exc:
             return _failed(firing, f"the message could not be built: {exc}")
         label_id = self._label_id(gmail, firing, purpose)
@@ -212,7 +232,9 @@ class GmailSender:
         except GmailTransient as exc:
             if exc.outcome_unknown:
                 return self._look(gmail, firing, message_id, purpose, exc.code)
-            return _failed(firing, f"Gmail was unavailable ({exc.code}); nothing was sent")
+            return _not_sent(firing, f"Gmail was unavailable ({exc.code}); nothing was sent")
+        except (GmailRateLimited, GmailAuthError) as exc:
+            return _not_sent(firing, f"Gmail said {type(exc).__name__} ({exc.code})")
         except GmailError as exc:
             return _failed(firing, f"Gmail refused it ({type(exc).__name__}: {exc.code})")
         if threading_.thread_id is not None and ref.thread_id != threading_.thread_id:
@@ -230,6 +252,7 @@ class GmailSender:
                 gmail_message_id=ref.id,
                 gmail_thread_id=ref.thread_id,
                 gmail_draft_id=draft_id,
+                thread_known=tuple(k for k in threading_.known if k != ref.id),
             )
         at = self._clock()
         self._apply_label(gmail, ref.id, label_id, purpose)
@@ -251,7 +274,9 @@ class GmailSender:
         try:
             gmail = self._open(firing.user_id, firing.mailbox_id)
         except MailboxNotReady as exc:
-            raise _NotSent(f"the mailbox is not ready ({exc.code}); nothing was sent") from exc
+            raise _NotSent(
+                f"the mailbox is not ready ({exc.code}); nothing was sent", retry=True
+            ) from exc
         except MailboxNotFound as exc:
             raise _NotSent("the campaign's mailbox is gone; nothing was sent") from exc
         return gmail, firing.rfc822_message_id
@@ -265,9 +290,14 @@ class GmailSender:
             thread = gmail.get_thread(firing.thread_id, purpose=purpose)
         except GmailNotFound as exc:
             raise _NotSent("the earlier step's Gmail thread is gone; nothing was sent") from exc
+        except GmailRejected as exc:
+            raise _NotSent(
+                f"Gmail refused to read the earlier step's thread ({exc.code}); nothing was sent"
+            ) from exc
         except GmailError as exc:
             raise _NotSent(
-                f"the earlier step's thread could not be read ({exc.code}); nothing was sent"
+                f"the earlier step's thread could not be read ({exc.code}); nothing was sent",
+                retry=True,
             ) from exc
         earlier = [m for m in thread.messages if _SENT in m.label_ids and _DRAFT not in m.label_ids]
         cited = [
@@ -282,6 +312,7 @@ class GmailSender:
             subject=reply_subject(earlier[0].header("Subject")),
             in_reply_to=cited[-1],
             references=tuple(cited),
+            known=tuple(m.id for m in thread.messages),
         )
 
     def _look(
@@ -316,6 +347,7 @@ class GmailSender:
                 gmail_message_id=ref.id,
                 gmail_thread_id=ref.thread_id,
                 gmail_draft_id=found.draft_id,
+                thread_known=_others_in_thread(gmail, ref.id, ref.thread_id, purpose),
             )
         return unknown
 
@@ -361,7 +393,7 @@ class GmailSender:
         settings: Settings,
         now: datetime,
     ) -> None:
-        """Look up the user's leftovers, drafts and discarded drafts in Gmail (the module)."""
+        """Look up the user's leftovers and drafts in Gmail (the module)."""
         with session_scope(factory) as session:
             user = session.get(User, user_id)
             if user is None:
@@ -370,11 +402,10 @@ class GmailSender:
         last = self._drafts_polled.get(user_id)
         poll = last is None or now - last >= self._drafts_every
         drafts = work.drafts if poll else ()
-        discarded = work.discarded_drafts if poll else ()
-        if poll and (work.drafts or work.discarded_drafts):
+        if drafts:
             self._drafts_polled[user_id] = now
-        run = _Reconcile(self, factory, user_id, settings)
-        for mailbox_id in sorted({t.mailbox_id for t in (*work.leftovers, *drafts, *discarded)}):
+        run = _Reconcile(self, factory, user_id, settings, now)
+        for mailbox_id in sorted({t.mailbox_id for t in (*work.leftovers, *drafts)}):
             try:
                 gmail = self._open(user_id, mailbox_id)
             except (MailboxNotReady, MailboxNotFound) as exc:
@@ -384,7 +415,6 @@ class GmailSender:
                 gmail,
                 [t for t in work.leftovers if t.mailbox_id == mailbox_id],
                 [t for t in drafts if t.mailbox_id == mailbox_id],
-                [t for t in discarded if t.mailbox_id == mailbox_id],
             )
 
 
@@ -392,12 +422,18 @@ class _Reconcile:
     """One user's reconcile pass: each lookup in Gmail, then its own short writer session."""
 
     def __init__(
-        self, sender: GmailSender, factory: sessionmaker[Session], user_id: int, settings: Settings
+        self,
+        sender: GmailSender,
+        factory: sessionmaker[Session],
+        user_id: int,
+        settings: Settings,
+        now: datetime,
     ) -> None:
         self.sender = sender
         self.factory = factory
         self.user_id = user_id
         self.settings = settings
+        self.now = now
 
     def write(self, fn: Callable[[Session, User], object]) -> None:
         with session_scope(self.factory, write=True) as session:
@@ -406,15 +442,11 @@ class _Reconcile:
                 fn(session, user)
 
     def mailbox(
-        self,
-        gmail: Gmail,
-        leftovers: Collection[Tracked],
-        drafts: Collection[Tracked],
-        discarded: Collection[Tracked],
+        self, gmail: Gmail, leftovers: Collection[Tracked], drafts: Collection[Tracked]
     ) -> None:
         for tracked in leftovers:
             self.guarded(tracked, self.leftover, gmail, tracked)
-        if not drafts and not discarded:
+        if not drafts:
             return
         try:
             present = {
@@ -425,8 +457,6 @@ class _Reconcile:
             return
         for tracked in drafts:
             self.guarded(tracked, self.draft, gmail, tracked, present)
-        for tracked in discarded:
-            self.guarded(tracked, self.discarded, gmail, tracked, present)
 
     @staticmethod
     def guarded[*Ts](tracked: Tracked, fn: Callable[[*Ts], None], *args: *Ts) -> None:
@@ -446,9 +476,11 @@ class _Reconcile:
     def leftover(self, gmail: Gmail, tracked: Tracked) -> None:
         purpose = self.purpose(tracked, "reconcile")
         found = find_by_message_id(gmail, tracked.rfc822_message_id, purpose=purpose)
-        settings = self.settings
+        settings, now = self.settings, self.now
         if found is None:
-            self.write(lambda s, u: engine.settle_not_sent(s, u, settings, tracked.message_id))
+            self.write(
+                lambda s, u: engine.settle_not_sent(s, u, settings, tracked.message_id, now=now)
+            )
             return
         ref = found.message
         if found.sent:
@@ -467,6 +499,7 @@ class _Reconcile:
             self.label(gmail, tracked, ref.id, purpose)
         elif found.draft_id is not None:
             draft_id = found.draft_id
+            known = _others_in_thread(gmail, ref.id, ref.thread_id, purpose)
             self.write(
                 lambda s, u: engine.settle_drafted(
                     s,
@@ -476,6 +509,7 @@ class _Reconcile:
                     gmail_message_id=ref.id,
                     gmail_thread_id=ref.thread_id,
                     gmail_draft_id=draft_id,
+                    thread_known=known,
                 )
             )
         else:
@@ -491,29 +525,6 @@ class _Reconcile:
         if sent is None:
             self.write(lambda s, u: engine.settle_draft_missing(s, u, tracked.message_id))
             return
-        self.settle_sent(tracked, sent, MessageStatus.DRAFTED)
-        self.label(gmail, tracked, sent.id, purpose)
-
-    def discarded(self, gmail: Gmail, tracked: Tracked, present: Collection[str]) -> None:
-        purpose = self.purpose(tracked, "delete the discarded draft of")
-        if tracked.gmail_draft_id in present:
-            assert tracked.gmail_draft_id is not None
-            try:
-                gmail.delete_draft(tracked.gmail_draft_id, purpose=purpose)
-            except GmailNotFound:
-                pass  # sent or deleted since the list: look in the thread below
-            else:
-                self.write(lambda s, u: engine.forget_draft(s, u, tracked.message_id))
-                log.info("message %d: its discarded Gmail draft is deleted", tracked.message_id)
-                return
-        sent = self.sent_in_thread(gmail, tracked, purpose)
-        if sent is None:
-            self.write(lambda s, u: engine.forget_draft(s, u, tracked.message_id))
-            return
-        self.settle_sent(tracked, sent, MessageStatus.DISCARDED)
-        self.label(gmail, tracked, sent.id, purpose)
-
-    def settle_sent(self, tracked: Tracked, sent: Message, status: MessageStatus) -> None:
         settings = self.settings
         self.write(
             lambda s, u: engine.settle_sent(
@@ -521,37 +532,65 @@ class _Reconcile:
                 u,
                 settings,
                 tracked.message_id,
-                expect=(status,),
+                expect=(MessageStatus.DRAFTED,),
                 at=sent.internal_date,
                 gmail_message_id=sent.id,
                 gmail_thread_id=sent.thread_id,
             )
         )
+        self.label(gmail, tracked, sent.id, purpose)
 
     @staticmethod
     def sent_in_thread(gmail: Gmail, tracked: Tracked, purpose: str) -> Message | None:
-        """The first sent message in the draft's thread that no other message of the user
-        already holds: the draft, sent. None when the thread has none, or is gone."""
+        """The draft, sent: the first sent message in its thread that could be it. None
+        when the thread has none, or is gone.
+
+        A sent message that kept the draft's own message id is the draft. Any other
+        must be no older than the draft's claim and not one of ``thread_known``: an
+        earlier step, a message another row of the user holds, or one the thread
+        held when the draft was made (#273 review). What is left is a message the
+        person sent in the thread after the draft was made, which a sent draft with a
+        new id cannot be told apart from.
+        """
         if tracked.gmail_thread_id is None:
             return None
         try:
             thread = gmail.get_thread(tracked.gmail_thread_id, purpose=purpose)
         except GmailNotFound:
             return None
-        # The draft itself carries DRAFT until it is sent. Its own message id is not left
-        # out: whether a sent draft keeps it or gets a new one, the sent copy counts.
-        sent = [
+        sent = [m for m in thread.messages if _SENT in m.label_ids and _DRAFT not in m.label_ids]
+        kept = [m for m in sent if m.id == tracked.gmail_message_id]
+        if kept:
+            return kept[0]
+        since = tracked.scheduled_at
+        candidates = [
             m
-            for m in thread.messages
-            if _SENT in m.label_ids
-            and _DRAFT not in m.label_ids
-            and m.id not in tracked.thread_known
+            for m in sent
+            if m.id not in tracked.thread_known and since is not None and m.internal_date >= since
         ]
-        return min(sent, key=lambda m: m.internal_date) if sent else None
+        return min(candidates, key=lambda m: m.internal_date) if candidates else None
 
     def label(self, gmail: Gmail, tracked: Tracked, gmail_message_id: str, purpose: str) -> None:
         label_id = self.sender._label_named(gmail, tracked.mailbox_id, tracked.label, purpose)
         self.sender._apply_label(gmail, gmail_message_id, label_id, purpose)
+
+
+def _others_in_thread(
+    gmail: Gmail, gmail_message_id: str, thread_id: str, purpose: str
+) -> tuple[str, ...]:
+    """Every other Gmail message id in the thread, or none when it cannot be read. For a
+    draft found by its Message-ID: what the thread held when it was seen."""
+    try:
+        thread = gmail.get_thread(thread_id, purpose=purpose)
+    except GmailError as exc:
+        log.info("the draft's thread could not be read (%s); nothing is known in it", exc.code)
+        return ()
+    return tuple(m.id for m in thread.messages if m.id != gmail_message_id)
+
+
+def _not_sent(firing: Firing, reason: str) -> SendResult:
+    log.warning("message %d sent nothing, for now: %s", firing.message_id, reason)
+    return SendResult(SendOutcome.NOT_SENT, error=reason)
 
 
 def _failed(firing: Firing, reason: str) -> SendResult:

@@ -92,8 +92,16 @@ never came (:attr:`SendOutcome.UNKNOWN`). Nothing else changes it: an end
 (reply, removal, bounce, do-not-contact) and a merge leave it ``scheduled``.
 Each tick, a sender that is a :class:`Reconciler` searches Gmail for each
 leftover's Message-ID first, and the ``settle_*`` functions here record what it
-found: ``sent``, ``drafted``, or, when Gmail does not have it, ``failed`` or
-``discarded``. A leftover is never sent again.
+found: ``sent``, ``drafted``, or, when Gmail does not have it after
+:data:`RECONCILE_GIVE_UP_MISSES` searches over :data:`RECONCILE_GIVE_UP_AFTER`
+(its search can lag a send), ``failed`` or ``discarded``. A leftover is never
+sent again.
+
+**Nothing sent, for now** (#273 review). A send that certainly sent nothing, for
+a reason that may pass (:attr:`SendOutcome.NOT_SENT`: a rate limit, an outage
+before the write, a mailbox not ready), gives its claim back: the message row is
+deleted, the enrollment is due :data:`RETRY_AFTER` later, and its mailbox waits
+as long. An outage is waited out; it never fails a step.
 
 **Off the event loop** (#259). :class:`CampaignEngine` runs each tick in a
 worker thread (``asyncio.to_thread``), as :class:`~netkeeper.services.mailboxes.MailboxMonitor`
@@ -264,18 +272,28 @@ class SendOutcome(enum.StrEnum):
     or a sender that raised): the message may be in the recipient's inbox. It
     is never recorded as ``failed``. The message stays ``scheduled``, its
     enrollment parked, until :meth:`Reconciler.reconcile` finds it by Message-ID (#269).
+
+    ``not_sent`` is a send that certainly sent nothing and may work later: a rate
+    limit, Gmail unavailable before the write, a mailbox not ready. The claim is
+    given back: the message row is deleted, the enrollment is due again
+    :data:`RETRY_AFTER` later, and the mailbox sends nothing until then (#273
+    review). ``failed`` is what a retry would not change (a refusal, a thread
+    that is gone, a message that cannot be built): parked for a person.
     """
 
     SENT = "sent"
     DRAFTED = "drafted"
     FAILED = "failed"
     UNKNOWN = "unknown"
+    NOT_SENT = "not_sent"
 
 
 @dataclass(frozen=True, slots=True)
 class SendResult:
     """What the sender did. ``at`` is when the message went out (``sent_at``); it is what
-    the next step's timing derives from. ``error`` is one line, never a body or header."""
+    the next step's timing derives from. ``error`` is one line, never a body or header.
+    ``thread_known`` is, for a draft, the Gmail message ids its thread already held when
+    the draft was made: none of them is ever the draft, sent (#273 review)."""
 
     outcome: SendOutcome
     at: datetime | None = None
@@ -283,6 +301,7 @@ class SendResult:
     gmail_thread_id: str | None = None
     gmail_draft_id: str | None = None
     error: str | None = None
+    thread_known: tuple[str, ...] = ()
 
 
 class Sender(Protocol):
@@ -1286,6 +1305,12 @@ def _record(
         log.error("message %d vanished while it was being sent", firing.message_id)
         return
     session.refresh(message)
+    if result.outcome is SendOutcome.NOT_SENT:
+        _give_back(session, user, settings, message, result, now=now)
+        if firing.mailbox_id is not None:
+            _set_next_send_at(session, user, firing.mailbox_id, now + max(claim.gap, RETRY_AFTER))
+        session.flush()
+        return
     at = result.at or now
     if result.outcome is SendOutcome.SENT:
         message.status = MessageStatus.SENT
@@ -1294,6 +1319,7 @@ def _record(
     elif result.outcome is SendOutcome.DRAFTED:
         message.status = MessageStatus.DRAFTED
         message.error = None
+        message.thread_known_json = list(result.thread_known)
     elif result.outcome is SendOutcome.UNKNOWN:
         # It may have gone out. It stays ``scheduled``, the "did it go out?" signal,
         # and its enrollment parked, until reconcile finds it or rules it out (#269).
@@ -1329,6 +1355,46 @@ def _record(
     if firing.mailbox_id is not None:
         _set_next_send_at(session, user, firing.mailbox_id, max(at, now) + claim.gap)
     session.flush()
+
+
+RETRY_AFTER: Final = timedelta(minutes=15)
+"""A step whose send certainly sent nothing (:attr:`SendOutcome.NOT_SENT`) is due again
+this much later, and its mailbox sends nothing until then: an outage is waited out,
+never turned into failed steps (#273 review)."""
+
+
+def _give_back(
+    session: Session,
+    user: User,
+    settings: Settings,
+    message: Message,
+    result: SendResult,
+    *,
+    now: datetime,
+) -> None:
+    """Undo a claim whose send sent nothing: the message row goes, so the step is free to
+    fire again, and the enrollment is due :data:`RETRY_AFTER` later, inside the window.
+
+    Deleting the row is safe only because nothing reached Gmail: a send whose outcome
+    is unknown is never given back. The next claim writes a new row, and so a new
+    Message-ID.
+    """
+    # A merge may have moved the message to another enrollment meanwhile: follow it.
+    enrollment = _enrollment(session, user, message.enrollment_id)
+    session.delete(message)
+    session.flush()
+    log.warning(
+        "message %d sent nothing (%s); enrollment %d is due again in %s",
+        message.id,
+        result.error or "no reason given",
+        enrollment.id,
+        RETRY_AFTER,
+    )
+    # A paused enrollment keeps its due time for the resume; an ended one has none.
+    if enrollment.status in (EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED):
+        campaign = _campaign(session, user, enrollment.campaign_id)
+        due = now + RETRY_AFTER
+        enrollment.next_action_at = _in_window(settings, user, campaign, due) or due
 
 
 def _spacing_gap(settings: Settings, rng: random.Random) -> timedelta:
@@ -1370,7 +1436,21 @@ that did not wait, or a send whose answer never came. Before that it may still b
 the sender's hands, and a message just sent may not be in Gmail's search yet."""
 
 RECONCILE_BATCH: Final = 10
-"""At most this many leftovers, and this many discarded drafts, per user per tick."""
+"""At most this many leftovers per mailbox per tick. Per mailbox, so a mailbox that
+cannot be searched (disconnected, waiting for re-authorization) never holds another's
+slots (#273 review)."""
+
+RECONCILE_SEARCH_EVERY: Final = timedelta(minutes=20)
+"""A leftover whose search found nothing is searched again no sooner than this."""
+
+RECONCILE_GIVE_UP_MISSES: Final = 4
+"""A leftover is ruled "not in Gmail" only after this many searches found nothing ...
+
+Gmail's search can lag a send by minutes, and a message ruled not sent that went out
+anyway is lost to the sequence for good (#273 review)."""
+
+RECONCILE_GIVE_UP_AFTER: Final = timedelta(hours=2)
+"""... and only once this long has passed since the first of them."""
 
 DRAFT_MISSING: Final = "draft not found in Gmail, and nothing sent in its thread; checking again"
 """``messages.error`` of a draft seen gone once. Seen gone again, it is ``discarded``: a
@@ -1390,7 +1470,9 @@ class Tracked:
     """One outbound email the sender has to look up in Gmail, read with no Gmail call.
 
     ``thread_known`` is every Gmail message id the user's other messages in its
-    thread already hold, so a sent draft is told apart from an earlier step.
+    thread already hold, and, for a draft, every one its thread held when the
+    draft was made, so a sent draft is told apart from an earlier step or a note
+    the person sent before (#273 review).
     """
 
     message_id: int
@@ -1415,11 +1497,9 @@ class ReconcileWork:
 
     leftovers: tuple[Tracked, ...] = ()
     drafts: tuple[Tracked, ...] = ()
-    discarded_drafts: tuple[Tracked, ...] = ()
 
     def mailboxes(self) -> list[int]:
-        found = {t.mailbox_id for t in (*self.leftovers, *self.drafts, *self.discarded_drafts)}
-        return sorted(found)
+        return sorted({t.mailbox_id for t in (*self.leftovers, *self.drafts)})
 
 
 def _thread_known(session: Session, user: User, message: Message) -> frozenset[str]:
@@ -1486,7 +1566,12 @@ def _tracked(
                 gmail_draft_id=message.gmail_draft_id,
                 marked_missing=message.error == DRAFT_MISSING,
                 label=campaign_label(mailbox.label_prefix, campaign_name),
-                thread_known=_thread_known(session, user, message) if with_thread else frozenset(),
+                thread_known=(
+                    _thread_known(session, user, message)
+                    | frozenset(message.thread_known_json or ())
+                    if with_thread
+                    else frozenset()
+                ),
             )
         )
     return tuple(found)
@@ -1495,21 +1580,35 @@ def _tracked(
 def reconcile_work(session: Session, user: User, *, now: datetime) -> ReconcileWork:
     """What the sender has to look up for ``user``. Read-only.
 
-    - **Leftovers:** ``scheduled`` for :data:`RECONCILE_AFTER` or more (#269).
+    - **Leftovers:** ``scheduled`` for :data:`RECONCILE_AFTER` or more (#269), and
+      not searched in the last :data:`RECONCILE_SEARCH_EVERY`. At most
+      :data:`RECONCILE_BATCH` per mailbox, so one that cannot be searched never
+      holds another mailbox's slots (#273 review).
     - **Drafts:** ``drafted`` with a Gmail draft id, for the drafts poll (spec 11.5).
-    - **Discarded drafts:** ``discarded`` and still holding a draft id: a merge
-      discarded a drafted message, and the Gmail draft may still be there (#269).
+
+    A ``discarded`` message's Gmail draft, if it has one, is left where it is:
+    netkeeper deletes nothing in Gmail (ADR 0003; #273, question 2).
     """
-    leftovers = _tracked(
-        session,
-        user,
-        scoped(user, Message)
-        .where(
-            Message.status == MessageStatus.SCHEDULED,
-            Message.scheduled_at <= now - RECONCILE_AFTER,
+    due = scoped(user, Message).where(
+        Message.status == MessageStatus.SCHEDULED,
+        Message.scheduled_at <= now - RECONCILE_AFTER,
+        or_(
+            Message.reconcile_last_miss_at.is_(None),
+            Message.reconcile_last_miss_at <= now - RECONCILE_SEARCH_EVERY,
+        ),
+    )
+    mailbox_ids = session.scalars(
+        scoped(user, Mailbox).with_only_columns(Mailbox.id).order_by(Mailbox.id)
+    ).all()
+    leftovers = tuple(
+        tracked
+        for mailbox_id in mailbox_ids
+        for tracked in _tracked(
+            session,
+            user,
+            due.where(Mailbox.id == mailbox_id).limit(RECONCILE_BATCH),
+            with_thread=False,
         )
-        .limit(RECONCILE_BATCH),
-        with_thread=False,
     )
     drafts = _tracked(
         session,
@@ -1519,15 +1618,7 @@ def reconcile_work(session: Session, user: User, *, now: datetime) -> ReconcileW
         ),
         with_thread=True,
     )
-    discarded = _tracked(
-        session,
-        user,
-        scoped(user, Message)
-        .where(Message.status == MessageStatus.DISCARDED, Message.gmail_draft_id.is_not(None))
-        .limit(RECONCILE_BATCH),
-        with_thread=True,
-    )
-    return ReconcileWork(leftovers, drafts, discarded)
+    return ReconcileWork(leftovers, drafts)
 
 
 def _tracked_message(
@@ -1609,8 +1700,10 @@ def settle_drafted(
     gmail_message_id: str,
     gmail_thread_id: str,
     gmail_draft_id: str | None,
+    thread_known: Collection[str] = (),
 ) -> bool:
-    """A leftover Gmail has as a draft: ``drafted``, waiting for the person."""
+    """A leftover Gmail has as a draft: ``drafted``, waiting for the person.
+    ``thread_known`` is the other Gmail message ids in its thread (:class:`SendResult`)."""
     _require_writer(session, "settle_drafted")
     message = _tracked_message(session, user, message_id, (MessageStatus.SCHEDULED,))
     if message is None:
@@ -1620,23 +1713,48 @@ def settle_drafted(
     message.gmail_message_id = gmail_message_id
     message.gmail_thread_id = gmail_thread_id
     message.gmail_draft_id = gmail_draft_id
+    message.thread_known_json = sorted(thread_known)
     session.flush()
     _after_settling(session, user, settings, message, fired=True)
     log.info("message %d is drafted (found in Gmail)", message_id)
     return True
 
 
-def settle_not_sent(session: Session, user: User, settings: Settings, message_id: int) -> bool:
-    """A leftover Gmail does not have, :data:`RECONCILE_AFTER` after its claim. It is
-    never sent again (#269):
+def settle_not_sent(
+    session: Session, user: User, settings: Settings, message_id: int, *, now: datetime
+) -> bool:
+    """A search for a leftover's Message-ID found nothing. It is never sent again (#269).
+
+    One empty search rules nothing out: Gmail's search can lag a send. The miss is
+    counted, and the message stays ``scheduled`` until :data:`RECONCILE_GIVE_UP_MISSES`
+    searches have found nothing over at least :data:`RECONCILE_GIVE_UP_AFTER` (#273
+    review). Then:
 
     - ``discarded`` when nothing would send it anyway: its enrollment is over, or
       holds another message of the same step (a merge combined two).
     - Otherwise ``failed``, and the enrollment stays parked for a person.
+
+    True once it is settled.
     """
     _require_writer(session, "settle_not_sent")
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
     message = _tracked_message(session, user, message_id, (MessageStatus.SCHEDULED,))
     if message is None:
+        return False
+    message.reconcile_misses += 1
+    message.reconcile_first_miss_at = message.reconcile_first_miss_at or now
+    message.reconcile_last_miss_at = now
+    if (
+        message.reconcile_misses < RECONCILE_GIVE_UP_MISSES
+        or now - message.reconcile_first_miss_at < RECONCILE_GIVE_UP_AFTER
+    ):
+        message.error = (
+            f"not found in Gmail yet ({message.reconcile_misses} searches);"
+            " searching again, never sending again"
+        )
+        session.flush()
+        log.info("message %d is not in Gmail's search yet; it waits", message_id)
         return False
     enrollment = _enrollment(session, user, message.enrollment_id)
     twin = session.scalar(
@@ -1679,7 +1797,7 @@ def settle_draft_missing(session: Session, user: User, message_id: int) -> bool:
         return False
     message.status = MessageStatus.DISCARDED
     message.error = None
-    message.gmail_draft_id = None  # gone already: nothing for the discarded-draft pass
+    message.gmail_draft_id = None  # gone from Gmail already
     enrollment = _enrollment(session, user, message.enrollment_id)
     if enrollment.status in REMOVABLE_STATUSES:
         _end(session, user, enrollment, EnrollmentStatus.REMOVED, DRAFT_DISCARDED_REASON)
@@ -1694,15 +1812,6 @@ def settle_draft_present(session: Session, user: User, message_id: int) -> None:
     message = _tracked_message(session, user, message_id, (MessageStatus.DRAFTED,))
     if message is not None and message.error == DRAFT_MISSING:
         message.error = None
-        session.flush()
-
-
-def forget_draft(session: Session, user: User, message_id: int) -> None:
-    """A discarded message's Gmail draft is deleted, or was gone: drop its id (#269)."""
-    _require_writer(session, "forget_draft")
-    message = _tracked_message(session, user, message_id, (MessageStatus.DISCARDED,))
-    if message is not None:
-        message.gmail_draft_id = None
         session.flush()
 
 

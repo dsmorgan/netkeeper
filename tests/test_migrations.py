@@ -1953,3 +1953,44 @@ def test_0020_downgrades_to_mailboxes_without_it(migration_engine: Engine) -> No
     assert "generation" not in columns
     with migration_engine.begin() as connection:
         assert _count(connection, "mailboxes") == 1
+
+
+# --- message reconcile state (0021, P3-07 review) ----------------------------------------
+
+_RECONCILE_COLUMNS = (
+    "thread_known_json",
+    "reconcile_misses",
+    "reconcile_first_miss_at",
+    "reconcile_last_miss_at",
+)
+
+
+def test_0021_starts_every_message_with_no_misses_and_nothing_known(
+    migration_engine: Engine,
+) -> None:
+    migrations.upgrade(migration_engine, "0020")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+    migrations.upgrade(migration_engine, "0021")
+    with migration_engine.begin() as connection:
+        row = connection.execute(
+            text(f"SELECT {', '.join(_RECONCILE_COLUMNS)} FROM messages WHERE id = 1")
+        ).one()
+        assert tuple(row) == (None, 0, None, None)
+        _insert_message(connection, id=2, enrollment_id=1, contact_id=1, step_id=1)
+        found = connection.execute(text("SELECT reconcile_misses FROM messages WHERE id = 2"))
+        assert found.scalar_one() == 0  # the default fills it
+
+
+def test_0021_downgrades_to_messages_without_it(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0021")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+        connection.execute(
+            text("UPDATE messages SET reconcile_misses = 2, thread_known_json = '[\"a\"]'")
+        )
+    migrations.downgrade(migration_engine, "0020")
+    columns = {column["name"] for column in inspect(migration_engine).get_columns("messages")}
+    assert columns.isdisjoint(_RECONCILE_COLUMNS)
+    with migration_engine.begin() as connection:
+        assert _count(connection, "messages") == 1

@@ -1488,8 +1488,22 @@ def test_reconcile_takes_a_bounded_batch_of_leftovers(world: World) -> None:
     assert [t.message_id for t in work.leftovers] == made[:10]
 
 
-def _settle_not_sent(world: World, message_id: int, session: Session) -> bool:
-    return engine_module.settle_not_sent(session, world.user, SETTINGS, message_id)
+def _settle_not_sent(
+    world: World, message_id: int, session: Session, *, now: datetime = NOW
+) -> bool:
+    return engine_module.settle_not_sent(session, world.user, SETTINGS, message_id, now=now)
+
+
+GIVE_UP_EVERY = engine_module.RECONCILE_GIVE_UP_AFTER / (engine_module.RECONCILE_GIVE_UP_MISSES - 1)
+"""Misses this far apart rule a leftover out on the last one the give-up needs."""
+
+
+def _rule_out(world: World, message_id: int) -> list[bool]:
+    """Every empty search the give-up needs, spread over its span: what each returned."""
+    return [
+        world.write(partial(_settle_not_sent, world, message_id, now=NOW + GIVE_UP_EVERY * n))
+        for n in range(engine_module.RECONCILE_GIVE_UP_MISSES)
+    ]
 
 
 def test_a_leftover_not_in_gmail_with_a_twin_is_discarded_the_other_failed(world: World) -> None:
@@ -1509,7 +1523,7 @@ def test_a_leftover_not_in_gmail_with_a_twin_is_discarded_the_other_failed(world
 
     first, second = world.write(two)
     for message_id in (first, second):
-        world.write(partial(_settle_not_sent, world, message_id))
+        assert _rule_out(world, message_id)[-1] is True
     statuses = {m.id: m.status for m in world.messages(enrollment_id)}
     assert statuses == {first: MessageStatus.DISCARDED, second: MessageStatus.FAILED}
     assert world.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
@@ -1521,7 +1535,7 @@ def test_settling_a_message_that_moved_on_changes_nothing(world: World) -> None:
     [message] = world.messages(enrollment_id)
     assert message.status is MessageStatus.SENT
     changed = world.write(
-        lambda s: engine_module.settle_not_sent(s, world.user, SETTINGS, message.id)
+        lambda s: engine_module.settle_not_sent(s, world.user, SETTINGS, message.id, now=NOW)
     )
     assert changed is False
     assert world.messages(enrollment_id)[0].status is MessageStatus.SENT
@@ -1589,3 +1603,155 @@ def test_a_new_campaign_takes_any_mailbox_whatever_its_status(
     """The lock is on a stored campaign: one being created has sent nothing yet."""
     world = make_world(session_factory, status=CampaignStatus.ACTIVE)
     assert world.campaign.mailbox_id == world.mailbox.id
+
+
+# --- #273 review: search lag, a fair batch, not sent, and pinned choices ------------------
+
+
+def test_the_reconcile_constants_are_pinned() -> None:
+    """Safety constants against numbers written out here (CLAUDE.md)."""
+    assert timedelta(minutes=20) == engine_module.RECONCILE_SEARCH_EVERY
+    assert engine_module.RECONCILE_GIVE_UP_MISSES == 4
+    assert timedelta(hours=2) == engine_module.RECONCILE_GIVE_UP_AFTER
+    assert timedelta(minutes=15) == engine_module.RETRY_AFTER
+
+
+def test_one_empty_search_never_rules_a_leftover_out(world: World) -> None:
+    """Gmail's search can lag a send: misses are counted, and only enough of them, over
+    enough time, rule it out."""
+    [message_id] = _leftovers(world, 1, at=NOW)
+    assert _rule_out(world, message_id) == [False, False, False, True]
+    [message] = world.messages()
+    assert message.status is MessageStatus.FAILED
+    assert (message.reconcile_misses, message.reconcile_first_miss_at) == (4, NOW)
+
+
+@pytest.mark.parametrize(
+    "gaps",
+    [
+        # Many misses, close together: a lagging search, not an absent message.
+        [timedelta(minutes=1)] * 20,
+        # Few misses, far apart.
+        [timedelta(hours=5)] * (4 - 2),
+    ],
+    ids=["many-close", "few-far"],
+)
+def test_misses_rule_nothing_out_until_both_count_and_time_are_met(
+    world: World, gaps: list[timedelta]
+) -> None:
+    [message_id] = _leftovers(world, 1, at=NOW)
+    at = NOW
+    for gap in [timedelta(0), *gaps]:
+        assert world.write(partial(_settle_not_sent, world, message_id, now=at)) is False
+        at += gap
+    [message] = world.messages()
+    assert message.status is MessageStatus.SCHEDULED
+    assert message.error is not None and "not found in Gmail yet" in message.error
+
+
+def test_a_leftover_searched_recently_waits_its_turn(world: World) -> None:
+    [message_id] = _leftovers(world, 1, at=NOW)
+    first = NOW + timedelta(minutes=10)
+    world.write(partial(_settle_not_sent, world, message_id, now=first))
+
+    def listed(now: datetime) -> list[int]:
+        work = world.read(lambda s: engine_module.reconcile_work(s, world.user, now=now))
+        return [t.message_id for t in work.leftovers]
+
+    assert listed(first + timedelta(minutes=19)) == []
+    assert listed(first + timedelta(minutes=20)) == [message_id]
+
+
+def test_settle_not_sent_refuses_a_naive_time(world: World) -> None:
+    [message_id] = _leftovers(world, 1, at=NOW)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        world.write(partial(_settle_not_sent, world, message_id, now=datetime(2026, 9, 29)))
+
+
+def test_reconcile_takes_a_batch_per_mailbox(world: World) -> None:
+    """A mailbox whose leftovers cannot be searched never holds another mailbox's slots."""
+    first = _leftovers(world, engine_module.RECONCILE_BATCH + 2, at=NOW)
+
+    def elsewhere(session: Session) -> int:
+        user = session.get(User, world.user.id)
+        assert user is not None
+        mailbox = make_mailbox(session, user, email="other-box@example.test")
+        campaign = factories.make_campaign(session, user, mailbox_id=mailbox.id)
+        contact = factories.make_contact(session, user, emails=["other@example.test"])
+        enrollment = factories.make_enrollment(session, campaign, contact)
+        return factories.make_message(
+            session, enrollment, status=MessageStatus.SCHEDULED, sent_at=None, scheduled_at=NOW
+        ).id
+
+    other = world.write(elsewhere)
+    work = world.read(
+        lambda s: engine_module.reconcile_work(s, world.user, now=NOW + timedelta(hours=1))
+    )
+    assert [t.message_id for t in work.leftovers] == [
+        *first[: engine_module.RECONCILE_BATCH],
+        other,
+    ]
+
+
+def test_settle_sent_never_lowers_the_current_step(world: World) -> None:
+    """A late find of step 1 on an enrollment already past step 2 leaves it where it is."""
+    enrollment_id = world.enroll_new(current_step=2, next_action_at=None)
+
+    def leftover(session: Session) -> int:
+        enrollment = get_scoped(session, world.user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        return factories.make_message(
+            session, enrollment, position=1, status=MessageStatus.SCHEDULED, sent_at=None
+        ).id
+
+    message_id = world.write(leftover)
+    world.write(
+        lambda s: engine_module.settle_sent(
+            s,
+            world.user,
+            SETTINGS,
+            message_id,
+            expect=(MessageStatus.SCHEDULED,),
+            at=NOW,
+            gmail_message_id="gm",
+            gmail_thread_id="th",
+        )
+    )
+    assert world.enrollment(enrollment_id).current_step == 2
+
+
+def test_a_follow_up_joins_the_thread_of_the_first_step_actually_sent(world: World) -> None:
+    """``_thread_id``: a failed or discarded message is no thread to reply in, and the
+    first sent is the earliest by ``sent_at``, not by row id."""
+    enrollment_id = world.enroll_new(next_action_at=None)
+
+    def history(session: Session) -> None:
+        enrollment = get_scoped(session, world.user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        for status, thread, sent_at in [
+            (MessageStatus.FAILED, "failed-thread", NOW - timedelta(days=9)),
+            (MessageStatus.DISCARDED, "discarded-thread", NOW - timedelta(days=8)),
+            (MessageStatus.SENT, "later-thread", NOW - timedelta(days=1)),
+            (MessageStatus.SENT, "earlier-thread", NOW - timedelta(days=5)),
+        ]:
+            factories.make_message(
+                session, enrollment, status=status, sent_at=sent_at, gmail_thread_id=thread
+            )
+
+    world.write(history)
+    found = world.read(lambda s: engine_module._thread_id(s, world.user, enrollment_id))
+    assert found == "earlier-thread"
+
+
+async def test_stop_holds_every_claim_and_start_lifts_it(world: World) -> None:
+    enrollment_id = world.enroll_new()
+    engine = CampaignEngine(world.factory, SETTINGS, world.sender, clock=lambda: NOW)
+    await engine.stop()
+    await engine.tick_once()
+    assert world.messages(enrollment_id) == []  # stopping: nothing is claimed
+    engine.start()
+    try:
+        await engine.tick_once()
+    finally:
+        await engine.stop()
+    assert len(world.messages(enrollment_id)) == 1
