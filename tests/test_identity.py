@@ -2250,7 +2250,13 @@ E = EnrollmentStatus
         ((E.ACTIVE, 3), (E.PAUSED, 1), (E.PAUSED, 3)),
         ((E.PAUSED, 1), (E.ACTIVE, 3), (E.PAUSED, 3)),
         ((E.PENDING, None), (E.PAUSED, None), (E.PAUSED, None)),
+        # The survivor pending wins the tie itself, and the loser's pause still holds (#247).
+        ((E.PAUSED, None), (E.PENDING, None), (E.PAUSED, None)),
         ((E.COMPLETED, 3), (E.PAUSED, 1), (E.COMPLETED, 3)),  # nothing left to pause
+        # At a tied step, completed beats active, on either side (#247 review).
+        ((E.COMPLETED, 3), (E.ACTIVE, 3), (E.COMPLETED, 3)),
+        ((E.ACTIVE, 3), (E.COMPLETED, 3), (E.COMPLETED, 3)),
+        ((E.COMPLETED, 3), (E.PAUSED, 3), (E.COMPLETED, 3)),
         # One the person or the contact ended is never restarted by a merge, and the
         # step is the higher one either way (#242 review, 2).
         ((E.REPLIED, 1), (E.ACTIVE, 2), (E.REPLIED, 2)),
@@ -2295,6 +2301,91 @@ def test_merge_combines_two_enrollments_in_one_campaign(
     assert (set_aside.status, set_aside.exit_reason) == (EnrollmentStatus.REMOVED, "merged")
 
 
+def test_a_chained_merge_through_a_completed_contact_keeps_the_pause(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """#247 review: A paused at 1, B completed at 3, C active at 3. A into B, then B into C.
+
+    Before the fix the second merge tied at step 3 and the active one won, so the
+    person's pause on A came back as an active enrollment.
+    """
+    alice, _ = users
+    campaign = factories.make_campaign(writer, alice)
+    a, b, c = (factories.make_contact(writer, alice) for _ in range(3))
+    factories.make_enrollment(writer, campaign, a, status=E.PAUSED, current_step=1)
+    factories.make_enrollment(writer, campaign, b, status=E.COMPLETED, current_step=3)
+    factories.make_enrollment(writer, campaign, c, status=E.ACTIVE, current_step=3)
+
+    merge(writer, alice, b.id, a.id)
+    merge(writer, alice, c.id, b.id)
+    writer.expire_all()
+
+    [kept] = enrollments_of(writer, alice, c.id)
+    assert (kept.status, kept.current_step) == (E.COMPLETED, 3)
+
+
+@pytest.mark.parametrize("stopped", [E.REMOVED, E.REPLIED, E.OPTED_OUT, E.BOUNCED, E.COMPLETED])
+@pytest.mark.parametrize("winner_is_survivor", [True, False])
+def test_merge_discards_a_stopped_winners_waiting_messages(
+    writer: Session, users: tuple[User, User], stopped: EnrollmentStatus, winner_is_survivor: bool
+) -> None:
+    """#247 review: a stopped winner at step 1 still holding a step-2 message waiting to go.
+
+    Nothing would send it, because only an active enrollment fires, but it must not
+    sit there reading as a step to come. What was sent stays as it is.
+    """
+    alice, _ = users
+    campaign = factories.make_campaign(
+        writer, alice, channels=(TemplateChannel.EMAIL, TemplateChannel.EMAIL)
+    )
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    winning = {"status": stopped, "current_step": 1}
+    losing = {"status": E.PENDING, "current_step": None}
+    to_loser = factories.make_enrollment(
+        writer, campaign, loser, **(losing if winner_is_survivor else winning)
+    )
+    to_survivor = factories.make_enrollment(
+        writer, campaign, survivor, **(winning if winner_is_survivor else losing)
+    )
+    winner = to_survivor if winner_is_survivor else to_loser
+    sent = factories.make_message(writer, winner, position=1).id
+    waiting = factories.make_message(
+        writer, winner, position=2, status=MessageStatus.SCHEDULED, sent_at=None
+    ).id
+
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+
+    [kept] = enrollments_of(writer, alice, survivor.id)
+    assert kept.status is stopped
+    statuses = {m.id: m.status for m in writer.scalars(scoped(alice, Message))}
+    assert statuses == {sent: MessageStatus.SENT, waiting: MessageStatus.DISCARDED}
+
+
+def test_merge_keeps_a_live_winners_waiting_message(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """The discard above is for a stopped winner only: a live one keeps its next step."""
+    alice, _ = users
+    campaign = factories.make_campaign(
+        writer, alice, channels=(TemplateChannel.EMAIL, TemplateChannel.EMAIL)
+    )
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    factories.make_enrollment(writer, campaign, loser, status=E.PENDING)
+    to_survivor = factories.make_enrollment(writer, campaign, survivor, current_step=1)
+    waiting = factories.make_message(
+        writer, to_survivor, position=2, status=MessageStatus.SCHEDULED, sent_at=None
+    ).id
+
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+
+    kept = writer.scalars(scoped(alice, Message).where(Message.id == waiting)).one()
+    assert kept.status is MessageStatus.SCHEDULED
+
+
 def test_the_stop_precedence_is_pinned() -> None:
     """Safety constants against words written out here (CLAUDE.md)."""
     assert [s.value for s in identity.STOP_PRECEDENCE] == [
@@ -2308,6 +2399,7 @@ def test_the_stop_precedence_is_pinned() -> None:
         "drafted",
         "prefilled",
     }
+    assert {s.value for s in identity.LIVE_AFTER_MERGE} == {"pending", "active", "paused"}
 
 
 @pytest.mark.parametrize("losers_wins", [True, False])
