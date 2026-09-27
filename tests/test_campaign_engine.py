@@ -531,7 +531,10 @@ def test_a_step_with_an_outbound_message_already_is_refused(world: World) -> Non
     assert world.enrollment(enrollment_id).next_action_at is None  # parked, not retried
 
 
-def test_a_discarded_message_does_not_count_as_the_step_fired(world: World) -> None:
+def test_a_discarded_message_of_the_step_counts_too(world: World) -> None:
+    """Review of #264: a merge discards the outranked side's ``scheduled`` message, which
+    may be in the sender's hands. If the process stops before the send is recorded, the
+    discarded row is all that says the step fired: it must refuse the step."""
     enrollment_id = world.enroll_new()
 
     def discarded(session: Session) -> None:
@@ -542,7 +545,8 @@ def test_a_discarded_message_does_not_count_as_the_step_fired(world: World) -> N
         )
 
     world.write(discarded)
-    assert [f.enrollment_id for f, _ in world.tick().fired] == [enrollment_id]
+    result = world.tick()
+    assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.STEP_ALREADY_SENT,)
 
 
 def test_a_crash_after_the_claim_never_sends_the_step_again(world: World) -> None:
@@ -981,3 +985,114 @@ async def test_the_engine_ticks_in_a_worker_thread(world: World) -> None:
 def test_the_engine_refuses_no_interval(world: World) -> None:
     with pytest.raises(ValueError, match="positive"):
         CampaignEngine(world.factory, SETTINGS, None, interval_s=0)
+
+
+# --- review of #264 ------------------------------------------------------------------------
+
+
+def test_blocked_rows_never_starve_another_campaign(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows of a capped campaign keep their old due time. However many there are, they are
+    left out of the scan, so another campaign on another mailbox still fires."""
+    monkeypatch.setattr(engine_module, "SCAN_LIMIT", 2)
+    monkeypatch.setattr(engine_module, "PAGE_SIZE", 1)
+    capped = make_world(session_factory, daily_cap=0)
+    ahead = [capped.enroll_new(next_action_at=NOW - timedelta(days=1)) for _ in range(3)]
+
+    def other_campaign(session: Session) -> int:
+        user = session.get(User, capped.user.id)
+        assert user is not None
+        mailbox = make_mailbox(session, user, email="other-box@example.test")
+        campaign = factories.make_campaign(session, user, mailbox_id=mailbox.id)
+        contact = factories.make_contact(session, user, emails=["behind@example.test"])
+        return factories.make_enrollment(session, campaign, contact, next_action_at=NOW).id
+
+    behind = capped.write(other_campaign)
+    result = capped.tick()
+    assert [f.enrollment_id for f, _ in result.fired] == [behind]
+    assert reasons_of(result, ahead[0]) == (Skip.CAMPAIGN_AT_CAP,)
+
+
+def test_linkedin_rows_never_starve_an_email_step(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(engine_module, "SCAN_LIMIT", 2)
+    monkeypatch.setattr(engine_module, "PAGE_SIZE", 1)
+    world = make_world(session_factory, channels=(LINKEDIN, EMAIL))
+    linkedin = [world.enroll_new(next_action_at=NOW - timedelta(days=1)) for _ in range(3)]
+    email_step = world.enroll_new(current_step=1)
+
+    def sent_step_one(session: Session) -> None:
+        enrollment = get_scoped(session, world.user, Enrollment, email_step)
+        assert enrollment is not None
+        factories.make_message(session, enrollment, position=1, sent_at=NOW - timedelta(days=8))
+
+    world.write(sent_step_one)
+    result = world.tick()
+    assert [f.enrollment_id for f, _ in result.fired] == [email_step]
+    assert reasons_of(result, linkedin[0]) == (Skip.LINKEDIN_STEP,)  # reported a page at most
+
+
+@pytest.mark.parametrize(("median", "floor"), [(240, 0), (0, 90), (240, -5)])
+def test_a_spacing_that_is_not_one_holds_every_send(world: World, median: int, floor: int) -> None:
+    """Review of #264: refused before anything is claimed, never after the sender sent."""
+    world.enroll_new()
+    settings = Settings(
+        campaigns=CampaignSettings(
+            send_window_days=ALWAYS_OPEN.send_window_days,
+            send_window_hours=ALWAYS_OPEN.send_window_hours,
+            send_spacing_median_s=median,
+            send_spacing_floor_s=floor,
+        )
+    )
+    results = run_tick(world.factory, settings=settings, sender=world.sender, clock=lambda: NOW)
+    assert results == [] and world.sender.firings == [] and world.messages() == []
+
+
+def test_one_users_failure_does_not_stop_the_next(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alice = make_world(session_factory)
+    bob = make_world(session_factory)
+    alice.enroll_new()
+    theirs = bob.enroll_new()
+    real = engine_module.tick_user
+
+    def failing_for_alice(factory: Any, user_id: int, **kwargs: Any) -> TickResult:
+        if user_id == alice.user.id:
+            raise RuntimeError("boom")
+        return real(factory, user_id, **kwargs)
+
+    monkeypatch.setattr(engine_module, "tick_user", failing_for_alice)
+    results = run_tick(session_factory, settings=SETTINGS, sender=bob.sender, clock=lambda: NOW)
+    assert [(r.user_id, [f.enrollment_id for f, _ in r.fired]) for r in results] == [
+        (bob.user.id, [theirs])
+    ]
+
+
+def test_a_gap_in_step_positions_fires_the_next_position_up(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Review of #264: steps at 1, 2 and 4. After step 2, step 4 fires; nothing ends early."""
+    world = make_world(session_factory)
+
+    def renumber(session: Session) -> None:
+        campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+        assert campaign is not None
+        campaign.steps[2].position = 4
+
+    world.write(renumber)
+    enrollment_id = world.enroll_new(current_step=2)
+
+    def history(session: Session) -> None:
+        enrollment = get_scoped(session, world.user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        factories.make_message(session, enrollment, position=1, sent_at=NOW - timedelta(days=20))
+        factories.make_message(session, enrollment, position=2, sent_at=NOW - timedelta(days=10))
+
+    world.write(history)
+    [(firing, _)] = world.tick().fired
+    assert firing.step_position == 4
+    enrollment = world.enrollment(enrollment_id)
+    assert (enrollment.status, enrollment.current_step) == (EnrollmentStatus.COMPLETED, 4)
