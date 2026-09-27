@@ -1924,3 +1924,32 @@ def test_0019_downgrades_to_campaigns_without_the_key(migration_engine: Engine) 
     with migration_engine.begin() as connection:
         assert _count(connection, "campaigns") == 1
         connection.execute(text("UPDATE campaigns SET mailbox_id = 7 WHERE id = 1"))
+
+
+# --- mailbox generation (0020, #256) -----------------------------------------------------
+
+
+def test_0020_starts_every_mailbox_at_generation_zero(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0019")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_mailbox(connection, id=1)
+    migrations.upgrade(migration_engine, "0020")
+    with migration_engine.begin() as connection:
+        found = connection.execute(text("SELECT generation FROM mailboxes WHERE id = 1"))
+        assert found.scalar_one() == 0
+        _insert_mailbox(connection, id=2, email="other@example.com")  # the default fills it
+        found = connection.execute(text("SELECT generation FROM mailboxes WHERE id = 2"))
+        assert found.scalar_one() == 0
+
+
+def test_0020_downgrades_to_mailboxes_without_it(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0020")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_mailbox(connection, id=1)
+    migrations.downgrade(migration_engine, "0019")
+    columns = {column["name"] for column in inspect(migration_engine).get_columns("mailboxes")}
+    assert "generation" not in columns
+    with migration_engine.begin() as connection:
+        assert _count(connection, "mailboxes") == 1

@@ -350,6 +350,50 @@ def test_a_disconnect_during_the_check_is_not_overwritten(
     assert _row(session_factory, mailbox.id).status_reason == "disconnected"
 
 
+def test_a_reauthorization_during_the_check_is_not_overwritten(
+    session_factory: sessionmaker[Session],
+    connected: tuple[User, Mailbox],
+    fake_google: FakeGoogle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The poll refreshes the old, dead token while a person authorizes again (#256).
+
+    ``keychain_ref`` is the same before and after, so only ``generation`` shows
+    the check's answer is about a grant that has since been replaced.
+    """
+    user, mailbox = connected
+    fake_google.revoke_all()
+    refresh = gmail_oauth.refresh_access_token
+
+    def reauthorize_meanwhile(*args: object, **kwargs: object) -> str:
+        _connect(session_factory, user, fake_google.issue_refresh_token())
+        return refresh(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(gmail_oauth, "refresh_access_token", reauthorize_meanwhile)
+    result = service.check_mailbox(session_factory, user.id, mailbox.id)
+    assert result == service.CheckResult(mailbox.id, user.id, MailboxStatus.OK, None, False)
+    row = _row(session_factory, mailbox.id)
+    assert (row.status, row.status_reason, row.keychain_ref) == (
+        MailboxStatus.OK,
+        None,
+        mailbox.keychain_ref,
+    )
+
+
+def test_every_authorization_moves_the_generation(
+    session_factory: sessionmaker[Session],
+) -> None:
+    user = _user(session_factory)
+    first = _connect(session_factory, user, "rt-1")
+    second = _connect(session_factory, user, "rt-2")
+    with session_scope(session_factory, write=True) as session:
+        service.disconnect(session, user, service.get_mailbox(session, user, first.id))
+    third = _connect(session_factory, user, "rt-3")
+    assert first.id == second.id == third.id
+    assert (first.generation, second.generation, third.generation) == (1, 2, 3)
+    assert _row(session_factory, first.id).generation == 3
+
+
 def test_the_check_holds_no_session_while_it_asks_google(
     session_factory: sessionmaker[Session],
     connected: tuple[User, Mailbox],

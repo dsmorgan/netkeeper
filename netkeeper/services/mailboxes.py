@@ -26,7 +26,8 @@ revoked token shows as the banner within one poll.
 
 **Sessions.** No HTTP call is made while a session is open: a check reads what
 it needs, closes the session, calls Google, then opens a writer to record the
-result, and records it only when the mailbox is still the one it checked.
+result, and records it only when the mailbox is still the one it checked: still
+``ok``, and not authorized again since (``generation``).
 """
 
 from __future__ import annotations
@@ -225,6 +226,7 @@ def connect(
     mailbox.status = MailboxStatus.OK
     mailbox.status_reason = None
     mailbox.checked_at = now or utcnow()
+    mailbox.generation += 1  # a check of the grant before this one no longer applies
     session.flush()
     keychain.set_secret(user.id, mailbox.keychain_ref, refresh_token)
     log.info("mailbox %d connected", mailbox.id)
@@ -326,6 +328,7 @@ def check_mailbox(
         if mailbox.status is not MailboxStatus.OK:
             return CheckResult(mailbox.id, user_id, mailbox.status, mailbox.status_reason, False)
         ref = mailbox.keychain_ref
+        generation = mailbox.generation
 
     reason: str | None = None
     try:
@@ -379,7 +382,7 @@ def _record(
         mailbox = None if user is None else get_scoped(session, user, Mailbox, mailbox_id)
         if mailbox is None:
             return None
-        if mailbox.status is not MailboxStatus.OK or mailbox.keychain_ref != ref:
+        if mailbox.status is not MailboxStatus.OK or mailbox.generation != generation:
             # A person disconnected or re-authorized it while we were asking Google.
             return CheckResult(mailbox.id, user_id, mailbox.status, mailbox.status_reason, False)
         if reason is None:
