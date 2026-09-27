@@ -8,7 +8,9 @@ the event bus and the task runner, all kept on ``app.state``, along with the
 signer behind bulk count confirmations. Given an extractor (``netkeeper
 serve``), it also starts the scheduler (P2-10), whose scheduled LinkedIn runs
 fire only on an account a person armed, and the mailbox poll (P3-01), which
-refreshes each Gmail token every ``[campaigns] reply_poll_minutes``. API
+refreshes each Gmail token every ``[campaigns] reply_poll_minutes``, and the
+campaign engine's minute tick (P3-06), which fires only through the sender it
+is given (P3-07 builds the real one; without one it does nothing). API
 modules under :mod:`netkeeper.web.api` are discovered, so adding an endpoint
 never edits this file.
 """
@@ -35,6 +37,7 @@ from netkeeper.crm.tags import ensure_default_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import install_scope_guard
+from netkeeper.services.campaign_engine import CampaignEngine, Sender
 from netkeeper.services.events import EventBus
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.mailboxes import MailboxMonitor, PendingAuthorizations
@@ -59,6 +62,7 @@ def create_app(
     engine: Engine | None = None,
     extractor: ServeExtractor | None = None,
     gmail: GoogleEndpoints | None = None,
+    campaign_sender: Sender | None = None,
 ) -> FastAPI:
     """Build the application without starting it.
 
@@ -76,6 +80,10 @@ def create_app(
 
     ``gmail`` is where the Gmail OAuth flow sends its requests; None is Google
     itself (``netkeeper.campaigns.gmail_oauth.GOOGLE``). Tests pass a loopback fake.
+
+    ``campaign_sender`` is what the campaign engine hands each firing to; the
+    engine's minute tick starts with the scheduler, and with no sender it fires
+    nothing (P3-07 supplies the Gmail one).
     """
     resolved = load_settings() if settings is None else settings
 
@@ -85,6 +93,7 @@ def create_app(
         tasks: TaskRunner | None = None
         serving: ServeScheduler | None = None
         monitor: MailboxMonitor | None = None
+        campaigns: CampaignEngine | None = None
         try:
             tasks = _start(app, active, resolved)
             app.state.gmail_endpoints = gmail
@@ -106,8 +115,13 @@ def create_app(
                 )
                 monitor.start()
                 app.state.mailbox_monitor = monitor
+                campaigns = CampaignEngine(app.state.session_factory, resolved, campaign_sender)
+                campaigns.start()
+                app.state.campaign_engine = campaigns
             yield
         finally:
+            if campaigns is not None:
+                await campaigns.stop()
             if monitor is not None:
                 await monitor.stop()
             if serving is not None:
@@ -168,6 +182,7 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     # Gmail authorizations waiting for Google's redirect; like the signer, never written down.
     app.state.pending_oauth = PendingAuthorizations()
     app.state.mailbox_monitor = None
+    app.state.campaign_engine = None
     return tasks
 
 
