@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+import httplib2
 from keyring.backend import KeyringBackend
 from keyring.errors import KeyringError, PasswordDeleteError
 
@@ -248,3 +249,76 @@ class MemoryKeyring(KeyringBackend):
     def _check(self) -> None:
         if self.broken:
             raise KeyringError("the fake Keychain is locked")
+
+
+@dataclass
+class Sent:
+    """One request :class:`RecordingHttp` saw."""
+
+    method: str
+    uri: str
+    body: Any
+    headers: dict[str, str]
+
+    @property
+    def path(self) -> str:
+        return urlsplit(self.uri).path
+
+    @property
+    def query(self) -> dict[str, list[str]]:
+        return parse_qs(urlsplit(self.uri).query)
+
+    def json(self) -> Any:
+        return json.loads(self.body)
+
+
+@dataclass
+class RecordingHttp:
+    """The transport under ``GmailClient``: records every request, answers from a script.
+
+    Spec 16's "fake service object that records calls and replays canned
+    responses", at the HTTP layer so the real client's request building and
+    error mapping run. Each answer is ``(status, body)`` or an exception to
+    raise. Running out of answers fails the test, so nothing falls through to
+    a network.
+    """
+
+    answers: list[tuple[int, Any] | BaseException] = field(default_factory=list)
+    requests: list[Sent] = field(default_factory=list)
+    timeout: float | None = None
+
+    def answer(self, status: int, body: Any = None) -> RecordingHttp:
+        self.answers.append((status, {} if body is None else body))
+        return self
+
+    def fail(self, exc: BaseException) -> RecordingHttp:
+        self.answers.append(exc)
+        return self
+
+    def request(
+        self,
+        uri: str,
+        method: str = "GET",
+        body: Any = None,
+        headers: dict[str, str] | None = None,
+        **_: Any,
+    ) -> tuple[Any, bytes]:
+        self.requests.append(Sent(method, uri, body, dict(headers or {})))
+        assert self.answers, f"no answer scripted for {method} {uri}"
+        answer = self.answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        status, payload = answer
+        raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+        return httplib2.Response({"status": str(status), "content-type": "application/json"}), raw
+
+
+def gmail_error(status: int, reason: str, message: str = "a refusal") -> dict[str, Any]:
+    """A Gmail API error body."""
+    return {
+        "error": {
+            "code": status,
+            "message": message,
+            "errors": [{"domain": "global", "reason": reason, "message": message}],
+        }
+    }

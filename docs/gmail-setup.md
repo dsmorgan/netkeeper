@@ -138,7 +138,18 @@ The Settings page and `netkeeper gmail status` show a short reason code:
 | `state_mismatch` | Google's answer didn't match an authorization started in the last 10 minutes, or the server restarted in between | Start again from Settings |
 | `other_mailbox_connected` | A different Gmail account is already connected | Disconnect it first |
 | `keychain` | The Keychain refused to read or write | Unlock the login Keychain and try again |
+| `insufficientPermissions`, `accessNotConfigured`, `authError` | Gmail refused the token during a campaign's call (a send, a draft, a reply poll) | Check the Gmail API is enabled (step 2), then authorize again |
 
-A network failure or an error on Google's side never marks a mailbox. netkeeper tries again at the next poll.
+A network failure, an error on Google's side, or a Gmail rate limit never marks a mailbox. netkeeper tries again at the next poll.
 
 On Linux, `keyring` uses the Secret Service (for example GNOME Keyring). Without a running Secret Service, every step that stores a secret fails with a Keychain error.
+
+## Checking the client against your account
+
+The test suite never talks to Gmail; the engine's tests run against an in-memory fake. One test checks the real client, and the fake's threading rule, against your own account. It is skipped unless you ask for it:
+
+```sh
+NETKEEPER_GMAIL_TESTS=1 NETKEEPER_TEST_TIME_LIMIT_S=60 .venv/bin/python -m pytest tests/test_gmail_live.py -v
+```
+
+It reads the OAuth client and token from your login Keychain, for the mailbox `netkeeper gmail login` connected (user 1, mailbox 1; set `NETKEEPER_GMAIL_TEST_USER` and `NETKEEPER_GMAIL_TEST_MAILBOX` if yours differ; `netkeeper gmail status` shows the mailbox's id). It sends two short messages from the account to itself, one a follow-up in the other's thread, and leaves them and one draft under the label `netkeeper/live-test`. Delete them whenever you like. The raised time limit is for Gmail's round trips; the offline suite never needs it.
