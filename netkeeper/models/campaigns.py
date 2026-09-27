@@ -330,6 +330,15 @@ class Enrollment(UserOwned, TimestampMixin, Base):
     # Per-channel conversation handles the follow-ups reuse (spec 11.5, 11.6): the Gmail
     # thread and step-1 message ids, the LinkedIn conversation URN.
     channel_ids_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    # Consecutive sends that certainly sent nothing (``not_sent``, P3-07; 0022), since
+    # when, and the latest one's reason: each retry waits longer, and after enough of
+    # them over long enough the step is failed for a person (#280). Cleared by any
+    # other outcome.
+    not_sent_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    not_sent_since: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    not_sent_error: Mapped[str | None] = mapped_column(String(500))
 
     campaign: Mapped[Campaign] = relationship()
 

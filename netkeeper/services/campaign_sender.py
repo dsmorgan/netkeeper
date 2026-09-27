@@ -27,9 +27,10 @@ Sending
   created when missing and applied to each sent message. A draft gets it once
   it is seen sent. A label failure never fails a send that went out.
 - **Outcomes.** Nothing sent, for a reason that may pass, is ``not_sent``,
-  and the engine gives the claim back to try again later: a rate limit, Gmail
-  unavailable before the write, an authorization error, a mailbox that is not
-  ready, a thread that could not be read (#273 review). Nothing sent, for a
+  and the engine gives the claim back to try again later, each time a little
+  later, until a day of tries fails the step for a person (#280): a rate limit,
+  Gmail unavailable before the write, an authorization error, a mailbox that is
+  not ready, a thread that could not be read (#273 review). Nothing sent, for a
   reason a retry would not change, is ``failed`` with a one-line reason: a
   thread that is gone, a message that cannot be built, a Gmail refusal. A
   write whose answer never came
