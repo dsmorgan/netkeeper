@@ -59,7 +59,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings
 from netkeeper.crm import apply as mapping
-from netkeeper.db import session_scope
+from netkeeper.db import off_loop, session_scope
 from netkeeper.linkedin import pacing
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.enrich import (
@@ -186,20 +186,15 @@ class _Gate:
     clock: Clock
     sleep: Sleep
 
-    def _cancelled(self) -> bool:
+    def _cancelled_now(self) -> bool:
         with session_scope(self.factory) as session:
             user = _load_user(session, self.user_id)
             return runs.cancel_requested(session, user, self.run_id)
 
-    async def before_visit(self, number: int) -> StopReason | None:
-        if self._cancelled():
-            log.info("enrichment: cancelled before visit %d", number)
-            return StopReason.CANCELLED
-        now = self.clock()
-        start, end = self.window
-        if not pacing.is_active_at(now, self.settings.timezone, start=start, end=end):
-            log.info("enrichment: the active window closed before visit %d", number)
-            return StopReason.INACTIVE
+    async def _cancelled(self) -> bool:
+        return await off_loop(self._cancelled_now)
+
+    def _spend_visit(self, number: int, now: datetime) -> StopReason | None:
         with session_scope(self.factory, write=True) as session:
             user = _load_user(session, self.user_id)
             try:
@@ -216,16 +211,118 @@ class _Gate:
                 return StopReason.BUDGET
         return None
 
+    async def before_visit(self, number: int) -> StopReason | None:
+        if await self._cancelled():
+            log.info("enrichment: cancelled before visit %d", number)
+            return StopReason.CANCELLED
+        now = self.clock()
+        start, end = self.window
+        if not pacing.is_active_at(now, self.settings.timezone, start=start, end=end):
+            log.info("enrichment: the active window closed before visit %d", number)
+            return StopReason.INACTIVE
+        return await off_loop(self._spend_visit, number, now)
+
     async def pause(self, seconds: float) -> bool:
         remaining = seconds
         while remaining > 0:
             step = min(CANCEL_SLICE_S, remaining)
             await self.sleep(step)
             remaining -= step
-            if self._cancelled():
+            if await self._cancelled():
                 log.info("enrichment: cancelled during the wait between profiles")
                 return False
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class _Started:
+    """What the opening transaction read off the run."""
+
+    run_id: int
+    account_id: int
+    max_visits: int | None
+    planned_already: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _Planned:
+    """What the planning transaction settled: the day's visits, the budget, the targets."""
+
+    visits: TodaysVisits
+    multiplier: float
+    visit_budget: int
+    chosen: list[tuple[int, str]]
+    urns: dict[int, str]
+    skipped: int
+
+
+def _start(
+    factory: sessionmaker[Session], user_id: int, run_id: int | None, clock: Clock
+) -> _Started:
+    with session_scope(factory, write=True) as session:
+        user = _load_user(session, user_id)
+        now = clock()
+        if run_id is None:
+            run_id = runs.create_run(
+                session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=now
+            ).id
+        run = runs.get_run(session, user, run_id)
+        if run.kind is not SyncRunKind.ENRICH:
+            raise ValueError(f"run {run_id} is a {run.kind.value} run, not an enrichment run")
+        return _Started(
+            run_id=run_id,
+            account_id=run.linkedin_account_id,
+            max_visits=run.max_visits,
+            planned_already=run.plan_json is not None,
+        )
+
+
+def _plan(
+    factory: sessionmaker[Session],
+    user_id: int,
+    started: _Started,
+    *,
+    settings: LinkedInSettings,
+    clock: Clock,
+) -> _Planned:
+    run_id, account_id, max_visits = started.run_id, started.account_id, started.max_visits
+    with session_scope(factory, write=True) as session:
+        user = _load_user(session, user_id)
+        now = clock()
+        refuse_if_flagged_or_hot(session, user, account_id, now=now, settings=settings)
+        multiplier = heat_service.cooldown_multiplier(
+            session, user, account_id, now=now, settings=settings.heat
+        )
+        visits = todays_visits(
+            session, user, account_id, now=now, settings=settings, multiplier=multiplier
+        )
+        # A run's own cap only ever lowers the day's budget, never raises it.
+        visit_budget = visits.remaining if max_visits is None else min(visits.remaining, max_visits)
+        if not started.planned_already:
+            chosen = enrich_plan.prioritize(
+                session,
+                user,
+                account_id,
+                now=now,
+                limit=visit_budget,
+                stale_days=settings.enrich_stale_days,
+            )
+            plan = enrich_plan.store_plan(
+                session, user, run_id, [contact_id for contact_id, _ in chosen]
+            )
+        else:
+            plan = enrich_plan.load_plan(session, user, run_id)
+            chosen = enrich_plan.targets_for(session, user, plan)
+        urns = enrich_plan.urns_for(session, user, [contact_id for contact_id, _ in chosen])
+        chosen = [(contact_id, slug) for contact_id, slug in chosen if contact_id in urns]
+        return _Planned(
+            visits=visits,
+            multiplier=multiplier,
+            visit_budget=visit_budget,
+            chosen=chosen,
+            urns=urns,
+            skipped=len(plan.remaining) - len(chosen),
+        )
 
 
 async def enrich_contacts(
@@ -257,53 +354,17 @@ async def enrich_contacts(
     outside) and the exception propagates.
     """
     window = _active_window(settings)
-    with session_scope(factory, write=True) as session:
-        user = _load_user(session, user_id)
-        now = clock()
-        if run_id is None:
-            run_id = runs.create_run(
-                session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=now
-            ).id
-        run = runs.get_run(session, user, run_id)
-        if run.kind is not SyncRunKind.ENRICH:
-            raise ValueError(f"run {run_id} is a {run.kind.value} run, not an enrichment run")
-        account_id = run.linkedin_account_id
-        max_visits = run.max_visits
-        planned_already = run.plan_json is not None
+    # Every session below runs whole off the event loop (#259): open, work, commit
+    # in one off_loop call, so no transaction spans an await. The boundaries are
+    # the ones this function always had, one transaction per block.
+    started = await off_loop(_start, factory, user_id, run_id, clock)
+    run_id = started.run_id
+    account_id = started.account_id
 
-    with runs_recording(factory, user_id, run_id, clock=clock):
-        with session_scope(factory, write=True) as session:
-            user = _load_user(session, user_id)
-            now = clock()
-            refuse_if_flagged_or_hot(session, user, account_id, now=now, settings=settings)
-            multiplier = heat_service.cooldown_multiplier(
-                session, user, account_id, now=now, settings=settings.heat
-            )
-            visits = todays_visits(
-                session, user, account_id, now=now, settings=settings, multiplier=multiplier
-            )
-            # A run's own cap only ever lowers the day's budget, never raises it.
-            visit_budget = (
-                visits.remaining if max_visits is None else min(visits.remaining, max_visits)
-            )
-            if not planned_already:
-                chosen = enrich_plan.prioritize(
-                    session,
-                    user,
-                    account_id,
-                    now=now,
-                    limit=visit_budget,
-                    stale_days=settings.enrich_stale_days,
-                )
-                plan = enrich_plan.store_plan(
-                    session, user, run_id, [contact_id for contact_id, _ in chosen]
-                )
-            else:
-                plan = enrich_plan.load_plan(session, user, run_id)
-                chosen = enrich_plan.targets_for(session, user, plan)
-            urns = enrich_plan.urns_for(session, user, [contact_id for contact_id, _ in chosen])
-            chosen = [(contact_id, slug) for contact_id, slug in chosen if contact_id in urns]
-            skipped = len(plan.remaining) - len(chosen)
+    async with runs_recording(factory, user_id, run_id, clock=clock):
+        planned = await off_loop(_plan, factory, user_id, started, settings=settings, clock=clock)
+        visits, multiplier, visit_budget = planned.visits, planned.multiplier, planned.visit_budget
+        chosen, urns, skipped = planned.chosen, planned.urns, planned.skipped
 
         configured = profiles(settings.pacing)
         spec = EnrichJobSpec(
@@ -326,13 +387,18 @@ async def enrich_contacts(
         )
         counts = mapping.HarvestCounts()
 
-        async def on_harvest(harvest: ProfileHarvest) -> None:
+        def apply_harvest(harvest: ProfileHarvest) -> None:
+            # One transaction: the harvest and the plan's record that its contact is
+            # done commit together, so a resume skips exactly what was written.
             with session_scope(factory, write=True) as session:
                 user = _load_user(session, user_id)
                 mapping.apply_harvest(session, user, harvest, counts)
                 enrich_plan.mark_completed(session, user, run_id, harvest.contact_ref)
 
-        async def progress(event: ProgressEvent) -> None:
+        async def on_harvest(harvest: ProfileHarvest) -> None:
+            await off_loop(apply_harvest, harvest)
+
+        def record_progress(event: ProgressEvent) -> None:
             with session_scope(factory, write=True) as session:
                 runs.record_progress(
                     session,
@@ -348,6 +414,9 @@ async def enrich_contacts(
                         "stopped": None if event.stopped is None else event.stopped.value,
                     },
                 )
+
+        async def progress(event: ProgressEvent) -> None:
+            await off_loop(record_progress, event)
             if on_progress is not None:
                 await on_progress(event)
 
@@ -361,43 +430,48 @@ async def enrich_contacts(
             clock=clock,
         )
 
-        heat_raised = flagged = False
-        with session_scope(factory, write=True) as session:
-            user = _load_user(session, user_id)
-            if result.reason is StopReason.RESPONSE and result.outcome is not None:
-                if result.outcome in _HEAT_OUTCOMES:
-                    heat_service.raise_heat(
-                        session, user, account_id, now=clock(), settings=settings.heat
-                    )
-                    heat_raised = True
-                if result.outcome in _FLAG_OUTCOMES:
-                    flag_session(session, user, result.outcome, url=result.final_url or "")
-                    flagged = True
-            report = EnrichRunReport(
-                account_id=account_id,
-                run_id=run_id,
-                visits=visits,
-                result=result,
-                harvests=counts,
-                visit_budget=visit_budget,
-                skipped=skipped,
-                heat_raised=heat_raised,
-                session_flagged=flagged,
-            )
-            runs.finish_run(
-                session,
-                user,
-                run_id,
-                status=(
-                    SyncRunStatus.COMPLETED
-                    if result.reason is StopReason.END_OF_PLAN
-                    else SyncRunStatus.ABORTED
-                ),
-                now=clock(),
-                stop_reason=stop_reason_of(result.reason.value, result.outcome),
-                counts=report.counts(),
-                notes=_lost_notes(result),
-            )
+        def finish(result: EnrichResult) -> EnrichRunReport:
+            # One transaction, as before: heat, the session flag, and the run's ending.
+            heat_raised = flagged = False
+            with session_scope(factory, write=True) as session:
+                user = _load_user(session, user_id)
+                if result.reason is StopReason.RESPONSE and result.outcome is not None:
+                    if result.outcome in _HEAT_OUTCOMES:
+                        heat_service.raise_heat(
+                            session, user, account_id, now=clock(), settings=settings.heat
+                        )
+                        heat_raised = True
+                    if result.outcome in _FLAG_OUTCOMES:
+                        flag_session(session, user, result.outcome, url=result.final_url or "")
+                        flagged = True
+                report = EnrichRunReport(
+                    account_id=account_id,
+                    run_id=run_id,
+                    visits=visits,
+                    result=result,
+                    harvests=counts,
+                    visit_budget=visit_budget,
+                    skipped=skipped,
+                    heat_raised=heat_raised,
+                    session_flagged=flagged,
+                )
+                runs.finish_run(
+                    session,
+                    user,
+                    run_id,
+                    status=(
+                        SyncRunStatus.COMPLETED
+                        if result.reason is StopReason.END_OF_PLAN
+                        else SyncRunStatus.ABORTED
+                    ),
+                    now=clock(),
+                    stop_reason=stop_reason_of(result.reason.value, result.outcome),
+                    counts=report.counts(),
+                    notes=_lost_notes(result),
+                )
+            return report
+
+        report = await off_loop(finish, result)
     return report
 
 
@@ -421,11 +495,15 @@ async def resume_enrichment(
     :class:`~netkeeper.services.enrich_plan.PlanFinished` for one with nothing
     left to resume, and the same refusals as :func:`enrich_contacts` after that.
     """
-    with session_scope(factory, write=True) as session:
-        user = _load_user(session, user_id)
-        run_id = enrich_plan.start_resume(
-            session, user, of_run_id, now=clock(), max_visits=max_visits
-        ).id
+
+    def start_resume() -> int:
+        with session_scope(factory, write=True) as session:
+            user = _load_user(session, user_id)
+            return enrich_plan.start_resume(
+                session, user, of_run_id, now=clock(), max_visits=max_visits
+            ).id
+
+    run_id = await off_loop(start_resume)
     return await enrich_contacts(
         factory,
         user_id,

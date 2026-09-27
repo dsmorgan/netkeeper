@@ -47,8 +47,8 @@ from __future__ import annotations
 import asyncio
 import enum
 import logging
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final, Protocol
@@ -57,7 +57,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings
-from netkeeper.db import is_writer, session_scope
+from netkeeper.db import is_writer, off_loop, session_scope
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import (
@@ -454,10 +454,10 @@ def stop_reason_of(reason: str, outcome: Outcome | None) -> str:
     return outcome.value if reason == "response" and outcome is not None else reason
 
 
-@contextmanager
-def recording(
+@asynccontextmanager
+async def recording(
     factory: sessionmaker[Session], user_id: int, run_id: int, *, clock: Callable[[], datetime]
-) -> Iterator[None]:
+) -> AsyncIterator[None]:
     """Record on run ``run_id`` how the block failed, if it did, and re-raise.
 
     A refusal (:class:`SessionFlagged`, :class:`HeatSkipped`) is ``failed``
@@ -465,22 +465,45 @@ def recording(
     shutting down) is ``aborted``, "interrupted", keeping what completed; any
     other exception is ``failed``, with the first line of its message. A run
     the block already finished is left as it is.
+
+    The ending is written off the event loop (:func:`netkeeper.db.off_loop`,
+    #259), after any database work the block still had in flight.
     """
     try:
         yield
     except SessionFlagged as exc:
-        _finish_quietly(
-            factory, user_id, run_id, clock, SyncRunStatus.FAILED, "session_flagged", exc
+        await off_loop(
+            _finish_quietly,
+            factory,
+            user_id,
+            run_id,
+            clock,
+            SyncRunStatus.FAILED,
+            "session_flagged",
+            exc,
         )
         raise
     except HeatSkipped as exc:
-        _finish_quietly(factory, user_id, run_id, clock, SyncRunStatus.FAILED, "heat_skip", exc)
+        await off_loop(
+            _finish_quietly, factory, user_id, run_id, clock, SyncRunStatus.FAILED, "heat_skip", exc
+        )
         raise
     except asyncio.CancelledError:
-        _finish_quietly(factory, user_id, run_id, clock, SyncRunStatus.ABORTED, "interrupted", None)
+        await off_loop(
+            _finish_quietly,
+            factory,
+            user_id,
+            run_id,
+            clock,
+            SyncRunStatus.ABORTED,
+            "interrupted",
+            None,
+        )
         raise
     except Exception as exc:
-        _finish_quietly(factory, user_id, run_id, clock, SyncRunStatus.FAILED, "error", exc)
+        await off_loop(
+            _finish_quietly, factory, user_id, run_id, clock, SyncRunStatus.FAILED, "error", exc
+        )
         raise
 
 

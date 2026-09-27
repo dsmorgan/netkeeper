@@ -39,7 +39,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings
-from netkeeper.db import session_scope
+from netkeeper.db import off_loop, session_scope
 from netkeeper.models import SyncRunKind, SyncRunTrigger, User, UserKind
 from netkeeper.models.base import utcnow
 from netkeeper.services import runs
@@ -105,16 +105,22 @@ def _handler(
     *,
     clock: Callable[[], datetime],
 ) -> JobHandler:
+    def record(ctx: JobContext) -> int | None:
+        with session_scope(factory, write=True) as session:
+            user = session.get(User, ctx.user_id)
+            if user is None:
+                log.error("scheduled %s: no user %d", run_kind.value, ctx.user_id)
+                return None
+            return runs.create_run(
+                session, user, run_kind, trigger=SyncRunTrigger.SCHEDULED, now=clock()
+            ).id
+
     async def handle(ctx: JobContext) -> JobOutcome | None:
         try:
-            with session_scope(factory, write=True) as session:
-                user = session.get(User, ctx.user_id)
-                if user is None:
-                    log.error("scheduled %s: no user %d", run_kind.value, ctx.user_id)
-                    return None
-                run_id = runs.create_run(
-                    session, user, run_kind, trigger=SyncRunTrigger.SCHEDULED, now=clock()
-                ).id
+            # Off the event loop, in one writer session as before (#259).
+            run_id = await off_loop(record, ctx)
+            if run_id is None:
+                return None
         except runs.ScheduledRunsDisarmed:
             log.error(
                 "scheduled %s reached a disarmed account %d past the scheduler's arm gate;"
@@ -130,7 +136,12 @@ def _handler(
         await tasks.wait(task_id)
         if result() is runs.RunOutcome.RETRY_LATER:
             return JobOutcome.RETRY_LATER
-        if run_kind is SyncRunKind.CONNECTIONS_FULL and _lost_answers(factory, ctx.user_id, run_id):
+        lost = (
+            await off_loop(_lost_answers, factory, ctx.user_id, run_id)
+            if run_kind is SyncRunKind.CONNECTIONS_FULL
+            else 0
+        )
+        if lost:
             log.info("scheduled full sync run %d lost answers; it is not done", run_id)
             return JobOutcome.NOT_DONE
         return None
