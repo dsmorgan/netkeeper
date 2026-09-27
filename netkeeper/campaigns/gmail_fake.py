@@ -511,6 +511,8 @@ class FakeGmail:
         if not sep or not value:
             raise ValueError(f"the fake does not search for {term!r}; use an operator it knows")
         if key in {"from", "to"}:
+            if value.lower() == "me":
+                raise ValueError(f"the fake does not read {key}:me; name the address")
             # Gmail matches whole words: ``from:ada`` finds ada@example.com, and
             # neither ``from:ad`` nor ``from:ada@example.com`` finds bada@example.com.
             word = re.compile(rf"(?<![^\W_]){re.escape(value.lower())}(?![^\W_])")
@@ -544,6 +546,9 @@ class FakeGmail:
             return lambda stored: label in stored.labels
         if key == "label":
             wanted = value.lower()
+            if wanted in {"spam", "trash"}:
+                # Gmail finds spam and trash this way; the fake leaves them out of searches.
+                raise ValueError(f"the fake does not search label:{value}; use in:anywhere")
             ids = {label.id for label in self._labels.values() if label.name.lower() == wanted}
             return lambda stored: bool(stored.labels & ids)
         raise ValueError(f"the fake does not search for {key}:")
