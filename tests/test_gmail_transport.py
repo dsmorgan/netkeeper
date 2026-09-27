@@ -49,9 +49,13 @@ class Refuse:
 
 @dataclass(frozen=True)
 class FailWrite:
-    """A script entry: the socket connects, and writing to it raises ``error``."""
+    """A script entry: the socket connects, and writing to it raises ``error``.
+
+    With ``after_bytes``, the first that many bytes of the write go out before
+    it fails: a connection reset part way through the body."""
 
     error: OSError
+    after_bytes: int | None = None
 
 
 def _answer(status: str, headers: str = "", body: bytes = b"", length: int | None = None) -> bytes:
@@ -73,13 +77,21 @@ class Wire:
 
 
 class _Socket:
-    def __init__(self, wire: Wire, answers: list[bytes], write_error: OSError | None) -> None:
+    def __init__(
+        self,
+        wire: Wire,
+        answers: list[bytes],
+        write_error: OSError | None,
+        after_bytes: int | None = None,
+    ) -> None:
         self._wire = wire
         self._answers = answers
         self._write_error = write_error
+        self._after_bytes = after_bytes
 
     def sendall(self, data: bytes) -> None:
-        self._wire.written.append(bytes(data))  # counted as an attempt, then it fails
+        chunk = bytes(data) if self._after_bytes is None else bytes(data)[: self._after_bytes]
+        self._wire.written.append(chunk)  # counted as an attempt, then it fails
         if self._write_error is not None:
             raise self._write_error
 
@@ -100,7 +112,7 @@ def _fake_connection(wire: Wire) -> type[Any]:
             if isinstance(script, Refuse):
                 raise script.error
             if isinstance(script, FailWrite):
-                self.sock = _Socket(wire, [], script.error)
+                self.sock = _Socket(wire, [], script.error, script.after_bytes)
             else:
                 self.sock = _Socket(wire, script, None)
 
@@ -278,3 +290,40 @@ def test_a_name_that_does_not_resolve_sent_nothing() -> None:
         _client(wire).send(_message(), purpose="send step 1 for enrollment 7")
     assert caught.value.outcome_unknown is False
     assert wire.requests("POST") == 0
+
+
+# --- verification of #270, required in P3-07 (#269) ----------------------------------
+
+
+def test_a_send_answered_with_a_garbage_status_line_is_sent_once() -> None:
+    """``BadStatusLine`` is an ``HTTPException``, not an ``OSError``: a mixin whose
+    ``getresponse`` caught only ``OSError`` would let httplib2 send it again."""
+    wire = Wire(scripts=[[b"GARBAGE\r\n\r\n"], [_ok({"id": "m1", "threadId": "m1"})]])
+    with pytest.raises(GmailTransient) as caught:
+        _client(wire).send(_message(), purpose="send step 1 for enrollment 7")
+    assert (caught.value.code, caught.value.outcome_unknown) == ("unavailable", True)
+    assert wire.requests("POST") == 1
+    assert wire.connects == 1
+
+
+def test_a_send_reset_part_way_through_its_body_is_sent_once() -> None:
+    reset = FailWrite(OSError(errno.ECONNRESET, "reset by peer"), after_bytes=200)
+    wire = Wire(scripts=[reset, [_ok({"id": "m1", "threadId": "m1"})]])
+    with pytest.raises(GmailTransient) as caught:
+        _client(wire).send(_message(), purpose="send step 1 for enrollment 7")
+    assert (caught.value.code, caught.value.outcome_unknown) == ("unavailable", True)
+    assert wire.requests("POST") == 1
+    assert len(wire.written[0]) == 200  # the body was cut off, not sent whole
+
+
+def test_a_send_whose_answer_does_not_decompress_has_the_outcome_unknown() -> None:
+    """Gmail answered, so the message went; the answer is unreadable. Never a raw
+    ``FailedToDecompressContent``, and never a known outcome."""
+    broken = _answer(
+        "200 OK", "Content-Type: application/json\r\nContent-Encoding: gzip\r\n", b"not gzip"
+    )
+    wire = Wire(scripts=[[broken], [_ok({"id": "m1", "threadId": "m1"})]])
+    with pytest.raises(GmailTransient) as caught:
+        _client(wire).send(_message(), purpose="send step 1 for enrollment 7")
+    assert (caught.value.code, caught.value.outcome_unknown) == ("unavailable", True)
+    assert wire.requests("POST") == 1
