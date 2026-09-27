@@ -33,6 +33,15 @@ describe('ReauthBanner', () => {
     expect(banner).toHaveTextContent('Email steps are paused until it is authorized again.')
   })
 
+  it('explains a client Google no longer lets use the token', async () => {
+    renderWithBackend(<ReauthBanner />, () =>
+      status({
+        mailboxes: [mailbox({ status: 'reauth_required', status_reason: 'unauthorized_client' })],
+      }),
+    )
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Save a Desktop app client/)
+  })
+
   it('shows while the Keychain is locked, never asking for the status', async () => {
     const { calls } = renderWithBackend(
       <ReauthBanner />,

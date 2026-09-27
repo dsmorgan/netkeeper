@@ -98,6 +98,8 @@ const REASONS: Record<string, string> = {
     'Google no longer accepts the token: access was revoked, or the consent screen is still in Testing and its 7 days are up.',
   invalid_client:
     'Google does not know the OAuth client any more: it was deleted, or its secret was reset.',
+  unauthorized_client:
+    'Google will not let the OAuth client use this token. Save a Desktop app client, then authorize again.',
   token_missing: 'The Keychain has no token for this mailbox.',
   client_missing: 'No OAuth client is stored. Add the client ID and secret first.',
   disconnected: 'Disconnected. Its token is gone from the Keychain.',
