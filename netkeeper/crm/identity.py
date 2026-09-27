@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Final, Literal, assert_never
@@ -1165,6 +1165,12 @@ UNSENT_MESSAGE_STATUSES: Final[frozenset[MessageStatus]] = frozenset(
 )
 """Outbound messages waiting to go. A merge discards the set-aside enrollment's (#242 review)."""
 
+LIVE_AFTER_MERGE: Final[frozenset[EnrollmentStatus]] = frozenset(
+    {EnrollmentStatus.PENDING, EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED}
+)
+"""A combined enrollment in one of these still has steps to send; any other keeps no
+unsent message (#247 review)."""
+
 _ENROLLMENT_STATE: Final = (
     "status",
     "current_step",
@@ -1192,7 +1198,10 @@ def _merge_campaign_rows(session: Session, user: User, survivor: Contact, loser:
       A merge must never restart a sequence somebody opted out of, bounced
       from, replied to, or was taken out of, nor let a reply hide an opt-out.
     - Otherwise the one furthest along (the higher ``current_step``).
-    - Otherwise the ``active`` one, and then the survivor's own.
+    - Otherwise a ``completed`` one, then an ``active`` one, and then the
+      survivor's own. A completed enrollment has nothing left to send, so a tie
+      with it must not restart a sequence, nor let a chained merge through a
+      completed middle contact lose a pause (#247 review).
 
     Whichever wins, the combined enrollment keeps what either one knew:
 
@@ -1203,7 +1212,10 @@ def _merge_campaign_rows(session: Session, user: User, survivor: Contact, loser:
     - ``replied_at`` is the winner's, or else the other's.
     - The other one's unsent messages (:data:`UNSENT_MESSAGE_STATUSES`) are
       ``discarded``, so the combined enrollment never holds two of a step
-      waiting to go.
+      waiting to go. When the combined enrollment is over (anything but
+      :data:`LIVE_AFTER_MERGE`), the winner's are discarded too: nothing is
+      left to send them, and a stale one waiting must not read as a step to
+      come (#247 review).
 
     The survivor's row is the one that stays: it takes the combined state and
     every message of both. Moving the loser's row across instead would collide
@@ -1246,6 +1258,8 @@ def _merge_campaign_rows(session: Session, user: User, survivor: Contact, loser:
             state["status"] = EnrollmentStatus.PAUSED
         state["replied_at"] = winner.replied_at or other.replied_at
         outranked.append(other.id)
+        if state["status"] not in LIVE_AFTER_MERGE:
+            outranked.append(winner.id)
         for name, value in state.items():
             setattr(kept, name, value)
         row.status = EnrollmentStatus.REMOVED
@@ -1291,14 +1305,21 @@ def _merge_campaign_rows(session: Session, user: User, survivor: Contact, loser:
     session.flush()
 
 
-def _enrollment_rank(row: Enrollment, *, survivor_row: bool) -> tuple[int, int, bool, bool]:
+_TIE_RANK: Final[Mapping[EnrollmentStatus, int]] = {
+    EnrollmentStatus.COMPLETED: 2,
+    EnrollmentStatus.ACTIVE: 1,
+}
+"""At a tied step, completed beats active beats the rest (#247 review)."""
+
+
+def _enrollment_rank(row: Enrollment, *, survivor_row: bool) -> tuple[int, int, int, bool]:
     """Of two enrollments in one campaign, the higher wins: see :func:`_merge_campaign_rows`."""
     stop = (
         len(STOP_PRECEDENCE) - STOP_PRECEDENCE.index(row.status)
         if row.status in STOP_PRECEDENCE
         else 0
     )
-    return (stop, row.current_step or 0, row.status is EnrollmentStatus.ACTIVE, survivor_row)
+    return (stop, row.current_step or 0, _TIE_RANK.get(row.status, 0), survivor_row)
 
 
 def _assignments_of(session: Session, user: User, contact_id: int) -> dict[int, ContactTag]:
