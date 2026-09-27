@@ -1994,3 +1994,38 @@ def test_0021_downgrades_to_messages_without_it(migration_engine: Engine) -> Non
     assert columns.isdisjoint(_RECONCILE_COLUMNS)
     with migration_engine.begin() as connection:
         assert _count(connection, "messages") == 1
+
+
+# --- enrollment not-sent retries (0022, #280) --------------------------------------------
+
+_NOT_SENT_COLUMNS = ("not_sent_count", "not_sent_since", "not_sent_error")
+
+
+def test_0022_starts_every_enrollment_with_no_tries_counted(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0021")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+    migrations.upgrade(migration_engine, "0022")
+    with migration_engine.begin() as connection:
+        row = connection.execute(
+            text(f"SELECT {', '.join(_NOT_SENT_COLUMNS)} FROM enrollments WHERE id = 1")
+        ).one()
+        assert tuple(row) == (0, None, None)
+        _insert_contact(connection, id=2, user_id=1)
+        _insert_enrollment(connection, id=2, campaign_id=1, contact_id=2)
+        found = connection.execute(text("SELECT not_sent_count FROM enrollments WHERE id = 2"))
+        assert found.scalar_one() == 0  # the default fills it
+
+
+def test_0022_downgrades_to_enrollments_without_it(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0022")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+        connection.execute(
+            text("UPDATE enrollments SET not_sent_count = 3, not_sent_error = 'rate limited'")
+        )
+    migrations.downgrade(migration_engine, "0021")
+    columns = {column["name"] for column in inspect(migration_engine).get_columns("enrollments")}
+    assert columns.isdisjoint(_NOT_SENT_COLUMNS)
+    with migration_engine.begin() as connection:
+        assert _count(connection, "enrollments") == 1

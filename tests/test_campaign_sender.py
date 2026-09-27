@@ -203,6 +203,15 @@ class Mail:
 
         self.write(change)
 
+    def set_enrollment(self, enrollment_id: int, **changes: Any) -> None:
+        def change(session: Session) -> None:
+            row = get_scoped(session, self.user, Enrollment, enrollment_id)
+            assert row is not None
+            for name, value in changes.items():
+                setattr(row, name, value)
+
+        self.write(change)
+
     def labelled(self) -> list[str]:
         """Gmail ids of the messages that carry the campaign's label."""
         [label] = [lb for lb in self.gmail.list_labels(purpose="test") if lb.name == self.label]
@@ -1285,3 +1294,143 @@ def test_a_contact_at_a_unicode_domain_is_sent_to_its_idna_address(mail: Mail) -
     [message] = mail.messages(enrollment_id)
     assert message.gmail_message_id is not None
     assert mail.gmail.raw(message.gmail_message_id).get_all("To") == ["ada@xn--bcher-kva.example"]
+
+
+# --- #280: tries that sent nothing are counted, spaced out, and bounded -----------------
+
+
+class Unreadable(LostAnswers):
+    """A Gmail whose threads can never be read: every follow-up sends nothing, for now."""
+
+    def get_thread(self, thread_id: str, *, purpose: str) -> Any:
+        self._call("threads.get", purpose)
+        raise GmailTransient("backend error", code="unavailable")
+
+
+def _thread_reads(mail: Mail) -> int:
+    return [m for m, _ in mail.gmail.calls].count("threads.get")
+
+
+def test_the_not_sent_constants_are_pinned() -> None:
+    """Safety constants against numbers written out here (CLAUDE.md)."""
+    assert timedelta(minutes=15) == engine_module.RETRY_AFTER
+    assert timedelta(hours=2) == engine_module.RETRY_AFTER_MAX
+    assert engine_module.NOT_SENT_GIVE_UP_TRIES == 8
+    assert timedelta(hours=24) == engine_module.NOT_SENT_GIVE_UP_AFTER
+    waits = [engine_module.retry_after(n) for n in (1, 2, 3, 4, 5, 6, 100)]
+    minutes = [int(w.total_seconds() // 60) for w in waits]
+    assert minutes == [15, 30, 60, 120, 120, 120, 120]
+    with pytest.raises(ValueError):
+        engine_module.retry_after(0)
+
+
+def test_a_thread_that_can_never_be_read_fails_the_step_after_a_day_of_tries(
+    mail: Mail,
+) -> None:
+    """#280: 193 ``threads.get`` in two days, and never a step parked for a person. Now
+    each try waits longer, and a day of them fails the step with the reason."""
+    enrollment_id = mail.enroll()
+    mail.tick()  # step 1 goes out; step 2 is a follow-up in its thread
+    mail.gmail.__class__ = Unreadable
+    start = NOW + WEEK
+    at = start
+    waits: list[timedelta] = []
+    while at < start + timedelta(days=3):
+        [(_, outcome)] = mail.tick(at).fired
+        assert outcome.outcome is SendOutcome.NOT_SENT  # the sender's word for it
+        if mail.messages(enrollment_id)[-1].status is MessageStatus.FAILED:
+            break  # the engine's record: the tries are over
+        enrollment = mail.enrollment(enrollment_id)
+        assert enrollment.not_sent_error == outcome.error
+        assert enrollment.not_sent_since == start
+        assert enrollment.next_action_at is not None
+        waits.append(enrollment.next_action_at - at)
+        spacing = mail.read(lambda s: engine_module.next_send_at(s, mail.user, mail.mailbox.id))
+        assert spacing is not None
+        at = max(enrollment.next_action_at, spacing)  # the next tick that can fire it
+    assert at - start >= engine_module.NOT_SENT_GIVE_UP_AFTER
+    tries = _thread_reads(mail)
+    assert engine_module.NOT_SENT_GIVE_UP_TRIES <= tries <= 16  # was one every 15 minutes
+    assert waits[:4] == [timedelta(minutes=m) for m in (15, 30, 60, 120)]
+    assert max(waits) == engine_module.RETRY_AFTER_MAX
+
+    step_2 = mail.messages(enrollment_id)[-1]
+    assert step_2.status is MessageStatus.FAILED
+    assert step_2.error is not None
+    assert step_2.error.startswith(f"nothing sent after {tries} tries over ")
+    assert "could not be read (unavailable)" in step_2.error
+    enrollment = mail.enrollment(enrollment_id)
+    assert enrollment.status is EnrollmentStatus.ACTIVE
+    assert enrollment.next_action_at is None  # parked for a person
+    assert (enrollment.not_sent_count, enrollment.not_sent_since) == (0, None)
+
+    mail.tick(at + timedelta(days=2))
+    assert _thread_reads(mail) == tries  # never tried again
+    assert len(mail.gmail.sent()) == 1
+
+
+def test_a_send_that_goes_out_ends_the_run_of_tries(mail: Mail) -> None:
+    enrollment_id = mail.enroll()
+    mail.gmail.fail_next("messages.send", GmailRateLimited("slow down", code="rateLimitExceeded"))
+    mail.gmail.fail_next("messages.send", GmailRateLimited("slow down", code="rateLimitExceeded"))
+    mail.tick()
+    enrollment = mail.enrollment(enrollment_id)
+    assert enrollment.not_sent_count == 1
+    assert (
+        enrollment.not_sent_error is not None and "rateLimitExceeded" in enrollment.not_sent_error
+    )
+    second = NOW + engine_module.RETRY_AFTER
+    mail.tick(second)
+    enrollment = mail.enrollment(enrollment_id)
+    assert (enrollment.not_sent_count, enrollment.not_sent_since) == (2, NOW)
+    assert enrollment.next_action_at == second + timedelta(minutes=30)  # twice as long
+
+    [(_, outcome)] = mail.tick(second + timedelta(minutes=30)).fired
+    assert outcome.outcome is SendOutcome.SENT
+    enrollment = mail.enrollment(enrollment_id)
+    assert (enrollment.not_sent_count, enrollment.not_sent_since) == (0, None)
+    assert enrollment.not_sent_error is None
+
+
+def test_tries_far_apart_still_get_every_try_before_the_step_fails(mail: Mail) -> None:
+    """A day has passed since the first try, but the campaign was paused between them:
+    the step is not failed until :data:`NOT_SENT_GIVE_UP_TRIES` tries in a row."""
+    enrollment_id = mail.enroll()
+    at = NOW
+    for n in range(1, engine_module.NOT_SENT_GIVE_UP_TRIES):
+        mail.gmail.fail_next("messages.send", GmailTransient("down", code="unavailable"))
+        mail.tick(at)
+        assert mail.messages(enrollment_id) == [], n  # given back
+        at += timedelta(days=2)
+        mail.set_enrollment(enrollment_id, next_action_at=at)  # as a resume would leave it
+    mail.gmail.fail_next("messages.send", GmailTransient("down", code="unavailable"))
+    mail.tick(at)
+    [message] = mail.messages(enrollment_id)
+    assert message.status is MessageStatus.FAILED
+    assert message.error == (
+        f"nothing sent after {engine_module.NOT_SENT_GIVE_UP_TRIES} tries over "
+        f"{24 * 2 * (engine_module.NOT_SENT_GIVE_UP_TRIES - 1)} h; the last: "
+        "Gmail was unavailable (unavailable); nothing was sent"
+    )
+
+
+def test_a_paused_enrollment_gets_a_new_due_time_after_not_sent(mail: Mail) -> None:
+    """#280 (N8): paused while its send was in flight, it keeps a due time for the resume."""
+    enrollment_id = mail.enroll()
+
+    @dataclass
+    class PausedMidSend:
+        inner: GmailSender
+
+        def send(self, firing: Firing) -> SendResult:
+            mail.write(lambda s: engine_module.pause_enrollment(s, mail.user, enrollment_id))
+            mail.gmail.fail_next("messages.send", GmailTransient("down", code="unavailable"))
+            return self.inner.send(firing)
+
+    [(_, outcome)] = mail.tick(sender=PausedMidSend(mail.sender)).fired
+    assert outcome.outcome is SendOutcome.NOT_SENT
+    enrollment = mail.enrollment(enrollment_id)
+    assert enrollment.status is EnrollmentStatus.PAUSED
+    assert enrollment.next_action_at == NOW + engine_module.RETRY_AFTER
+    assert enrollment.not_sent_count == 1
+    assert mail.messages(enrollment_id) == []

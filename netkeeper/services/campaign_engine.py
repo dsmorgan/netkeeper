@@ -100,8 +100,12 @@ sent again.
 **Nothing sent, for now** (#273 review). A send that certainly sent nothing, for
 a reason that may pass (:attr:`SendOutcome.NOT_SENT`: a rate limit, an outage
 before the write, a mailbox not ready), gives its claim back: the message row is
-deleted, the enrollment is due :data:`RETRY_AFTER` later, and its mailbox waits
-as long. An outage is waited out; it never fails a step.
+deleted, the enrollment is due :func:`retry_after` later, and its mailbox waits
+:data:`RETRY_AFTER`. An outage is waited out; it never fails a step. The tries are
+counted on the enrollment (``not_sent_count``, with the latest reason), and each
+waits twice as long as the one before, up to :data:`RETRY_AFTER_MAX`. Only
+:data:`NOT_SENT_GIVE_UP_TRIES` tries in a row over :data:`NOT_SENT_GIVE_UP_AFTER`
+fail the step, with the reason, for a person (#280). Any other outcome ends the run.
 
 **Off the event loop** (#259). :class:`CampaignEngine` runs each tick in a
 worker thread (``asyncio.to_thread``), as :class:`~netkeeper.services.mailboxes.MailboxMonitor`
@@ -1361,11 +1365,15 @@ def _record(
         return
     session.refresh(message)
     if result.outcome is SendOutcome.NOT_SENT:
-        _give_back(session, user, settings, message, result, now=now)
-        if firing.mailbox_id is not None:
-            _set_next_send_at(session, user, firing.mailbox_id, now + max(claim.gap, RETRY_AFTER))
-        session.flush()
-        return
+        if _give_back(session, user, settings, message, result, now=now):
+            if firing.mailbox_id is not None:
+                wait = max(claim.gap, RETRY_AFTER)
+                _set_next_send_at(session, user, firing.mailbox_id, now + wait)
+            session.flush()
+            return
+        # Tried too often for too long: failed below, for a person (#280).
+        result = SendResult(SendOutcome.FAILED, error=message.error)
+    _clear_not_sent(session, user, message.enrollment_id)
     at = result.at or now
     if result.outcome is SendOutcome.SENT:
         message.status = MessageStatus.SENT
@@ -1414,8 +1422,40 @@ def _record(
 
 RETRY_AFTER: Final = timedelta(minutes=15)
 """A step whose send certainly sent nothing (:attr:`SendOutcome.NOT_SENT`) is due again
-this much later, and its mailbox sends nothing until then: an outage is waited out,
-never turned into failed steps (#273 review)."""
+this much later the first time, and its mailbox sends nothing until then: an outage is
+waited out, never turned into failed steps (#273 review). Each further try in a row
+waits twice as long as the one before, up to :data:`RETRY_AFTER_MAX` (#280)."""
+
+RETRY_AFTER_MAX: Final = timedelta(hours=2)
+"""The longest an enrollment waits between tries that sent nothing (#280). Its mailbox
+waits only :data:`RETRY_AFTER`: one enrollment's thread that cannot be read must not
+hold every other enrollment on the mailbox for hours."""
+
+NOT_SENT_GIVE_UP_TRIES: Final = 8
+"""A step is failed for a person only after this many tries in a row sent nothing ...
+
+A try that sent nothing leaves no row behind, so without a limit a step whose thread
+could never be read was tried every :data:`RETRY_AFTER` for good (#280)."""
+
+NOT_SENT_GIVE_UP_AFTER: Final = timedelta(hours=24)
+"""... and only once this long has passed since the first of them. Both: an outage
+shorter than this never fails a step, however many tries it costs, and a step whose
+campaign was paused for days between two tries still gets all of its tries."""
+
+
+def retry_after(tries: int) -> timedelta:
+    """How long an enrollment waits after ``tries`` sends in a row that sent nothing."""
+    if tries < 1:
+        raise ValueError("tries counts from 1")
+    return min(RETRY_AFTER * (1 << min(tries - 1, 16)), RETRY_AFTER_MAX)
+
+
+def _clear_not_sent(session: Session, user: User, enrollment_id: int) -> None:
+    """Any outcome but ``not_sent`` ends a run of tries that sent nothing."""
+    enrollment = _enrollment(session, user, enrollment_id)
+    enrollment.not_sent_count = 0
+    enrollment.not_sent_since = None
+    enrollment.not_sent_error = None
 
 
 def _give_back(
@@ -1426,30 +1466,56 @@ def _give_back(
     result: SendResult,
     *,
     now: datetime,
-) -> None:
+) -> bool:
     """Undo a claim whose send sent nothing: the message row goes, so the step is free to
-    fire again, and the enrollment is due :data:`RETRY_AFTER` later, inside the window.
+    fire again, and the enrollment is due :func:`retry_after` later, inside the window.
 
     Deleting the row is safe only because nothing reached Gmail: a send whose outcome
     is unknown is never given back. The next claim writes a new row, and so a new
     Message-ID.
+
+    The try is counted on the enrollment. Once :data:`NOT_SENT_GIVE_UP_TRIES` in a
+    row have sent nothing over at least :data:`NOT_SENT_GIVE_UP_AFTER`, nothing is
+    given back: the message keeps its row, with the reason as its ``error``, and
+    False is returned for the caller to record it ``failed`` (#280). True when the
+    claim was given back.
     """
+    reason = (result.error or "no reason given")[:ERROR_MAX_LENGTH]
     # A merge may have moved the message to another enrollment meanwhile: follow it.
     enrollment = _enrollment(session, user, message.enrollment_id)
+    enrollment.not_sent_count += 1
+    enrollment.not_sent_since = enrollment.not_sent_since or now
+    enrollment.not_sent_error = reason
+    tries, since = enrollment.not_sent_count, enrollment.not_sent_since
+    if tries >= NOT_SENT_GIVE_UP_TRIES and now - since >= NOT_SENT_GIVE_UP_AFTER:
+        hours = int((now - since).total_seconds() // 3600)
+        message.error = (f"nothing sent after {tries} tries over {hours} h; the last: {reason}")[
+            :ERROR_MAX_LENGTH
+        ]
+        log.warning(
+            "message %d: %d tries in a row sent nothing; enrollment %d waits for a person",
+            message.id,
+            tries,
+            enrollment.id,
+        )
+        return False
+    wait = retry_after(tries)
     session.delete(message)
     session.flush()
     log.warning(
-        "message %d sent nothing (%s); enrollment %d is due again in %s",
+        "message %d sent nothing (%s); enrollment %d is due again in %s (try %d)",
         message.id,
-        result.error or "no reason given",
+        reason,
         enrollment.id,
-        RETRY_AFTER,
+        wait,
+        tries,
     )
     # A paused enrollment keeps its due time for the resume; an ended one has none.
     if enrollment.status in (EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED):
         campaign = _campaign(session, user, enrollment.campaign_id)
-        due = now + RETRY_AFTER
+        due = now + wait
         enrollment.next_action_at = _in_window(settings, user, campaign, due) or due
+    return True
 
 
 def _spacing_gap(settings: Settings, rng: random.Random) -> timedelta:
