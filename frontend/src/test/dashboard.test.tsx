@@ -69,7 +69,48 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-/** Routes the three queries the dashboard makes; anything else answers 404. */
+/** The at-a-glance cards' reads on a fresh install (`glance-cards.test.tsx` covers their states). */
+const GLANCE_EMPTY: Record<string, unknown> = {
+  '/api/v1/dashboard/next-fires': { items: [], total: 0 },
+  '/api/v1/dashboard/changed-jobs': { items: [], total: 0, days: 30 },
+  '/api/v1/dashboard/inbound': {
+    count: 0,
+    since: '2026-09-20T12:00:00Z',
+    reply_detection: false,
+  },
+  '/api/v1/linkedin/schedule': { armed: false, armed_at: null, scheduler_running: true, jobs: [] },
+  '/api/v1/linkedin/status': {
+    session_flag: null,
+    session_flagged_at: null,
+    heat_tripped: false,
+    armed: false,
+    running_run_id: null,
+    can_start_runs: true,
+  },
+  '/api/v1/linkedin/runs': { items: [], total: 0 },
+  '/api/v1/linkedin/budget': {
+    budgets: [],
+    profile_visits_today: {
+      ramp: 10,
+      after_weekend: 10,
+      after_heat: 10,
+      spent_today: 0,
+      week_left: null,
+      remaining: 10,
+    },
+  },
+  '/api/v1/linkedin/heat': {
+    score: 0,
+    threshold: 5,
+    multiplier: 1,
+    tripped: false,
+    last_raised_at: null,
+    cleared_at: null,
+    resumes_at: null,
+  },
+}
+
+/** Routes the queries the dashboard makes; anything else answers 404. */
 function serveDashboard({
   stats,
   drafts = { items: [], total: 0 },
@@ -93,6 +134,8 @@ function serveDashboard({
     }
     if (url.pathname === '/api/v1/lists') return jsonResponse(lists)
     if (url.pathname === '/api/v1/mailboxes') return jsonResponse(mailboxes)
+    const glance = GLANCE_EMPTY[url.pathname]
+    if (glance !== undefined) return jsonResponse(glance)
     return new Response('not found', { status: 404 })
   })
   return seen
@@ -108,7 +151,8 @@ function serveDashboard({
  * destination on any step fails a single assertion.
  */
 function renderedSteps() {
-  return screen.getAllByRole('listitem').map((li) => {
+  const setupPath = within(screen.getByRole('list', { name: 'Setup path' }))
+  return setupPath.getAllByRole('listitem').map((li) => {
     const title = li.querySelector('[data-slot="card-title"]')?.textContent?.trim() ?? null
     const detail = li.querySelector('[data-slot="card-description"]')?.textContent?.trim() ?? null
     const badge = li.querySelector('[data-slot="badge"]')?.textContent?.trim() ?? null
@@ -133,12 +177,18 @@ describe('dashboard: a fresh install with nothing imported', () => {
     const headings = main.getAllByRole('heading', { level: 2 }).map((node) => node.textContent)
     expect(headings).toEqual([
       'Start here',
+      'Next campaign sends',
+      'Next LinkedIn run',
+      'LinkedIn browser',
+      'Mailbox',
+      'Budget and heat',
+      'Replies this week',
+      'Changed jobs',
       '1. Import your data',
       '2. Review what was tagged by a rule',
       '3. Triage',
       '4. Build a list',
       '5. Export',
-      'Mailbox',
     ])
   })
 
