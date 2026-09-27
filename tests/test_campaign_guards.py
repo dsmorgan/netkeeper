@@ -66,6 +66,8 @@ def facts(**changes: Any) -> ContactFacts:
         has_linkedin=True,
         other_campaigns=frozenset(),
         last_outbound_at=None,
+        address_bounced_elsewhere=False,
+        duplicate_address=False,
     )
     return dataclasses.replace(eligible, **changes)
 
@@ -103,7 +105,9 @@ def test_the_guard_sets_are_pinned() -> None:
         "no_email",
         "email_bounced",
         "email_invalid",
+        "address_bounced_elsewhere",
         "no_linkedin",
+        "duplicate_address",
         "in_another_campaign",
         "contacted_recently",
     ]
@@ -117,6 +121,8 @@ def test_every_guard_runs() -> None:
         "not_do_not_contact",
         "not_disconnected",
         "has_channel_address",
+        "address_not_bounced_elsewhere",
+        "not_duplicate_address",
         "not_in_another_campaign",
         "not_contacted_recently",
     ]
@@ -186,6 +192,30 @@ def test_a_channel_with_no_guard_excludes() -> None:
     """A channel added later without an address guard must send nothing, not everything."""
     fax = cast("TemplateChannel", "fax")
     assert reasons(facts(), fax) == (Reason.UNKNOWN_CHANNEL,)
+
+
+def test_an_address_bounced_elsewhere_excludes_email_steps_only() -> None:
+    """#238: the address is bounced on another contact; LinkedIn is still open (spec 11.5)."""
+    elsewhere = facts(address_bounced_elsewhere=True)
+    assert reasons(elsewhere, EMAIL) == (Reason.ADDRESS_BOUNCED_ELSEWHERE,)
+    assert reasons(elsewhere, LINKEDIN) == ()
+
+
+def test_a_duplicate_address_excludes_on_every_channel() -> None:
+    """#238: a shared address is one person, whichever channel the step uses."""
+    for channel in (EMAIL, LINKEDIN):
+        assert reasons(facts(duplicate_address=True), channel) == (Reason.DUPLICATE_ADDRESS,)
+
+
+def test_the_summary_names_both_address_reasons() -> None:
+    """#238: the review screen's line picks up both reasons."""
+    verdicts = _verdicts(
+        (5, None), (2, Reason.DUPLICATE_ADDRESS), (1, Reason.ADDRESS_BOUNCED_ELSEWHERE)
+    )
+    assert excluded_summary(verdicts, contacted_within_days=30) == (
+        "8 in audience, 3 excluded: 2 address already in this campaign,"
+        " 1 address bounced on another contact"
+    )
 
 
 def test_another_running_campaign_excludes_unless_allowed() -> None:
@@ -374,7 +404,9 @@ def test_every_reason_has_its_label() -> None:
         "no_email": "no email",
         "email_bounced": "bounced email",
         "email_invalid": "invalid email",
+        "address_bounced_elsewhere": "address bounced on another contact",
         "no_linkedin": "no LinkedIn profile",
+        "duplicate_address": "address already in this campaign",
         "in_another_campaign": "in another campaign",
         "contacted_recently": "contacted in the last 1 day",
     }
@@ -426,6 +458,8 @@ def test_facts_read_the_contact_as_it_is(writer: Session, user: User, campaign: 
         has_linkedin=True,
         other_campaigns=frozenset(),
         last_outbound_at=None,
+        address_bounced_elsewhere=False,
+        duplicate_address=False,
     )
 
 
@@ -979,3 +1013,139 @@ def test_another_users_message_never_exempts_an_interaction(
     writer.flush()
     verdict = check_step(writer, user, enrollment, campaign.steps[1], now=NOW)
     assert verdict.reasons == (Reason.CONTACTED_RECENTLY,)
+
+
+# --- #238 Part A: the address, across contacts ---------------------------------------
+
+
+def test_enrollment_excludes_an_address_bounced_on_another_contact(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    """The review's probe: bounced on A, still sendable on B. B is excluded, by the address."""
+    holder = factories.make_contact(writer, user, emails=["shared@example.test"])
+    holder.emails[0].status = EmailStatus.BOUNCED
+    other = factories.make_contact(writer, user, emails=["SHARED@example.test"])
+    clean = factories.make_contact(writer, user, emails=["clean@example.test"])
+    writer.flush()
+    verdicts = check_enrollment(writer, user, campaign, [other.id, clean.id], now=NOW)
+    assert [v.reasons for v in verdicts] == [(Reason.ADDRESS_BOUNCED_ELSEWHERE,), ()]
+
+
+@pytest.mark.parametrize("status", [EmailStatus.BOUNCED, EmailStatus.INVALID])
+def test_a_step_fire_excludes_an_address_bounced_elsewhere_since(
+    writer: Session, user: User, campaign: Campaign, status: EmailStatus
+) -> None:
+    """Checked again at the fire: the bounce on the other contact came after enrollment."""
+    contact = factories.make_contact(writer, user, emails=["shared@example.test"])
+    enrollment = factories.make_enrollment(writer, campaign, contact)
+    assert check_step(writer, user, enrollment, campaign.steps[0], now=NOW).eligible
+    holder = factories.make_contact(writer, user, emails=["shared@example.test"])
+    holder.emails[0].status = status
+    writer.flush()
+    verdict = check_step(writer, user, enrollment, campaign.steps[0], now=NOW)
+    assert verdict.reasons == (Reason.ADDRESS_BOUNCED_ELSEWHERE,)
+    # LinkedIn stays open (spec 11.5).
+    assert check_step(writer, user, enrollment, campaign.steps[1], now=NOW).eligible
+
+
+def test_a_bounce_on_another_users_contact_is_not_this_users(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    stranger = factories.make_user(writer)
+    theirs = factories.make_contact(writer, stranger, emails=["shared@example.test"])
+    theirs.emails[0].status = EmailStatus.BOUNCED
+    mine = factories.make_contact(writer, user, emails=["shared@example.test"])
+    writer.flush()
+    [verdict] = check_enrollment(writer, user, campaign, [mine.id], now=NOW)
+    assert verdict.eligible
+
+
+def test_enrollment_takes_one_of_a_batch_sharing_an_address(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    """The review's probe: two unmerged contacts with one address. The first by id gets in."""
+    first = factories.make_contact(writer, user, emails=["same@example.test"])
+    second = factories.make_contact(
+        writer, user, emails=["other@example.test", "same@example.test"]
+    )
+    second.emails[0].status = EmailStatus.BOUNCED  # so "same" is the sendable one
+    third = factories.make_contact(writer, user, emails=["third@example.test"])
+    writer.flush()
+    verdicts = check_enrollment(writer, user, campaign, [third.id, second.id, first.id], now=NOW)
+    by_id = {v.contact_id: v.reasons for v in verdicts}
+    assert by_id == {first.id: (), second.id: (Reason.DUPLICATE_ADDRESS,), third.id: ()}
+
+
+@pytest.mark.parametrize("status", sorted(EnrollmentStatus))
+def test_enrollment_excludes_an_address_already_in_the_campaign(
+    writer: Session, user: User, campaign: Campaign, status: EnrollmentStatus
+) -> None:
+    """Any enrollment holds its address, whatever its status: one that ended may have been
+    sent to, and freeing the address would send the sequence to it again."""
+    enrolled = factories.make_contact(writer, user, emails=["same@example.test"])
+    factories.make_enrollment(writer, campaign, enrolled, status=status)
+    newcomer = factories.make_contact(writer, user, emails=["same@example.test"])
+    [verdict] = check_enrollment(writer, user, campaign, [newcomer.id], now=NOW)
+    assert verdict.reasons == (Reason.DUPLICATE_ADDRESS,)
+
+
+def test_an_address_in_another_campaign_is_not_a_duplicate(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    """The duplicate is per campaign; another campaign's is the other-campaign guard's."""
+    other = factories.make_campaign(writer, user, status=CampaignStatus.COMPLETED)
+    enrolled = factories.make_contact(writer, user, emails=["same@example.test"])
+    factories.make_enrollment(writer, other, enrolled, status=EnrollmentStatus.COMPLETED)
+    newcomer = factories.make_contact(writer, user, emails=["same@example.test"])
+    [verdict] = check_enrollment(writer, user, campaign, [newcomer.id], now=NOW)
+    assert verdict.eligible
+
+
+def test_a_step_fire_lets_the_older_of_two_enrollments_sharing_an_address_proceed(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    """Both enrolled while their addresses differed; one is changed to match since.
+    Only the older proceeds, so the address gets each step once."""
+    older = factories.make_contact(writer, user, emails=["same@example.test"])
+    newer = factories.make_contact(writer, user, emails=["different@example.test"])
+    first = factories.make_enrollment(writer, campaign, older)
+    second = factories.make_enrollment(writer, campaign, newer)
+    assert check_step(writer, user, second, campaign.steps[0], now=NOW).eligible
+    newer.emails[0].email = "same@example.test"
+    writer.flush()
+    assert check_step(writer, user, first, campaign.steps[0], now=NOW).eligible
+    blocked = check_step(writer, user, second, campaign.steps[0], now=NOW)
+    assert blocked.reasons == (Reason.DUPLICATE_ADDRESS,)
+    # Once the older one ends, the address is still taken: it may have been sent to.
+    first.status = EnrollmentStatus.COMPLETED
+    writer.flush()
+    blocked = check_step(writer, user, second, campaign.steps[0], now=NOW)
+    assert blocked.reasons == (Reason.DUPLICATE_ADDRESS,)
+
+
+def test_a_merged_away_contacts_enrollment_does_not_hold_its_address(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    """After a merge the set-aside enrollment's contact is the survivor; not a second person."""
+    survivor = factories.make_contact(writer, user, emails=["s@example.test"])
+    loser = factories.make_contact(writer, user, emails=["s@example.test"])
+    factories.make_enrollment(writer, campaign, loser)
+    factories.make_enrollment(writer, campaign, survivor)
+    merge_contacts(writer, user, survivor.id, loser.id)
+    writer.expire_all()
+    [kept] = writer.scalars(
+        scoped(user, Enrollment).where(Enrollment.contact_id == survivor.id)
+    ).all()
+    assert check_step(writer, user, kept, campaign.steps[0], now=NOW).eligible
+
+
+def test_another_users_enrollment_does_not_hold_the_address(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    stranger = factories.make_user(writer)
+    their_campaign = factories.make_campaign(writer, stranger)
+    theirs = factories.make_contact(writer, stranger, emails=["same@example.test"])
+    factories.make_enrollment(writer, their_campaign, theirs)
+    mine = factories.make_contact(writer, user, emails=["same@example.test"])
+    [verdict] = check_enrollment(writer, user, campaign, [mine.id], now=NOW)
+    assert verdict.eligible

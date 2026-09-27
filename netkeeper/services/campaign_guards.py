@@ -57,6 +57,7 @@ from netkeeper.models import (
     CampaignStatus,
     CampaignStep,
     Contact,
+    ContactEmail,
     EmailStatus,
     Enrollment,
     EnrollmentStatus,
@@ -86,7 +87,9 @@ class Reason(enum.StrEnum):
     NO_EMAIL = "no_email"
     EMAIL_BOUNCED = "email_bounced"
     EMAIL_INVALID = "email_invalid"
+    ADDRESS_BOUNCED_ELSEWHERE = "address_bounced_elsewhere"
     NO_LINKEDIN = "no_linkedin"
+    DUPLICATE_ADDRESS = "duplicate_address"
     IN_ANOTHER_CAMPAIGN = "in_another_campaign"
     CONTACTED_RECENTLY = "contacted_recently"
 
@@ -137,6 +140,12 @@ class ContactFacts:
     than this one, whose enrollment came first. ``last_outbound_at`` is the newest
     time anyone contacted them, counting every outbound interaction and every
     sent campaign message, except the firing enrollment's own.
+
+    The two address facts are about the contact's ``sendable_email`` (#238, Part A).
+    ``address_bounced_elsewhere``: another contact of the user holds the same
+    address as bounced or invalid. ``duplicate_address``: the address is already
+    on another enrollment in this campaign (see :func:`load_facts` for which).
+    Both are ``False`` for a contact with no sendable address.
     """
 
     contact_id: int
@@ -150,6 +159,8 @@ class ContactFacts:
     has_linkedin: bool
     other_campaigns: frozenset[int]
     last_outbound_at: datetime | None
+    address_bounced_elsewhere: bool
+    duplicate_address: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +251,31 @@ def has_channel_address(facts: ContactFacts, channel: TemplateChannel, *_: objec
     return Reason.UNKNOWN_CHANNEL if guard is None else guard(facts)
 
 
+def address_not_bounced_elsewhere(
+    facts: ContactFacts, channel: TemplateChannel, *_: object
+) -> Reason | None:
+    """An email step's address has not bounced, nor been found invalid, on another contact.
+
+    Address statuses live per contact, so a bounce on one row would otherwise leave
+    the same address sendable on another (#238). Email only: a bounce leaves a
+    contact eligible for LinkedIn steps (spec 11.5).
+    """
+    if channel is TemplateChannel.EMAIL and facts.address_bounced_elsewhere:
+        return Reason.ADDRESS_BOUNCED_ELSEWHERE
+    return None
+
+
+def not_duplicate_address(facts: ContactFacts, *_: object) -> Reason | None:
+    """The address is not already on another enrollment in this campaign (#238).
+
+    Two unmerged contacts sharing an address are one person with two rows: without
+    this, both are eligible and the address gets every step twice. Checked on
+    every channel, because a shared address says it is the same person whichever
+    channel the step uses.
+    """
+    return Reason.DUPLICATE_ADDRESS if facts.duplicate_address else None
+
+
 def not_in_another_campaign(
     facts: ContactFacts, channel: TemplateChannel, policy: GuardPolicy, *_: object
 ) -> Reason | None:
@@ -272,6 +308,8 @@ GUARDS: Final[tuple[Guard, ...]] = (
     not_do_not_contact,
     not_disconnected,
     has_channel_address,
+    address_not_bounced_elsewhere,
+    not_duplicate_address,
     not_in_another_campaign,
     not_contacted_recently,
 )
@@ -396,7 +434,9 @@ _LABELS: Final[Mapping[Reason, str]] = {
     Reason.NO_EMAIL: "no email",
     Reason.EMAIL_BOUNCED: "bounced email",
     Reason.EMAIL_INVALID: "invalid email",
+    Reason.ADDRESS_BOUNCED_ELSEWHERE: "address bounced on another contact",
     Reason.NO_LINKEDIN: "no LinkedIn profile",
+    Reason.DUPLICATE_ADDRESS: "address already in this campaign",
     Reason.IN_ANOTHER_CAMPAIGN: "in another campaign",
 }
 
@@ -452,6 +492,18 @@ def load_facts(
       nothing is ignored.
     - Another campaign's enrollment counts only if it came first, so two campaigns
       that enrolled the same person never exclude each other both at once.
+    - A duplicate address, the same way: at a step fire, only an enrollment in this
+      campaign older than ``enrollment_id`` counts. At enrollment time every
+      enrollment already in the campaign counts, and so does a contact earlier in
+      ``contact_ids`` (by id) with the same sendable address, so of a batch sharing
+      one address only the first gets in.
+
+    An enrollment of any status counts as holding its address, not only a live one:
+    a completed or removed enrollment may have been sent to, and freeing the
+    address when it ends would send the sequence to it a second time. An
+    enrollment of a contact since merged away does not, because its person is
+    the survivor. Addresses are compared as stored: ``ContactEmail`` normalizes
+    them on the way in.
 
     The contacts and their addresses are read fresh, never taken from the
     session's identity map: sessions here keep their objects across commits
@@ -469,9 +521,15 @@ def load_facts(
     ).all()
     others = _other_campaigns(session, user, ids, campaign_id, enrollment_id)
     last_out = _last_outbound(session, user, ids, enrollment_id)
-    facts: dict[int, ContactFacts] = {}
+    sendable: dict[int, str] = {}
     for contact in contacts:
         email = sendable_email(contact, refuse=UNSENDABLE_EMAIL_STATUSES)
+        if email is not None:
+            sendable[contact.id] = email.email
+    bounced = _bounced_elsewhere(session, user, sendable)
+    duplicates = _duplicate_addresses(session, user, sendable, campaign_id, enrollment_id)
+    facts: dict[int, ContactFacts] = {}
+    for contact in contacts:
         facts[contact.id] = ContactFacts(
             contact_id=contact.id,
             merged=contact.merged_into_id is not None,
@@ -480,12 +538,79 @@ def load_facts(
             do_not_contact=contact.do_not_contact,
             disconnected=contact.li_disconnected_at is not None,
             email_statuses=tuple(e.status for e in contact.emails),
-            sendable_email=None if email is None else email.email,
+            sendable_email=sendable.get(contact.id),
             has_linkedin=bool(contact.li_urn or contact.li_public_id),
             other_campaigns=frozenset(others.get(contact.id, ())),
             last_outbound_at=last_out.get(contact.id),
+            address_bounced_elsewhere=contact.id in bounced,
+            duplicate_address=contact.id in duplicates,
         )
     return facts
+
+
+def _bounced_elsewhere(session: Session, user: User, sendable: Mapping[int, str]) -> set[int]:
+    """The contacts whose sendable address another contact holds as bounced or invalid."""
+    if not sendable:
+        return set()
+    rows = session.execute(
+        scoped(user, ContactEmail)
+        .with_only_columns(ContactEmail.email, ContactEmail.contact_id)
+        .where(
+            ContactEmail.email.in_(sorted(set(sendable.values()))),
+            ContactEmail.status.in_(UNSENDABLE_EMAIL_STATUSES),
+        )
+    ).tuples()
+    holders: dict[str, set[int]] = {}
+    for address, holder in rows:
+        holders.setdefault(address, set()).add(holder)
+    return {
+        contact_id
+        for contact_id, address in sendable.items()
+        if holders.get(address, set()) - {contact_id}
+    }
+
+
+def _duplicate_addresses(
+    session: Session,
+    user: User,
+    sendable: Mapping[int, str],
+    campaign_id: int | None,
+    enrollment_id: int | None,
+) -> set[int]:
+    """The contacts whose sendable address is already on another enrollment: see
+    :func:`load_facts`."""
+    found: set[int] = set()
+    if enrollment_id is None:
+        first: dict[str, int] = {}
+        for contact_id in sorted(sendable):
+            if first.setdefault(sendable[contact_id], contact_id) != contact_id:
+                found.add(contact_id)
+    if not sendable or campaign_id is None:
+        return found
+    statement = (
+        scoped(user, Enrollment)
+        .with_only_columns(ContactEmail.email, Enrollment.contact_id)
+        .join(Contact, Contact.id == Enrollment.contact_id)
+        .join(ContactEmail, ContactEmail.contact_id == Contact.id)
+        .where(
+            Contact.user_id == user.id,
+            ContactEmail.user_id == user.id,
+            Enrollment.campaign_id == campaign_id,
+            Contact.merged_into_id.is_(None),
+            ContactEmail.email.in_(sorted(set(sendable.values()))),
+        )
+    )
+    if enrollment_id is not None:
+        statement = statement.where(Enrollment.id < enrollment_id)
+    holders: dict[str, set[int]] = {}
+    for address, holder in session.execute(statement).tuples():
+        holders.setdefault(address, set()).add(holder)
+    found.update(
+        contact_id
+        for contact_id, address in sendable.items()
+        if holders.get(address, set()) - {contact_id}
+    )
+    return found
 
 
 def _other_campaigns(
