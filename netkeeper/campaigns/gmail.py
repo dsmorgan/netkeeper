@@ -28,7 +28,12 @@ A :class:`GmailTransient` from a call that writes (send, create a draft,
 create a label, change labels) has ``outcome_unknown`` set: the request may
 have reached Gmail before the connection failed, so the caller must look (a
 search for ``rfc822msgid:``) before trying again, or it may send twice.
-Nothing here retries a request by itself.
+Nothing here retries a request by itself, and neither does the transport:
+``httplib2`` silently sends a request a second time when the first attempt's
+connection drops before an answer (``BadStatusLine``, ``RemoteDisconnected``),
+whatever the method. :class:`WriteOnceHttp` is ``httplib2`` with that turned off
+for every method that is not idempotent, so a ``POST`` is written to the wire
+at most once, and always on a fresh connection.
 
 **Auth.** :class:`GmailClient` never refreshes a token itself: it is given a
 ``refresh`` function (``services.mailboxes.open_gmail`` passes P3-01's
@@ -49,6 +54,7 @@ is not): one per job.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -98,6 +104,10 @@ _PAGE_MAX: Final = 500
 
 #: Seconds before a request with no answer gives up.
 DEFAULT_TIMEOUT_S: Final = 30.0
+
+#: The methods ``httplib2`` may send again after a dropped connection: the
+#: idempotent ones (RFC 9110, 9.2.2). Every Gmail write is a ``POST``.
+RESENDABLE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE"})
 
 
 # --- errors ------------------------------------------------------------------------
@@ -311,6 +321,97 @@ def encode_raw(message: EmailMessage) -> str:
     return base64.urlsafe_b64encode(message.as_bytes(policy=SMTP)).decode("ascii")
 
 
+# --- the transport -----------------------------------------------------------------
+
+
+class SentWithoutAnswer(Exception):
+    """A write reached the connection, and the connection failed before an answer.
+
+    Raised in place of the ``OSError`` or ``HTTPException`` that ``httplib2``
+    would have caught and answered by sending the request again. Gmail may have
+    acted on it.
+    """
+
+
+class WriteOnceMixin(http.client.HTTPConnection):
+    """What makes an ``httplib2`` connection never let a write be sent twice.
+
+    For a method outside :data:`RESENDABLE_METHODS` it drops a kept-alive
+    socket and connects afresh first, so a connection the server closed while
+    idle cannot fail a write, and it turns any failure after that into
+    :class:`SentWithoutAnswer`, which ``httplib2``'s retry loop does not catch.
+    """
+
+    _nk_method = "GET"
+    _nk_fresh = False  # connected, and nothing sent on the socket yet
+
+    def connect(self) -> None:
+        super().connect()
+        self._nk_fresh = True
+
+    def request(self, method: str, url: str, *args: Any, **kwargs: Any) -> None:
+        self._nk_method = method.upper()
+        try:
+            if self._nk_method in RESENDABLE_METHODS:
+                super().request(method, url, *args, **kwargs)
+                return
+            if self.sock is None or not self._nk_fresh:
+                self.close()
+                self.connect()  # outside the inner try: a failure to connect sent nothing
+            try:
+                super().request(method, url, *args, **kwargs)
+            except (OSError, http.client.HTTPException) as exc:
+                raise self._no_answer(exc) from exc
+        finally:
+            self._nk_fresh = False
+
+    def getresponse(self) -> http.client.HTTPResponse:
+        try:
+            return super().getresponse()
+        except (OSError, http.client.HTTPException) as exc:
+            if self._nk_method in RESENDABLE_METHODS:
+                raise
+            raise self._no_answer(exc) from exc
+
+    def _no_answer(self, exc: BaseException) -> SentWithoutAnswer:
+        self.close()
+        return SentWithoutAnswer(
+            f"the connection failed during a {self._nk_method} ({type(exc).__name__})"
+        )
+
+
+class WriteOnceConnection(WriteOnceMixin, httplib2.HTTPSConnectionWithTimeout):  # type: ignore[misc]
+    """``httplib2``'s HTTPS connection with :class:`WriteOnceMixin`."""
+
+
+class WriteOnceHttp(httplib2.Http):  # type: ignore[misc]
+    """``httplib2.Http`` whose HTTPS connections are ``connection_type``:
+    :class:`WriteOnceConnection`, unless a test passes another class with
+    :class:`WriteOnceMixin`."""
+
+    def __init__(
+        self,
+        *,
+        timeout: float | None = DEFAULT_TIMEOUT_S,
+        connection_type: type[WriteOnceMixin] = WriteOnceConnection,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self._nk_connection_type = connection_type
+
+    def request(
+        self,
+        uri: str,
+        method: str = "GET",
+        body: Any = None,
+        headers: Any = None,
+        redirections: int = httplib2.DEFAULT_MAX_REDIRECTS,
+        connection_type: Any = None,
+    ) -> Any:
+        if connection_type is None and uri.lower().startswith("https:"):
+            connection_type = self._nk_connection_type
+        return super().request(uri, method, body, headers, redirections, connection_type)
+
+
 # --- the real client ---------------------------------------------------------------
 
 
@@ -332,7 +433,7 @@ class GmailClient:
     ``on_auth_failure`` is called with the :class:`GmailAuthError` before it is
     raised; a failure inside it is logged and does not hide the auth error.
     ``http`` is the transport under the auth layer: a test passes a recording
-    fake, production leaves it to ``httplib2``.
+    fake, production leaves it to :class:`WriteOnceHttp`.
     """
 
     def __init__(
@@ -346,7 +447,7 @@ class GmailClient:
     ) -> None:
         self.mailbox_id = mailbox_id
         self._on_auth_failure = on_auth_failure
-        transport = http if http is not None else httplib2.Http(timeout=timeout_s)
+        transport = http if http is not None else WriteOnceHttp(timeout=timeout_s)
         self._service: Any = build(
             "gmail",
             "v1",
@@ -494,7 +595,7 @@ class GmailClient:
             else:
                 # Refused, but not in a way that says the grant is dead. Nothing was sent.
                 error = GmailTransient("Google refused to renew the access token", code=exc.code)
-        except (OSError, httplib2.HttpLib2Error) as exc:
+        except (OSError, httplib2.HttpLib2Error, SentWithoutAnswer) as exc:
             error = GmailTransient(
                 f"could not reach Gmail ({type(exc).__name__})",
                 code="unavailable",

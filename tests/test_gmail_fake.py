@@ -129,6 +129,20 @@ def test_a_follow_up_gmail_would_not_thread_starts_a_new_one(
     assert second.thread_id == second.id
 
 
+def test_a_send_without_a_thread_id_starts_a_new_thread_whatever_it_cites(
+    gmail: FakeGmail,
+) -> None:
+    """Gmail threads a sent message only into the ``threadId`` it is given (#267)."""
+    first = gmail.send(_mail(), purpose="send step 1")
+    second = gmail.send(
+        _mail("Re: Catching up", msgid="<s2@example.com>", reply_to="<s1@example.com>"),
+        purpose="send step 2",
+    )
+    assert second.thread_id != first.thread_id
+    assert second.thread_id == second.id
+    assert len(gmail.get_thread(first.thread_id, purpose="read").messages) == 1
+
+
 def test_an_unknown_thread_is_not_found(gmail: FakeGmail) -> None:
     with pytest.raises(GmailNotFound):
         gmail.send(_mail(), thread_id="nope", purpose="send step 2")
