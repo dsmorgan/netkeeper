@@ -141,7 +141,7 @@ Drift signals to watch for at every checkpoint:
 
 ### CP5: Gmail setup by following the guide
 
-- **Demo:** Someone (you, on a clean Google account, or a second person) creates the Cloud project and OAuth client from the setup guide alone, authorizes, and sees the mailbox healthy on the dashboard.
+- **Demo:** Someone (you, on a clean Google account, or a second person) creates the Cloud project and OAuth client from the setup guide alone, authorizes, and sees the mailbox healthy in Settings (connected, with when its token was last refreshed).
 - **Questions:** How long did it take? Where did the guide lose you? Did the unverified-app screen surprise you? Does re-auth after a revoked token work?
 - **Re-read:** ADR 0003.
 - **Why now:** Setup friction is the biggest adoption risk for contributors and other users; measure it before the campaign UI hides it.
