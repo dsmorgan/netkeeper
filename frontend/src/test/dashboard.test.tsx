@@ -132,13 +132,13 @@ describe('dashboard: a fresh install with nothing imported', () => {
 
     const headings = main.getAllByRole('heading', { level: 2 }).map((node) => node.textContent)
     expect(headings).toEqual([
-      'Mailbox',
       'Start here',
       '1. Import your data',
       '2. Review what was tagged by a rule',
       '3. Triage',
       '4. Build a list',
       '5. Export',
+      'Mailbox',
     ])
   })
 

@@ -81,8 +81,6 @@ export function DashboardPage() {
         </span>
       </div>
 
-      <MailboxCard />
-
       {!hasContacts && (
         <Card size="sm" className="border-primary/40">
           <CardHeader>
@@ -102,6 +100,8 @@ export function DashboardPage() {
           </li>
         ))}
       </ol>
+
+      <MailboxCard />
     </div>
   )
 }
