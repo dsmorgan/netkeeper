@@ -245,3 +245,93 @@ def test_one_bare_address_with_space_around_it_is_sent_to() -> None:
 def test_campaign_label() -> None:
     assert campaign_label("netkeeper", "First 100") == "netkeeper/First 100"
     assert campaign_label("netkeeper/", "  First   100 ") == "netkeeper/First 100"
+
+
+# --- #280: Unicode domains, and a subject that is one line -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("to", "expected"),
+    [
+        ("ada@ü.example", "ada@xn--tda.example"),
+        ("ada@bücher.example", "ada@xn--bcher-kva.example"),
+        ("ada@straße.example", "ada@xn--strae-oqa.example"),  # IDNA 2008, not "strasse"
+        ("ada@BÜCHER.example", "ada@xn--bcher-kva.example"),
+        ("ada@xn--tda.example", "ada@xn--tda.example"),
+        ("Ada@Example.TEST", "Ada@Example.TEST"),  # ASCII is left as it is
+    ],
+)
+def test_a_unicode_domain_goes_into_to_as_idna(to: str, expected: str) -> None:
+    """#280: the header's own encoding made ``a@ü.com`` ``a@=?utf-8?q?=C3=BC?=.com``."""
+    message = build_message(to=to, subject="s", body="b", message_id=_id())
+    assert message["To"] == expected
+    raw = message.as_bytes(policy=SMTP)
+    assert f"To: {expected}\r\n".encode() in raw
+    assert b"=?" not in raw.split(b"\r\n\r\n")[0]
+    assert _wire(message).get_all("To") == [expected]
+
+
+@pytest.mark.parametrize(
+    "to", ["ada@-bü.example", "ada@ü..example", "ada@ü_x.example", "ü@example.test"]
+)
+def test_an_address_that_cannot_go_into_to_is_refused(to: str) -> None:
+    with pytest.raises(ComposeError):
+        build_message(to=to, subject="s", body="b", message_id=_id())
+
+
+SUBJECT_BREAKS = [
+    "\x0b",  # VT
+    "\x0c",  # FF
+    "\x1c",
+    "\x1d",
+    "\x1e",
+    "\x85",  # NEL
+    "\u2028",  # LINE SEPARATOR
+    "\u2029",  # PARAGRAPH SEPARATOR
+    "\x00",  # NUL
+    "\x07",
+    "\x7f",
+    "\r",
+    "\n",
+]
+
+
+@pytest.mark.parametrize(
+    "separator", SUBJECT_BREAKS, ids=[f"U+{ord(c):04X}" for c in SUBJECT_BREAKS]
+)
+def test_a_subject_with_a_line_separator_or_control_is_a_compose_error(separator: str) -> None:
+    """#280: these raised a bare ValueError (or passed, for NUL), and the step read as an
+    unknown outcome that failed hours later."""
+    with pytest.raises(ComposeError, match="one line"):
+        build_message(
+            to="ada@example.test", subject=f"Hi{separator}Bcc: x", body="b", message_id=_id()
+        )
+
+
+@pytest.mark.parametrize(
+    "subject", ["=?utf-8?q?Hello?=", "Re: =?UTF-8?B?SGk=?= there", "a =?x?y?z?= b"]
+)
+def test_a_subject_with_an_encoded_word_is_refused(subject: str) -> None:
+    """The header would decode it, so the recipient would read something else (#280)."""
+    with pytest.raises(ComposeError, match="encoded word"):
+        build_message(to="ada@example.test", subject=subject, body="b", message_id=_id())
+
+
+@pytest.mark.parametrize("subject", ["Tab\there", "Olá, Ada", "Is 2+2=4?", "=? not one ?"])
+def test_an_ordinary_subject_is_kept(subject: str) -> None:
+    message = build_message(to="ada@example.test", subject=subject, body="b", message_id=_id())
+    assert _wire(message)["Subject"] == subject
+
+
+def test_whatever_the_email_package_refuses_is_a_compose_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal the checks above missed still fails the step at once, never as an
+    unknown outcome (#280)."""
+
+    def refuse(self: EmailMessage, *args: object, **kwargs: object) -> None:
+        raise ValueError("refused")
+
+    monkeypatch.setattr(EmailMessage, "set_content", refuse)
+    with pytest.raises(ComposeError, match="email package refused"):
+        build_message(to="ada@example.test", subject="s", body="b", message_id=_id())

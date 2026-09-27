@@ -42,6 +42,7 @@ from netkeeper.models import (
     Message,
     MessageStatus,
     StepMode,
+    Template,
     TemplateChannel,
     User,
 )
@@ -1246,3 +1247,41 @@ def test_a_lost_draft_answer_with_the_draft_not_listed_yet_is_unknown(drafts: Ma
     [message] = drafts.messages(enrollment_id)
     assert message.status is MessageStatus.DRAFTED
     assert [m for m, _ in drafts.gmail.calls].count("drafts.create") == 1
+
+
+# --- #280: a message that cannot be built fails at once -----------------------------------
+
+
+def _set_subject(mail: Mail, subject: str) -> None:
+    def change(session: Session) -> None:
+        for template in session.scalars(scoped(mail.user, Template)):
+            template.subject = subject
+
+    mail.write(change)
+
+
+@pytest.mark.parametrize(
+    "subject", ["Catching\x00up", "Catching\x07up", "=?utf-8?q?Catching_up?="], ids=repr
+)
+def test_a_subject_compose_refuses_fails_the_step_at_once(mail: Mail, subject: str) -> None:
+    """#280: a message that cannot be built is ``failed`` at once, with no search for a
+    message never sent. The render already makes every line break a space; NUL, another
+    control, or an encoded word still reaches the compose (NUL used to go out as is)."""
+    enrollment_id = mail.enroll()
+    _set_subject(mail, subject)
+    [(_, outcome)] = mail.tick().fired
+    assert outcome.outcome is SendOutcome.FAILED
+    assert outcome.error is not None and "could not be built" in outcome.error
+    [message] = mail.messages(enrollment_id)
+    assert message.status is MessageStatus.FAILED
+    mail.tick(NOW + LATER)
+    assert [m for m, _ in mail.gmail.calls if m in ("messages.send", "messages.list")] == []
+
+
+def test_a_contact_at_a_unicode_domain_is_sent_to_its_idna_address(mail: Mail) -> None:
+    enrollment_id = mail.enroll("ada@bücher.example")
+    [(_, outcome)] = mail.tick().fired
+    assert outcome.outcome is SendOutcome.SENT
+    [message] = mail.messages(enrollment_id)
+    assert message.gmail_message_id is not None
+    assert mail.gmail.raw(message.gmail_message_id).get_all("To") == ["ada@xn--bcher-kva.example"]
