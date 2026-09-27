@@ -34,12 +34,13 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns import gmail_oauth
+from netkeeper.campaigns.gmail import GmailClient
 from netkeeper.db import session_scope
 from netkeeper.models import Mailbox, MailboxStatus, User, UserKind
 from netkeeper.models.base import utcnow
@@ -338,6 +339,30 @@ def check_mailbox(
         log.warning("mailbox %d not checked: %s", mailbox_id, exc)
         return CheckResult(mailbox_id, user_id, MailboxStatus.OK, None, False)
 
+    return _record(factory, user_id, mailbox_id, ref, reason, clock)
+
+
+def mark_reauth_required(
+    factory: sessionmaker[Session], user_id: int, mailbox_id: int, ref: str, reason: str
+) -> CheckResult | None:
+    """Set the mailbox ``reauth_required`` for ``reason``, as a failed check would.
+
+    ``ref`` is the ``keychain_ref`` the caller's token came from: a mailbox a
+    person disconnected or re-authorized since then is left alone. None when
+    the user or mailbox is gone. Opens a writer, so call it with no session open.
+    """
+    return _record(factory, user_id, mailbox_id, ref, reason, utcnow)
+
+
+def _record(
+    factory: sessionmaker[Session],
+    user_id: int,
+    mailbox_id: int,
+    ref: str,
+    reason: str | None,
+    clock: Callable[[], datetime],
+) -> CheckResult | None:
+    """Write what a check found: ``checked_at`` when ``reason`` is None, else the pause."""
     with session_scope(factory, write=True) as session:
         user = session.get(User, user_id)
         mailbox = None if user is None else get_scoped(session, user, Mailbox, mailbox_id)
@@ -353,6 +378,85 @@ def check_mailbox(
         mailbox.status_reason = reason
         log.warning("mailbox %d needs re-authorization (%s); email steps pause", mailbox.id, reason)
         return CheckResult(mailbox.id, user_id, mailbox.status, reason, True)
+
+
+class MailboxNotReady(RuntimeError):
+    """The mailbox cannot send: it is not ``ok``, or its secrets are gone. ``code`` says why."""
+
+    def __init__(self, mailbox_id: int, code: str) -> None:
+        super().__init__(f"mailbox {mailbox_id} is not ready to use ({code})")
+        self.mailbox_id = mailbox_id
+        self.code = code
+
+
+def open_gmail(
+    factory: sessionmaker[Session],
+    user_id: int,
+    mailbox_id: int,
+    *,
+    endpoints: gmail_oauth.GoogleEndpoints | None = None,
+    on_status_change: Callable[[CheckResult], None] | None = None,
+    http: Any = None,
+) -> GmailClient:
+    """A :class:`GmailClient` for the user's ``ok`` mailbox (item P3-02).
+
+    The client renews its access token with P3-01's
+    :func:`~netkeeper.campaigns.gmail_oauth.refresh_access_token`, from the
+    OAuth client and refresh token in the Keychain. When Gmail or Google
+    refuses the grant, the mailbox goes ``reauth_required`` by the same path as
+    :func:`check_mailbox`, and ``on_status_change`` hears of it (it runs on the
+    calling thread: an async caller hands :func:`status_event` to the loop).
+
+    :class:`MailboxNotFound` when it is not the user's; :class:`MailboxNotReady`
+    when it is not ``ok``, a secret is missing (which marks the mailbox, as a
+    check would), or the Keychain is locked (which does not). Reads a session
+    and closes it before returning.
+    """
+    with session_scope(factory) as session:
+        user = session.get(User, user_id)
+        mailbox = None if user is None else get_scoped(session, user, Mailbox, mailbox_id)
+        if mailbox is None:
+            raise MailboxNotFound(f"no mailbox {mailbox_id}")
+        if mailbox.status is not MailboxStatus.OK:
+            raise MailboxNotReady(mailbox_id, mailbox.status.value)
+        ref = mailbox.keychain_ref
+
+    def mark(reason: str, used: str | None = None) -> None:
+        if used is not None:
+            try:
+                current = keychain.get_secret(user_id, ref)
+            except keychain.KeychainUnavailable:
+                current = used  # cannot tell; pausing is the safe side
+            if current != used:
+                # Re-authorized since this client read its token: the new grant is fine.
+                log.info("mailbox %d was re-authorized meanwhile; not marked", mailbox_id)
+                return
+        result = mark_reauth_required(factory, user_id, mailbox_id, ref, reason)
+        if result is not None and result.changed and on_status_change is not None:
+            on_status_change(result)
+
+    try:
+        client = load_client(user_id)
+        token = keychain.get_secret(user_id, ref)
+    except keychain.KeychainUnavailable as exc:
+        # Nothing is known about the grant, so nothing is marked (as in a check).
+        raise MailboxNotReady(mailbox_id, "keychain_unavailable") from exc
+    if client is None:
+        mark(REASON_CLIENT_MISSING)
+        raise MailboxNotReady(mailbox_id, REASON_CLIENT_MISSING)
+    if token is None:
+        mark(REASON_TOKEN_MISSING)
+        raise MailboxNotReady(mailbox_id, REASON_TOKEN_MISSING)
+
+    def refresh() -> str:
+        return gmail_oauth.refresh_access_token(client, token, endpoints=endpoints)
+
+    return GmailClient(
+        refresh,
+        mailbox_id=mailbox_id,
+        on_auth_failure=lambda error: mark(error.code, token),
+        http=http,
+    )
 
 
 def poll_mailboxes(
