@@ -52,8 +52,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    inspect,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from netkeeper.models.base import Base, TimestampMixin, UserOwned, UTCDateTime, string_enum
 
@@ -167,8 +168,19 @@ class MessageStatus(enum.StrEnum):
     RECEIVED = "received"
 
 
+class CampaignMailboxLocked(ValueError):
+    """A campaign's mailbox changes only while the campaign is a ``draft`` (#269)."""
+
+
 class Campaign(UserOwned, TimestampMixin, Base):
-    """A sequence of steps sent to an audience (spec 8.5, 11.2)."""
+    """A sequence of steps sent to an audience (spec 8.5, 11.2).
+
+    ``mailbox_id`` is locked once the campaign leaves ``draft`` (#264 question 2,
+    #269): the daily caps count a campaign's sends through its current mailbox,
+    since ``messages`` has no mailbox column, and a reconcile searches for a
+    message in that mailbox by its Message-ID. Setting it on a stored campaign
+    that is not a draft raises :class:`CampaignMailboxLocked`.
+    """
 
     __tablename__ = "campaigns"
     __table_args__ = (
@@ -217,6 +229,17 @@ class Campaign(UserOwned, TimestampMixin, Base):
     contacted_within_days_guard: Mapped[int] = mapped_column(Integer, nullable=False)
     approved_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     test_sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+    @validates("mailbox_id")
+    def _lock_mailbox(self, _key: str, value: int | None) -> int | None:
+        if inspect(self).key is None:  # not stored yet: nothing has been sent through it
+            return value
+        if value != self.mailbox_id and self.status is not CampaignStatus.DRAFT:
+            raise CampaignMailboxLocked(
+                f"campaign {self.id} is {self.status}: its mailbox cannot change once it"
+                " leaves draft, because its caps and its sent mail are counted through it"
+            )
+        return value
 
     steps: Mapped[list[CampaignStep]] = relationship(
         back_populates="campaign",
