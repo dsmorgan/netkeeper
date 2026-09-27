@@ -744,6 +744,10 @@ def check_step(
     :attr:`Reason.CAMPAIGN_NOT_ACTIVE` (:func:`enrollment_state`), so a
     finished, paused, or removed enrollment is never sent to by a caller that
     forgot to filter it out.
+
+    It does not say whether the step already fired: "never twice" is the engine's
+    check, :func:`netkeeper.services.campaign_engine.step_has_message`, run on the
+    enrollment's messages before this (#261, #264 review).
     """
     if enrollment.user_id != user.id or step.user_id != user.id:
         raise ValueError("an enrollment and its step must be the user's")

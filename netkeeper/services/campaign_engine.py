@@ -1266,18 +1266,22 @@ def tick_user(
     *,
     settings: Settings,
     sender: Sender,
-    now: datetime,
     clock: Callable[[], datetime],
     rng: random.Random,
 ) -> TickResult:
-    """One user's tick: choose and claim, send with no session open, record. Blocking."""
+    """One user's tick: choose and claim, send with no session open, record. Blocking.
+
+    The time is read once the writer session holds the write lock, not before: the
+    lock can take up to the busy timeout to get, and a claim decided on the time from
+    before the wait could land after the window closed (#264 review)."""
     result = TickResult(user_id)
     claims: list[_Claim] = []
     for _ in range(BATCH_PER_TICK):
         with session_scope(factory, write=True) as session:
-            user = session.get(User, user_id)
+            user = session.get(User, user_id)  # the first statement: the write lock is held
             if user is None:
                 return result
+            now = clock()
             claim = _Chooser(session, user, settings, now, result, rng).choose()
         if claim is None:
             break
@@ -1329,7 +1333,6 @@ def run_tick(
                     user_id,
                     settings=settings,
                     sender=sender,
-                    now=now,
                     clock=clock,
                     rng=draw,
                 )
