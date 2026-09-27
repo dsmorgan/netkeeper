@@ -34,11 +34,14 @@ refuse, so no test can reach Google.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import http.client
 import json
 import logging
 import secrets
+import socket
+import threading
 import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -380,8 +383,10 @@ class LoopbackReceiver:
     port is known before the URL is shown; close it with :meth:`close` or ``with``.
 
     The server handles one connection at a time, so each connection gets at most
-    ``connection_timeout_s`` (and never past :meth:`wait`'s deadline): a socket
-    a browser opens and never uses (a preconnect) cannot hold the wait open.
+    ``connection_timeout_s`` in all (and never past :meth:`wait`'s deadline): a
+    socket a browser opens and never uses (a preconnect), or one that sends a
+    byte at a time, cannot hold the wait open. The socket timeout bounds each
+    read; a timer shuts the connection at its overall deadline.
     """
 
     def __init__(self, *, connection_timeout_s: float = CONNECTION_TIMEOUT_S) -> None:
@@ -389,6 +394,21 @@ class LoopbackReceiver:
 
         class Handler(BaseHTTPRequestHandler):
             timeout = connection_timeout_s
+
+            def setup(self) -> None:
+                super().setup()
+                # The socket timeout restarts on every read; this deadline does not.
+                self._cutoff = threading.Timer(self.timeout, self._cut)
+                self._cutoff.daemon = True
+                self._cutoff.start()
+
+            def _cut(self) -> None:
+                with contextlib.suppress(OSError):
+                    self.connection.shutdown(socket.SHUT_RDWR)
+
+            def finish(self) -> None:
+                self._cutoff.cancel()
+                super().finish()
 
             def do_GET(self) -> None:
                 parts = urlsplit(self.path)
@@ -418,7 +438,7 @@ class LoopbackReceiver:
     def wait(self, timeout_s: float) -> dict[str, str]:
         """The redirect's query once it arrives; :class:`TimeoutError` after ``timeout_s``.
 
-        A hard bound: an idle connection is dropped at the deadline, not after it.
+        A hard bound: a connection still open at the deadline is dropped then.
         """
         deadline = time.monotonic() + timeout_s
         while not self._received:

@@ -394,6 +394,33 @@ def test_a_silent_connection_cannot_hold_the_wait_past_its_timeout(
     assert elapsed < 2
 
 
+def test_a_connection_that_sends_a_byte_at_a_time_is_cut_at_its_deadline() -> None:
+    """The socket timeout restarts on every read, so a drip needs an overall deadline (#260)."""
+    stop = threading.Event()
+
+    def drip(port: int) -> None:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            for byte in b"GET /?state=s1&code=c1 HTTP/1.1\r\n" * 20:
+                if stop.wait(0.05):
+                    return
+                try:
+                    sock.sendall(bytes([byte]))
+                except OSError:
+                    return  # cut off: what the receiver should do
+
+    with LoopbackReceiver(connection_timeout_s=0.3) as receiver:
+        port = int(urlsplit(receiver.redirect_uri).port or 0)
+        dripper = threading.Thread(target=drip, args=(port,), daemon=True)
+        dripper.start()
+        try:
+            result, elapsed = _wait_in_thread(receiver, 1.0)
+        finally:
+            stop.set()
+            dripper.join(5)
+    assert isinstance(result, TimeoutError)
+    assert elapsed < 2
+
+
 def test_the_redirect_after_a_silent_connection_still_arrives() -> None:
     with LoopbackReceiver(connection_timeout_s=0.1) as receiver:
         port = int(urlsplit(receiver.redirect_uri).port or 0)
