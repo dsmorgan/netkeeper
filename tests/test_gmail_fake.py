@@ -247,6 +247,15 @@ def test_a_bounce_lands_in_the_thread_from_the_mailer_daemon(gmail: FakeGmail) -
     assert MAILER_DAEMON in (message.header("From") or "")
 
 
+def test_a_snippet_is_escaped_as_gmail_sends_it_and_read_as_text(gmail: FakeGmail) -> None:
+    message = _mail()
+    message.set_content('I don\'t mind "soon" & <soon>.')
+    ref = gmail.send(message, purpose="send step 1")
+
+    assert gmail.wire_snippet(ref.id) == "I don&#39;t mind &quot;soon&quot; &amp; &lt;soon&gt;."
+    assert gmail.get_message(ref.id, purpose="read").snippet == 'I don\'t mind "soon" & <soon>.'
+
+
 def test_reading_a_message_never_carries_its_body(gmail: FakeGmail) -> None:
     ref = gmail.send(_mail(), purpose="send step 1")
     message = gmail.get_message(ref.id, purpose="read")
@@ -295,6 +304,46 @@ def test_history_filters_by_label(gmail: FakeGmail) -> None:
     assert gmail.history(baseline, label_id="INBOX", purpose="poll").messages_added == (inbound,)
 
 
+def test_history_keeps_a_message_deleted_since_and_reading_it_is_not_found(
+    gmail: FakeGmail,
+) -> None:
+    """Gmail keeps ``messageAdded`` for a message deleted since; P3-08 must cope (#267)."""
+    baseline = gmail.history_id
+    first = gmail.send(_mail(), purpose="send step 1")
+    reply = gmail.reply(first, sender=ADA)
+    gmail.delete(reply)
+
+    history = gmail.history(baseline, purpose="reply poll")
+    assert history.messages_added == (first, reply)
+    assert gmail.history(baseline, label_id="INBOX", purpose="poll").messages_added == (reply,)
+    with pytest.raises(GmailNotFound):
+        gmail.get_message(reply.id, purpose="read reply")
+    thread = gmail.get_thread(first.thread_id, purpose="read")
+    assert [message.id for message in thread.messages] == [first.id]
+
+
+def test_history_keeps_a_draft_sent_or_discarded_since(gmail: FakeGmail) -> None:
+    baseline = gmail.history_id
+    sent_draft = gmail.create_draft(_mail(msgid="<d1@example.com>"), purpose="draft 1")
+    discarded = gmail.create_draft(_mail(msgid="<d2@example.com>"), purpose="draft 2")
+    sent = gmail.send_draft(sent_draft.id)
+    gmail.discard_draft(discarded.id)
+
+    added = gmail.history(baseline, purpose="poll").messages_added
+    assert added == (sent_draft.message, discarded.message, sent)
+    for gone in (sent_draft.message, discarded.message):
+        with pytest.raises(GmailNotFound):
+            gmail.get_message(gone.id, purpose="read")
+
+
+def test_deleting_a_drafts_message_removes_the_draft(gmail: FakeGmail) -> None:
+    draft = gmail.create_draft(_mail(), purpose="draft")
+    gmail.delete(draft.message)
+    assert gmail.drafts() == {}
+    with pytest.raises(GmailNotFound):
+        gmail.get_draft(draft.id, purpose="check draft")
+
+
 def test_history_older_than_gmail_keeps_is_not_found(gmail: FakeGmail) -> None:
     baseline = gmail.history_id
     gmail.send(_mail(), purpose="send step 1")
@@ -326,9 +375,42 @@ def test_search_operators(gmail: FakeGmail, clock: Clock) -> None:
     assert search("rfc822msgid:b@example.com") == [second.id]
     assert search('label:"netkeeper/First 100"') == [first.id]
     assert search("in:inbox") == [inbound.id]
-    assert spam.id not in search("in:anywhere")
+    assert spam.id in search("in:anywhere")  # the one search with spam and trash (#267)
+    assert spam.id not in search("from:spam@example.com")
     assert search(f"before:{int((T0 + timedelta(minutes=1)).timestamp())}") == [first.id]
     assert len(gmail.search("in:anywhere", max_results=2, purpose="s")) == 2
+
+
+def test_trash_is_searched_only_in_anywhere(gmail: FakeGmail) -> None:
+    trashed = gmail.deliver(_inbound("Old news"), labels=["TRASH"])
+    assert gmail.search(f"from:{ADA}", purpose="s") == []
+    assert gmail.search(f"from:{ADA} in:anywhere", purpose="s") == [trashed]
+
+
+@pytest.mark.parametrize(
+    ("query", "found"),
+    [
+        ("from:ada@example.com", True),
+        ("from:ada", True),  # a whole word of the address
+        ("from:example.com", True),
+        ("from:lovelace", True),  # a word of the display name
+        ("from:ad", False),  # part of a word
+        ("from:da@example.com", False),
+        ("from:ada@example.co", False),
+        ("from:bada@example.com", False),
+    ],
+)
+def test_from_matches_whole_words_as_gmail_does(gmail: FakeGmail, query: str, found: bool) -> None:
+    ref = gmail.deliver(_inbound("Hi", sender="Ada Lovelace <ada@example.com>"))
+    assert gmail.search(query, purpose="s") == ([ref] if found else [])
+
+
+def test_to_does_not_match_an_address_that_only_contains_the_one_asked_for(
+    gmail: FakeGmail,
+) -> None:
+    gmail.send(_mail(to="bada@example.com"), purpose="send")
+    wanted = gmail.send(_mail(to=ADA, msgid="<s2@example.com>"), purpose="send")
+    assert gmail.search(f"to:{ADA}", purpose="s") == [wanted]
 
 
 @pytest.mark.parametrize("query", ["hello", "after:2026/10/06", "subject:hi", "in:chats"])

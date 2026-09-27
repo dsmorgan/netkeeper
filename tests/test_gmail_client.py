@@ -160,7 +160,7 @@ def test_get_message_reads_metadata_never_the_body() -> None:
         "labelIds": ["INBOX", "UNREAD"],
         "historyId": "4242",
         "internalDate": "1790000000000",
-        "snippet": "Thanks, happy to talk",
+        "snippet": "Thanks, I don&#39;t mind &quot;soon&quot; &amp; &lt;b&gt;happy&lt;/b&gt;",
         "payload": {
             "headers": [
                 {"name": "From", "value": "Ada <ada@example.com>"},
@@ -172,6 +172,7 @@ def test_get_message_reads_metadata_never_the_body() -> None:
     message = _client(http).get_message("m1", purpose="reply check for enrollment 7")
 
     assert message.label_ids == {"INBOX", "UNREAD"}
+    assert message.snippet == 'Thanks, I don\'t mind "soon" & <b>happy</b>'  # unescaped (#267)
     assert message.history_id == 4242
     assert message.internal_date == datetime.fromtimestamp(1_790_000_000, tz=UTC)
     assert message.header("message-id") == "<reply@example.com>"

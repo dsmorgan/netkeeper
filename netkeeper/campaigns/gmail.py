@@ -54,6 +54,7 @@ is not): one per job.
 from __future__ import annotations
 
 import base64
+import html
 import http.client
 import json
 import logging
@@ -182,6 +183,8 @@ class Message:
     """A message's metadata: the :data:`METADATA_HEADERS`, labels and snippet, no body.
 
     ``internal_date`` is when Gmail received it (for a sent message, when it was sent).
+    ``snippet`` is plain text: Gmail sends it HTML-escaped (``don&#39;t``), and
+    :func:`snippet_text` has undone that, so a phrase can be matched against it.
     """
 
     id: str
@@ -254,7 +257,8 @@ class Gmail(Protocol):
 
     def search(self, query: str, *, max_results: int = 100, purpose: str) -> list[MessageRef]:
         """``messages.list`` with Gmail's search syntax, newest first. Spam and
-        trash are left out, as Gmail leaves them out."""
+        trash are left out, as Gmail leaves them out, unless the query says
+        ``in:anywhere``. ``from:`` and ``to:`` match whole words."""
         ...
 
     def list_labels(self, *, purpose: str) -> list[Label]: ...
@@ -276,7 +280,11 @@ class Gmail(Protocol):
         self, start_history_id: int, *, label_id: str | None = None, purpose: str
     ) -> History:
         """``history.list`` of ``messageAdded`` since ``start_history_id``, every page.
-        :class:`GmailNotFound` when the start is older than Gmail keeps."""
+        :class:`GmailNotFound` when the start is older than Gmail keeps.
+
+        A message deleted since it was added is still listed (a draft sent or
+        discarded, a reply the person deleted), and reading it is
+        :class:`GmailNotFound`: skip it, never fail the poll on it."""
         ...
 
 
@@ -314,6 +322,11 @@ def ensure_label(gmail: Gmail, name: str, *, purpose: str) -> Label:
             if label.name.lower() == wanted:
                 return label
         raise
+
+
+def snippet_text(snippet: str) -> str:
+    """A snippet as Gmail's API sends it (HTML-escaped), as the text it stands for."""
+    return html.unescape(snippet)
 
 
 def encode_raw(message: EmailMessage) -> str:
@@ -670,6 +683,6 @@ def _message(body: Mapping[str, Any]) -> Message:
         label_ids=frozenset(body.get("labelIds", [])),
         history_id=int(body["historyId"]),
         internal_date=datetime.fromtimestamp(int(body["internalDate"]) / 1000, tz=UTC),
-        snippet=str(body.get("snippet", "")),
+        snippet=snippet_text(str(body.get("snippet", ""))),
         headers=tuple((str(item["name"]), str(item["value"])) for item in headers),
     )

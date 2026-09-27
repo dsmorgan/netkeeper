@@ -17,16 +17,21 @@ get it wrong:
   change and draft moves it on, and each message carries the id of its last
   change. :meth:`FakeGmail.history` returns the messages added after a start,
   in order, and :class:`GmailNotFound` for a start older than
-  :meth:`FakeGmail.forget_history` left.
+  :meth:`FakeGmail.forget_history` left. As in Gmail, a message deleted since
+  (:meth:`FakeGmail.delete`, a draft sent or discarded) keeps its
+  ``messageAdded`` entry, and reading it is :class:`GmailNotFound`.
+- **Snippets** are HTML-escaped as Gmail's are (``don&#39;t``) and unescaped by
+  :func:`~netkeeper.campaigns.gmail.snippet_text`, the client's own step.
 - **Headers.** A message without ``Message-ID`` gets one, and one without
   ``From`` gets the mailbox's address, as Gmail fills them in. A message with no
   recipient is :class:`GmailRejected`.
-- **Search.** ``from:``, ``to:``, ``rfc822msgid:``, ``in:`` (``inbox``, ``sent``,
-  ``drafts``, ``anywhere``), ``label:``, and ``after:``/``before:`` with epoch
-  seconds only (Gmail reads a ``YYYY/MM/DD`` date in Pacific time, a trap for
-  the engine). Terms are ANDed. Anything else raises :class:`ValueError` rather
-  than matching everything, so a test cannot pass on a query Gmail would read
-  differently.
+- **Search.** ``from:`` and ``to:`` (whole words, as Gmail matches them),
+  ``rfc822msgid:``, ``in:`` (``inbox``, ``sent``, ``drafts``, and ``anywhere``,
+  the one search that includes spam and trash), ``label:``, and
+  ``after:``/``before:`` with epoch seconds only (Gmail reads a ``YYYY/MM/DD``
+  date in Pacific time, a trap for the engine). Terms are ANDed. Anything else
+  raises :class:`ValueError` rather than matching everything, so a test cannot
+  pass on a query Gmail would read differently.
 
 Nothing here is sent anywhere. A test scripts failures with
 :meth:`FakeGmail.fail_next`, and reads :attr:`FakeGmail.calls` for the methods
@@ -36,6 +41,7 @@ and purposes the engine used.
 from __future__ import annotations
 
 import email
+import html
 import itertools
 import logging
 import re
@@ -63,6 +69,7 @@ from netkeeper.campaigns.gmail import (
     Thread,
     check_purpose,
     log_call,
+    snippet_text,
 )
 from netkeeper.models.base import utcnow
 
@@ -128,6 +135,7 @@ class FakeGmail:
             name: Label(id=name, name=name, type="system") for name in SYSTEM_LABELS
         }
         self._history: list[tuple[int, str]] = []  # (history id, message id added)
+        self._deleted: dict[str, _Stored] = {}  # gone, but still in history
         self._history_id = 1000
         self._history_floor = 0
         self._ids = itertools.count(0x18F0000000000000)
@@ -185,11 +193,15 @@ class FakeGmail:
         self._call("messages.list", purpose)
         if max_results < 1:
             raise ValueError("max_results must be at least 1")
-        tests = [self._term(term) for term in shlex.split(query)]
+        terms = shlex.split(query)
+        tests = [self._term(term) for term in terms]
+        # Gmail leaves spam and trash out of every search but ``in:anywhere``.
+        anywhere = any(term.lower() == "in:anywhere" for term in terms)
         hits = [
             stored
             for stored in self._messages.values()
-            if not stored.labels & {"SPAM", "TRASH"} and all(test(stored) for test in tests)
+            if (anywhere or not stored.labels & {"SPAM", "TRASH"})
+            and all(test(stored) for test in tests)
         ]
         hits.sort(key=lambda stored: (stored.internal_date, stored.id), reverse=True)
         return [MessageRef(stored.id, stored.thread_id) for stored in hits[:max_results]]
@@ -233,8 +245,8 @@ class FakeGmail:
             raise GmailNotFound("Requested entity was not found.", code="notFound")
         added: list[MessageRef] = []
         for history_id, message_id in self._history:
-            stored = self._messages.get(message_id)
-            if history_id <= start_history_id or stored is None:
+            stored = self._messages.get(message_id) or self._deleted[message_id]
+            if history_id <= start_history_id:
                 continue
             if label_id is not None and label_id not in stored.labels:
                 continue
@@ -295,8 +307,8 @@ class FakeGmail:
         """The person pressing Send on a draft: the draft goes, a ``SENT`` message
         with a new id takes its place in the same thread."""
         message_id = self._drafts.pop(draft_id)
-        draft = self._messages.pop(message_id)
-        self._threads[draft.thread_id].remove(message_id)
+        draft = self._messages[message_id]
+        self._remove(draft)
         sent = _Stored(
             id=self._new_id(),
             thread_id=draft.thread_id,
@@ -310,11 +322,17 @@ class FakeGmail:
 
     def discard_draft(self, draft_id: str) -> None:
         """The person deleting a draft instead of sending it."""
-        message_id = self._drafts.pop(draft_id)
-        stored = self._messages.pop(message_id)
-        self._threads[stored.thread_id].remove(message_id)
-        if not self._threads[stored.thread_id]:
-            del self._threads[stored.thread_id]
+        self._remove(self._messages[self._drafts.pop(draft_id)])
+        self._bump()
+
+    def delete(self, message: MessageRef) -> None:
+        """The person deleting a message for good (not to Trash). History keeps
+        its ``messageAdded``; reading it is :class:`GmailNotFound`."""
+        stored = self._get(message.id)
+        for draft_id, message_id in list(self._drafts.items()):
+            if message_id == stored.id:
+                del self._drafts[draft_id]
+        self._remove(stored)
         self._bump()
 
     def forget_history(self) -> None:
@@ -341,6 +359,10 @@ class FakeGmail:
     def sent(self) -> list[Message]:
         """Every ``SENT`` message, oldest first."""
         return [self._view(stored) for stored in self._messages.values() if "SENT" in stored.labels]
+
+    def wire_snippet(self, message_id: str) -> str:
+        """The snippet as Gmail's API would send it, before :func:`snippet_text`."""
+        return _snippet(self._get(message_id).parsed)
 
     def raw(self, message_id: str) -> EmailMessage:
         """The whole message as it was stored, body included."""
@@ -411,6 +433,13 @@ class FakeGmail:
         self._threads.setdefault(stored.thread_id, []).append(stored.id)
         self._history.append((stored.history_id, stored.id))
 
+    def _remove(self, stored: _Stored) -> None:
+        del self._messages[stored.id]
+        self._deleted[stored.id] = stored
+        self._threads[stored.thread_id].remove(stored.id)
+        if not self._threads[stored.thread_id]:
+            del self._threads[stored.thread_id]
+
     def _move(self, stored: _Stored, thread_id: str) -> None:
         self._threads[stored.thread_id].remove(stored.id)
         if not self._threads[stored.thread_id]:
@@ -451,7 +480,7 @@ class FakeGmail:
             label_ids=frozenset(stored.labels),
             history_id=stored.history_id,
             internal_date=stored.internal_date,
-            snippet=_snippet(stored.parsed),
+            snippet=snippet_text(_snippet(stored.parsed)),
             headers=headers,
         )
 
@@ -461,10 +490,12 @@ class FakeGmail:
         if not sep or not value:
             raise ValueError(f"the fake does not search for {term!r}; use an operator it knows")
         if key in {"from", "to"}:
-            wanted = value.lower()
+            # Gmail matches whole words: ``from:ada`` finds ada@example.com, and
+            # neither ``from:ad`` nor ``from:ada@example.com`` finds bada@example.com.
+            word = re.compile(rf"(?<![^\W_]){re.escape(value.lower())}(?![^\W_])")
             names = ("From",) if key == "from" else ("To", "Cc", "Bcc")
             return lambda stored: any(
-                wanted in f"{name} {address}".lower()
+                word.search(f"{name} {address}".lower())
                 for header in names
                 for name, address in getaddresses(
                     [str(v) for v in stored.parsed.get_all(header) or []]
@@ -498,8 +529,10 @@ class FakeGmail:
 
 
 def _snippet(parsed: EmailMessage) -> str:
+    """The snippet as Gmail's API sends it: the start of the text, HTML-escaped."""
     part = parsed.get_body(preferencelist=("plain",))
     if part is None:
         return ""
     assert isinstance(part, EmailMessage)
-    return " ".join(str(part.get_content()).split())[:100]
+    text = " ".join(str(part.get_content()).split())[:100]
+    return html.escape(text, quote=False).replace('"', "&quot;").replace("'", "&#39;")
