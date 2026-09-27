@@ -109,6 +109,10 @@ const REASONS: Record<string, string> = {
   scope_not_granted: 'Gmail access was unticked on Google’s page. Start again and leave it ticked.',
   gmail_api_refused:
     'The Gmail API refused the token. Enable the Gmail API in the Cloud project (docs/gmail-setup.md, step 2).',
+  insufficientPermissions:
+    'The token does not include Gmail access. Authorize again and leave Gmail access ticked on Google’s page.',
+  http_403:
+    'Gmail refused the token. Authorize again; if it happens again, check the Gmail API is enabled in the Cloud project (docs/gmail-setup.md, step 2).',
   other_mailbox_connected:
     'Another Gmail account is already connected. Disconnect it first to connect a different one.',
   keychain: 'The Keychain refused. Unlock it and try again.',
