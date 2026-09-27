@@ -82,6 +82,7 @@ from netkeeper.models import (
     User,
     linkedin_profile_url,
     normalize_public_id,
+    single_address,
 )
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped, scoped, scoped_count, scoped_update
@@ -687,11 +688,14 @@ def add_email(
 
     The first address on a contact is primary whether or not asked; a later one
     asked to be primary demotes the others. :class:`Conflict` for an address the
-    contact already has; ``ValueError`` for an empty one.
+    contact already has; ``ValueError`` for an empty one or anything but one bare
+    address (a campaign sends to it, #269). Importers go through
+    :class:`IncomingEmail` alone: a bad address there must not stop an import.
     """
     _require_writer(session)
     contact = live_contact(session, user, contact_id)
     incoming = IncomingEmail(email, kind, is_primary)
+    single_address(incoming.email)
     if any(row.email == incoming.email for row in contact.emails):
         raise Conflict(f"the contact already has {incoming.email}")
     row = ContactEmail(
@@ -712,12 +716,15 @@ def add_email(
 def update_email(
     session: Session, user: User, contact_id: int, email_id: int, changes: Mapping[str, Any]
 ) -> ContactEmail:
-    """Change an address's fields; the row becomes the person's own observation."""
+    """Change an address's fields; the row becomes the person's own observation.
+
+    ``ValueError`` for a new address that is not one bare address, as :func:`add_email`.
+    """
     _require_writer(session)
     contact = live_contact(session, user, contact_id)
     row = _child(contact.emails, email_id, "email")
     if "email" in changes:
-        address = IncomingEmail(changes["email"]).email
+        address = single_address(IncomingEmail(changes["email"]).email)
         if any(other.email == address for other in contact.emails if other is not row):
             raise Conflict(f"the contact already has {address}")
         row.email = address

@@ -1068,6 +1068,90 @@ async def test_bulk_unarchive_then_archive_stamps_afresh(
     assert again is not None and again != first["archived_at"]
 
 
+# --- an address is one bare address (#269) ----------------------------------
+
+#: What a campaign's ``To`` would read as another, or a further, recipient.
+NOT_ONE_ADDRESS = [
+    "ada@example.test, eve@example.test",
+    "ada@example.test; eve@example.test",
+    "ada@example.test eve@example.test",
+    "friends: ada@example.test, eve@example.test;",
+    "Eve <eve@example.test>",
+    '"Ada Quill" <ada@example.test>',
+    "ada",
+]
+
+
+def _email_rows(session: Session, owner: User, contact_id: int) -> list[str]:
+    user = session.get(User, owner.id)
+    assert user is not None
+    contact = get_scoped(session, user, Contact, contact_id)
+    assert contact is not None
+    return sorted(row.email for row in contact.emails)
+
+
+@pytest.mark.parametrize("address", NOT_ONE_ADDRESS)
+def test_the_service_refuses_all_but_one_bare_address(
+    factory: sessionmaker[Session], owner: User, people: list[int], address: str
+) -> None:
+    with session_scope(factory, write=True) as session:
+        user = session.get(User, owner.id)
+        assert user is not None
+        with pytest.raises(ValueError, match="one bare"):
+            service.add_email(session, user, people[1], address)
+        contact = get_scoped(session, user, Contact, people[1])
+        assert contact is not None
+        (row,) = contact.emails
+        with pytest.raises(ValueError, match="one bare"):
+            service.update_email(session, user, people[1], row.id, {"email": address})
+        assert _email_rows(session, owner, people[1]) == ["bo.marsh@example.test"]
+
+
+def test_the_service_takes_one_bare_address(
+    factory: sessionmaker[Session], owner: User, people: list[int]
+) -> None:
+    with session_scope(factory, write=True) as session:
+        user = session.get(User, owner.id)
+        assert user is not None
+        added = service.add_email(session, user, people[1], " Bo@Work.Example.test ")
+        assert added.email == "bo@work.example.test"
+        service.update_email(session, user, people[1], added.id, {"email": "bo+2@example.test"})
+        assert _email_rows(session, owner, people[1]) == [
+            "bo+2@example.test",
+            "bo.marsh@example.test",
+        ]
+
+
+@pytest.mark.parametrize("address", NOT_ONE_ADDRESS)
+async def test_the_api_refuses_all_but_one_bare_address(
+    client: httpx.AsyncClient,
+    factory: sessionmaker[Session],
+    owner: User,
+    people: list[int],
+    address: str,
+) -> None:
+    base = f"/api/v1/contacts/{people[1]}/emails"
+    added = await client.post(base, json={"email": address}, headers=CSRF)
+    assert added.status_code == 422, added.text
+    (row,) = (await client.get(f"/api/v1/contacts/{people[1]}")).json()["emails"]
+    patched = await client.patch(f"{base}/{row['id']}", json={"email": address}, headers=CSRF)
+    assert patched.status_code == 422, patched.text
+    with session_scope(factory) as session:
+        assert _email_rows(session, owner, people[1]) == ["bo.marsh@example.test"]
+
+
+async def test_the_api_takes_one_bare_address(client: httpx.AsyncClient, people: list[int]) -> None:
+    base = f"/api/v1/contacts/{people[1]}/emails"
+    added = await client.post(base, json={"email": " Bo@Work.Example.test "}, headers=CSRF)
+    assert added.status_code == 201, added.text
+    assert added.json()["email"] == "bo@work.example.test"
+    patched = await client.patch(
+        f"{base}/{added.json()['id']}", json={"email": "bo+2@example.test"}, headers=CSRF
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["email"] == "bo+2@example.test"
+
+
 # --- the service's clock ----------------------------------------------------
 
 

@@ -42,6 +42,7 @@ from netkeeper.models import (
     linkedin_profile_url,
     normalize_email,
     normalize_public_id,
+    single_address,
 )
 from netkeeper.scoping import (
     UnscopedQueryError,
@@ -244,6 +245,44 @@ def test_empty_values_are_rejected_or_become_none() -> None:
         ContactAlias(li_public_id=" ")
     with pytest.raises(ValueError, match="empty"):
         normalize_email(" ")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "bob",
+        "bob@",
+        "@example.com",
+        "bob@@example.com",
+        "bob@example..com",
+        "bob..smith@example.com",
+        "bob@example.com, eve@evil.example",
+        "bob@example.com; eve@evil.example",
+        "bob@example.com eve@evil.example",
+        " bob@example.com",
+        "bob@example.com\nBcc: eve@evil.example",
+        "friends: bob@example.com, eve@evil.example;",
+        "Eve <eve@evil.example>",
+        '"Bob Smith" <bob@example.com>',
+        '"bob smith"@example.com',
+        "bob(comment)@example.com",
+        "bob@example.com (Bob)",
+        "bob@[192.0.2.1]",
+        "bob\\@example.com",
+    ],
+)
+def test_single_address_refuses_all_but_one_bare_address(value: str) -> None:
+    """A ``To`` built from any of these sends to another, or a further, recipient (#269)."""
+    with pytest.raises(ValueError, match="one bare"):
+        single_address(value)
+
+
+@pytest.mark.parametrize(
+    "value", ["bob@example.com", "Bob.Smith+work@mail.example.co.uk", "o'neil@example.com"]
+)
+def test_single_address_returns_one_bare_address_unchanged(value: str) -> None:
+    assert single_address(value) == value
 
 
 def test_li_url_follows_the_slug_unless_set_by_hand() -> None:

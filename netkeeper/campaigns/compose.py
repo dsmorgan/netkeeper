@@ -34,6 +34,8 @@ from datetime import UTC, datetime
 from email.message import EmailMessage
 from typing import Final
 
+from netkeeper.models.contacts import single_address
+
 #: Bumped only if the derivation changes: a new version gives every row a new id.
 MESSAGE_ID_VERSION: Final = "v1"
 
@@ -90,21 +92,23 @@ def build_message(
 ) -> EmailMessage:
     """A plain-text message for Gmail's ``raw``, with ``message_id`` as its Message-ID.
 
-    :class:`ComposeError` for an address or a header value with a line break in
-    it, or a Message-ID that is not one: nothing a merge value holds can add a
-    header (spec 11.1).
+    :class:`ComposeError` for a ``to`` that is not one bare address (a list, a
+    group or a display name would send to someone else too, #269), a header
+    value with a line break in it, or a Message-ID that is not one: nothing a
+    merge value holds can add a header or a recipient (spec 11.1).
     """
-    if not to.strip() or "@" not in to:
-        raise ComposeError("a campaign message needs one recipient address")
-    for value in (to, subject):
-        if "\r" in value or "\n" in value:
-            raise ComposeError("a header value is one line")
+    try:
+        address = single_address(to.strip())
+    except ValueError:
+        raise ComposeError("a campaign message needs exactly one bare recipient address") from None
+    if "\r" in subject or "\n" in subject:
+        raise ComposeError("a header value is one line")
     cited = [*references, *([in_reply_to] if in_reply_to else [])]
     for value in (message_id, *cited):
         if not is_message_id(value):
             raise ComposeError("a Message-ID is <local@domain>")
     message = EmailMessage()
-    message["To"] = to.strip()
+    message["To"] = address
     message["Subject"] = subject
     message["Message-ID"] = message_id
     if in_reply_to is not None:

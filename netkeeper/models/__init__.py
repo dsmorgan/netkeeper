@@ -45,6 +45,7 @@ from netkeeper.models.contacts import (
     linkedin_profile_url,
     normalize_email,
     normalize_public_id,
+    single_address,
 )
 from netkeeper.models.imports import (
     IMPORT_TABLES,
@@ -186,6 +187,7 @@ __all__ = [
     "linkedin_profile_url",
     "normalize_email",
     "normalize_public_id",
+    "single_address",
     "string_enum",
     "tag_name_key",
 ]
