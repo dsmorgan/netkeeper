@@ -33,6 +33,9 @@ API_PATHS = {
     "/api/v1/contacts",
     "/api/v1/contacts/query",
     "/api/v1/contacts/stats",
+    "/api/v1/dashboard/next-fires",
+    "/api/v1/dashboard/changed-jobs",
+    "/api/v1/dashboard/inbound",
     "/api/v1/contacts/bulk",
     "/api/v1/contacts/bulk/count",
     "/api/v1/contacts/{contact_id}",
@@ -214,6 +217,7 @@ def test_known_api_modules_are_discovered() -> None:
     assert [name for name, _ in discover_routers()] == [
         "autotag_rules",
         "contacts",
+        "dashboard",
         "events",
         "exports",
         "health",

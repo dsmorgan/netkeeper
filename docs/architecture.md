@@ -912,7 +912,7 @@ Cost controls: a per-day call cap, batch size limits, and a token estimate shown
 
 | Route | Purpose |
 |---|---|
-| `/` | Dashboard: the setup path (P1-24) |
+| `/` | Dashboard: at a glance, what happens next and what is unhealthy (P3-12); below it, the setup path (P1-24) |
 | `/contacts`, `/contacts/:id` | Table with saved views; detail with fields, tags, timeline, snapshots, messages, LLM brief |
 | `/triage` | Step 6 workflow |
 | `/lists` | Three tabs: static and smart lists with the filter builder; tags and their auto-tag rules (edited and reordered in place, with a live match count); and saved views, the same ones the Contacts table applies, built and edited with the same filter builder |
@@ -931,6 +931,12 @@ Review-tags reads `stats.tagged_by_rule` (`TagSource.RULE` only), not `stats.tag
 Build-a-list is stuck at "no badge" for every count once there are contacts, for a different reason: `GET /lists` always includes the built-in "Validated" smart list the backend seeds at every server start (`ensure_validated_list`), with nothing in the response marking it as built-in, so raw length would read "done" for a person who has built nothing — there is no fix inside this response shape, and it is tracked as its own backend issue. Its control still matches the count, though: "Build a list" when the count is genuinely zero, "Open lists" once one exists. Export is the third "no badge" step, for a third reason: nothing records that one ran at all (it is a browser download, not a tracked action).
 
 Later phases add their own steps to the same plain array (phase 2 "connect LinkedIn", budgets, heat, mailbox and browser health; phase 3 "connect Gmail", replies this week, changed-jobs prompts, next scheduled sends) rather than rewriting the page around them.
+
+*As built (P3-12).* Status is not a step, so it did not join the setup array: nothing about "is heat tripped" is a person's progress. It sits above the setup path as a grid of cards, each with its own loading, error, and empty state, so one failing read never hides the others. Each card reads the endpoint that already owns its answer, and nothing restates a rule: next LinkedIn run from `GET /linkedin/schedule` (the scheduler's persisted due times; unarmed, the card says runs are off instead of showing a time that will not fire), the session flag from `GET /linkedin/status` and the last run from `GET /linkedin/runs?limit=1` (a missing flag reads "no session flag is raised", never "healthy", since nothing here checks the live session), budget and heat from `GET /linkedin/budget` and `GET /linkedin/heat`, and the mailbox card from #271. These share the LinkedIn page's query cache and refetch on `run.started` and `run.finished`. Three reads had no home and live under `/dashboard`, all read-only and user-scoped (`netkeeper/services/dashboard.py`):
+
+- `GET /dashboard/next-fires`: the next campaign steps by `next_action_at`, soonest first, a past one reading "due now" (the next tick's). `campaign_engine.upcoming()` sits beside the tick and selects what the tick selects: an active enrollment of an active campaign, never the due time alone, with a LinkedIn step left out until P4. Each row names the contact and nothing else about them. The page polls it once a minute, because a tick publishes no event.
+- `GET /dashboard/changed-jobs`: live contacts, not do-not-contact, whose `last_position_change` (the merge field's meaning: the latest position start or end on or before today, #232, #255) falls in the last 30 days of the user's own calendar, newest first, each linked to the contact.
+- `GET /dashboard/inbound`: inbound interactions (`email_in`, `li_in`) in the last seven days, with `reply_detection: false`. Reply detection is P3-08; until it exists the card says so and shows this count as inbound messages, not replies.
 
 ## 15. Configuration, secrets, and data locations
 
