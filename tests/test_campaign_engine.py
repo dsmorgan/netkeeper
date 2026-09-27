@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -36,7 +37,7 @@ from netkeeper.models import (
     TemplateChannel,
     User,
 )
-from netkeeper.scoping import get_scoped, install_scope_guard, scoped, unscoped
+from netkeeper.scoping import get_scoped, install_scope_guard, scoped, scoped_delete, unscoped
 from netkeeper.services import campaign_engine as engine_module
 from netkeeper.services.campaign_engine import (
     CampaignEngine,
@@ -87,16 +88,18 @@ class World:
         ]
         return result
 
-    def read[T](self, fn: Any) -> Any:
+    def read[T](self, fn: Callable[[Session], T]) -> T:
         with session_scope(self.factory) as session:
             return fn(session)
 
-    def write(self, fn: Any) -> Any:
+    def write[T](self, fn: Callable[[Session], T]) -> T:
         with session_scope(self.factory, write=True) as session:
             return fn(session)
 
     def enrollment(self, enrollment_id: int) -> Enrollment:
-        return self.read(lambda s: get_scoped(s, self.user, Enrollment, enrollment_id))
+        row = self.read(lambda s: get_scoped(s, self.user, Enrollment, enrollment_id))
+        assert row is not None
+        return row
 
     def messages(self, enrollment_id: int | None = None) -> list[Message]:
         def load(session: Session) -> list[Message]:
@@ -303,7 +306,7 @@ def test_the_spacing_floor_holds_without_the_stored_time(world: World) -> None:
     """The stored next send time lost: the floor after the last firing still holds."""
     ids = [world.enroll_new() for _ in range(2)]
     world.tick()
-    world.write(lambda s: s.execute(unscoped(SettingKV.__table__.delete())))
+    world.write(lambda s: s.execute(scoped_delete(world.user, SettingKV)))
     assert reasons_of(world.tick(NOW + timedelta(seconds=89)), ids[1]) == (Skip.SPACING,)
     assert world.tick(NOW + timedelta(seconds=90)).fired != []
 
@@ -315,6 +318,7 @@ def test_the_spacing_survives_a_restart(world: World, engine: Engine) -> None:
     fresh = make_session_factory(engine)
     install_scope_guard(fresh)
     stored = world.read(lambda s: next_send_at(s, world.user, world.mailbox.id))
+    assert stored is not None
     world.factory = fresh
     assert reasons_of(world.tick(stored - timedelta(seconds=1)), ids[1]) == (Skip.SPACING,)
     assert world.tick(stored).fired != []
@@ -480,8 +484,14 @@ def test_enrollment_moves_refuse_the_wrong_state(world: World) -> None:
         (resume_enrollment, "not paused"),
         (remove_enrollment, "already completed"),
     ):
+
+        def attempt(
+            session: Session, move: Callable[[Session, User, int], Enrollment] = move
+        ) -> None:
+            move(session, world.user, enrollment_id)
+
         with pytest.raises(CampaignEngineError, match=match):
-            world.write(lambda s, move=move: move(s, world.user, enrollment_id))
+            world.write(attempt)
 
 
 def test_removal_ends_the_enrollment_and_discards_what_was_waiting(world: World) -> None:
@@ -882,10 +892,8 @@ def test_activate_makes_pending_active_with_the_first_step_in_the_window(
     enrollment = world.enrollment(enrollment_id)
     assert enrollment.status is EnrollmentStatus.ACTIVE
     assert enrollment.next_action_at == datetime(2026, 9, 30, 10, 0, tzinfo=UTC)
-    assert (
-        world.read(lambda s: get_scoped(s, world.user, Campaign, world.campaign.id)).status
-        is CampaignStatus.ACTIVE
-    )
+    campaign = world.read(lambda s: get_scoped(s, world.user, Campaign, world.campaign.id))
+    assert campaign is not None and campaign.status is CampaignStatus.ACTIVE
 
 
 @pytest.mark.parametrize(

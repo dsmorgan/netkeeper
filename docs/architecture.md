@@ -764,6 +764,8 @@ stateDiagram-v2
 
 `next_action_at` for step n+1 is computed from the actual `sent_at` of step n, not the scheduled time, and is then pushed into the campaign's send window.
 
+*As built (P3-06):* `netkeeper/services/campaign_engine.py`. `enroll` makes `pending` enrollments of the contacts the guards pass, and only while the campaign is `draft` or `reviewing`. `activate` takes a `reviewing` campaign with `approved_at` recorded, steps, a mailbox for its email steps, and lint-clean templates to `active`, and each `pending` enrollment to `active`, its first step due after the step's delay inside the window. `next_action_at` counts from the enrollment's **latest** sent outbound message, not only step n's: after a merge the enrollment can hold a newer message from the other contact (#242 review). A step still waiting (a draft nobody has sent) leaves `next_action_at` empty until `schedule_next` sees it sent (P3-07). A campaign pause holds on the campaign, not on its enrollments: the tick fires only for an `active` enrollment of an `active` campaign, so nothing fires while it is paused, and each enrollment keeps its own state and `next_action_at`. Pausing the enrollments too would lose, on resume, which of them a person or a merge had paused on their own. At a step fire, a do-not-contact contact moves the enrollment to `opted_out` and a bounced address to `bounced`; a reply found on the enrollment moves it to `replied`.
+
 ### 11.4 Scheduler and send windows
 
 - A campaign tick runs every minute. It selects enrollments with `next_action_at <= now`, inside the campaign's send window, in a stable order, up to the remaining per-campaign and per-mailbox daily cap, and up to a per-tick batch of 1.
@@ -771,6 +773,16 @@ stateDiagram-v2
 - Default window: Tuesday to Thursday, 09:00 to 16:30, local time. Per campaign override. A holiday list in config.
 - Per-mailbox cap default 80 recipients per local day across all campaigns, hard max 400 (Gmail's consumer limit is 500 and the account can be locked for less if the mail looks bulk).
 - The tick and the next fire time are persisted so a restart never skips or doubles a send.
+
+*As built (P3-06):* `CampaignEngine` runs `run_tick` every minute under `netkeeper serve`, in a worker thread, so no SQLite write happens on the event loop (#259). It fires only through the `Sender` it is given; the Gmail one is P3-07's, and without one the tick does nothing. Per local user, per tick:
+
+- **Selection** is on status: an `active` enrollment of an `active` campaign with `next_action_at <= now`, oldest due first. A held pause keeps its due time, so the due time alone selects nothing (#242 review). A LinkedIn step is left unfired with the reason `linkedin_step` (P4), and blocks nobody behind it.
+- **The window** (`netkeeper/campaigns/schedule.py`) is `[campaigns] send_window_days` and `send_window_hours`, overridden per campaign by `send_window_json` (`{"days": [...], "hours": [start, end]}`), in the user's time zone (`linkedin.timezone`). The hours are `[start, end)`. `[campaigns] holidays` are local dates with no window. A step due outside it is deferred to the next opening. A window that cannot be read, or never opens, sends nothing for that campaign.
+- **Caps** count per local day, every outbound message fired that day whatever became of it (a failed send may still have gone out). The mailbox's `daily_cap` counts email across all its campaigns, never over 400. The campaign's is `daily_cap`, or `[campaigns] mailbox_daily_cap` when that is unset.
+- **Spacing:** one firing per tick, then `human_delay` with a median of `send_spacing_median_s` and a floor of `send_spacing_floor_s`, counted from when the message went out. The next send time is persisted per mailbox in `settings_kv`, and the floor after the last firing holds even without it.
+- **Never twice.** A step with an outbound message on the enrollment that is not `discarded` is refused and parked (`next_action_at` cleared), whatever `current_step` says (#242 review). The message is written `scheduled` and committed before the sender is called, so a crash between the two leaves the step claimed rather than free to fire again. Whether it went out is P3-07's to reconcile. A failed send is recorded on the message and parked, never retried by the tick.
+- **Guards** run at every fire (11.9). An exclusion that can pass (contacted recently, waiting for review, another campaign, a duplicate address) is checked again a day later.
+- `simulate_campaign` replays the tick on a virtual clock; three weeks of a 100-contact campaign keep every window, cap and cadence (`tests/test_simulate_campaign.py`). `netkeeper simulate` for campaigns is P3-13.
 
 ### 11.5 Gmail integration
 
@@ -838,7 +850,7 @@ Checked at enrollment and again at every step fire, because state changes betwee
 - **Recent contact.** The newest outbound interaction (`email_out`, `li_out`, `call` or `meeting`) or sent campaign message is within `contacted_within_days_guard` days. At a step fire, only the firing enrollment's own messages are exempt, not the rest of the campaign's. After a merge, the survivor holds the merged-away contact's interactions, and a step that went to the other row still counts (#235 review). At enrollment time nothing is exempt. A window of 0 turns the guard off.
 - **Only an active enrollment of an active campaign fires.** Anything else is excluded with `enrollment_not_active` or `campaign_not_active`, so a finished or paused enrollment is never sent to, even by a caller that forgets to filter it out.
 - **Fresh reads.** Sessions keep their objects across commits (`expire_on_commit=False`), so the guards read the contact, its addresses, and the enrollment's and campaign's statuses fresh on every check. Nothing a caller is holding is trusted (#235 review).
-- **Mailbox and browser.** `check_channel` works over a `ChannelState` its caller fills in, and anything left unknown excludes. The mailbox table and `netkeeper.services.mailboxes.mailbox_health` exist since P3-01; the code that fills the state from them comes with P3-06.
+- **Mailbox and browser.** `check_channel` works over a `ChannelState` its caller fills in, and anything left unknown excludes. Since P3-06 the engine fills it for email steps from `netkeeper.services.mailboxes.mailbox_health` and the mailbox's count for the day: a campaign with no mailbox, a mailbox that is not the user's, and one that is `reauth_required` or `disabled` pause its email steps, and nothing is marked sent. The browser side waits for P4.
 
 `excluded_summary` writes the 11.8 line from the verdicts. Each excluded contact counts once, under its first reason, so the parts add up to the number excluded.
 
