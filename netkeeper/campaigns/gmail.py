@@ -17,7 +17,7 @@ request's body, at ``DEBUG``; their loggers are held at ``WARNING`` here.
 
 **Errors.** Every failure is one of five :class:`GmailError` types:
 :class:`GmailRateLimited` (429, or a 403 whose reason is a rate or quota limit,
-or whose ``status`` is ``RESOURCE_EXHAUSTED`` when it names no reason),
+or whose ``status`` is ``RESOURCE_EXHAUSTED``, whatever reason it names),
 :class:`GmailNotFound` (404: a gone draft, an unknown thread, or a history id
 older than Gmail keeps), :class:`GmailAuthError` (the grant is dead, or the API
 refused the token), :class:`GmailTransient` (network, timeout, 5xx; try later),
@@ -34,7 +34,10 @@ Nothing here retries a request by itself, and neither does the transport:
 connection drops before an answer (``BadStatusLine``, ``RemoteDisconnected``),
 whatever the method. :class:`WriteOnceHttp` is ``httplib2`` with that turned off
 for every method that is not idempotent, so a ``POST`` is written to the wire
-at most once, and always on a fresh connection.
+at most once, and always on a fresh connection. It follows no redirect. An
+answer cut short (``IncompleteRead``) is a :class:`GmailTransient` too, with the
+outcome unknown for a write. A name that does not resolve or a refused
+connection sent nothing, so its outcome is known even for a write.
 
 **Auth.** :class:`GmailClient` never refreshes a token itself: it is given a
 ``refresh`` function (``services.mailboxes.open_gmail`` passes P3-01's
@@ -101,8 +104,8 @@ RATE_LIMIT_REASONS: Final = frozenset(
     {"rateLimitExceeded", "userRateLimitExceeded", "dailyLimitExceeded", "quotaExceeded"}
 )
 
-#: A 403 with this ``error.status`` is a limit too. Newer answers can carry only
-#: the status, with no legacy ``errors[].reason``.
+#: A 403 with this ``error.status`` is a limit too, whatever its ``errors[].reason``
+#: says. Newer answers can carry only the status, with no legacy reason.
 RATE_LIMIT_STATUS: Final = "RESOURCE_EXHAUSTED"
 
 #: ``messages.list`` answers at most this many per page.
@@ -414,6 +417,10 @@ class WriteOnceHttp(httplib2.Http):  # type: ignore[misc]
         connection_type: type[WriteOnceMixin] = WriteOnceConnection,
     ) -> None:
         super().__init__(timeout=timeout)
+        # A redirect would resend a write's body (308) or leave this transport for
+        # plain httplib2 (a redirect to http:). Gmail's API never redirects, so a
+        # 3xx is answered as it is and the client reads it as a refusal.
+        self.follow_redirects = False
         self._nk_connection_type = connection_type
 
     def request(
@@ -613,7 +620,17 @@ class GmailClient:
             else:
                 # Refused, but not in a way that says the grant is dead. Nothing was sent.
                 error = GmailTransient("Google refused to renew the access token", code=exc.code)
-        except (OSError, httplib2.HttpLib2Error, SentWithoutAnswer) as exc:
+        except (httplib2.ServerNotFoundError, ConnectionRefusedError) as exc:
+            # The name did not resolve, or the connection was refused: nothing left.
+            error = GmailTransient(
+                f"could not reach Gmail ({type(exc).__name__})", code="unavailable"
+            )
+        except (
+            OSError,
+            http.client.HTTPException,  # an answer cut short (IncompleteRead) among them
+            httplib2.HttpLib2Error,
+            SentWithoutAnswer,
+        ) as exc:
             error = GmailTransient(
                 f"could not reach Gmail ({type(exc).__name__})",
                 code="unavailable",

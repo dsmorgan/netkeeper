@@ -334,6 +334,18 @@ def test_a_403_with_no_legacy_reason_is_classed_by_its_status(
     assert len(failures) == (1 if expected is GmailAuthError else 0)
 
 
+def test_a_quota_status_is_a_limit_whatever_reason_it_names() -> None:
+    """As the module docstring says: RESOURCE_EXHAUSTED never marks the mailbox."""
+    body = gmail_error(403, "forbidden")
+    body["error"]["status"] = "RESOURCE_EXHAUSTED"
+    failures: list[GmailAuthError] = []
+    with pytest.raises(GmailRateLimited):
+        _client(RecordingHttp().answer(403, body), failures=failures).get_message(
+            "m1", purpose="read message 1"
+        )
+    assert failures == []
+
+
 def test_a_rate_limit_reason_wins_over_a_status_that_is_not_one() -> None:
     body = gmail_error(403, "userRateLimitExceeded")
     body["error"]["status"] = "PERMISSION_DENIED"

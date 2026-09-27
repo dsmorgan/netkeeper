@@ -448,7 +448,20 @@ def test_to_does_not_match_an_address_that_only_contains_the_one_asked_for(
     assert gmail.search(f"to:{ADA}", purpose="s") == [wanted]
 
 
-@pytest.mark.parametrize("query", ["hello", "after:2026/10/06", "subject:hi", "in:chats"])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "hello",
+        "after:2026/10/06",
+        "subject:hi",
+        "in:chats",
+        # Gmail finds matches for these; the fake would answer none, so it refuses (#270).
+        "label:SPAM",
+        "label:trash",
+        "from:me",
+        "to:ME",
+    ],
+)
 def test_search_refuses_what_it_cannot_read_as_gmail_would(gmail: FakeGmail, query: str) -> None:
     with pytest.raises(ValueError):
         gmail.search(query, purpose="search")
