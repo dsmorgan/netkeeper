@@ -153,6 +153,55 @@ def test_create_and_get_a_draft() -> None:
     assert (get.method, get.path, get.query["format"]) == ("GET", f"{API}/drafts/r9", ["minimal"])
 
 
+def test_list_drafts_reads_every_page() -> None:
+    http = (
+        RecordingHttp()
+        .answer(
+            200,
+            {
+                "drafts": [{"id": "r1", "message": {"id": "m1", "threadId": "t1"}}],
+                "nextPageToken": "p2",
+            },
+        )
+        .answer(200, {"drafts": [{"id": "r2", "message": {"id": "m2", "threadId": "t2"}}]})
+    )
+    drafts = _client(http).list_drafts(purpose="drafts poll for mailbox 3")
+
+    assert [(d.id, d.message.id, d.message.thread_id) for d in drafts] == [
+        ("r1", "m1", "t1"),
+        ("r2", "m2", "t2"),
+    ]
+    first, second = http.requests
+    assert (first.method, first.path) == ("GET", f"{API}/drafts")
+    assert "pageToken" not in first.query
+    assert second.query["pageToken"] == ["p2"]
+
+
+def test_list_drafts_with_none_is_empty() -> None:
+    http = RecordingHttp().answer(200, {"resultSizeEstimate": 0})
+    assert _client(http).list_drafts(purpose="drafts poll for mailbox 3") == []
+
+
+def test_delete_draft_deletes_it() -> None:
+    http = RecordingHttp().answer(204, b"")
+    _client(http).delete_draft("r9", purpose="delete the discarded draft of message 4")
+    [sent] = http.requests
+    assert (sent.method, sent.path) == ("DELETE", f"{API}/drafts/r9")
+
+
+def test_delete_draft_of_a_gone_draft_is_not_found() -> None:
+    http = RecordingHttp().answer(404, gmail_error(404, "notFound"))
+    with pytest.raises(GmailNotFound):
+        _client(http).delete_draft("r9", purpose="delete the discarded draft of message 4")
+
+
+def test_a_transient_failure_of_a_delete_leaves_the_outcome_unknown() -> None:
+    http = RecordingHttp().answer(503, gmail_error(503, "backendError"))
+    with pytest.raises(GmailTransient) as caught:
+        _client(http).delete_draft("r9", purpose="delete the discarded draft of message 4")
+    assert caught.value.outcome_unknown is True
+
+
 def test_get_message_reads_metadata_never_the_body() -> None:
     body = {
         "id": "m1",
