@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import random
 import threading
 from collections.abc import Callable
@@ -17,7 +18,7 @@ from campaign_fakes import ALWAYS_OPEN, LATENCY, NOW, SETTINGS, FakeSender, make
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.campaigns import schedule
+from netkeeper.campaigns import gmail, schedule
 from netkeeper.campaigns.compose import message_id_for
 from netkeeper.config import CampaignSettings, Settings
 from netkeeper.crm.contacts import merge_contacts
@@ -1861,3 +1862,38 @@ def test_settle_drafted_stores_the_thread_snapshot(world: World) -> None:
     work = world.read(lambda s: engine_module.reconcile_work(s, world.user, now=NOW))
     [tracked] = work.drafts
     assert tracked.thread_known == {"gm-earlier", "gm-note"}
+
+
+def test_the_unknown_send_end_is_pinned_and_covers_the_gmail_timeout() -> None:
+    """Pinned against a number written out here (CLAUDE.md), and never shorter than the
+    Gmail client's request timeout, the latest a lost answer's send can still happen."""
+    assert timedelta(seconds=30) == engine_module.UNKNOWN_SEND_END_MAX
+    assert timedelta(seconds=gmail.DEFAULT_TIMEOUT_S) <= engine_module.UNKNOWN_SEND_END_MAX
+
+
+def test_the_claim_after_an_unknown_outcome_keeps_the_floor_from_its_worst_case_end(
+    world: World,
+) -> None:
+    """#280 review: reconcile settles an unknown outcome at least ``RECONCILE_AFTER`` after
+    the claim, later than any spacing gap, so the next claim came before it could re-space.
+    The record itself now spaces from the latest the send could have gone out."""
+    # A median under the floor: every gap is the floor itself, the tightest spacing.
+    tight = Settings(campaigns=dataclasses.replace(SETTINGS.campaigns, send_spacing_median_s=1))
+    first = world.enroll_new()
+    second = world.enroll_new()
+    world.sender.outcome = SendOutcome.UNKNOWN
+    world.tick(settings=tight)
+    [unknown] = world.messages(first)
+    assert unknown.status is MessageStatus.SCHEDULED
+    world.sender.outcome = SendOutcome.SENT
+
+    worst_end = NOW + engine_module.UNKNOWN_SEND_END_MAX  # recorded at NOW
+    floor = timedelta(seconds=tight.campaigns.send_spacing_floor_s)
+    at = NOW
+    while not world.messages(second):
+        at += timedelta(seconds=10)
+        assert at < NOW + engine_module.RECONCILE_AFTER, "the next claim never came"
+        world.tick(at, settings=tight)
+    [claimed] = world.messages(second)
+    assert claimed.scheduled_at == at
+    assert at == worst_end + floor  # the first moment the floor from the worst case allows

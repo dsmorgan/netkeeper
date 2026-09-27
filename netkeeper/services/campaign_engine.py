@@ -1416,8 +1416,21 @@ def _record(
         enrollment.current_step = max(enrollment.current_step or 0, firing.step_position)
         _advance(session, user, settings, campaign, enrollment)
     if firing.mailbox_id is not None:
-        _set_next_send_at(session, user, firing.mailbox_id, max(at, now) + claim.gap)
+        end = max(at, now)
+        if result.outcome is SendOutcome.UNKNOWN:
+            # It may still go out after the answer was lost: space the mailbox from the
+            # latest it could. Reconcile comes RECONCILE_AFTER later, after the next
+            # claim, so re-spacing from Gmail's time then is too late for it (#280).
+            end += UNKNOWN_SEND_END_MAX
+        _set_next_send_at(session, user, firing.mailbox_id, end + claim.gap)
     session.flush()
+
+
+UNKNOWN_SEND_END_MAX: Final = timedelta(seconds=30)
+"""The latest a send whose answer never came can still go out, after it is recorded:
+the Gmail client's request timeout (``campaigns.gmail.DEFAULT_TIMEOUT_S``). The mailbox's
+next send is spaced from then, so a message Gmail sent late never has the next one
+within the spacing floor of it (#280 review)."""
 
 
 RETRY_AFTER: Final = timedelta(minutes=15)
