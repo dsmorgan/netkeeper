@@ -20,3 +20,7 @@ Use the Gmail API with the `gmail.modify` scope, refresh tokens in the macOS Key
 - Setup takes about fifteen minutes the first time. The guide has to be good.
 - The tool holds a broad scope on the mailbox. It never deletes mail, logs every call's purpose, and keeps the token out of the database.
 - Non-Gmail providers are out of scope until someone proposes an ADR with a provider abstraction and a reply-detection story.
+
+## Amendments
+
+- 2026-09-27 (#269, P3-07): **A precondition for PostgreSQL or more than one sending process.** A campaign step is never sent twice because the tick claims it, by writing its message `scheduled`, in a writer session, and on SQLite that session begins with `BEGIN IMMEDIATE`, so no other writer can claim the same step at the same time. On PostgreSQL, `mark_for_write` does nothing, and two processes could claim one step. P3-07 needed no migration, so no index was added. Before any PostgreSQL or multi-process deployment, the claim needs a guard the database enforces. A plain unique index on outbound messages over (enrollment, step) is not enough on its own: a merge moves both contacts' messages onto one enrollment, so one enrollment can hold two messages of a step. The index must leave those out, for example a partial unique index on claims made by the tick, or the claim must lock the enrollment row (`SELECT ... FOR UPDATE`).
