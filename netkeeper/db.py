@@ -6,10 +6,15 @@ they need one and pass it around explicitly.
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import functools
 import logging
 import os
 import sqlite3
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -190,3 +195,67 @@ def session_scope(factory: sessionmaker[Session], *, write: bool = False) -> Ite
         raise
     finally:
         session.close()
+
+
+# --- background database work, off the event loop (#259) ---------------------------
+
+_db_executor: ThreadPoolExecutor | None = None
+_db_executor_lock = threading.Lock()
+
+
+def _executor() -> ThreadPoolExecutor:
+    global _db_executor
+    with _db_executor_lock:
+        if _db_executor is None:
+            _db_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="netkeeper-db")
+        return _db_executor
+
+
+async def off_loop[**P, T](fn: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    """Run ``fn(*args, **kwargs)`` on the background-database thread and return its result.
+
+    Background work under ``netkeeper serve`` (the browser worker, the runners,
+    the scheduler's heartbeat) puts each whole :func:`session_scope` -- open,
+    work, commit -- in one ``fn`` and awaits it here, so a transaction never
+    spans an ``await`` and no SQLite call blocks the event loop (#259). A
+    request's write transaction is opened in a worker thread and committed by a
+    dependency teardown that needs the loop; a writer blocked *on the loop* in
+    SQLite's busy handler kept that commit from ever running, and both sides sat
+    out ``busy_timeout`` before the background write failed "database is
+    locked". Blocked here instead, the write waits for the request's commit and
+    goes on.
+
+    **One thread, shared by every caller in the process.** Background writes run
+    one at a time in the order they were submitted, so they never contend with
+    each other for the write lock, and a write submitted after another (a run's
+    "interrupted" ending after its last progress write) lands after it. Never
+    call :func:`off_loop` for work that waits on something outside the database
+    (a network call, a browser): it would hold up every background write behind
+    it. ``MailboxMonitor`` stays on ``asyncio.to_thread`` for that reason.
+
+    **A started transaction always finishes.** Blocking code on the loop could
+    not be interrupted halfway; the cancel landed at the next ``await``. To keep
+    that, a cancel that arrives while ``fn`` is queued or running waits for
+    ``fn`` to finish (its transaction committed or rolled back) and then
+    propagates, so a shutdown never abandons a write partway or races the
+    ending a cancel handler records next. Its result is discarded, as the code
+    after it would not have run either; an exception it raised is logged.
+    """
+    loop = asyncio.get_running_loop()
+    context = contextvars.copy_context()
+    call = functools.partial(context.run, fn, *args, **kwargs)
+    future = loop.run_in_executor(_executor(), call)
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        while not future.done():
+            try:
+                await asyncio.wait({future})
+            except asyncio.CancelledError:
+                continue
+        if not future.cancelled() and (error := future.exception()) is not None:
+            log.warning(
+                "background database work failed while its task was being cancelled",
+                exc_info=error,
+            )
+        raise

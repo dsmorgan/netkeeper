@@ -56,7 +56,7 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings, Settings, load_settings
-from netkeeper.db import session_scope
+from netkeeper.db import off_loop, session_scope
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin.activity_lock import account_key
 from netkeeper.linkedin.browser import (
@@ -180,13 +180,20 @@ class BrowserWorker:
         self._profiles = profiles
 
     async def execute(self, run_id: int, user_id: int) -> runs.RunOutcome:
-        """Run ``run_id`` to its end and record how it ended. See the module docstring."""
-        facts = self._facts(run_id, user_id)
+        """Run ``run_id`` to its end and record how it ended. See the module docstring.
+
+        Every database read and write here runs off the event loop
+        (:func:`netkeeper.db.off_loop`, #259), each in its own session as before;
+        the browser work stays on the loop.
+        """
+        facts = await off_loop(self._facts, run_id, user_id)
         if facts is None:
             return runs.RunOutcome.DONE
-        refusal = self._refusal(run_id, user_id, facts)
+        refusal = await off_loop(self._refusal, run_id, user_id, facts)
         if refusal is not None:
-            self._finish(run_id, user_id, SyncRunStatus.FAILED, refusal[0], refusal[1])
+            await off_loop(
+                self._finish, run_id, user_id, SyncRunStatus.FAILED, refusal[0], refusal[1]
+            )
             self._publish("run.finished", run_id, user_id, {"status": "failed"})
             return runs.RunOutcome.DONE
         self._publish("run.started", run_id, user_id, {"kind": facts.kind.value})
@@ -197,12 +204,21 @@ class BrowserWorker:
         except (BrowserBusy, BrowserUnavailable) as exc:
             reason = "browser_busy" if isinstance(exc, BrowserBusy) else "browser_unavailable"
             log.warning("run %d could not use the browser: %s", run_id, exc)
-            self._finish(run_id, user_id, SyncRunStatus.FAILED, reason, runs.describe(exc))
+            await off_loop(
+                self._finish, run_id, user_id, SyncRunStatus.FAILED, reason, runs.describe(exc)
+            )
             outcome = runs.RunOutcome.RETRY_LATER
         except asyncio.CancelledError:
             # The process is shutting down. A cancel that landed inside the runner
             # was recorded there; one that landed while attaching was not.
-            self._finish(run_id, user_id, SyncRunStatus.ABORTED, "interrupted", runs.INTERRUPTED)
+            await off_loop(
+                self._finish,
+                run_id,
+                user_id,
+                SyncRunStatus.ABORTED,
+                "interrupted",
+                runs.INTERRUPTED,
+            )
             raise
         except (runs.HeatSkipped, runs.SessionFlagged) as exc:
             log.info("run %d refused: %s", run_id, exc)  # recorded by the runner
@@ -211,8 +227,11 @@ class BrowserWorker:
             # not (a failure before the runner started), and stops it from taking the
             # caller down.
             log.exception("run %d failed", run_id)
-            self._finish(run_id, user_id, SyncRunStatus.FAILED, "error", runs.describe(exc))
-        self._publish("run.finished", run_id, user_id, {"status": self._status(run_id, user_id)})
+            await off_loop(
+                self._finish, run_id, user_id, SyncRunStatus.FAILED, "error", runs.describe(exc)
+            )
+        status = await off_loop(self._status, run_id, user_id)
+        self._publish("run.finished", run_id, user_id, {"status": status})
         return outcome
 
     async def _run_job(

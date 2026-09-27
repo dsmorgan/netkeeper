@@ -91,7 +91,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings
 from netkeeper.crm import apply as mapping
-from netkeeper.db import session_scope
+from netkeeper.db import off_loop, session_scope
 from netkeeper.linkedin import heat as heat_math
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.connections import (
@@ -213,15 +213,14 @@ class _BudgetGate:
     multiplier: float
     cancelled: bool = False
 
-    def _cancel_requested(self) -> bool:
+    def _cancel_requested_now(self) -> bool:
         with session_scope(self.factory) as session:
             return runs.cancel_requested(session, _load_user(session, self.user_id), self.run_id)
 
-    async def before_page(self, number: int) -> bool:
-        if self.cancelled or self._cancel_requested():
-            self.cancelled = True
-            log.info("connections sync: cancelled before page %d", number)
-            return False
+    async def _cancel_requested(self) -> bool:
+        return await off_loop(self._cancel_requested_now)
+
+    def _spend_page(self, number: int) -> bool:
         with session_scope(self.factory, write=True) as session:
             user = _load_user(session, self.user_id)
             try:
@@ -238,6 +237,13 @@ class _BudgetGate:
                 return False
         return True
 
+    async def before_page(self, number: int) -> bool:
+        if self.cancelled or await self._cancel_requested():
+            self.cancelled = True
+            log.info("connections sync: cancelled before page %d", number)
+            return False
+        return await off_loop(self._spend_page, number)
+
     async def between_pages(self) -> None:
         delay = profiles(self.settings.pacing).delay
         remaining = human_delay(
@@ -251,7 +257,7 @@ class _BudgetGate:
             step = min(CANCEL_SLICE_S, remaining)
             await self.sleep(step)
             remaining -= step
-            if self._cancel_requested():
+            if await self._cancel_requested():
                 self.cancelled = True
                 log.info("connections sync: cancelled during the wait between pages")
                 return
@@ -287,18 +293,26 @@ async def sync_connections(
     ``failed``, and never ages anyone.
     """
     kind = _KIND_OF[mode]
-    with session_scope(factory, write=True) as session:
-        user = _load_user(session, user_id)
-        if run_id is None:
-            run_id = runs.create_run(
-                session, user, kind, trigger=SyncRunTrigger.MANUAL, now=clock()
-            ).id
-        run = runs.get_run(session, user, run_id)
-        if run.kind is not kind:
-            raise ValueError(f"run {run_id} is a {run.kind.value} run, not {kind.value}")
-        account_id = run.linkedin_account_id
+    # Every session below runs whole off the event loop (#259): open, work, commit
+    # in one off_loop call, so no transaction spans an await. The boundaries are
+    # the ones this function always had, one transaction per block.
 
-    with runs_recording(factory, user_id, run_id, clock=clock):
+    def start(run_id: int | None) -> tuple[int, int]:
+        with session_scope(factory, write=True) as session:
+            user = _load_user(session, user_id)
+            if run_id is None:
+                run_id = runs.create_run(
+                    session, user, kind, trigger=SyncRunTrigger.MANUAL, now=clock()
+                ).id
+            run = runs.get_run(session, user, run_id)
+            if run.kind is not kind:
+                raise ValueError(f"run {run_id} is a {run.kind.value} run, not {kind.value}")
+            return run_id, run.linkedin_account_id
+
+    started_run_id, account_id = await off_loop(start, run_id)
+    run_id = started_run_id
+
+    def prepare() -> tuple[float, int, frozenset[str]]:
         with session_scope(factory, write=True) as session:
             user = _load_user(session, user_id)
             now = clock()
@@ -317,6 +331,10 @@ async def sync_connections(
             known = (
                 mapping.known_urns(session, user) if mode is SyncMode.INCREMENTAL else frozenset()
             )
+            return multiplier, remaining, known
+
+    async with runs_recording(factory, user_id, run_id, clock=clock):
+        multiplier, remaining, known = await off_loop(prepare)
 
         # Spec 9.7: while warm, the per-run budget shrinks -- never to zero while
         # anything is left of the day's.
@@ -335,11 +353,14 @@ async def sync_connections(
         )
         counts = mapping.PageCounts()
 
-        async def on_page(page: ConnectionsPage) -> None:
+        def apply_page(page: ConnectionsPage) -> None:
             with session_scope(factory, write=True) as session:
                 mapping.apply_page(session, _load_user(session, user_id), page, counts)
 
-        async def progress(event: ProgressEvent) -> None:
+        async def on_page(page: ConnectionsPage) -> None:
+            await off_loop(apply_page, page)
+
+        def record_progress(event: ProgressEvent) -> None:
             with session_scope(factory, write=True) as session:
                 runs.record_progress(
                     session,
@@ -353,8 +374,22 @@ async def sync_connections(
                         "stopped": None if event.stopped is None else event.stopped.value,
                     },
                 )
+
+        async def progress(event: ProgressEvent) -> None:
+            await off_loop(record_progress, event)
             if on_progress is not None:
                 await on_progress(event)
+
+        def record_route_unreadable() -> None:
+            with session_scope(factory, write=True) as session:
+                route_breaker.record(
+                    session,
+                    _load_user(session, user_id),
+                    account_id,
+                    route_changed=True,
+                    succeeded=False,
+                    now=clock(),
+                )
 
         try:
             result = await run_connections_sync(
@@ -385,29 +420,25 @@ async def sync_connections(
             # a gate whose whole point is "the connections route is broken", and
             # would make ``reset-breaker``'s own messaging ("run one by hand to check
             # whether the wall is still there") actively misleading for it.
-            with session_scope(factory, write=True) as session:
-                route_breaker.record(
-                    session,
-                    _load_user(session, user_id),
-                    account_id,
-                    route_changed=True,
-                    succeeded=False,
-                    now=clock(),
-                )
+            await off_loop(record_route_unreadable)
             raise
 
-        heat_raised = flagged = False
-        with session_scope(factory, write=True) as session:
-            user = _load_user(session, user_id)
-            if result.reason is StopReason.RESPONSE and result.outcome is not None:
-                if result.outcome in _HEAT_OUTCOMES:
-                    heat_service.raise_heat(
-                        session, user, account_id, now=clock(), settings=settings.heat
-                    )
-                    heat_raised = True
-                if result.outcome in _FLAG_OUTCOMES:
-                    flag_session(session, user, result.outcome, url=result.final_url or "")
-                    flagged = True
+        def record_response() -> tuple[bool, bool]:
+            heat_raised = flagged = False
+            with session_scope(factory, write=True) as session:
+                user = _load_user(session, user_id)
+                if result.reason is StopReason.RESPONSE and result.outcome is not None:
+                    if result.outcome in _HEAT_OUTCOMES:
+                        heat_service.raise_heat(
+                            session, user, account_id, now=clock(), settings=settings.heat
+                        )
+                        heat_raised = True
+                    if result.outcome in _FLAG_OUTCOMES:
+                        flag_session(session, user, result.outcome, url=result.final_url or "")
+                        flagged = True
+            return heat_raised, flagged
+
+        heat_raised, flagged = await off_loop(record_response)
 
         # #191 review F7: its own writer session, after heat and the session flag
         # have already committed above, so a problem writing the breaker's row (a
@@ -417,72 +448,81 @@ async def sync_connections(
         # StopReason.BUDGET or PAGE_BUDGET) is route_changed or a natural end, so
         # record() leaves the streak exactly where it was for either -- there is no
         # separate cancelled/gate.cancelled case to special-case here.
-        with session_scope(factory, write=True) as session:
-            route_breaker.record(
-                session,
-                _load_user(session, user_id),
-                account_id,
-                route_changed=(
-                    result.reason is StopReason.RESPONSE and result.outcome is Outcome.ROUTE_CHANGED
-                ),
-                succeeded=result.reason in _NATURAL_ENDS,
-                now=clock(),
-            )
-            # #199: the answer-lost limit, a streak per run kind beside the breaker's. A
-            # run recorded ``answer_lost`` (stopped for a lost answer, or read to the
-            # end without some) extends its kind's streak; a run of the same kind
-            # recorded ``completed`` clears it. A cancel or a budget stop, losses or
-            # not, is recorded as that and leaves it.
-            route_breaker.record_answer_lost(
-                session,
-                _load_user(session, user_id),
-                account_id,
-                kind=kind,
-                answer_lost=(
-                    _stop_reason(result, cancelled=gate.cancelled) == StopReason.ANSWER_LOST.value
-                ),
-                clean_end=_clean_end(result, cancelled=gate.cancelled),
-                now=clock(),
-            )
+        def record_breakers() -> None:
+            with session_scope(factory, write=True) as session:
+                route_breaker.record(
+                    session,
+                    _load_user(session, user_id),
+                    account_id,
+                    route_changed=(
+                        result.reason is StopReason.RESPONSE
+                        and result.outcome is Outcome.ROUTE_CHANGED
+                    ),
+                    succeeded=result.reason in _NATURAL_ENDS,
+                    now=clock(),
+                )
+                # #199: the answer-lost limit, a streak per run kind beside the
+                # breaker's. A run recorded ``answer_lost`` (stopped for a lost answer,
+                # or read to the end without some) extends its kind's streak; a run of
+                # the same kind recorded ``completed`` clears it. A cancel or a budget
+                # stop, losses or not, is recorded as that and leaves it.
+                route_breaker.record_answer_lost(
+                    session,
+                    _load_user(session, user_id),
+                    account_id,
+                    kind=kind,
+                    answer_lost=(
+                        _stop_reason(result, cancelled=gate.cancelled)
+                        == StopReason.ANSWER_LOST.value
+                    ),
+                    clean_end=_clean_end(result, cancelled=gate.cancelled),
+                    now=clock(),
+                )
 
-        aging: mapping.AgingCounts | None = None
-        with session_scope(factory, write=True) as session:
-            user = _load_user(session, user_id)
-            if result.complete:
-                aging = mapping.age_unseen(
+        await off_loop(record_breakers)
+
+        def finish() -> SyncRunReport:
+            aging: mapping.AgingCounts | None = None
+            with session_scope(factory, write=True) as session:
+                user = _load_user(session, user_id)
+                if result.complete:
+                    aging = mapping.age_unseen(
+                        session,
+                        user,
+                        result.seen_urns,
+                        observed_at=clock(),
+                        disconnect_after_misses=settings.disconnect_after_misses,
+                        created_by_sync=counts.new_connection_ids,
+                        seen_public_ids=result.seen_public_ids,
+                        held_for_review=frozenset(counts.review_contact_ids),
+                    )
+                report = SyncRunReport(
+                    account_id=account_id,
+                    result=result,
+                    pages=counts,
+                    aging=aging,
+                    heat_raised=heat_raised,
+                    session_flagged=flagged,
+                    run_id=run_id,
+                    cancelled=gate.cancelled,
+                )
+                runs.finish_run(
                     session,
                     user,
-                    result.seen_urns,
-                    observed_at=clock(),
-                    disconnect_after_misses=settings.disconnect_after_misses,
-                    created_by_sync=counts.new_connection_ids,
-                    seen_public_ids=result.seen_public_ids,
-                    held_for_review=frozenset(counts.review_contact_ids),
+                    run_id,
+                    status=(
+                        SyncRunStatus.COMPLETED
+                        if _clean_end(result, cancelled=gate.cancelled)
+                        else SyncRunStatus.ABORTED
+                    ),
+                    now=clock(),
+                    stop_reason=_stop_reason(result, cancelled=gate.cancelled),
+                    counts=report.counts(),
+                    notes=(*_lost_notes(result), *_completion_notes(result), *_aging_notes(aging)),
                 )
-            report = SyncRunReport(
-                account_id=account_id,
-                result=result,
-                pages=counts,
-                aging=aging,
-                heat_raised=heat_raised,
-                session_flagged=flagged,
-                run_id=run_id,
-                cancelled=gate.cancelled,
-            )
-            runs.finish_run(
-                session,
-                user,
-                run_id,
-                status=(
-                    SyncRunStatus.COMPLETED
-                    if _clean_end(result, cancelled=gate.cancelled)
-                    else SyncRunStatus.ABORTED
-                ),
-                now=clock(),
-                stop_reason=_stop_reason(result, cancelled=gate.cancelled),
-                counts=report.counts(),
-                notes=(*_lost_notes(result), *_completion_notes(result), *_aging_notes(aging)),
-            )
+            return report
+
+        report = await off_loop(finish)
     return report
 
 

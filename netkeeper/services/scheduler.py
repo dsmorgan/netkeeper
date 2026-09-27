@@ -85,6 +85,9 @@ writers. :func:`poll_and_fire` releases the writer session (and the SQLite
 write lock with it) *before* awaiting the injected handler: a real enrichment
 run is minutes of bursts and human-like delays (spec 9.5), and holding a write
 transaction open for that long would starve every other writer in the process.
+The heartbeat's sessions run off the event loop (:func:`netkeeper.db.off_loop`,
+#259): each whole session in one call, so a request holding the write lock is
+waited for on the database thread instead of freezing the loop it needs to commit.
 
 **Wired into ``netkeeper serve`` (P2-10), disarmed.** ``serve``'s lifespan
 builds and starts this scheduler (:mod:`netkeeper.services.scheduled_runs`)
@@ -141,7 +144,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import HeatSettings, LinkedInSettings
-from netkeeper.db import is_writer, session_scope
+from netkeeper.db import is_writer, off_loop, session_scope
 from netkeeper.linkedin import pacing
 from netkeeper.models import JsonValue, User
 from netkeeper.models.base import utcnow
@@ -882,72 +885,83 @@ async def poll_and_fire(
     the (possibly long-running) handler is awaited, so a real job never holds
     the SQLite write lock for its duration.
     """
-    with session_scope(session_factory, write=True) as session:
-        state = _load_state(session, user, account_id, kind)
-        if state is None or state.due > now:
-            return None
-        if now - state.due >= schedule.interval:
-            deferred = _defer_as_catchup(
+
+    def claim() -> tuple[datetime, bool, bool, str | None, datetime] | None:
+        # The one writer session that reads and advances the due time, run whole
+        # off the event loop (#259); it commits before the handler is awaited.
+        with session_scope(session_factory, write=True) as session:
+            state = _load_state(session, user, account_id, kind)
+            if state is None or state.due > now:
+                return None
+            if now - state.due >= schedule.interval:
+                deferred = _defer_as_catchup(
+                    session,
+                    user,
+                    account_id,
+                    kind,
+                    state=state,
+                    now=now,
+                    schedule=schedule,
+                    rng=rng if rng is not None else random.Random(),  # noqa: S311 -- jitter
+                    tz=tz,
+                    active_start=active_start,
+                    active_end=active_end,
+                )
+                log.warning(
+                    "scheduler: %s for account %d lapsed %s past its due time; "
+                    "catching up once at %s instead of replaying every interval",
+                    kind.value,
+                    account_id,
+                    now - state.due,
+                    deferred.isoformat(),
+                )
+                return None
+            due = state.due
+            is_catchup = state.is_catchup
+            was_reoffer = state.resume_due is not None
+            skipped_reason: str | None = None
+            if not isinstance(armed, Arming) and not armed(session, user, account_id):
+                skipped_reason = "disarmed"
+            elif session_flag(session, user) is not None:
+                # A checkpoint or a login wall: the run would refuse anyway (spec 9.7),
+                # so no run is recorded and nothing is attached (#175 review, F3).
+                skipped_reason = "session_flagged"
+            elif isinstance(heat_settings, HeatSettings) and heat_service.should_skip(
+                session, user, account_id, now=now, settings=heat_settings
+            ):
+                skipped_reason = "heat"
+            elif kind in _ROUTE_BREAKER_KINDS and route_breaker.tripped(session, user, account_id):
+                # Two connections runs in a row ended route_changed (#189 item 1): a wall
+                # served in place raises no heat and sets no flag, so this is what stops
+                # a scheduled sync from loading it again at every interval.
+                skipped_reason = "route_changed_breaker"
+            elif kind in _ROUTE_BREAKER_KINDS and route_breaker.answer_lost_tripped(
+                session, user, account_id
+            ):
+                # Three runs of one connections kind in a row ended answer_lost (#199):
+                # the page's answers keep arriving unreadable, which moves neither heat
+                # nor the route-changed breaker, so this stops scheduled runs spending
+                # page views.
+                skipped_reason = "answer_lost_breaker"
+            next_due = record_fired(
                 session,
                 user,
                 account_id,
                 kind,
-                state=state,
-                now=now,
+                due=due,
                 schedule=schedule,
-                rng=rng if rng is not None else random.Random(),  # noqa: S311 -- jitter
                 tz=tz,
                 active_start=active_start,
                 active_end=active_end,
+                handler_ran=skipped_reason is None,
+                now=now,
             )
-            log.warning(
-                "scheduler: %s for account %d lapsed %s past its due time; "
-                "catching up once at %s instead of replaying every interval",
-                kind.value,
-                account_id,
-                now - state.due,
-                deferred.isoformat(),
-            )
-            return None
-        due = state.due
-        is_catchup = state.is_catchup
-        was_reoffer = state.resume_due is not None
-        skipped_reason: str | None = None
-        if not isinstance(armed, Arming) and not armed(session, user, account_id):
-            skipped_reason = "disarmed"
-        elif session_flag(session, user) is not None:
-            # A checkpoint or a login wall: the run would refuse anyway (spec 9.7),
-            # so no run is recorded and nothing is attached (#175 review, F3).
-            skipped_reason = "session_flagged"
-        elif isinstance(heat_settings, HeatSettings) and heat_service.should_skip(
-            session, user, account_id, now=now, settings=heat_settings
-        ):
-            skipped_reason = "heat"
-        elif kind in _ROUTE_BREAKER_KINDS and route_breaker.tripped(session, user, account_id):
-            # Two connections runs in a row ended route_changed (#189 item 1): a wall
-            # served in place raises no heat and sets no flag, so this is what stops
-            # a scheduled sync from loading it again at every interval.
-            skipped_reason = "route_changed_breaker"
-        elif kind in _ROUTE_BREAKER_KINDS and route_breaker.answer_lost_tripped(
-            session, user, account_id
-        ):
-            # Three runs of one connections kind in a row ended answer_lost (#199): the page's
-            # answers keep arriving unreadable, which moves neither heat nor the
-            # route-changed breaker, so this stops scheduled runs spending page views.
-            skipped_reason = "answer_lost_breaker"
-        next_due = record_fired(
-            session,
-            user,
-            account_id,
-            kind,
-            due=due,
-            schedule=schedule,
-            tz=tz,
-            active_start=active_start,
-            active_end=active_end,
-            handler_ran=skipped_reason is None,
-            now=now,
-        )
+        return due, is_catchup, was_reoffer, skipped_reason, next_due
+
+    claimed = await off_loop(claim)
+    if claimed is None:
+        return None
+    due, is_catchup, was_reoffer, skipped_reason, next_due = claimed
     fired = skipped_reason is None
     if fired:
         handler = registry[kind]
@@ -967,7 +981,8 @@ async def poll_and_fire(
                 account_id,
             )
         elif outcome is JobOutcome.NOT_DONE:
-            next_due = offer_again(
+            next_due = await off_loop(
+                offer_again,
                 session_factory,
                 user,
                 account_id,
@@ -980,7 +995,8 @@ async def poll_and_fire(
                 active_end=active_end,
             )
         elif outcome is JobOutcome.RETRY_LATER:
-            next_due = park_retry(
+            next_due = await off_loop(
+                park_retry,
                 session_factory,
                 user,
                 account_id,
@@ -1039,17 +1055,18 @@ async def poll_once(
     fired: list[FireResult] = []
     for user, account_id in accounts:
         tz = user.timezone
-        with session_scope(session_factory) as session:
-            due_now = {
-                kind: state.due
-                for kind in schedules
-                if (state := _load_state(session, user, account_id, kind)) is not None
-                and state.due <= now
-            }
+        due_now = await off_loop(_due_now, session_factory, user, account_id, schedules, now)
         last_fired_at: datetime | None = None
         for kind in sorted(due_now, key=lambda k: (due_now[k], k.value)):
             if last_fired_at is not None and now - last_fired_at < MIN_JOB_KIND_GAP:
-                _defer_past_the_gap(session_factory, user, account_id, kind, after=last_fired_at)
+                await off_loop(
+                    _defer_past_the_gap,
+                    session_factory,
+                    user,
+                    account_id,
+                    kind,
+                    after=last_fired_at,
+                )
                 continue
             result = await poll_and_fire(
                 session_factory,
@@ -1073,6 +1090,23 @@ async def poll_once(
             if result.fired:
                 last_fired_at = now
     return fired
+
+
+def _due_now(
+    session_factory: sessionmaker[Session],
+    user: User,
+    account_id: int,
+    schedules: Mapping[JobKind, JobSchedule],
+    now: datetime,
+) -> dict[JobKind, datetime]:
+    """Every kind in ``schedules`` whose stored due time has arrived, in one read session."""
+    with session_scope(session_factory) as session:
+        return {
+            kind: state.due
+            for kind in schedules
+            if (state := _load_state(session, user, account_id, kind)) is not None
+            and state.due <= now
+        }
 
 
 def _defer_past_the_gap(
@@ -1266,9 +1300,11 @@ def build_scheduler(
             )
 
     async def _heartbeat() -> None:
+        # The accounts are read off the event loop too (#259); poll_once runs each
+        # of its sessions there.
         await poll_once(
             session_factory,
-            accounts(),
+            await off_loop(lambda: list(accounts())),
             now=clock(),
             registry=registry,
             schedules=schedules,
