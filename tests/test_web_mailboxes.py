@@ -272,6 +272,23 @@ async def test_a_revoked_token_shows_as_reauth_required_after_one_check(
     ]
 
 
+async def test_the_banners_list_needs_no_keychain(
+    client: httpx.AsyncClient, fake_google: FakeGoogle, memory_keyring: MemoryKeyring
+) -> None:
+    """The banner reads ``GET /mailboxes``, so a locked Keychain cannot hide it (#256)."""
+    await _set_client(client)
+    await _connect(client, fake_google)
+    [mailbox] = (await client.get("/api/v1/mailboxes")).json()
+    fake_google.revoke_all()
+    await client.post(f"/api/v1/mailboxes/{mailbox['id']}/check", headers=CSRF)
+    memory_keyring.broken = True
+    assert (await client.get("/api/v1/mailboxes/status")).status_code == 503
+    response = await client.get("/api/v1/mailboxes")
+    assert response.status_code == 200
+    [row] = response.json()
+    assert (row["status"], row["status_reason"]) == ("reauth_required", "invalid_grant")
+
+
 async def test_an_answer_cut_off_part_way_is_not_a_server_error(
     client: httpx.AsyncClient, fake_google: FakeGoogle
 ) -> None:

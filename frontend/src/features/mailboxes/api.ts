@@ -17,6 +17,7 @@ export type MailboxStatus = components['schemas']['MailboxStatusOut']
 
 export const mailboxKeys = {
   all: ['mailboxes'] as const,
+  list: () => [...mailboxKeys.all, 'list'] as const,
   status: () => [...mailboxKeys.all, 'status'] as const,
 }
 
@@ -30,6 +31,20 @@ export const mailboxStatusQuery = queryOptions({
   queryFn: async ({ signal }): Promise<MailboxStatus> => {
     const { data, error, response } = await api.GET('/api/v1/mailboxes/status', { signal })
     if (data === undefined) throw failure(error, response, 'GET /mailboxes/status')
+    return data
+  },
+})
+
+/**
+ * Every mailbox, from the database alone. The banner reads this rather than the
+ * status, which also reads the OAuth client from the Keychain: a locked Keychain
+ * must not hide a mailbox that needs re-authorizing.
+ */
+export const mailboxListQuery = queryOptions({
+  queryKey: mailboxKeys.list(),
+  queryFn: async ({ signal }): Promise<Mailbox[]> => {
+    const { data, error, response } = await api.GET('/api/v1/mailboxes', { signal })
+    if (data === undefined) throw failure(error, response, 'GET /mailboxes')
     return data
   },
 })

@@ -5,18 +5,19 @@ import { useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { useServerEvent } from '@/features/events/use-server-event'
 
-import { mailboxKeys, mailboxStatusQuery, navigation, reasonText, startAuthorization } from './api'
+import { mailboxKeys, mailboxListQuery, navigation, reasonText, startAuthorization } from './api'
 
 /**
  * The app-wide banner for a mailbox that needs authorizing again (spec 11.5).
  *
  * Shown on every page while any mailbox is `reauth_required`: email steps are
  * paused until someone does. The backend's poll publishes `mailbox.status` the
- * moment it marks one, so the banner appears without a reload.
+ * moment it marks one, so the banner appears without a reload. It reads the
+ * mailboxes alone, never the Keychain, so it shows even while the Keychain is locked.
  */
 export function ReauthBanner() {
   const queryClient = useQueryClient()
-  const status = useQuery(mailboxStatusQuery)
+  const mailboxes = useQuery(mailboxListQuery)
   const refresh = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: mailboxKeys.all })
   }, [queryClient])
@@ -27,10 +28,7 @@ export function ReauthBanner() {
     onSuccess: (url) => navigation.assign(url),
   })
 
-  const stuck =
-    status.data?.reauth_required === true
-      ? status.data.mailboxes.filter((mailbox) => mailbox.status === 'reauth_required')
-      : []
+  const stuck = mailboxes.data?.filter((mailbox) => mailbox.status === 'reauth_required') ?? []
   const first = stuck[0]
   if (first === undefined) return null
 

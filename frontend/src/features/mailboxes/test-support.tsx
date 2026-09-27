@@ -44,8 +44,8 @@ export function status(overrides: Partial<MailboxStatus> = {}): MailboxStatus {
 type Handler = (body: unknown) => Response
 
 /**
- * A fake backend: `routes` keyed `"METHOD /path"`, the status route reading
- * `current()` on every call, so a test can change what the next fetch sees.
+ * A fake backend: `routes` keyed `"METHOD /path"`, the status and list routes
+ * reading `current()` on every call, so a test can change what the next fetch sees.
  */
 export function renderWithBackend(
   ui: ReactNode,
@@ -61,6 +61,7 @@ export function renderWithBackend(
     const route = routes[`${request.method} ${pathname}`]
     if (route !== undefined) return route(body)
     if (pathname === '/api/v1/mailboxes/status') return jsonResponse(current())
+    if (pathname === '/api/v1/mailboxes') return jsonResponse(current().mailboxes)
     return jsonResponse({ detail: `unexpected ${request.method} ${pathname}` }, 500)
   })
   const source = new FakeEventSource('/api/v1/events')
