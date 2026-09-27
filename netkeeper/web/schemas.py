@@ -2007,8 +2007,10 @@ class MailboxStatusOut(BaseModel):
 class OAuthClientIn(BaseModel):
     """The Desktop-app client from your Cloud project (docs/gmail-setup.md)."""
 
-    client_id: str = Field(min_length=1, max_length=300)
-    client_secret: str = Field(min_length=1, max_length=300)
+    # No max_length: a validation error echoes its input, and this one is secret.
+    # ``gmail_oauth.validate_client`` holds both to 300 characters and says so safely.
+    client_id: str = Field(min_length=1)
+    client_secret: str = Field(min_length=1)
 
 
 class OAuthStartIn(BaseModel):

@@ -5849,13 +5849,11 @@
         "description": "The Desktop-app client from your Cloud project (docs/gmail-setup.md).",
         "properties": {
           "client_id": {
-            "maxLength": 300,
             "minLength": 1,
             "title": "Client Id",
             "type": "string"
           },
           "client_secret": {
-            "maxLength": 300,
             "minLength": 1,
             "title": "Client Secret",
             "type": "string"

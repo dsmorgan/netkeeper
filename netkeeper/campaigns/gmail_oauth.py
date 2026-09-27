@@ -54,6 +54,10 @@ GMAIL_SCOPE: Final = "https://www.googleapis.com/auth/gmail.modify"
 #: Every Google OAuth client id ends in this; anything else was pasted from the wrong field.
 CLIENT_ID_SUFFIX: Final = ".apps.googleusercontent.com"
 
+#: The longest client ID or secret accepted. Checked here, not by the request's
+#: schema, whose error would echo the value back.
+CLIENT_FIELD_MAX_LENGTH: Final = 300
+
 #: What Google's token endpoint answers for a revoked or expired grant.
 INVALID_GRANT: Final = "invalid_grant"
 
@@ -167,8 +171,16 @@ def validate_client(client_id: str, client_secret: str) -> OAuthClient:
             " client ID, not the project ID or the secret",
             code="bad_client_id",
         )
+    if len(client_id) > CLIENT_FIELD_MAX_LENGTH:
+        raise ClientConfigError(
+            f"the client ID is over {CLIENT_FIELD_MAX_LENGTH} characters", code="bad_client_id"
+        )
     if not client_secret or any(char.isspace() for char in client_secret):
         raise ClientConfigError("the client secret is empty or malformed", code="bad_secret")
+    if len(client_secret) > CLIENT_FIELD_MAX_LENGTH:
+        raise ClientConfigError(
+            f"the client secret is over {CLIENT_FIELD_MAX_LENGTH} characters", code="bad_secret"
+        )
     return OAuthClient(client_id=client_id, client_secret=client_secret)
 
 
