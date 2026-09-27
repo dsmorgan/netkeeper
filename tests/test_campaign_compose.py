@@ -206,6 +206,39 @@ def test_nothing_can_add_a_header(fields: dict[str, object]) -> None:
         build_message(**arguments)  # type: ignore[arg-type]
 
 
+#: ``To`` values that name more than one recipient, or another one (#269).
+NOT_ONE_ADDRESS = [
+    "ada@example.test, eve@example.test",
+    "ada@example.test; eve@example.test",
+    "ada@example.test eve@example.test",
+    "friends: ada@example.test, eve@example.test;",
+    "Eve <eve@example.test>",
+    '"Ada Quill" <ada@example.test>',
+    '"ada@example.test"@example.test',
+    "ada(comment)@example.test",
+    "ada@example.test (Ada)",
+    "ada@[192.0.2.1]",
+    "ada@@example.test",
+    "@example.test",
+    "ada@",
+]
+
+
+@pytest.mark.parametrize("to", NOT_ONE_ADDRESS)
+def test_to_is_exactly_one_bare_address(to: str) -> None:
+    with pytest.raises(ComposeError, match="one bare recipient"):
+        build_message(to=to, subject="Catching up", body="b", message_id=_id())
+
+
+def test_one_bare_address_with_space_around_it_is_sent_to() -> None:
+    message = _wire(
+        build_message(to="  ada.quill+work@example.test ", subject="s", body="b", message_id=_id())
+    )
+    assert message["To"] == "ada.quill+work@example.test"
+    assert message.get_all("To") == ["ada.quill+work@example.test"]
+    assert message["Cc"] is None and message["Bcc"] is None
+
+
 # --- labels ---------------------------------------------------------------------------
 
 

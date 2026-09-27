@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import enum
 from datetime import date, datetime
+from email.errors import MessageError
+from email.headerregistry import Address
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from sqlalchemy import (
@@ -57,6 +59,10 @@ if TYPE_CHECKING:
     from netkeeper.models.tags import ContactTag, Tag
 
 LINKEDIN_PROFILE_URL = "https://www.linkedin.com/in/{public_id}/"
+
+#: Characters that make an address list, a display name, a group, a quoted local
+#: part or a comment. None of them belongs in the one bare address a ``To`` holds.
+_ADDRESS_SPECIALS = frozenset(',;<>":()[]\\')
 
 
 class ContactMet(enum.StrEnum):
@@ -175,6 +181,27 @@ def normalize_email(value: str) -> str:
     if not cleaned:
         raise ValueError("email is empty")
     return cleaned
+
+
+def single_address(value: str) -> str:
+    """``value`` if it is exactly one bare ``local@domain`` address; ``ValueError`` if not.
+
+    A ``To`` header takes a list, so ``a@x.com, b@y.com``, a group
+    (``g: a@x.com, b@y.com;``) or a display name (``Eve <b@y.com>``) there sends
+    to another or a further recipient (#269). The value must parse as one
+    addr-spec and come back from the parser unchanged, and whitespace and the
+    characters that build lists, names, groups and comments are refused outright.
+    Nothing is stripped or lowercased here: callers normalize first.
+    """
+    if not value or any(ch.isspace() or ch in _ADDRESS_SPECIALS for ch in value):
+        raise ValueError("an email address is one bare local@domain address")
+    try:
+        parsed = Address(addr_spec=value)
+    except (ValueError, MessageError):
+        raise ValueError("an email address is one bare local@domain address") from None
+    if parsed.addr_spec != value or not parsed.username or not parsed.domain:
+        raise ValueError("an email address is one bare local@domain address")
+    return value
 
 
 def _preferred_name_default(context: DefaultExecutionContext) -> str:

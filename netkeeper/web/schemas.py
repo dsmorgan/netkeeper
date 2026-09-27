@@ -56,6 +56,7 @@ from netkeeper.models import (
     TemplateChannel,
     TriageDecisionKind,
     UserKind,
+    single_address,
 )
 from netkeeper.models.imports import FILENAME_MAX_LENGTH, PRESET_NAME_MAX_LENGTH
 from netkeeper.services.tasks import TaskStatus
@@ -864,12 +865,22 @@ class ConfirmationRejected(BaseModel):
     reason: InvalidReason
 
 
+def _one_address(value: str) -> str:
+    """One bare ``local@domain``: a list, a group or a display name would send a
+    campaign to someone else too (#269). The service checks again and normalizes."""
+    single_address(value.strip())
+    return value
+
+
+EmailAddress = Annotated[str, Field(min_length=1), AfterValidator(_one_address)]
+
+
 class ContactEmailIn(BaseModel):
     """A new address. The first address on a contact becomes primary whether or not asked."""
 
     model_config = ConfigDict(extra="forbid")
 
-    email: str = Field(min_length=1)
+    email: EmailAddress
     kind: EmailKind = EmailKind.OTHER
     is_primary: bool = False
     status: EmailStatus = EmailStatus.OK
@@ -880,7 +891,7 @@ class ContactEmailPatch(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    email: str | None = Field(None, min_length=1)
+    email: EmailAddress | None = None
     kind: EmailKind | None = None
     is_primary: bool | None = None
     status: EmailStatus | None = None
