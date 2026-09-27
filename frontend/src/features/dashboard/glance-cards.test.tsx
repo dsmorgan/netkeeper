@@ -399,7 +399,7 @@ describe('BudgetHeatCard', () => {
   it('raises tripped heat as an alert with when runs resume', async () => {
     renderCard(BudgetHeatCard, {
       [BUDGET]: json(budget()),
-      [HEAT]: json(heat({ score: 6, tripped: true, resumes_at: '2099-01-01T00:00:00Z' })),
+      [HEAT]: json(heat({ score: 6, tripped: true, resumes_at: FUTURE })),
     })
     const body = await card('Budget and heat')
     expect(await body.findByRole('alert')).toHaveTextContent(
