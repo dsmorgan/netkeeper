@@ -8,6 +8,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 
 import factories
@@ -16,6 +17,7 @@ from campaign_fakes import ALWAYS_OPEN, LATENCY, NOW, SETTINGS, FakeSender, make
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.campaigns.compose import message_id_for
 from netkeeper.config import CampaignSettings, Settings
 from netkeeper.crm.contacts import merge_contacts
 from netkeeper.crm.interactions import add_interaction
@@ -495,7 +497,11 @@ def test_enrollment_moves_refuse_the_wrong_state(world: World) -> None:
             world.write(attempt)
 
 
-def test_removal_ends_the_enrollment_and_discards_what_was_waiting(world: World) -> None:
+def test_removal_ends_the_enrollment_and_leaves_a_scheduled_message_for_reconcile(
+    world: World,
+) -> None:
+    """#269: a ``scheduled`` message may be in the sender's hands, or out already. Only
+    reconcile, after a search by Message-ID, says whether it went; never a blind discard."""
     enrollment_id = world.enroll_new()
 
     def with_waiting(session: Session) -> int:
@@ -510,7 +516,7 @@ def test_removal_ends_the_enrollment_and_discards_what_was_waiting(world: World)
     enrollment = world.enrollment(enrollment_id)
     assert (enrollment.status, enrollment.exit_reason) == (EnrollmentStatus.REMOVED, "removed")
     assert enrollment.next_action_at is None
-    assert [m.status for m in world.messages() if m.id == waiting] == [MessageStatus.DISCARDED]
+    assert [m.status for m in world.messages() if m.id == waiting] == [MessageStatus.SCHEDULED]
 
 
 # --- #261 requirement 2: never fire a step twice -------------------------------------------
@@ -579,13 +585,30 @@ def test_a_crash_after_the_claim_never_sends_the_step_again(world: World) -> Non
 
 def test_a_sender_failure_is_the_messages_and_never_retried(world: World) -> None:
     enrollment_id = world.enroll_new()
-    world.sender.raises = RuntimeError("connection reset, token abc123")
-    result = world.tick()
-    [(_, outcome)] = result.fired
+    world.sender.outcome = SendOutcome.FAILED
+    [(_, outcome)] = world.tick().fired
     assert outcome.outcome is SendOutcome.FAILED
     [message] = world.messages(enrollment_id)
     assert message.status is MessageStatus.FAILED
-    assert message.error == "sender raised RuntimeError"  # never the exception's text
+    enrollment = world.enrollment(enrollment_id)
+    assert (enrollment.current_step, enrollment.next_action_at) == (None, None)
+    world.sender.outcome = SendOutcome.SENT
+    assert world.tick(NOW + timedelta(days=1)).fired == []
+
+
+def test_a_sender_that_raises_leaves_the_outcome_unknown_never_failed(world: World) -> None:
+    """#269: a sender may raise after Gmail took the message. The message stays
+    ``scheduled`` (the "did it go out?" signal) and is never sent again."""
+    enrollment_id = world.enroll_new()
+    world.sender.raises = RuntimeError("connection reset, token abc123")
+    result = world.tick()
+    [(_, outcome)] = result.fired
+    assert outcome.outcome is SendOutcome.UNKNOWN
+    [message] = world.messages(enrollment_id)
+    assert message.status is MessageStatus.SCHEDULED
+    assert message.error is not None
+    assert "sender raised RuntimeError" in message.error
+    assert "abc123" not in message.error  # never the exception's text
     enrollment = world.enrollment(enrollment_id)
     assert (enrollment.current_step, enrollment.next_action_at) == (None, None)
     world.sender.raises = None
@@ -1272,3 +1295,244 @@ async def test_the_minute_loop_survives_a_failed_tick(
     finally:
         await engine.stop()
     assert len(calls) >= 2
+
+
+# --- P3-07 (#269): what the engine does with a sender's answer -----------------------------
+
+
+def test_an_unknown_outcome_stays_scheduled_and_parked(world: World) -> None:
+    """#269, requirement 1: Gmail's ``outcome_unknown`` is never recorded as ``failed``."""
+    enrollment_id = world.enroll_new()
+    world.sender.outcome = SendOutcome.UNKNOWN
+    [(_, outcome)] = world.tick().fired
+    assert outcome.outcome is SendOutcome.UNKNOWN
+    [message] = world.messages(enrollment_id)
+    assert (message.status, message.sent_at) == (MessageStatus.SCHEDULED, None)
+    assert message.error is not None and "reconciling by Message-ID" in message.error
+    enrollment = world.enrollment(enrollment_id)
+    assert (enrollment.current_step, enrollment.next_action_at) == (None, None)
+    assert world.read(lambda s: next_send_at(s, world.user, world.mailbox.id)) is not None
+    world.sender.outcome = SendOutcome.SENT
+    assert world.tick(NOW + timedelta(days=1)).fired == []  # never sent a second time
+
+
+def test_a_naive_time_from_the_sender_is_refused_before_the_record(world: World) -> None:
+    """#269, requirement 5: a naive ``at`` would make the record raise after the send.
+    The record uses its own time instead."""
+
+    class Naive(FakeSender):
+        def send(self, firing: Firing) -> SendResult:
+            self.firings.append(firing)
+            return SendResult(
+                SendOutcome.SENT,
+                at=datetime(2026, 9, 29, 14, 7),  # no zone
+                gmail_message_id="gm-1",
+                gmail_thread_id="thread-1",
+            )
+
+    world.sender = Naive()
+    enrollment_id = world.enroll_new()
+    [(_, outcome)] = world.tick().fired
+    assert outcome.at is None
+    [message] = world.messages(enrollment_id)
+    assert (message.status, message.sent_at) == (MessageStatus.SENT, NOW)
+    assert world.enrollment(enrollment_id).next_action_at == NOW + timedelta(days=7)
+
+
+def test_a_mailbox_address_with_no_domain_parks_the_step_before_the_claim(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The Message-ID must be known before the send: no domain, no claim."""
+    world = make_world(session_factory)
+    world.write(
+        lambda s: setattr(get_scoped(s, world.user, Mailbox, world.mailbox.id), "email", "me")
+    )
+    enrollment_id = world.enroll_new()
+    result = world.tick()
+    assert result.fired == []
+    assert reasons_of(result, enrollment_id) == (Skip.MAILBOX_ADDRESS,)
+    assert world.messages(enrollment_id) == []
+
+
+def test_a_firing_carries_its_message_id_and_label(world: World) -> None:
+    enrollment_id = world.enroll_new()
+    [(firing, _)] = world.tick().fired
+    [message] = world.messages(enrollment_id)
+    assert firing.rfc822_message_id is not None
+    assert firing.rfc822_message_id.endswith("@example.test>")
+    assert firing.rfc822_message_id == message_id_for(
+        user_id=world.user.id,
+        message_id=message.id,
+        created_at=message.created_at,
+        address=world.mailbox.email,
+    )
+    assert firing.label == f"netkeeper/{world.campaign.name}"
+
+
+def test_nothing_is_claimed_once_stopping(world: World) -> None:
+    enrollment_id = world.enroll_new()
+    results = run_tick(
+        world.factory,
+        settings=SETTINGS,
+        sender=world.sender,
+        clock=lambda: NOW,
+        stopping=lambda: True,
+    )
+    assert results == []
+    assert world.messages(enrollment_id) == []
+    assert world.enrollment(enrollment_id).next_action_at == NOW
+
+
+class _Held(FakeSender):
+    """A send that blocks until the test lets it go."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def send(self, firing: Firing) -> SendResult:
+        self.started.set()
+        self.release.wait(5)
+        return super().send(firing)
+
+
+async def test_stop_waits_for_a_send_in_flight_so_it_is_recorded(world: World) -> None:
+    """#269, requirement 4: the send in a worker thread is recorded before stop returns,
+    so it is never written after the database is disposed."""
+    sender = _Held()
+    enrollment_id = world.enroll_new()
+    engine = CampaignEngine(world.factory, SETTINGS, sender, clock=lambda: NOW, interval_s=0.01)
+    engine.start()
+    assert await asyncio.to_thread(sender.started.wait, 5)
+    stopping = asyncio.ensure_future(engine.stop())
+    await asyncio.sleep(0.05)
+    assert not stopping.done()  # waiting for the send
+    sender.release.set()
+    assert await stopping is True
+    [message] = world.messages(enrollment_id)
+    assert message.status is MessageStatus.SENT
+    assert len(sender.firings) == 1
+
+
+async def test_stop_gives_up_after_its_bound_and_leaves_the_message_for_reconcile(
+    world: World,
+) -> None:
+    sender = _Held()
+    enrollment_id = world.enroll_new()
+    engine = CampaignEngine(
+        world.factory, SETTINGS, sender, clock=lambda: NOW, interval_s=0.01, stop_wait_s=0.05
+    )
+    engine.start()
+    assert await asyncio.to_thread(sender.started.wait, 5)
+    assert await engine.stop() is False
+    [message] = world.messages(enrollment_id)
+    assert message.status is MessageStatus.SCHEDULED  # the "did it go out?" signal
+    sender.release.set()
+    for _ in range(500):  # let the orphaned tick finish before the test's database goes
+        if world.messages(enrollment_id)[0].status is not MessageStatus.SCHEDULED:
+            break
+        await asyncio.sleep(0.01)
+    assert len(sender.firings) == 1
+
+
+def test_the_stop_wait_cannot_be_negative(world: World) -> None:
+    with pytest.raises(ValueError, match="negative"):
+        CampaignEngine(world.factory, SETTINGS, None, stop_wait_s=-1)
+
+
+def _leftovers(world: World, count: int, *, at: datetime) -> list[int]:
+    def make(session: Session) -> list[int]:
+        made: list[int] = []
+        for n in range(count):
+            contact = factories.make_contact(session, world.user, emails=[f"l{n}@example.test"])
+            campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+            assert campaign is not None
+            enrollment = factories.make_enrollment(session, campaign, contact)
+            made.append(
+                factories.make_message(
+                    session,
+                    enrollment,
+                    status=MessageStatus.SCHEDULED,
+                    sent_at=None,
+                    scheduled_at=at,
+                ).id
+            )
+        return made
+
+    return world.write(make)
+
+
+def test_reconcile_lists_a_scheduled_message_only_once_it_is_a_leftover(world: World) -> None:
+    [message_id] = _leftovers(world, 1, at=NOW)
+
+    def listed(now: datetime) -> list[int]:
+        work = world.read(lambda s: engine_module.reconcile_work(s, world.user, now=now))
+        return [t.message_id for t in work.leftovers]
+
+    assert listed(NOW + timedelta(minutes=9)) == []
+    assert listed(NOW + timedelta(minutes=10)) == [message_id]
+
+
+def test_reconcile_takes_a_bounded_batch_of_leftovers(world: World) -> None:
+    made = _leftovers(world, 12, at=NOW)
+    work = world.read(
+        lambda s: engine_module.reconcile_work(s, world.user, now=NOW + timedelta(hours=1))
+    )
+    assert [t.message_id for t in work.leftovers] == made[:10]
+
+
+def _settle_not_sent(world: World, message_id: int, session: Session) -> bool:
+    return engine_module.settle_not_sent(session, world.user, SETTINGS, message_id)
+
+
+def test_a_leftover_not_in_gmail_with_a_twin_is_discarded_the_other_failed(world: World) -> None:
+    """A merge can leave two ``scheduled`` messages of one step on one enrollment. Neither is
+    sent again: the first is ``discarded`` beside its twin, the last ``failed`` for a person."""
+    enrollment_id = world.enroll_new(next_action_at=None)
+
+    def two(session: Session) -> list[int]:
+        enrollment = get_scoped(session, world.user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        fields: dict[str, Any] = {
+            "status": MessageStatus.SCHEDULED,
+            "sent_at": None,
+            "scheduled_at": NOW,
+        }
+        return [factories.make_message(session, enrollment, **fields).id for _ in range(2)]
+
+    first, second = world.write(two)
+    for message_id in (first, second):
+        world.write(partial(_settle_not_sent, world, message_id))
+    statuses = {m.id: m.status for m in world.messages(enrollment_id)}
+    assert statuses == {first: MessageStatus.DISCARDED, second: MessageStatus.FAILED}
+    assert world.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+
+
+def test_settling_a_message_that_moved_on_changes_nothing(world: World) -> None:
+    enrollment_id = world.enroll_new()
+    world.tick()
+    [message] = world.messages(enrollment_id)
+    assert message.status is MessageStatus.SENT
+    changed = world.write(
+        lambda s: engine_module.settle_not_sent(s, world.user, SETTINGS, message.id)
+    )
+    assert changed is False
+    assert world.messages(enrollment_id)[0].status is MessageStatus.SENT
+
+
+def test_settle_sent_refuses_a_naive_time(world: World) -> None:
+    [message_id] = _leftovers(world, 1, at=NOW)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        world.write(
+            lambda s: engine_module.settle_sent(
+                s,
+                world.user,
+                SETTINGS,
+                message_id,
+                expect=(MessageStatus.SCHEDULED,),
+                at=datetime(2026, 9, 29, 14, 0),
+                gmail_message_id="gm",
+                gmail_thread_id="th",
+            )
+        )

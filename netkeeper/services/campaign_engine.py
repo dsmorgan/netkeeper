@@ -1,7 +1,8 @@
 """The campaign engine: the enrollment state machine and the minute tick (spec 11.3, 11.4; P3-06).
 
 The engine decides what fires and when. It never sends: each firing goes to a
-:class:`Sender`, and the real one (Gmail send and draft) is P3-07's. Without a
+:class:`Sender`, and the Gmail one (send and draft modes) is
+:class:`netkeeper.services.campaign_sender.GmailSender` (P3-07). Without a
 sender, the tick does nothing at all, not even reading.
 
 The state machine
@@ -57,8 +58,8 @@ The tick
    - Its next step already has an outbound message on the enrollment, of any
      status: refused and parked (``next_action_at`` cleared). ``current_step``
      alone is not enough: after a merge the enrollment holds the other contact's
-     messages (#242 review). A ``discarded`` one counts too: a merge can discard
-     a message the sender is holding (:func:`step_has_message`).
+     messages (#242 review). A ``discarded`` one counts too
+     (:func:`step_has_message`).
    - Another outbound message on it is still waiting (a draft nobody has sent
      yet): parked until it is sent.
    - Cadence: the next step's delay after the latest sent outbound message has
@@ -81,7 +82,18 @@ the database: each enrollment's ``next_action_at`` and each mailbox's next send
 time (``settings_kv``). A crash before the claim commits changes nothing, and
 the next tick chooses again. A crash after it leaves the message ``scheduled``
 and the enrollment parked, and the step is never fired a second time: the
-refusal above sees the message. Whether it went out is for P3-07 to reconcile.
+refusal above sees the message.
+
+**Did it go out?** (P3-07, #269). A message's RFC 822 Message-ID is derived from
+its row (:func:`netkeeper.campaigns.compose.message_id_for`), so it is known
+before the send. A message still ``scheduled`` :data:`RECONCILE_AFTER` after its
+claim is a leftover: a crash, a stop that did not wait, or a send whose answer
+never came (:attr:`SendOutcome.UNKNOWN`). Nothing else changes it: an end
+(reply, removal, bounce, do-not-contact) and a merge leave it ``scheduled``.
+Each tick, a sender that is a :class:`Reconciler` searches Gmail for each
+leftover's Message-ID first, and the ``settle_*`` functions here record what it
+found: ``sent``, ``drafted``, or, when Gmail does not have it, ``failed`` or
+``discarded``. A leftover is never sent again.
 
 **Off the event loop** (#259). :class:`CampaignEngine` runs each tick in a
 worker thread (``asyncio.to_thread``), as :class:`~netkeeper.services.mailboxes.MailboxMonitor`
@@ -93,18 +105,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import enum
 import logging
 import random
+import threading
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Final, Protocol
+from typing import Final, Protocol, runtime_checkable
 
 from sqlalchemy import ColumnElement, Select, and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from netkeeper.campaigns import schedule
+from netkeeper.campaigns.compose import ComposeError, campaign_label, message_id_for
 from netkeeper.campaigns.render import MergeValues, TemplateRenderError, me_fields, render
 from netkeeper.campaigns.templates import activation_errors, contact_fields
 from netkeeper.config import Settings
@@ -117,6 +132,7 @@ from netkeeper.models import (
     Contact,
     Enrollment,
     EnrollmentStatus,
+    Mailbox,
     Message,
     MessageDirection,
     MessageStatus,
@@ -199,6 +215,7 @@ class Skip(enum.StrEnum):
     TEMPLATE_ERRORS = "template_errors"
     RENDER_FAILED = "render_failed"
     NO_ADDRESS = "no_address"
+    MAILBOX_ADDRESS = "mailbox_address"
     GUARD_EXCLUDED = "guard_excluded"
     ENDED = "ended"
 
@@ -212,6 +229,13 @@ class Firing:
 
     ``thread_id`` is the Gmail thread of the enrollment's first sent email, for a
     step with ``same_thread`` (spec 11.5); ``None`` otherwise.
+
+    ``rfc822_message_id`` is the Message-ID the message goes out with, derived
+    from the message row before anything is sent
+    (:func:`netkeeper.campaigns.compose.message_id_for`): after a crash or an
+    unknown outcome, a search for it says whether Gmail has the message (#269).
+    ``label`` is the campaign's Gmail label (spec 11.5). Both are None only for a
+    firing with no mailbox.
     """
 
     message_id: int
@@ -229,12 +253,23 @@ class Firing:
     to_address: str | None
     subject: str | None
     body: str
+    rfc822_message_id: str | None = None
+    label: str | None = None
 
 
 class SendOutcome(enum.StrEnum):
+    """What became of a firing.
+
+    ``unknown`` is a send whose answer never came (Gmail's ``outcome_unknown``,
+    or a sender that raised): the message may be in the recipient's inbox. It
+    is never recorded as ``failed``. The message stays ``scheduled``, its
+    enrollment parked, until :meth:`Reconciler.reconcile` finds it by Message-ID (#269).
+    """
+
     SENT = "sent"
     DRAFTED = "drafted"
     FAILED = "failed"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +290,23 @@ class Sender(Protocol):
     with no session open."""
 
     def send(self, firing: Firing) -> SendResult: ...
+
+
+@runtime_checkable
+class Reconciler(Protocol):
+    """A sender that can also look at what it sent before (P3-07): each tick, before
+    anything is chosen, the engine calls :meth:`reconcile` for the user. Blocking, and
+    called with no session open; it opens its own. It must not raise for a Gmail
+    failure: whatever it could not settle waits for the next tick."""
+
+    def reconcile(
+        self,
+        factory: sessionmaker[Session],
+        user_id: int,
+        *,
+        settings: Settings,
+        now: datetime,
+    ) -> None: ...
 
 
 # --- what a tick did ----------------------------------------------------------------
@@ -480,7 +532,10 @@ REMOVABLE_STATUSES: Final[frozenset[EnrollmentStatus]] = frozenset(
 
 
 def remove_enrollment(session: Session, user: User, enrollment_id: int) -> Enrollment:
-    """Manual removal (spec 11.3): the enrollment is over, and nothing waiting on it goes out."""
+    """Manual removal (spec 11.3): the enrollment is over, and no step of it fires again.
+
+    A message it holds that is still ``scheduled`` is left for :meth:`Reconciler.reconcile`:
+    it may be in the sender's hands, or out already (#269)."""
     _require_writer(session, "remove_enrollment")
     enrollment = _enrollment(session, user, enrollment_id)
     if enrollment.status not in REMOVABLE_STATUSES:
@@ -496,21 +551,17 @@ def _end(
     status: EnrollmentStatus,
     reason: str | None,
 ) -> None:
-    """Leave the sequence: ``reason`` is ``exit_reason``, None for a sequence that ran out."""
+    """Leave the sequence: ``reason`` is ``exit_reason``, None for a sequence that ran out.
+
+    No message changes here. A ``scheduled`` one is the "did it go out?" signal: it
+    may be in the sender's hands right now, or have gone out before a crash, so
+    only :meth:`Reconciler.reconcile`, after a search by Message-ID, says whether it was sent
+    or discarded (#269). A drafted or prefilled message is the person's to send or
+    delete, and the drafts poll (P3-07) and P4 track what becomes of it.
+    """
     enrollment.status = status
     enrollment.exit_reason = reason
     enrollment.next_action_at = None
-    waiting = session.scalars(
-        scoped(user, Message).where(
-            Message.enrollment_id == enrollment.id,
-            Message.direction == MessageDirection.OUT,
-            Message.status == MessageStatus.SCHEDULED,
-        )
-    ).all()
-    # Only ``scheduled``: a drafted or prefilled message is the person's to send or delete,
-    # and P3-07 and P4 track what becomes of it.
-    for message in waiting:
-        message.status = MessageStatus.DISCARDED
     session.flush()
     log.info("enrollment %d is %s (%s)", enrollment.id, status, reason)
 
@@ -552,10 +603,10 @@ def step_has_message(session: Session, user: User, enrollment_id: int, step_id: 
     """Whether the enrollment already holds an outbound message of this step, whatever its
     status: the step fired, whether or not anyone knows it went out (#242 review).
 
-    ``discarded`` counts too. A merge discards the outranked side's ``scheduled``
-    message, and that one may be in the sender's hands right now: if the process
-    stops before the send is recorded, only this refusal keeps the step from going
-    out a second time (review of #264). A parked enrollment is the safe outcome."""
+    ``discarded`` counts too: a merge discards the outranked side's waiting
+    draft, and a reconcile discards a leftover that never reached Gmail (#269).
+    Either way the step fired once, and a parked enrollment is the safe outcome
+    (review of #264)."""
     found = session.scalar(
         scoped(user, Message)
         .with_only_columns(Message.id)
@@ -600,6 +651,8 @@ def _reply_at(session: Session, user: User, enrollment_id: int) -> datetime | No
 
 
 def _thread_id(session: Session, user: User, enrollment_id: int) -> str | None:
+    """The Gmail thread of the enrollment's first **sent** email: a follow-up joins it
+    (spec 11.5). A draft never sent, or a discarded one, is no thread to reply in."""
     return session.scalar(
         scoped(user, Message)
         .with_only_columns(Message.gmail_thread_id)
@@ -607,9 +660,10 @@ def _thread_id(session: Session, user: User, enrollment_id: int) -> str | None:
             Message.enrollment_id == enrollment_id,
             Message.channel == TemplateChannel.EMAIL,
             Message.direction == MessageDirection.OUT,
+            Message.status == MessageStatus.SENT,
             Message.gmail_thread_id.is_not(None),
         )
-        .order_by(Message.id)
+        .order_by(Message.sent_at, Message.id)
         .limit(1)
     )
 
@@ -1128,6 +1182,20 @@ class _Chooser:
         if not rendered.subject:
             self.park(enrollment, Skip.RENDER_FAILED)
             return None
+        mailbox = (
+            None
+            if campaign.mailbox_id is None
+            else get_scoped(session, user, Mailbox, campaign.mailbox_id)
+        )
+        created = utcnow()
+        try:
+            if mailbox is None:
+                raise ComposeError("no mailbox")
+            # Checked before the claim: the Message-ID must be known before the send.
+            message_id_for(user_id=user.id, message_id=0, created_at=created, address=mailbox.email)
+        except ComposeError:
+            self.park(enrollment, Skip.MAILBOX_ADDRESS)
+            return None
         message = Message(
             user_id=user.id,
             enrollment_id=enrollment.id,
@@ -1139,6 +1207,7 @@ class _Chooser:
             subject=rendered.subject,
             body_rendered=rendered.body,
             scheduled_at=self.now,
+            created_at=created,
         )
         session.add(message)
         enrollment.next_action_at = None
@@ -1160,6 +1229,10 @@ class _Chooser:
             to_address=address.email,
             subject=rendered.subject,
             body=rendered.body,
+            rfc822_message_id=message_id_for(
+                user_id=user.id, message_id=message.id, created_at=created, address=mailbox.email
+            ),
+            label=campaign_label(mailbox.label_prefix, campaign.name),
         )
         log.info(
             "campaign %d: step %d for enrollment %d claimed as message %d",
@@ -1217,8 +1290,17 @@ def _record(
     if result.outcome is SendOutcome.SENT:
         message.status = MessageStatus.SENT
         message.sent_at = at
+        message.error = None
     elif result.outcome is SendOutcome.DRAFTED:
         message.status = MessageStatus.DRAFTED
+        message.error = None
+    elif result.outcome is SendOutcome.UNKNOWN:
+        # It may have gone out. It stays ``scheduled``, the "did it go out?" signal,
+        # and its enrollment parked, until reconcile finds it or rules it out (#269).
+        message.status = MessageStatus.SCHEDULED
+        message.error = (
+            f"outcome unknown ({result.error or 'no answer'}); reconciling by Message-ID"
+        )[:ERROR_MAX_LENGTH]
     else:
         message.status = MessageStatus.FAILED
         message.error = (result.error or "the sender gave no reason")[:ERROR_MAX_LENGTH]
@@ -1232,6 +1314,12 @@ def _record(
     if result.outcome is SendOutcome.FAILED:
         log.warning(
             "enrollment %d step %d failed; it waits for a person",
+            enrollment.id,
+            firing.step_position,
+        )
+    elif result.outcome is SendOutcome.UNKNOWN:
+        log.warning(
+            "enrollment %d step %d: the send's outcome is unknown; it waits for reconcile",
             enrollment.id,
             firing.step_position,
         )
@@ -1253,11 +1341,369 @@ def _spacing_gap(settings: Settings, rng: random.Random) -> timedelta:
 
 
 def _send(sender: Sender, firing: Firing) -> SendResult:
+    """The sender's result, fit to record.
+
+    A sender that raises may have sent before it did, so its outcome is
+    ``unknown``, never ``failed`` (#269). A naive ``at`` would make the record
+    raise after the send: it is refused, and the record uses its own time (#269).
+    """
     try:
-        return sender.send(firing)
+        result = sender.send(firing)
     except Exception as exc:  # the sender's failure is the message's, never the tick's
         log.exception("sending message %d failed", firing.message_id)
-        return SendResult(SendOutcome.FAILED, error=f"sender raised {type(exc).__name__}")
+        return SendResult(SendOutcome.UNKNOWN, error=f"sender raised {type(exc).__name__}")
+    if result.at is not None and (result.at.tzinfo is None or result.at.utcoffset() is None):
+        log.error(
+            "the sender gave message %d a time with no zone; the record's own time is used",
+            firing.message_id,
+        )
+        result = dataclasses.replace(result, at=None)
+    return result
+
+
+# --- reconciling what the sender may have done (P3-07) -----------------------------
+
+
+RECONCILE_AFTER: Final = timedelta(minutes=10)
+"""A ``scheduled`` message this long after its claim is a leftover: a crash, a stop
+that did not wait, or a send whose answer never came. Before that it may still be in
+the sender's hands, and a message just sent may not be in Gmail's search yet."""
+
+RECONCILE_BATCH: Final = 10
+"""At most this many leftovers, and this many discarded drafts, per user per tick."""
+
+DRAFT_MISSING: Final = "draft not found in Gmail, and nothing sent in its thread; checking again"
+"""``messages.error`` of a draft seen gone once. Seen gone again, it is ``discarded``: a
+draft the person just sent (undo send, scheduled send) may not show as sent at once."""
+
+DRAFT_DISCARDED_REASON: Final = "draft_discarded"
+"""``exit_reason`` of an enrollment whose draft the person deleted (spec 11.5)."""
+
+LIVE_STATUSES: Final[frozenset[EnrollmentStatus]] = frozenset(
+    {EnrollmentStatus.PENDING, EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED}
+)
+"""An enrollment in one of these may still send a step."""
+
+
+@dataclass(frozen=True, slots=True)
+class Tracked:
+    """One outbound email the sender has to look up in Gmail, read with no Gmail call.
+
+    ``thread_known`` is every Gmail message id the user's other messages in its
+    thread already hold, so a sent draft is told apart from an earlier step.
+    """
+
+    message_id: int
+    user_id: int
+    enrollment_id: int
+    mailbox_id: int
+    status: MessageStatus
+    mode: StepMode | None
+    rfc822_message_id: str
+    scheduled_at: datetime | None
+    gmail_message_id: str | None
+    gmail_thread_id: str | None
+    gmail_draft_id: str | None
+    marked_missing: bool
+    label: str
+    thread_known: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcileWork:
+    """What :func:`reconcile_work` found for one user."""
+
+    leftovers: tuple[Tracked, ...] = ()
+    drafts: tuple[Tracked, ...] = ()
+    discarded_drafts: tuple[Tracked, ...] = ()
+
+    def mailboxes(self) -> list[int]:
+        found = {t.mailbox_id for t in (*self.leftovers, *self.drafts, *self.discarded_drafts)}
+        return sorted(found)
+
+
+def _thread_known(session: Session, user: User, message: Message) -> frozenset[str]:
+    if message.gmail_thread_id is None:
+        return frozenset()
+    held = session.scalars(
+        scoped(user, Message)
+        .with_only_columns(Message.gmail_message_id)
+        .where(
+            Message.gmail_thread_id == message.gmail_thread_id,
+            Message.id != message.id,
+            Message.gmail_message_id.is_not(None),
+        )
+    )
+    return frozenset(value for value in held if value is not None)
+
+
+def _tracked(
+    session: Session, user: User, statement: Select[tuple[Message]], *, with_thread: bool
+) -> tuple[Tracked, ...]:
+    rows = session.execute(
+        statement.add_columns(Mailbox, Campaign.name, CampaignStep.mode)
+        .join(Enrollment, Enrollment.id == Message.enrollment_id)
+        .join(Campaign, Campaign.id == Enrollment.campaign_id)
+        .join(Mailbox, Mailbox.id == Campaign.mailbox_id)
+        .outerjoin(
+            CampaignStep,
+            and_(CampaignStep.id == Message.step_id, CampaignStep.user_id == user.id),
+        )
+        .where(
+            Enrollment.user_id == user.id,
+            Campaign.user_id == user.id,
+            Mailbox.user_id == user.id,
+            Message.channel == TemplateChannel.EMAIL,
+            Message.direction == MessageDirection.OUT,
+        )
+        .order_by(Message.id)
+        .execution_options(populate_existing=True)
+    ).tuples()
+    found: list[Tracked] = []
+    for message, mailbox, campaign_name, mode in rows:
+        try:
+            rfc822 = message_id_for(
+                user_id=user.id,
+                message_id=message.id,
+                created_at=message.created_at,
+                address=mailbox.email,
+            )
+        except ComposeError:
+            log.error("message %d has no Message-ID to search for; left as it is", message.id)
+            continue
+        found.append(
+            Tracked(
+                message_id=message.id,
+                user_id=user.id,
+                enrollment_id=message.enrollment_id,
+                mailbox_id=mailbox.id,
+                status=message.status,
+                mode=mode,
+                rfc822_message_id=rfc822,
+                scheduled_at=message.scheduled_at,
+                gmail_message_id=message.gmail_message_id,
+                gmail_thread_id=message.gmail_thread_id,
+                gmail_draft_id=message.gmail_draft_id,
+                marked_missing=message.error == DRAFT_MISSING,
+                label=campaign_label(mailbox.label_prefix, campaign_name),
+                thread_known=_thread_known(session, user, message) if with_thread else frozenset(),
+            )
+        )
+    return tuple(found)
+
+
+def reconcile_work(session: Session, user: User, *, now: datetime) -> ReconcileWork:
+    """What the sender has to look up for ``user``. Read-only.
+
+    - **Leftovers:** ``scheduled`` for :data:`RECONCILE_AFTER` or more (#269).
+    - **Drafts:** ``drafted`` with a Gmail draft id, for the drafts poll (spec 11.5).
+    - **Discarded drafts:** ``discarded`` and still holding a draft id: a merge
+      discarded a drafted message, and the Gmail draft may still be there (#269).
+    """
+    leftovers = _tracked(
+        session,
+        user,
+        scoped(user, Message)
+        .where(
+            Message.status == MessageStatus.SCHEDULED,
+            Message.scheduled_at <= now - RECONCILE_AFTER,
+        )
+        .limit(RECONCILE_BATCH),
+        with_thread=False,
+    )
+    drafts = _tracked(
+        session,
+        user,
+        scoped(user, Message).where(
+            Message.status == MessageStatus.DRAFTED, Message.gmail_draft_id.is_not(None)
+        ),
+        with_thread=True,
+    )
+    discarded = _tracked(
+        session,
+        user,
+        scoped(user, Message)
+        .where(Message.status == MessageStatus.DISCARDED, Message.gmail_draft_id.is_not(None))
+        .limit(RECONCILE_BATCH),
+        with_thread=True,
+    )
+    return ReconcileWork(leftovers, drafts, discarded)
+
+
+def _tracked_message(
+    session: Session, user: User, message_id: int, expect: Collection[MessageStatus]
+) -> Message | None:
+    """The message, read fresh, if it is still in one of ``expect``; else None (logged)."""
+    message = session.scalars(
+        scoped(user, Message)
+        .where(Message.id == message_id)
+        .execution_options(populate_existing=True)
+    ).first()
+    if message is None or message.status not in expect:
+        log.info("message %d changed while it was looked up; left as it is", message_id)
+        return None
+    return message
+
+
+def _step_position(session: Session, user: User, step_id: int | None) -> int | None:
+    if step_id is None:
+        return None
+    return session.scalar(
+        scoped(user, CampaignStep)
+        .with_only_columns(CampaignStep.position)
+        .where(CampaignStep.id == step_id)
+    )
+
+
+def _after_settling(
+    session: Session, user: User, settings: Settings, message: Message, *, fired: bool
+) -> None:
+    """The enrollment's next step, now that the message's outcome is known."""
+    enrollment = _enrollment(session, user, message.enrollment_id)
+    if fired:
+        position = _step_position(session, user, message.step_id)
+        if position is not None:
+            enrollment.current_step = max(enrollment.current_step or 0, position)
+    campaign = _campaign(session, user, enrollment.campaign_id)
+    _advance(session, user, settings, campaign, enrollment)
+    session.flush()
+
+
+def settle_sent(
+    session: Session,
+    user: User,
+    settings: Settings,
+    message_id: int,
+    *,
+    expect: Collection[MessageStatus],
+    at: datetime,
+    gmail_message_id: str,
+    gmail_thread_id: str,
+) -> bool:
+    """Gmail has the message as sent: ``sent`` at ``at``, and the next step scheduled
+    from it (spec 11.3). For a leftover found by its Message-ID, a draft seen sent,
+    and a discarded draft the person sent anyway. False when the message moved on."""
+    _require_writer(session, "settle_sent")
+    if at.tzinfo is None or at.utcoffset() is None:
+        raise ValueError("at must be timezone-aware")
+    message = _tracked_message(session, user, message_id, expect)
+    if message is None:
+        return False
+    message.status = MessageStatus.SENT
+    message.sent_at = at
+    message.error = None
+    message.gmail_message_id = gmail_message_id
+    message.gmail_thread_id = gmail_thread_id
+    session.flush()
+    _after_settling(session, user, settings, message, fired=True)
+    log.info("message %d is sent (found in Gmail)", message_id)
+    return True
+
+
+def settle_drafted(
+    session: Session,
+    user: User,
+    settings: Settings,
+    message_id: int,
+    *,
+    gmail_message_id: str,
+    gmail_thread_id: str,
+    gmail_draft_id: str | None,
+) -> bool:
+    """A leftover Gmail has as a draft: ``drafted``, waiting for the person."""
+    _require_writer(session, "settle_drafted")
+    message = _tracked_message(session, user, message_id, (MessageStatus.SCHEDULED,))
+    if message is None:
+        return False
+    message.status = MessageStatus.DRAFTED
+    message.error = None
+    message.gmail_message_id = gmail_message_id
+    message.gmail_thread_id = gmail_thread_id
+    message.gmail_draft_id = gmail_draft_id
+    session.flush()
+    _after_settling(session, user, settings, message, fired=True)
+    log.info("message %d is drafted (found in Gmail)", message_id)
+    return True
+
+
+def settle_not_sent(session: Session, user: User, settings: Settings, message_id: int) -> bool:
+    """A leftover Gmail does not have, :data:`RECONCILE_AFTER` after its claim. It is
+    never sent again (#269):
+
+    - ``discarded`` when nothing would send it anyway: its enrollment is over, or
+      holds another message of the same step (a merge combined two).
+    - Otherwise ``failed``, and the enrollment stays parked for a person.
+    """
+    _require_writer(session, "settle_not_sent")
+    message = _tracked_message(session, user, message_id, (MessageStatus.SCHEDULED,))
+    if message is None:
+        return False
+    enrollment = _enrollment(session, user, message.enrollment_id)
+    twin = session.scalar(
+        scoped(user, Message)
+        .with_only_columns(Message.id)
+        .where(
+            Message.enrollment_id == enrollment.id,
+            Message.step_id == message.step_id,
+            Message.direction == MessageDirection.OUT,
+            Message.id != message.id,
+            Message.status.not_in((MessageStatus.DISCARDED, MessageStatus.FAILED)),
+        )
+        .limit(1)
+    )
+    if enrollment.status not in LIVE_STATUSES or (message.step_id is not None and twin):
+        message.status = MessageStatus.DISCARDED
+        message.error = None
+        session.flush()
+        _after_settling(session, user, settings, message, fired=False)
+        log.info("message %d never reached Gmail; discarded", message_id)
+    else:
+        message.status = MessageStatus.FAILED
+        message.error = "not in Gmail after a crash or an unknown outcome; not sent again"
+        session.flush()
+        log.warning("message %d never reached Gmail; it waits for a person", message_id)
+    return True
+
+
+def settle_draft_missing(session: Session, user: User, message_id: int) -> bool:
+    """The draft is gone and nothing in its thread was sent. The first time, it is
+    marked (:data:`DRAFT_MISSING`); the second, the message is ``discarded`` and the
+    enrollment ``removed`` (spec 11.5). True once it is discarded."""
+    _require_writer(session, "settle_draft_missing")
+    message = _tracked_message(session, user, message_id, (MessageStatus.DRAFTED,))
+    if message is None:
+        return False
+    if message.error != DRAFT_MISSING:
+        message.error = DRAFT_MISSING
+        session.flush()
+        return False
+    message.status = MessageStatus.DISCARDED
+    message.error = None
+    message.gmail_draft_id = None  # gone already: nothing for the discarded-draft pass
+    enrollment = _enrollment(session, user, message.enrollment_id)
+    if enrollment.status in REMOVABLE_STATUSES:
+        _end(session, user, enrollment, EnrollmentStatus.REMOVED, DRAFT_DISCARDED_REASON)
+    session.flush()
+    log.info("message %d: its draft was deleted, not sent; discarded", message_id)
+    return True
+
+
+def settle_draft_present(session: Session, user: User, message_id: int) -> None:
+    """The draft is still there: a mark from an earlier poll no longer holds."""
+    _require_writer(session, "settle_draft_present")
+    message = _tracked_message(session, user, message_id, (MessageStatus.DRAFTED,))
+    if message is not None and message.error == DRAFT_MISSING:
+        message.error = None
+        session.flush()
+
+
+def forget_draft(session: Session, user: User, message_id: int) -> None:
+    """A discarded message's Gmail draft is deleted, or was gone: drop its id (#269)."""
+    _require_writer(session, "forget_draft")
+    message = _tracked_message(session, user, message_id, (MessageStatus.DISCARDED,))
+    if message is not None:
+        message.gmail_draft_id = None
+        session.flush()
 
 
 def tick_user(
@@ -1268,15 +1714,27 @@ def tick_user(
     sender: Sender,
     clock: Callable[[], datetime],
     rng: random.Random,
+    stopping: Callable[[], bool] = lambda: False,
 ) -> TickResult:
-    """One user's tick: choose and claim, send with no session open, record. Blocking.
+    """One user's tick: reconcile, choose and claim, send with no session open, record.
+    Blocking.
 
-    The time is read once the writer session holds the write lock, not before: the
-    lock can take up to the busy timeout to get, and a claim decided on the time from
-    before the wait could land after the window closed (#264 review)."""
+    A sender that is a :class:`Reconciler` looks up what it sent before, first
+    (P3-07). The time is read once the writer session holds the write lock, not
+    before: the lock can take up to the busy timeout to get, and a claim decided on
+    the time from before the wait could land after the window closed (#264 review).
+    Nothing is claimed once ``stopping()`` is true: a claim is a send to come.
+    """
     result = TickResult(user_id)
+    if isinstance(sender, Reconciler) and not stopping():
+        try:
+            sender.reconcile(factory, user_id, settings=settings, now=clock())
+        except Exception:  # what it could not settle waits for the next tick
+            log.exception("reconciling campaign messages failed for user %d", user_id)
     claims: list[_Claim] = []
     for _ in range(BATCH_PER_TICK):
+        if stopping():
+            break
         with session_scope(factory, write=True) as session:
             user = session.get(User, user_id)  # the first statement: the write lock is held
             if user is None:
@@ -1303,10 +1761,12 @@ def run_tick(
     sender: Sender | None,
     clock: Callable[[], datetime] = utcnow,
     rng: random.Random | None = None,
+    stopping: Callable[[], bool] = lambda: False,
 ) -> list[TickResult]:
     """One tick for every local user. Blocking: run it off the event loop.
 
-    Without a sender nothing is read or written: sending arrives with P3-07.
+    Without a sender nothing is read or written. Once ``stopping()`` is true, no
+    user's tick starts and nothing more is claimed (:meth:`CampaignEngine.stop`).
     """
     if sender is None:
         return []
@@ -1326,6 +1786,8 @@ def run_tick(
         )
     results: list[TickResult] = []
     for user_id in user_ids:
+        if stopping():
+            break
         try:
             results.append(
                 tick_user(
@@ -1335,6 +1797,7 @@ def run_tick(
                     sender=sender,
                     clock=clock,
                     rng=draw,
+                    stopping=stopping,
                 )
             )
         except Exception:  # one user's failure is not the next user's
@@ -1345,12 +1808,25 @@ def run_tick(
 # --- the minute loop ----------------------------------------------------------------
 
 
+STOP_WAIT_S: Final = 45.0
+"""How long :meth:`CampaignEngine.stop` waits for a tick in flight: a send and the
+search after an unknown outcome, each under the client's 30-second timeout."""
+
+
 class CampaignEngine:
     """The minute tick ``netkeeper serve`` runs (spec 11.4), each tick in a worker thread.
 
     Like :class:`~netkeeper.services.mailboxes.MailboxMonitor`: no SQLite write
     happens on the event loop's thread, so a request holding the write lock can
     always reach its commit (#259).
+
+    **Stopping** (#269). A tick's thread cannot be cancelled, and a send in it
+    keeps going after the loop's task is. :meth:`stop` therefore asks the tick
+    to claim nothing more, and waits for it, up to ``stop_wait_s``, so its send
+    is recorded before the database is disposed. A tick that outlasts the wait
+    is left to finish on its own: whatever it cannot record stays ``scheduled``,
+    and the next start's reconcile finds it by its Message-ID. Nothing is sent
+    twice either way.
     """
 
     def __init__(
@@ -1362,16 +1838,22 @@ class CampaignEngine:
         interval_s: float = TICK_INTERVAL_S,
         clock: Callable[[], datetime] = utcnow,
         rng: random.Random | None = None,
+        stop_wait_s: float = STOP_WAIT_S,
     ) -> None:
         if interval_s <= 0:
             raise ValueError("the campaign tick interval must be positive")
+        if stop_wait_s < 0:
+            raise ValueError("the stop wait cannot be negative")
         self._factory = factory
         self._settings = settings
         self._sender = sender
         self._interval_s = interval_s
         self._clock = clock
         self._rng = rng if rng is not None else random.Random()  # noqa: S311 -- spacing, not crypto
+        self._stop_wait_s = stop_wait_s
         self._task: asyncio.Task[None] | None = None
+        self._stopping = threading.Event()
+        self._inflight: asyncio.Future[list[TickResult]] | None = None
 
     @property
     def sender(self) -> Sender | None:
@@ -1379,28 +1861,56 @@ class CampaignEngine:
 
     def start(self) -> None:
         if self._sender is None:
-            log.info("the campaign engine has no sender yet (P3-07); nothing will fire")
+            log.info("the campaign engine has no sender; nothing will fire")
         if self._task is None:
+            self._stopping.clear()
             self._task = asyncio.get_running_loop().create_task(self._run(), name="campaign-tick")
 
-    async def stop(self) -> None:
-        if self._task is None:
-            return
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
-        self._task = None
+    async def stop(self) -> bool:
+        """Stop the minute loop and wait for a tick in flight (see the class).
+
+        True when nothing is left running; False when a tick outlasted the wait.
+        """
+        self._stopping.set()
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+            self._task = None
+        inflight = self._inflight
+        if inflight is None or inflight.done():
+            return True
+        try:
+            await asyncio.wait_for(asyncio.shield(inflight), timeout=self._stop_wait_s)
+        except TimeoutError:
+            log.warning(
+                "a campaign tick is still running after %.0f s; what it cannot record "
+                "is reconciled on the next start",
+                self._stop_wait_s,
+            )
+            return False
+        except Exception:
+            log.exception("the campaign tick in flight failed while stopping")
+        return True
 
     async def tick_once(self) -> list[TickResult]:
-        """One tick, off the loop."""
-        return await asyncio.to_thread(
-            run_tick,
-            self._factory,
-            settings=self._settings,
-            sender=self._sender,
-            clock=self._clock,
-            rng=self._rng,
+        """One tick, off the loop. Nothing is claimed once :meth:`stop` has begun."""
+        if self._inflight is not None and not self._inflight.done():
+            raise RuntimeError("a campaign tick is already running")
+        self._inflight = asyncio.ensure_future(
+            asyncio.to_thread(
+                run_tick,
+                self._factory,
+                settings=self._settings,
+                sender=self._sender,
+                clock=self._clock,
+                rng=self._rng,
+                stopping=self._stopping.is_set,
+            )
         )
+        # Shielded: cancelling the loop's task must not orphan the thread's future,
+        # which stop() waits on.
+        return await asyncio.shield(self._inflight)
 
     async def _run(self) -> None:
         while True:

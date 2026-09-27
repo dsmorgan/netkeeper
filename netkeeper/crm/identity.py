@@ -1161,9 +1161,12 @@ earlier here over the later: an opt-out must survive a merge with a reply.
 """
 
 UNSENT_MESSAGE_STATUSES: Final[frozenset[MessageStatus]] = frozenset(
-    {MessageStatus.SCHEDULED, MessageStatus.DRAFTED, MessageStatus.PREFILLED}
+    {MessageStatus.DRAFTED, MessageStatus.PREFILLED}
 )
-"""Outbound messages waiting to go. A merge discards the set-aside enrollment's (#242 review)."""
+"""Outbound messages waiting for the person. A merge discards the set-aside enrollment's
+(#242 review), and the campaign engine deletes a discarded message's Gmail draft (#269).
+Not ``scheduled``: a scheduled message may be in the sender's hands or out already, so
+the engine's reconcile decides it after a search by Message-ID, never a merge (#269)."""
 
 LIVE_AFTER_MERGE: Final[frozenset[EnrollmentStatus]] = frozenset(
     {EnrollmentStatus.PENDING, EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED}
@@ -1212,10 +1215,13 @@ def _merge_campaign_rows(session: Session, user: User, survivor: Contact, loser:
     - ``replied_at`` is the winner's, or else the other's.
     - The other one's unsent messages (:data:`UNSENT_MESSAGE_STATUSES`) are
       ``discarded``, so the combined enrollment never holds two of a step
-      waiting to go. When the combined enrollment is over (anything but
-      :data:`LIVE_AFTER_MERGE`), the winner's are discarded too: nothing is
-      left to send them, and a stale one waiting must not read as a step to
-      come (#247 review).
+      waiting for the person. A ``scheduled`` one is left as it is: it may be
+      in the sender's hands or out already, and the engine's reconcile
+      searches Gmail for it first (#269). When the combined enrollment is
+      over (anything but :data:`LIVE_AFTER_MERGE`), the winner's are
+      discarded too: nothing is left to send them, and a stale one waiting
+      must not read as a step to come (#247 review). A discarded ``drafted``
+      message's Gmail draft is deleted by the engine's reconcile (#269).
 
     The survivor's row is the one that stays: it takes the combined state and
     every message of both. Moving the loser's row across instead would collide

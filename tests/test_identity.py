@@ -2351,6 +2351,9 @@ def test_merge_discards_a_stopped_winners_waiting_messages(
     winner = to_survivor if winner_is_survivor else to_loser
     sent = factories.make_message(writer, winner, position=1).id
     waiting = factories.make_message(
+        writer, winner, position=2, status=MessageStatus.DRAFTED, sent_at=None
+    ).id
+    claimed = factories.make_message(
         writer, winner, position=2, status=MessageStatus.SCHEDULED, sent_at=None
     ).id
 
@@ -2360,7 +2363,11 @@ def test_merge_discards_a_stopped_winners_waiting_messages(
     [kept] = enrollments_of(writer, alice, survivor.id)
     assert kept.status is stopped
     statuses = {m.id: m.status for m in writer.scalars(scoped(alice, Message))}
-    assert statuses == {sent: MessageStatus.SENT, waiting: MessageStatus.DISCARDED}
+    assert statuses == {
+        sent: MessageStatus.SENT,
+        waiting: MessageStatus.DISCARDED,
+        claimed: MessageStatus.SCHEDULED,  # the engine's reconcile decides it (#269)
+    }
 
 
 def test_merge_keeps_a_live_winners_waiting_message(
@@ -2394,11 +2401,7 @@ def test_the_stop_precedence_is_pinned() -> None:
         "replied",
         "removed",
     ]
-    assert {s.value for s in identity.UNSENT_MESSAGE_STATUSES} == {
-        "scheduled",
-        "drafted",
-        "prefilled",
-    }
+    assert {s.value for s in identity.UNSENT_MESSAGE_STATUSES} == {"drafted", "prefilled"}
     assert {s.value for s in identity.LIVE_AFTER_MERGE} == {"pending", "active", "paused"}
 
 
@@ -2423,9 +2426,7 @@ def test_merge_keeps_a_reply_the_winning_enrollment_did_not_see(
     assert (kept.status, kept.replied_at) == (EnrollmentStatus.OPTED_OUT, NOW)
 
 
-@pytest.mark.parametrize(
-    "unsent", [MessageStatus.SCHEDULED, MessageStatus.DRAFTED, MessageStatus.PREFILLED]
-)
+@pytest.mark.parametrize("unsent", [MessageStatus.DRAFTED, MessageStatus.PREFILLED])
 @pytest.mark.parametrize("survivor_ahead", [True, False])
 def test_merge_discards_the_outranked_enrollments_unsent_messages(
     writer: Session, users: tuple[User, User], unsent: MessageStatus, survivor_ahead: bool
@@ -2474,6 +2475,38 @@ def test_merge_discards_the_outranked_enrollments_unsent_messages(
         )
     ).all()
     assert [m.id for m in waiting_now] == [pending[winner]]
+
+
+@pytest.mark.parametrize("survivor_ahead", [True, False])
+def test_merge_never_discards_a_scheduled_message(
+    writer: Session, users: tuple[User, User], survivor_ahead: bool
+) -> None:
+    """#269: a ``scheduled`` message may be in the sender's hands or out already. The
+    merge moves it and leaves its status to the engine's reconcile."""
+    alice, _ = users
+    campaign = factories.make_campaign(
+        writer, alice, channels=(TemplateChannel.EMAIL, TemplateChannel.EMAIL)
+    )
+    survivor = factories.make_contact(writer, alice)
+    loser = factories.make_contact(writer, alice)
+    to_loser = factories.make_enrollment(
+        writer, campaign, loser, current_step=1 if survivor_ahead else 2
+    )
+    to_survivor = factories.make_enrollment(
+        writer, campaign, survivor, current_step=2 if survivor_ahead else 1
+    )
+    claimed = {"status": MessageStatus.SCHEDULED, "sent_at": None}
+    ids = [
+        factories.make_message(writer, to_loser, position=2, **claimed).id,
+        factories.make_message(writer, to_survivor, position=2, **claimed).id,
+    ]
+    kept_id = to_survivor.id
+
+    merge(writer, alice, survivor.id, loser.id)
+    writer.expire_all()
+
+    rows = writer.scalars(scoped(alice, Message).where(Message.id.in_(ids))).all()
+    assert {(m.status, m.enrollment_id) for m in rows} == {(MessageStatus.SCHEDULED, kept_id)}
 
 
 def test_merge_discards_nothing_when_no_enrollments_combine(
