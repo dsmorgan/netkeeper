@@ -57,7 +57,10 @@ Each tick, before anything is chosen, :meth:`GmailSender.reconcile` looks up wha
   was made: an earlier step, or a note the person sent before, is never the
   draft (#273 review). A draft gone with nothing sent is ``discarded`` and its
   enrollment ``removed``, on the second poll that finds it gone, not the first
-  (undo send).
+  (undo send). *Known limitation* (#280): a draft the person edits into a new
+  thread and then sends is sent outside the thread the poll reads, so it reads
+  as ``discarded``. That is the conservative direction (nothing more is sent);
+  confirm it at the first live draft run (#277).
 
 netkeeper deletes nothing in Gmail (ADR 0003). A draft whose message a merge
 discarded stays in Gmail for the person (#273, question 2).
