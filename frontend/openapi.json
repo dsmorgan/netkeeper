@@ -972,6 +972,81 @@
         "title": "BulkSelection",
         "type": "object"
       },
+      "ChangedJobOut": {
+        "description": "A live contact whose position changed recently: a reason to reconnect (spec 9.8).",
+        "properties": {
+          "changed_on": {
+            "format": "date",
+            "title": "Changed On",
+            "type": "string"
+          },
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "contact_name": {
+            "title": "Contact Name",
+            "type": "string"
+          },
+          "current_company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Company"
+          },
+          "current_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Title"
+          }
+        },
+        "required": [
+          "contact_id",
+          "contact_name",
+          "current_title",
+          "current_company",
+          "changed_on"
+        ],
+        "title": "ChangedJobOut",
+        "type": "object"
+      },
+      "ChangedJobPage": {
+        "properties": {
+          "days": {
+            "title": "Days",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ChangedJobOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "days"
+        ],
+        "title": "ChangedJobPage",
+        "type": "object"
+      },
       "ChangedJobsWithinDays": {
         "additionalProperties": false,
         "description": "A ``contact_snapshots`` row observed in the last ``days`` days (spec 9.8).",
@@ -4818,6 +4893,31 @@
         "title": "ImportStatus",
         "type": "string"
       },
+      "InboundOut": {
+        "description": "Inbound messages logged in the last seven days, and whether replies are detected.\n\n``reply_detection`` is false until P3-08: ``count`` is then every inbound\ninteraction (``email_in``, ``li_in``) in the window, however it was recorded\n(by hand, or an archive import), not replies to a campaign.",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "reply_detection": {
+            "title": "Reply Detection",
+            "type": "boolean"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          }
+        },
+        "required": [
+          "count",
+          "since",
+          "reply_detection"
+        ],
+        "title": "InboundOut",
+        "type": "object"
+      },
       "InteractionIn": {
         "description": "A new interaction. ``at`` must carry a timezone; it is stored as UTC.",
         "properties": {
@@ -5753,6 +5853,91 @@
           "value"
         ],
         "title": "Neq",
+        "type": "object"
+      },
+      "NextFireOut": {
+        "description": "One campaign step the minute tick will consider at ``due`` (spec 11.4).\n\nThe contact is named and nothing more: no address, no message text. ``due``\nin the past means the next tick's. ``step_position`` is null only for an\nenrollment with no next step, which the tick completes rather than sends.",
+        "properties": {
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "integer"
+          },
+          "campaign_name": {
+            "title": "Campaign Name",
+            "type": "string"
+          },
+          "channel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Channel"
+          },
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "contact_name": {
+            "title": "Contact Name",
+            "type": "string"
+          },
+          "due": {
+            "format": "date-time",
+            "title": "Due",
+            "type": "string"
+          },
+          "enrollment_id": {
+            "title": "Enrollment Id",
+            "type": "integer"
+          },
+          "step_position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step Position"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "due",
+          "campaign_id",
+          "campaign_name",
+          "step_position",
+          "channel",
+          "contact_id",
+          "contact_name"
+        ],
+        "title": "NextFireOut",
+        "type": "object"
+      },
+      "NextFirePage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/NextFireOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "NextFirePage",
         "type": "object"
       },
       "Not-Input": {
@@ -10940,6 +11125,120 @@
         "summary": "Unarchive Contact",
         "tags": [
           "contacts"
+        ]
+      }
+    },
+    "/api/v1/dashboard/changed-jobs": {
+      "get": {
+        "description": "Live contacts whose position changed in the last 30 days, newest first (spec 9.8).",
+        "operationId": "list_changed_jobs",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangedJobPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Changed Jobs",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/v1/dashboard/inbound": {
+      "get": {
+        "description": "Inbound messages in the last seven days. Replies are not detected yet (P3-08).",
+        "operationId": "get_inbound_this_week",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboundOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Inbound",
+        "tags": [
+          "dashboard"
+        ]
+      }
+    },
+    "/api/v1/dashboard/next-fires": {
+      "get": {
+        "description": "The next campaign steps due, soonest first (``next_action_at``, spec 11.4).",
+        "operationId": "list_next_fires",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 5,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NextFirePage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Next Fires",
+        "tags": [
+          "dashboard"
         ]
       }
     },

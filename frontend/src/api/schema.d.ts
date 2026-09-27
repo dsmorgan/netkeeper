@@ -631,6 +631,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/dashboard/changed-jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Changed Jobs
+         * @description Live contacts whose position changed in the last 30 days, newest first (spec 9.8).
+         */
+        get: operations["list_changed_jobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/dashboard/inbound": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Inbound
+         * @description Inbound messages in the last seven days. Replies are not detected yet (P3-08).
+         */
+        get: operations["get_inbound_this_week"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/dashboard/next-fires": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Next Fires
+         * @description The next campaign steps due, soonest first (``next_action_at``, spec 11.4).
+         */
+        get: operations["list_next_fires"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -2386,6 +2446,34 @@ export interface components {
             ids?: number[] | null;
         };
         /**
+         * ChangedJobOut
+         * @description A live contact whose position changed recently: a reason to reconnect (spec 9.8).
+         */
+        ChangedJobOut: {
+            /**
+             * Changed On
+             * Format: date
+             */
+            changed_on: string;
+            /** Contact Id */
+            contact_id: number;
+            /** Contact Name */
+            contact_name: string;
+            /** Current Company */
+            current_company: string | null;
+            /** Current Title */
+            current_title: string | null;
+        };
+        /** ChangedJobPage */
+        ChangedJobPage: {
+            /** Days */
+            days: number;
+            /** Items */
+            items: components["schemas"]["ChangedJobOut"][];
+            /** Total */
+            total: number;
+        };
+        /**
          * ChangedJobsWithinDays
          * @description A ``contact_snapshots`` row observed in the last ``days`` days (spec 9.8).
          */
@@ -3440,6 +3528,25 @@ export interface components {
          */
         ImportStatus: "draft" | "committed" | "rolled_back";
         /**
+         * InboundOut
+         * @description Inbound messages logged in the last seven days, and whether replies are detected.
+         *
+         *     ``reply_detection`` is false until P3-08: ``count`` is then every inbound
+         *     interaction (``email_in``, ``li_in``) in the window, however it was recorded
+         *     (by hand, or an archive import), not replies to a campaign.
+         */
+        InboundOut: {
+            /** Count */
+            count: number;
+            /** Reply Detection */
+            reply_detection: boolean;
+            /**
+             * Since
+             * Format: date-time
+             */
+            since: string;
+        };
+        /**
          * InteractionIn
          * @description A new interaction. ``at`` must carry a timezone; it is stored as UTC.
          */
@@ -3804,6 +3911,42 @@ export interface components {
             op: "neq";
             /** Value */
             value: string | number | boolean;
+        };
+        /**
+         * NextFireOut
+         * @description One campaign step the minute tick will consider at ``due`` (spec 11.4).
+         *
+         *     The contact is named and nothing more: no address, no message text. ``due``
+         *     in the past means the next tick's. ``step_position`` is null only for an
+         *     enrollment with no next step, which the tick completes rather than sends.
+         */
+        NextFireOut: {
+            /** Campaign Id */
+            campaign_id: number;
+            /** Campaign Name */
+            campaign_name: string;
+            /** Channel */
+            channel: string | null;
+            /** Contact Id */
+            contact_id: number;
+            /** Contact Name */
+            contact_name: string;
+            /**
+             * Due
+             * Format: date-time
+             */
+            due: string;
+            /** Enrollment Id */
+            enrollment_id: number;
+            /** Step Position */
+            step_position: number | null;
+        };
+        /** NextFirePage */
+        NextFirePage: {
+            /** Items */
+            items: components["schemas"]["NextFireOut"][];
+            /** Total */
+            total: number;
         };
         /** Not */
         "Not-Input": {
@@ -6586,6 +6729,88 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MergedConflict"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_changed_jobs: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChangedJobPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_inbound_this_week: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InboundOut"];
+                };
+            };
+        };
+    };
+    list_next_fires: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NextFirePage"];
                 };
             };
             /** @description Validation Error */

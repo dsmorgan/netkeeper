@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import factories
@@ -382,6 +382,24 @@ def _seed_pins(session: Session, user: User) -> int:
     return 2
 
 
+def _seed_next_fires(session: Session, user: User) -> int:
+    """Two due enrollments of ``user`` in one active email campaign (P3-12)."""
+    campaign = factories.make_campaign(session, user)
+    for _ in range(2):
+        factories.make_enrollment(
+            session, campaign, factories.make_contact(session, user), next_action_at=SEED_AT
+        )
+    return 2
+
+
+def _seed_changed_jobs(session: Session, user: User) -> int:
+    """One contact of ``user`` who started a job two days ago (P3-12)."""
+    started = datetime.now(UTC).date() - timedelta(days=2)
+    position = {"title": "Seeded", "company": "Seed Co", "started_on": started}
+    factories.make_contact(session, user, positions=[position])
+    return 1
+
+
 REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/contacts", seed_contacts, paged_count),
     ListEndpoint(
@@ -447,4 +465,6 @@ REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/linkedin/runs", _seed_runs, paged_count),
     ListEndpoint(f"{API_PREFIX}/linkedin/pins", _seed_pins, array_count),
     ListEndpoint(f"{API_PREFIX}/mailboxes", _seed_mailboxes, array_count),
+    ListEndpoint(f"{API_PREFIX}/dashboard/next-fires", _seed_next_fires, paged_count),
+    ListEndpoint(f"{API_PREFIX}/dashboard/changed-jobs", _seed_changed_jobs, paged_count),
 ]
