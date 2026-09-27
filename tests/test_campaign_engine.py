@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 import threading
 from collections.abc import Callable
@@ -1096,3 +1097,178 @@ def test_a_gap_in_step_positions_fires_the_next_position_up(
     assert firing.step_position == 4
     enrollment = world.enrollment(enrollment_id)
     assert (enrollment.status, enrollment.current_step) == (EnrollmentStatus.COMPLETED, 4)
+
+
+# --- #264 review: rules that correct code had, and no test pinned -----------------------
+
+
+def test_one_minute_before_the_window_opens_nothing_fires(
+    session_factory: sessionmaker[Session],
+) -> None:
+    world = make_world(session_factory, send_window_json={"hours": ["15:00", "16:30"]})
+    enrollment_id = world.enroll_new()
+    early = world.tick(datetime(2026, 9, 29, 14, 59, tzinfo=UTC), settings=Settings())
+    assert early.fired == [] and reasons_of(early, enrollment_id) == (Skip.OUTSIDE_WINDOW,)
+    opens = datetime(2026, 9, 29, 15, 0, tzinfo=UTC)
+    assert world.enrollment(enrollment_id).next_action_at == opens
+    assert world.tick(opens, settings=Settings()).fired != []
+
+
+def test_exactly_at_the_close_nothing_fires(session_factory: sessionmaker[Session]) -> None:
+    """The hours are ``[start, end)``: 16:30 is already outside."""
+    world = make_world(session_factory)
+    enrollment_id = world.enroll_new()
+    close = datetime(2026, 9, 29, 16, 30, tzinfo=UTC)
+    result = world.tick(close, settings=Settings())
+    assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.OUTSIDE_WINDOW,)
+    assert world.enrollment(enrollment_id).next_action_at == datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
+
+
+def test_the_time_is_read_once_the_write_lock_is_held(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A tick that started at 16:29:30 and got the write lock at 16:30 must not claim."""
+    world = make_world(session_factory)
+    world.enroll_new()
+    times = iter([datetime(2026, 9, 29, 16, 29, 30, tzinfo=UTC)])
+    after = datetime(2026, 9, 29, 16, 30, tzinfo=UTC)
+    results = run_tick(
+        world.factory,
+        settings=Settings(),
+        sender=world.sender,
+        clock=lambda: next(times, after),
+        rng=random.Random(1),
+    )
+    assert [r.fired for r in results] == [[]]
+    assert world.messages() == []
+
+
+@pytest.mark.parametrize("delay", ["step_delay", "deferred"])
+def test_a_first_step_due_later_does_not_fire_now(
+    session_factory: sessionmaker[Session], delay: str
+) -> None:
+    """Nothing but the due time holds step 1 back: selection must require it."""
+    world = make_world(session_factory)
+    if delay == "step_delay":
+
+        def three_days(session: Session) -> None:
+            campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+            assert campaign is not None
+            campaign.steps[0].delay_days = 3
+
+        world.write(three_days)
+    enrollment_id = world.enroll_new(next_action_at=NOW + timedelta(days=3))
+    result = world.tick()
+    assert result.fired == [] and enrollment_id not in result.skipped()
+    assert world.tick(NOW + timedelta(days=3)).fired != []
+
+
+def _seed_fired_today(world: World, campaign_id: int, statuses: list[MessageStatus]) -> None:
+    """Messages fired today on enrollments with no due step, in each of ``statuses``."""
+
+    def seed(session: Session) -> None:
+        user = session.get(User, world.user.id)
+        assert user is not None
+        campaign = get_scoped(session, user, Campaign, campaign_id)
+        assert campaign is not None
+        for status in statuses:
+            contact = factories.make_contact(session, user)
+            enrollment = factories.make_enrollment(session, campaign, contact)
+            factories.make_message(
+                session,
+                enrollment,
+                status=status,
+                sent_at=None,
+                scheduled_at=NOW - timedelta(hours=1),
+            )
+
+    world.write(seed)
+
+
+UNSENT_TODAY = [MessageStatus.FAILED, MessageStatus.DRAFTED, MessageStatus.SCHEDULED]
+
+
+def test_the_campaign_cap_counts_every_status_fired_today(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A failed send may have gone out, and a draft goes out when the person sends it."""
+    world = make_world(session_factory, daily_cap=3)
+    _seed_fired_today(world, world.campaign.id, UNSENT_TODAY)
+    enrollment_id = world.enroll_new()
+    result = world.tick()
+    assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.CAMPAIGN_AT_CAP,)
+
+
+def test_the_mailbox_cap_counts_every_status_fired_today(world: World) -> None:
+    world.write(
+        lambda s: setattr(get_scoped(s, world.user, Mailbox, world.mailbox.id), "daily_cap", 3)
+    )
+
+    def other_campaign(session: Session) -> int:
+        user = session.get(User, world.user.id)
+        assert user is not None
+        return factories.make_campaign(session, user, mailbox_id=world.mailbox.id).id
+
+    _seed_fired_today(world, world.write(other_campaign), UNSENT_TODAY)
+    enrollment_id = world.enroll_new()
+    result = world.tick()
+    assert result.fired == [] and reasons_of(result, enrollment_id) == ("mailbox_at_cap",)
+
+
+def test_the_mailbox_cap_is_never_over_400(world: World) -> None:
+    """Spec 11.4's hard max holds even over a ``daily_cap`` stored higher."""
+    world.write(
+        lambda s: setattr(get_scoped(s, world.user, Mailbox, world.mailbox.id), "daily_cap", 1000)
+    )
+
+    def four_hundred(session: Session) -> None:
+        user = session.get(User, world.user.id)
+        assert user is not None
+        other = factories.make_campaign(session, user, mailbox_id=world.mailbox.id)
+        contact = factories.make_contact(session, user)
+        enrollment = factories.make_enrollment(session, other, contact)
+        step_id = other.steps[0].id
+        session.add_all(
+            Message(
+                user_id=user.id,
+                enrollment_id=enrollment.id,
+                step_id=step_id,
+                contact_id=contact.id,
+                channel=EMAIL,
+                direction=MessageDirection.OUT,
+                status=MessageStatus.SENT,
+                scheduled_at=NOW - timedelta(hours=1),
+                sent_at=NOW - timedelta(hours=1),
+            )
+            for _ in range(400)
+        )
+        session.flush()
+
+    world.write(four_hundred)
+    enrollment_id = world.enroll_new()
+    result = world.tick()
+    assert result.fired == [] and reasons_of(result, enrollment_id) == ("mailbox_at_cap",)
+
+
+async def test_the_minute_loop_survives_a_failed_tick(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+
+    def flaky(*_: Any, **__: Any) -> list[TickResult]:
+        calls.append(len(calls))
+        if len(calls) == 1:
+            raise RuntimeError("the database went away")
+        return []
+
+    monkeypatch.setattr(engine_module, "run_tick", flaky)
+    engine = CampaignEngine(world.factory, SETTINGS, world.sender, interval_s=0.01)
+    engine.start()
+    try:
+        for _ in range(200):
+            if len(calls) >= 2:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await engine.stop()
+    assert len(calls) >= 2
