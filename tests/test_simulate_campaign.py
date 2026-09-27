@@ -130,18 +130,16 @@ def test_a_hundred_contacts_over_three_weeks_keep_every_window_cap_and_cadence(
     for second in seconds:
         step_one = first[second.enrollment_id]
         assert step_one.sent_at is not None and second.scheduled_at is not None
-        assert step_one.sent_at > step_one.scheduled_at  # type: ignore[operator]
+        assert step_one.scheduled_at is not None
+        assert step_one.sent_at > step_one.scheduled_at
         assert second.scheduled_at >= step_one.sent_at + timedelta(days=7)
     # And some fired as soon as they were due: the cadence is not only the caps' doing.
-    tight = [
-        s
-        for s in seconds
-        if s.scheduled_at is not None
-        and first[s.enrollment_id].sent_at is not None
-        and s.scheduled_at - (first[s.enrollment_id].sent_at + timedelta(days=7))
-        < timedelta(minutes=2)  # type: ignore[operator]
-    ]
-    assert tight
+    lateness = []
+    for second in seconds:
+        sent_at = first[second.enrollment_id].sent_at
+        assert sent_at is not None and second.scheduled_at is not None
+        lateness.append(second.scheduled_at - (sent_at + timedelta(days=7)))
+    assert min(lateness) < timedelta(minutes=2)
 
     # The ones that finished are completed; the rest still have a due step.
     for enrollment in enrollments.values():
