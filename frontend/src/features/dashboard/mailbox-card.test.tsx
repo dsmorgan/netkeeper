@@ -51,7 +51,10 @@ function renderCard(current: () => MailboxStatus, routes: Record<string, Handler
       component: () => <p>Settings page</p>,
     }),
   ])
-  const router = createRouter({ routeTree, history: createMemoryHistory({ initialEntries: ['/'] }) })
+  const router = createRouter({
+    routeTree,
+    history: createMemoryHistory({ initialEntries: ['/'] }),
+  })
 
   const utils = render(
     <QueryClientProvider client={queryClient}>
