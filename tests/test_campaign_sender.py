@@ -8,6 +8,7 @@ reaches Gmail or Google.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.campaigns.compose import message_id_for
 from netkeeper.campaigns.gmail import (
     Draft,
+    GmailAuthError,
+    GmailError,
     GmailRateLimited,
     GmailRejected,
     GmailTransient,
@@ -73,9 +76,27 @@ class Clock:
 
 
 class LostAnswers(FakeGmail):
-    """A Gmail whose answer to the next ``lose`` writes never arrives, after it acted."""
+    """A Gmail whose answer to the next ``lose`` writes never arrives, after it acted.
+    The next ``lag`` searches by Message-ID find nothing (Gmail's search lagging a send),
+    and the next ``unlisted`` draft listings leave every draft out."""
 
     lose: int = 0
+    lag: int = 0
+    unlisted: int = 0
+
+    def search(self, query: str, *, max_results: int = 100, purpose: str) -> list[MessageRef]:
+        found = super().search(query, max_results=max_results, purpose=purpose)
+        if self.lag and "rfc822msgid:" in query:
+            self.lag -= 1
+            return []
+        return found
+
+    def list_drafts(self, *, purpose: str) -> list[Draft]:
+        listed = super().list_drafts(purpose=purpose)
+        if self.unlisted:
+            self.unlisted -= 1
+            return []
+        return listed
 
     def _lost(self) -> None:
         if self.lose:
@@ -147,10 +168,10 @@ class Mail:
         with session_scope(self.factory, write=True) as session:
             return fn(session)
 
-    def enroll(self, email: str = "ada@example.test") -> int:
+    def enroll(self, email: str = "ada@example.test", *, campaign_id: int | None = None) -> int:
         def make(session: Session) -> int:
             contact = factories.make_contact(session, self.user, emails=[email])
-            campaign = get_scoped(session, self.user, Campaign, self.campaign.id)
+            campaign = get_scoped(session, self.user, Campaign, campaign_id or self.campaign.id)
             assert campaign is not None
             return factories.make_enrollment(
                 session, campaign, contact, next_action_at=self.clock.now
@@ -232,6 +253,19 @@ def expected_message_id(mail: Mail, message: Message) -> str:
         created_at=message.created_at,
         address="me@example.com",
     )
+
+
+def search_until_given_up(mail: Mail, first: datetime) -> datetime:
+    """Tick at every search a leftover gets, from ``first`` until no message is left
+    ``scheduled`` (the engine's give-up). The time of the last tick."""
+    every = engine_module.RECONCILE_SEARCH_EVERY
+    at = first
+    while True:
+        mail.tick(at)
+        if all(m.status is not MessageStatus.SCHEDULED for m in mail.messages()):
+            return at
+        assert at - first <= engine_module.RECONCILE_GIVE_UP_AFTER + every, "never gave up"
+        at += every
 
 
 # --- constants -----------------------------------------------------------------------------
@@ -490,29 +524,38 @@ def test_a_drafts_poll_failure_changes_nothing(drafts: Mail) -> None:
 # --- failures that sent nothing ------------------------------------------------------------
 
 
-def test_a_mailbox_that_is_not_ready_sends_nothing(session_factory: sessionmaker[Session]) -> None:
-    def refuse(user_id: int, mailbox_id: int) -> Any:
-        raise MailboxNotReady(mailbox_id, "reauth_required")
+def test_a_mailbox_that_is_not_ready_gives_the_claim_back(
+    session_factory: sessionmaker[Session],
+) -> None:
+    ready = False
+    opened: list[Mail] = []
 
-    mail = make_mail(session_factory, opener=refuse)
+    def open_when_ready(user_id: int, mailbox_id: int) -> Any:
+        if not ready:
+            raise MailboxNotReady(mailbox_id, "reauth_required")
+        return opened[0].gmail
+
+    mail = make_mail(session_factory, opener=open_when_ready)
+    opened.append(mail)
     enrollment_id = mail.enroll()
     [(_, outcome)] = mail.tick().fired
-    assert outcome.outcome is SendOutcome.FAILED
+    assert outcome.outcome is SendOutcome.NOT_SENT
     assert outcome.error == "the mailbox is not ready (reauth_required); nothing was sent"
-    assert mail.messages(enrollment_id)[0].status is MessageStatus.FAILED
+    assert mail.messages(enrollment_id) == []  # the step is free to fire again
+    retry = NOW + engine_module.RETRY_AFTER
+    assert mail.enrollment(enrollment_id).next_action_at == retry
+
+    ready = True
+    [(_, outcome)] = mail.tick(retry).fired
+    assert outcome.outcome is SendOutcome.SENT
+    assert [m.status for m in mail.messages(enrollment_id)] == [MessageStatus.SENT]
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        GmailRejected("Invalid To header", code="invalidArgument"),
-        GmailRateLimited("slow down", code="rateLimitExceeded"),
-        GmailTransient("no route", code="unavailable", outcome_unknown=False),
-    ],
-)
-def test_a_send_gmail_refused_is_failed_and_never_retried(mail: Mail, error: Exception) -> None:
+def test_a_send_gmail_refused_is_failed_and_never_retried(mail: Mail) -> None:
     enrollment_id = mail.enroll()
-    mail.gmail.fail_next("messages.send", error)  # type: ignore[arg-type]
+    mail.gmail.fail_next(
+        "messages.send", GmailRejected("Invalid To header", code="invalidArgument")
+    )
     [(_, outcome)] = mail.tick().fired
     assert outcome.outcome is SendOutcome.FAILED
     assert outcome.error is not None and "ada@" not in outcome.error
@@ -522,6 +565,72 @@ def test_a_send_gmail_refused_is_failed_and_never_retried(mail: Mail, error: Exc
     mail.tick(NOW + timedelta(days=1) + LATER)
     assert [m for m, _ in mail.gmail.calls].count("messages.send") == 1
     assert "messages.list" not in [m for m, _ in mail.gmail.calls]  # no search for a known outcome
+
+
+@pytest.mark.parametrize(
+    ("method", "error"),
+    [
+        ("messages.send", GmailRateLimited("slow down", code="rateLimitExceeded")),
+        ("messages.send", GmailTransient("no route", code="unavailable", outcome_unknown=False)),
+        ("messages.send", GmailAuthError("token revoked", code="invalid_grant")),
+        ("threads.get", GmailTransient("no route", code="unavailable")),
+        ("threads.get", GmailRateLimited("slow down", code="rateLimitExceeded")),
+    ],
+    ids=["send-rate-limited", "send-unavailable", "send-auth", "thread-unavailable", "thread-rate"],
+)
+def test_a_send_that_certainly_sent_nothing_is_tried_again_later(
+    mail: Mail, method: str, error: GmailError
+) -> None:
+    """#273 review, fix 4: nothing sent is never ``failed`` for a reason that may pass.
+    The claim is given back, and the mailbox waits :data:`RETRY_AFTER` before its next."""
+    enrollment_id = mail.enroll()
+    if method == "threads.get":  # the follow-up's read of the first step's thread
+        mail.tick()
+        mail.clock.now = NOW + WEEK
+    mail.gmail.fail_next(method, error)
+    [(firing, outcome)] = mail.tick().fired
+    assert outcome.outcome is SendOutcome.NOT_SENT
+    attempt = mail.clock.now
+    assert len(mail.messages(enrollment_id)) == firing.step_position - 1  # the claim is gone
+    retry = attempt + engine_module.RETRY_AFTER
+    assert mail.enrollment(enrollment_id).next_action_at == retry
+    next_send = mail.read(lambda s: engine_module.next_send_at(s, mail.user, mail.mailbox.id))
+    assert next_send is not None and next_send >= retry
+
+    assert mail.tick(retry - timedelta(minutes=1)).fired == []
+    [(again, outcome)] = mail.tick(retry).fired
+    assert (again.step_position, outcome.outcome) == (firing.step_position, SendOutcome.SENT)
+    statuses = [m.status for m in mail.messages(enrollment_id)]
+    assert statuses == [MessageStatus.SENT] * firing.step_position
+    assert len(mail.gmail.sent()) == firing.step_position  # never twice
+
+
+def test_an_hour_long_outage_fails_no_step(session_factory: sessionmaker[Session]) -> None:
+    """#273 review, fix 4: 8 due steps and an hour with Gmail down. Every one goes out
+    once Gmail is back, once each, and none is ``failed``."""
+
+    class Down(LostAnswers):
+        until = NOW + timedelta(hours=1)
+
+        def send(
+            self, message: EmailMessage, *, thread_id: str | None = None, purpose: str
+        ) -> MessageRef:
+            if self.clock() < self.until:
+                self._call("messages.send", purpose)
+                raise GmailTransient("backend error", code="unavailable")
+            return super().send(message, thread_id=thread_id, purpose=purpose)
+
+    mail = make_mail(session_factory, modes=(StepMode.SEND,), same_thread=(False,))
+    mail.gmail.__class__ = Down
+    enrolled = [mail.enroll(f"p{n}@example.test") for n in range(8)]
+    at = NOW
+    while at < NOW + timedelta(hours=6):
+        mail.tick(at)
+        at += timedelta(minutes=5)
+    statuses = [m.status for m in mail.messages()]
+    assert statuses == [MessageStatus.SENT] * 8
+    assert sorted(m.enrollment_id for m in mail.messages()) == sorted(enrolled)
+    assert len(mail.gmail.sent()) == 8
 
 
 def test_a_label_failure_never_fails_a_send(mail: Mail) -> None:
@@ -586,9 +695,14 @@ def test_an_unknown_outcome_not_found_stays_scheduled_then_fails_never_resent(
     mail.tick(NOW + timedelta(minutes=5))  # too soon to rule it out
     assert mail.messages(enrollment_id)[0].status is MessageStatus.SCHEDULED
 
-    mail.tick(NOW + LATER)
+    mail.tick(NOW + LATER)  # one empty search rules nothing out: Gmail's search can lag
+    assert mail.messages(enrollment_id)[0].status is MessageStatus.SCHEDULED
+    last = search_until_given_up(mail, NOW + LATER + engine_module.RECONCILE_SEARCH_EVERY)
     [message] = mail.messages(enrollment_id)
     assert message.status is MessageStatus.FAILED
+    assert message.reconcile_first_miss_at == NOW + LATER
+    assert message.reconcile_last_miss_at == last
+    assert last - (NOW + LATER) >= engine_module.RECONCILE_GIVE_UP_AFTER
     assert mail.enrollment(enrollment_id).next_action_at is None  # parked for a person
     mail.tick(NOW + timedelta(days=30))
     assert [m for m, _ in mail.gmail.calls].count("messages.send") == 1
@@ -621,9 +735,11 @@ def test_a_reconcile_that_cannot_reach_gmail_leaves_the_message(mail: Mail) -> N
     mail.tick()
     mail.gmail.fail_next("messages.list", GmailRateLimited("slow", code="rateLimitExceeded"))
     mail.tick(NOW + LATER)
-    assert mail.messages(enrollment_id)[0].status is MessageStatus.SCHEDULED
-    mail.tick(NOW + LATER + timedelta(minutes=1))
-    assert mail.messages(enrollment_id)[0].status is MessageStatus.FAILED
+    [message] = mail.messages(enrollment_id)
+    assert (message.status, message.reconcile_misses) == (MessageStatus.SCHEDULED, 0)
+    mail.tick(NOW + LATER + timedelta(minutes=1))  # a search that ran: one miss, no more
+    [message] = mail.messages(enrollment_id)
+    assert (message.status, message.reconcile_misses) == (MessageStatus.SCHEDULED, 1)
 
 
 # --- crash leftovers (#269, requirement 2) -------------------------------------------------
@@ -661,7 +777,10 @@ def test_a_removed_enrollments_leftover_is_reconciled_not_discarded_blindly(
     mail.write(lambda s: remove_enrollment(s, mail.user, enrollment_id))
     assert mail.messages(enrollment_id)[0].status is MessageStatus.SCHEDULED
 
-    mail.tick(NOW + LATER)
+    if delivered:
+        mail.tick(NOW + LATER)
+    else:
+        search_until_given_up(mail, NOW + LATER)
     [message] = mail.messages(enrollment_id)
     expected = MessageStatus.SENT if delivered else MessageStatus.DISCARDED
     assert message.status is expected
@@ -679,80 +798,41 @@ def test_a_leftover_found_as_a_draft_is_drafted(drafts: Mail) -> None:
     assert drafts.enrollment(enrollment_id).current_step == 1
 
 
-# --- discarded drafts (#269, requirement 3) ------------------------------------------------
+# --- discarded drafts (#269, requirement 3; #273, question 2) -----------------------------
 
 
-def test_a_merge_discarded_drafts_gmail_draft_is_deleted(drafts: Mail) -> None:
+def test_a_merge_discarded_drafts_gmail_draft_stays_for_the_person(drafts: Mail) -> None:
+    """netkeeper deletes nothing in Gmail (ADR 0003): the message records ``discarded``,
+    and its draft stays where it is, untouched, poll after poll."""
     older = drafts.enroll("ada@example.test")
     newer = drafts.enroll("ada.other@example.test")
     drafts.tick()
     drafts.tick(NOW + timedelta(hours=1))
-    assert len(drafts.gmail.drafts()) == 2
+    before = drafts.gmail.drafts()
+    assert len(before) == 2
     survivor, loser = (drafts.enrollment(i).contact_id for i in (newer, older))
     drafts.write(lambda s: merge_contacts(s, drafts.user, survivor, loser))
-    rows = drafts.messages()
-    [discarded] = [m for m in rows if m.status is MessageStatus.DISCARDED]
-    [kept] = [m for m in rows if m.status is MessageStatus.DRAFTED]
-    assert discarded.gmail_draft_id is not None
+    [discarded] = [m for m in drafts.messages() if m.status is MessageStatus.DISCARDED]
+    assert discarded.gmail_draft_id in before
 
     drafts.tick(NOW + timedelta(hours=2))
-    assert list(drafts.gmail.drafts()) == [kept.gmail_draft_id]
+    drafts.tick(NOW + timedelta(hours=3))
+    assert drafts.gmail.drafts() == before
     [after] = [m for m in drafts.messages() if m.id == discarded.id]
-    assert (after.status, after.gmail_draft_id) == (MessageStatus.DISCARDED, None)
-    assert (
-        "drafts.delete",
-        f"delete the discarded draft of message {discarded.id} "
-        f"for enrollment {after.enrollment_id}",
-    ) in drafts.gmail.calls
-
-
-def test_a_discarded_draft_the_person_sent_anyway_is_sent(drafts: Mail) -> None:
-    enrollment_id = drafts.enroll()
-    drafts.tick()
-    [message] = drafts.messages(enrollment_id)
-    assert message.gmail_draft_id is not None
-    drafts.set_message(message.id, status=MessageStatus.DISCARDED)
-    sent_ref = drafts.gmail.send_draft(message.gmail_draft_id, at=NOW + timedelta(minutes=30))
-
-    drafts.tick(NOW + timedelta(hours=1))
-    [message] = drafts.messages(enrollment_id)
-    assert (message.status, message.sent_at) == (MessageStatus.SENT, NOW + timedelta(minutes=30))
-    assert message.gmail_message_id == sent_ref.id
-    assert "drafts.delete" not in [m for m, _ in drafts.gmail.calls]
-
-
-def test_a_discarded_draft_already_gone_only_forgets_its_id(drafts: Mail) -> None:
-    enrollment_id = drafts.enroll()
-    drafts.tick()
-    [message] = drafts.messages(enrollment_id)
-    assert message.gmail_draft_id is not None
-    drafts.set_message(message.id, status=MessageStatus.DISCARDED)
-    drafts.gmail.discard_draft(message.gmail_draft_id)
-
-    drafts.tick(NOW + timedelta(hours=1))
-    [message] = drafts.messages(enrollment_id)
-    assert (message.status, message.gmail_draft_id) == (MessageStatus.DISCARDED, None)
-
-
-def test_a_discarded_draft_sent_between_the_list_and_the_delete_is_sent(drafts: Mail) -> None:
-    enrollment_id = drafts.enroll()
-    drafts.tick()
-    [message] = drafts.messages(enrollment_id)
-    draft_id = message.gmail_draft_id
-    assert draft_id is not None
-    drafts.set_message(message.id, status=MessageStatus.DISCARDED)
-    sent_at = NOW + timedelta(minutes=45)
-
-    real_delete = drafts.gmail.delete_draft
-
-    def raced(draft: str, *, purpose: str) -> None:
-        drafts.gmail.send_draft(draft, at=sent_at)  # the person, a moment before
-        real_delete(draft, purpose=purpose)
-
-    drafts.gmail.delete_draft = raced  # type: ignore[method-assign,assignment]
-    drafts.tick(NOW + timedelta(hours=1))
-    [message] = drafts.messages(enrollment_id)
-    assert (message.status, message.sent_at) == (MessageStatus.SENT, sent_at)
+    assert (after.status, after.gmail_draft_id) == (
+        MessageStatus.DISCARDED,
+        discarded.gmail_draft_id,
+    )
+    methods = {m for m, _ in drafts.gmail.calls}
+    assert methods <= {
+        "drafts.create",
+        "drafts.list",
+        "labels.list",
+        "labels.create",
+        "threads.get",
+        "messages.get",
+        "messages.list",
+    }
 
 
 # --- nothing reaches Gmail but the fake ----------------------------------------------------
@@ -841,3 +921,328 @@ def test_a_label_that_fails_to_apply_is_looked_up_again(mail: Mail) -> None:
     methods = [m for m, _ in mail.gmail.calls]
     assert methods.count("labels.list") == 2
     assert len(mail.labelled()) == 1  # the second send is labelled
+
+
+# --- #273 review -----------------------------------------------------------------------------
+
+
+def person_writes(mail: Mail, thread_of: MessageRef, subject: str, at: datetime) -> MessageRef:
+    """The person sending their own note in a thread, from Gmail: SENT, not netkeeper's."""
+    first = mail.gmail.raw(thread_of.id)
+    note = EmailMessage()
+    note["To"] = "ada@example.test"
+    note["Subject"] = subject
+    note["In-Reply-To"] = first["Message-ID"]
+    note["References"] = first["Message-ID"]
+    note.set_content("One more thing.")
+    saved, mail.clock.now = mail.clock.now, at
+    try:
+        return mail.gmail.send(note, thread_id=thread_of.thread_id, purpose="the person")
+    finally:
+        mail.clock.now = saved
+
+
+@pytest.fixture
+def mixed(session_factory: sessionmaker[Session]) -> Mail:
+    """Step 1 sent, step 2 a draft in its thread, step 3 sent in the thread."""
+    return make_mail(
+        session_factory,
+        modes=(StepMode.SEND, StepMode.DRAFT, StepMode.SEND),
+        same_thread=(False, True, True),
+    )
+
+
+@pytest.mark.parametrize("snapshot", [True, False], ids=["snapshot", "made-before-0021"])
+def test_a_deleted_draft_never_reads_as_sent_from_an_older_note_in_its_thread(
+    mixed: Mail, snapshot: bool
+) -> None:
+    """#273 review, fix 1: step 1 is sent; on day 2 the person sends their own note in
+    the thread; on day 7 step 2 is drafted; the person deletes the draft. Step 2 was
+    never sent, so step 3 never goes out. A draft made before migration 0021 has no
+    thread snapshot, and the note's date alone rules it out."""
+    enrollment_id = mixed.enroll()
+    mixed.tick()
+    [first] = mixed.gmail.sent()
+    person_writes(
+        mixed, MessageRef(first.id, first.thread_id), "Re: Hello", NOW + timedelta(days=2)
+    )
+    mixed.tick(NOW + WEEK)
+    [(draft_id, draft)] = mixed.gmail.drafts().items()
+    assert draft.thread_id == first.thread_id
+    if not snapshot:
+        mixed.set_message(mixed.messages(enrollment_id)[1].id, thread_known_json=None)
+    mixed.gmail.discard_draft(draft_id)
+
+    mixed.tick(NOW + WEEK + timedelta(hours=1))
+    mixed.tick(NOW + WEEK + timedelta(hours=2))
+    step_two = mixed.messages(enrollment_id)[1]
+    assert (step_two.status, step_two.sent_at) == (MessageStatus.DISCARDED, None)
+    enrollment = mixed.enrollment(enrollment_id)
+    assert (enrollment.status, enrollment.current_step) == (EnrollmentStatus.REMOVED, 2)
+    mixed.tick(NOW + timedelta(days=9))
+    mixed.tick(NOW + timedelta(days=30))
+    assert len(mixed.gmail.sent()) == 2  # step 1 and the person's note: no step 3
+
+
+def test_a_note_the_thread_held_when_the_draft_was_made_never_reads_as_the_draft(
+    mixed: Mail,
+) -> None:
+    """Gmail's clock ahead of netkeeper's: a note dated after the claim, but already in the
+    thread when the draft was made. The draft's thread snapshot rules it out."""
+    enrollment_id = mixed.enroll()
+    mixed.tick()
+    [first] = mixed.gmail.sent()
+    note = person_writes(
+        mixed, MessageRef(first.id, first.thread_id), "Re: Hello", NOW + WEEK + timedelta(minutes=5)
+    )
+    mixed.tick(NOW + WEEK)
+    step_two = mixed.messages(enrollment_id)[1]
+    assert step_two.thread_known_json is not None and note.id in step_two.thread_known_json
+    [draft_id] = mixed.gmail.drafts()
+    mixed.gmail.discard_draft(draft_id)
+
+    mixed.tick(NOW + WEEK + timedelta(hours=1))
+    mixed.tick(NOW + WEEK + timedelta(hours=2))
+    assert mixed.messages(enrollment_id)[1].status is MessageStatus.DISCARDED
+
+
+@pytest.mark.parametrize("keep_id", [False, True], ids=["new-id", "kept-id"])
+def test_a_sent_draft_is_found_whether_gmail_keeps_its_id_or_not(
+    drafts: Mail, keep_id: bool
+) -> None:
+    """E4: Gmail has been seen giving a sent draft a new message id, and keeping it."""
+    enrollment_id = drafts.enroll()
+    drafts.tick()
+    [(draft_id, draft)] = drafts.gmail.drafts().items()
+    sent_at = NOW + timedelta(hours=3)
+    sent = drafts.gmail.send_draft(draft_id, at=sent_at, keep_id=keep_id)
+    assert (sent.id == draft.id) is keep_id
+
+    drafts.tick(NOW + timedelta(hours=4))
+    [message] = drafts.messages(enrollment_id)
+    assert (message.status, message.sent_at, message.gmail_message_id) == (
+        MessageStatus.SENT,
+        sent_at,
+        sent.id,
+    )
+    assert drafts.enrollment(enrollment_id).next_action_at == sent_at + WEEK
+    assert drafts.labelled() == [sent.id]
+
+
+def test_a_draft_sent_keeping_its_id_counts_even_with_gmails_clock_behind(drafts: Mail) -> None:
+    """A sent copy that kept the draft's own message id is the draft, whatever its date."""
+    enrollment_id = drafts.enroll()
+    drafts.tick()
+    [draft_id] = drafts.gmail.drafts()
+    sent_at = NOW - timedelta(minutes=5)  # Gmail's clock behind netkeeper's
+    sent = drafts.gmail.send_draft(draft_id, at=sent_at, keep_id=True)
+    drafts.tick(NOW + timedelta(hours=1))
+    [message] = drafts.messages(enrollment_id)
+    assert (message.status, message.sent_at, message.gmail_message_id) == (
+        MessageStatus.SENT,
+        sent_at,
+        sent.id,
+    )
+
+
+@pytest.mark.parametrize("lag", [2, 5])
+def test_gmail_search_lag_never_turns_a_sent_message_into_failed(mail: Mail, lag: int) -> None:
+    """#273 review, fix 2: the send went out, its answer was lost, and the search by
+    Message-ID finds nothing ``lag`` times (the first right after the send)."""
+    enrollment_id = mail.enroll()
+    mail.gmail.lose = 1
+    mail.gmail.lag = lag
+    [(_, outcome)] = mail.tick().fired
+    assert outcome.outcome is SendOutcome.UNKNOWN
+    at = NOW + LATER
+    while mail.messages(enrollment_id)[0].status is MessageStatus.SCHEDULED:
+        assert at < NOW + timedelta(days=1), "never settled"
+        mail.tick(at)
+        at += engine_module.RECONCILE_SEARCH_EVERY
+    [message] = mail.messages(enrollment_id)
+    [sent] = mail.gmail.sent()
+    assert (message.status, message.sent_at, message.gmail_message_id) == (
+        MessageStatus.SENT,
+        NOW,
+        sent.id,
+    )
+    assert mail.enrollment(enrollment_id).next_action_at == NOW + WEEK
+    assert [m for m, _ in mail.gmail.calls].count("messages.send") == 1
+
+
+def add_mailbox(mail: Mail, modes: Sequence[StepMode]) -> tuple[int, int, LostAnswers]:
+    """A second mailbox of the same user with its own campaign and Gmail: the mailbox's
+    id, the campaign's, and the Gmail. The sender opens each mailbox's own."""
+
+    def make(session: Session) -> tuple[int, int]:
+        user = session.get(User, mail.user.id)
+        assert user is not None
+        mailbox = make_mailbox(session, user, email="two@example.com")
+        campaign = factories.make_campaign(
+            session, user, channels=(EMAIL,) * len(modes), mailbox_id=mailbox.id
+        )
+        for step, mode in zip(campaign.steps, modes, strict=True):
+            step.mode = mode
+        session.flush()
+        return mailbox.id, campaign.id
+
+    mailbox_id, campaign_id = mail.write(make)
+    gmail = LostAnswers("two@example.com", mailbox_id=mailbox_id, clock=mail.clock)
+    # Ids of its own, as two real mailboxes have: the fakes' counters start alike.
+    gmail._ids = itertools.count(0x28F0000000000000)
+    gmail._drafts_made = itertools.count(1001)
+    boxes = {mail.mailbox.id: mail.gmail, mailbox_id: gmail}
+    mail.sender = GmailSender(
+        mail.factory,
+        opener=lambda user_id, box: boxes[box],
+        clock=mail.clock,
+        drafts_every=timedelta(0),
+    )
+    return mailbox_id, campaign_id, gmail
+
+
+def test_a_mailbox_that_cannot_be_searched_never_stalls_another(mail: Mail) -> None:
+    """#273 review, fix 5: 10 old leftovers on a disconnected mailbox 1, and mailbox 2's
+    leftover is still searched."""
+    _, campaign_id, gmail = add_mailbox(mail, (StepMode.SEND,))
+    opener = mail.sender._open
+
+    def first_disconnected(user_id: int, mailbox_id: int) -> Any:
+        if mailbox_id == mail.mailbox.id:
+            raise MailboxNotReady(mailbox_id, "reauth_required")
+        return opener(user_id, mailbox_id)
+
+    mail.sender._open = first_disconnected
+
+    def leftovers(session: Session) -> int:
+        made: list[int] = []
+        for n, campaign in enumerate(
+            [mail.campaign.id] * engine_module.RECONCILE_BATCH + [campaign_id]
+        ):
+            row = get_scoped(session, mail.user, Campaign, campaign)
+            assert row is not None
+            contact = factories.make_contact(session, mail.user, emails=[f"l{n}@example.test"])
+            enrollment = factories.make_enrollment(session, row, contact, next_action_at=None)
+            made.append(
+                factories.make_message(
+                    session,
+                    enrollment,
+                    status=MessageStatus.SCHEDULED,
+                    sent_at=None,
+                    scheduled_at=NOW,
+                ).id
+            )
+        return made[-1]
+
+    theirs = mail.write(leftovers)
+    mail.tick(NOW + LATER)
+    [message] = [m for m in mail.messages() if m.id == theirs]
+    assert message.reconcile_misses == 1  # searched in mailbox 2's Gmail
+    assert "messages.list" in [m for m, _ in gmail.calls]
+
+
+def test_the_drafts_poll_checks_each_draft_against_its_own_mailbox(drafts: Mail) -> None:
+    """S21: a draft waiting in mailbox 2 is never looked for in mailbox 1's drafts, nor
+    one in mailbox 1 in mailbox 2's."""
+    _, campaign_id, gmail = add_mailbox(drafts, (StepMode.DRAFT,))
+    theirs = drafts.enroll("bob@example.test", campaign_id=campaign_id)
+    ours = drafts.enroll("ada@example.test")
+    drafts.tick()
+    drafts.tick(NOW + timedelta(hours=1))
+    assert (len(gmail.drafts()), len(drafts.gmail.drafts())) == (1, 1)
+    drafts.tick(NOW + timedelta(hours=2))
+    drafts.tick(NOW + timedelta(hours=3))
+    for enrollment_id in (theirs, ours):
+        [message] = drafts.messages(enrollment_id)
+        assert (message.status, message.error) == (MessageStatus.DRAFTED, None)
+        assert drafts.enrollment(enrollment_id).status is not EnrollmentStatus.REMOVED
+
+
+def test_a_thread_with_no_sent_message_left_fails_the_follow_up(mail: Mail) -> None:
+    """S13: the first step is gone from its thread, which only holds the reply. The
+    follow-up is ``failed``, never sent as a new conversation, and never retried."""
+    enrollment_id = mail.enroll()
+    mail.tick()
+    [first] = mail.gmail.sent()
+    ref = MessageRef(first.id, first.thread_id)
+    mail.gmail.reply(ref, sender="ada@example.test", at=NOW + timedelta(days=1))
+    mail.gmail.delete(ref)
+
+    [(_, outcome)] = mail.tick(NOW + WEEK).fired
+    assert outcome.outcome is SendOutcome.FAILED
+    assert outcome.error is not None and "not in its Gmail thread" in outcome.error
+    assert mail.gmail.sent() == []
+    assert mail.messages(enrollment_id)[1].status is MessageStatus.FAILED
+
+
+def test_a_follow_up_takes_its_subject_and_first_citation_from_the_earliest_sent(
+    mail: Mail,
+) -> None:
+    """S16 and S9: the person forwarded step 1 in its thread. The follow-up's subject is
+    step 1's with one ``Re:``, ``References`` starts at step 1, and ``In-Reply-To`` is
+    the newest."""
+    mail.enroll()
+    mail.tick()
+    [first] = mail.gmail.sent()
+    ref = MessageRef(first.id, first.thread_id)
+    forwarded = person_writes(mail, ref, "Fwd: Hello", NOW + timedelta(days=1))
+    mail.tick(NOW + WEEK)
+    follow_up = mail.gmail.raw(mail.gmail.sent()[-1].id)
+    first_id = mail.gmail.raw(first.id)["Message-ID"]
+    forwarded_id = mail.gmail.raw(forwarded.id)["Message-ID"]
+    assert follow_up["Subject"] == "Re: Hello"
+    assert follow_up["References"].split() == [first_id, forwarded_id]
+    assert follow_up["In-Reply-To"] == forwarded_id
+
+
+def test_the_find_returns_the_earliest_sent_copy() -> None:
+    """S9: two sent messages carry the Message-ID (a resend by hand): the first to go out
+    is the one the step's time comes from."""
+    clock = Clock()
+    gmail = FakeGmail("me@example.com", clock=clock)
+
+    def send_at(at: datetime) -> MessageRef:
+        message = EmailMessage()
+        message["To"] = "ada@example.test"
+        message["Subject"] = "Hello"
+        message["Message-ID"] = "<same@example.com>"
+        message.set_content("Hi")
+        clock.now = at
+        return gmail.send(message, purpose="test")
+
+    send_at(NOW + timedelta(hours=1))
+    earlier = send_at(NOW)
+    found = sender_module.find_by_message_id(gmail, "<same@example.com>", purpose="reconcile")
+    assert found is not None and found.sent
+    assert (found.message.id, found.message.internal_date) == (earlier.id, NOW)
+
+
+def test_a_leftover_found_as_a_draft_not_listed_yet_waits(drafts: Mail) -> None:
+    """S23: the search finds the draft's message, but ``drafts.list`` does not name it yet.
+    It stays ``scheduled``, with no miss counted, and is drafted once it is listed."""
+    enrollment_id = drafts.enroll()
+    with pytest.raises(Crash):
+        drafts.tick(sender=CrashAfterSend(drafts.sender))
+    drafts.gmail.unlisted = 1
+    drafts.tick(NOW + LATER)
+    [message] = drafts.messages(enrollment_id)
+    assert (message.status, message.reconcile_misses) == (MessageStatus.SCHEDULED, 0)
+    drafts.tick(NOW + LATER + timedelta(minutes=1))
+    [message] = drafts.messages(enrollment_id)
+    [draft_id] = drafts.gmail.drafts()
+    assert (message.status, message.gmail_draft_id) == (MessageStatus.DRAFTED, draft_id)
+
+
+def test_a_lost_draft_answer_with_the_draft_not_listed_yet_is_unknown(drafts: Mail) -> None:
+    """S25: the answer to ``drafts.create`` was lost, and the draft is not listed yet: the
+    outcome is unknown, never failed, and reconcile drafts it later."""
+    enrollment_id = drafts.enroll()
+    drafts.gmail.lose = 1
+    drafts.gmail.unlisted = 1
+    [(_, outcome)] = drafts.tick().fired
+    assert outcome.outcome is SendOutcome.UNKNOWN
+    assert drafts.messages(enrollment_id)[0].status is MessageStatus.SCHEDULED
+    drafts.tick(NOW + LATER)
+    [message] = drafts.messages(enrollment_id)
+    assert message.status is MessageStatus.DRAFTED
+    assert [m for m, _ in drafts.gmail.calls].count("drafts.create") == 1

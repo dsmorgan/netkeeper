@@ -53,6 +53,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     inspect,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
@@ -375,6 +376,20 @@ class Message(UserOwned, TimestampMixin, Base):
     li_message_urn: Mapped[str | None] = mapped_column(String(300))
     # One line on why a send failed. Never a message body, a token, or a header.
     error: Mapped[str | None] = mapped_column(String(500))
+    # For the sender's reconcile (P3-07; 0021). The Gmail message ids the thread already
+    # held when the draft was made: a draft gone from Gmail reads as sent only for a sent
+    # message outside them. NULL for anything but a draft.
+    thread_known_json: Mapped[list[str] | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
+    # Searches by Message-ID that found nothing, with the first's and the latest's time. A
+    # leftover is ruled "not in Gmail" only after several, spread out: Gmail's search can
+    # lag a send by minutes.
+    reconcile_misses: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    reconcile_first_miss_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    reconcile_last_miss_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     enrollment: Mapped[Enrollment] = relationship()
 
