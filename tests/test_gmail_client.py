@@ -297,6 +297,7 @@ def test_labels_and_modify() -> None:
         (400, "invalidArgument", GmailRejected, "invalidArgument"),
         (500, "backendError", GmailTransient, "backendError"),
         (503, "", GmailTransient, "http_503"),
+        (408, "", GmailTransient, "http_408"),
     ],
 )
 def test_http_errors_map_to_typed_errors(
