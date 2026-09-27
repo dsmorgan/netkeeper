@@ -24,6 +24,7 @@ from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import make_session_factory, session_scope
 from netkeeper.models import (
     Campaign,
+    CampaignMailboxLocked,
     CampaignStatus,
     Contact,
     EmailStatus,
@@ -697,10 +698,12 @@ def test_an_unknown_mailbox_pauses_email_steps(
     def point(session: Session) -> None:
         campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
         assert campaign is not None
+        campaign.status = CampaignStatus.DRAFT  # the mailbox is locked outside draft (#269)
         if mailbox == "none":
             campaign.mailbox_id = None
         else:
             campaign.mailbox_id = make_mailbox(session, factories.make_user(session)).id
+        campaign.status = CampaignStatus.ACTIVE
 
     world.write(point)
     enrollment_id = world.enroll_new()
@@ -941,8 +944,11 @@ def test_activate_is_refused_until_the_campaign_is_ready(
     def change(session: Session) -> None:
         campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
         assert campaign is not None
+        status = changes.get("status", campaign.status)
+        campaign.status = CampaignStatus.DRAFT  # the mailbox is locked outside draft (#269)
         for name, value in changes.items():
             setattr(campaign, name, value)
+        campaign.status = status
 
     world.write(change)
     with pytest.raises(CampaignEngineError, match=match):
@@ -1536,3 +1542,50 @@ def test_settle_sent_refuses_a_naive_time(world: World) -> None:
                 gmail_thread_id="th",
             )
         )
+
+
+# --- #269, requirement 6: the mailbox is locked once the campaign leaves draft --------------
+
+
+@pytest.mark.parametrize(
+    "status", [s for s in CampaignStatus if s is not CampaignStatus.DRAFT], ids=str
+)
+def test_a_campaign_past_draft_refuses_a_mailbox_change(
+    session_factory: sessionmaker[Session], status: CampaignStatus
+) -> None:
+    world = make_world(session_factory, status=status)
+
+    def change(session: Session, *, to: int | None) -> None:
+        campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+        assert campaign is not None
+        campaign.mailbox_id = to
+
+    other = world.write(lambda s: make_mailbox(s, world.user, email="other@example.test").id)
+    for to in (other, None):
+        with pytest.raises(CampaignMailboxLocked, match="cannot change once it leaves draft"):
+            world.write(partial(change, to=to))
+    world.write(partial(change, to=world.mailbox.id))  # the same one is no change
+    kept = world.read(lambda s: get_scoped(s, world.user, Campaign, world.campaign.id))
+    assert kept is not None and kept.mailbox_id == world.mailbox.id
+
+
+def test_a_draft_campaign_may_change_its_mailbox(session_factory: sessionmaker[Session]) -> None:
+    world = make_world(session_factory, status=CampaignStatus.DRAFT)
+    other = world.write(lambda s: make_mailbox(s, world.user, email="other@example.test").id)
+
+    def change(session: Session) -> None:
+        campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+        assert campaign is not None
+        campaign.mailbox_id = other
+
+    world.write(change)
+    kept = world.read(lambda s: get_scoped(s, world.user, Campaign, world.campaign.id))
+    assert kept is not None and kept.mailbox_id == other
+
+
+def test_a_new_campaign_takes_any_mailbox_whatever_its_status(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The lock is on a stored campaign: one being created has sent nothing yet."""
+    world = make_world(session_factory, status=CampaignStatus.ACTIVE)
+    assert world.campaign.mailbox_id == world.mailbox.id
