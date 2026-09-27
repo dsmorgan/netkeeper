@@ -12,7 +12,8 @@ get it wrong:
   joins the thread its headers and subject point to, the same way.
 - **Ids.** A thread's id is its first message's id. Sending a draft (the
   person's part, :meth:`FakeGmail.send_draft`) removes the draft and adds a
-  ``SENT`` message with a new id in the same thread.
+  ``SENT`` message with a new id in the same thread, or, with ``keep_id``, turns
+  the draft's own message into the sent one.
 - **History.** One ``history_id`` that only grows: every added message, label
   change and draft moves it on, and each message carries the id of its last
   change. :meth:`FakeGmail.history` returns the messages added after a start,
@@ -192,14 +193,6 @@ class FakeGmail:
             for draft_id, message_id in self._drafts.items()
         ]
 
-    def delete_draft(self, draft_id: str, *, purpose: str) -> None:
-        self._call("drafts.delete", purpose)
-        message_id = self._drafts.pop(draft_id, None)
-        if message_id is None:
-            raise GmailNotFound("no such draft", code="notFound")
-        self._remove(self._messages[message_id])
-        self._bump()
-
     def get_message(self, message_id: str, *, purpose: str) -> Message:
         self._call("messages.get", purpose)
         return self._view(self._get(message_id))
@@ -330,12 +323,21 @@ class FakeGmail:
         self._move(stored, original.thread_id)
         return MessageRef(stored.id, stored.thread_id)
 
-    def send_draft(self, draft_id: str, *, at: datetime | None = None) -> MessageRef:
+    def send_draft(
+        self, draft_id: str, *, at: datetime | None = None, keep_id: bool = False
+    ) -> MessageRef:
         """The person pressing Send on a draft: the draft goes, a ``SENT`` message
-        with a new id takes its place in the same thread."""
+        with a new id takes its place in the same thread. With ``keep_id``, the
+        draft's own message becomes the sent one, id and all: Gmail has been seen
+        doing either, so the engine must read both right."""
         draft = self._messages[self._drafts[draft_id]]
         _require_recipient(draft.parsed)
         del self._drafts[draft_id]
+        if keep_id:
+            draft.labels = {"SENT"}
+            draft.internal_date = at or self.clock()
+            draft.history_id = self._bump()
+            return MessageRef(draft.id, draft.thread_id)
         self._remove(draft)
         sent = _Stored(
             id=self._new_id(),

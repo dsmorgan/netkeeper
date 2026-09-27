@@ -6,7 +6,9 @@ answers from a script and records what was sent. Nothing reaches Gmail.
 
 import base64
 import email
+import inspect
 import logging
+import re
 from datetime import UTC, datetime
 from email.message import EmailMessage
 from email.policy import SMTP
@@ -15,6 +17,7 @@ from typing import Any
 import pytest
 from gmail_fakes import RecordingHttp, gmail_error
 
+from netkeeper.campaigns import gmail as gmail_module
 from netkeeper.campaigns import gmail_oauth
 from netkeeper.campaigns.gmail import (
     Gmail,
@@ -182,24 +185,15 @@ def test_list_drafts_with_none_is_empty() -> None:
     assert _client(http).list_drafts(purpose="drafts poll for mailbox 3") == []
 
 
-def test_delete_draft_deletes_it() -> None:
-    http = RecordingHttp().answer(204, b"")
-    _client(http).delete_draft("r9", purpose="delete the discarded draft of message 4")
-    [sent] = http.requests
-    assert (sent.method, sent.path) == ("DELETE", f"{API}/drafts/r9")
-
-
-def test_delete_draft_of_a_gone_draft_is_not_found() -> None:
-    http = RecordingHttp().answer(404, gmail_error(404, "notFound"))
-    with pytest.raises(GmailNotFound):
-        _client(http).delete_draft("r9", purpose="delete the discarded draft of message 4")
-
-
-def test_a_transient_failure_of_a_delete_leaves_the_outcome_unknown() -> None:
-    http = RecordingHttp().answer(503, gmail_error(503, "backendError"))
-    with pytest.raises(GmailTransient) as caught:
-        _client(http).delete_draft("r9", purpose="delete the discarded draft of message 4")
-    assert caught.value.outcome_unknown is True
+def test_netkeeper_never_deletes_mail() -> None:
+    """ADR 0003: netkeeper deletes nothing in Gmail, drafts included (#273, question 2).
+    Neither the interface nor the client has a way to, and the client never builds a
+    ``delete``, ``trash`` or ``batchDelete`` request."""
+    for cls in (Gmail, GmailClient):
+        names = [name.lower() for name in dir(cls) if not name.startswith("__")]
+        assert [n for n in names if "delete" in n or "trash" in n] == []
+    source = inspect.getsource(gmail_module)
+    assert re.search(r"\.(delete|trash|batchDelete|untrash)\(", source) is None
 
 
 def test_get_message_reads_metadata_never_the_body() -> None:
