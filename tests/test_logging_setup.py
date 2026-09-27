@@ -138,6 +138,29 @@ def test_the_oauth_callbacks_query_never_reaches_the_access_log() -> None:
     assert "/api/v1/mailboxes/oauth/callback?<redacted>" in record.getMessage()
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/mailboxes/oauth/callback/",
+        "/api/v1/mailboxes/oauth/callback//",
+        "//api/v1//mailboxes/oauth/callback",
+        "/API/v1/Mailboxes/OAuth/Callback",
+    ],
+)
+def test_every_spelling_of_the_callback_is_redacted(path: str) -> None:
+    """``/callback/?code=`` is logged before it redirects to the callback (#256)."""
+    record = _access_record(f"{path}?state=s&code=4/secret")
+    assert RedactQueryFilter().filter(record)
+    assert "secret" not in record.getMessage()
+    assert f"{path}?<redacted>" in record.getMessage()
+
+
+def test_a_path_that_only_starts_like_the_callback_is_logged() -> None:
+    record = _access_record("/api/v1/mailboxes/oauth/callbacks?q=x")
+    assert RedactQueryFilter().filter(record)
+    assert "callbacks?q=x" in record.getMessage()
+
+
 def test_other_queries_are_logged_as_they_were() -> None:
     record = _access_record("/api/v1/contacts?q=x")
     assert RedactQueryFilter().filter(record)

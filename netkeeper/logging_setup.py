@@ -53,9 +53,18 @@ class RedactQueryFilter(logging.Filter):
         args = record.args
         if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
             path, sep, _ = args[2].partition("?")
-            if sep and path in REDACTED_QUERY_PATHS:
+            if sep and _comparable(path) in REDACTED_QUERY_PATHS:
                 record.args = (*args[:2], f"{path}?<redacted>", *args[3:])
         return True
+
+
+def _comparable(path: str) -> str:
+    """``path`` without repeated or trailing slashes, lower-cased.
+
+    ``/callback/?code=`` is answered (a redirect to ``/callback?code=``) before the
+    route sees it, so each spelling that differs only in slashes or case is redacted.
+    """
+    return "/" + "/".join(part for part in path.lower().split("/") if part)
 
 
 def setup_logging(level: str | int | None = None) -> None:
