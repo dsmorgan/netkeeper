@@ -42,6 +42,18 @@ describe('ReauthBanner', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/Save a Desktop app client/)
   })
 
+  it.each([
+    ['insufficientPermissions', /does not include Gmail access/],
+    ['http_403', /Gmail refused the token/],
+  ])('explains the Gmail API refusing the token (%s)', async (reason, text) => {
+    renderWithBackend(<ReauthBanner />, () =>
+      status({ mailboxes: [mailbox({ status: 'reauth_required', status_reason: reason })] }),
+    )
+    const banner = await screen.findByRole('alert')
+    expect(banner).toHaveTextContent(text)
+    expect(banner).not.toHaveTextContent('Google answered')
+  })
+
   it('shows while the Keychain is locked, never asking for the status', async () => {
     const { calls } = renderWithBackend(
       <ReauthBanner />,

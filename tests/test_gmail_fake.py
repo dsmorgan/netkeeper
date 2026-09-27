@@ -156,6 +156,41 @@ def test_a_message_with_no_recipient_is_rejected(gmail: FakeGmail) -> None:
     assert gmail.sent() == []
 
 
+def test_a_draft_with_no_recipient_is_kept_but_cannot_be_sent(gmail: FakeGmail) -> None:
+    """Gmail accepts such a draft; only pressing Send on it fails (#267)."""
+    message = _mail()
+    del message["To"]
+    draft = gmail.create_draft(message, purpose="draft step 1")
+    assert gmail.get_draft(draft.id, purpose="check draft") == draft
+    with pytest.raises(GmailRejected):
+        gmail.send_draft(draft.id)
+    assert gmail.drafts() == {draft.id: draft.message}
+    assert gmail.sent() == []
+
+
+@pytest.mark.parametrize(
+    ("sender", "kept"),
+    [
+        (ME, True),
+        (f"Sam Sender <{ME.upper()}>", True),
+        ("Sam <alias@example.com>", True),  # a verified alias
+        ("Someone Else <other@example.com>", False),
+        (f"{ME}, other@example.com", False),
+    ],
+)
+def test_a_from_gmail_would_not_send_as_is_rewritten(sender: str, kept: bool) -> None:
+    gmail = FakeGmail(ME, aliases=["Alias@example.com"])
+    message = _mail()
+    message["From"] = sender
+    ref = gmail.send(message, purpose="send step 1")
+    assert gmail.get_message(ref.id, purpose="read").header("From") == (sender if kept else ME)
+
+
+def test_an_inbound_from_is_kept(gmail: FakeGmail) -> None:
+    ref = gmail.deliver(_inbound("Hi", sender="Ada <ada@example.com>"))
+    assert gmail.get_message(ref.id, purpose="read").header("From") == "Ada <ada@example.com>"
+
+
 @pytest.mark.parametrize(
     ("subject", "expected"),
     [
@@ -433,6 +468,24 @@ def test_labels(gmail: FakeGmail) -> None:
         gmail.modify_labels(ref.id, add=["Label_404"], purpose="label step 1")
     with pytest.raises(GmailNotFound):
         gmail.modify_labels("nope", add=[made.id], purpose="label step 1")
+
+
+@pytest.mark.parametrize(
+    ("add", "remove"), [(["DRAFT"], []), (["SENT"], []), ([], ["SENT"]), ([], ["DRAFT"])]
+)
+def test_modify_labels_refuses_draft_and_sent(
+    gmail: FakeGmail, add: list[str], remove: list[str]
+) -> None:
+    ref = gmail.send(_mail(), purpose="send step 1")
+    with pytest.raises(GmailRejected):
+        gmail.modify_labels(ref.id, add=add, remove=remove, purpose="label step 1")
+    assert gmail.get_message(ref.id, purpose="read").label_ids == {"SENT"}
+
+
+def test_modify_labels_accepts_the_labels_a_client_may_change(gmail: FakeGmail) -> None:
+    ref = gmail.deliver(_inbound("Hi"))
+    gmail.modify_labels(ref.id, add=["IMPORTANT"], remove=["UNREAD", "INBOX"], purpose="triage")
+    assert gmail.get_message(ref.id, purpose="read").label_ids == {"IMPORTANT"}
 
 
 # --- scripting, purposes ----------------------------------------------------------

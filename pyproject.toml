@@ -34,6 +34,12 @@ dependencies = [
   # The Gmail API client (spec 6, 11.5; P3-02). Discovery is the bundled static
   # document, so building the service never fetches one.
   "google-api-python-client>=2.150",
+  # Imported directly by netkeeper/campaigns/gmail.py, not only through the
+  # client above. The transport that never resends a write (WriteOnceHttp)
+  # subclasses httplib2's; tests/test_gmail_transport.py pins the resend it undoes.
+  "google-auth>=2.30",
+  "google-auth-httplib2>=0.2",
+  "httplib2>=0.22",
 ]
 
 [project.optional-dependencies]

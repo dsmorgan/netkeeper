@@ -23,8 +23,12 @@ get it wrong:
 - **Snippets** are HTML-escaped as Gmail's are (``don&#39;t``) and unescaped by
   :func:`~netkeeper.campaigns.gmail.snippet_text`, the client's own step.
 - **Headers.** A message without ``Message-ID`` gets one, and one without
-  ``From`` gets the mailbox's address, as Gmail fills them in. A message with no
-  recipient is :class:`GmailRejected`.
+  ``From`` gets the mailbox's address, as Gmail fills them in. A ``From`` that is
+  neither the mailbox nor one of its verified ``aliases`` is replaced with the
+  mailbox's address, as Gmail rewrites it. Sending a message with no recipient
+  is :class:`GmailRejected`; drafting one is not, as in Gmail.
+- **Labels.** ``modify_labels`` refuses ``DRAFT`` and ``SENT``, which Gmail
+  does not let a client add or remove.
 - **Search.** ``from:`` and ``to:`` (whole words, as Gmail matches them),
   ``rfc822msgid:``, ``in:`` (``inbox``, ``sent``, ``drafts``, and ``anywhere``,
   the one search that includes spam and trash), ``label:``, and
@@ -78,6 +82,9 @@ log = logging.getLogger(__name__)
 #: Gmail's system labels the engine reads.
 SYSTEM_LABELS: Final = ("INBOX", "SENT", "DRAFT", "UNREAD", "SPAM", "TRASH", "IMPORTANT")
 
+#: System labels Gmail refuses in ``messages.modify``.
+UNMODIFIABLE_LABELS: Final = frozenset({"DRAFT", "SENT"})
+
 #: The address Gmail's bounce notices come from (spec 11.5).
 MAILER_DAEMON: Final = "mailer-daemon@googlemail.com"
 
@@ -122,8 +129,11 @@ class FakeGmail:
         *,
         mailbox_id: int = 0,
         clock: Callable[[], datetime] = utcnow,
+        aliases: Sequence[str] = (),
     ) -> None:
         self.address = address.lower()
+        #: Verified send-as addresses a ``From`` may name besides the mailbox's own.
+        self.aliases = frozenset(alias.lower() for alias in aliases)
         self.mailbox_id = mailbox_id
         self.clock = clock
         #: ``(method, purpose)`` for every call, in order.
@@ -153,7 +163,9 @@ class FakeGmail:
         self, message: EmailMessage, *, thread_id: str | None = None, purpose: str
     ) -> MessageRef:
         self._call("messages.send", purpose)
-        stored = self._add(message, thread_id=thread_id, labels={"SENT"}, outbound=True)
+        stored = self._add(
+            message, thread_id=thread_id, labels={"SENT"}, outbound=True, needs_recipient=True
+        )
         return MessageRef(stored.id, stored.thread_id)
 
     def create_draft(
@@ -231,7 +243,7 @@ class FakeGmail:
         self._call("messages.modify", purpose)
         stored = self._get(message_id)
         unknown = [label for label in (*add, *remove) if label not in self._labels]
-        if unknown:
+        if unknown or UNMODIFIABLE_LABELS & {*add, *remove}:
             raise GmailRejected("Invalid label", code="invalidArgument")
         stored.labels |= set(add)
         stored.labels -= set(remove)
@@ -306,8 +318,9 @@ class FakeGmail:
     def send_draft(self, draft_id: str, *, at: datetime | None = None) -> MessageRef:
         """The person pressing Send on a draft: the draft goes, a ``SENT`` message
         with a new id takes its place in the same thread."""
-        message_id = self._drafts.pop(draft_id)
-        draft = self._messages[message_id]
+        draft = self._messages[self._drafts[draft_id]]
+        _require_recipient(draft.parsed)
+        del self._drafts[draft_id]
         self._remove(draft)
         sent = _Stored(
             id=self._new_id(),
@@ -402,16 +415,17 @@ class FakeGmail:
         labels: set[str],
         outbound: bool,
         at: datetime | None = None,
+        needs_recipient: bool = False,
     ) -> _Stored:
         # A round trip through bytes, as the real client sends it, so a message
         # that cannot be serialized fails here too.
         parsed = email.message_from_bytes(message.as_bytes(policy=SMTP), policy=SMTP)
         assert isinstance(parsed, EmailMessage)
-        if outbound:
-            if not any(parsed.get(name) for name in ("To", "Cc", "Bcc")):
-                raise GmailRejected("Recipient address required", code="invalidArgument")
-            if parsed.get("From") is None:
-                parsed["From"] = self.address
+        if needs_recipient:
+            _require_recipient(parsed)
+        if outbound and not self._may_send_as(parsed.get("From")):
+            del parsed["From"]
+            parsed["From"] = self.address
         if parsed.get("Message-ID") is None:
             parsed["Message-ID"] = make_msgid(domain="mail.gmail.com")
         if thread_id is not None and thread_id not in self._threads:
@@ -432,6 +446,13 @@ class FakeGmail:
         self._messages[stored.id] = stored
         self._threads.setdefault(stored.thread_id, []).append(stored.id)
         self._history.append((stored.history_id, stored.id))
+
+    def _may_send_as(self, sender: object) -> bool:
+        """Whether Gmail keeps ``sender`` as the From: the mailbox or a verified alias."""
+        if sender is None:
+            return False
+        addresses = [address.lower() for _, address in getaddresses([str(sender)])]
+        return len(addresses) == 1 and addresses[0] in {self.address, *self.aliases}
 
     def _remove(self, stored: _Stored) -> None:
         del self._messages[stored.id]
@@ -526,6 +547,11 @@ class FakeGmail:
             ids = {label.id for label in self._labels.values() if label.name.lower() == wanted}
             return lambda stored: bool(stored.labels & ids)
         raise ValueError(f"the fake does not search for {key}:")
+
+
+def _require_recipient(parsed: EmailMessage) -> None:
+    if not any(parsed.get(name) for name in ("To", "Cc", "Bcc")):
+        raise GmailRejected("Recipient address required", code="invalidArgument")
 
 
 def _snippet(parsed: EmailMessage) -> str:

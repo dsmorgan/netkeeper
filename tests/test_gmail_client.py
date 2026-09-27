@@ -311,6 +311,36 @@ def test_http_errors_map_to_typed_errors(
     assert getattr(caught.value, "code", None) == code
 
 
+@pytest.mark.parametrize(
+    ("status", "api_status", "expected"),
+    [
+        (403, "RESOURCE_EXHAUSTED", GmailRateLimited),  # a quota, not the token (#267)
+        (403, "PERMISSION_DENIED", GmailAuthError),
+        (403, None, GmailAuthError),
+        (429, "RESOURCE_EXHAUSTED", GmailRateLimited),
+    ],
+)
+def test_a_403_with_no_legacy_reason_is_classed_by_its_status(
+    status: int, api_status: str | None, expected: type[Exception]
+) -> None:
+    error: dict[str, Any] = {"code": status, "message": "a refusal"}
+    if api_status is not None:
+        error["status"] = api_status
+    failures: list[GmailAuthError] = []
+    http = RecordingHttp().answer(status, {"error": error})
+    with pytest.raises(expected) as caught:
+        _client(http, failures=failures).get_message("m1", purpose="read message 1")
+    assert getattr(caught.value, "code", None) == f"http_{status}"
+    assert len(failures) == (1 if expected is GmailAuthError else 0)
+
+
+def test_a_rate_limit_reason_wins_over_a_status_that_is_not_one() -> None:
+    body = gmail_error(403, "userRateLimitExceeded")
+    body["error"]["status"] = "PERMISSION_DENIED"
+    with pytest.raises(GmailRateLimited):
+        _client(RecordingHttp().answer(403, body)).get_message("m1", purpose="read message 1")
+
+
 def test_googles_message_text_is_never_kept() -> None:
     http = RecordingHttp().answer(400, gmail_error(400, "invalidArgument", "Invalid To: ada@x.io"))
     with pytest.raises(GmailRejected) as caught:

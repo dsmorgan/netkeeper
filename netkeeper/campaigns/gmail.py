@@ -16,7 +16,8 @@ message, not a search query (which names addresses), not a token.
 request's body, at ``DEBUG``; their loggers are held at ``WARNING`` here.
 
 **Errors.** Every failure is one of five :class:`GmailError` types:
-:class:`GmailRateLimited` (429, or a 403 whose reason is a rate or quota limit),
+:class:`GmailRateLimited` (429, or a 403 whose reason is a rate or quota limit,
+or whose ``status`` is ``RESOURCE_EXHAUSTED`` when it names no reason),
 :class:`GmailNotFound` (404: a gone draft, an unknown thread, or a history id
 older than Gmail keeps), :class:`GmailAuthError` (the grant is dead, or the API
 refused the token), :class:`GmailTransient` (network, timeout, 5xx; try later),
@@ -99,6 +100,10 @@ PURPOSE_MAX_LENGTH: Final = 120
 RATE_LIMIT_REASONS: Final = frozenset(
     {"rateLimitExceeded", "userRateLimitExceeded", "dailyLimitExceeded", "quotaExceeded"}
 )
+
+#: A 403 with this ``error.status`` is a limit too. Newer answers can carry only
+#: the status, with no legacy ``errors[].reason``.
+RATE_LIMIT_STATUS: Final = "RESOURCE_EXHAUSTED"
 
 #: ``messages.list`` answers at most this many per page.
 _PAGE_MAX: Final = 500
@@ -631,9 +636,10 @@ class GmailClient:
 
 def _from_http(exc: HttpError, *, writes: bool) -> GmailError:
     status = int(exc.resp.status)
-    reason = _reason(exc.content)
+    reason, api_status = _error_codes(exc.content)
     code = reason or f"http_{status}"
-    if status == 429 or (status == 403 and reason in RATE_LIMIT_REASONS):
+    limited = reason in RATE_LIMIT_REASONS or api_status == RATE_LIMIT_STATUS
+    if status == 429 or (status == 403 and limited):
         return GmailRateLimited(f"Gmail answered {status}: {code}", code=code)
     if status == 401 or status == 403:
         return GmailAuthError(f"Gmail refused the token: {code}", code=code)
@@ -646,18 +652,26 @@ def _from_http(exc: HttpError, *, writes: bool) -> GmailError:
     return GmailRejected(f"Gmail refused the request: {code}", code=code)
 
 
-def _reason(content: bytes) -> str | None:
-    """The first ``errors[].reason`` of a Gmail error body, when it looks like a code."""
+def _error_codes(content: bytes) -> tuple[str | None, str | None]:
+    """The first ``errors[].reason`` and the ``status`` of a Gmail error body, each
+    when it looks like a code."""
     try:
         body: Any = json.loads(content)
     except (ValueError, TypeError):
-        return None
+        return None, None
     error = body.get("error") if isinstance(body, dict) else None
-    errors = error.get("errors") if isinstance(error, dict) else None
+    if not isinstance(error, dict):
+        return None, None
+    errors = error.get("errors")
     first = errors[0] if isinstance(errors, list) and errors else None
     reason = first.get("reason") if isinstance(first, dict) else None
-    if isinstance(reason, str) and reason.isalnum() and len(reason) <= 64:
-        return reason
+    status = error.get("status")
+    return _as_code(reason), _as_code(status)
+
+
+def _as_code(value: object) -> str | None:
+    if isinstance(value, str) and value.replace("_", "").isalnum() and len(value) <= 64:
+        return value
     return None
 
 
