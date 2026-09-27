@@ -301,6 +301,13 @@ SCRIPT_CALLS = frozenset(
 )
 ALLOWED_SCRIPTS = frozenset({(LINKEDIN / "preflight.py", "_read_fingerprint", "evaluate")})
 
+#: Where ``super().request(...)`` may appear, and how many times: the Gmail
+#: transport's overrides of ``httplib2``'s ``request`` methods, which call the
+#: method they override (#267). No browser is in reach there. Any other
+#: ``.request`` read, in this file or elsewhere, is still a finding.
+SUPER_REQUEST = "calls the request it overrides"
+ALLOWED_SUPER_REQUESTS = {PACKAGE / "campaigns" / "gmail.py": 3}
+
 # The attach point. Everything else goes through AttachBrowserProvider.
 CONNECT_CALL = "connect_over_cdp"
 CONNECTOR_MODULE = LINKEDIN / "browser.py"
@@ -528,7 +535,9 @@ def api_request_sends(source: str, path: Path = MEMORY) -> Iterator[Finding]:
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Attribute):
             continue
-        if node.attr == "request" and not (
+        if node.attr == "request" and _is_super_call(node.value):
+            yield Finding(path, node.lineno, SUPER_REQUEST)
+        elif node.attr == "request" and not (
             isinstance(node.value, ast.Name) and node.value.id == "response"
         ):
             yield Finding(path, node.lineno, "reads an API request context (ADR 0006)")
@@ -541,6 +550,17 @@ def api_request_sends(source: str, path: Path = MEMORY) -> Iterator[Finding]:
     for line, name in reached_names(source, path):
         if name == "APIRequestContext":
             yield Finding(path, line, "an API request context sends requests (ADR 0006)")
+
+
+def _is_super_call(node: ast.expr) -> bool:
+    """``super()``, with no arguments."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "super"
+        and not node.args
+        and not node.keywords
+    )
 
 
 def page_drivers(source: str, path: Path = MEMORY) -> Iterator[Finding]:
@@ -931,7 +951,16 @@ def test_no_code_path_alters_or_answers_a_request() -> None:
 def test_no_code_path_sends_through_an_api_request_context() -> None:
     """ADR 0006: no request of netkeeper's own from outside the page either."""
     findings = scan([PACKAGE], api_request_sends)
-    assert not findings, complain(findings, "netkeeper sends no requests of its own:")
+    for path, count in ALLOWED_SUPER_REQUESTS.items():
+        hits = [f for f in findings if f.path == path and f.detail == SUPER_REQUEST]
+        assert len(hits) == count, (
+            f"{path.name} no longer makes exactly {count} super().request calls ({len(hits)});"
+            " if they moved, update ALLOWED_SUPER_REQUESTS"
+        )
+    others = [
+        f for f in findings if not (f.path in ALLOWED_SUPER_REQUESTS and f.detail == SUPER_REQUEST)
+    ]
+    assert not others, complain(others, "netkeeper sends no requests of its own:")
 
 
 def test_the_observing_modules_only_listen_and_scroll() -> None:
@@ -1161,6 +1190,8 @@ def test_the_api_request_scanner_catches_a_send() -> None:
     assert list(api_request_sends("api = self._run.context.request\n"))
     assert list(api_request_sends("rc = await playwright.request.new_context()\n"))
     assert list(context_mutations("rc = await playwright.request.new_context()\n"))
+    assert list(api_request_sends("super().request(url)\n"))  # allowed by path only
+    assert list(api_request_sends("super(Page, page).request.get(url)\n"))
     assert not list(api_request_sends("body = response.request.post_data\n"))
     assert not list(api_request_sends("method = response.request.method\n"))
 
