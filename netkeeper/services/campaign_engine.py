@@ -38,6 +38,8 @@ The tick
    oldest due first. Status is what selects: a held pause keeps
    ``next_action_at``, so a due time alone means nothing (#242 review). A
    candidate whose next step is on LinkedIn is left unfired (P4) and reported.
+   Blocked and LinkedIn rows are left out of the query itself, so however many
+   there are, they never crowd out a row that could fire.
    For the rest, in this order, what the campaign or mailbox decides first:
 
    - Its campaign or mailbox is already blocked this tick: skipped.
@@ -52,10 +54,11 @@ The tick
    - Spacing: the mailbox's next send time (persisted) has not come, or its
      last firing was under the floor ago: the mailbox is blocked.
    - A reply is on the enrollment: it becomes ``replied``.
-   - Its next step already has an outbound message on the enrollment: refused
-     and parked (``next_action_at`` cleared). ``current_step`` alone is not
-     enough: after a merge the enrollment holds the other contact's messages
-     (#242 review). A discarded message never went out and does not count.
+   - Its next step already has an outbound message on the enrollment, of any
+     status: refused and parked (``next_action_at`` cleared). ``current_step``
+     alone is not enough: after a merge the enrollment holds the other contact's
+     messages (#242 review). A ``discarded`` one counts too: a merge can discard
+     a message the sender is holding (:func:`step_has_message`).
    - Another outbound message on it is still waiting (a draft nobody has sent
      yet): parked until it is sent.
    - Cadence: the next step's delay after the latest sent outbound message has
@@ -98,7 +101,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Final, Protocol
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from netkeeper.campaigns import schedule
@@ -151,7 +154,11 @@ RECHECK_AFTER: Final = timedelta(days=1)
 review, in another campaign ...) is checked again this much later, inside the window."""
 
 SCAN_LIMIT: Final = 500
-"""At most this many due enrollments are looked at in one tick. The rest wait a minute."""
+"""At most this many due enrollments are looked at in one tick. The rest wait a minute.
+Blocked and LinkedIn rows are left out of the query, so they never use it up."""
+
+PAGE_SIZE: Final = 50
+"""Due enrollments are read this many at a time, each page leaving out what is blocked."""
 
 ERROR_MAX_LENGTH: Final = 500
 """``messages.error`` holds one line; a sender's error is cut to fit."""
@@ -542,8 +549,13 @@ def _latest_sent(session: Session, user: User, enrollment_id: int) -> datetime |
 
 
 def step_has_message(session: Session, user: User, enrollment_id: int, step_id: int) -> bool:
-    """Whether the enrollment already holds an outbound message of this step that is not
-    ``discarded``: the step fired, whether or not anyone knows it went out (#242 review)."""
+    """Whether the enrollment already holds an outbound message of this step, whatever its
+    status: the step fired, whether or not anyone knows it went out (#242 review).
+
+    ``discarded`` counts too. A merge discards the outranked side's ``scheduled``
+    message, and that one may be in the sender's hands right now: if the process
+    stops before the send is recorded, only this refusal keeps the step from going
+    out a second time (review of #264). A parked enrollment is the safe outcome."""
     found = session.scalar(
         scoped(user, Message)
         .with_only_columns(Message.id)
@@ -551,7 +563,6 @@ def step_has_message(session: Session, user: User, enrollment_id: int, step_id: 
             Message.enrollment_id == enrollment_id,
             Message.step_id == step_id,
             Message.direction == MessageDirection.OUT,
-            Message.status != MessageStatus.DISCARDED,
         )
         .limit(1)
     )
@@ -730,6 +741,8 @@ def _spacing_release(
 class _Claim:
     firing: Firing
     step_id: int
+    # Drawn before the claim, so nothing about spacing can fail once the sender has sent.
+    gap: timedelta
 
 
 @dataclass(slots=True)
@@ -741,20 +754,20 @@ class _Blocks:
     windows: dict[int, schedule.SendWindow] = field(default_factory=dict)
 
 
-def _due(
-    session: Session, user: User, now: datetime
-) -> list[tuple[Enrollment, CampaignStep | None]]:
-    """Due enrollments, selected on status (#242 review), with their next step if any."""
-    step = and_(
+def _next_step_join(user: User) -> ColumnElement[bool]:
+    return and_(
         CampaignStep.user_id == user.id,
         CampaignStep.campaign_id == Enrollment.campaign_id,
         CampaignStep.position == func.coalesce(Enrollment.current_step, 0) + 1,
     )
-    rows = session.execute(
+
+
+def _selected(user: User, now: datetime) -> Select[tuple[Enrollment]]:
+    """Due enrollments, selected on status (#242 review), never on the due time alone."""
+    return (
         scoped(user, Enrollment)
-        .add_columns(CampaignStep)
         .join(Campaign, Campaign.id == Enrollment.campaign_id)
-        .outerjoin(CampaignStep, step)
+        .outerjoin(CampaignStep, _next_step_join(user))
         .where(
             Campaign.user_id == user.id,
             Campaign.status == CampaignStatus.ACTIVE,
@@ -762,11 +775,57 @@ def _due(
             Enrollment.next_action_at.is_not(None),
             Enrollment.next_action_at <= now,
         )
-        .order_by(Enrollment.next_action_at, Enrollment.id)
-        .limit(SCAN_LIMIT)
+    )
+
+
+def _due(
+    session: Session,
+    user: User,
+    now: datetime,
+    *,
+    seen: Collection[int],
+    campaigns: Collection[int],
+    mailboxes: Collection[int],
+) -> list[tuple[Enrollment, CampaignStep | None]]:
+    """The next page of due enrollments with their next step, oldest due first.
+
+    Left out in the query, so they can never fill the scan and starve the rest: the
+    rows this tick has already looked at, those of a campaign or mailbox blocked this
+    tick (a cap, a mailbox needing re-authorization ...), and those whose next step
+    is on LinkedIn (P4), which keep their due time (review of #264).
+    """
+    statement = (
+        _selected(user, now)
+        .add_columns(CampaignStep)
+        .where(or_(CampaignStep.id.is_(None), CampaignStep.channel != TemplateChannel.LINKEDIN))
+    )
+    if seen:
+        statement = statement.where(Enrollment.id.not_in(sorted(seen)))
+    if campaigns:
+        statement = statement.where(Enrollment.campaign_id.not_in(sorted(campaigns)))
+    if mailboxes:
+        statement = statement.where(
+            or_(Campaign.mailbox_id.is_(None), Campaign.mailbox_id.not_in(sorted(mailboxes)))
+        )
+    rows = session.execute(
+        statement.order_by(Enrollment.next_action_at, Enrollment.id)
+        .limit(PAGE_SIZE)
         .execution_options(populate_existing=True)
     ).tuples()
     return list(rows)
+
+
+def _linkedin_due(session: Session, user: User, now: datetime) -> list[int]:
+    """Some of the due enrollments whose next step is on LinkedIn, to report them (P4)."""
+    return list(
+        session.scalars(
+            _selected(user, now)
+            .with_only_columns(Enrollment.id)
+            .where(CampaignStep.channel == TemplateChannel.LINKEDIN)
+            .order_by(Enrollment.next_action_at, Enrollment.id)
+            .limit(PAGE_SIZE)
+        )
+    )
 
 
 def _next_due(session: Session, user: User, now: datetime) -> datetime | None:
@@ -796,8 +855,15 @@ class _Chooser:
     """One user's choose phase: see the module docstring, "The tick"."""
 
     def __init__(
-        self, session: Session, user: User, settings: Settings, now: datetime, result: TickResult
+        self,
+        session: Session,
+        user: User,
+        settings: Settings,
+        now: datetime,
+        result: TickResult,
+        rng: random.Random,
     ) -> None:
+        self.rng = rng
         self.session = session
         self.user = user
         self.settings = settings
@@ -841,10 +907,25 @@ class _Chooser:
 
     def choose(self) -> _Claim | None:
         claimed: _Claim | None = None
-        for enrollment, step in _due(self.session, self.user, self.now):
-            if claimed is not None:
+        for enrollment_id in _linkedin_due(self.session, self.user, self.now):
+            self.result.decisions.append(Decision(enrollment_id, False, (Skip.LINKEDIN_STEP,)))
+        seen: list[int] = []
+        while claimed is None and len(seen) < SCAN_LIMIT:
+            page = _due(
+                self.session,
+                self.user,
+                self.now,
+                seen=seen,
+                campaigns=self.blocks.campaigns.keys(),
+                mailboxes=self.blocks.mailboxes.keys(),
+            )
+            if not page:
                 break
-            claimed = self._consider(enrollment, step)
+            for enrollment, step in page:
+                seen.append(enrollment.id)
+                claimed = self._consider(enrollment, step)
+                if claimed is not None:
+                    break
         upcoming = _next_due(self.session, self.user, self.now)
         if upcoming is not None:
             self.wakes.append(upcoming)
@@ -859,6 +940,20 @@ class _Chooser:
             campaign = self.campaigns[enrollment.campaign_id] = _campaign(
                 session, user, enrollment.campaign_id
             )
+        if step is None:
+            # Positions are unique but may skip a number (a step deleted from a draft):
+            # the next step is the next position up, as _advance has it.
+            step = next(
+                (
+                    s
+                    for s in _steps(session, user, campaign.id)
+                    if s.position > (enrollment.current_step or 0)
+                ),
+                None,
+            )
+            if step is not None and step.channel is not TemplateChannel.EMAIL:
+                self.skip(enrollment, Skip.LINKEDIN_STEP)
+                return None
         if step is None:  # nothing left: the last step's record should have said so
             if enrollment.current_step is None:
                 self.park(enrollment, Skip.CAMPAIGN_BLOCKED, "no_steps")
@@ -1073,7 +1168,7 @@ class _Chooser:
             enrollment.id,
             message.id,
         )
-        return _Claim(firing, step.id)
+        return _Claim(firing, step.id, _spacing_gap(self.settings, self.rng))
 
 
 # --- the tick: recording ------------------------------------------------------------
@@ -1110,7 +1205,6 @@ def _record(
     result: SendResult,
     *,
     now: datetime,
-    rng: random.Random,
 ) -> None:
     """The outcome on the message, the enrollment's next step, and the mailbox's spacing."""
     firing = claim.firing
@@ -1145,13 +1239,17 @@ def _record(
         enrollment.current_step = max(enrollment.current_step or 0, firing.step_position)
         _advance(session, user, settings, campaign, enrollment)
     if firing.mailbox_id is not None:
-        gap = schedule.spacing_delay(
-            rng,
-            median_s=settings.campaigns.send_spacing_median_s,
-            floor_s=settings.campaigns.send_spacing_floor_s,
-        )
-        _set_next_send_at(session, user, firing.mailbox_id, max(at, now) + gap)
+        _set_next_send_at(session, user, firing.mailbox_id, max(at, now) + claim.gap)
     session.flush()
+
+
+def _spacing_gap(settings: Settings, rng: random.Random) -> timedelta:
+    """Raises ValueError for a spacing that is not one (see :func:`run_tick`)."""
+    return schedule.spacing_delay(
+        rng,
+        median_s=settings.campaigns.send_spacing_median_s,
+        floor_s=settings.campaigns.send_spacing_floor_s,
+    )
 
 
 def _send(sender: Sender, firing: Firing) -> SendResult:
@@ -1180,7 +1278,7 @@ def tick_user(
             user = session.get(User, user_id)
             if user is None:
                 return result
-            claim = _Chooser(session, user, settings, now, result).choose()
+            claim = _Chooser(session, user, settings, now, result, rng).choose()
         if claim is None:
             break
         claims.append(claim)
@@ -1189,7 +1287,7 @@ def tick_user(
             user = session.get(User, user_id)
             if user is None:
                 return result
-            _record(session, user, settings, claim, outcome, now=clock(), rng=rng)
+            _record(session, user, settings, claim, outcome, now=clock())
         result.fired.append((claim.firing, outcome))
     return result
 
@@ -1212,16 +1310,33 @@ def run_tick(
     if now.tzinfo is None:
         raise ValueError("the tick's clock must be timezone-aware")
     draw = rng if rng is not None else random.Random()  # noqa: S311 -- spacing, not crypto
+    try:
+        _spacing_gap(settings, random.Random(0))  # noqa: S311 -- a check, not crypto
+    except ValueError as exc:
+        # Refused before anything is claimed: sends are never a burst (review of #264).
+        log.error("campaign sends are held: %s", exc)
+        return []
     with session_scope(factory) as session:
         user_ids = list(
             session.scalars(select(User.id).where(User.kind == UserKind.LOCAL).order_by(User.id))
         )
-    return [
-        tick_user(
-            factory, user_id, settings=settings, sender=sender, now=now, clock=clock, rng=draw
-        )
-        for user_id in user_ids
-    ]
+    results: list[TickResult] = []
+    for user_id in user_ids:
+        try:
+            results.append(
+                tick_user(
+                    factory,
+                    user_id,
+                    settings=settings,
+                    sender=sender,
+                    now=now,
+                    clock=clock,
+                    rng=draw,
+                )
+            )
+        except Exception:  # one user's failure is not the next user's
+            log.exception("campaign tick failed for user %d", user_id)
+    return results
 
 
 # --- the minute loop ----------------------------------------------------------------
