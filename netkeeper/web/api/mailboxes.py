@@ -12,6 +12,11 @@ The flow, from the Settings page:
    exchanges the code, asks Gmail whose account it is, stores the token, and
    redirects to ``/settings?gmail=connected`` (or ``gmail=error&reason=<code>``).
 
+Arming (#277): ``POST /mailboxes/{id}/arm`` with ``draft``, then, as a separate
+step, ``send``, which answers ``409`` until a draft made there has been found by
+its Message-ID; ``POST /mailboxes/{id}/disarm`` undoes both. Like every state
+change, both need the CSRF header.
+
 No handler holds a session while it talks to Google. The access log never shows
 the callback's query string (``netkeeper.logging_setup``), which carries the code.
 """
@@ -33,11 +38,13 @@ from netkeeper.campaigns import gmail_oauth
 from netkeeper.config import Settings
 from netkeeper.db import session_scope
 from netkeeper.models import Mailbox, MailboxStatus, User
+from netkeeper.models.base import utcnow
 from netkeeper.services import keychain
 from netkeeper.services import mailboxes as service
 from netkeeper.services.events import Event, EventBus
 from netkeeper.web.deps import AuthProvider, CurrentUser, SessionDep, read_only
 from netkeeper.web.schemas import (
+    MailboxArmIn,
     MailboxOut,
     MailboxStatusOut,
     OAuthClientIn,
@@ -57,6 +64,7 @@ NOT_FOUND: Responses = {404: {"description": "No such mailbox for this user"}}
 NO_CLIENT: Responses = {409: {"description": "No OAuth client is stored yet"}}
 INVALID: Responses = {422: {"description": "Not a usable Desktop-app OAuth client"}}
 NO_KEYCHAIN: Responses = {503: {"description": "The Keychain refused"}}
+NOT_ARMABLE: Responses = {409: {"description": "Not armable this way yet; the detail says why"}}
 
 
 @contextmanager
@@ -65,6 +73,8 @@ def translate_errors() -> Iterator[None]:
         yield
     except service.MailboxNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except service.ArmRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except service.ClientNotConfigured as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except gmail_oauth.ClientConfigError as exc:
@@ -239,6 +249,32 @@ def disconnect_mailbox(
     session.commit()  # before the event, so a listener that reads again sees it
     _publish(request, event)
     return out
+
+
+@router.post("/mailboxes/{mailbox_id}/arm", responses={**NOT_FOUND, **NOT_ARMABLE})
+def arm_mailbox(
+    mailbox_id: int, body: MailboxArmIn, session: SessionDep, user: CurrentUser
+) -> MailboxOut:
+    """Let ``serve`` use the mailbox: ``draft`` first, ``send`` as a separate step (#277).
+    Applies from the engine's next claim."""
+    with translate_errors():
+        mailbox = service.arm(
+            session,
+            user,
+            service.get_mailbox(session, user, mailbox_id),
+            body.mode,
+            by=f"web (user {user.id})",
+            now=utcnow(),
+        )
+    return MailboxOut.model_validate(mailbox)
+
+
+@router.post("/mailboxes/{mailbox_id}/disarm", responses=NOT_FOUND)
+def disarm_mailbox(mailbox_id: int, session: SessionDep, user: CurrentUser) -> MailboxOut:
+    """Stop ``serve`` using the mailbox from the engine's next claim (#277)."""
+    with translate_errors():
+        mailbox = service.disarm(session, user, service.get_mailbox(session, user, mailbox_id))
+    return MailboxOut.model_validate(mailbox)
 
 
 def _back(outcome: str, reason: str | None) -> RedirectResponse:
