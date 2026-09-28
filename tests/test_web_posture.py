@@ -1,7 +1,7 @@
 """``GET /posture``: the same report `netkeeper posture` prints, as data (P2-12).
 
 Read-only, no browser probe (CLAUDE.md: never await browser work in a request
-handler) -- the session protection here is always reported unknown, never
+handler) -- the session protection here comes from recorded evidence (#282), never
 checked live. The two-user isolation of this per-user report is in
 ``tests/isolation/test_isolation.py``.
 """
@@ -46,20 +46,20 @@ async def test_the_shape_is_a_full_report(client: httpx.AsyncClient, running_app
     assert report["local_time"]
 
 
-async def test_the_browser_session_is_always_unknown_here_never_assumed_healthy(
+async def test_with_no_evidence_the_browser_session_is_unknown_never_assumed_healthy(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
     """This endpoint never attaches (CLAUDE.md: no browser work in a request
-    handler), so it always calls `posture()` with `probe=None` — the
-    linkedin-session protection is always reported unknown here, whatever the
-    real session looks like. A live check stays `netkeeper preflight`, a
-    terminal command; without it, `ok` can never read true through this route
-    alone, which is correct: this report cannot see what it never asked."""
+    handler), so it always calls `posture()` with `probe=None`. The
+    linkedin-session row answers from recorded evidence (#282,
+    tests/test_session_evidence.py); with none -- no preflight, no run that read
+    LinkedIn -- it is unknown, and `ok` cannot read true: this report cannot
+    see what nothing ever checked."""
     report = (await client.get("/api/v1/posture")).json()
 
     session_row = next(row for row in report["protections"] if row["name"] == "linkedin session")
     assert session_row["status"] == "unknown"
-    assert session_row["value"] == "not probed"
+    assert session_row["value"] == "not checked yet"
     assert session_row["warnings"] != []
     assert "netkeeper preflight" in session_row["warnings"][0]
     assert report["ok"] is False

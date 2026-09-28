@@ -88,7 +88,12 @@ from netkeeper.services.budgets import (
 )
 from netkeeper.services.budgets import status as budget_status
 from netkeeper.services.linkedin_accounts import find_account, scheduled_runs_armed
-from netkeeper.services.linkedin_session import session_flag
+from netkeeper.services.linkedin_session import (
+    SessionEvidence,
+    SessionFlag,
+    last_session_evidence,
+    session_flag,
+)
 from netkeeper.services.runs import latest_run
 from netkeeper.services.runs import view as run_view
 from netkeeper.services.scheduler import (
@@ -171,6 +176,14 @@ MAX_PLAUSIBLE_HOLD_HOURS: Final = 4.0
 #: leaves one unbroken stream of requests, which is the shape bursts exist to
 #: avoid.
 MIN_BURST_BREAK_S: Final = 60.0
+
+
+#: How long a recorded "logged in" (a preflight, a probe, or a run that read
+#: LinkedIn) counts as current on a report that ran no probe of its own (#282).
+#: Past it the session row still reads on, with a warning: LinkedIn sessions
+#: last weeks, but a day is long enough that "it worked yesterday" is worth
+#: checking again before trusting an unattended run with it.
+SESSION_EVIDENCE_FRESH_FOR: Final = timedelta(hours=24)
 
 
 class Status(enum.StrEnum):
@@ -404,7 +417,13 @@ def posture(
     protections: list[Protection] = [
         _browser_mode(browser_mode, linkedin.cdp_url),
         _activity_lock(lock, now=now, account=activity_lock.account_key(account_id)),
-        _linkedin_session(probe),
+        _linkedin_session(
+            probe,
+            evidence=last_session_evidence(session, user, account_id),
+            flag=session_flag(session, user),
+            now=now,
+            zone=zone,
+        ),
         _session_flag(session, user),
         _active_hours(linkedin, zone, zone_warning, now=now, local_now=local_now),
         _account_timezone(user, linkedin.timezone),
@@ -689,23 +708,27 @@ def _suspicious_holder(
     return tuple(warnings)
 
 
-def _linkedin_session(probe: SessionProbe | None) -> Protection:
+def _linkedin_session(
+    probe: SessionProbe | None,
+    *,
+    evidence: SessionEvidence | None = None,
+    flag: SessionFlag | None = None,
+    now: datetime,
+    zone: ZoneInfo,
+) -> Protection:
     """Whether a LinkedIn session is actually present, from a probe of the cookie jar.
 
     Cookie names only; a value cannot reach here because :class:`SessionProbe`
     has nowhere to put one.
+
+    With no live probe (the web page, which may not touch the browser, or
+    ``posture --no-probe``), the row answers from the last evidence instead
+    (#282): what ``netkeeper preflight`` or ``posture --probe`` last found, or
+    the newest run that read LinkedIn without flagging the session, whichever is
+    newer. See :func:`_session_from_evidence`.
     """
     if probe is None:
-        return Protection(
-            name="linkedin session",
-            status=Status.UNKNOWN,
-            value="not probed",
-            warnings=(
-                "no browser probe was run, so whether this Chrome profile still holds a"
-                " LinkedIn session is unknown. `netkeeper preflight` answers it, and"
-                " `netkeeper posture --probe` folds the answer into this report",
-            ),
-        )
+        return _session_from_evidence(evidence, flag, now=now, zone=zone)
     if not probe.attached:
         return Protection(
             name="linkedin session",
@@ -737,6 +760,89 @@ def _linkedin_session(probe: SessionProbe | None) -> Protection:
         status=Status.ON,
         value=f"logged in ({names})",
     )
+
+
+def _session_from_evidence(
+    evidence: SessionEvidence | None,
+    flag: SessionFlag | None,
+    *,
+    now: datetime,
+    zone: ZoneInfo,
+) -> Protection:
+    """The session row from recorded evidence, for a report that ran no probe (#282).
+
+    * Nothing ever recorded: unknown, and it says how to get an answer.
+    * A session flag is up: off, whatever the evidence says. A flag is what
+      LinkedIn itself answered, and a live cookie is not proof a checkpoint is
+      resolved (spec 9.7).
+    * The last evidence found no session: off.
+    * Logged in within :data:`SESSION_EVIDENCE_FRESH_FOR`: on.
+    * Logged in, but longer ago: on, with a warning that it may have expired.
+    """
+    if evidence is None and flag is None:
+        return Protection(
+            name="linkedin session",
+            status=Status.UNKNOWN,
+            value="not checked yet",
+            warnings=(
+                "nothing has checked the LinkedIn session yet: no `netkeeper preflight`"
+                " and no run that read LinkedIn. Run `netkeeper preflight` in a terminal;"
+                " this report shows what it finds",
+            ),
+        )
+    if flag is not None:
+        when = f"{local_time_of(flag.flagged_at, zone):%Y-%m-%d %H:%M}"
+        return Protection(
+            name="linkedin session",
+            status=Status.OFF,
+            value=f"flagged {flag.outcome.value} {when}",
+            warnings=(
+                f"LinkedIn answered with a {flag.outcome.value.replace('_', ' ')} on {when},"
+                " so no run can use this session until the session flag is cleared (see"
+                " the session flag row)",
+            ),
+        )
+    assert evidence is not None
+    when = f"{local_time_of(evidence.observed_at, zone):%Y-%m-%d %H:%M}"
+    age = now - evidence.observed_at
+    ago = _ago(age)
+    if not evidence.logged_in:
+        return Protection(
+            name="linkedin session",
+            status=Status.OFF,
+            value=f"no session at {when} by {evidence.source} ({ago})",
+            warnings=(
+                f"the last check ({evidence.source}, {when}) found no LinkedIn session in"
+                " this Chrome profile, so no job can run. Log in once in the netkeeper"
+                " Chrome profile, then run `netkeeper preflight`",
+            ),
+        )
+    value = f"last confirmed logged in {when} by {evidence.source} ({ago})"
+    if age <= SESSION_EVIDENCE_FRESH_FOR:
+        return Protection(name="linkedin session", status=Status.ON, value=value)
+    hours = SESSION_EVIDENCE_FRESH_FOR.total_seconds() / 3600
+    return Protection(
+        name="linkedin session",
+        status=Status.ON,
+        value=value,
+        warnings=(
+            f"the session was last confirmed {ago}, more than {hours:.0f} h ago, so it"
+            " may have expired since. `netkeeper preflight` checks it again, and this"
+            " report shows the result",
+        ),
+    )
+
+
+def _ago(age: timedelta) -> str:
+    """``age`` as a person says it: "just now", "25 min ago", "3 h ago", "2 days ago"."""
+    minutes = max(int(age.total_seconds() // 60), 0)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} min ago"
+    if minutes < 48 * 60:
+        return f"{minutes // 60} h ago"
+    return f"{minutes // (24 * 60)} days ago"
 
 
 def _session_flag(session: Session, user: User) -> Protection:

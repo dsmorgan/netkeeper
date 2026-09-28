@@ -112,7 +112,7 @@ def test_posture_exits_non_zero_when_anything_warned(cli_db: sessionmaker[Sessio
 
     assert result.exit_code == 1
     assert "NOT clear" in result.output
-    assert "no browser probe was run" in result.output
+    assert "nothing has checked the LinkedIn session yet" in result.output
 
 
 def test_posture_reports_a_browser_it_could_not_attach_to(

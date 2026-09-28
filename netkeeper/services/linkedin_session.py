@@ -32,8 +32,9 @@ from sqlalchemy.orm import Session
 
 from netkeeper.db import is_writer
 from netkeeper.linkedin.classify import Outcome
-from netkeeper.models import User
+from netkeeper.models import SyncRun, SyncRunKind, SyncRunStatus, User
 from netkeeper.models.base import utcnow
+from netkeeper.scoping import scoped
 from netkeeper.services.settings_kv import delete_setting, get_setting, set_setting
 
 SESSION_FLAG_KEY: Final = "linkedin.session_flag"
@@ -144,3 +145,158 @@ def session_flag(session: Session, user: User) -> SessionFlag | None:
     except ValueError:
         return None
     return SessionFlag(outcome=outcome, url=url, flagged_at=flagged_at)
+
+
+# --- the last evidence about the session (#282) ---------------------------------------
+
+SESSION_EVIDENCE_KEY: Final = "linkedin.session_evidence"
+"""The ``settings_kv`` key holding the last :class:`SessionEvidence` a browser
+check recorded (``netkeeper preflight``, ``netkeeper posture --probe``)."""
+
+#: How many of the account's newest ended runs :func:`run_evidence` looks through
+#: for one that read LinkedIn. A handful of refused or empty runs in a row is
+#: ordinary (a flag, heat, a budget spent); more than this and the evidence is
+#: stale anyway.
+RUN_EVIDENCE_LOOKBACK: Final = 20
+
+_FLAG_OUTCOME_VALUES: Final = frozenset(outcome.value for outcome in _FLAGGABLE)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionEvidence:
+    """What the last look at the LinkedIn session found, when, and who looked.
+
+    ``source`` is ``"preflight"``, ``"posture --probe"``, or ``"run <id>"``.
+    Cookie *names* only, never a value: this is what a web page shows when it
+    cannot probe the browser itself (a request handler may not, spec 9.9), and it
+    must not carry more than preflight read.
+    """
+
+    logged_in: bool
+    source: str
+    observed_at: datetime
+    cookie_names: tuple[str, ...] = ()
+
+
+def record_session_evidence(
+    session: Session,
+    user: User,
+    *,
+    logged_in: bool,
+    source: str,
+    cookie_names: tuple[str, ...] = (),
+    now: datetime | None = None,
+) -> SessionEvidence:
+    """Store what a browser check just found about ``user``'s LinkedIn session.
+
+    Called by ``netkeeper preflight`` and ``netkeeper posture --probe`` after
+    they read the cookie jar, so a later page load (which never probes) can say
+    what they found. Needs a writer session. Replaces any earlier record: only
+    the latest one is kept.
+    """
+    if not is_writer(session):
+        raise RuntimeError(
+            "record_session_evidence() needs a writer session; use session_scope(write=True)"
+        )
+    evidence = SessionEvidence(
+        logged_in=logged_in,
+        source=source,
+        observed_at=utcnow() if now is None else now,
+        cookie_names=tuple(cookie_names),
+    )
+    set_setting(
+        session,
+        user,
+        SESSION_EVIDENCE_KEY,
+        {
+            "logged_in": evidence.logged_in,
+            "source": evidence.source,
+            "observed_at": evidence.observed_at.isoformat(),
+            "cookie_names": list(evidence.cookie_names),
+        },
+    )
+    return evidence
+
+
+def recorded_evidence(session: Session, user: User) -> SessionEvidence | None:
+    """The last evidence a browser check stored, or ``None``. Read-only.
+
+    Anything unreadable reads as "nothing recorded", the same way
+    :func:`session_flag` treats a value it cannot parse: the posture row then
+    says unknown, which is the honest answer.
+    """
+    stored = get_setting(session, user, SESSION_EVIDENCE_KEY)
+    if not isinstance(stored, dict):
+        return None
+    logged_in = stored.get("logged_in")
+    source = stored.get("source")
+    observed_at_value = stored.get("observed_at")
+    names = stored.get("cookie_names", [])
+    if not isinstance(logged_in, bool) or not isinstance(source, str):
+        return None
+    if not isinstance(observed_at_value, str) or not isinstance(names, list):
+        return None
+    try:
+        observed_at = datetime.fromisoformat(observed_at_value)
+    except ValueError:
+        return None
+    return SessionEvidence(
+        logged_in=logged_in,
+        source=source,
+        observed_at=observed_at,
+        cookie_names=tuple(name for name in names if isinstance(name, str)),
+    )
+
+
+def run_evidence(session: Session, user: User, account_id: int) -> SessionEvidence | None:
+    """The newest run on ``account_id`` that shows the session worked, as evidence. Read-only.
+
+    A run counts when it ended (``completed`` or ``aborted``), flagged nothing,
+    was not stopped by a checkpoint or a login wall, and actually read LinkedIn:
+    a connections sync that read at least one connection, or an enrichment that
+    harvested at least one profile. A logged-out page is classified and flags
+    the session, so a run that read something and flagged nothing was logged in
+    when it did. Refused runs, empty runs, and failed runs say nothing either way
+    and are skipped.
+    """
+    rows = session.scalars(
+        scoped(user, SyncRun)
+        .where(
+            SyncRun.linkedin_account_id == account_id,
+            SyncRun.status.in_((SyncRunStatus.COMPLETED, SyncRunStatus.ABORTED)),
+            SyncRun.completed_at.is_not(None),
+        )
+        .order_by(SyncRun.completed_at.desc(), SyncRun.id.desc())
+        .limit(RUN_EVIDENCE_LOOKBACK)
+    ).all()
+    for run in rows:
+        if run.completed_at is not None and _read_linkedin(run):
+            return SessionEvidence(
+                logged_in=True, source=f"run {run.id}", observed_at=run.completed_at
+            )
+    return None
+
+
+def _read_linkedin(run: SyncRun) -> bool:
+    counts = run.counts_json
+    if not isinstance(counts, dict) or counts.get("session_flagged") is not False:
+        return False
+    if counts.get("outcome") in _FLAG_OUTCOME_VALUES:
+        return False
+    read = counts.get("completed") if run.kind is SyncRunKind.ENRICH else counts.get("connections")
+    return isinstance(read, int) and not isinstance(read, bool) and read > 0
+
+
+def last_session_evidence(session: Session, user: User, account_id: int) -> SessionEvidence | None:
+    """The newer of :func:`recorded_evidence` and :func:`run_evidence`. Read-only.
+
+    On a tie, a "no session" record wins over a run that read LinkedIn.
+    """
+    candidates = [
+        found
+        for found in (recorded_evidence(session, user), run_evidence(session, user, account_id))
+        if found is not None
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda found: (found.observed_at, not found.logged_in))

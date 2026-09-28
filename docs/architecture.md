@@ -536,6 +536,8 @@ Enrichment order: contacts you are about to enroll in a campaign that lack the c
 
 Heat (`linkedin/heat.py`): each `Throttled` or `Checkpoint` adds to a score that decays exponentially, computed on read. While warm, `human_delay` medians stretch and the per-run budget shrinks, never to zero. Above `heat_skip_threshold` the scheduler skips browser jobs entirely. The Settings page shows the level, when it was last raised, and when runs resume. A manual clear exists for the case where the block was something else.
 
+*As built (#282): the session row with no probe.* The posture report on the Settings page never probes the browser (a request handler may not), so its LinkedIn session row answers from the last evidence the database holds. `netkeeper preflight` and `netkeeper posture --probe` record what they found (logged in or not, the cookie names, the time, which command) in `settings_kv` (`linkedin.session_evidence`); an unreadable cookie jar or a failed attach records nothing. A run counts as evidence when it ended `completed` or `aborted`, flagged nothing, and read something: a connections sync that read a connection, or an enrichment that harvested a profile. The newer of the two wins, and on a tie a "no session" record wins. The row reads `on` while the evidence is at most 24 hours old, `on` with a warning after that, `off` when the last check found no session or while a session flag is up (a flag always wins), and `unknown` only when nothing was ever recorded.
+
 ### 9.8 Sync semantics and change detection
 
 Unlike Instagram's follower lists, LinkedIn's connections list is complete, so removal detection is simpler but still debounced:

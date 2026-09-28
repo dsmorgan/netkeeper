@@ -84,7 +84,11 @@ from netkeeper.services.linkedin_accounts import (
     ensure_account,
     find_account,
 )
-from netkeeper.services.linkedin_session import clear_session_flag, session_flag
+from netkeeper.services.linkedin_session import (
+    clear_session_flag,
+    record_session_evidence,
+    session_flag,
+)
 from netkeeper.services.pacing import profiles as pacing_profiles
 from netkeeper.services.posture import SessionProbe, posture
 from netkeeper.services.posture import render as render_posture
@@ -385,12 +389,18 @@ def preflight(ctx: typer.Context) -> None:
     flag is different -- a live session cookie is not proof a checkpoint is
     resolved -- so it is left in place, with a line saying so and naming
     `netkeeper linkedin clear-flag` (#168 review, F1).
+
+    What it found about the session (logged in or not, and the cookie names) is
+    recorded, so the Settings page's posture report, which never probes the
+    browser itself, can show it (#282).
     """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
     provider = AttachBrowserProvider(settings.linkedin.cdp_url)
     report = asyncio.run(run_preflight(provider, _browser_lock_key()))
     for line in _clear_session_flag_after_login(report):
+        typer.echo(line)
+    for line in _record_session_evidence(report, source="preflight"):
         typer.echo(line)
     for line in _preflight_lines(report):
         typer.echo(line)
@@ -496,6 +506,58 @@ def _clear_session_flag_after_login(report: PreflightReport) -> list[str]:
             return []
         log.warning("could not clear the session flag: %s", exc)
         return [f"could not clear the session flag: {exc.orig or exc}"]
+    finally:
+        engine.dispose()
+
+
+def _record_session_evidence(report: PreflightReport, *, source: str) -> list[str]:
+    """Record what a browser check found about the session, for pages that never probe (#282).
+
+    Only a definite answer is recorded: logged in, or no session in the profile.
+    An unreadable cookie jar or a failed attach says nothing about the session
+    and leaves the last record as it was. Cookie names only, never a value.
+
+    The same fresh-install rules as :func:`_clear_session_flag_after_login`: no
+    database file means nothing is created and nothing printed, a missing schema
+    or no local user is silent, and any other database error is one line and
+    never fails the command. The write is its own short writer session, after
+    the browser work, so it never holds the write lock while attaching.
+    """
+    if not report.attached or report.login is LoginState.UNKNOWN:
+        return []
+    url = database_url()
+    parsed_url = make_url(url)
+    sqlite_file = parsed_url.database
+    is_sqlite_file = parsed_url.get_backend_name() == "sqlite" and sqlite_file not in (
+        None,
+        ":memory:",
+    )
+    if is_sqlite_file and sqlite_file is not None and not Path(sqlite_file).exists():
+        return []
+    engine = make_engine(url)
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = session.scalars(
+                select(User).where(User.kind == UserKind.LOCAL).order_by(User.id)
+            ).first()
+            if user is None:
+                return []
+            record_session_evidence(
+                session,
+                user,
+                logged_in=report.login is LoginState.LOGGED_IN,
+                source=source,
+                cookie_names=report.session_cookies,
+            )
+        return []
+    except OperationalError as exc:
+        if _is_missing_schema(exc):
+            log.debug("no schema to record the session check in yet: %s", exc)
+            return []
+        log.warning("could not record the session check: %s", exc)
+        return [f"could not record the session check: {exc.orig or exc}"]
     finally:
         engine.dispose()
 
@@ -645,8 +707,8 @@ def posture_command(
         typer.Option(
             "--probe/--no-probe",
             help="Attach to Chrome and read the LinkedIn session, as `netkeeper preflight`"
-            " does. --no-probe answers from the database alone and reports the session as"
-            " unknown.",
+            " does, and record what it found. --no-probe answers from the database alone:"
+            " the session from the last recorded check or run, or unknown.",
         ),
     ] = True,
     account: Annotated[
@@ -666,18 +728,23 @@ def posture_command(
     runs resume, the weekend multiplier, LinkedIn auto-send, and the session
     flag a checkpoint or a login wall raises.
 
-    Reads only: it takes no write lock and changes nothing. Exits non-zero when
-    anything warned, so it can gate a script as well as inform a person. It
-    attaches to Chrome to check the LinkedIn session, the same way `netkeeper
-    preflight` does; --no-probe skips that and reports the session as unknown
-    rather than assuming it is fine.
+    The report itself only reads. Exits non-zero when anything warned, so it can
+    gate a script as well as inform a person. It attaches to Chrome to check the
+    LinkedIn session, the same way `netkeeper preflight` does, and records what
+    it found for the Settings page (#282), in one short write before the report
+    is read. --no-probe skips the probe and reports the session from the last
+    recorded check or the newest run that read LinkedIn, or as unknown when
+    there is neither, rather than assuming it is fine.
     """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
     provider = _provider(settings)
-    session_probe = (
-        _session_probe(asyncio.run(run_preflight(provider, _browser_lock_key()))) if probe else None
-    )
+    session_probe: SessionProbe | None = None
+    if probe:
+        preflight_report = asyncio.run(run_preflight(provider, _browser_lock_key()))
+        for line in _record_session_evidence(preflight_report, source="posture --probe"):
+            typer.echo(line, err=True)
+        session_probe = _session_probe(preflight_report)
     engine = make_engine(database_url())
     try:
         factory = make_session_factory(engine)
