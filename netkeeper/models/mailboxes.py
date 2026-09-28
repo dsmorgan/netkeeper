@@ -13,6 +13,16 @@ here or in any other table holds a token (spec 15, 18).
   client for it. Email steps pause until someone authorizes again.
 - ``disabled``: a person disconnected it. Its token is gone from the Keychain.
 
+Arming (#277). ``serve`` hands a mailbox's campaign steps to Gmail only while a
+person has armed it, and every mailbox starts disarmed. ``armed_at`` is when it
+was armed (NULL: disarmed; nothing is claimed on it and Gmail is never called for
+it). Armed, it drafts every step, a ``send`` step included, until
+``send_armed_at`` is set too: the separate step that lets ``send`` steps go out
+with ``messages.send``. That step needs ``message_id_verified_at``: when a search
+by Message-ID first found a draft netkeeper made on this mailbox, the live check
+that Gmail keeps the Message-ID reconcile depends on. ``armed_by`` says who took
+the latest arming step (``cli (<login>)`` or ``web (user <id>)``).
+
 A mailbox is never deleted, because the campaigns that name it keep pointing at
 it: ``campaigns.mailbox_id`` has no ``ON DELETE`` action. In v1 a user has one
 live mailbox (spec 8.5); :mod:`netkeeper.services.mailboxes` enforces that.
@@ -47,6 +57,16 @@ class MailboxStatus(enum.StrEnum):
     OK = "ok"
     REAUTH_REQUIRED = "reauth_required"
     DISABLED = "disabled"
+
+
+class MailboxArm(enum.StrEnum):
+    """What an armed mailbox may do (#277). Not stored: read from the arming columns."""
+
+    DRAFT = "draft"
+    SEND = "send"
+
+
+MAILBOX_ARMED_BY_MAX_LENGTH: Final = 100
 
 
 class Mailbox(UserOwned, TimestampMixin, Base):
@@ -92,3 +112,15 @@ class Mailbox(UserOwned, TimestampMixin, Base):
     generation: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    # Arming (#277; see the module docstring). NULL ``armed_at`` is disarmed.
+    armed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    send_armed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    armed_by: Mapped[str | None] = mapped_column(String(MAILBOX_ARMED_BY_MAX_LENGTH))
+    message_id_verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+    @property
+    def arm(self) -> MailboxArm | None:
+        """None while disarmed; ``send`` only once both arming steps are taken."""
+        if self.armed_at is None:
+            return None
+        return MailboxArm.DRAFT if self.send_armed_at is None else MailboxArm.SEND
