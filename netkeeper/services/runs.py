@@ -57,7 +57,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings
-from netkeeper.db import is_writer, off_loop, session_scope
+from netkeeper.db import CancelledWhileFailing, is_writer, off_loop, session_scope
 from netkeeper.linkedin import activity_lock, pacing
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import (
@@ -537,8 +537,11 @@ async def recording(
 
     A refusal (:class:`SessionFlagged`, :class:`HeatSkipped`) is ``failed``
     with that reason; a cancellation from outside the run (the process
-    shutting down) is ``aborted``, "interrupted", keeping what completed; any
-    other exception is ``failed``, with the first line of its message. A run
+    shutting down) is ``aborted``, "interrupted", keeping what completed,
+    unless the database write in flight when it landed failed too
+    (:class:`~netkeeper.db.CancelledWhileFailing`, #266), which is ``failed``,
+    "error"; any other exception is ``failed``, with the first line of its
+    message. A run
     the block already finished is left as it is.
 
     The ending is written off the event loop (:func:`netkeeper.db.off_loop`,
@@ -561,6 +564,20 @@ async def recording(
     except HeatSkipped as exc:
         await off_loop(
             _finish_quietly, factory, user_id, run_id, clock, SyncRunStatus.FAILED, "heat_skip", exc
+        )
+        raise
+    except CancelledWhileFailing as exc:
+        # The process is shutting down, but the write in flight failed on its own
+        # (#266): that is a failure, not a clean interruption.
+        await off_loop(
+            _finish_quietly,
+            factory,
+            user_id,
+            run_id,
+            clock,
+            SyncRunStatus.FAILED,
+            "error",
+            exc.error,
         )
         raise
     except asyncio.CancelledError:

@@ -203,6 +203,20 @@ _db_executor: ThreadPoolExecutor | None = None
 _db_executor_lock = threading.Lock()
 
 
+class CancelledWhileFailing(asyncio.CancelledError):
+    """A cancel that arrived while :func:`off_loop` work was in flight, and the work failed.
+
+    Still a :class:`asyncio.CancelledError`, so the task is cancelled exactly as
+    before; ``error`` is what the work itself raised, so a handler recording the
+    run's ending can record the failure (``failed``, "error") rather than a
+    clean interruption (#266). The failure is also this exception's ``__cause__``.
+    """
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__(f"cancelled while background database work failed: {error!r}")
+        self.error = error
+
+
 def _executor() -> ThreadPoolExecutor:
     global _db_executor
     with _db_executor_lock:
@@ -239,7 +253,10 @@ async def off_loop[**P, T](fn: Callable[P, T], /, *args: P.args, **kwargs: P.kwa
     ``fn`` to finish (its transaction committed or rolled back) and then
     propagates, so a shutdown never abandons a write partway or races the
     ending a cancel handler records next. Its result is discarded, as the code
-    after it would not have run either; an exception it raised is logged.
+    after it would not have run either. An exception it raised is logged, and
+    the cancel propagates as :class:`CancelledWhileFailing` carrying it, so the
+    handler that records the run's ending can tell a write that failed from one
+    that was merely interrupted (#266).
     """
     loop = asyncio.get_running_loop()
     context = contextvars.copy_context()
@@ -258,4 +275,5 @@ async def off_loop[**P, T](fn: Callable[P, T], /, *args: P.args, **kwargs: P.kwa
                 "background database work failed while its task was being cancelled",
                 exc_info=error,
             )
+            raise CancelledWhileFailing(error) from error
         raise
