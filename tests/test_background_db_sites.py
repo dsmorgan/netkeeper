@@ -201,6 +201,52 @@ async def test_worker_records_its_own_interrupted_ending_off_the_loop_on_a_cance
     )
 
 
+class _ProviderWhoseWriteFailsOnCancel:
+    """A provider whose attach waits on a database write that fails after a cancel lands.
+
+    Stands in for any cancel that reaches the worker, not the runner, while background
+    database work is in flight: the worker's own handler has to record it.
+    """
+
+    mode = "attach"
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def _write(self) -> None:
+        self.started.set()
+        self.release.wait(5)
+        raise RuntimeError("disk I/O error")
+
+    @asynccontextmanager
+    async def run(self, key: str) -> AsyncIterator[Any]:
+        await off_loop(self._write)
+        yield None  # pragma: no cover - the write never succeeds
+
+
+async def test_worker_records_a_cancel_that_carries_a_failed_write_as_failed(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Review mutant M7: the worker's own ``CancelledWhileFailing`` branch."""
+    run_id, user_id = _new_run(session_factory)
+    provider = _ProviderWhoseWriteFailsOnCancel()
+    task = asyncio.create_task(_worker(provider, session_factory).execute(run_id, user_id))
+    assert await asyncio.to_thread(provider.started.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0.02)
+    provider.release.set()
+    with pytest.raises(CancelledWhileFailing):
+        await task
+
+    run = _run(session_factory, run_id, user_id)
+    assert (run.status, run.stop_reason, run.error) == (
+        SyncRunStatus.FAILED,
+        "error",
+        "RuntimeError: disk I/O error",
+    )
+
+
 async def test_worker_finish_after_an_error_before_the_runner_stays_off_the_loop(
     engine: Engine, session_factory: sessionmaker[Session]
 ) -> None:

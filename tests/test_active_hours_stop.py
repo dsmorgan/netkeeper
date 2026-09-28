@@ -17,6 +17,7 @@ from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import factories
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -37,9 +38,13 @@ from netkeeper.linkedin.enrich import StopReason
 from netkeeper.linkedin.pacing import outside_window_message
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger
 from netkeeper.scoping import install_scope_guard
-from netkeeper.services import runs
+from netkeeper.services import enrich_plan, runs
 from netkeeper.services.posture import active_hours_source, describe_active_hours
 from netkeeper.services.users import ensure_local_user
+
+#: Every CLI command here runs with a provider that fails the test if a run reaches it
+#: (#293 review): the refusal under test must hold without any browser behind it.
+pytestmark = pytest.mark.usefixtures("no_browser_for_cli_runs")
 
 NEW_YORK = "America/New_York"
 #: 03:00 in New York on a Wednesday: before the default 08:30 window.
@@ -107,6 +112,33 @@ async def test_the_api_refuses_a_manual_run_outside_the_window_and_records_nothi
     assert refused.json()["detail"].startswith("outside active hours (08:30-21:30")
     assert "`[linkedin] active_hours`" in refused.json()["detail"]
     assert connector.attaches == 0 and _rows(bare_engine) == []
+
+
+async def test_the_api_refuses_a_resume_outside_the_window_and_records_nothing(
+    bare_engine: Engine, no_frontend: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review mutant M3c: a resume is a manual run too, refused before its row exists."""
+    monkeypatch.setattr("netkeeper.web.api.linkedin.utcnow", lambda: TEN_PM)
+    provider, connector = fake_provider()
+    async with served(bare_engine, Settings(), provider, Clock(START)) as app:
+        with session_scope(app.state.session_factory, write=True) as session:
+            user = ensure_local_user(session, settings=Settings())
+            ids = [factories.make_contact(session, user).id for _ in range(2)]
+            aborted = runs.create_run(
+                session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=TWO_PM
+            )
+            enrich_plan.store_plan(session, user, aborted.id, ids)
+            runs.finish_run(session, user, aborted.id, status=SyncRunStatus.ABORTED, now=TWO_PM)
+            aborted_id = aborted.id
+        async with client_for(app) as client:
+            refused = await client.post(
+                f"/api/v1/linkedin/runs/{aborted_id}/resume", json={}, headers=HEADERS
+            )
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"].startswith("outside active hours (08:30-21:30")
+    assert connector.attaches == 0
+    assert [run.id for run in _rows(bare_engine)] == [aborted_id]  # no resume recorded
 
 
 @pytest.fixture

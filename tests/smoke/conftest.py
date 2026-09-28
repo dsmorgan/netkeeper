@@ -63,8 +63,13 @@ def _bounded(test: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     here = os.path.dirname(__file__)
     for item in items:
+        if not str(item.path).startswith(here):
+            continue
+        # The explicit opt-out from tests/conftest.py's real-browser guard: these
+        # tests drive a real, isolated Chrome. Port 9222 stays blocked even so.
+        item.add_marker(pytest.mark.real_cdp)
         test = getattr(item, "obj", None)
-        if str(item.path).startswith(here) and inspect.iscoroutinefunction(test):
+        if inspect.iscoroutinefunction(test):
             item.obj = _bounded(test)  # type: ignore[attr-defined]
 
 

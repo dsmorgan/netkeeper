@@ -114,6 +114,7 @@ testpaths = ["tests"]
 filterwarnings = ["error::DeprecationWarning:netkeeper.*"]
 markers = [
   "slow: seconds of CPU on purpose (the week simulations); skipped by `make test-fast`, and given tests/time_limit.py's longer limit",
+  "real_cdp: may attach to a real, isolated Chrome over CDP (the opt-in smoke suite); port 9222 stays blocked even then (tests/conftest.py)",
 ]
 
 [tool.towncrier]
