@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from gmail_fakes import CLIENT_ID, CLIENT_SECRET, FAKE_EMAIL, FakeGoogle, MemoryKeyring
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 from typer.testing import CliRunner
 
@@ -22,8 +23,9 @@ from netkeeper import migrations
 from netkeeper.campaigns import gmail_oauth
 from netkeeper.cli import app as cli
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
-from netkeeper.models import MailboxStatus
-from netkeeper.scoping import install_scope_guard
+from netkeeper.models import Mailbox, MailboxArm, MailboxStatus, User
+from netkeeper.models.base import utcnow
+from netkeeper.scoping import install_scope_guard, unscoped
 from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.users import ensure_local_user
 
@@ -249,3 +251,71 @@ def test_login_never_prints_the_code_or_a_token(
     )
     for secret in shown:
         assert secret not in result.output
+
+
+# --- arm and disarm (#277) ----------------------------------------------------------
+
+
+def _connected(factory: sessionmaker[Session]) -> int:
+    with session_scope(factory, write=True) as session:
+        user = session.scalars(select(User)).one()
+        return mailbox_service.connect(session, user, FAKE_EMAIL, "rt", daily_cap=80).id
+
+
+def _mailbox(factory: sessionmaker[Session], mailbox_id: int) -> Mailbox:
+    with session_scope(factory) as session:
+        row = session.scalars(unscoped(select(Mailbox).where(Mailbox.id == mailbox_id))).one()
+        session.expunge(row)
+        return row
+
+
+def test_arm_asks_first_and_starts_with_drafts(
+    cli_db: sessionmaker[Session], memory_keyring: MemoryKeyring
+) -> None:
+    mailbox_id = _connected(cli_db)
+    declined = runner.invoke(cli, ["gmail", "arm", FAKE_EMAIL], input="n\n")
+    assert declined.exit_code == 1
+    assert _mailbox(cli_db, mailbox_id).arm is None
+
+    result = runner.invoke(cli, ["gmail", "arm", str(mailbox_id)], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "armed for drafts" in result.output
+    row = _mailbox(cli_db, mailbox_id)
+    assert row.arm is MailboxArm.DRAFT
+    assert row.armed_by is not None and row.armed_by.startswith("cli")
+    status = runner.invoke(cli, ["gmail", "status"]).output
+    assert "ARMED" in status and "draft since" in status
+
+
+def test_arm_for_send_is_refused_until_a_draft_was_found_by_its_message_id(
+    cli_db: sessionmaker[Session], memory_keyring: MemoryKeyring
+) -> None:
+    mailbox_id = _connected(cli_db)
+    before = runner.invoke(cli, ["gmail", "arm", FAKE_EMAIL, "--send", "--yes"])
+    assert before.exit_code == 1
+    assert "not armed" in before.output
+    runner.invoke(cli, ["gmail", "arm", FAKE_EMAIL, "--yes"])
+    refused = runner.invoke(cli, ["gmail", "arm", FAKE_EMAIL, "--send", "--yes"])
+    assert refused.exit_code == 1
+    assert "Message-ID" in refused.output
+    assert _mailbox(cli_db, mailbox_id).arm is MailboxArm.DRAFT
+
+    with session_scope(cli_db, write=True) as session:
+        user = session.scalars(select(User)).one()
+        mailbox_service.record_message_id_verified(session, user, mailbox_id, now=utcnow())
+    armed = runner.invoke(cli, ["gmail", "arm", FAKE_EMAIL, "--send", "--yes"])
+    assert armed.exit_code == 0, armed.output
+    assert _mailbox(cli_db, mailbox_id).arm is MailboxArm.SEND
+    assert "send since" in runner.invoke(cli, ["gmail", "status"]).output
+
+
+def test_disarm_undoes_both_steps(
+    cli_db: sessionmaker[Session], memory_keyring: MemoryKeyring
+) -> None:
+    mailbox_id = _connected(cli_db)
+    runner.invoke(cli, ["gmail", "arm", FAKE_EMAIL, "--yes"])
+    result = runner.invoke(cli, ["gmail", "disarm", FAKE_EMAIL])
+    assert result.exit_code == 0, result.output
+    assert _mailbox(cli_db, mailbox_id).arm is None
+    assert runner.invoke(cli, ["gmail", "disarm", "nobody@example.com"]).exit_code == 1
+    assert runner.invoke(cli, ["gmail", "arm", "nobody@example.com", "--yes"]).exit_code == 1
