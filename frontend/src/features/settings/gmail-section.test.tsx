@@ -151,6 +151,89 @@ describe('GmailSection', () => {
     expect(screen.getByRole('button', { name: 'Connect Gmail' })).toBeEnabled()
   })
 
+  it('arms for drafts only after confirming, then offers to disarm', async () => {
+    let current = status({ mailboxes: [mailbox()] })
+    const armed = mailbox({
+      arm: 'draft',
+      armed_at: '2026-09-27T12:00:00Z',
+      armed_by: 'web (user 1)',
+    })
+    const { calls } = renderSection(() => current, {
+      'POST /api/v1/mailboxes/3/arm': () => {
+        current = status({ mailboxes: [armed] })
+        return jsonResponse(armed)
+      },
+    })
+    const item = (await screen.findByText('sender@example.com')).closest('li') as HTMLElement
+    expect(within(item).getByText('not armed')).toBeInTheDocument()
+    expect(within(item).queryByRole('button', { name: 'Disarm' })).not.toBeInTheDocument()
+    fireEvent.click(within(item).getByRole('button', { name: 'Arm for drafts' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('send steps included')
+    expect(calls.some((call) => call.path.endsWith('/arm'))).toBe(false)
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Arm for drafts' }))
+    expect(await screen.findByText('armed: drafts only')).toBeInTheDocument()
+    expect(calls).toContainEqual({
+      method: 'POST',
+      path: '/api/v1/mailboxes/3/arm',
+      body: { mode: 'draft' },
+    })
+    expect(screen.getByText(/by web \(user 1\)/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Disarm' })).toBeEnabled()
+  })
+
+  it('waits for a draft found by its Message-ID before it can arm to send', async () => {
+    renderSection(() =>
+      status({ mailboxes: [mailbox({ arm: 'draft', armed_at: '2026-09-27T12:00:00Z' })] }),
+    )
+    expect(await screen.findByRole('button', { name: 'Arm to send' })).toBeDisabled()
+    expect(screen.getByText(/waits until netkeeper finds one of its drafts/)).toBeInTheDocument()
+  })
+
+  it('arms to send, a separate step, only after confirming', async () => {
+    const drafts = {
+      arm: 'draft' as const,
+      armed_at: '2026-09-27T12:00:00Z',
+      message_id_verified_at: '2026-09-27T12:10:00Z',
+    }
+    let current = status({ mailboxes: [mailbox(drafts)] })
+    const { calls } = renderSection(() => current, {
+      'POST /api/v1/mailboxes/3/arm': () => {
+        const sending = mailbox({ ...drafts, arm: 'send', send_armed_at: '2026-09-28T12:00:00Z' })
+        current = status({ mailboxes: [sending] })
+        return jsonResponse(sending)
+      },
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Arm to send' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('with no one pressing Send')
+    expect(calls.some((call) => call.path.endsWith('/arm'))).toBe(false)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Arm to send' }))
+    expect(await screen.findByText('armed: sending')).toBeInTheDocument()
+    expect(calls).toContainEqual({
+      method: 'POST',
+      path: '/api/v1/mailboxes/3/arm',
+      body: { mode: 'send' },
+    })
+    expect(screen.queryByRole('button', { name: 'Arm to send' })).not.toBeInTheDocument()
+  })
+
+  it('disarms at once', async () => {
+    let current = status({
+      mailboxes: [mailbox({ arm: 'send', armed_at: '2026-09-27T12:00:00Z' })],
+    })
+    const { calls } = renderSection(() => current, {
+      'POST /api/v1/mailboxes/3/disarm': () => {
+        current = status({ mailboxes: [mailbox()] })
+        return jsonResponse(current.mailboxes[0])
+      },
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Disarm' }))
+    expect(await screen.findByText('not armed')).toBeInTheDocument()
+    expect(calls).toContainEqual({ method: 'POST', path: '/api/v1/mailboxes/3/disarm', body: null })
+  })
+
   it('reports the callback’s outcome', async () => {
     const { unmount } = renderSection(() => status(), {}, { gmail: 'connected' })
     expect(await screen.findByText('Gmail is connected.')).toBeInTheDocument()

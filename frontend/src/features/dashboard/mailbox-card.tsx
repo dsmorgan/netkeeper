@@ -7,6 +7,8 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useServerEvent } from '@/features/events/use-server-event'
 import {
+  ARM_LABEL,
+  armText,
   mailboxKeys,
   mailboxListQuery,
   navigation,
@@ -41,7 +43,8 @@ function pickMailbox(mailboxes: Mailbox[]): Mailbox | undefined {
 /**
  * The mailbox's health on the dashboard (issue #268, CP5 spec 10.1): the
  * connected address and status, when its token was last refreshed, and a
- * link to Settings — or **Re-authorize** when Google needs it again.
+ * link to Settings — or **Re-authorize** when Google needs it again — and
+ * whether `serve` may use it: not armed, drafts only, or sending (#277).
  *
  * Reads `GET /api/v1/mailboxes`, never `/status`: the list comes from the
  * database alone, so this still shows while the Keychain is locked (#256
@@ -128,6 +131,14 @@ export function MailboxCard() {
             Token last refreshed {when(mailbox.checked_at)}
           </span>
         </div>
+        {mailbox.status !== 'disabled' && (
+          <div className="flex flex-wrap items-center gap-3">
+            <Badge variant={mailbox.arm === null ? 'secondary' : 'outline'}>
+              {ARM_LABEL[mailbox.arm ?? 'none']}
+            </Badge>
+            <span className="text-sm text-muted-foreground">{armText(mailbox)}</span>
+          </div>
+        )}
         {reason !== null && <p className="text-sm text-muted-foreground">{reason}</p>}
         <div className="flex flex-wrap items-center gap-2">
           {mailbox.status === 'reauth_required' ? (

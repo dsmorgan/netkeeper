@@ -5622,9 +5622,64 @@
         "title": "Lte",
         "type": "object"
       },
+      "MailboxArm": {
+        "description": "What an armed mailbox may do (#277). Not stored: read from the arming columns.",
+        "enum": [
+          "draft",
+          "send"
+        ],
+        "title": "MailboxArm",
+        "type": "string"
+      },
+      "MailboxArmIn": {
+        "description": "Arm a mailbox: ``draft`` first, then ``send`` as a separate step.",
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/MailboxArm"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "title": "MailboxArmIn",
+        "type": "object"
+      },
       "MailboxOut": {
         "description": "A connected Gmail account. Never its token: that is in the Keychain.",
         "properties": {
+          "arm": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MailboxArm"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "armed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Armed At"
+          },
+          "armed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Armed By"
+          },
           "checked_at": {
             "anyOf": [
               {
@@ -5658,8 +5713,32 @@
             "title": "Label Prefix",
             "type": "string"
           },
+          "message_id_verified_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id Verified At"
+          },
           "provider": {
             "$ref": "#/components/schemas/MailboxProvider"
+          },
+          "send_armed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Send Armed At"
           },
           "status": {
             "$ref": "#/components/schemas/MailboxStatus"
@@ -5690,6 +5769,11 @@
           "daily_cap",
           "label_prefix",
           "checked_at",
+          "arm",
+          "armed_at",
+          "send_armed_at",
+          "armed_by",
+          "message_id_verified_at",
           "created_at",
           "updated_at"
         ],
@@ -13224,6 +13308,65 @@
         ]
       }
     },
+    "/api/v1/mailboxes/{mailbox_id}/arm": {
+      "post": {
+        "description": "Let ``serve`` use the mailbox: ``draft`` first, ``send`` as a separate step (#277).\nApplies from the engine's next claim.",
+        "operationId": "arm_mailbox_api_v1_mailboxes__mailbox_id__arm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "mailbox_id",
+            "required": true,
+            "schema": {
+              "title": "Mailbox Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MailboxArmIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such mailbox for this user"
+          },
+          "409": {
+            "description": "Not armable this way yet; the detail says why"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Arm Mailbox",
+        "tags": [
+          "mailboxes"
+        ]
+      }
+    },
     "/api/v1/mailboxes/{mailbox_id}/check": {
       "post": {
         "description": "Refresh the token now, as the background poll does; answers the mailbox after.",
@@ -13268,6 +13411,52 @@
           }
         },
         "summary": "Check Mailbox",
+        "tags": [
+          "mailboxes"
+        ]
+      }
+    },
+    "/api/v1/mailboxes/{mailbox_id}/disarm": {
+      "post": {
+        "description": "Stop ``serve`` using the mailbox from the engine's next claim (#277).",
+        "operationId": "disarm_mailbox_api_v1_mailboxes__mailbox_id__disarm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "mailbox_id",
+            "required": true,
+            "schema": {
+              "title": "Mailbox Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such mailbox for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Disarm Mailbox",
         "tags": [
           "mailboxes"
         ]
