@@ -1925,7 +1925,9 @@ def test_an_unknown_send_that_took_time_spaces_from_its_record_not_its_claim(
     second = world.enroll_new()
     clock = [NOW]
     slow = SlowUnknown(clock, timedelta(seconds=25))
-    run_tick(world.factory, settings=tight, sender=slow, clock=lambda: clock[0])
+    run_tick(
+        world.factory, settings=tight, sender=slow, clock=lambda: clock[0], rng=random.Random(1)
+    )
     assert len(slow.firings) == 1
 
     floor = timedelta(seconds=tight.campaigns.send_spacing_floor_s)
