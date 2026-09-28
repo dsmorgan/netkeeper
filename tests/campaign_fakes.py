@@ -19,6 +19,13 @@ ALWAYS_OPEN = CampaignSettings(
 )
 SETTINGS = Settings(campaigns=ALWAYS_OPEN)
 LATENCY = timedelta(minutes=7)
+# A mailbox through both arming steps (#277): what the Gmail sender needs to send.
+ARMED_FOR_SEND: dict[str, Any] = {
+    "armed_at": NOW - timedelta(days=1),
+    "send_armed_at": NOW - timedelta(days=1),
+    "message_id_verified_at": NOW - timedelta(days=1),
+    "armed_by": "test",
+}
 
 
 @dataclass

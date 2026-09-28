@@ -145,6 +145,7 @@ from netkeeper.models import (
     Enrollment,
     EnrollmentStatus,
     Mailbox,
+    MailboxArm,
     Message,
     MessageDirection,
     MessageStatus,
@@ -228,6 +229,7 @@ class Skip(enum.StrEnum):
     RENDER_FAILED = "render_failed"
     NO_ADDRESS = "no_address"
     MAILBOX_ADDRESS = "mailbox_address"
+    MAILBOX_DISARMED = "mailbox_disarmed"
     GUARD_EXCLUDED = "guard_excluded"
     ENDED = "ended"
 
@@ -330,6 +332,21 @@ class Reconciler(Protocol):
         settings: Settings,
         now: datetime,
     ) -> None: ...
+
+
+@runtime_checkable
+class ArmGated(Protocol):
+    """A sender that fires only on a mailbox a person armed (#277). The engine asks
+    :meth:`armed` in each claim's writer session, before anything else about the step:
+
+    - None (disarmed, or no such mailbox): nothing on the mailbox is claimed, and every
+      step on it stays due as it is.
+    - ``draft``: every email step on it is a draft, a ``send`` step included.
+    - ``send``: each step fires in its own mode.
+
+    A sender without it (the tests' fakes) fires on every mailbox."""
+
+    def armed(self, session: Session, user: User, mailbox_id: int) -> MailboxArm | None: ...
 
 
 # --- what a tick did ----------------------------------------------------------------
@@ -994,8 +1011,10 @@ class _Chooser:
         now: datetime,
         result: TickResult,
         rng: random.Random,
+        gate: ArmGated | None = None,
     ) -> None:
         self.rng = rng
+        self.gate = gate
         self.session = session
         self.user = user
         self.settings = settings
@@ -1105,6 +1124,21 @@ class _Chooser:
                 enrollment, Skip.CAMPAIGN_BLOCKED, *self.blocks.mailboxes[campaign.mailbox_id][0]
             )
             return None
+        arm: MailboxArm | None = MailboxArm.SEND
+        if self.gate is not None:
+            # First: a disarmed mailbox changes nothing on the enrollment (#277).
+            arm = (
+                None
+                if campaign.mailbox_id is None
+                else self.gate.armed(session, user, campaign.mailbox_id)
+            )
+            if arm is None:
+                if campaign.mailbox_id is None:
+                    self.block_campaign(campaign.id, (Skip.MAILBOX_DISARMED,))
+                else:
+                    self.block_mailbox(campaign.mailbox_id, (Skip.MAILBOX_DISARMED,))
+                self.skip(enrollment, Skip.MAILBOX_DISARMED)
+                return None
 
         try:
             window = self.blocks.windows.get(campaign.id) or window_for(
@@ -1179,7 +1213,8 @@ class _Chooser:
         if not verdict.eligible:
             self._excluded(enrollment, campaign, verdict)
             return None
-        return self._claim(campaign, enrollment, step, latest)
+        mode = StepMode.DRAFT if arm is MailboxArm.DRAFT else step.mode
+        return self._claim(campaign, enrollment, step, latest, mode)
 
     def _mailbox(
         self, campaign: Campaign, day_start: datetime, day_end: datetime
@@ -1219,6 +1254,7 @@ class _Chooser:
         enrollment: Enrollment,
         step: CampaignStep,
         latest: datetime | None,
+        mode: StepMode,
     ) -> _Claim | None:
         session, user = self.session, self.user
         template = get_scoped(session, user, Template, step.template_id)
@@ -1301,7 +1337,7 @@ class _Chooser:
             mailbox_id=campaign.mailbox_id,
             step_position=step.position,
             channel=step.channel,
-            mode=step.mode,
+            mode=mode,
             same_thread=step.same_thread,
             thread_id=_thread_id(session, user, enrollment.id) if step.same_thread else None,
             to_address=address.email,
@@ -2016,7 +2052,8 @@ def tick_user(
             if user is None:
                 return result
             now = clock()
-            claim = _Chooser(session, user, settings, now, result, rng).choose()
+            gate = sender if isinstance(sender, ArmGated) else None
+            claim = _Chooser(session, user, settings, now, result, rng, gate).choose()
         if claim is None:
             break
         claims.append(claim)
