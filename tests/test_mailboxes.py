@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns import gmail_oauth
 from netkeeper.db import session_scope
-from netkeeper.models import Mailbox, MailboxStatus, User
+from netkeeper.models import Mailbox, MailboxArm, MailboxStatus, User
 from netkeeper.scoping import unscoped
 from netkeeper.services import keychain
 from netkeeper.services import mailboxes as service
@@ -547,3 +547,112 @@ def test_starting_too_many_drops_the_oldest() -> None:
         pending.add(1, _authorization(f"s{index}"))
     assert pending.take("s0", 1) is None
     assert pending.take(f"s{service.PENDING_MAX}", 1) is not None
+
+
+# --- arming (#277) -----------------------------------------------------------------
+
+
+def _arm(
+    factory: sessionmaker[Session], user: User, mailbox_id: int, mode: MailboxArm, *, by: str = "t"
+) -> Mailbox:
+    with session_scope(factory, write=True) as session:
+        mailbox = service.get_mailbox(session, user, mailbox_id)
+        service.arm(session, user, mailbox, mode, by=by, now=NOW)
+        session.expunge(mailbox)
+        return mailbox
+
+
+def _verify(factory: sessionmaker[Session], user: User, mailbox_id: int) -> bool:
+    with session_scope(factory, write=True) as session:
+        return service.record_message_id_verified(session, user, mailbox_id, now=NOW)
+
+
+def test_a_new_mailbox_starts_disarmed(session_factory: sessionmaker[Session]) -> None:
+    user = _user(session_factory)
+    mailbox = _connect(session_factory, user, "rt")
+    assert mailbox.arm is None
+    with session_scope(session_factory) as session:
+        assert service.armed(session, user, mailbox.id) is None
+
+
+def test_arming_for_drafts_records_who_and_when(session_factory: sessionmaker[Session]) -> None:
+    user = _user(session_factory)
+    mailbox = _connect(session_factory, user, "rt")
+    row = _arm(session_factory, user, mailbox.id, MailboxArm.DRAFT, by="cli (me)")
+    assert (row.arm, row.armed_at, row.armed_by, row.send_armed_at) == (
+        MailboxArm.DRAFT,
+        NOW,
+        "cli (me)",
+        None,
+    )
+    with session_scope(session_factory) as session:
+        assert service.armed(session, user, mailbox.id) is MailboxArm.DRAFT
+
+
+def test_send_is_refused_until_armed_for_drafts_and_a_draft_was_found(
+    session_factory: sessionmaker[Session],
+) -> None:
+    user = _user(session_factory)
+    mailbox = _connect(session_factory, user, "rt")
+    with pytest.raises(service.ArmRefused, match="not armed"):
+        _arm(session_factory, user, mailbox.id, MailboxArm.SEND)
+    _arm(session_factory, user, mailbox.id, MailboxArm.DRAFT)
+    with pytest.raises(service.ArmRefused, match="Message-ID"):
+        _arm(session_factory, user, mailbox.id, MailboxArm.SEND)
+    assert _row(session_factory, mailbox.id).arm is MailboxArm.DRAFT
+
+    assert _verify(session_factory, user, mailbox.id)
+    assert not _verify(session_factory, user, mailbox.id)  # recorded once
+    row = _arm(session_factory, user, mailbox.id, MailboxArm.SEND, by="web (user 1)")
+    assert (row.arm, row.send_armed_at, row.armed_by) == (MailboxArm.SEND, NOW, "web (user 1)")
+
+
+def test_even_verified_send_needs_the_draft_step_first(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Arming for send is always a separate step after arming for drafts."""
+    user = _user(session_factory)
+    mailbox = _connect(session_factory, user, "rt")
+    _verify(session_factory, user, mailbox.id)
+    with pytest.raises(service.ArmRefused, match="not armed"):
+        _arm(session_factory, user, mailbox.id, MailboxArm.SEND)
+
+
+def test_arming_for_drafts_takes_send_back_and_disarm_undoes_both(
+    session_factory: sessionmaker[Session],
+) -> None:
+    user = _user(session_factory)
+    mailbox = _connect(session_factory, user, "rt")
+    _arm(session_factory, user, mailbox.id, MailboxArm.DRAFT)
+    _verify(session_factory, user, mailbox.id)
+    _arm(session_factory, user, mailbox.id, MailboxArm.SEND)
+    assert _arm(session_factory, user, mailbox.id, MailboxArm.DRAFT).arm is MailboxArm.DRAFT
+    with session_scope(session_factory, write=True) as session:
+        service.disarm(session, user, service.get_mailbox(session, user, mailbox.id))
+    row = _row(session_factory, mailbox.id)
+    assert (row.arm, row.armed_at, row.send_armed_at, row.armed_by) == (None, None, None, None)
+    assert row.message_id_verified_at == NOW  # the check stays passed
+
+
+def test_disconnecting_disarms_and_a_disconnected_mailbox_is_never_armed(
+    session_factory: sessionmaker[Session], memory_keyring: MemoryKeyring
+) -> None:
+    user = _user(session_factory)
+    mailbox = _connect(session_factory, user, "rt")
+    _arm(session_factory, user, mailbox.id, MailboxArm.DRAFT)
+    with session_scope(session_factory, write=True) as session:
+        service.disconnect(session, user, service.get_mailbox(session, user, mailbox.id))
+    assert _row(session_factory, mailbox.id).arm is None
+    with pytest.raises(service.ArmRefused, match="disconnected"):
+        _arm(session_factory, user, mailbox.id, MailboxArm.DRAFT)
+    assert _connect(session_factory, user, "rt-2").arm is None  # connected again: disarmed
+
+
+def test_another_users_mailbox_reads_disarmed(session_factory: sessionmaker[Session]) -> None:
+    owner = _user(session_factory)
+    other = _user(session_factory)
+    mailbox = _connect(session_factory, owner, "rt")
+    _arm(session_factory, owner, mailbox.id, MailboxArm.DRAFT)
+    with session_scope(session_factory, write=True) as session:
+        assert service.armed(session, other, mailbox.id) is None
+        assert not service.record_message_id_verified(session, other, mailbox.id, now=NOW)
