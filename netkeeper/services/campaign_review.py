@@ -209,7 +209,7 @@ def _pending(session: Session, user: User, campaign_id: int) -> list[Enrollment]
     )
 
 
-def _source_contact_ids(session: Session, user: User, campaign: Campaign) -> set[int]:
+def source_contact_ids(session: Session, user: User, campaign: Campaign) -> set[int]:
     """The contacts of the campaign's audience source: its list or its filter."""
     if campaign.filter_json is not None:
         tree = parse_filter(campaign.filter_json)
@@ -235,7 +235,7 @@ def _source_contact_ids(session: Session, user: User, campaign: Campaign) -> set
 def _audience(session: Session, user: User, campaign: Campaign) -> tuple[list[Enrollment], str]:
     """The pending enrollments and the audience fingerprint."""
     pending = _pending(session, user, campaign.id)
-    source = _source_contact_ids(session, user, campaign)
+    source = source_contact_ids(session, user, campaign)
     fingerprint = _digest(
         {
             "source": [campaign.source_list_id, campaign.filter_json],
@@ -256,7 +256,7 @@ def guard_summary(session: Session, user: User, campaign: Campaign, *, now: date
     From :func:`~netkeeper.services.campaign_guards.check_enrollment` and
     :func:`~netkeeper.services.campaign_guards.excluded_summary`, never restated.
     """
-    ids = _source_contact_ids(session, user, campaign) | {
+    ids = source_contact_ids(session, user, campaign) | {
         e.contact_id for e in _pending(session, user, campaign.id)
     }
     verdicts = check_enrollment(session, user, campaign, ids, now=now)

@@ -11,6 +11,7 @@ import factories
 from sqlalchemy.orm import Session
 
 from netkeeper.campaigns import templates as template_service
+from netkeeper.config import Settings
 from netkeeper.crm import import_runs as import_service
 from netkeeper.crm import lists as list_service
 from netkeeper.crm import positions as position_service
@@ -34,6 +35,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.scoping import scoped
+from netkeeper.services import campaigns as campaign_service
 from netkeeper.services import enrich_plan, runs
 from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.linkedin_accounts import ensure_account
@@ -392,6 +394,32 @@ def _seed_next_fires(session: Session, user: User) -> int:
     return 2
 
 
+def _seed_campaigns(session: Session, user: User) -> int:
+    """Two draft campaigns of ``user`` from the campaign service (P3-13)."""
+    mailbox = mailbox_service.connect(
+        session, user, f"camp{user.id}@example.com", f"rt-camp-{user.id}", daily_cap=80
+    )
+    template = template_service.create_template(
+        session,
+        user,
+        name="campaign step",
+        channel=TemplateChannel.EMAIL,
+        subject="Hello",
+        body="Hi {{ first_name }}",
+        me_keys=(),
+    )
+    for name in ("first", "second"):
+        campaign_service.create_campaign(
+            session,
+            user,
+            name=name,
+            steps=[campaign_service.StepSpec(template_id=template.id)],
+            settings=Settings(),
+            mailbox_id=mailbox.id,
+        )
+    return 2
+
+
 def _seed_changed_jobs(session: Session, user: User) -> int:
     """One contact of ``user`` who started a job two days ago (P3-12)."""
     started = datetime.now(UTC).date() - timedelta(days=2)
@@ -465,6 +493,7 @@ REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/linkedin/runs", _seed_runs, paged_count),
     ListEndpoint(f"{API_PREFIX}/linkedin/pins", _seed_pins, array_count),
     ListEndpoint(f"{API_PREFIX}/mailboxes", _seed_mailboxes, array_count),
+    ListEndpoint(f"{API_PREFIX}/campaigns", _seed_campaigns, array_count),
     ListEndpoint(f"{API_PREFIX}/dashboard/next-fires", _seed_next_fires, paged_count),
     ListEndpoint(f"{API_PREFIX}/dashboard/changed-jobs", _seed_changed_jobs, paged_count),
 ]
