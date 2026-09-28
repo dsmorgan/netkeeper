@@ -9,8 +9,8 @@ signer behind bulk count confirmations. Given an extractor (``netkeeper
 serve``), it also starts the scheduler (P2-10), whose scheduled LinkedIn runs
 fire only on an account a person armed, and the mailbox poll (P3-01), which
 refreshes each Gmail token every ``[campaigns] reply_poll_minutes``, and the
-campaign engine's minute tick (P3-06), which fires only through the sender it
-is given (P3-07 builds the real one; without one it does nothing). API
+campaign engine's minute tick (P3-06), which fires through the Gmail sender
+(P3-07) only on a mailbox a person armed (#277). API
 modules under :mod:`netkeeper.web.api` are discovered, so adding an endpoint
 never edits this file.
 """
@@ -27,6 +27,7 @@ from types import ModuleType
 
 from fastapi import APIRouter, FastAPI
 from sqlalchemy import Engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper import __version__, migrations
 from netkeeper.campaigns.gmail_oauth import GoogleEndpoints
@@ -38,9 +39,10 @@ from netkeeper.db import database_url, make_engine, make_session_factory, sessio
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import install_scope_guard
 from netkeeper.services.campaign_engine import CampaignEngine, Sender
+from netkeeper.services.campaign_sender import GmailSender
 from netkeeper.services.events import EventBus
 from netkeeper.services.linkedin_accounts import ensure_account
-from netkeeper.services.mailboxes import MailboxMonitor, PendingAuthorizations
+from netkeeper.services.mailboxes import MailboxMonitor, PendingAuthorizations, open_gmail
 from netkeeper.services.runs import fail_interrupted_runs
 from netkeeper.services.scheduled_runs import ServeExtractor, start_serve_scheduler
 from netkeeper.services.tasks import TaskRunner
@@ -82,8 +84,10 @@ def create_app(
     itself (``netkeeper.campaigns.gmail_oauth.GOOGLE``). Tests pass a loopback fake.
 
     ``campaign_sender`` is what the campaign engine hands each firing to; the
-    engine's minute tick starts with the scheduler, and with no sender it fires
-    nothing (P3-07 supplies the Gmail one).
+    engine's minute tick starts with the scheduler. None is the Gmail sender
+    (:class:`~netkeeper.services.campaign_sender.GmailSender`, its requests going
+    to ``gmail``), which touches only a mailbox a person armed (#277): with none
+    armed, nothing is claimed and Gmail is never called. Tests pass a fake.
     """
     resolved = load_settings() if settings is None else settings
 
@@ -121,7 +125,12 @@ def create_app(
                 teardown.push_async_callback(monitor.stop)
                 monitor.start()
                 app.state.mailbox_monitor = monitor
-                campaigns = CampaignEngine(app.state.session_factory, resolved, campaign_sender)
+                sender = (
+                    campaign_sender
+                    if campaign_sender is not None
+                    else _gmail_sender(app.state.session_factory, gmail)
+                )
+                campaigns = CampaignEngine(app.state.session_factory, resolved, sender)
                 teardown.push_async_callback(campaigns.stop)
                 campaigns.start()
                 app.state.campaign_engine = campaigns
@@ -180,6 +189,16 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     app.state.mailbox_monitor = None
     app.state.campaign_engine = None
     return tasks
+
+
+def _gmail_sender(factory: sessionmaker[Session], endpoints: GoogleEndpoints | None) -> GmailSender:
+    """``serve``'s campaign sender: Gmail, on armed mailboxes only (#277)."""
+    return GmailSender(
+        factory,
+        opener=lambda user_id, mailbox_id: open_gmail(
+            factory, user_id, mailbox_id, endpoints=endpoints
+        ),
+    )
 
 
 def _poll_minutes(settings: Settings) -> int:
