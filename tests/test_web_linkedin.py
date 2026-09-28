@@ -24,6 +24,9 @@ from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User, U
 from netkeeper.services import budgets, enrich_plan, runs
 from netkeeper.services.linkedin_accounts import ensure_account
 
+#: These tests start runs by hand at whatever time the suite runs (#213).
+pytestmark = pytest.mark.usefixtures("inside_active_hours")
+
 NOW = datetime.now(UTC)
 
 

@@ -6965,7 +6965,7 @@
         "type": "object"
       },
       "RunOut": {
-        "description": "One run: what it is, how far it got, and how it ended. Counts only, never names.\n\n``planned``/``completed`` are an enrichment plan's size and progress.\n``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.\n``resumed_by`` is the id of the run that already took over this one's\nremaining plan, or null when it has not been (and so still may be, spec 9.9).",
+        "description": "One run: what it is, how far it got, and how it ended. Counts only, never names.\n\n``planned``/``completed`` are an enrichment plan's size and progress.\n``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.\n``resumed_by`` is the id of the run that already took over this one's\nremaining plan, or null when it has not been (and so still may be, spec 9.9).\n``stop_reason_text`` is ``stop_reason`` in plain words (\"outside active\nhours\" for ``inactive``, #213), or null while the run is running.",
         "properties": {
           "aging_refused": {
             "anyOf": [
@@ -7133,6 +7133,17 @@
             ],
             "title": "Stop Reason"
           },
+          "stop_reason_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Reason Text"
+          },
           "trigger": {
             "$ref": "#/components/schemas/SyncRunTrigger"
           }
@@ -7145,6 +7156,7 @@
           "started_at",
           "completed_at",
           "stop_reason",
+          "stop_reason_text",
           "cancel_requested_at",
           "max_visits",
           "resume_of_id",
@@ -13413,7 +13425,7 @@
         ]
       },
       "post": {
-        "description": "Record a manual run and submit it; answers at once, before any browser work.",
+        "description": "Record a manual run and submit it; answers at once, before any browser work.\n\nOutside ``[linkedin] active_hours`` it answers ``409`` with the window, when it\nnext opens, and where to change it, and records no run (#213).",
         "operationId": "start_linkedin_run",
         "requestBody": {
           "content": {
@@ -13437,7 +13449,7 @@
             "description": "Successful Response"
           },
           "409": {
-            "description": "A run is running, the session is flagged, or heat is too high"
+            "description": "A run is running, the session is flagged, heat is too high, or it is outside active hours"
           },
           "422": {
             "description": "A kind with no runner, or max_visits on a sync"

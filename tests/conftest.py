@@ -187,3 +187,17 @@ async def client(running_app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=running_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
         yield client
+
+
+@pytest.fixture
+def inside_active_hours(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lets a run started by hand start whatever the wall clock says (#213).
+
+    The API and the CLI refuse a manual run outside ``[linkedin] active_hours``,
+    checked against the real clock. A test that starts runs by hand to exercise
+    something else takes this, so it passes at 3 a.m. too; the refusal itself is
+    tested in tests/test_active_hours_stop.py with its own clock.
+    """
+    from netkeeper.services import runs
+
+    monkeypatch.setattr(runs, "refuse_if_outside_active_hours", lambda *_, **__: None)

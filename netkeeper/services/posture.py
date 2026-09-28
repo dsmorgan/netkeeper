@@ -425,7 +425,14 @@ def posture(
             zone=zone,
         ),
         _session_flag(session, user),
-        _active_hours(linkedin, zone, zone_warning, now=now, local_now=local_now),
+        _active_hours(
+            linkedin,
+            zone,
+            zone_warning,
+            now=now,
+            local_now=local_now,
+            source=active_hours_source(settings),
+        ),
         _account_timezone(user, linkedin.timezone),
         _weekend_damping(linkedin.weekend_multiplier, local_now),
         _pacing(linkedin.pacing, _profile_visit_cap(settings)),
@@ -893,8 +900,9 @@ def _active_hours(
     *,
     now: datetime,
     local_now: datetime,
+    source: str = "defaults",
 ) -> Protection:
-    """The active window, and where ``now`` falls in it (spec 9.5)."""
+    """The active window, where ``now`` falls in it (spec 9.5), and where it was set (#213)."""
     active_hours = linkedin.active_hours
     timezone_name = linkedin.timezone
     warnings: list[str] = []
@@ -943,7 +951,28 @@ def _active_hours(
         if inside
         else f"{start:%H:%M}-{end:%H:%M} {timezone_name}; outside, opens {opens:%a %H:%M}"
     )
+    value += f"; set in {source}"
     return Protection(name="active hours", status=status, value=value, warnings=tuple(warnings))
+
+
+def active_hours_source(settings: Settings) -> str:
+    """Where ``[linkedin] active_hours`` came from: the config file's path, or the defaults.
+
+    Shown beside the window (#213) so a person who wants a different one knows
+    which file to edit, or that there is none yet and the default is in force.
+    """
+    if settings.source_path is None:
+        return "the defaults (no config.toml)"
+    return str(settings.source_path)
+
+
+def describe_active_hours(settings: Settings) -> str:
+    """``[linkedin] active_hours`` in one line: the window, its zone, and its source (#213)."""
+    start, end = settings.linkedin.active_hours
+    return (
+        f"active hours: {start}-{end} {settings.linkedin.timezone}, set in"
+        f" {active_hours_source(settings)} (`[linkedin] active_hours`)"
+    )
 
 
 def _account_timezone(user: User, configured: str) -> Protection:

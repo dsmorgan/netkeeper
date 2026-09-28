@@ -50,7 +50,7 @@ import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any, Final, Protocol
 
 from sqlalchemy import select
@@ -58,7 +58,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings
 from netkeeper.db import is_writer, off_loop, session_scope
-from netkeeper.linkedin import activity_lock
+from netkeeper.linkedin import activity_lock, pacing
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import (
     JsonValue,
@@ -166,6 +166,14 @@ class HeatSkipped(RuntimeError):
 
 class SessionFlagged(RuntimeError):
     """The session flag is set (a checkpoint or a login wall); the run did not start."""
+
+
+class OutsideActiveHours(RuntimeError):
+    """A manual run was asked for outside ``[linkedin] active_hours``; it was not recorded.
+
+    The message is :func:`netkeeper.linkedin.pacing.outside_window_message`: the
+    window, when it next opens, and where to change it (#213).
+    """
 
 
 # --- reading ------------------------------------------------------------------
@@ -449,6 +457,73 @@ def refuse_if_flagged_or_hot(
         )
 
 
+def refuse_if_outside_active_hours(settings: LinkedInSettings, *, now: datetime) -> None:
+    """:class:`OutsideActiveHours` when ``now`` is outside ``[linkedin] active_hours`` (#213).
+
+    For a run started by hand, checked before its row is created, so a run that
+    could not visit anything is never recorded. Every manual kind is checked,
+    connections syncs included: the scheduler never starts any kind outside the
+    window (spec 9.5), and a person starting one by hand gets the same rule and
+    the same sentence. Inside a run, only enrichment checks the window again
+    between units, since a sync is minutes long and one stopped part-way through
+    the list would age nobody for the week. A window that does not parse is a
+    :class:`RunError`: nothing may run unguarded by it.
+    """
+    _require_aware(now)
+    try:
+        start, end = (time.fromisoformat(value) for value in settings.active_hours)
+    except ValueError as exc:
+        raise RunError(
+            f"[linkedin] active_hours is not two HH:MM times ({settings.active_hours!r}),"
+            " so no run can start until config.toml is fixed"
+        ) from exc
+    if not pacing.is_active_at(now, settings.timezone, start=start, end=end):
+        raise OutsideActiveHours(
+            pacing.outside_window_message(now, settings.timezone, start=start, end=end)
+        )
+
+
+#: Every ``stop_reason`` a run can carry, in the words a person reads (#213). The
+#: short reason stays the stored value (a breaker counts on it); these are what the
+#: CLI, the API's ``stop_reason_text``, and the LinkedIn page show beside it.
+STOP_REASON_TEXT: Final[Mapping[str, str]] = {
+    # how a run ends on its own
+    "end_of_list": "read to the end of the connections list",
+    "caught_up": "caught up with connections it already knew",
+    "page_budget": "read the pages it was allowed",
+    "end_of_plan": "visited every profile in its plan",
+    "visit_budget": "made the visits it was allowed",
+    "budget": "today's or this week's budget is spent",
+    "inactive": "outside active hours",
+    "cancelled": "cancelled",
+    "answer_lost": "lost some of the page's answers",
+    # what LinkedIn answered
+    "throttled": "LinkedIn throttled it",
+    "checkpoint": "LinkedIn showed a checkpoint",
+    "logged_out": "LinkedIn asked to log in",
+    "route_changed": "the page's answers changed shape",
+    "not_found": "a profile was not found",
+    # refused before it started, or could not run
+    "session_flagged": "refused: the session is flagged",
+    "heat_skip": "refused: heat is over its skip threshold",
+    "disarmed": "refused: scheduled runs are disarmed",
+    "route_changed_breaker": "refused: the route-changed breaker is tripped",
+    "answer_lost_breaker": "refused: the answer-lost limit is tripped",
+    "no_runner": "refused: no runner for this kind",
+    "browser_busy": "the browser was busy with another run",
+    "browser_unavailable": "Chrome was not reachable",
+    "interrupted": "the netkeeper process running it stopped",
+    "error": "an error stopped it",
+}
+
+
+def describe_stop_reason(reason: str | None) -> str | None:
+    """``reason`` in plain words, or the reason itself when it has none yet; ``None`` stays."""
+    if reason is None:
+        return None
+    return STOP_REASON_TEXT.get(reason, reason)
+
+
 def stop_reason_of(reason: str, outcome: Outcome | None) -> str:
     """A run's ``stop_reason``: the job's reason, or the outcome that stopped it."""
     return outcome.value if reason == "response" and outcome is not None else reason
@@ -588,6 +663,8 @@ class RunView:
     #: a plan is resumed at most once, so a client can tell "already resumed" apart
     #: from "still resumable" without a second call to load the plan itself.
     resumed_by: int | None
+    #: ``stop_reason`` in plain words (:data:`STOP_REASON_TEXT`), or ``None`` while running.
+    stop_reason_text: str | None = None
 
 
 def view(run: SyncRun) -> RunView:
@@ -605,6 +682,7 @@ def view(run: SyncRun) -> RunView:
         completed=len(done) if isinstance(done, list) else None,
         aging_refused=refused if isinstance(refused, str) else None,
         resumed_by=resumed_by if isinstance(resumed_by, int) else None,
+        stop_reason_text=describe_stop_reason(run.stop_reason),
     )
 
 

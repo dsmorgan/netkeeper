@@ -51,6 +51,9 @@ from netkeeper.services.scheduled_runs import ServeExtractor, serve_registry
 from netkeeper.web.app import create_app
 from netkeeper.web.security import CLIENT_HEADER, CLIENT_HEADER_VALUE
 
+#: These tests start runs by hand at whatever time the suite runs (#213).
+pytestmark = pytest.mark.usefixtures("inside_active_hours")
+
 #: Wednesday 2026-09-23, 02:00 in New York: before the active window opens, so
 #: the first day's due times are all snapped to 08:30 and then land in it.
 START = datetime(2026, 9, 23, 6, 0, tzinfo=UTC)

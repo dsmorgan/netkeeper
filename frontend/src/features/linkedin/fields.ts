@@ -7,6 +7,17 @@ export const RUN_STATUS_CLASSES: Record<RunStatus, string> = {
   failed: 'bg-destructive/10 text-destructive',
 }
 
+/**
+ * How a run ended, in plain words: the server's `stop_reason_text` ("outside active
+ * hours"), falling back to the stored reason for one it has no words for yet (#213).
+ */
+export function stopReasonLabel(run: {
+  stop_reason: string | null
+  stop_reason_text: string | null
+}): string | null {
+  return run.stop_reason_text ?? run.stop_reason
+}
+
 /** A timestamp in the reader's own locale, or the raw string if it will not parse. */
 export function formatWhen(iso: string | null): string {
   if (iso === null) return '—'

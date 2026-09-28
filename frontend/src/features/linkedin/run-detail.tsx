@@ -7,7 +7,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { cn } from '@/lib/utils'
 
 import { cancelRun, linkedinKeys, resumeRun, runQuery } from './api'
-import { formatFields, formatWhen, RUN_STATUS_CLASSES, type Field } from './fields'
+import { formatFields, formatWhen, RUN_STATUS_CLASSES, stopReasonLabel, type Field } from './fields'
 import { RUN_KIND_LABELS, RUN_STATUS_LABELS } from './types'
 
 function message(error: unknown): string {
@@ -98,7 +98,7 @@ export function RunDetail({
           </p>
         )}
         {data.stop_reason !== null && (
-          <p className="text-muted-foreground">Stopped: {data.stop_reason}</p>
+          <p className="text-muted-foreground">Stopped: {stopReasonLabel(data)}</p>
         )}
         {data.error !== null && <p role="alert">{data.error}</p>}
         {data.notes !== null && <p className="text-muted-foreground">{data.notes}</p>}

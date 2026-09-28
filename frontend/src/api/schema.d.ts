@@ -1336,6 +1336,9 @@ export interface paths {
         /**
          * Start Run
          * @description Record a manual run and submit it; answers at once, before any browser work.
+         *
+         *     Outside ``[linkedin] active_hours`` it answers ``409`` with the window, when it
+         *     next opens, and where to change it, and records no run (#213).
          */
         post: operations["start_linkedin_run"];
         delete?: never;
@@ -4609,6 +4612,8 @@ export interface components {
          *     ``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.
          *     ``resumed_by`` is the id of the run that already took over this one's
          *     remaining plan, or null when it has not been (and so still may be, spec 9.9).
+         *     ``stop_reason_text`` is ``stop_reason`` in plain words ("outside active
+         *     hours" for ``inactive``, #213), or null while the run is running.
          */
         RunOut: {
             /** Aging Refused */
@@ -4652,6 +4657,8 @@ export interface components {
             status: components["schemas"]["SyncRunStatus"];
             /** Stop Reason */
             stop_reason: string | null;
+            /** Stop Reason Text */
+            stop_reason_text: string | null;
             trigger: components["schemas"]["SyncRunTrigger"];
         };
         /** RunPage */
@@ -8489,7 +8496,7 @@ export interface operations {
                     "application/json": components["schemas"]["RunAccepted"];
                 };
             };
-            /** @description A run is running, the session is flagged, or heat is too high */
+            /** @description A run is running, the session is flagged, heat is too high, or it is outside active hours */
             409: {
                 headers: {
                     [name: string]: unknown;

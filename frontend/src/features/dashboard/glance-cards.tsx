@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { budgetQuery, heatQuery, scheduleQuery, statusQuery } from '@/features/linkedin/api'
-import { RUN_STATUS_CLASSES, formatWhen } from '@/features/linkedin/fields'
+import { RUN_STATUS_CLASSES, formatWhen, stopReasonLabel } from '@/features/linkedin/fields'
 import {
   RUN_KIND_LABELS,
   RUN_STATUS_LABELS,
@@ -272,7 +272,7 @@ function LastRun({ run }: { run: Run }) {
         {run.status === 'running'
           ? `Started ${formatWhen(run.started_at)}`
           : `Ended ${formatWhen(run.completed_at ?? run.started_at)}`}
-        {run.stop_reason !== null && ` · ${run.stop_reason}`}
+        {run.stop_reason !== null && ` · ${stopReasonLabel(run)}`}
       </span>
     </div>
   )

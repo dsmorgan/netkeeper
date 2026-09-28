@@ -455,6 +455,33 @@ def next_window_start(
     return candidate.astimezone(UTC)
 
 
+def outside_window_message(
+    now_utc: datetime,
+    tz: ZoneInfo | str,
+    *,
+    start: time = DEFAULT_ACTIVE_START,
+    end: time = DEFAULT_ACTIVE_END,
+) -> str:
+    """The one sentence a run stopped or refused by active hours says (#213).
+
+    For example: "outside active hours (08:30-21:30 America/New_York); the next
+    window opens at 08:30 tomorrow. Change `[linkedin] active_hours` in
+    config.toml to adjust." The log line, the run's note, a refused manual run,
+    and the API's answer all use this, so a person reads one wording wherever
+    they meet it. ``tz``'s name is printed as given (a :class:`ZoneInfo`'s key).
+    """
+    zone = ZoneInfo(tz) if isinstance(tz, str) else tz
+    local_now = local_time_of(now_utc, zone)
+    opens = next_window_start(now_utc, zone, start=start).astimezone(zone)
+    days = (opens.date() - local_now.date()).days
+    when = {0: "today", 1: "tomorrow"}.get(days, f"on {opens:%A}")
+    return (
+        f"outside active hours ({start:%H:%M}-{end:%H:%M} {zone.key}); the next window"
+        f" opens at {opens:%H:%M} {when}. Change `[linkedin] active_hours` in"
+        " config.toml to adjust."
+    )
+
+
 # --- warm-up ---------------------------------------------------------------
 
 # Appendix C: "Warm-up ... New profile, new device: ramp."

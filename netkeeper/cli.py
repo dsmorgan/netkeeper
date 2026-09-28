@@ -90,7 +90,7 @@ from netkeeper.services.linkedin_session import (
     session_flag,
 )
 from netkeeper.services.pacing import profiles as pacing_profiles
-from netkeeper.services.posture import SessionProbe, posture
+from netkeeper.services.posture import SessionProbe, describe_active_hours, posture
 from netkeeper.services.posture import render as render_posture
 from netkeeper.services.simulate_run import DEFAULT_DAYS as DEFAULT_SIMULATION_DAYS
 from netkeeper.services.simulate_run import DEFAULT_SEED as DEFAULT_SIMULATION_SEED
@@ -992,7 +992,8 @@ def linkedin_sync(
     no request of its own. It stays within today's page budget and follows the
     same pacing, heat, and session-flag rules a scheduled run has. It works while
     scheduled runs are disarmed: this is how the first supervised run is done.
-    Ctrl-C stops it; what it read is kept.
+    Outside `[linkedin] active_hours` it refuses before recording a run, and says
+    when the window opens. Ctrl-C stops it; what it read is kept.
     """
     kind = SyncRunKind.CONNECTIONS_FULL if full else SyncRunKind.CONNECTIONS_INCREMENTAL
     _run_by_hand(ctx, kind)
@@ -1026,8 +1027,10 @@ def linkedin_enrich(
     one click on Contact info, read from what the page loads and sends nothing of
     its own (ADR 0006), paced like a person, within today's warm-up-ramped,
     weekend-damped, heat-shrunk budget (`netkeeper posture` shows it). Pinned
-    contacts go first. It works while scheduled runs are disarmed. Ctrl-C stops
-    it between profiles; `--resume <run id>` picks up what it left.
+    contacts go first. It works while scheduled runs are disarmed. Outside
+    `[linkedin] active_hours` it refuses before recording a run, and a run the
+    window closes on stops between profiles, saying so. Ctrl-C stops it between
+    profiles; `--resume <run id>` picks up what it left.
     """
     _run_by_hand(ctx, SyncRunKind.ENRICH, max_visits=max_visits, resume=resume)
 
@@ -1049,6 +1052,7 @@ def _run_by_hand(
             user = _local_user_or_exit(session)
             user_id = user.id
             try:
+                runs.refuse_if_outside_active_hours(settings.linkedin, now=datetime.now(UTC))
                 account_id = ensure_account(session, user).id
                 runs.refuse_if_flagged_or_hot(
                     session, user, account_id, now=datetime.now(UTC), settings=settings.linkedin
@@ -1070,6 +1074,7 @@ def _run_by_hand(
                 runs.RunError,
                 runs.HeatSkipped,
                 runs.SessionFlagged,
+                runs.OutsideActiveHours,
                 enrich_plan.PlanNotFound,
                 enrich_plan.PlanFinished,
             ) as exc:
@@ -1127,7 +1132,7 @@ def _run_lines(run: SyncRun) -> list[str]:
         ("status", run.status.value),
         ("started", f"{run.started_at:%Y-%m-%d %H:%M UTC}"),
         ("ended", "-" if run.completed_at is None else f"{run.completed_at:%Y-%m-%d %H:%M UTC}"),
-        ("stopped by", run.stop_reason or "-"),
+        ("stopped by", _stopped_by(run.stop_reason)),
     ]
     if derived.planned is not None:
         rows.append(("plan", f"{derived.completed or 0} of {derived.planned} done"))
@@ -1146,6 +1151,14 @@ def _run_lines(run: SyncRun) -> list[str]:
     if run.error:
         rows.append(("error", run.error))
     return _format_table(("FIELD", "VALUE"), rows).splitlines()
+
+
+def _stopped_by(reason: str | None) -> str:
+    """A run's stop reason in plain words, with the stored word beside it (#213)."""
+    text = runs.describe_stop_reason(reason)
+    if reason is None or text is None:
+        return "-"
+    return text if text == reason else f"{text} ({reason})"
 
 
 @linkedin_app.command("runs")
@@ -1167,7 +1180,7 @@ def linkedin_runs(
                     run.trigger.value,
                     run.status.value,
                     f"{run.started_at:%Y-%m-%d %H:%M}",
-                    run.stop_reason or "-",
+                    runs.describe_stop_reason(run.stop_reason) or "-",
                 )
                 for run in rows
             ]
@@ -1236,8 +1249,10 @@ def linkedin_cancel(run_id: Annotated[int, typer.Argument(help="The run to stop.
 
 
 @schedule_app.command("status")
-def linkedin_schedule_status() -> None:
-    """Whether scheduled LinkedIn runs are armed, and the counts that skip them. Reads only."""
+def linkedin_schedule_status(ctx: typer.Context) -> None:
+    """Whether scheduled LinkedIn runs are armed, the active window, and the counts that
+    skip them. Reads only."""
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
     engine = make_engine(database_url())
     try:
         factory = make_session_factory(engine)
@@ -1258,6 +1273,7 @@ def linkedin_schedule_status() -> None:
         )
     else:
         typer.echo(f"armed since {armed_at:%Y-%m-%d %H:%M UTC}: scheduled runs fire when due")
+    typer.echo(describe_active_hours(settings))
     typer.echo(_streak_line("route-changed breaker", "route_changed", route))
     for kind, streak in lost.items():
         typer.echo(_streak_line("answer-lost limit", "answer_lost", streak, kind=kind))

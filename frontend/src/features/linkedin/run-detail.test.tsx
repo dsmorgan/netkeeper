@@ -71,6 +71,25 @@ describe('RunDetail', () => {
     ).toBeInTheDocument()
   })
 
+  it('says plainly that active hours stopped the run, and when the window opens (#213)', async () => {
+    renderDetail(1, {
+      'GET /api/v1/linkedin/runs/1': () =>
+        jsonResponse(
+          run({
+            id: 1,
+            kind: 'enrich',
+            status: 'aborted',
+            stop_reason: 'inactive',
+            stop_reason_text: 'outside active hours',
+            notes:
+              'stopped outside active hours (08:30-21:30 America/New_York); the next window opens at 08:30 tomorrow. Change `[linkedin] active_hours` in config.toml to adjust.',
+          }),
+        ),
+    })
+    expect(await screen.findByText('Stopped: outside active hours')).toBeInTheDocument()
+    expect(screen.getByText(/the next window opens at 08:30 tomorrow/)).toBeInTheDocument()
+  })
+
   it('offers Resume only for a resumable aborted enrichment', async () => {
     renderDetail(1, {
       'GET /api/v1/linkedin/runs/1': () =>

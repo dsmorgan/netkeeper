@@ -919,6 +919,7 @@ def test_the_scanner_can_actually_find_a_caller() -> None:
     assert _callers_of("netkeeper.linkedin.pacing.is_active_at", live_only=False) == {
         package / "services" / "scheduler.py",
         package / "services" / "enrichment.py",
+        package / "services" / "runs.py",  # a manual run refused outside the window (#213)
     }
     assert not _callers_of("netkeeper.linkedin.pacing.a_function_nobody_wrote", live_only=False)
 
