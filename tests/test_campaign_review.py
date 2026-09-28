@@ -28,7 +28,9 @@ from netkeeper.models import (
     Enrollment,
     EnrollmentStatus,
     Interaction,
+    Mailbox,
     Message,
+    ReviewPreview,
     StepMode,
     Template,
     TemplateChannel,
@@ -128,14 +130,7 @@ async def _review(client: httpx.AsyncClient, s: Setup) -> Any:
 
 async def _approve_sample(client: httpx.AsyncClient, s: Setup) -> Any:
     sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
-    ids = [e["enrollment_id"] for e in sample["enrollments"]]
-    await _ok(
-        await client.post(
-            f"{s.base}/review/approve",
-            json={"enrollment_ids": ids, "content_fingerprint": sample["content_fingerprint"]},
-            headers=CSRF,
-        )
-    )
+    await _approve(client, s, sample["enrollments"])
     return sample
 
 
@@ -150,14 +145,16 @@ async def _search_one(client: httpx.AsyncClient, s: Setup, sample: Any) -> tuple
     return other, viewed
 
 
-async def _approve(client: httpx.AsyncClient, s: Setup, ids: list[int], fingerprint: str) -> None:
-    await _ok(
-        await client.post(
-            f"{s.base}/review/approve",
-            json={"enrollment_ids": ids, "content_fingerprint": fingerprint},
-            headers=CSRF,
-        )
-    )
+def _approval(previews: list[Any]) -> dict[str, Any]:
+    return {
+        "previews": [
+            {"enrollment_id": p["enrollment_id"], "fingerprint": p["fingerprint"]} for p in previews
+        ]
+    }
+
+
+async def _approve(client: httpx.AsyncClient, s: Setup, previews: list[Any]) -> None:
+    await _ok(await client.post(f"{s.base}/review/approve", json=_approval(previews), headers=CSRF))
 
 
 async def _test_send_all(client: httpx.AsyncClient, s: Setup) -> None:
@@ -192,9 +189,9 @@ async def _complete(client: httpx.AsyncClient, s: Setup, *, skip: str | None = N
         sample = await _approve_sample(client, s)
     else:
         sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
-    other, viewed = await _search_one(client, s, sample)
+    _other, viewed = await _search_one(client, s, sample)
     if skip != "searched_previews":
-        await _approve(client, s, [other], viewed["content_fingerprint"])
+        await _approve(client, s, viewed["enrollments"])
     if skip != "test_sends":
         await _test_send_all(client, s)
     if skip != "lint":
@@ -266,7 +263,7 @@ async def test_one_sampled_preview_left_unapproved_is_named(
     await _complete(client, s, skip="sample_previews")
     sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
     ids = [e["enrollment_id"] for e in sample["enrollments"]]
-    await _approve(client, s, ids[1:], sample["content_fingerprint"])
+    await _approve(client, s, sample["enrollments"][1:])
     response = await client.post(f"{s.base}/activate", headers=CSRF)
     assert response.status_code == 409
     [gap] = response.json()["missing"]
@@ -397,29 +394,47 @@ async def test_an_approval_for_previews_that_changed_since_is_refused(
     s = _build(running_app)
     sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
     _edit(s, "template")
-    ids = [e["enrollment_id"] for e in sample["enrollments"]]
     response = await client.post(
-        f"{s.base}/review/approve",
-        json={"enrollment_ids": ids, "content_fingerprint": sample["content_fingerprint"]},
-        headers=CSRF,
+        f"{s.base}/review/approve", json=_approval(sample["enrollments"]), headers=CSRF
     )
     assert response.status_code == 409
+    assert "changed since they were viewed" in response.json()["detail"]
 
 
 async def test_previews_never_viewed_cannot_be_approved(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
     s = _build(running_app)
-    review = await _review(client, s)
     response = await client.post(
         f"{s.base}/review/approve",
-        json={
-            "enrollment_ids": [s.enrollment_ids[0]],
-            "content_fingerprint": review["content_fingerprint"],
-        },
+        json={"previews": [{"enrollment_id": s.enrollment_ids[0], "fingerprint": "x"}]},
         headers=CSRF,
     )
     assert response.status_code == 409
+    assert "not viewed" in response.json()["detail"]
+
+
+async def test_an_enrollment_no_longer_pending_cannot_be_approved(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app)
+    sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
+    first = sample["enrollments"][0]
+    with session_scope(s.factory, write=True) as session:
+        user = _local(session)
+        enrollment = get_scoped(session, user, Enrollment, first["enrollment_id"])
+        assert enrollment is not None
+        enrollment.status = EnrollmentStatus.REMOVED
+    response = await client.post(f"{s.base}/review/approve", json=_approval([first]), headers=CSRF)
+    assert response.status_code == 409
+    assert "not pending" in response.json()["detail"]
+    with session_scope(s.factory) as session:
+        row = session.scalars(
+            unscoped(select(ReviewPreview)).where(
+                ReviewPreview.enrollment_id == first["enrollment_id"]
+            )
+        ).one()
+        assert row.approved_at is None
 
 
 async def test_a_summary_that_is_not_the_current_one_is_not_acknowledged(
@@ -579,7 +594,7 @@ async def test_a_test_send_is_refused_unless_the_mailbox_is_armed_for_send(
         f"{s.base}/review/test-send", json={"step_id": s.step_ids[0]}, headers=CSRF
     )
     assert response.status_code == 409
-    assert "armed for send" in response.json()["detail"]
+    assert "is not armed for send" in response.json()["detail"]  # the first check
     assert (s.opened, s.gmail.calls) == ([], [])
     with session_scope(s.factory) as session:
         assert session.scalar(unscoped(select(func.count()).select_from(TestSend))) == 0
@@ -625,7 +640,7 @@ async def test_a_test_send_gmail_refused_records_nothing(
         ("POST", "/review/start", None),
         ("POST", "/review/sample", None),
         ("POST", "/review/previews", {"enrollment_ids": [1]}),
-        ("POST", "/review/approve", {"enrollment_ids": [1], "content_fingerprint": "x"}),
+        ("POST", "/review/approve", {"previews": [{"enrollment_id": 1, "fingerprint": "x"}]}),
         ("POST", "/review/lint", None),
         ("POST", "/review/guards/acknowledge", {"summary": "x", "audience_fingerprint": "x"}),
         ("POST", "/review/test-send", {"step_id": 1}),
@@ -655,3 +670,121 @@ async def test_another_users_campaign_is_404(
         assert session.scalars(unscoped(select(Campaign.status))).one() is (
             CampaignStatus.REVIEWING
         )
+
+
+@pytest.mark.parametrize(
+    "then",
+    [
+        pytest.param({"armed_at": None, "send_armed_at": None, "armed_by": None}, id="disarmed"),
+        pytest.param({"send_armed_at": None}, id="back-to-drafts"),
+    ],
+)
+async def test_an_arming_changed_after_the_first_check_sends_nothing(
+    client: httpx.AsyncClient,
+    running_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    then: dict[str, Any],
+) -> None:
+    """The recheck just before the Gmail call: disarmed, or taken back to drafts, after
+    the test send was prepared, it opens no Gmail client."""
+    s = _build(running_app)
+    prepare = campaign_review.prepare_test_send
+
+    def prepare_then_change(*args: Any, **kwargs: Any) -> campaign_review.TestSendPlan:
+        plan = prepare(*args, **kwargs)
+        with session_scope(s.factory, write=True) as session:
+            mailbox = get_scoped(session, _local(session), Mailbox, plan.mailbox_id)
+            assert mailbox is not None
+            for name, value in then.items():
+                setattr(mailbox, name, value)
+        return plan
+
+    monkeypatch.setattr(campaign_review, "prepare_test_send", prepare_then_change)
+    response = await client.post(
+        f"{s.base}/review/test-send", json={"step_id": s.step_ids[0]}, headers=CSRF
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "the mailbox is no longer armed for send"
+    assert (s.opened, s.gmail.calls) == ([], [])
+
+
+@pytest.mark.parametrize("edit", ["renamed", "new_email"])
+async def test_editing_an_approved_contact_undoes_its_approval(
+    client: httpx.AsyncClient, running_app: FastAPI, edit: str
+) -> None:
+    s = _build(running_app)
+    await _complete(client, s)
+    sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
+    enrollment_id = sample["enrollments"][0]["enrollment_id"]
+    with session_scope(s.factory, write=True) as session:
+        user = _local(session)
+        enrollment = get_scoped(session, user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        contact = get_scoped(session, user, Contact, enrollment.contact_id)
+        assert contact is not None
+        if edit == "renamed":
+            contact.preferred_name = "Somebody Else"
+        else:
+            contact.emails[0].email = "moved@contacts.example"
+    response = await client.post(f"{s.base}/activate", headers=CSRF)
+    assert response.status_code == 409
+    [gap] = response.json()["missing"]
+    assert (gap["requirement"], gap["enrollment_ids"]) == ("sample_previews", [enrollment_id])
+    assert _campaign(s)[0] is CampaignStatus.REVIEWING
+
+
+async def test_an_old_audience_fingerprint_is_not_acknowledged(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app)
+    before = await _review(client, s)
+    _edit(s, "removed")
+    _edit(s, "enrolled")  # the same count, so the same summary, for another audience
+    after = await _review(client, s)
+    assert after["guard_summary"] == before["guard_summary"]
+    response = await client.post(
+        f"{s.base}/review/guards/acknowledge",
+        json={
+            "summary": after["guard_summary"],
+            "audience_fingerprint": before["audience_fingerprint"],
+        },
+        headers=CSRF,
+    )
+    assert response.status_code == 409
+    assert "audience changed" in response.json()["detail"]
+
+
+async def test_previews_viewed_in_an_earlier_sample_must_still_be_approved(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app)
+    await _complete(client, s, skip="sample_previews")
+    first = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
+    _edit(s, "enrolled")
+    await _ack(client, s)
+    second = await _approve_sample(client, s)
+    dropped = {e["enrollment_id"] for e in first["enrollments"]} - {
+        e["enrollment_id"] for e in second["enrollments"]
+    }
+    body = await _review(client, s)
+    searched = [m for m in body["missing"] if m["requirement"] == "searched_previews"]
+    if dropped:
+        assert _missing(body) == {"searched_previews"}
+        assert set(searched[0]["enrollment_ids"]) == dropped
+    else:  # every earlier draw was drawn again (about 1 in 286)
+        assert _missing(body) == set()
+
+
+async def test_a_test_send_renders_for_the_first_sampled_enrollment(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app)
+    sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
+    await _ok(
+        await client.post(
+            f"{s.base}/review/test-send", json={"step_id": s.step_ids[0]}, headers=CSRF
+        )
+    )
+    [sent] = s.gmail.sent()
+    first = sample["enrollments"][0]
+    assert first["steps"][0]["body"] in s.gmail.raw(sent.id).get_content()

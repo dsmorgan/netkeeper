@@ -476,17 +476,32 @@ def enroll(
     return EnrollResult(tuple(enrolled), tuple(sorted(present)), tuple(verdicts))
 
 
+REVIEW_GATE: Final = object()
+"""The token :func:`activate` needs. Only
+:func:`netkeeper.services.campaign_review.activate` passes it, after the review gate
+(spec 11.8) passed, and tests that stand in for it: nothing else may activate."""
+
+
 def activate(
-    session: Session, user: User, campaign_id: int, *, settings: Settings, now: datetime
+    session: Session,
+    user: User,
+    campaign_id: int,
+    *,
+    settings: Settings,
+    now: datetime,
+    gate: object = None,
 ) -> Campaign:
     """``reviewing`` to ``active``: every ``pending`` enrollment becomes ``active``.
 
-    Refused unless the campaign is ``reviewing`` with ``approved_at`` recorded (the
-    review gate, spec 11.8; P3-09 records it), has steps, has a mailbox when a step
+    Refused unless called through the review gate (``gate`` is :data:`REVIEW_GATE`:
+    call :func:`netkeeper.services.campaign_review.activate`), and unless the campaign
+    is ``reviewing`` with ``approved_at`` recorded (spec 11.8), has steps, has a mailbox when a step
     is email, and every step's template is free of lint errors. Each first step is
     due after its delay, inside the send window.
     """
     _require_writer(session, "activate")
+    if gate is not REVIEW_GATE:
+        raise CampaignEngineError("activate only through the review gate (campaign_review)")
     campaign = _campaign(session, user, campaign_id)
     if campaign.status is not CampaignStatus.REVIEWING:
         raise CampaignEngineError(f"campaign {campaign_id} is {campaign.status}, not reviewing")

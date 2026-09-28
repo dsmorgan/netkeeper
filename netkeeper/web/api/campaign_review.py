@@ -7,7 +7,7 @@ The flow, for the campaign builder (P3-11):
 2. ``POST .../review/sample`` draws the sample (the same one while the audience
    is unchanged) and answers its previews; ``POST .../review/previews`` answers
    the previews of enrollments the person looked up. ``POST .../review/approve``
-   approves viewed previews, for the ``content_fingerprint`` they came with.
+   approves viewed previews, each with the ``fingerprint`` it came with.
 3. ``POST .../review/lint``, ``POST .../review/guards/acknowledge`` (with the
    summary and ``audience_fingerprint`` from ``GET .../review``), and
    ``POST .../review/test-send`` for each email step.
@@ -103,6 +103,7 @@ class EnrollmentPreviewOut(BaseModel):
     contact_name: str
     sampled: bool
     approved: bool
+    fingerprint: str
     steps: list[StepPreviewOut]
 
 
@@ -115,9 +116,15 @@ class PreviewsIn(BaseModel):
     enrollment_ids: Annotated[list[int], Field(min_length=1, max_length=service.VIEW_MAX)]
 
 
+class ApprovalIn(BaseModel):
+    enrollment_id: int
+    fingerprint: Annotated[str, Field(max_length=64)]
+
+
 class ApproveIn(BaseModel):
-    enrollment_ids: Annotated[list[int], Field(min_length=1, max_length=service.VIEW_MAX)]
-    content_fingerprint: Annotated[str, Field(max_length=64)]
+    """Each enrollment with the ``fingerprint`` its preview came with."""
+
+    previews: Annotated[list[ApprovalIn], Field(min_length=1, max_length=service.VIEW_MAX)]
 
 
 class LintStepOut(BaseModel):
@@ -189,6 +196,7 @@ def _previews_out(previews: service.Previews) -> PreviewsOut:
                 contact_name=e.contact_name,
                 sampled=e.sampled,
                 approved=e.approved,
+                fingerprint=e.fingerprint,
                 steps=[
                     StepPreviewOut(
                         position=s.position,
@@ -268,14 +276,13 @@ def view_previews(
 def approve_previews(
     campaign_id: int, body: ApproveIn, request: Request, session: SessionDep, user: CurrentUser
 ) -> ReviewOut:
-    """Approve viewed previews, for the ``content_fingerprint`` they were shown with."""
+    """Approve viewed previews, each for the ``fingerprint`` it was shown with."""
     with translate_errors():
         service.approve(
             session,
             user,
             campaign_id,
-            body.enrollment_ids,
-            content_fingerprint_seen=body.content_fingerprint,
+            {p.enrollment_id: p.fingerprint for p in body.previews},
             me=_me(request),
             now=utcnow(),
         )

@@ -189,7 +189,7 @@ export interface paths {
         put?: never;
         /**
          * Approve Previews
-         * @description Approve viewed previews, for the ``content_fingerprint`` they were shown with.
+         * @description Approve viewed previews, each for the ``fingerprint`` it was shown with.
          */
         post: operations["approve_previews_api_v1_campaigns__campaign_id__review_approve_post"];
         delete?: never;
@@ -2285,12 +2285,20 @@ export interface components {
              */
             op: "and";
         };
-        /** ApproveIn */
+        /** ApprovalIn */
+        ApprovalIn: {
+            /** Enrollment Id */
+            enrollment_id: number;
+            /** Fingerprint */
+            fingerprint: string;
+        };
+        /**
+         * ApproveIn
+         * @description Each enrollment with the ``fingerprint`` its preview came with.
+         */
         ApproveIn: {
-            /** Content Fingerprint */
-            content_fingerprint: string;
-            /** Enrollment Ids */
-            enrollment_ids: number[];
+            /** Previews */
+            previews: components["schemas"]["ApprovalIn"][];
         };
         /**
          * ArchiveConnectionCountsOut
@@ -3329,6 +3337,8 @@ export interface components {
             contact_name: string;
             /** Enrollment Id */
             enrollment_id: number;
+            /** Fingerprint */
+            fingerprint: string;
             /** Sampled */
             sampled: boolean;
             /** Steps */

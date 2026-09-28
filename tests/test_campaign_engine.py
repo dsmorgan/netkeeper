@@ -46,6 +46,7 @@ from netkeeper.models import (
 from netkeeper.scoping import get_scoped, install_scope_guard, scoped, scoped_delete, unscoped
 from netkeeper.services import campaign_engine as engine_module
 from netkeeper.services.campaign_engine import (
+    REVIEW_GATE,
     CampaignEngine,
     CampaignEngineError,
     Firing,
@@ -921,7 +922,11 @@ def test_activate_makes_pending_active_with_the_first_step_in_the_window(
         send_window_json={"days": ["Wed"], "hours": ["10:00", "12:00"]},
     )
     enrollment_id = world.enroll_new(status=EnrollmentStatus.PENDING, next_action_at=None)
-    world.write(lambda s: activate(s, world.user, world.campaign.id, settings=Settings(), now=NOW))
+    world.write(
+        lambda s: activate(
+            s, world.user, world.campaign.id, settings=Settings(), now=NOW, gate=REVIEW_GATE
+        )
+    )
     enrollment = world.enrollment(enrollment_id)
     assert enrollment.status is EnrollmentStatus.ACTIVE
     assert enrollment.next_action_at == datetime(2026, 9, 30, 10, 0, tzinfo=UTC)
@@ -955,8 +960,23 @@ def test_activate_is_refused_until_the_campaign_is_ready(
     world.write(change)
     with pytest.raises(CampaignEngineError, match=match):
         world.write(
+            lambda s: activate(
+                s, world.user, world.campaign.id, settings=SETTINGS, now=NOW, gate=REVIEW_GATE
+            )
+        )
+
+
+def test_activate_is_refused_outside_the_review_gate(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Even with ``approved_at`` set, only the gate's token activates (#288)."""
+    world = make_world(session_factory, status=CampaignStatus.REVIEWING, approved_at=NOW)
+    with pytest.raises(CampaignEngineError, match="review gate"):
+        world.write(
             lambda s: activate(s, world.user, world.campaign.id, settings=SETTINGS, now=NOW)
         )
+    campaign = world.read(lambda s: get_scoped(s, world.user, Campaign, world.campaign.id))
+    assert campaign is not None and campaign.status is CampaignStatus.REVIEWING
 
 
 def test_activate_is_refused_over_a_template_with_lint_errors(
@@ -972,7 +992,9 @@ def test_activate_is_refused_over_a_template_with_lint_errors(
     world.write(break_it)
     with pytest.raises(CampaignEngineError, match="step 2's template"):
         world.write(
-            lambda s: activate(s, world.user, world.campaign.id, settings=SETTINGS, now=NOW)
+            lambda s: activate(
+                s, world.user, world.campaign.id, settings=SETTINGS, now=NOW, gate=REVIEW_GATE
+            )
         )
 
 

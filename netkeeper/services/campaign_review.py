@@ -82,8 +82,8 @@ from netkeeper.models import (
     TestSend,
     User,
 )
-from netkeeper.scoping import get_scoped, scoped, scoped_delete
-from netkeeper.services import campaign_engine
+from netkeeper.scoping import get_scoped, scoped
+from netkeeper.services import campaign_engine, mailboxes
 from netkeeper.services.campaign_guards import (
     UNSENDABLE_EMAIL_STATUSES,
     check_enrollment,
@@ -340,6 +340,7 @@ class EnrollmentPreview:
     contact_name: str
     sampled: bool
     approved: bool
+    fingerprint: str
     steps: tuple[StepPreview, ...]
 
 
@@ -356,6 +357,21 @@ def _contact(session: Session, user: User, contact_id: int) -> Contact | None:
         .options(selectinload(Contact.emails), selectinload(Contact.positions))
         .execution_options(populate_existing=True)
     ).first()
+
+
+def preview_fingerprint(
+    session: Session, user: User, content: str, contact_id: int, today: date
+) -> str:
+    """What one enrollment's previews show: the content fingerprint, the contact's merge
+    values and its sendable address. An approval counts only while this is unchanged, so
+    editing the contact (a name, an email) undoes it."""
+    contact = _contact(session, user, contact_id)
+    if contact is None:
+        return _digest([content, None])
+    email = sendable_email(contact, refuse=UNSENDABLE_EMAIL_STATUSES)
+    return _digest(
+        [content, contact_fields(contact, today), None if email is None else email.email]
+    )
 
 
 def _render_step(
@@ -423,12 +439,14 @@ def _preview(
         if contact is None
         else f"{contact.preferred_name or contact.first_name} {contact.last_name}".strip()
     )
+    fingerprint = preview_fingerprint(session, user, content, enrollment.contact_id, today)
     return EnrollmentPreview(
         enrollment.id,
         enrollment.contact_id,
         name,
         row.sampled,
-        row.approved_at is not None and row.approved_fingerprint == content,
+        row.approved_at is not None and row.approved_fingerprint == fingerprint,
+        fingerprint,
         tuple(shown),
     )
 
@@ -474,10 +492,12 @@ def draw_sample(
     pending, audience = _audience(session, user, campaign)
     rows = _rows(session, user, campaign_id)
     if not _sample_is_current(rows, audience):
-        stale = [r.id for r in rows if r.sampled]
-        if stale:
-            session.execute(scoped_delete(user, ReviewPreview).where(ReviewPreview.id.in_(stale)))
-            session.flush()
+        # The old draw stays as viewed previews: each still has to be approved, as any
+        # preview the person looked at does, unless it is drawn again.
+        for old in rows:
+            if old.sampled:
+                old.sampled = False
+                old.sample_fingerprint = None
         chooser = rng if rng is not None else random.SystemRandom()
         chosen = sorted(chooser.sample([e.id for e in pending], min(SAMPLE_SIZE, len(pending))))
         existing = {r.enrollment_id: r for r in _rows(session, user, campaign_id)}
@@ -545,30 +565,39 @@ def approve(
     session: Session,
     user: User,
     campaign_id: int,
-    enrollment_ids: Collection[int],
+    seen: Mapping[int, str],
     *,
-    content_fingerprint_seen: str,
     me: Mapping[str, str],
     now: datetime,
 ) -> list[ReviewPreview]:
-    """Approve previews the person viewed. ``content_fingerprint_seen`` is the one the
-    previews came with: refused when the steps or templates changed since."""
+    """Approve previews the person viewed. ``seen`` maps each enrollment to the
+    ``fingerprint`` its preview came with: refused when a step, a template or the
+    contact changed since."""
     _require_writer(session, "approve")
     campaign = _reviewing(session, user, campaign_id)
-    current = content_fingerprint(session, user, campaign, me)
-    if content_fingerprint_seen != current:
-        raise ReviewConflict("the previews changed since they were viewed; view them again")
-    ids = set(enrollment_ids)
+    ids = sorted(seen)
     if not ids:
         raise ReviewConflict("approve at least one enrollment")
+    content = content_fingerprint(session, user, campaign, me)
     rows = {r.enrollment_id: r for r in _rows(session, user, campaign_id)}
-    pending = {e.id for e in _pending(session, user, campaign_id)}
-    for enrollment_id in sorted(ids):
-        if enrollment_id not in rows or enrollment_id not in pending:
+    pending = {e.id: e for e in _pending(session, user, campaign_id)}
+    current: dict[int, str] = {}
+    for enrollment_id in ids:
+        if enrollment_id not in pending:
+            raise ReviewConflict(f"enrollment {enrollment_id} is not pending in this campaign")
+        if enrollment_id not in rows:
             raise ReviewConflict(f"enrollment {enrollment_id}'s previews were not viewed")
-    for enrollment_id in sorted(ids):
+        current[enrollment_id] = preview_fingerprint(
+            session, user, content, pending[enrollment_id].contact_id, now.date()
+        )
+        if seen[enrollment_id] != current[enrollment_id]:
+            raise ReviewConflict(
+                f"enrollment {enrollment_id}'s previews changed since they were viewed;"
+                " view them again"
+            )
+    for enrollment_id in ids:
         rows[enrollment_id].approved_at = now
-        rows[enrollment_id].approved_fingerprint = current
+        rows[enrollment_id].approved_fingerprint = current[enrollment_id]
     session.flush()
     return [rows[i] for i in sorted(ids)]
 
@@ -624,7 +653,9 @@ def acknowledge_guards(
     campaign = _reviewing(session, user, campaign_id)
     audience = audience_fingerprint(session, user, campaign)
     summary = guard_summary(session, user, campaign, now=now)
-    if audience_fingerprint_seen != audience or summary_seen != summary:
+    if audience_fingerprint_seen != audience:
+        raise ReviewConflict("the audience changed since the summary was shown; look again")
+    if summary_seen != summary:
         raise ReviewConflict(f"the guard results changed; they are now: {summary}")
     campaign.guards_acknowledged_at = now
     campaign.guards_fingerprint = audience
@@ -687,8 +718,9 @@ def prepare_test_send(
     if mailbox.status is not MailboxStatus.OK:
         raise ReviewConflict(f"{mailbox.email} is {mailbox.status}")
     pending = _pending(session, user, campaign_id)
-    if enrollment_id is None:
-        enrollment = pending[0] if pending else None
+    if enrollment_id is None:  # the first sampled one, else the first pending one
+        sampled = {r.enrollment_id for r in _rows(session, user, campaign_id) if r.sampled}
+        enrollment = next((e for e in pending if e.id in sampled), pending[0] if pending else None)
     else:
         enrollment = next((e for e in pending if e.id == enrollment_id), None)
     if enrollment is None:
@@ -726,12 +758,7 @@ def prepare_test_send(
 
 def still_armed_for_send(session: Session, user: User, mailbox_id: int) -> bool:
     """Read again just before the Gmail call, as the sender does before each write."""
-    mailbox = session.scalars(
-        scoped(user, Mailbox)
-        .where(Mailbox.id == mailbox_id)
-        .execution_options(populate_existing=True)
-    ).first()
-    return mailbox is not None and mailbox.arm is MailboxArm.SEND
+    return mailboxes.armed(session, user, mailbox_id) is MailboxArm.SEND
 
 
 def record_test_send(
@@ -775,14 +802,19 @@ def missing(
     steps = _steps(session, user, campaign.id)
     content = content_fingerprint(session, user, campaign, me)
     pending, audience = _audience(session, user, campaign)
-    live = {e.id for e in pending}
+    live = {e.id: e for e in pending}
     rows = _rows(session, user, campaign.id)
 
     def unapproved(candidates: Sequence[ReviewPreview]) -> tuple[int, ...]:
         return tuple(
             r.enrollment_id
             for r in candidates
-            if r.approved_at is None or r.approved_fingerprint != content
+            if r.approved_at is None
+            or r.enrollment_id not in live
+            or r.approved_fingerprint
+            != preview_fingerprint(
+                session, user, content, live[r.enrollment_id].contact_id, now.date()
+            )
         )
 
     if not live:
@@ -820,8 +852,14 @@ def missing(
         out.append(
             Missing("guards", "the guard summary for the current audience is not acknowledged")
         )
-    elif campaign.guards_summary != guard_summary(session, user, campaign, now=now):
-        out.append(Missing("guards", "the guard results changed since they were acknowledged"))
+    elif campaign.guards_summary != (summary := guard_summary(session, user, campaign, now=now)):
+        out.append(
+            Missing(
+                "guards",
+                f"the guard results changed since they were acknowledged: {summary}"
+                f" (acknowledged: {campaign.guards_summary})",
+            )
+        )
     return out
 
 
@@ -845,6 +883,13 @@ def activate(
     campaign.approved_at = now
     session.flush()
     try:
-        return campaign_engine.activate(session, user, campaign_id, settings=settings, now=now)
+        return campaign_engine.activate(
+            session,
+            user,
+            campaign_id,
+            settings=settings,
+            now=now,
+            gate=campaign_engine.REVIEW_GATE,
+        )
     except campaign_engine.CampaignEngineError as exc:
         raise ReviewConflict(str(exc)) from exc

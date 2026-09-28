@@ -71,26 +71,40 @@
         "title": "And",
         "type": "object"
       },
-      "ApproveIn": {
+      "ApprovalIn": {
         "properties": {
-          "content_fingerprint": {
-            "maxLength": 64,
-            "title": "Content Fingerprint",
-            "type": "string"
+          "enrollment_id": {
+            "title": "Enrollment Id",
+            "type": "integer"
           },
-          "enrollment_ids": {
+          "fingerprint": {
+            "maxLength": 64,
+            "title": "Fingerprint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "fingerprint"
+        ],
+        "title": "ApprovalIn",
+        "type": "object"
+      },
+      "ApproveIn": {
+        "description": "Each enrollment with the ``fingerprint`` its preview came with.",
+        "properties": {
+          "previews": {
             "items": {
-              "type": "integer"
+              "$ref": "#/components/schemas/ApprovalIn"
             },
             "maxItems": 50,
             "minItems": 1,
-            "title": "Enrollment Ids",
+            "title": "Previews",
             "type": "array"
           }
         },
         "required": [
-          "enrollment_ids",
-          "content_fingerprint"
+          "previews"
         ],
         "title": "ApproveIn",
         "type": "object"
@@ -2963,6 +2977,10 @@
             "title": "Enrollment Id",
             "type": "integer"
           },
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
+          },
           "sampled": {
             "title": "Sampled",
             "type": "boolean"
@@ -2981,6 +2999,7 @@
           "contact_name",
           "sampled",
           "approved",
+          "fingerprint",
           "steps"
         ],
         "title": "EnrollmentPreviewOut",
@@ -10098,7 +10117,7 @@
     },
     "/api/v1/campaigns/{campaign_id}/review/approve": {
       "post": {
-        "description": "Approve viewed previews, for the ``content_fingerprint`` they were shown with.",
+        "description": "Approve viewed previews, each for the ``fingerprint`` it was shown with.",
         "operationId": "approve_previews_api_v1_campaigns__campaign_id__review_approve_post",
         "parameters": [
           {
