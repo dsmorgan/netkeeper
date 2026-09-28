@@ -96,9 +96,13 @@ from netkeeper.services.linkedin_accounts import (
     ensure_account,
     find_account,
 )
-from netkeeper.services.linkedin_session import clear_session_flag, session_flag
+from netkeeper.services.linkedin_session import (
+    clear_session_flag,
+    record_session_evidence,
+    session_flag,
+)
 from netkeeper.services.pacing import profiles as pacing_profiles
-from netkeeper.services.posture import SessionProbe, posture
+from netkeeper.services.posture import SessionProbe, describe_active_hours, posture
 from netkeeper.services.posture import render as render_posture
 from netkeeper.services.simulate_campaign import DEFAULT_SCHEDULE_DAYS
 from netkeeper.services.simulate_run import DEFAULT_DAYS as DEFAULT_SIMULATION_DAYS
@@ -403,12 +407,18 @@ def preflight(ctx: typer.Context) -> None:
     flag is different -- a live session cookie is not proof a checkpoint is
     resolved -- so it is left in place, with a line saying so and naming
     `netkeeper linkedin clear-flag` (#168 review, F1).
+
+    What it found about the session (logged in or not, and the cookie names) is
+    recorded, so the Settings page's posture report, which never probes the
+    browser itself, can show it (#282).
     """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
     provider = AttachBrowserProvider(settings.linkedin.cdp_url)
     report = asyncio.run(run_preflight(provider, _browser_lock_key()))
     for line in _clear_session_flag_after_login(report):
+        typer.echo(line)
+    for line in _record_session_evidence(report, source="preflight"):
         typer.echo(line)
     for line in _preflight_lines(report):
         typer.echo(line)
@@ -514,6 +524,58 @@ def _clear_session_flag_after_login(report: PreflightReport) -> list[str]:
             return []
         log.warning("could not clear the session flag: %s", exc)
         return [f"could not clear the session flag: {exc.orig or exc}"]
+    finally:
+        engine.dispose()
+
+
+def _record_session_evidence(report: PreflightReport, *, source: str) -> list[str]:
+    """Record what a browser check found about the session, for pages that never probe (#282).
+
+    Only a definite answer is recorded: logged in, or no session in the profile.
+    An unreadable cookie jar or a failed attach says nothing about the session
+    and leaves the last record as it was. Cookie names only, never a value.
+
+    The same fresh-install rules as :func:`_clear_session_flag_after_login`: no
+    database file means nothing is created and nothing printed, a missing schema
+    or no local user is silent, and any other database error is one line and
+    never fails the command. The write is its own short writer session, after
+    the browser work, so it never holds the write lock while attaching.
+    """
+    if not report.attached or report.login is LoginState.UNKNOWN:
+        return []
+    url = database_url()
+    parsed_url = make_url(url)
+    sqlite_file = parsed_url.database
+    is_sqlite_file = parsed_url.get_backend_name() == "sqlite" and sqlite_file not in (
+        None,
+        ":memory:",
+    )
+    if is_sqlite_file and sqlite_file is not None and not Path(sqlite_file).exists():
+        return []
+    engine = make_engine(url)
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = session.scalars(
+                select(User).where(User.kind == UserKind.LOCAL).order_by(User.id)
+            ).first()
+            if user is None:
+                return []
+            record_session_evidence(
+                session,
+                user,
+                logged_in=report.login is LoginState.LOGGED_IN,
+                source=source,
+                cookie_names=report.session_cookies,
+            )
+        return []
+    except OperationalError as exc:
+        if _is_missing_schema(exc):
+            log.debug("no schema to record the session check in yet: %s", exc)
+            return []
+        log.warning("could not record the session check: %s", exc)
+        return [f"could not record the session check: {exc.orig or exc}"]
     finally:
         engine.dispose()
 
@@ -663,8 +725,8 @@ def posture_command(
         typer.Option(
             "--probe/--no-probe",
             help="Attach to Chrome and read the LinkedIn session, as `netkeeper preflight`"
-            " does. --no-probe answers from the database alone and reports the session as"
-            " unknown.",
+            " does, and record what it found. --no-probe answers from the database alone:"
+            " the session from the last recorded check or run, or unknown.",
         ),
     ] = True,
     account: Annotated[
@@ -684,18 +746,23 @@ def posture_command(
     runs resume, the weekend multiplier, LinkedIn auto-send, and the session
     flag a checkpoint or a login wall raises.
 
-    Reads only: it takes no write lock and changes nothing. Exits non-zero when
-    anything warned, so it can gate a script as well as inform a person. It
-    attaches to Chrome to check the LinkedIn session, the same way `netkeeper
-    preflight` does; --no-probe skips that and reports the session as unknown
-    rather than assuming it is fine.
+    The report itself only reads. Exits non-zero when anything warned, so it can
+    gate a script as well as inform a person. It attaches to Chrome to check the
+    LinkedIn session, the same way `netkeeper preflight` does, and records what
+    it found for the Settings page (#282), in one short write before the report
+    is read. --no-probe skips the probe and reports the session from the last
+    recorded check or the newest run that read LinkedIn, or as unknown when
+    there is neither, rather than assuming it is fine.
     """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
     provider = _provider(settings)
-    session_probe = (
-        _session_probe(asyncio.run(run_preflight(provider, _browser_lock_key()))) if probe else None
-    )
+    session_probe: SessionProbe | None = None
+    if probe:
+        preflight_report = asyncio.run(run_preflight(provider, _browser_lock_key()))
+        for line in _record_session_evidence(preflight_report, source="posture --probe"):
+            typer.echo(line, err=True)
+        session_probe = _session_probe(preflight_report)
     engine = make_engine(database_url())
     try:
         factory = make_session_factory(engine)
@@ -1016,7 +1083,8 @@ def linkedin_sync(
     no request of its own. It stays within today's page budget and follows the
     same pacing, heat, and session-flag rules a scheduled run has. It works while
     scheduled runs are disarmed: this is how the first supervised run is done.
-    Ctrl-C stops it; what it read is kept.
+    Outside `[linkedin] active_hours` it refuses before recording a run, and says
+    when the window opens. Ctrl-C stops it; what it read is kept.
     """
     kind = SyncRunKind.CONNECTIONS_FULL if full else SyncRunKind.CONNECTIONS_INCREMENTAL
     _run_by_hand(ctx, kind)
@@ -1050,8 +1118,10 @@ def linkedin_enrich(
     one click on Contact info, read from what the page loads and sends nothing of
     its own (ADR 0006), paced like a person, within today's warm-up-ramped,
     weekend-damped, heat-shrunk budget (`netkeeper posture` shows it). Pinned
-    contacts go first. It works while scheduled runs are disarmed. Ctrl-C stops
-    it between profiles; `--resume <run id>` picks up what it left.
+    contacts go first. It works while scheduled runs are disarmed. Outside
+    `[linkedin] active_hours` it refuses before recording a run, and a run the
+    window closes on stops between profiles, saying so. Ctrl-C stops it between
+    profiles; `--resume <run id>` picks up what it left.
     """
     _run_by_hand(ctx, SyncRunKind.ENRICH, max_visits=max_visits, resume=resume)
 
@@ -1073,6 +1143,7 @@ def _run_by_hand(
             user = _local_user_or_exit(session)
             user_id = user.id
             try:
+                runs.refuse_if_outside_active_hours(settings.linkedin, now=datetime.now(UTC))
                 account_id = ensure_account(session, user).id
                 runs.refuse_if_flagged_or_hot(
                     session, user, account_id, now=datetime.now(UTC), settings=settings.linkedin
@@ -1094,6 +1165,7 @@ def _run_by_hand(
                 runs.RunError,
                 runs.HeatSkipped,
                 runs.SessionFlagged,
+                runs.OutsideActiveHours,
                 enrich_plan.PlanNotFound,
                 enrich_plan.PlanFinished,
             ) as exc:
@@ -1151,7 +1223,7 @@ def _run_lines(run: SyncRun) -> list[str]:
         ("status", run.status.value),
         ("started", f"{run.started_at:%Y-%m-%d %H:%M UTC}"),
         ("ended", "-" if run.completed_at is None else f"{run.completed_at:%Y-%m-%d %H:%M UTC}"),
-        ("stopped by", run.stop_reason or "-"),
+        ("stopped by", _stopped_by(run.stop_reason)),
     ]
     if derived.planned is not None:
         rows.append(("plan", f"{derived.completed or 0} of {derived.planned} done"))
@@ -1170,6 +1242,14 @@ def _run_lines(run: SyncRun) -> list[str]:
     if run.error:
         rows.append(("error", run.error))
     return _format_table(("FIELD", "VALUE"), rows).splitlines()
+
+
+def _stopped_by(reason: str | None) -> str:
+    """A run's stop reason in plain words, with the stored word beside it (#213)."""
+    text = runs.describe_stop_reason(reason)
+    if reason is None or text is None:
+        return "-"
+    return text if text == reason else f"{text} ({reason})"
 
 
 @linkedin_app.command("runs")
@@ -1191,7 +1271,7 @@ def linkedin_runs(
                     run.trigger.value,
                     run.status.value,
                     f"{run.started_at:%Y-%m-%d %H:%M}",
-                    run.stop_reason or "-",
+                    runs.describe_stop_reason(run.stop_reason) or "-",
                 )
                 for run in rows
             ]
@@ -1260,8 +1340,10 @@ def linkedin_cancel(run_id: Annotated[int, typer.Argument(help="The run to stop.
 
 
 @schedule_app.command("status")
-def linkedin_schedule_status() -> None:
-    """Whether scheduled LinkedIn runs are armed, and the counts that skip them. Reads only."""
+def linkedin_schedule_status(ctx: typer.Context) -> None:
+    """Whether scheduled LinkedIn runs are armed, the active window, and the counts that
+    skip them. Reads only."""
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
     engine = make_engine(database_url())
     try:
         factory = make_session_factory(engine)
@@ -1282,6 +1364,7 @@ def linkedin_schedule_status() -> None:
         )
     else:
         typer.echo(f"armed since {armed_at:%Y-%m-%d %H:%M UTC}: scheduled runs fire when due")
+    typer.echo(describe_active_hours(settings))
     typer.echo(_streak_line("route-changed breaker", "route_changed", route))
     for kind, streak in lost.items():
         typer.echo(_streak_line("answer-lost limit", "answer_lost", streak, kind=kind))

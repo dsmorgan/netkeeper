@@ -7,7 +7,7 @@ import { SELECT_CLASS } from '@/features/imports/styles'
 import { cn } from '@/lib/utils'
 
 import { runsQuery } from './api'
-import { formatWhen, RUN_STATUS_CLASSES, summarizeFields } from './fields'
+import { formatWhen, RUN_STATUS_CLASSES, stopReasonLabel, summarizeFields } from './fields'
 import {
   RUNNABLE_KINDS,
   RUN_KIND_LABELS,
@@ -154,7 +154,9 @@ export function RunsPanel({
                       {formatWhen(item.started_at)}
                       {item.completed_at !== null && ` → ${formatWhen(item.completed_at)}`}
                     </td>
-                    <td className="py-2 pr-3 text-muted-foreground">{item.stop_reason ?? '—'}</td>
+                    <td className="py-2 pr-3 text-muted-foreground">
+                      {stopReasonLabel(item) ?? '—'}
+                    </td>
                     <td className="py-2 text-muted-foreground">{summarizeFields(item.counts)}</td>
                   </tr>
                 ))}

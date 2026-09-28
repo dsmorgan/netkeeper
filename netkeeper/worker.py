@@ -56,7 +56,7 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import LinkedInSettings, Settings, load_settings
-from netkeeper.db import off_loop, session_scope
+from netkeeper.db import CancelledWhileFailing, off_loop, session_scope
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin.activity_lock import account_key
 from netkeeper.linkedin.browser import (
@@ -208,16 +208,18 @@ class BrowserWorker:
                 self._finish, run_id, user_id, SyncRunStatus.FAILED, reason, runs.describe(exc)
             )
             outcome = runs.RunOutcome.RETRY_LATER
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             # The process is shutting down. A cancel that landed inside the runner
-            # was recorded there; one that landed while attaching was not.
+            # was recorded there; one that landed while attaching was not. A cancel
+            # that carries a failed database write is a failure (#266).
+            failed = exc.error if isinstance(exc, CancelledWhileFailing) else None
             await off_loop(
                 self._finish,
                 run_id,
                 user_id,
-                SyncRunStatus.ABORTED,
-                "interrupted",
-                runs.INTERRUPTED,
+                SyncRunStatus.ABORTED if failed is None else SyncRunStatus.FAILED,
+                "interrupted" if failed is None else "error",
+                runs.INTERRUPTED if failed is None else runs.describe(failed),
             )
             raise
         except (runs.HeatSkipped, runs.SessionFlagged) as exc:

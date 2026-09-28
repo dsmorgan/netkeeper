@@ -1727,6 +1727,8 @@ class RunOut(BaseModel):
     ``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.
     ``resumed_by`` is the id of the run that already took over this one's
     remaining plan, or null when it has not been (and so still may be, spec 9.9).
+    ``stop_reason_text`` is ``stop_reason`` in plain words ("outside active
+    hours" for ``inactive``, #213), or null while the run is running.
     """
 
     id: int
@@ -1736,6 +1738,7 @@ class RunOut(BaseModel):
     started_at: datetime
     completed_at: datetime | None
     stop_reason: str | None
+    stop_reason_text: str | None
     cancel_requested_at: datetime | None
     max_visits: int | None
     resume_of_id: int | None

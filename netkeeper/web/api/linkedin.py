@@ -105,6 +105,7 @@ def _run_out(run: SyncRun) -> RunOut:
         started_at=run.started_at,
         completed_at=run.completed_at,
         stop_reason=run.stop_reason,
+        stop_reason_text=derived.stop_reason_text,
         cancel_requested_at=run.cancel_requested_at,
         max_visits=run.max_visits,
         resume_of_id=run.resume_of_id,
@@ -165,7 +166,10 @@ def get_run(run_id: int, user: CurrentUser, session: SessionDep) -> RunOut:
     operation_id="start_linkedin_run",
     status_code=202,
     responses={
-        409: {"description": "A run is running, the session is flagged, or heat is too high"},
+        409: {
+            "description": "A run is running, the session is flagged, heat is too high, or"
+            " it is outside active hours"
+        },
         422: {"description": "A kind with no runner, or max_visits on a sync"},
         503: {"description": "This process has no browser worker"},
     },
@@ -173,10 +177,15 @@ def get_run(run_id: int, user: CurrentUser, session: SessionDep) -> RunOut:
 async def start_run(
     body: RunStartIn, request: Request, user: CurrentUser, session: SessionDep, tasks: Tasks
 ) -> RunAccepted:
-    """Record a manual run and submit it; answers at once, before any browser work."""
+    """Record a manual run and submit it; answers at once, before any browser work.
+
+    Outside ``[linkedin] active_hours`` it answers ``409`` with the window, when it
+    next opens, and where to change it, and records no run (#213).
+    """
     executor = _executor(request)
     account = ensure_account(session, user)
     try:
+        runs.refuse_if_outside_active_hours(_settings(request), now=utcnow())
         runs.refuse_if_flagged_or_hot(
             session, user, account.id, now=utcnow(), settings=_settings(request)
         )
@@ -188,7 +197,12 @@ async def start_run(
             now=utcnow(),
             max_visits=body.max_visits,
         )
-    except (runs.RunAlreadyRunning, runs.HeatSkipped, runs.SessionFlagged) as exc:
+    except (
+        runs.RunAlreadyRunning,
+        runs.HeatSkipped,
+        runs.SessionFlagged,
+        runs.OutsideActiveHours,
+    ) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except runs.RunError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -233,6 +247,7 @@ async def resume_run(
     account = ensure_account(session, user)
     try:
         enrich_plan.load_plan(session, user, run_id)  # 404 before any 409: is there a plan?
+        runs.refuse_if_outside_active_hours(_settings(request), now=utcnow())
         runs.refuse_if_flagged_or_hot(
             session, user, account.id, now=utcnow(), settings=_settings(request)
         )
@@ -246,6 +261,7 @@ async def resume_run(
         runs.RunError,
         runs.HeatSkipped,
         runs.SessionFlagged,
+        runs.OutsideActiveHours,
     ) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _submit(session, tasks, executor, run, user)

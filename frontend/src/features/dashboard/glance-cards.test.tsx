@@ -129,6 +129,7 @@ function run(overrides: Record<string, unknown> = {}) {
     started_at: '2026-09-26T10:00:00Z',
     completed_at: '2026-09-26T10:05:00Z',
     stop_reason: null,
+    stop_reason_text: null,
     cancel_requested_at: null,
     max_visits: null,
     resume_of_id: null,

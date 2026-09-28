@@ -6,6 +6,7 @@ import factories
 import httpx
 import keyring
 import pytest
+from browser_guard import RealBrowserBlocked, is_personal_cdp
 from fastapi import FastAPI
 from gmail_fakes import FakeGoogle, MemoryKeyring
 from sqlalchemy import Engine
@@ -46,6 +47,51 @@ def _clean_netkeeper_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("NETKEEPER_DATA", str(tmp_path / "netkeeper-data"))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_browser(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test reaches a real Chrome unless it opts out, and none ever reaches port 9222.
+
+    The only place netkeeper opens a browser connection is
+    ``PlaywrightCdpConnector.connect`` (``tests/test_browser_safety.py`` keeps it that
+    way), so that is replaced here with a guard that raises
+    :class:`RealBrowserBlocked` before Playwright starts -- the CDP socket is opened
+    by Playwright's driver process, where a Python socket spy could not see it.
+    ``playwright.async_api.async_playwright`` is blocked too, for any route that
+    skips the connector.
+
+    A test that must drive a real, isolated Chrome (the opt-in smoke suite under
+    ``tests/smoke/``) opts out with ``@pytest.mark.real_cdp``. Even then the connector
+    refuses the default ``http://127.0.0.1:9222`` and every other port-9222 address:
+    point ``NETKEEPER_CDP_URL`` at an isolated Chrome on another port.
+    """
+    from netkeeper.linkedin import browser
+
+    real_connect = browser.PlaywrightCdpConnector.connect
+    opted_out = request.node.get_closest_marker("real_cdp") is not None
+
+    async def guarded_connect(self: object, cdp_url: str) -> object:
+        if not opted_out:
+            raise RealBrowserBlocked(
+                f"a test tried to attach to a real Chrome at {cdp_url}. Give it a fake"
+                " connector (browser_fakes.FakeConnector) or a provider that fails if used"
+            )
+        if is_personal_cdp(cdp_url):
+            raise RealBrowserBlocked(
+                f"a real_cdp test tried to attach to {cdp_url}, a personal Chrome's debug"
+                " port. Set NETKEEPER_CDP_URL to an isolated Chrome on another port"
+            )
+        return await real_connect(self, cdp_url)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(browser.PlaywrightCdpConnector, "connect", guarded_connect)
+    if not opted_out:
+        import playwright.async_api
+
+        def blocked_playwright(*_: object, **__: object) -> None:
+            raise RealBrowserBlocked("a test tried to start Playwright without opting in")
+
+        monkeypatch.setattr(playwright.async_api, "async_playwright", blocked_playwright)
 
 
 #: What ``gmail_oauth.GOOGLE`` is during a test: a scheme urllib cannot open, so a
@@ -187,3 +233,47 @@ async def client(running_app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=running_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
         yield client
+
+
+@pytest.fixture
+def inside_active_hours(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lets a run started by hand start whatever the wall clock says (#213).
+
+    The API and the CLI refuse a manual run outside ``[linkedin] active_hours``,
+    checked against the real clock. A test that starts runs by hand to exercise
+    something else takes this, so it passes at 3 a.m. too; the refusal itself is
+    tested in tests/test_active_hours_stop.py with its own clock.
+    """
+    from netkeeper.services import runs
+
+    monkeypatch.setattr(runs, "refuse_if_outside_active_hours", lambda *_, **__: None)
+
+
+class _ProviderThatFailsIfUsed:
+    """A browser provider for a test whose run must never reach the browser (#293 review).
+
+    Building it is fine; entering a run on it fails the test. ``mode`` is the attach
+    mode, so anything that only reads the provider's mode still works.
+    """
+
+    mode = "attach"
+
+    def __init__(self, *_: object, **__: object) -> None:
+        pass
+
+    def run(self, *_: object, **__: object) -> object:
+        pytest.fail("this test's run reached the browser provider; it must be refused first")
+
+
+@pytest.fixture
+def no_browser_for_cli_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``netkeeper`` CLI commands in this test get a provider that fails the test if used.
+
+    For a test that expects the CLI to refuse *before* any browser work: if that
+    refusal ever goes away (a regression, a mutation), the test fails here instead of
+    running a real attach.
+    """
+    from netkeeper import cli
+
+    monkeypatch.setattr(cli, "_provider", lambda *_, **__: _ProviderThatFailsIfUsed())
+    monkeypatch.setattr(cli, "AttachBrowserProvider", _ProviderThatFailsIfUsed)

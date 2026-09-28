@@ -38,6 +38,9 @@ from netkeeper.services.settings_kv import set_setting
 from netkeeper.services.users import ensure_local_user
 from netkeeper.worker import BrowserWorker
 
+#: These tests start runs by hand at whatever time the suite runs (#213).
+pytestmark = pytest.mark.usefixtures("inside_active_hours")
+
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
 
 

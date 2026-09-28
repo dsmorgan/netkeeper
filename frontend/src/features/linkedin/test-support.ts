@@ -120,6 +120,7 @@ export function run(overrides: Partial<Run> = {}): Run {
     started_at: '2026-09-23T10:00:00Z',
     completed_at: null,
     stop_reason: null,
+    stop_reason_text: null,
     cancel_requested_at: null,
     max_visits: null,
     resume_of_id: null,

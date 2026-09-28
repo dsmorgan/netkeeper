@@ -50,8 +50,13 @@ their activity lock there, not in your real data directory. They cannot see a ru
 `serve` holds, and running them alongside one opens a second CDP client on your Chrome.
 
 Run it against Chrome stable in a window, not a headless one, and say which Chrome
-version you used in the pull request. `NETKEEPER_CDP_URL` overrides the debug port if
-yours is not the default `http://127.0.0.1:9222`.
+version you used in the pull request. Run it against an isolated Chrome (its own
+`--user-data-dir`, not signed in to LinkedIn) on a debug port other than 9222, and point
+`NETKEEPER_CDP_URL` at it: the suite refuses every port-9222 address, the default
+included, because that is where your own netkeeper Chrome listens. Outside
+`tests/smoke/`, every test is refused a real Chrome altogether (`tests/conftest.py`,
+`_no_real_browser`); a test that genuinely needs one opts out with
+`@pytest.mark.real_cdp`.
 
 ## AI-assisted contributions
 

@@ -185,6 +185,8 @@ class _Gate:
     window: tuple[time, time]
     clock: Clock
     sleep: Sleep
+    #: Set when the window closed: the sentence the log and the run's note use (#213).
+    inactive_message: str | None = None
 
     def _cancelled_now(self) -> bool:
         with session_scope(self.factory) as session:
@@ -218,7 +220,10 @@ class _Gate:
         now = self.clock()
         start, end = self.window
         if not pacing.is_active_at(now, self.settings.timezone, start=start, end=end):
-            log.info("enrichment: the active window closed before visit %d", number)
+            self.inactive_message = pacing.outside_window_message(
+                now, self.settings.timezone, start=start, end=end
+            )
+            log.info("enrichment: stopped before visit %d: %s", number, self.inactive_message)
             return StopReason.INACTIVE
         return await off_loop(self._spend_visit, number, now)
 
@@ -467,7 +472,7 @@ async def enrich_contacts(
                     now=clock(),
                     stop_reason=stop_reason_of(result.reason.value, result.outcome),
                     counts=report.counts(),
-                    notes=_lost_notes(result),
+                    notes=(*_lost_notes(result), *_inactive_notes(result, gate)),
                 )
             return report
 
@@ -526,3 +531,10 @@ def _lost_notes(result: EnrichResult) -> tuple[str, ...]:
     if result.copied:
         notes.append(f"read from streamed copies: {'; '.join(result.copied)}.")
     return tuple(notes)
+
+
+def _inactive_notes(result: EnrichResult, gate: _Gate) -> tuple[str, ...]:
+    """#213: a run the window stopped says so on the run, in the log's own words."""
+    if result.reason is StopReason.INACTIVE and gate.inactive_message is not None:
+        return (f"stopped {gate.inactive_message}",)
+    return ()

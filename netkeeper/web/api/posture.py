@@ -7,11 +7,13 @@ see its own module docstring. `netkeeper posture` has printed this report from a
 terminal since P2-11; this is the same report, for the Settings page (the frontend
 pages table in docs/architecture.md names it as arriving with P2-12).
 
-Read-only and per-user: `posture()` is called with no browser probe (`probe=None`),
-which the service reports as an unknown protection rather than assuming healthy --
-a live attach-and-read-the-session check has to await browser work, and CLAUDE.md
-forbids that inside a request handler. A live check stays `netkeeper preflight`, a
-terminal command.
+Read-only and per-user: `posture()` is called with no browser probe (`probe=None`)
+-- a live attach-and-read-the-session check has to await browser work, and CLAUDE.md
+forbids that inside a request handler. The LinkedIn session row answers instead from
+the last evidence the database holds (#282): what `netkeeper preflight` or `netkeeper
+posture --probe` last recorded, or the newest run that read LinkedIn without flagging
+the session. With neither, it says unknown rather than assuming healthy. A live check
+stays `netkeeper preflight`, a terminal command.
 """
 
 from __future__ import annotations
