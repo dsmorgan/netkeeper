@@ -16,10 +16,13 @@ from campaign_fakes import NOW, SETTINGS, FakeSender, make_mailbox
 from fastapi import FastAPI
 from sqlalchemy import Connection, Engine, event, select
 
+from netkeeper.campaigns.gmail_fake import FakeGmail
 from netkeeper.config import Settings
 from netkeeper.db import SQLITE_BUSY_TIMEOUT_MS, session_scope
-from netkeeper.models import MessageStatus, StepMode, User, UserKind
-from netkeeper.services.campaign_engine import CampaignEngine
+from netkeeper.models import Mailbox, Message, MessageStatus, StepMode, User, UserKind
+from netkeeper.scoping import unscoped
+from netkeeper.services.campaign_engine import CampaignEngine, SendOutcome, Skip, run_tick
+from netkeeper.services.campaign_sender import GmailSender
 from netkeeper.services.mailboxes import MailboxMonitor
 from netkeeper.services.scheduled_runs import ServeExtractor, ServeScheduler
 from netkeeper.services.tasks import TaskRunner
@@ -182,3 +185,52 @@ async def test_a_request_holding_the_write_lock_during_a_tick_does_not_deadlock(
     assert outcome.outcome.value == MessageStatus.SENT.value
     # Waiting on the request's commit, not on the busy timeout.
     assert elapsed < SQLITE_BUSY_TIMEOUT_MS / 1000 / 2
+
+
+async def test_serve_sends_nothing_and_never_calls_gmail_until_a_mailbox_is_armed(
+    bare_engine: Engine,
+    tmp_path: Path,
+    _migrated_template: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#277: ``serve`` builds the Gmail sender itself, and with no mailbox armed a due
+    step is not claimed and no Gmail client is even opened. Armed for drafts, the same
+    step becomes a draft, never a ``messages.send``."""
+    import conftest
+
+    conftest._copy_template(_migrated_template, tmp_path / "bare")
+    monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", str(tmp_path / "no-dist"))
+    opened: list[int] = []
+    gmail = FakeGmail("me1@example.test", clock=lambda: NOW)
+
+    def open_gmail(factory: object, user_id: int, mailbox_id: int, **kwargs: object) -> FakeGmail:
+        opened.append(mailbox_id)
+        return gmail
+
+    monkeypatch.setattr("netkeeper.web.app.open_gmail", open_gmail)
+    extractor = ServeExtractor(executor=lambda factory, bus: object())  # type: ignore[arg-type,return-value]
+    served = create_app(SETTINGS, engine=bare_engine, extractor=extractor)
+    async with served.router.lifespan_context(served):
+        sender = served.state.campaign_engine.sender
+        assert isinstance(sender, GmailSender)
+        factory = served.state.session_factory
+        _due_enrollment_and_a_contact(served)
+
+        def tick() -> list[Any]:
+            return run_tick(factory, settings=SETTINGS, sender=sender, clock=lambda: NOW)
+
+        [result] = await asyncio.to_thread(tick)
+        assert result.fired == []
+        assert [d.reasons for d in result.decisions] == [(Skip.MAILBOX_DISARMED,)]
+        assert (opened, gmail.calls) == ([], [])
+        with session_scope(factory) as session:
+            assert list(session.scalars(unscoped(select(Message)))) == []
+
+        with session_scope(factory, write=True) as session:
+            mailbox = session.scalars(unscoped(select(Mailbox))).one()
+            mailbox.armed_at = NOW
+        [result] = await asyncio.to_thread(tick)
+        [(firing, outcome)] = result.fired
+        assert (firing.mode, outcome.outcome) == (StepMode.DRAFT, SendOutcome.DRAFTED)
+        assert opened
+        assert "messages.send" not in [method for method, _ in gmail.calls]
