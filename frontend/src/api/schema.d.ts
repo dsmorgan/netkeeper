@@ -1492,6 +1492,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/mailboxes/{mailbox_id}/arm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Arm Mailbox
+         * @description Let ``serve`` use the mailbox: ``draft`` first, ``send`` as a separate step (#277).
+         *     Applies from the engine's next claim.
+         */
+        post: operations["arm_mailbox_api_v1_mailboxes__mailbox_id__arm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/mailboxes/{mailbox_id}/check": {
         parameters: {
             query?: never;
@@ -1506,6 +1527,26 @@ export interface paths {
          * @description Refresh the token now, as the background poll does; answers the mailbox after.
          */
         post: operations["check_mailbox_api_v1_mailboxes__mailbox_id__check_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mailboxes/{mailbox_id}/disarm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disarm Mailbox
+         * @description Stop ``serve`` using the mailbox from the engine's next claim (#277).
+         */
+        post: operations["disarm_mailbox_api_v1_mailboxes__mailbox_id__disarm_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3808,10 +3849,28 @@ export interface components {
             value: string | number | boolean;
         };
         /**
+         * MailboxArm
+         * @description What an armed mailbox may do (#277). Not stored: read from the arming columns.
+         * @enum {string}
+         */
+        MailboxArm: "draft" | "send";
+        /**
+         * MailboxArmIn
+         * @description Arm a mailbox: ``draft`` first, then ``send`` as a separate step.
+         */
+        MailboxArmIn: {
+            mode: components["schemas"]["MailboxArm"];
+        };
+        /**
          * MailboxOut
          * @description A connected Gmail account. Never its token: that is in the Keychain.
          */
         MailboxOut: {
+            arm: components["schemas"]["MailboxArm"] | null;
+            /** Armed At */
+            armed_at: string | null;
+            /** Armed By */
+            armed_by: string | null;
             /** Checked At */
             checked_at: string | null;
             /**
@@ -3827,7 +3886,11 @@ export interface components {
             id: number;
             /** Label Prefix */
             label_prefix: string;
+            /** Message Id Verified At */
+            message_id_verified_at: string | null;
             provider: components["schemas"]["MailboxProvider"];
+            /** Send Armed At */
+            send_armed_at: string | null;
             status: components["schemas"]["MailboxStatus"];
             /** Status Reason */
             status_reason: string | null;
@@ -8365,6 +8428,55 @@ export interface operations {
             };
         };
     };
+    arm_mailbox_api_v1_mailboxes__mailbox_id__arm_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                mailbox_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MailboxArmIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailboxOut"];
+                };
+            };
+            /** @description No such mailbox for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not armable this way yet; the detail says why */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     check_mailbox_api_v1_mailboxes__mailbox_id__check_post: {
         parameters: {
             query?: never;
@@ -8407,6 +8519,44 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    disarm_mailbox_api_v1_mailboxes__mailbox_id__disarm_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                mailbox_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailboxOut"];
+                };
+            };
+            /** @description No such mailbox for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

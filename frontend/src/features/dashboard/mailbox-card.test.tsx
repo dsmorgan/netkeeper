@@ -80,6 +80,22 @@ describe('MailboxCard', () => {
     expect(screen.getByRole('link', { name: 'Settings' })).toBeInTheDocument()
   })
 
+  it('shows whether serve may use the mailbox, and in which mode', async () => {
+    let current = status({ mailboxes: [mailbox()] })
+    const { source } = renderCard(() => current)
+    expect(await screen.findByText('not armed')).toBeInTheDocument()
+    expect(screen.getByText(/sends nothing from it/)).toBeInTheDocument()
+
+    current = status({
+      mailboxes: [
+        mailbox({ arm: 'draft', armed_at: '2026-09-27T12:00:00Z', armed_by: 'cli (dsm)' }),
+      ],
+    })
+    act(() => source.emit('mailbox.status', { mailbox_id: 3, status: 'ok', reason: null }))
+    expect(await screen.findByText('armed: drafts only')).toBeInTheDocument()
+    expect(screen.getByText(/by cli \(dsm\)/)).toBeInTheDocument()
+  })
+
   it('says a mailbox needs re-authorizing and offers to fix it', async () => {
     renderCard(() =>
       status({

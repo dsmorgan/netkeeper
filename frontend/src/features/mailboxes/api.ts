@@ -80,6 +80,49 @@ export async function disconnectMailbox(mailboxId: number): Promise<Mailbox> {
   return data
 }
 
+export type MailboxArm = NonNullable<Mailbox['arm']>
+
+/**
+ * Let `serve` use the mailbox (#277): `draft` first, then `send` as a separate
+ * step, which the backend refuses (409) until a draft made there has been found
+ * by its Message-ID.
+ */
+export async function armMailbox(mailboxId: number, mode: MailboxArm): Promise<Mailbox> {
+  const { data, error, response } = await api.POST('/api/v1/mailboxes/{mailbox_id}/arm', {
+    params: { path: { mailbox_id: mailboxId } },
+    body: { mode },
+  })
+  if (data === undefined) throw failure(error, response, 'POST /mailboxes/{id}/arm')
+  return data
+}
+
+export async function disarmMailbox(mailboxId: number): Promise<Mailbox> {
+  const { data, error, response } = await api.POST('/api/v1/mailboxes/{mailbox_id}/disarm', {
+    params: { path: { mailbox_id: mailboxId } },
+  })
+  if (data === undefined) throw failure(error, response, 'POST /mailboxes/{id}/disarm')
+  return data
+}
+
+/** A short label for the mailbox's arming. */
+export const ARM_LABEL: Record<MailboxArm | 'none', string> = {
+  none: 'not armed',
+  draft: 'armed: drafts only',
+  send: 'armed: sending',
+}
+
+/** What `serve` does with the mailbox, in a sentence, with who armed it and when. */
+export function armText(mailbox: Mailbox): string {
+  if (mailbox.arm === null || mailbox.armed_at === null) {
+    return 'Not armed: netkeeper serve makes no drafts and sends nothing from it.'
+  }
+  const since = new Date(mailbox.send_armed_at ?? mailbox.armed_at).toLocaleString()
+  const by = mailbox.armed_by === null ? '' : ` by ${mailbox.armed_by}`
+  return mailbox.arm === 'send'
+    ? `Armed to send since ${since}${by}: send steps go out on their own.`
+    : `Armed for drafts since ${since}${by}: every step becomes a draft you send yourself.`
+}
+
 /** Leaves the app for Google's page. A seam, so a test can see where it would go. */
 export const navigation = {
   assign(url: string): void {

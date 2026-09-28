@@ -8,7 +8,11 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
+  ARM_LABEL,
+  armMailbox,
+  armText,
   checkMailbox,
+  disarmMailbox,
   disconnectMailbox,
   mailboxKeys,
   mailboxStatusQuery,
@@ -17,6 +21,7 @@ import {
   saveClient,
   startAuthorization,
   type Mailbox,
+  type MailboxArm,
 } from '@/features/mailboxes/api'
 
 /** What the OAuth callback said, from `/settings?gmail=...&reason=...`. */
@@ -51,6 +56,7 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
   const [disconnecting, setDisconnecting] = useState<Mailbox | null>(null)
+  const [arming, setArming] = useState<{ mailbox: Mailbox; mode: MailboxArm } | null>(null)
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: mailboxKeys.all })
 
@@ -75,6 +81,16 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
       await refresh()
     },
   })
+
+  const arm = useMutation({
+    mutationFn: ({ mailbox, mode }: { mailbox: Mailbox; mode: MailboxArm }) =>
+      armMailbox(mailbox.id, mode),
+    onSuccess: async () => {
+      setArming(null)
+      await refresh()
+    },
+  })
+  const disarm = useMutation({ mutationFn: disarmMailbox, onSettled: refresh })
 
   const live = status.data?.mailboxes.filter((mailbox) => mailbox.status !== 'disabled') ?? []
   const showClientForm = status.isSuccess && (!status.data.client_configured || editingClient)
@@ -181,6 +197,14 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
                         {STATUS_LABEL[mailbox.status]}
                       </Badge>
                     </div>
+                    {mailbox.status !== 'disabled' && (
+                      <p className="flex flex-wrap items-center gap-2">
+                        <Badge variant={mailbox.arm === null ? 'secondary' : 'outline'}>
+                          {ARM_LABEL[mailbox.arm ?? 'none']}
+                        </Badge>
+                        <span className="text-muted-foreground">{armText(mailbox)}</span>
+                      </p>
+                    )}
                     {mailbox.status !== 'ok' && reasonText(mailbox.status_reason) !== null && (
                       <p className="text-muted-foreground">{reasonText(mailbox.status_reason)}</p>
                     )}
@@ -210,14 +234,54 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
                             {check.isPending ? 'Checking…' : 'Check now'}
                           </Button>
                         )}
+                        {mailbox.arm === null && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setArming({ mailbox, mode: 'draft' })}
+                          >
+                            Arm for drafts
+                          </Button>
+                        )}
+                        {mailbox.arm === 'draft' && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setArming({ mailbox, mode: 'send' })}
+                            disabled={mailbox.message_id_verified_at === null}
+                          >
+                            Arm to send
+                          </Button>
+                        )}
+                        {mailbox.arm !== null && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => disarm.mutate(mailbox.id)}
+                            disabled={disarm.isPending}
+                          >
+                            Disarm
+                          </Button>
+                        )}
                         <Button variant="ghost" size="sm" onClick={() => setDisconnecting(mailbox)}>
                           Disconnect
                         </Button>
                       </div>
                     )}
+                    {mailbox.arm === 'draft' && mailbox.message_id_verified_at === null && (
+                      <p className="text-xs text-muted-foreground">
+                        Arming to send waits until netkeeper finds one of its drafts here by its
+                        Message-ID, which the next drafts check does after a draft is made.
+                      </p>
+                    )}
                   </li>
                 ))}
               </ul>
+            )}
+            {disarm.isError && (
+              <p role="alert" className="text-destructive">
+                {message(disarm.error)}
+              </p>
             )}
             {check.isError && (
               <p role="alert" className="text-destructive">
@@ -265,6 +329,26 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
         netkeeper forgets {disconnecting?.email}’s token and stops using it. Email steps pause.
         Campaigns that sent from it keep their history. To revoke access on Google’s side too,
         remove netkeeper from your Google Account’s third-party access page.
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={arming !== null}
+        onOpenChange={(open) => {
+          if (!open) setArming(null)
+        }}
+        title={
+          arming?.mode === 'send' ? 'Arm this mailbox to send?' : 'Arm this mailbox for drafts?'
+        }
+        confirmLabel={arming?.mode === 'send' ? 'Arm to send' : 'Arm for drafts'}
+        pending={arm.isPending}
+        error={arm.isError ? message(arm.error) : null}
+        onConfirm={() => {
+          if (arming !== null) arm.mutate(arming)
+        }}
+      >
+        {arming?.mode === 'send'
+          ? `netkeeper serve will send campaign email from ${arming.mailbox.email} on its own, with no one pressing Send. Disarm stops it from the next minute.`
+          : `netkeeper serve will make each due campaign step a Gmail draft in ${arming?.mailbox.email ?? ''}, send steps included. You send each draft yourself.`}
       </ConfirmDialog>
     </Card>
   )
