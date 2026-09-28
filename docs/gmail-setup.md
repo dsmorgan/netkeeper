@@ -104,6 +104,15 @@ Google sends your browser back to netkeeper. The web UI shows **Gmail is connect
 
 While `netkeeper serve` runs, it refreshes every connected mailbox's token every `[campaigns] reply_poll_minutes` (10 by default).
 
+## 8. Arm the mailbox: drafts first, then send
+
+A connected mailbox does nothing on its own. `netkeeper serve` hands it campaign steps only once you arm it, and every mailbox starts disarmed. Arming takes two separate steps.
+
+1. **Arm for drafts**: **Arm for drafts** in Settings, or `netkeeper gmail arm you@gmail.com`. From the next minute, every due step on the mailbox becomes a Gmail draft, `send` steps included, and you send each one yourself. netkeeper never calls `messages.send` for a mailbox armed for drafts only.
+2. **Arm to send**: **Arm to send** in Settings, or `netkeeper gmail arm you@gmail.com --send`. From then on, `send` steps go out on their own. This step is refused until netkeeper has found one of its own drafts on the mailbox by its Message-ID. It checks the first draft it makes on its next drafts check, within about 10 minutes. That's the live check that Gmail keeps the Message-ID netkeeper sets, which netkeeper relies on to find out whether a send whose answer never came went out.
+
+**Disarm** (in Settings, or `netkeeper gmail disarm you@gmail.com`) undoes both steps. From the next minute, nothing more is claimed on the mailbox, and netkeeper makes no Gmail call for it. A step already handed to Gmail isn't recalled. Disconnecting disarms too, and a mailbox you connect again starts disarmed. Settings, the dashboard's mailbox card and `netkeeper gmail status` show the mode, since when, and who armed it.
+
 ## When Google stops accepting the token
 
 This happens when you revoke netkeeper's access in your Google Account, after seven days in Testing mode, or when the OAuth client is deleted or its secret is reset. Google says so with `invalid_grant`, `invalid_client` or `unauthorized_client`. Within one poll, netkeeper:
