@@ -2062,3 +2062,44 @@ def test_0023_downgrades_to_mailboxes_without_it(migration_engine: Engine) -> No
     assert columns.isdisjoint(_ARM_COLUMNS)
     with migration_engine.begin() as connection:
         assert _count(connection, "mailboxes") == 1
+
+
+# --- the review gate (0024, #288) --------------------------------------------------------
+
+_REVIEW_COLUMNS = (
+    "lint_checked_at",
+    "lint_fingerprint",
+    "guards_acknowledged_at",
+    "guards_fingerprint",
+    "guards_summary",
+)
+_REVIEW_TABLES = ("campaign_review_previews", "campaign_test_sends")
+
+
+def test_0024_starts_every_campaign_unreviewed(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0023")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_campaign(connection, id=1, status="reviewing")
+    migrations.upgrade(migration_engine, "0024")
+    with migration_engine.begin() as connection:
+        row = connection.execute(
+            text(f"SELECT {', '.join(_REVIEW_COLUMNS)} FROM campaigns WHERE id = 1")
+        ).one()
+        assert tuple(row) == (None,) * len(_REVIEW_COLUMNS)
+        for table in _REVIEW_TABLES:
+            assert _count(connection, table) == 0
+
+
+def test_0024_downgrades_to_campaigns_without_it(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0024")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_campaign(connection, id=1)
+        connection.execute(text("UPDATE campaigns SET guards_summary = '1 in audience'"))
+    migrations.downgrade(migration_engine, "0023")
+    columns = {column["name"] for column in inspect(migration_engine).get_columns("campaigns")}
+    assert columns.isdisjoint(_REVIEW_COLUMNS)
+    assert not set(_REVIEW_TABLES) & set(inspect(migration_engine).get_table_names())
+    with migration_engine.begin() as connection:
+        assert _count(connection, "campaigns") == 1
