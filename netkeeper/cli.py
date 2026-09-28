@@ -1,5 +1,5 @@
 """Command-line entry point: serve, db, config, backup, openapi, tags, import/export, gmail,
-version."""
+campaigns, version."""
 
 from __future__ import annotations
 
@@ -9,22 +9,24 @@ import json
 import logging
 import os
 import secrets
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Final, Literal, NoReturn
+from zoneinfo import ZoneInfo
 
 import typer
 import uvicorn
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError, ProgrammingError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper import __version__, migrations
 from netkeeper.campaigns import gmail_oauth
+from netkeeper.campaigns.render import me_fields
 from netkeeper.config import ConfigError, Settings, load_settings, render_toml
 from netkeeper.crm import import_runs
 from netkeeper.crm.archive import ArchiveImport, import_archive
@@ -32,7 +34,7 @@ from netkeeper.crm.archive_check import open_checked_archive
 from netkeeper.crm.contacts import ContactStats, contact_stats
 from netkeeper.crm.exports import ExportError, ExportFormat, ExportPreset, export_stream
 from netkeeper.crm.filters import FilterError, FilterTree, SortKey, parse_filter, parse_sort
-from netkeeper.crm.lists import ListCount, list_lists, list_views, member_counts
+from netkeeper.crm.lists import ListCount, find_list, list_lists, list_views, member_counts
 from netkeeper.crm.tags import ensure_default_rules, list_tags, run_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.linkedin.activity_lock import SINGLE_ACCOUNT_KEY, account_key
@@ -51,12 +53,14 @@ from netkeeper.linkedin.rehearse import rehearse as run_rehearsal
 from netkeeper.linkedin.rehearse import render as render_rehearsal
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import (
+    EnrollmentStatus,
     ImportResolution,
     ImportRun,
     ImportStatus,
     Mailbox,
     MailboxArm,
     MailboxStatus,
+    StepMode,
     SyncRun,
     SyncRunKind,
     SyncRunStatus,
@@ -66,7 +70,15 @@ from netkeeper.models import (
 )
 from netkeeper.paths import CONFIG_ENV, data_dir
 from netkeeper.scoping import install_scope_guard
-from netkeeper.services import enrich_plan, keychain, route_breaker, runs
+from netkeeper.services import (
+    campaign_review,
+    enrich_plan,
+    keychain,
+    route_breaker,
+    runs,
+    simulate_campaign,
+)
+from netkeeper.services import campaigns as campaign_service
 from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.backup import (
     BACKUPS_DIRNAME,
@@ -88,6 +100,7 @@ from netkeeper.services.linkedin_session import clear_session_flag, session_flag
 from netkeeper.services.pacing import profiles as pacing_profiles
 from netkeeper.services.posture import SessionProbe, posture
 from netkeeper.services.posture import render as render_posture
+from netkeeper.services.simulate_campaign import DEFAULT_SCHEDULE_DAYS
 from netkeeper.services.simulate_run import DEFAULT_DAYS as DEFAULT_SIMULATION_DAYS
 from netkeeper.services.simulate_run import DEFAULT_SEED as DEFAULT_SIMULATION_SEED
 from netkeeper.services.simulate_run import DEFAULT_THROTTLES as DEFAULT_SIMULATION_THROTTLES
@@ -138,6 +151,11 @@ gmail_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(gmail_app, name="gmail")
+campaigns_app = typer.Typer(
+    help="Campaigns: create, enroll, review status, activate through the review gate, pause.",
+    no_args_is_help=True,
+)
+app.add_typer(campaigns_app, name="campaigns")
 
 
 @dataclass(frozen=True, slots=True)
@@ -854,8 +872,13 @@ def _provider(settings: Settings) -> AttachBrowserProvider:
 def simulate_command(
     ctx: typer.Context,
     days: Annotated[
-        int, typer.Option(help="How many simulated days to replay.")
-    ] = DEFAULT_SIMULATION_DAYS,
+        int | None,
+        typer.Option(
+            help=f"How many simulated days to replay. Default {DEFAULT_SIMULATION_DAYS},"
+            f" or {DEFAULT_SCHEDULE_DAYS} with --campaign.",
+            show_default=False,
+        ),
+    ] = None,
     throttles: Annotated[
         int,
         typer.Option(help="How many Throttled outcomes to inject, at points drawn from --seed."),
@@ -864,6 +887,24 @@ def simulate_command(
         int,
         typer.Option(help="Seeds the throttle placement. The same seed always repeats."),
     ] = DEFAULT_SIMULATION_SEED,
+    campaign: Annotated[
+        int | None,
+        typer.Option(
+            "--campaign",
+            help="Replay this campaign's schedule instead: its steps, delays, send window"
+            " and caps, for its audience, sending nothing.",
+            show_default=False,
+        ),
+    ] = None,
+    start: Annotated[
+        datetime | None,
+        typer.Option(
+            help="With --campaign: when the replay starts (ISO 8601, in your time zone"
+            " unless it says). Default: now.",
+            formats=["%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"],
+            show_default=False,
+        ),
+    ] = None,
 ) -> None:
     """What would N simulated days do to your account? Answered without doing any of it.
 
@@ -883,17 +924,67 @@ def simulate_command(
     per-run budget shrinking, and, with enough of them close together, the skip
     threshold tripping -- are the genuine ones a live run would see, not a
     picture of them.
+
+    With `--campaign ID` it replays that campaign's schedule instead: its steps,
+    delays, modes, send window, holidays, and caps, for as many synthetic contacts
+    as it has live enrollments (or, with nobody enrolled yet, as its list or filter
+    holds), from step 1 as if activated at `--start`. It reads the campaign from
+    your database and changes nothing there; the replay runs on the real engine
+    tick in a scratch database, deleted afterwards, and sends nothing. It shows the
+    sends per local day and step.
     """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
+    if campaign is not None:
+        _simulate_campaign(campaign, settings=settings, days=days, start=start, seed=seed)
+        if throttles:
+            typer.echo("note: --throttles applies to LinkedIn runs; ignored with --campaign")
+        return
+    if start is not None:
+        typer.echo("error: --start applies only with --campaign", err=True)
+        raise typer.Exit(code=1)
     try:
         report = asyncio.run(
-            run_simulation(days=days, throttles=throttles, seed=seed, settings=settings)
+            run_simulation(
+                days=DEFAULT_SIMULATION_DAYS if days is None else days,
+                throttles=throttles,
+                seed=seed,
+                settings=settings,
+            )
         )
     except InvalidSimulation as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(render_simulation(report), nl=False)
+
+
+def _simulate_campaign(
+    campaign_id: int, *, settings: Settings, days: int | None, start: datetime | None, seed: int
+) -> None:
+    """`simulate --campaign`: read the campaign's shape, replay it in a scratch database."""
+    with _campaign_db() as factory, session_scope(factory) as session:
+        user = _local_user_or_exit(session)
+        try:
+            shape = simulate_campaign.campaign_shape(session, user, campaign_id, settings=settings)
+        except simulate_campaign.InvalidSchedule as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+    zone = ZoneInfo(shape.timezone)
+    begin = datetime.now(UTC) if start is None else start
+    if begin.tzinfo is None:
+        begin = begin.replace(tzinfo=zone)
+    try:
+        report = simulate_campaign.simulate_schedule(
+            shape,
+            settings=settings,
+            start=begin.astimezone(UTC),
+            days=simulate_campaign.DEFAULT_SCHEDULE_DAYS if days is None else days,
+            seed=seed,
+        )
+    except simulate_campaign.InvalidSchedule as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(simulate_campaign.render_schedule(report), nl=False)
 
 
 # --- LinkedIn runs: start by hand, watch, cancel, arm the schedule (P2-10) -----------
@@ -2033,6 +2124,364 @@ def _sort_or_exit(raw: str | None) -> list[SortKey]:
     except FilterError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+
+# --- campaigns (P3-13) --------------------------------------------------------
+#
+# Each command mirrors a `/campaigns` route. Activation goes through the review gate
+# (`campaign_review.activate`) and nothing else: this module never names the engine's
+# gate token, and `tests/test_cli_campaigns.py` checks that it doesn't.
+
+
+@contextmanager
+def _campaign_db() -> Iterator[sessionmaker[Session]]:
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        yield factory
+    finally:
+        engine.dispose()
+
+
+@contextmanager
+def _campaign_errors() -> Iterator[None]:
+    """A refusal from the campaign services, as `error: ...` and exit 1."""
+    try:
+        yield
+    except (campaign_service.CampaignError, campaign_review.ReviewError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _counts_cell(counts: Mapping[EnrollmentStatus, int]) -> str:
+    shown = [f"{n} {status.value}" for status in EnrollmentStatus if (n := counts.get(status))]
+    return ", ".join(shown) or "none"
+
+
+def _missing_lines(missing: Sequence[campaign_review.Missing]) -> list[str]:
+    lines = []
+    for m in missing:
+        where = ""
+        if m.enrollment_ids:
+            where = " (enrollments " + ", ".join(str(i) for i in m.enrollment_ids) + ")"
+        elif m.step_positions:
+            where = " (steps " + ", ".join(str(p) for p in m.step_positions) + ")"
+        lines.append(f"  - {m.requirement}: {m.detail}{where}")
+    return lines
+
+
+def _when(at: datetime | None) -> str:
+    return "-" if at is None else f"{at:%Y-%m-%d %H:%M UTC}"
+
+
+def _list_id_or_exit(session: Session, user: User, which: str | None) -> int | None:
+    """The id of the user's list named by its name or id."""
+    if which is None:
+        return None
+    found = find_list(session, user, which)
+    if found is not None:
+        return found.id
+    if which.isdigit():
+        return int(which)  # the service refuses an id that is not the user's
+    typer.echo(f"error: no list {which!r}", err=True)
+    raise typer.Exit(code=1)
+
+
+def _audience_filter_or_exit(raw: str | None) -> FilterTree | None:
+    return None if raw is None else _filter_or_exit(raw)
+
+
+def _step_or_exit(raw: str) -> campaign_service.StepSpec:
+    """``TEMPLATE_ID[:DELAY_DAYS[:MODE]]``."""
+    parts = raw.split(":")
+    try:
+        if not 1 <= len(parts) <= 3:
+            raise ValueError
+        template_id = int(parts[0])
+        delay = int(parts[1]) if len(parts) > 1 and parts[1] else None
+        mode = StepMode(parts[2]) if len(parts) > 2 else None
+    except ValueError as exc:
+        modes = ", ".join(m.value for m in StepMode)
+        typer.echo(
+            f"error: --step {raw!r}: expected TEMPLATE_ID[:DELAY_DAYS[:MODE]], MODE one of {modes}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+    return campaign_service.StepSpec(template_id=template_id, delay_days=delay, mode=mode)
+
+
+@campaigns_app.command("list")
+def campaigns_list() -> None:
+    """List the campaigns, newest first, with their enrollments by status (GET /campaigns)."""
+    with _campaign_db() as factory, session_scope(factory) as session:
+        user = _local_user_or_exit(session)
+        rows = [
+            (
+                str(row.campaign.id),
+                row.campaign.name,
+                row.campaign.status.value,
+                str(row.steps),
+                _counts_cell(row.enrollments),
+            )
+            for row in campaign_service.list_campaigns(session, user)
+        ]
+    if not rows:
+        typer.echo("no campaigns; create one with `netkeeper campaigns create`")
+        return
+    typer.echo(_format_table(("ID", "NAME", "STATUS", "STEPS", "ENROLLMENTS"), rows), nl=False)
+
+
+@campaigns_app.command("status")
+def campaigns_status(
+    ctx: typer.Context,
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+) -> None:
+    """Show one campaign: its steps, enrollments, next fire, and review (GET /campaigns/{id}).
+
+    For a draft or reviewing campaign it lists what activation still needs.
+    """
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
+    with _campaign_db() as factory, session_scope(factory) as session, _campaign_errors():
+        user = _local_user_or_exit(session)
+        detail = campaign_service.campaign_status(
+            session, user, campaign_id, me=me_fields(settings.me), now=datetime.now(UTC)
+        )
+        c = detail.campaign
+        lines = [
+            f"campaign {c.id}: {c.name}",
+            f"status: {c.status.value}",
+            f"mailbox: {detail.mailbox_email or '-'}",
+            f"daily cap: {'config' if c.daily_cap is None else c.daily_cap}",
+            f"enrollments: {_counts_cell(detail.enrollments)}",
+            f"next fire: {_when(detail.next_action_at)}",
+        ]
+        steps = [
+            (
+                str(s.step.position),
+                s.step.channel.value,
+                s.step.mode.value,
+                f"+{s.step.delay_days}d",
+                s.step.condition.value,
+                "yes" if s.step.same_thread else "no",
+                f"{s.template_name} v{s.template_version}",
+                str(s.fired),
+                str(s.sent),
+            )
+            for s in detail.steps
+        ]
+        missing = detail.missing
+        status = c.status
+    typer.echo("\n".join(lines))
+    typer.echo(
+        _format_table(
+            (
+                "STEP",
+                "CHANNEL",
+                "MODE",
+                "DELAY",
+                "CONDITION",
+                "THREAD",
+                "TEMPLATE",
+                "FIRED",
+                "SENT",
+            ),
+            steps,
+        ),
+        nl=False,
+    )
+    if status in campaign_service.REVIEWABLE:
+        if missing:
+            typer.echo("review: activation still needs")
+            typer.echo("\n".join(_missing_lines(missing)))
+        else:
+            typer.echo("review: complete; `netkeeper campaigns activate` can activate it")
+
+
+@campaigns_app.command("create")
+def campaigns_create(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="The campaign's name, also its Gmail label.")],
+    step: Annotated[
+        list[str],
+        typer.Option(
+            "--step",
+            help="A step, in order: TEMPLATE_ID[:DELAY_DAYS[:MODE]]. Repeat for each step."
+            " Defaults: the first at once, the rest 7 days on; draft for email, prefill for"
+            " LinkedIn.",
+        ),
+    ],
+    mailbox: Annotated[
+        str | None,
+        typer.Option("--mailbox", help="The mailbox's address or ID. Needed for an email step."),
+    ] = None,
+    list_name: Annotated[
+        str | None, typer.Option("--list", help="The audience: a list's name or ID.")
+    ] = None,
+    filter_json: Annotated[
+        str | None, typer.Option("--filter", help="The audience: a filter, as JSON.")
+    ] = None,
+    daily_cap: Annotated[
+        int | None, typer.Option(help="The campaign's own daily cap. Default: the config's.")
+    ] = None,
+) -> None:
+    """Create a draft campaign (POST /campaigns). Nobody is enrolled until `enroll`."""
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
+    steps = [_step_or_exit(raw) for raw in step]
+    audience = _audience_filter_or_exit(filter_json)
+    with _campaign_db() as factory, session_scope(factory, write=True) as session:
+        user = _local_user_or_exit(session)
+        mailbox_id = None if mailbox is None else _mailbox_or_exit(session, user, mailbox).id
+        list_id = _list_id_or_exit(session, user, list_name)
+        with _campaign_errors():
+            campaign = campaign_service.create_campaign(
+                session,
+                user,
+                name=name,
+                steps=steps,
+                settings=settings,
+                mailbox_id=mailbox_id,
+                list_id=list_id,
+                filter=audience,
+                daily_cap=daily_cap,
+            )
+        line = f"created draft campaign {campaign.id} {campaign.name!r} with {len(steps)} steps"
+    typer.echo(line)
+
+
+@campaigns_app.command("enroll")
+def campaigns_enroll(
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+    list_name: Annotated[
+        str | None,
+        typer.Option("--list", help="Set the audience to this list (name or ID) first."),
+    ] = None,
+    filter_json: Annotated[
+        str | None, typer.Option("--filter", help="Set the audience to this filter first (JSON).")
+    ] = None,
+    contact: Annotated[
+        list[int] | None, typer.Option("--contact", help="Also enroll this contact ID.")
+    ] = None,
+) -> None:
+    """Enroll the audience as pending, through the guards (POST /campaigns/{id}/enroll).
+
+    Only a draft or reviewing campaign takes anyone. `--list` or `--filter` sets the
+    audience first, on a draft only.
+    """
+    audience = _audience_filter_or_exit(filter_json)
+    with _campaign_db() as factory, session_scope(factory, write=True) as session:
+        user = _local_user_or_exit(session)
+        list_id = _list_id_or_exit(session, user, list_name)
+        with _campaign_errors():
+            outcome = campaign_service.enroll(
+                session,
+                user,
+                campaign_id,
+                now=datetime.now(UTC),
+                list_id=list_id,
+                filter=audience,
+                contact_ids=contact or (),
+            )
+    typer.echo(
+        f"campaign {campaign_id}: {outcome.enrolled} enrolled, {outcome.already} already in,"
+        f" {outcome.excluded} excluded"
+    )
+    typer.echo(outcome.summary)
+
+
+@campaigns_app.command("activate")
+def campaigns_activate(
+    ctx: typer.Context,
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    """Activate a reviewed campaign through the review gate (POST /campaigns/{id}/activate).
+
+    Refused, with the list of what is missing, unless every review requirement is
+    recorded and current: sampled and searched previews approved, a test send of
+    each email step, a clean lint, and the guard summary acknowledged. Once active,
+    `netkeeper serve` fires its steps on an armed mailbox.
+    """
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
+    me = me_fields(settings.me)
+    with _campaign_db() as factory:
+        # Read, then ask, then write: a writer held across the prompt would lock out serve.
+        with session_scope(factory) as session, _campaign_errors():
+            user = _local_user_or_exit(session)
+            campaign = campaign_review.get_campaign(session, user, campaign_id)
+            name = campaign.name
+            gaps = campaign_review.missing(session, user, campaign, me=me, now=datetime.now(UTC))
+        if gaps:
+            _refuse_activation(campaign_id, gaps)
+        if not yes and not typer.confirm(
+            f"activate campaign {campaign_id} {name!r}? `netkeeper serve` fires its steps"
+            " from the next tick on an armed mailbox"
+        ):
+            typer.echo(f"cancelled: campaign {campaign_id} stays in review")
+            raise typer.Exit(code=1)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            try:
+                campaign_review.activate(
+                    session, user, campaign_id, settings=settings, me=me, now=datetime.now(UTC)
+                )
+            except campaign_review.ReviewIncomplete as exc:
+                _refuse_activation(campaign_id, exc.missing, cause=exc)
+            except campaign_review.ReviewError as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+    typer.echo(f"campaign {campaign_id} {name!r} is active")
+
+
+def _refuse_activation(
+    campaign_id: int,
+    missing: Sequence[campaign_review.Missing],
+    *,
+    cause: BaseException | None = None,
+) -> NoReturn:
+    typer.echo(
+        f"error: campaign {campaign_id} cannot be activated; the review still needs:", err=True
+    )
+    typer.echo("\n".join(_missing_lines(missing)), err=True)
+    raise typer.Exit(code=1) from cause
+
+
+@campaigns_app.command("pause")
+def campaigns_pause(
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+) -> None:
+    """Pause an active campaign (POST /campaigns/{id}/pause).
+
+    Nothing fires until `resume`; each enrollment keeps its state and due time. A step
+    already handed to Gmail is not recalled.
+    """
+    with (
+        _campaign_db() as factory,
+        session_scope(factory, write=True) as session,
+        _campaign_errors(),
+    ):
+        user = _local_user_or_exit(session)
+        campaign_service.pause(session, user, campaign_id)
+    typer.echo(f"campaign {campaign_id} paused")
+
+
+@campaigns_app.command("resume")
+def campaigns_resume(
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+) -> None:
+    """Resume a paused campaign (POST /campaigns/{id}/resume).
+
+    A step that came due meanwhile fires at the next chance, one at a time and spaced
+    as usual.
+    """
+    with (
+        _campaign_db() as factory,
+        session_scope(factory, write=True) as session,
+        _campaign_errors(),
+    ):
+        user = _local_user_or_exit(session)
+        campaign_service.resume(session, user, campaign_id)
+    typer.echo(f"campaign {campaign_id} resumed")
 
 
 # --- contacts ---------------------------------------------------------------

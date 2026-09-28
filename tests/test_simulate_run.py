@@ -226,7 +226,7 @@ async def _run_one_direct_fire(target_ordinals: frozenset[int]) -> sr._RunState:
     start = datetime.combine(sr.REFERENCE_START_DATE, time(0, 0), tzinfo=zone).astimezone(UTC)
     cap = min(DEFAULTS.linkedin.budget.profile_visits_per_day, 100)
 
-    with sr._scratch_database() as factory:
+    with sr.scratch_database() as factory:
         with session_scope(factory, write=True) as session:
             user = User(kind=UserKind.LOCAL, timezone=DEFAULTS.linkedin.timezone, created_at=start)
             session.add(user)
@@ -472,7 +472,7 @@ async def test_the_scratch_schema_is_built_by_migrations_not_create_all() -> Non
     revision on disk, is direct evidence of which one built the scratch
     schema -- the production one, not a models-only approximation of it that
     can drift from what the migrations actually build."""
-    with sr._scratch_database() as factory, session_scope(factory) as session:
+    with sr.scratch_database() as factory, session_scope(factory) as session:
         engine = session.get_bind()
         assert migrations.current_revision(engine) == migrations.head_revision()  # type: ignore[arg-type]
 
