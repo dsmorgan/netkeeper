@@ -18,7 +18,7 @@ from typing import Any
 
 import factories
 import pytest
-from campaign_fakes import NOW, SETTINGS, make_mailbox
+from campaign_fakes import ARMED_FOR_SEND, NOW, SETTINGS, make_mailbox
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.compose import message_id_for
@@ -39,6 +39,7 @@ from netkeeper.models import (
     Enrollment,
     EnrollmentStatus,
     Mailbox,
+    MailboxArm,
     Message,
     MessageStatus,
     StepMode,
@@ -49,6 +50,7 @@ from netkeeper.models import (
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import campaign_engine as engine_module
 from netkeeper.services import campaign_sender as sender_module
+from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.campaign_engine import (
     DRAFT_DISCARDED_REASON,
     DRAFT_MISSING,
@@ -228,7 +230,7 @@ def make_mail(
     clock = Clock()
     with session_scope(factory, write=True) as session:
         user = factories.make_user(session)
-        mailbox = make_mailbox(session, user, email="me@example.com")
+        mailbox = make_mailbox(session, user, email="me@example.com", **ARMED_FOR_SEND)
         campaign = factories.make_campaign(
             session, user, channels=(EMAIL,) * len(modes), mailbox_id=mailbox.id
         )
@@ -1087,7 +1089,7 @@ def add_mailbox(mail: Mail, modes: Sequence[StepMode]) -> tuple[int, int, LostAn
     def make(session: Session) -> tuple[int, int]:
         user = session.get(User, mail.user.id)
         assert user is not None
-        mailbox = make_mailbox(session, user, email="two@example.com")
+        mailbox = make_mailbox(session, user, email="two@example.com", **ARMED_FOR_SEND)
         campaign = factories.make_campaign(
             session, user, channels=(EMAIL,) * len(modes), mailbox_id=mailbox.id
         )
@@ -1462,3 +1464,167 @@ def test_a_sent_draft_with_a_new_id_counts_from_the_claim_itself(
         assert (message.sent_at, message.gmail_message_id) == (NOW, sent.id)
     else:
         assert message.error == DRAFT_MISSING
+
+
+# --- the arm switch (#277) ----------------------------------------------------------
+
+
+def set_arm(mail: Mail, arm: MailboxArm | None, *, verified: bool = True) -> None:
+    """Set the mailbox's arming as a person's arm and disarm would leave it."""
+
+    def change(session: Session) -> None:
+        row = get_scoped(session, mail.user, Mailbox, mail.mailbox.id)
+        assert row is not None
+        row.armed_at = None if arm is None else NOW - WEEK
+        row.send_armed_at = NOW - WEEK if arm is MailboxArm.SEND else None
+        row.message_id_verified_at = NOW - WEEK if verified else None
+
+    mail.write(change)
+
+
+def gmail_methods(mail: Mail) -> list[str]:
+    return [method for method, _ in mail.gmail.calls]
+
+
+def counting_opener(mail: Mail) -> tuple[list[int], Callable[[int, int], Any]]:
+    opened: list[int] = []
+
+    def opener(user_id: int, mailbox_id: int) -> Any:
+        opened.append(mailbox_id)
+        return mail.gmail
+
+    return opened, opener
+
+
+def test_the_gmail_sender_is_gated_on_arming() -> None:
+    assert issubclass(GmailSender, engine_module.ArmGated)
+
+
+def test_a_disarmed_mailbox_claims_nothing_and_never_calls_gmail(mail: Mail) -> None:
+    set_arm(mail, None)
+    opened, opener = counting_opener(mail)
+    mail.sender = GmailSender(mail.factory, opener=opener, clock=mail.clock)
+    enrollment_id = mail.enroll()
+    result = mail.tick()
+    assert mail.messages() == []
+    assert result.decisions == [
+        engine_module.Decision(enrollment_id, False, (engine_module.Skip.MAILBOX_DISARMED,))
+    ]
+    assert mail.enrollment(enrollment_id).next_action_at == NOW  # left due, as it was
+    mail.tick(NOW + timedelta(hours=3))
+    assert (mail.messages(), opened, mail.gmail.calls) == ([], [], [])
+
+
+def test_disarmed_leftovers_and_drafts_wait_with_no_gmail_call(drafts: Mail) -> None:
+    """Reconcile, the drafts poll and the Message-ID check skip a disarmed mailbox."""
+    set_arm(drafts, MailboxArm.SEND)
+    first = drafts.enroll("ada@example.test")
+    second = drafts.enroll("bob@example.test")
+    drafts.tick()
+    drafts.tick(NOW + timedelta(hours=1))  # a second claim, past the spacing
+    [drafted] = drafts.messages(first)
+    [leftover] = drafts.messages(second)
+    drafts.set_message(leftover.id, status=MessageStatus.SCHEDULED)  # as a crash leaves it
+    set_arm(drafts, None, verified=False)
+    opened, opener = counting_opener(drafts)
+    drafts.sender = GmailSender(
+        drafts.factory, opener=opener, clock=drafts.clock, drafts_every=timedelta(0)
+    )
+    before = len(drafts.gmail.calls)
+    drafts.tick(NOW + timedelta(hours=1) + LATER)
+    assert (opened, len(drafts.gmail.calls)) == ([], before)
+    assert [m.status for m in drafts.messages()] == [MessageStatus.DRAFTED, MessageStatus.SCHEDULED]
+    set_arm(drafts, MailboxArm.DRAFT)  # armed again: both are looked up
+    drafts.tick(NOW + timedelta(hours=1) + LATER + timedelta(minutes=1))
+    assert opened and len(drafts.gmail.calls) > before
+    assert drafted.status is MessageStatus.DRAFTED
+
+
+def test_armed_for_drafts_a_send_step_is_a_draft_and_messages_send_is_never_called(
+    mail: Mail,
+) -> None:
+    """Every step of a three-step send campaign, through the person sending each draft."""
+    set_arm(mail, MailboxArm.DRAFT)
+    enrollment_id = mail.enroll()
+    at = NOW
+    for step in range(3):
+        mail.tick(at)
+        message = mail.messages(enrollment_id)[step]
+        assert message.status is MessageStatus.DRAFTED
+        assert message.gmail_draft_id is not None
+        mail.gmail.send_draft(message.gmail_draft_id, at=at + timedelta(minutes=5))
+        mail.tick(at + timedelta(minutes=30))  # the drafts poll sees it sent
+        assert mail.messages(enrollment_id)[step].status is MessageStatus.SENT
+        at += WEEK + timedelta(hours=1)
+    assert "messages.send" not in gmail_methods(mail)
+    assert gmail_methods(mail).count("drafts.create") == 3
+
+
+@dataclass
+class ChangesArmingFirst:
+    """Between the claim and the send, a person changes the mailbox's arming."""
+
+    mail: Mail
+    arm: MailboxArm | None
+
+    def send(self, firing: Firing) -> SendResult:
+        set_arm(self.mail, self.arm)
+        return self.mail.sender.send(firing)
+
+
+@pytest.mark.parametrize("arm", [None, MailboxArm.DRAFT], ids=["disarmed", "drafts-only"])
+def test_a_send_claimed_before_the_arming_changed_sends_nothing(
+    mail: Mail, arm: MailboxArm | None
+) -> None:
+    set_arm(mail, MailboxArm.SEND)
+    enrollment_id = mail.enroll()
+    result = mail.tick(sender=ChangesArmingFirst(mail, arm))
+    [(_, outcome)] = result.fired
+    assert outcome.outcome is SendOutcome.NOT_SENT
+    assert outcome.error is not None and "nothing was sent" in outcome.error
+    assert mail.gmail.calls == []
+    assert mail.messages(enrollment_id) == []  # the claim is given back
+    enrollment = mail.enrollment(enrollment_id)
+    assert enrollment.next_action_at is not None and enrollment.next_action_at > NOW
+
+
+def test_a_disarm_after_the_claim_lets_a_draft_already_claimed_through_as_a_draft(
+    drafts: Mail,
+) -> None:
+    """Disarming takes effect at the next claim; a draft already claimed is still only a
+    draft, and after it nothing is claimed."""
+    set_arm(drafts, MailboxArm.DRAFT)
+    first = drafts.enroll("ada@example.test")
+    second = drafts.enroll("bob@example.test")
+    drafts.tick(sender=ChangesArmingFirst(drafts, MailboxArm.DRAFT))
+    [message] = drafts.messages(first)
+    assert message.status is MessageStatus.DRAFTED
+    set_arm(drafts, None)
+    drafts.tick(NOW + timedelta(hours=1))
+    assert drafts.messages(second) == []
+
+
+def test_the_first_draft_found_by_its_message_id_verifies_the_mailbox(drafts: Mail) -> None:
+    set_arm(drafts, MailboxArm.DRAFT, verified=False)
+    drafts.gmail.lag = 1  # Gmail's search lags the first time
+    drafts.enroll()
+    drafts.tick()
+
+    def verified_at() -> datetime | None:
+        row = drafts.read(lambda s: get_scoped(s, drafts.user, Mailbox, drafts.mailbox.id))
+        assert row is not None
+        return row.message_id_verified_at
+
+    drafts.tick(NOW + timedelta(minutes=1))
+    assert verified_at() is None  # not found yet: tried again at the next poll
+    drafts.tick(NOW + timedelta(minutes=2))
+    assert verified_at() == NOW + timedelta(minutes=2)
+    searches = [c for c in drafts.gmail.calls if c[0] == "messages.list"]
+    drafts.tick(NOW + timedelta(minutes=3))
+    assert [c for c in drafts.gmail.calls if c[0] == "messages.list"] == searches  # once only
+    with session_scope(drafts.factory, write=True) as session:
+        user = session.get(User, drafts.user.id)
+        assert user is not None
+        mailbox = mailbox_service.get_mailbox(session, user, drafts.mailbox.id)
+        mailbox_service.arm(session, user, mailbox, MailboxArm.SEND, by="test", now=NOW)
+        assert mailbox.arm is MailboxArm.SEND

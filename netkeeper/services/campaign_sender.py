@@ -62,6 +62,23 @@ Each tick, before anything is chosen, :meth:`GmailSender.reconcile` looks up wha
   as ``discarded``. That is the conservative direction (nothing more is sent);
   confirm it at the first live draft run (#277).
 
+Arming (#277)
+-------------
+:class:`GmailSender` is :class:`~netkeeper.services.campaign_engine.ArmGated`: it
+touches only a mailbox a person armed (:func:`netkeeper.services.mailboxes.arm`).
+
+- **Disarmed**: the engine claims nothing on it, :meth:`GmailSender.send` makes no
+  Gmail call for it, and reconcile skips it, so its leftovers and drafts wait
+  until it is armed again.
+- **Armed for drafts**: every step becomes a draft. :meth:`GmailSender.send` reads
+  the arming again before any Gmail call, and a ``send`` firing on a mailbox not
+  armed for send (disarmed or taken back to drafts since the claim) sends nothing:
+  its claim is given back (``not_sent``). No ``messages.send``, ever.
+- **The Message-ID check**: until one has passed, each drafts poll of an armed
+  mailbox searches for its oldest waiting draft by Message-ID. Found, the mailbox
+  is recorded verified, which arming for send requires: the first live check that
+  Gmail keeps the Message-ID netkeeper sets, which reconcile depends on.
+
 netkeeper deletes nothing in Gmail (ADR 0003). A draft whose message a merge
 discarded stays in Gmail for the person (#273, question 2).
 
@@ -98,9 +115,11 @@ from netkeeper.campaigns.gmail import (
 )
 from netkeeper.config import Settings
 from netkeeper.db import session_scope
-from netkeeper.models import MessageStatus, StepMode, TemplateChannel, User
+from netkeeper.models import Mailbox, MailboxArm, MessageStatus, StepMode, TemplateChannel, User
 from netkeeper.models.base import utcnow
+from netkeeper.scoping import get_scoped
 from netkeeper.services import campaign_engine as engine
+from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.campaign_engine import Firing, SendOutcome, SendResult, Tracked
 from netkeeper.services.mailboxes import MailboxNotFound, MailboxNotReady, open_gmail
 
@@ -196,6 +215,7 @@ class GmailSender:
     ) -> None:
         if drafts_every < timedelta(0):
             raise ValueError("the drafts poll interval cannot be negative")
+        self._factory = factory
         self._open: GmailOpener = opener or (
             lambda user_id, mailbox_id: open_gmail(factory, user_id, mailbox_id)
         )
@@ -204,12 +224,34 @@ class GmailSender:
         self._drafts_polled: dict[int, datetime] = {}
         self._label_ids: dict[tuple[int, str], str] = {}
 
+    # --- arming (#277) ----------------------------------------------------------------
+
+    def armed(self, session: Session, user: User, mailbox_id: int) -> MailboxArm | None:
+        """The engine's gate (:class:`~netkeeper.services.campaign_engine.ArmGated`)."""
+        return mailbox_service.armed(session, user, mailbox_id)
+
+    def _disarmed_for(self, firing: Firing) -> str | None:
+        """Why ``firing`` must not reach Gmail now, read fresh; None when it may."""
+        if firing.mailbox_id is None:
+            return None  # refused by _ready, with no Gmail call either
+        with session_scope(self._factory) as session:
+            user = session.get(User, firing.user_id)
+            arm = None if user is None else self.armed(session, user, firing.mailbox_id)
+        if arm is None:
+            return "the mailbox is disarmed; nothing was sent"
+        if firing.mode is not StepMode.DRAFT and arm is not MailboxArm.SEND:
+            return "the mailbox is armed for drafts only; nothing was sent"
+        return None
+
     # --- sending ---------------------------------------------------------------------
 
     def send(self, firing: Firing) -> SendResult:
         """Send or draft one firing. Never raises for a Gmail failure."""
         verb = "draft" if firing.mode is StepMode.DRAFT else "send"
         purpose = f"{verb} step {firing.step_position} for enrollment {firing.enrollment_id}"
+        refused = self._disarmed_for(firing)
+        if refused is not None:
+            return _not_sent(firing, refused)
         try:
             gmail, message_id = self._ready(firing)
             threading_ = self._threading(gmail, firing, purpose)
@@ -403,6 +445,12 @@ class GmailSender:
             if user is None:
                 return
             work = engine.reconcile_work(session, user, now=now)
+            # A disarmed mailbox gets no Gmail call: what it holds waits for it (#277).
+            unverified: dict[int, bool] = {}
+            for mailbox_id in work.mailboxes():
+                mailbox = get_scoped(session, user, Mailbox, mailbox_id)
+                if mailbox is not None and mailbox.arm is not None:
+                    unverified[mailbox_id] = mailbox.message_id_verified_at is None
         last = self._drafts_polled.get(user_id)
         poll = last is None or now - last >= self._drafts_every
         drafts = work.drafts if poll else ()
@@ -410,6 +458,8 @@ class GmailSender:
             self._drafts_polled[user_id] = now
         run = _Reconcile(self, factory, user_id, settings, now)
         for mailbox_id in sorted({t.mailbox_id for t in (*work.leftovers, *drafts)}):
+            if mailbox_id not in unverified:
+                continue
             try:
                 gmail = self._open(user_id, mailbox_id)
             except (MailboxNotReady, MailboxNotFound) as exc:
@@ -419,6 +469,7 @@ class GmailSender:
                 gmail,
                 [t for t in work.leftovers if t.mailbox_id == mailbox_id],
                 [t for t in drafts if t.mailbox_id == mailbox_id],
+                verify=unverified[mailbox_id],
             )
 
 
@@ -446,12 +497,20 @@ class _Reconcile:
                 fn(session, user)
 
     def mailbox(
-        self, gmail: Gmail, leftovers: Collection[Tracked], drafts: Collection[Tracked]
+        self,
+        gmail: Gmail,
+        leftovers: Collection[Tracked],
+        drafts: Collection[Tracked],
+        *,
+        verify: bool = False,
     ) -> None:
         for tracked in leftovers:
             self.guarded(tracked, self.leftover, gmail, tracked)
         if not drafts:
             return
+        if verify:
+            oldest = min(drafts, key=lambda t: t.message_id)
+            self.guarded(oldest, self.verify, gmail, oldest)
         try:
             present = {
                 d.id for d in gmail.list_drafts(purpose=f"drafts poll for user {self.user_id}")
@@ -518,6 +577,23 @@ class _Reconcile:
             )
         else:
             log.info("message %d is a Gmail draft not listed yet; it waits", tracked.message_id)
+
+    def verify(self, gmail: Gmail, tracked: Tracked) -> None:
+        """Search for a draft by the Message-ID netkeeper set; found, the mailbox is
+        verified and can be armed for send (#277). Not found is not a failure: Gmail's
+        search can lag, and the next poll tries again."""
+        purpose = self.purpose(tracked, "Message-ID check of")
+        if find_by_message_id(gmail, tracked.rfc822_message_id, purpose=purpose) is None:
+            log.info(
+                "mailbox %d: draft message %d not found by its Message-ID yet",
+                tracked.mailbox_id,
+                tracked.message_id,
+            )
+            return
+        now, mailbox_id = self.now, tracked.mailbox_id
+        self.write(
+            lambda s, u: mailbox_service.record_message_id_verified(s, u, mailbox_id, now=now)
+        )
 
     def draft(self, gmail: Gmail, tracked: Tracked, present: Collection[str]) -> None:
         if tracked.gmail_draft_id in present:
