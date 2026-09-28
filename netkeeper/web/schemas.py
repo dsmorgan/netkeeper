@@ -42,6 +42,7 @@ from netkeeper.models import (
     InteractionKind,
     LinkKind,
     ListKind,
+    MailboxArm,
     MailboxProvider,
     MailboxStatus,
     MetSource,
@@ -1999,8 +2000,23 @@ class MailboxOut(BaseModel):
     label_prefix: str
     checked_at: datetime | None
     """When a token refresh last succeeded."""
+    arm: MailboxArm | None
+    """What ``serve`` may do with it (#277): None is nothing (disarmed), ``draft`` makes
+    every campaign step a draft, ``send`` lets send steps go out."""
+    armed_at: datetime | None
+    send_armed_at: datetime | None
+    armed_by: str | None
+    """Who took the latest arming step: ``cli (<login>)`` or ``web (user <id>)``."""
+    message_id_verified_at: datetime | None
+    """When a draft made there was first found by its Message-ID; arming for send needs it."""
     created_at: datetime
     updated_at: datetime
+
+
+class MailboxArmIn(BaseModel):
+    """Arm a mailbox: ``draft`` first, then ``send`` as a separate step."""
+
+    mode: MailboxArm
 
 
 class MailboxStatusOut(BaseModel):

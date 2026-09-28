@@ -9,11 +9,13 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from gmail_fakes import CLIENT_ID, CLIENT_SECRET, FAKE_EMAIL, FakeGoogle, MemoryKeyring
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import CampaignSettings, Settings
 from netkeeper.db import DATABASE_FILENAME, session_scope
+from netkeeper.models import Mailbox, MailboxArm, User, UserKind
+from netkeeper.scoping import unscoped
 from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.events import EventBus, Subscription
 from netkeeper.services.scheduled_runs import ServeExtractor
@@ -373,6 +375,87 @@ async def test_another_users_mailbox_is_404(
     assert start.status_code == 404
     status = await _status(client)
     assert (status["mailboxes"], status["reauth_required"]) == ([], False)
+
+
+# --- arming (#277) -----------------------------------------------------------------
+
+
+async def _arm(client: httpx.AsyncClient, mailbox_id: int, mode: str) -> httpx.Response:
+    return await client.post(
+        f"/api/v1/mailboxes/{mailbox_id}/arm", json={"mode": mode}, headers=CSRF
+    )
+
+
+async def test_arming_goes_draft_then_send_and_disarm_undoes_it(
+    client: httpx.AsyncClient, fake_google: FakeGoogle, running_app: FastAPI
+) -> None:
+    await _set_client(client)
+    await _connect(client, fake_google)
+    [mailbox] = (await client.get("/api/v1/mailboxes")).json()
+    assert (mailbox["arm"], mailbox["armed_at"], mailbox["message_id_verified_at"]) == (
+        None,
+        None,
+        None,
+    )
+    refused = await _arm(client, mailbox["id"], "send")
+    assert refused.status_code == 409
+    assert "not armed" in refused.json()["detail"]
+
+    drafts = await _arm(client, mailbox["id"], "draft")
+    assert drafts.status_code == 200, drafts.text
+    assert drafts.json()["arm"] == "draft"
+    assert drafts.json()["armed_by"].startswith("web (user ")
+    assert drafts.json()["armed_at"] is not None
+    assert (await _arm(client, mailbox["id"], "send")).status_code == 409  # not verified
+
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        [row] = session.scalars(unscoped(select(Mailbox))).all()
+        row.message_id_verified_at = row.armed_at
+    sends = await _arm(client, mailbox["id"], "send")
+    assert sends.status_code == 200, sends.text
+    assert sends.json()["arm"] == "send"
+    listed = (await client.get("/api/v1/mailboxes/status")).json()["mailboxes"]
+    assert [row["arm"] for row in listed] == ["send"]
+
+    disarmed = await client.post(f"/api/v1/mailboxes/{mailbox['id']}/disarm", headers=CSRF)
+    assert disarmed.status_code == 200
+    assert (disarmed.json()["arm"], disarmed.json()["armed_at"]) == (None, None)
+
+
+async def test_arming_needs_the_csrf_header(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = session.scalars(select(User).where(User.kind == UserKind.LOCAL)).one()
+        mailbox = mailbox_service.connect(session, user, "me@example.com", "rt", daily_cap=80)
+    arm = await client.post(f"/api/v1/mailboxes/{mailbox.id}/arm", json={"mode": "draft"})
+    disarm = await client.post(f"/api/v1/mailboxes/{mailbox.id}/disarm")
+    assert (arm.status_code, disarm.status_code) == (403, 403)
+    with session_scope(factory) as session:
+        assert session.scalars(unscoped(select(Mailbox))).one().arm is None
+
+
+@pytest.mark.parametrize("action", ["arm", "disarm"])
+async def test_another_users_mailbox_is_not_armed_or_disarmed(
+    client: httpx.AsyncClient, running_app: FastAPI, action: str
+) -> None:
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        other = factories.make_user(session)
+        mailbox = mailbox_service.connect(session, other, "them@example.com", "rt", daily_cap=80)
+        if action == "disarm":
+            mailbox_service.arm(
+                session, other, mailbox, MailboxArm.DRAFT, by="them", now=mailbox.created_at
+            )
+    response = await client.post(
+        f"/api/v1/mailboxes/{mailbox.id}/{action}", json={"mode": "draft"}, headers=CSRF
+    )
+    assert response.status_code == 404
+    with session_scope(factory) as session:
+        row = session.scalars(unscoped(select(Mailbox))).one()
+        assert row.arm is (MailboxArm.DRAFT if action == "disarm" else None)
 
 
 # --- the app ------------------------------------------------------------------------
