@@ -4,6 +4,7 @@ version."""
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
 import logging
 import os
@@ -54,6 +55,7 @@ from netkeeper.models import (
     ImportRun,
     ImportStatus,
     Mailbox,
+    MailboxArm,
     MailboxStatus,
     SyncRun,
     SyncRunKind,
@@ -2180,7 +2182,10 @@ def gmail_status() -> None:
     if not rows:
         typer.echo("no mailboxes; run `netkeeper gmail login`")
         return
-    typer.echo(_format_table(("ID", "EMAIL", "STATUS", "REASON", "CAP", "CHECKED"), rows), nl=False)
+    typer.echo(
+        _format_table(("ID", "EMAIL", "STATUS", "REASON", "CAP", "CHECKED", "ARMED"), rows),
+        nl=False,
+    )
 
 
 @gmail_app.command("check")
@@ -2231,6 +2236,89 @@ def gmail_disconnect(
     finally:
         engine.dispose()
     typer.echo(f"disconnected {wanted}")
+
+
+@gmail_app.command("arm")
+def gmail_arm(
+    mailbox: Annotated[str, typer.Argument(help="The mailbox's address or ID.")],
+    send: Annotated[
+        bool,
+        typer.Option(
+            "--send",
+            help="The second step: let send steps go out, not only drafts. Needs the mailbox"
+            " armed for drafts and one of its drafts found by its Message-ID.",
+        ),
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    """Let `netkeeper serve` use this mailbox for campaign steps: drafts first.
+
+    Armed, every campaign step on the mailbox becomes a Gmail draft you send by hand,
+    `send` steps included. `--send` is the separate step that lets send steps go out
+    on their own; it is refused until a draft made there has been found by its
+    Message-ID (`netkeeper gmail status`). `netkeeper gmail disarm` undoes both.
+    """
+    mode = MailboxArm.SEND if send else MailboxArm.DRAFT
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        # Read, then ask, then write: a writer held across the prompt would lock out serve.
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            row = _mailbox_or_exit(session, user, mailbox)
+            email, mailbox_id, current = row.email, row.id, row.arm
+        if current is mode:
+            typer.echo(f"{email} is already armed for {mode.value}")
+            return
+        question = (
+            f"let netkeeper serve send campaign email from {email} with no one pressing Send?"
+            if send
+            else f"let netkeeper serve make campaign drafts in {email}? You send each by hand"
+        )
+        if not yes and not typer.confirm(question):
+            typer.echo(f"cancelled: {email} stays as it was")
+            raise typer.Exit(code=1)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            row = mailbox_service.get_mailbox(session, user, mailbox_id)
+            try:
+                mailbox_service.arm(
+                    session, user, row, mode, by=_cli_actor(), now=datetime.now(UTC)
+                )
+            except mailbox_service.ArmRefused as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+    finally:
+        engine.dispose()
+    if send:
+        typer.echo(f"{email} armed for send: send steps go out from the next tick")
+    else:
+        typer.echo(
+            f"{email} armed for drafts: every step is a draft from the next tick;"
+            " `netkeeper gmail disarm` undoes it"
+        )
+
+
+@gmail_app.command("disarm")
+def gmail_disarm(
+    mailbox: Annotated[str, typer.Argument(help="The mailbox's address or ID.")],
+) -> None:
+    """Stop `netkeeper serve` using this mailbox: nothing more is claimed from the next tick.
+
+    A step already handed to Gmail is not recalled."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            row = _mailbox_or_exit(session, user, mailbox)
+            mailbox_service.disarm(session, user, row)
+            email = row.email
+    finally:
+        engine.dispose()
+    typer.echo(f"{email} disarmed")
 
 
 def _authorize_or_exit(
@@ -2296,7 +2384,34 @@ def _mailbox_row(row: Mailbox) -> tuple[str, ...]:
         row.status_reason or "-",
         str(row.daily_cap),
         checked,
+        _armed_cell(row),
     )
+
+
+def _armed_cell(row: Mailbox) -> str:
+    """``no``, or the mode, since when and by whom (#277)."""
+    if row.arm is None or row.armed_at is None:
+        return "no"
+    since = row.send_armed_at or row.armed_at
+    return f"{row.arm.value} since {since:%Y-%m-%d %H:%M UTC} by {row.armed_by or '?'}"
+
+
+def _mailbox_or_exit(session: Session, user: User, which: str) -> Mailbox:
+    """The user's mailbox named by its address or its id."""
+    wanted = which.strip().lower()
+    for row in mailbox_service.list_mailboxes(session, user):
+        if row.email == wanted or str(row.id) == wanted:
+            return row
+    typer.echo(f"error: no mailbox {wanted}", err=True)
+    raise typer.Exit(code=1)
+
+
+def _cli_actor() -> str:
+    """Who armed it, from the terminal: the login name."""
+    try:
+        return f"cli ({getpass.getuser()})"
+    except (OSError, KeyError):  # no login name to be had
+        return "cli"
 
 
 def _local_user_or_exit(session: Session) -> User:
