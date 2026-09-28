@@ -2029,3 +2029,36 @@ def test_0022_downgrades_to_enrollments_without_it(migration_engine: Engine) -> 
     assert columns.isdisjoint(_NOT_SENT_COLUMNS)
     with migration_engine.begin() as connection:
         assert _count(connection, "enrollments") == 1
+
+
+# --- mailbox arming (0023, #277) ---------------------------------------------------------
+
+_ARM_COLUMNS = ("armed_at", "send_armed_at", "armed_by", "message_id_verified_at")
+
+
+def test_0023_starts_every_mailbox_disarmed_and_unverified(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0022")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_mailbox(connection, id=1)
+    migrations.upgrade(migration_engine, "0023")
+    with migration_engine.begin() as connection:
+        row = connection.execute(
+            text(f"SELECT {', '.join(_ARM_COLUMNS)} FROM mailboxes WHERE id = 1")
+        ).one()
+        assert tuple(row) == (None, None, None, None)
+
+
+def test_0023_downgrades_to_mailboxes_without_it(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0023")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_mailbox(connection, id=1)
+        connection.execute(
+            text("UPDATE mailboxes SET armed_at = :t, armed_by = 'cli (me)'"), {"t": STAMP}
+        )
+    migrations.downgrade(migration_engine, "0022")
+    columns = {column["name"] for column in inspect(migration_engine).get_columns("mailboxes")}
+    assert columns.isdisjoint(_ARM_COLUMNS)
+    with migration_engine.begin() as connection:
+        assert _count(connection, "mailboxes") == 1
