@@ -1897,3 +1897,41 @@ def test_the_claim_after_an_unknown_outcome_keeps_the_floor_from_its_worst_case_
     [claimed] = world.messages(second)
     assert claimed.scheduled_at == at
     assert at == worst_end + floor  # the first moment the floor from the worst case allows
+
+
+@dataclass
+class SlowUnknown:
+    """A send that takes ``takes`` on the engine's own clock, then loses its answer."""
+
+    clock: list[datetime]
+    takes: timedelta
+    firings: list[Firing] = dataclasses.field(default_factory=list)
+
+    def send(self, firing: Firing) -> SendResult:
+        self.firings.append(firing)
+        self.clock[0] += self.takes
+        return SendResult(SendOutcome.UNKNOWN, error="timed out")
+
+
+def test_an_unknown_send_that_took_time_spaces_from_its_record_not_its_claim(
+    world: World,
+) -> None:
+    """#277 (from the verification of #284): with a frozen clock, spacing from the claim
+    time and from the record time are the same instant, so a mutant spacing from the
+    claim survived. Here the send takes 25 s: the next claim waits for the floor after
+    the worst-case end of a send recorded 25 s after its claim."""
+    tight = Settings(campaigns=dataclasses.replace(SETTINGS.campaigns, send_spacing_median_s=1))
+    world.enroll_new()
+    second = world.enroll_new()
+    clock = [NOW]
+    slow = SlowUnknown(clock, timedelta(seconds=25))
+    run_tick(world.factory, settings=tight, sender=slow, clock=lambda: clock[0])
+    assert len(slow.firings) == 1
+
+    floor = timedelta(seconds=tight.campaigns.send_spacing_floor_s)
+    allowed = NOW + timedelta(seconds=25) + engine_module.UNKNOWN_SEND_END_MAX + floor
+    world.tick(allowed - timedelta(seconds=1), settings=tight)
+    assert world.messages(second) == []  # spaced from the claim, it would be claimed here
+    world.tick(allowed, settings=tight)
+    [claimed] = world.messages(second)
+    assert claimed.scheduled_at == allowed
