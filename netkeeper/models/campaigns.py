@@ -228,8 +228,21 @@ class Campaign(UserOwned, TimestampMixin, Base):
     # campaign copies ``[campaigns] contacted_within_days_guard`` from the config, so a
     # later config change never changes a campaign already reviewed.
     contacted_within_days_guard: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Set by the review gate (spec 11.8; P3-09) in the transaction that activates the
+    # campaign, and only once every requirement below is recorded and current.
     approved_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # The latest test send (``campaign_test_sends`` holds each one).
     test_sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # The review's lint record (0024): when every step's template was found free of lint
+    # errors, and the content fingerprint it was found for. A later change to a step or
+    # template changes the fingerprint, and the record no longer counts.
+    lint_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    lint_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    # The guard summary a person acknowledged (spec 11.8's "212 in audience, 37
+    # excluded: ..."), when, and the audience fingerprint it was for.
+    guards_acknowledged_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    guards_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    guards_summary: Mapped[str | None] = mapped_column(Text)
 
     @validates("mailbox_id")
     def _lock_mailbox(self, _key: str, value: int | None) -> int | None:
@@ -402,6 +415,60 @@ class Message(UserOwned, TimestampMixin, Base):
 
     enrollment: Mapped[Enrollment] = relationship()
 
+
+class ReviewPreview(UserOwned, TimestampMixin, Base):
+    """One enrollment's rendered previews, viewed in a campaign's review (spec 11.8; P3-09).
+
+    ``sampled`` rows are the server's draw of up to ten, for the audience whose
+    fingerprint is ``sample_fingerprint``; the others are enrollments the person
+    looked up. Every one must be approved (``approved_at``) for the content
+    fingerprint that is current at activation: a change to a step or a template
+    after the approval undoes it.
+    """
+
+    __tablename__ = "campaign_review_previews"
+    __table_args__ = (UniqueConstraint("user_id", "campaign_id", "enrollment_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, sort_order=-100)
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    enrollment_id: Mapped[int] = mapped_column(
+        ForeignKey("enrollments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sampled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    sample_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    viewed_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    approved_fingerprint: Mapped[str | None] = mapped_column(String(64))
+
+
+class TestSend(UserOwned, TimestampMixin, Base):
+    """One test send of an email step to the campaign's own mailbox (spec 11.8; P3-09).
+
+    Not a :class:`Message`: nothing that counts caps, recency or an enrollment's
+    progress reads this table, so a test send can never count toward any of them.
+    It counts for the review only while ``fingerprint`` is the step's current one.
+    """
+
+    __tablename__ = "campaign_test_sends"
+    __test__ = False  # not a pytest class, whatever its name
+
+    id: Mapped[int] = mapped_column(primary_key=True, sort_order=-100)
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    step_id: Mapped[int] = mapped_column(
+        ForeignKey("campaign_steps.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    to_address: Mapped[str] = mapped_column(String(320), nullable=False)
+    gmail_message_id: Mapped[str | None] = mapped_column(String(200))
+    sent_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+
+
+REVIEW_TABLES: tuple[type[UserOwned], ...] = (ReviewPreview, TestSend)
+"""The tables P3-09 added, for tests and tooling that iterate them."""
 
 TEMPLATE_TABLES: tuple[type[UserOwned], ...] = (Template,)
 """The tables P3-03 added, for tests and tooling that iterate them."""

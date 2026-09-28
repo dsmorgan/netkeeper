@@ -137,6 +137,189 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/campaigns/{campaign_id}/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Activate Campaign
+         * @description ``reviewing`` to ``active``: ``409`` with ``missing`` unless every review
+         *     requirement is recorded and current, checked in this one writer transaction.
+         */
+        post: operations["activate_campaign_api_v1_campaigns__campaign_id__activate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Review
+         * @description Where the review stands: the fingerprints, the guard summary, what is missing.
+         */
+        get: operations["get_review_api_v1_campaigns__campaign_id__review_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/review/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve Previews
+         * @description Approve viewed previews, each for the ``fingerprint`` it was shown with.
+         */
+        post: operations["approve_previews_api_v1_campaigns__campaign_id__review_approve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/review/guards/acknowledge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Acknowledge Guards
+         * @description Acknowledge the guard summary; refused unless it is still the current one.
+         */
+        post: operations["acknowledge_guards_api_v1_campaigns__campaign_id__review_guards_acknowledge_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/review/lint": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Lint Campaign
+         * @description Lint every step's template; the result is recorded only when there is no error.
+         */
+        post: operations["lint_campaign_api_v1_campaigns__campaign_id__review_lint_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/review/previews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * View Previews
+         * @description The rendered previews of enrollments the person looked up. Each must be approved.
+         */
+        post: operations["view_previews_api_v1_campaigns__campaign_id__review_previews_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/review/sample": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sample Previews
+         * @description The sample's rendered previews, drawn by the server once per audience.
+         */
+        post: operations["sample_previews_api_v1_campaigns__campaign_id__review_sample_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/review/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Review
+         * @description ``draft`` to ``reviewing``: needs a step and someone enrolled.
+         */
+        post: operations["start_review_api_v1_campaigns__campaign_id__review_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/review/test-send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Send
+         * @description Send one email step, rendered for an enrollment, to the campaign mailbox's own
+         *     address. Needs the mailbox armed for send. Never a campaign message: it counts
+         *     toward no cap or recency and advances no enrollment.
+         */
+        post: operations["test_send_api_v1_campaigns__campaign_id__review_test_send_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/contacts": {
         parameters: {
             query?: never;
@@ -2072,6 +2255,16 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * ActivationRefusedOut
+         * @description The ``409`` body of an activation refused for an incomplete review.
+         */
+        ActivationRefusedOut: {
+            /** Detail */
+            detail: string;
+            /** Missing */
+            missing: components["schemas"]["MissingOut"][];
+        };
         /** And */
         "And-Input": {
             /** Children */
@@ -2091,6 +2284,21 @@ export interface components {
              * @enum {string}
              */
             op: "and";
+        };
+        /** ApprovalIn */
+        ApprovalIn: {
+            /** Enrollment Id */
+            enrollment_id: number;
+            /** Fingerprint */
+            fingerprint: string;
+        };
+        /**
+         * ApproveIn
+         * @description Each enrollment with the ``fingerprint`` its preview came with.
+         */
+        ApproveIn: {
+            /** Previews */
+            previews: components["schemas"]["ApprovalIn"][];
         };
         /**
          * ArchiveConnectionCountsOut
@@ -2486,6 +2694,12 @@ export interface components {
             /** Ids */
             ids?: number[] | null;
         };
+        /**
+         * CampaignStatus
+         * @description Where a campaign is in its life (spec 8.5, 11.8).
+         * @enum {string}
+         */
+        CampaignStatus: "draft" | "reviewing" | "active" | "paused" | "completed" | "archived";
         /**
          * ChangedJobOut
          * @description A live contact whose position changed recently: a reason to reconnect (spec 9.8).
@@ -3113,6 +3327,23 @@ export interface components {
              */
             op: "enrolled_in";
         };
+        /** EnrollmentPreviewOut */
+        EnrollmentPreviewOut: {
+            /** Approved */
+            approved: boolean;
+            /** Contact Id */
+            contact_id: number;
+            /** Contact Name */
+            contact_name: string;
+            /** Enrollment Id */
+            enrollment_id: number;
+            /** Fingerprint */
+            fingerprint: string;
+            /** Sampled */
+            sampled: boolean;
+            /** Steps */
+            steps: components["schemas"]["StepPreviewOut"][];
+        };
         /** Eq */
         Eq: {
             /**
@@ -3189,6 +3420,13 @@ export interface components {
             op: "gte";
             /** Value */
             value: string | number | boolean;
+        };
+        /** GuardsIn */
+        GuardsIn: {
+            /** Audience Fingerprint */
+            audience_fingerprint: string;
+            /** Summary */
+            summary: string;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -3738,11 +3976,25 @@ export interface components {
             rule: components["schemas"]["LintRule"];
             severity: components["schemas"]["Severity"];
         };
+        /** LintOut */
+        LintOut: {
+            /** Clean */
+            clean: boolean;
+            /** Steps */
+            steps: components["schemas"]["LintStepOut"][];
+        };
         /**
          * LintRule
          * @enum {string}
          */
         LintRule: "syntax" | "unsupported" | "unsafe_attribute" | "attribute_access" | "undefined_variable" | "no_contact_field" | "missing_subject" | "bad_link" | "missing_value";
+        /** LintStepOut */
+        LintStepOut: {
+            /** Errors */
+            errors: components["schemas"]["LintIssueOut"][];
+            /** Position */
+            position: number;
+        };
         /** ListCreate */
         ListCreate: {
             filter?: components["schemas"]["FilterTree-Input"] | null;
@@ -3960,6 +4212,17 @@ export interface components {
          * @enum {string}
          */
         MetSource: "manual" | "automatic";
+        /** MissingOut */
+        MissingOut: {
+            /** Detail */
+            detail: string;
+            /** Enrollment Ids */
+            enrollment_ids?: number[];
+            /** Requirement */
+            requirement: string;
+            /** Step Positions */
+            step_positions?: number[];
+        };
         /** Neq */
         Neq: {
             /**
@@ -4215,6 +4478,18 @@ export interface components {
             /** Preferred Name */
             preferred_name: string;
         };
+        /** PreviewsIn */
+        PreviewsIn: {
+            /** Enrollment Ids */
+            enrollment_ids: number[];
+        };
+        /** PreviewsOut */
+        PreviewsOut: {
+            /** Content Fingerprint */
+            content_fingerprint: string;
+            /** Enrollments */
+            enrollments: components["schemas"]["EnrollmentPreviewOut"][];
+        };
         /**
          * ProtectionOut
          * @description One row of the posture report (spec section 9): what it is, whether it is in
@@ -4251,6 +4526,22 @@ export interface components {
              * @enum {string}
              */
             field: "li_urn" | "li_public_id" | "li_url" | "first_name" | "last_name" | "headline" | "current_title" | "current_company" | "location" | "connected_on";
+        };
+        /** ReviewOut */
+        ReviewOut: {
+            /** Audience Fingerprint */
+            audience_fingerprint: string;
+            /** Campaign Id */
+            campaign_id: number;
+            /** Content Fingerprint */
+            content_fingerprint: string;
+            /** Guard Summary */
+            guard_summary: string;
+            /** Guards Acknowledged */
+            guards_acknowledged: string | null;
+            /** Missing */
+            missing: components["schemas"]["MissingOut"][];
+            status: components["schemas"]["CampaignStatus"];
         };
         /**
          * RollbackAcquiredOut
@@ -4548,6 +4839,23 @@ export interface components {
             /** Value */
             value: string;
         };
+        /** StepPreviewOut */
+        StepPreviewOut: {
+            /** Body */
+            body: string | null;
+            /** Channel */
+            channel: string;
+            /** Error */
+            error: string | null;
+            /** Issues */
+            issues: components["schemas"]["LintIssueOut"][];
+            /** Position */
+            position: number;
+            /** Subject */
+            subject: string | null;
+            /** To Address */
+            to_address: string | null;
+        };
         /**
          * SyncRunKind
          * @description Spec 8.4's run kinds. ``inbox`` and ``message_send`` have no runner yet.
@@ -4803,6 +5111,25 @@ export interface components {
             issues: components["schemas"]["LintIssueOut"][];
             /** Subject */
             subject: string | null;
+        };
+        /** TestSendIn */
+        TestSendIn: {
+            /** Enrollment Id */
+            enrollment_id?: number | null;
+            /** Step Id */
+            step_id: number;
+        };
+        /** TestSendOut */
+        TestSendOut: {
+            /**
+             * Sent At
+             * Format: date-time
+             */
+            sent_at: string;
+            /** Step Id */
+            step_id: number;
+            /** To Address */
+            to_address: string;
         };
         /** TimelineInteraction */
         TimelineInteraction: {
@@ -5545,6 +5872,429 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    activate_campaign_api_v1_campaigns__campaign_id__activate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewOut"];
+                };
+            };
+            /** @description No such campaign, step or enrollment for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The review is not complete (``missing`` lists what is not), or the campaign cannot be activated in its state */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActivationRefusedOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_review_api_v1_campaigns__campaign_id__review_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewOut"];
+                };
+            };
+            /** @description No such campaign, step or enrollment for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    approve_previews_api_v1_campaigns__campaign_id__review_approve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApproveIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewOut"];
+                };
+            };
+            /** @description No such campaign, step or enrollment for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state; the detail says why */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    acknowledge_guards_api_v1_campaigns__campaign_id__review_guards_acknowledge_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GuardsIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewOut"];
+                };
+            };
+            /** @description No such campaign, step or enrollment for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state; the detail says why */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    lint_campaign_api_v1_campaigns__campaign_id__review_lint_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LintOut"];
+                };
+            };
+            /** @description No such campaign, step or enrollment for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state; the detail says why */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    view_previews_api_v1_campaigns__campaign_id__review_previews_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreviewsIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreviewsOut"];
+                };
+            };
+            /** @description No such campaign, step or enrollment for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state; the detail says why */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sample_previews_api_v1_campaigns__campaign_id__review_sample_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreviewsOut"];
+                };
+            };
+            /** @description No such campaign, step or enrollment for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state; the detail says why */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_review_api_v1_campaigns__campaign_id__review_start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewOut"];
+                };
+            };
+            /** @description No such campaign, step or enrollment for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state; the detail says why */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    test_send_api_v1_campaigns__campaign_id__review_test_send_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TestSendIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestSendOut"];
+                };
+            };
+            /** @description No such campaign, step or enrollment for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state; the detail says why */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Gmail refused or failed the test send; nothing recorded */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

@@ -28,7 +28,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.scoping import scoped
-from netkeeper.services.campaign_engine import activate
+from netkeeper.services.campaign_engine import REVIEW_GATE, activate
 from netkeeper.services.simulate_campaign import simulate_campaign
 
 ZONE = ZoneInfo("America/New_York")
@@ -66,7 +66,7 @@ def _campaign(session: Session, user: User, mailbox_id: int, contacts: int, cap:
         )
         factories.make_enrollment(session, campaign, contact, status=EnrollmentStatus.PENDING)
     session.flush()
-    activate(session, user, campaign.id, settings=SETTINGS, now=START)
+    activate(session, user, campaign.id, settings=SETTINGS, now=START, gate=REVIEW_GATE)
     return campaign.id
 
 

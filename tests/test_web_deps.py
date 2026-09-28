@@ -112,6 +112,7 @@ def test_the_read_only_routes_are_the_ones_that_only_read() -> None:
         "set_oauth_client",
         "start_oauth",
         "check_mailbox",
+        "test_send",  # sends with no session open, then opens its own writer
     }
 
 
