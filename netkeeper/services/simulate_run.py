@@ -59,7 +59,7 @@ file under a throwaway temporary directory, migrates it to the production
 schema (:func:`netkeeper.migrations.upgrade` -- the same schema `netkeeper db
 upgrade` builds, not a `Base.metadata.create_all` approximation of it), runs
 the whole scenario against it, and deletes the directory again before
-returning (:func:`_scratch_database`). It is seeded from the *config*
+returning (:func:`scratch_database`). It is seeded from the *config*
 ``settings`` passed in -- budgets, pacing, heat, active hours, timezone --
 never from a real account's ``settings_kv`` counters, because there is no
 real account row this module ever opens. The scratch user's ``created_at``
@@ -310,7 +310,7 @@ async def _replay(
     gate = linkedin.heat if heat_gate is None else heat_gate
     effective_heat = linkedin.heat if isinstance(gate, HeatSkip) else gate
 
-    with _scratch_database() as factory, _quiet_scheduler_warnings():
+    with scratch_database() as factory, _quiet_scheduler_warnings():
         with session_scope(factory, write=True) as session:
             user = User(
                 kind=UserKind.LOCAL,
@@ -769,7 +769,7 @@ def _quiet_alembic() -> Iterator[None]:
 
 
 @contextmanager
-def _scratch_database() -> Iterator[sessionmaker[Session]]:
+def scratch_database() -> Iterator[sessionmaker[Session]]:
     """A throwaway, file-backed SQLite database under its own temporary directory,
     migrated to the same schema ``netkeeper db upgrade`` builds.
 

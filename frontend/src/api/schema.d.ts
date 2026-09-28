@@ -137,6 +137,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/campaigns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Campaigns
+         * @description Every campaign, newest first, with its enrollment counts by status.
+         */
+        get: operations["list_campaigns"];
+        put?: never;
+        /**
+         * Create Campaign
+         * @description A new ``draft``. Nobody is enrolled until ``POST .../enroll``.
+         */
+        post: operations["create_campaign"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Campaign
+         * @description One campaign: steps and their progress, enrollments, next fire, what review misses.
+         */
+        get: operations["get_campaign"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/campaigns/{campaign_id}/activate": {
         parameters: {
             query?: never;
@@ -152,6 +196,66 @@ export interface paths {
          *     requirement is recorded and current, checked in this one writer transaction.
          */
         post: operations["activate_campaign_api_v1_campaigns__campaign_id__activate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/enroll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enroll
+         * @description Enroll the audience as ``pending``, through the guards (spec 11.9).
+         */
+        post: operations["enroll_campaign"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pause
+         * @description ``active`` to ``paused``: nothing fires until resumed; enrollments keep their state.
+         */
+        post: operations["pause_campaign"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume
+         * @description ``paused`` to ``active``: a step that came due meanwhile fires at the next chance.
+         */
+        post: operations["resume_campaign"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2694,12 +2798,86 @@ export interface components {
             /** Ids */
             ids?: number[] | null;
         };
+        /** CampaignCreate */
+        CampaignCreate: {
+            /** Daily Cap */
+            daily_cap?: number | null;
+            filter?: components["schemas"]["FilterTree-Input"] | null;
+            /** List Id */
+            list_id?: number | null;
+            /** Mailbox Id */
+            mailbox_id?: number | null;
+            /** Name */
+            name: string;
+            /** Steps */
+            steps: components["schemas"]["StepIn"][];
+        };
+        /** CampaignOut */
+        CampaignOut: {
+            /** Approved At */
+            approved_at: string | null;
+            /** Contacted Within Days Guard */
+            contacted_within_days_guard: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Daily Cap */
+            daily_cap: number | null;
+            /** Enrollments */
+            enrollments: {
+                [key: string]: number;
+            };
+            /** Filter */
+            filter: {
+                [key: string]: unknown;
+            } | null;
+            /** Id */
+            id: number;
+            /** Mailbox Email */
+            mailbox_email: string | null;
+            /** Mailbox Id */
+            mailbox_id: number | null;
+            /** Missing */
+            missing: components["schemas"]["MissingOut"][];
+            /** Name */
+            name: string;
+            /** Next Action At */
+            next_action_at: string | null;
+            /** Source List Id */
+            source_list_id: number | null;
+            status: components["schemas"]["CampaignStatus"];
+            /** Steps */
+            steps: components["schemas"]["StepOut"][];
+        };
         /**
          * CampaignStatus
          * @description Where a campaign is in its life (spec 8.5, 11.8).
          * @enum {string}
          */
         CampaignStatus: "draft" | "reviewing" | "active" | "paused" | "completed" | "archived";
+        /** CampaignSummaryOut */
+        CampaignSummaryOut: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Enrollments */
+            enrollments: {
+                [key: string]: number;
+            };
+            /** Id */
+            id: number;
+            /** Mailbox Id */
+            mailbox_id: number | null;
+            /** Name */
+            name: string;
+            status: components["schemas"]["CampaignStatus"];
+            /** Steps */
+            steps: number;
+        };
         /**
          * ChangedJobOut
          * @description A live contact whose position changed recently: a reason to reconnect (spec 9.8).
@@ -3317,6 +3495,36 @@ export interface components {
          * @enum {string}
          */
         EmailStatus: "ok" | "bounced" | "invalid";
+        /**
+         * EnrollIn
+         * @description ``list_id`` or ``filter`` replaces the audience source first (a ``draft`` only),
+         *     removing the pending enrollments the new source does not hold; its contacts, and
+         *     any ``contact_ids``, are then enrolled through the guards.
+         */
+        EnrollIn: {
+            /** Contact Ids */
+            contact_ids?: number[];
+            filter?: components["schemas"]["FilterTree-Input"] | null;
+            /** List Id */
+            list_id?: number | null;
+        };
+        /** EnrollOut */
+        EnrollOut: {
+            /** Already */
+            already: number;
+            /** Campaign Id */
+            campaign_id: number;
+            /** Enrolled */
+            enrolled: number;
+            /** Excluded */
+            excluded: number;
+            /** Pending */
+            pending: number;
+            /** Removed */
+            removed: number;
+            /** Summary */
+            summary: string;
+        };
         /** EnrolledIn */
         EnrolledIn: {
             /** Campaign Id */
@@ -3344,6 +3552,12 @@ export interface components {
             /** Steps */
             steps: components["schemas"]["StepPreviewOut"][];
         };
+        /**
+         * EnrollmentStatus
+         * @description One contact's state in one campaign: spec 11.3's state machine.
+         * @enum {string}
+         */
+        EnrollmentStatus: "pending" | "active" | "paused" | "replied" | "completed" | "bounced" | "opted_out" | "removed";
         /** Eq */
         Eq: {
             /**
@@ -4839,6 +5053,59 @@ export interface components {
             /** Value */
             value: string;
         };
+        /**
+         * StepCondition
+         * @description When a step fires (spec 11.2): every time, or only if nobody has replied yet.
+         * @enum {string}
+         */
+        StepCondition: "always" | "no_reply";
+        /**
+         * StepIn
+         * @description One step. Left out, a field takes spec 11.2's default: the first step at once and
+         *     every other seven days on, ``no_reply`` after the first, ``draft`` for email and
+         *     ``prefill`` for LinkedIn, an email follow-up in the first email's thread.
+         */
+        StepIn: {
+            condition?: components["schemas"]["StepCondition"] | null;
+            /** Delay Days */
+            delay_days?: number | null;
+            mode?: components["schemas"]["StepMode"] | null;
+            /** Same Thread */
+            same_thread?: boolean | null;
+            /** Template Id */
+            template_id: number;
+        };
+        /**
+         * StepMode
+         * @description What a step does with the message it renders (spec 8.5, 11.5, 11.6).
+         *
+         *     ``draft`` and ``send`` are email modes, ``prefill`` and ``auto_send``
+         *     LinkedIn ones; the ``step_channel_mode`` CHECK keeps them to their channel.
+         * @enum {string}
+         */
+        StepMode: "draft" | "send" | "prefill" | "auto_send";
+        /** StepOut */
+        StepOut: {
+            channel: components["schemas"]["TemplateChannel"];
+            condition: components["schemas"]["StepCondition"];
+            /** Delay Days */
+            delay_days: number;
+            /** Fired */
+            fired: number;
+            mode: components["schemas"]["StepMode"];
+            /** Position */
+            position: number;
+            /** Same Thread */
+            same_thread: boolean;
+            /** Sent */
+            sent: number;
+            /** Template Id */
+            template_id: number;
+            /** Template Name */
+            template_name: string;
+            /** Template Version */
+            template_version: number;
+        };
         /** StepPreviewOut */
         StepPreviewOut: {
             /** Body */
@@ -5875,6 +6142,109 @@ export interface operations {
             };
         };
     };
+    list_campaigns: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignSummaryOut"][];
+                };
+            };
+        };
+    };
+    create_campaign: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CampaignCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state, or a name taken */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A value a campaign cannot be made from */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_campaign: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     activate_campaign_api_v1_campaigns__campaign_id__activate_post: {
         parameters: {
             query?: never;
@@ -5910,6 +6280,143 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ActivationRefusedOut"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    enroll_campaign: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnrollIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrollOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state, or a name taken */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A value a campaign cannot be made from */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    pause_campaign: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state, or a name taken */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_campaign: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state, or a name taken */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

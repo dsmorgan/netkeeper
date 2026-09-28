@@ -1032,6 +1032,223 @@
         "title": "BulkSelection",
         "type": "object"
       },
+      "CampaignCreate": {
+        "properties": {
+          "daily_cap": {
+            "anyOf": [
+              {
+                "maximum": 400.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daily Cap"
+          },
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterTree-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "list_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "List Id"
+          },
+          "mailbox_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mailbox Id"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/StepIn"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "steps"
+        ],
+        "title": "CampaignCreate",
+        "type": "object"
+      },
+      "CampaignOut": {
+        "properties": {
+          "approved_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved At"
+          },
+          "contacted_within_days_guard": {
+            "title": "Contacted Within Days Guard",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "daily_cap": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daily Cap"
+          },
+          "enrollments": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/EnrollmentStatus"
+            },
+            "title": "Enrollments",
+            "type": "object"
+          },
+          "filter": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filter"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "mailbox_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mailbox Email"
+          },
+          "mailbox_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mailbox Id"
+          },
+          "missing": {
+            "items": {
+              "$ref": "#/components/schemas/MissingOut"
+            },
+            "title": "Missing",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "next_action_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Action At"
+          },
+          "source_list_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source List Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CampaignStatus"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/StepOut"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "mailbox_id",
+          "mailbox_email",
+          "source_list_id",
+          "filter",
+          "daily_cap",
+          "contacted_within_days_guard",
+          "approved_at",
+          "created_at",
+          "steps",
+          "enrollments",
+          "next_action_at",
+          "missing"
+        ],
+        "title": "CampaignOut",
+        "type": "object"
+      },
       "CampaignStatus": {
         "description": "Where a campaign is in its life (spec 8.5, 11.8).",
         "enum": [
@@ -1044,6 +1261,62 @@
         ],
         "title": "CampaignStatus",
         "type": "string"
+      },
+      "CampaignSummaryOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "enrollments": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/EnrollmentStatus"
+            },
+            "title": "Enrollments",
+            "type": "object"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "mailbox_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mailbox Id"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CampaignStatus"
+          },
+          "steps": {
+            "title": "Steps",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "mailbox_id",
+          "steps",
+          "enrollments",
+          "created_at"
+        ],
+        "title": "CampaignSummaryOut",
+        "type": "object"
       },
       "ChangedJobOut": {
         "description": "A live contact whose position changed recently: a reason to reconnect (spec 9.8).",
@@ -2939,6 +3212,85 @@
         "title": "EmailStatus",
         "type": "string"
       },
+      "EnrollIn": {
+        "description": "``list_id`` or ``filter`` replaces the audience source first (a ``draft`` only),\nremoving the pending enrollments the new source does not hold; its contacts, and\nany ``contact_ids``, are then enrolled through the guards.",
+        "properties": {
+          "contact_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 10000,
+            "title": "Contact Ids",
+            "type": "array"
+          },
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilterTree-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "list_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "List Id"
+          }
+        },
+        "title": "EnrollIn",
+        "type": "object"
+      },
+      "EnrollOut": {
+        "properties": {
+          "already": {
+            "title": "Already",
+            "type": "integer"
+          },
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "integer"
+          },
+          "enrolled": {
+            "title": "Enrolled",
+            "type": "integer"
+          },
+          "excluded": {
+            "title": "Excluded",
+            "type": "integer"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "removed": {
+            "title": "Removed",
+            "type": "integer"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "campaign_id",
+          "enrolled",
+          "already",
+          "excluded",
+          "removed",
+          "pending",
+          "summary"
+        ],
+        "title": "EnrollOut",
+        "type": "object"
+      },
       "EnrolledIn": {
         "additionalProperties": false,
         "properties": {
@@ -3004,6 +3356,21 @@
         ],
         "title": "EnrollmentPreviewOut",
         "type": "object"
+      },
+      "EnrollmentStatus": {
+        "description": "One contact's state in one campaign: spec 11.3's state machine.",
+        "enum": [
+          "pending",
+          "active",
+          "paused",
+          "replied",
+          "completed",
+          "bounced",
+          "opted_out",
+          "removed"
+        ],
+        "title": "EnrollmentStatus",
+        "type": "string"
       },
       "Eq": {
         "additionalProperties": false,
@@ -7667,6 +8034,144 @@
         "title": "StartsWith",
         "type": "object"
       },
+      "StepCondition": {
+        "description": "When a step fires (spec 11.2): every time, or only if nobody has replied yet.",
+        "enum": [
+          "always",
+          "no_reply"
+        ],
+        "title": "StepCondition",
+        "type": "string"
+      },
+      "StepIn": {
+        "description": "One step. Left out, a field takes spec 11.2's default: the first step at once and\nevery other seven days on, ``no_reply`` after the first, ``draft`` for email and\n``prefill`` for LinkedIn, an email follow-up in the first email's thread.",
+        "properties": {
+          "condition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StepCondition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "delay_days": {
+            "anyOf": [
+              {
+                "maximum": 365.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delay Days"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StepMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "same_thread": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Same Thread"
+          },
+          "template_id": {
+            "title": "Template Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "template_id"
+        ],
+        "title": "StepIn",
+        "type": "object"
+      },
+      "StepMode": {
+        "description": "What a step does with the message it renders (spec 8.5, 11.5, 11.6).\n\n``draft`` and ``send`` are email modes, ``prefill`` and ``auto_send``\nLinkedIn ones; the ``step_channel_mode`` CHECK keeps them to their channel.",
+        "enum": [
+          "draft",
+          "send",
+          "prefill",
+          "auto_send"
+        ],
+        "title": "StepMode",
+        "type": "string"
+      },
+      "StepOut": {
+        "properties": {
+          "channel": {
+            "$ref": "#/components/schemas/TemplateChannel"
+          },
+          "condition": {
+            "$ref": "#/components/schemas/StepCondition"
+          },
+          "delay_days": {
+            "title": "Delay Days",
+            "type": "integer"
+          },
+          "fired": {
+            "title": "Fired",
+            "type": "integer"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/StepMode"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "same_thread": {
+            "title": "Same Thread",
+            "type": "boolean"
+          },
+          "sent": {
+            "title": "Sent",
+            "type": "integer"
+          },
+          "template_id": {
+            "title": "Template Id",
+            "type": "integer"
+          },
+          "template_name": {
+            "title": "Template Name",
+            "type": "string"
+          },
+          "template_version": {
+            "title": "Template Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "position",
+          "channel",
+          "mode",
+          "condition",
+          "delay_days",
+          "same_thread",
+          "template_id",
+          "template_name",
+          "template_version",
+          "fired",
+          "sent"
+        ],
+        "title": "StepOut",
+        "type": "object"
+      },
       "StepPreviewOut": {
         "properties": {
           "body": {
@@ -10013,6 +10518,117 @@
         ]
       }
     },
+    "/api/v1/campaigns": {
+      "get": {
+        "description": "Every campaign, newest first, with its enrollment counts by status.",
+        "operationId": "list_campaigns",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CampaignSummaryOut"
+                  },
+                  "title": "Response List Campaigns",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Campaigns",
+        "tags": [
+          "campaigns"
+        ]
+      },
+      "post": {
+        "description": "A new ``draft``. Nobody is enrolled until ``POST .../enroll``.",
+        "operationId": "create_campaign",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CampaignCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "409": {
+            "description": "Refused in the campaign's state, or a name taken"
+          },
+          "422": {
+            "description": "A value a campaign cannot be made from"
+          }
+        },
+        "summary": "Create Campaign",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}": {
+      "get": {
+        "description": "One campaign: steps and their progress, enrollments, next fire, what review misses.",
+        "operationId": "get_campaign",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Campaign",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
     "/api/v1/campaigns/{campaign_id}/activate": {
       "post": {
         "description": "``reviewing`` to ``active``: ``409`` with ``missing`` unless every review\nrequirement is recorded and current, checked in this one writer transaction.",
@@ -10064,6 +10680,156 @@
           }
         },
         "summary": "Activate Campaign",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/enroll": {
+      "post": {
+        "description": "Enroll the audience as ``pending``, through the guards (spec 11.9).",
+        "operationId": "enroll_campaign",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrollIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "409": {
+            "description": "Refused in the campaign's state, or a name taken"
+          },
+          "422": {
+            "description": "A value a campaign cannot be made from"
+          }
+        },
+        "summary": "Enroll",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/pause": {
+      "post": {
+        "description": "``active`` to ``paused``: nothing fires until resumed; enrollments keep their state.",
+        "operationId": "pause_campaign",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "409": {
+            "description": "Refused in the campaign's state, or a name taken"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pause",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/resume": {
+      "post": {
+        "description": "``paused`` to ``active``: a step that came due meanwhile fires at the next chance.",
+        "operationId": "resume_campaign",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "409": {
+            "description": "Refused in the campaign's state, or a name taken"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resume",
         "tags": [
           "campaigns"
         ]
