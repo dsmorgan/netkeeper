@@ -87,8 +87,9 @@ class CampaignCreate(BaseModel):
 
 
 class EnrollIn(BaseModel):
-    """``list_id`` or ``filter`` sets the audience source first (a ``draft`` only); its
-    contacts, and any ``contact_ids``, are then enrolled through the guards."""
+    """``list_id`` or ``filter`` replaces the audience source first (a ``draft`` only),
+    removing the pending enrollments the new source does not hold; its contacts, and
+    any ``contact_ids``, are then enrolled through the guards."""
 
     list_id: int | None = None
     filter: FilterTree | None = None
@@ -100,6 +101,9 @@ class EnrollOut(BaseModel):
     enrolled: int
     already: int
     excluded: int
+    removed: int
+    """Pending enrollments dropped because a new source no longer holds their contacts."""
+    pending: int
     summary: str
 
 
@@ -286,6 +290,8 @@ def enroll(campaign_id: int, body: EnrollIn, session: SessionDep, user: CurrentU
         enrolled=outcome.enrolled,
         already=outcome.already,
         excluded=outcome.excluded,
+        removed=outcome.removed,
+        pending=outcome.pending,
         summary=outcome.summary,
     )
 

@@ -2354,10 +2354,11 @@ def campaigns_enroll(
     campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
     list_name: Annotated[
         str | None,
-        typer.Option("--list", help="Set the audience to this list (name or ID) first."),
+        typer.Option("--list", help="Replace the audience with this list (name or ID) first."),
     ] = None,
     filter_json: Annotated[
-        str | None, typer.Option("--filter", help="Set the audience to this filter first (JSON).")
+        str | None,
+        typer.Option("--filter", help="Replace the audience with this filter first (JSON)."),
     ] = None,
     contact: Annotated[
         list[int] | None, typer.Option("--contact", help="Also enroll this contact ID.")
@@ -2365,8 +2366,9 @@ def campaigns_enroll(
 ) -> None:
     """Enroll the audience as pending, through the guards (POST /campaigns/{id}/enroll).
 
-    Only a draft or reviewing campaign takes anyone. `--list` or `--filter` sets the
-    audience first, on a draft only.
+    Only a draft or reviewing campaign takes anyone. `--list` or `--filter` replaces
+    the audience first, on a draft only: pending enrollments the new source does not
+    hold are removed.
     """
     audience = _audience_filter_or_exit(filter_json)
     with _campaign_db() as factory, session_scope(factory, write=True) as session:
@@ -2382,9 +2384,10 @@ def campaigns_enroll(
                 filter=audience,
                 contact_ids=contact or (),
             )
+    removed = f", {outcome.removed} removed" if outcome.removed else ""
     typer.echo(
         f"campaign {campaign_id}: {outcome.enrolled} enrolled, {outcome.already} already in,"
-        f" {outcome.excluded} excluded"
+        f" {outcome.excluded} excluded{removed}; {outcome.pending} pending"
     )
     typer.echo(outcome.summary)
 

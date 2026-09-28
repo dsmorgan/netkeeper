@@ -3213,7 +3213,7 @@
         "type": "string"
       },
       "EnrollIn": {
-        "description": "``list_id`` or ``filter`` sets the audience source first (a ``draft`` only); its\ncontacts, and any ``contact_ids``, are then enrolled through the guards.",
+        "description": "``list_id`` or ``filter`` replaces the audience source first (a ``draft`` only),\nremoving the pending enrollments the new source does not hold; its contacts, and\nany ``contact_ids``, are then enrolled through the guards.",
         "properties": {
           "contact_ids": {
             "items": {
@@ -3266,6 +3266,14 @@
             "title": "Excluded",
             "type": "integer"
           },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "removed": {
+            "title": "Removed",
+            "type": "integer"
+          },
           "summary": {
             "title": "Summary",
             "type": "string"
@@ -3276,6 +3284,8 @@
           "enrolled",
           "already",
           "excluded",
+          "removed",
+          "pending",
           "summary"
         ],
         "title": "EnrollOut",

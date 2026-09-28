@@ -3497,8 +3497,9 @@ export interface components {
         EmailStatus: "ok" | "bounced" | "invalid";
         /**
          * EnrollIn
-         * @description ``list_id`` or ``filter`` sets the audience source first (a ``draft`` only); its
-         *     contacts, and any ``contact_ids``, are then enrolled through the guards.
+         * @description ``list_id`` or ``filter`` replaces the audience source first (a ``draft`` only),
+         *     removing the pending enrollments the new source does not hold; its contacts, and
+         *     any ``contact_ids``, are then enrolled through the guards.
          */
         EnrollIn: {
             /** Contact Ids */
@@ -3517,6 +3518,10 @@ export interface components {
             enrolled: number;
             /** Excluded */
             excluded: number;
+            /** Pending */
+            pending: number;
+            /** Removed */
+            removed: number;
             /** Summary */
             summary: string;
         };

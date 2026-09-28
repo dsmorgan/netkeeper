@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import func
+from sqlalchemy import func, true
 from sqlalchemy.orm import Session
 
 from netkeeper.campaigns import templates as template_service
@@ -56,7 +56,6 @@ from netkeeper.models import (
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import campaign_engine, campaign_review
 from netkeeper.services import mailboxes as mailbox_service
-from netkeeper.services.campaign_guards import excluded_summary
 
 log = logging.getLogger(__name__)
 
@@ -260,8 +259,37 @@ class EnrollOutcome:
     enrolled: int
     already: int
     excluded: int
+    """Contacts this call considered and the guards kept out."""
+    removed: int
+    """Pending enrollments dropped because a new source no longer holds their contacts."""
+    pending: int
+    """Pending enrollments after the call: who the review will see."""
     summary: str
-    """Spec 11.8's line over the contacts this call considered (new ones only)."""
+    """Spec 11.8's line over the audience, as the review shows it (its source's contacts
+    and the pending ones)."""
+
+
+def _drop_outside(session: Session, user: User, campaign_id: int, keep: set[int]) -> int:
+    """Delete the campaign's pending enrollments whose contact is not in ``keep``.
+
+    Only ever on a ``draft``: a pending enrollment has fired nothing, so no message
+    names it, and a draft has no review records to lose. One that has a message
+    anyway is left alone rather than deleted."""
+    with_messages = scoped(user, Message).with_only_columns(Message.enrollment_id).scalar_subquery()
+    stale = list(
+        session.scalars(
+            scoped(user, Enrollment).where(
+                Enrollment.campaign_id == campaign_id,
+                Enrollment.status == EnrollmentStatus.PENDING,
+                Enrollment.contact_id.not_in(keep) if keep else true(),
+                Enrollment.id.not_in(with_messages),
+            )
+        )
+    )
+    for enrollment in stale:
+        session.delete(enrollment)
+    session.flush()
+    return len(stale)
 
 
 def enroll(
@@ -276,14 +304,18 @@ def enroll(
 ) -> EnrollOutcome:
     """Enroll the campaign's audience as ``pending``, through the guards.
 
-    ``list_id`` or ``filter`` first sets the campaign's audience source, and only
-    on a ``draft``; the source's contacts, and any ``contact_ids``, are then
-    enrolled by :func:`campaign_engine.enroll`, which refuses a campaign past review.
+    ``list_id`` or ``filter`` replaces the campaign's audience source, and only on a
+    ``draft``: the pending enrollments whose contacts the new source does not hold
+    (and that are not among ``contact_ids``) are removed first, so the audience is
+    the new source's. The source's contacts, and any ``contact_ids``, are then
+    enrolled by :func:`campaign_engine.enroll`, which applies the guards and refuses
+    a campaign past review.
     """
     _require_writer(session, "enroll")
     campaign = get_campaign(session, user, campaign_id)
     if list_id is not None and filter is not None:
         raise InvalidCampaign("the audience is a list or a filter, not both")
+    removed = 0
     if list_id is not None or filter is not None:
         if campaign.status is not CampaignStatus.DRAFT:
             raise CampaignConflict(
@@ -292,6 +324,8 @@ def enroll(
         campaign.source_list_id = None if list_id is None else _check_list(session, user, list_id)
         campaign.filter_json = None if filter is None else _check_filter(session, user, filter)
         session.flush()
+        keep = campaign_review.source_contact_ids(session, user, campaign) | set(contact_ids)
+        removed = _drop_outside(session, user, campaign_id, keep)
     ids = campaign_review.source_contact_ids(session, user, campaign) | set(contact_ids)
     if not ids:
         raise InvalidCampaign(
@@ -301,14 +335,22 @@ def enroll(
         result = campaign_engine.enroll(session, user, campaign_id, ids, now=now)
     except campaign_engine.CampaignEngineError as exc:
         raise CampaignConflict(str(exc)) from exc
+    pending = session.scalar(
+        scoped(user, Enrollment)
+        .with_only_columns(func.count(Enrollment.id))
+        .where(
+            Enrollment.campaign_id == campaign_id,
+            Enrollment.status == EnrollmentStatus.PENDING,
+        )
+    )
     return EnrollOutcome(
         campaign_id=campaign_id,
         enrolled=len(result.enrolled),
         already=len(result.already),
         excluded=len(result.verdicts) - len(result.enrolled),
-        summary=excluded_summary(
-            result.verdicts, contacted_within_days=campaign.contacted_within_days_guard
-        ),
+        removed=removed,
+        pending=pending or 0,
+        summary=campaign_review.guard_summary(session, user, campaign, now=now),
     )
 
 

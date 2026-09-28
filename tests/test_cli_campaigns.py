@@ -510,3 +510,53 @@ def test_simulate_refuses_an_unknown_campaign_and_a_stray_start(world: World) ->
     stray = _run("simulate", "--start", "2026-09-28")
     assert stray.exit_code == 1
     assert "--start applies only with --campaign" in stray.output
+
+
+# --- after review (#292) --------------------------------------------------------------
+
+
+def test_a_refused_activate_never_asks(world: World) -> None:
+    campaign_id = _reviewing(world)
+
+    result = _run("campaigns", "activate", str(campaign_id), input="y\n")
+
+    assert result.exit_code == 1
+    assert "cannot be activated" in result.output
+    assert "activate campaign" not in result.output  # the confirm prompt
+    assert "[y/N]" not in result.output
+    assert _campaign(world, campaign_id).status is CampaignStatus.REVIEWING
+
+
+def test_enroll_with_a_new_list_reports_what_it_removed(world: World) -> None:
+    campaign_id = _create(world)
+    _ok("campaigns", "enroll", str(campaign_id))
+    with session_scope(world.factory, write=True) as session:
+        user = _local(session)
+        row = list_service.create_list(session, user, "Just one", ListKind.STATIC)
+        list_service.add_members(session, user, row.id, world.contacts[:1])
+
+    output = _ok("campaigns", "enroll", str(campaign_id), "--list", "Just one")
+
+    assert "0 enrolled, 1 already in, 0 excluded, 2 removed; 1 pending" in output
+    assert "1 in audience" in output
+    assert _enrollment_statuses(world, campaign_id) == [EnrollmentStatus.PENDING]
+
+
+def test_simulate_warns_when_the_campaign_is_partway_through(world: World) -> None:
+    with session_scope(world.factory, write=True) as session:
+        user = _local(session)
+        campaign = factories.make_campaign(session, user, channels=(TemplateChannel.EMAIL,) * 2)
+        contact = factories.make_contact(session, user, emails=["x@contacts.example"])
+        factories.make_message(session, factories.make_enrollment(session, campaign, contact))
+        campaign_id = campaign.id
+
+    output = _ok("simulate", "--campaign", str(campaign_id), "--start", "2026-09-28", "--days", "2")
+
+    assert (
+        "warning: this campaign is active and partway through (1 messages fired so far)" in output
+    )
+
+    fresh = _create(world)
+    _ok("campaigns", "enroll", str(fresh))
+    quiet = _ok("simulate", "--campaign", str(fresh), "--start", "2026-09-28", "--days", "2")
+    assert "warning:" not in quiet

@@ -180,6 +180,8 @@ class CampaignShape:
     daily_cap: int | None
     mailbox_daily_cap: int
     timezone: str
+    already_fired: int = 0
+    """Outbound messages the real campaign has already fired."""
 
 
 @contextmanager
@@ -229,6 +231,16 @@ def campaign_shape(
         if campaign.mailbox_id is None
         else get_scoped(session, user, Mailbox, campaign.mailbox_id)
     )
+    fired = session.scalar(
+        scoped(user, Message)
+        .with_only_columns(func.count(Message.id))
+        .join(Enrollment, Enrollment.id == Message.enrollment_id)
+        .where(
+            Enrollment.user_id == user.id,
+            Enrollment.campaign_id == campaign_id,
+            Message.direction == MessageDirection.OUT,
+        )
+    )
     return CampaignShape(
         campaign_id=campaign.id,
         name=campaign.name,
@@ -242,6 +254,7 @@ def campaign_shape(
             settings.campaigns.mailbox_daily_cap if mailbox is None else mailbox.daily_cap
         ),
         timezone=user.timezone,
+        already_fired=fired or 0,
     )
 
 
@@ -426,6 +439,12 @@ def render_schedule(report: ScheduleReport) -> str:
         f" mailbox {shape.mailbox_daily_cap} per day",
         "",
     ]
+    if shape.status in (CampaignStatus.ACTIVE, CampaignStatus.PAUSED) and shape.already_fired:
+        lines[-1:-1] = [
+            f"warning: this campaign is {shape.status.value} and partway through"
+            f" ({shape.already_fired} messages fired so far); the replay starts every contact"
+            " at step 1, so it shows the whole schedule again, not what is left of it",
+        ]
     if report.days:
         headers = ("DATE", "DAY", *(f"STEP {s.position}" for s in shape.steps), "TOTAL")
         rows = [

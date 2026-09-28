@@ -21,7 +21,10 @@ from netkeeper.db import session_scope
 from netkeeper.models import (
     Campaign,
     CampaignStatus,
+    Enrollment,
+    EnrollmentStatus,
     ListKind,
+    Template,
     TemplateChannel,
     User,
     UserKind,
@@ -151,6 +154,8 @@ async def test_enroll_list_and_status(running_app: FastAPI, client: httpx.AsyncC
         "enrolled": 2,
         "already": 0,
         "excluded": 1,
+        "removed": 0,
+        "pending": 2,
         "summary": "3 in audience, 1 excluded: 1 do-not-contact",
     }
     listed = (await client.get("/api/v1/campaigns")).json()
@@ -220,3 +225,128 @@ async def test_nothing_under_campaigns_activates_a_draft(
     assert (await client.post(f"{base}/resume", headers=CSRF)).status_code == 409
     assert (await client.post(f"{base}/pause", headers=CSRF)).status_code == 409
     assert (await client.get(base)).json()["status"] == "draft"
+
+
+# --- after review (#292) --------------------------------------------------------------
+
+
+def _pending_contacts(app: FastAPI, campaign_id: int) -> list[int]:
+    factory: sessionmaker[Session] = app.state.session_factory
+    with session_scope(factory) as session:
+        return sorted(
+            session.scalars(
+                scoped(_local(session), Enrollment)
+                .with_only_columns(Enrollment.contact_id)
+                .where(
+                    Enrollment.campaign_id == campaign_id,
+                    Enrollment.status == EnrollmentStatus.PENDING,
+                )
+            )
+        )
+
+
+async def test_a_new_list_on_a_draft_replaces_the_audience(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """List A enrolls two; switching to list B (one other contact) leaves only B's."""
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    seed = _seed(running_app)
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        list_a = list_service.create_list(session, user, "A", ListKind.STATIC)
+        list_service.add_members(session, user, list_a.id, seed["contacts"][:2])
+        newcomer = factories.make_contact(session, user, emails=["b0@contacts.example"]).id
+        list_b = list_service.create_list(session, user, "B", ListKind.STATIC)
+        list_service.add_members(session, user, list_b.id, [newcomer])
+        a_id, b_id = list_a.id, list_b.id
+    created = await _create(client, seed, list_id=a_id)
+    base = f"/api/v1/campaigns/{created['id']}"
+    first = (await client.post(f"{base}/enroll", json={}, headers=CSRF)).json()
+    assert (first["enrolled"], first["pending"]) == (2, 2)
+    before = (await client.get(f"{base}/review")).json()
+
+    switched = await client.post(f"{base}/enroll", json={"list_id": b_id}, headers=CSRF)
+
+    assert switched.status_code == 200, switched.text
+    body = switched.json()
+    assert (body["enrolled"], body["removed"], body["pending"]) == (1, 2, 1)
+    assert _pending_contacts(running_app, created["id"]) == [newcomer]
+    after = (await client.get(f"{base}/review")).json()
+    assert body["summary"] == after["guard_summary"]
+    assert body["summary"].startswith("1 in audience")
+    assert after["audience_fingerprint"] != before["audience_fingerprint"]
+    status = (await client.get(base)).json()
+    assert status["source_list_id"] == b_id
+    assert status["enrollments"] == {"pending": 1}
+
+
+async def test_another_users_or_an_unknown_list_is_not_found(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    seed = _seed(running_app)
+    with session_scope(factory, write=True) as session:
+        other = factories.make_user(session, UserKind.HOSTED)
+        theirs = list_service.create_list(session, other, "theirs", ListKind.STATIC).id
+    for list_id in (theirs, 999_999):
+        response = await client.post(
+            "/api/v1/campaigns", json=_body(seed, name=f"C{list_id}", list_id=list_id), headers=CSRF
+        )
+        assert response.status_code == 404, response.text
+    created = await _create(client, seed)
+    base = f"/api/v1/campaigns/{created['id']}"
+    for list_id in (theirs, 999_999):
+        response = await client.post(f"{base}/enroll", json={"list_id": list_id}, headers=CSRF)
+        assert response.status_code == 404, response.text
+    assert (await client.get(base)).json()["source_list_id"] == seed["list_id"]
+    assert _pending_contacts(running_app, created["id"]) == []
+
+
+async def test_create_refuses_a_superseded_template(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    seed = _seed(running_app)
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        session.add(
+            Template(
+                user_id=user.id,
+                name="email",
+                channel=TemplateChannel.EMAIL,
+                subject="Catching up",
+                body="Hi {{ first_name }}!",
+                lint_json=[],
+                version=2,
+                previous_id=seed["email"],
+            )
+        )
+
+    response = await client.post(
+        "/api/v1/campaigns",
+        json=_body(seed, steps=[{"template_id": seed["email"]}]),
+        headers=CSRF,
+    )
+
+    assert response.status_code == 422
+    assert "older version" in response.json()["detail"]
+
+
+async def test_enroll_refuses_a_list_and_a_filter_together(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    seed = _seed(running_app)
+    created = await _create(client, seed)
+    base = f"/api/v1/campaigns/{created['id']}"
+
+    response = await client.post(
+        f"{base}/enroll",
+        json={"list_id": seed["list_id"], "filter": {"where": {"op": "has_li_url"}}},
+        headers=CSRF,
+    )
+
+    assert response.status_code == 422
+    assert "not both" in response.json()["detail"]
+    status = (await client.get(base)).json()
+    assert (status["source_list_id"], status["filter"]) == (seed["list_id"], None)
+    assert _pending_contacts(running_app, created["id"]) == []
