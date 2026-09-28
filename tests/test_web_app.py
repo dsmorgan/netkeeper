@@ -103,6 +103,15 @@ API_PATHS = {
     "/api/v1/triage/suggestions/{key}/contacts",
     "/api/v1/triage/suggestions/{key}/apply",
     "/api/v1/posture",
+    "/api/v1/campaigns/{campaign_id}/activate",
+    "/api/v1/campaigns/{campaign_id}/review",
+    "/api/v1/campaigns/{campaign_id}/review/approve",
+    "/api/v1/campaigns/{campaign_id}/review/guards/acknowledge",
+    "/api/v1/campaigns/{campaign_id}/review/lint",
+    "/api/v1/campaigns/{campaign_id}/review/previews",
+    "/api/v1/campaigns/{campaign_id}/review/sample",
+    "/api/v1/campaigns/{campaign_id}/review/start",
+    "/api/v1/campaigns/{campaign_id}/review/test-send",
     "/api/v1/mailboxes",
     "/api/v1/mailboxes/oauth/callback",
     "/api/v1/mailboxes/oauth/client",
@@ -218,6 +227,7 @@ def test_dev_app_sets_up_logging_then_builds_the_app(
 def test_known_api_modules_are_discovered() -> None:
     assert [name for name, _ in discover_routers()] == [
         "autotag_rules",
+        "campaign_review",
         "contacts",
         "dashboard",
         "events",
