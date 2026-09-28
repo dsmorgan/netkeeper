@@ -24,6 +24,15 @@ checks every ``ok`` mailbox of every local user, and ``netkeeper serve`` runs it
 every ``[campaigns] reply_poll_minutes`` (:class:`MailboxMonitor`), so a
 revoked token shows as the banner within one poll.
 
+**Arming** (#277). ``serve`` hands a mailbox's campaign steps to Gmail only
+while it is armed (:func:`arm`), and every mailbox starts disarmed. Armed, it
+drafts every step; :func:`arm` with ``send`` lets ``send`` steps go out, and is
+refused (:class:`ArmRefused`) until the mailbox is armed for drafts and a search
+by Message-ID has found a draft made there (:func:`record_message_id_verified`).
+:func:`disarm`, and disconnecting, undo both steps. The engine reads
+:func:`armed` fresh in each claim's writer session, so a change applies from the
+next claim on.
+
 **Sessions.** No HTTP call is made while a session is open: a check reads what
 it needs, closes the session, calls Google, then opens a writer to record the
 result, and records it only when the mailbox is still the one it checked: still
@@ -47,8 +56,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.campaigns import gmail_oauth
 from netkeeper.campaigns.gmail import GmailClient
 from netkeeper.db import session_scope
-from netkeeper.models import Mailbox, MailboxStatus, User, UserKind
+from netkeeper.models import Mailbox, MailboxArm, MailboxStatus, User, UserKind
 from netkeeper.models.base import utcnow
+from netkeeper.models.mailboxes import MAILBOX_ARMED_BY_MAX_LENGTH
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import keychain
 from netkeeper.services.events import Event, EventBus
@@ -68,6 +78,10 @@ STATUS_EVENT: Final = "mailbox.status"
 REASON_TOKEN_MISSING: Final = "token_missing"  # noqa: S105 - a status code
 REASON_CLIENT_MISSING: Final = "client_missing"
 REASON_DISCONNECTED: Final = "disconnected"
+
+
+class ArmRefused(RuntimeError):
+    """Arming this mailbox this way is not allowed yet; the message says why."""
 
 
 class MailboxNotFound(LookupError):
@@ -238,6 +252,7 @@ def disconnect(session: Session, user: User, mailbox: Mailbox) -> Mailbox:
     keychain.delete_secret(user.id, mailbox.keychain_ref)
     mailbox.status = MailboxStatus.DISABLED
     mailbox.status_reason = REASON_DISCONNECTED
+    _disarm(mailbox)  # a mailbox connected again starts disarmed (#277)
     session.flush()
     log.info("mailbox %d disconnected", mailbox.id)
     return mailbox
@@ -250,6 +265,85 @@ def status_event(mailbox_id: int, user_id: int, status: MailboxStatus, reason: s
         data={"mailbox_id": mailbox_id, "status": status.value, "reason": reason},
         user_id=user_id,
     )
+
+
+# --- arming (#277) -------------------------------------------------------------------
+
+
+def armed(session: Session, user: User, mailbox_id: int) -> MailboxArm | None:
+    """The user's mailbox's arming, read fresh from the database; None when disarmed or
+    not theirs. What the engine asks before each claim, and the sender before each write."""
+    mailbox = session.scalars(
+        scoped(user, Mailbox)
+        .where(Mailbox.id == mailbox_id)
+        .execution_options(populate_existing=True)
+    ).first()
+    return None if mailbox is None else mailbox.arm
+
+
+def arm(
+    session: Session, user: User, mailbox: Mailbox, mode: MailboxArm, *, by: str, now: datetime
+) -> Mailbox:
+    """Arm ``mailbox`` for drafts, or (a separate step) for sends. Needs a writer session.
+
+    Arming for drafts arms a disarmed mailbox, and takes one armed for sends back to
+    drafts only.
+    Arming for sends is refused (:class:`ArmRefused`) unless the mailbox is already
+    armed for drafts and a draft made there has been found by its Message-ID.
+    A disconnected mailbox is never armed.
+    """
+    if mailbox.status is MailboxStatus.DISABLED:
+        raise ArmRefused(f"{mailbox.email} is disconnected; connect it again first")
+    if mode is MailboxArm.DRAFT:
+        if mailbox.arm is not MailboxArm.DRAFT:
+            mailbox.armed_at = mailbox.armed_at or now
+            mailbox.send_armed_at = None
+            mailbox.armed_by = by[:MAILBOX_ARMED_BY_MAX_LENGTH]
+    else:
+        if mailbox.armed_at is None:
+            raise ArmRefused(
+                f"{mailbox.email} is not armed; arm it for drafts first and let a draft be made"
+            )
+        if mailbox.message_id_verified_at is None:
+            raise ArmRefused(
+                f"no draft on {mailbox.email} has been found by its Message-ID yet; while it"
+                " is armed for drafts, `serve` checks the first draft it makes"
+            )
+        if mailbox.send_armed_at is None:
+            mailbox.send_armed_at = now
+            mailbox.armed_by = by[:MAILBOX_ARMED_BY_MAX_LENGTH]
+    session.flush()
+    log.info("mailbox %d armed for %s by %s", mailbox.id, mailbox.arm, mailbox.armed_by)
+    return mailbox
+
+
+def disarm(session: Session, user: User, mailbox: Mailbox) -> Mailbox:
+    """Disarm ``mailbox``: nothing more is claimed on it from the next claim on. Needs a
+    writer session. What is already claimed and in the sender's hands is not recalled."""
+    _disarm(mailbox)
+    session.flush()
+    log.info("mailbox %d disarmed", mailbox.id)
+    return mailbox
+
+
+def _disarm(mailbox: Mailbox) -> None:
+    mailbox.armed_at = None
+    mailbox.send_armed_at = None
+    mailbox.armed_by = None
+
+
+def record_message_id_verified(
+    session: Session, user: User, mailbox_id: int, *, now: datetime
+) -> bool:
+    """Record that a draft made on the mailbox was found by its Message-ID, once. True when
+    this call recorded it. Needs a writer session."""
+    mailbox = get_scoped(session, user, Mailbox, mailbox_id)
+    if mailbox is None or mailbox.message_id_verified_at is not None:
+        return False
+    mailbox.message_id_verified_at = now
+    session.flush()
+    log.info("mailbox %d: a draft was found by its Message-ID", mailbox_id)
+    return True
 
 
 # --- health ------------------------------------------------------------------------
