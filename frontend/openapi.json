@@ -1,6 +1,28 @@
 {
   "components": {
     "schemas": {
+      "ActivationRefusedOut": {
+        "description": "The ``409`` body of an activation refused for an incomplete review.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "missing": {
+            "items": {
+              "$ref": "#/components/schemas/MissingOut"
+            },
+            "title": "Missing",
+            "type": "array"
+          }
+        },
+        "required": [
+          "detail",
+          "missing"
+        ],
+        "title": "ActivationRefusedOut",
+        "type": "object"
+      },
       "And-Input": {
         "additionalProperties": false,
         "properties": {
@@ -47,6 +69,30 @@
           "children"
         ],
         "title": "And",
+        "type": "object"
+      },
+      "ApproveIn": {
+        "properties": {
+          "content_fingerprint": {
+            "maxLength": 64,
+            "title": "Content Fingerprint",
+            "type": "string"
+          },
+          "enrollment_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Enrollment Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "enrollment_ids",
+          "content_fingerprint"
+        ],
+        "title": "ApproveIn",
         "type": "object"
       },
       "ArchiveConnectionCountsOut": {
@@ -971,6 +1017,19 @@
         },
         "title": "BulkSelection",
         "type": "object"
+      },
+      "CampaignStatus": {
+        "description": "Where a campaign is in its life (spec 8.5, 11.8).",
+        "enum": [
+          "draft",
+          "reviewing",
+          "active",
+          "paused",
+          "completed",
+          "archived"
+        ],
+        "title": "CampaignStatus",
+        "type": "string"
       },
       "ChangedJobOut": {
         "description": "A live contact whose position changed recently: a reason to reconnect (spec 9.8).",
@@ -2886,6 +2945,47 @@
         "title": "EnrolledIn",
         "type": "object"
       },
+      "EnrollmentPreviewOut": {
+        "properties": {
+          "approved": {
+            "title": "Approved",
+            "type": "boolean"
+          },
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "contact_name": {
+            "title": "Contact Name",
+            "type": "string"
+          },
+          "enrollment_id": {
+            "title": "Enrollment Id",
+            "type": "integer"
+          },
+          "sampled": {
+            "title": "Sampled",
+            "type": "boolean"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/StepPreviewOut"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "contact_id",
+          "contact_name",
+          "sampled",
+          "approved",
+          "steps"
+        ],
+        "title": "EnrollmentPreviewOut",
+        "type": "object"
+      },
       "Eq": {
         "additionalProperties": false,
         "properties": {
@@ -3871,6 +3971,26 @@
           "value"
         ],
         "title": "Gte",
+        "type": "object"
+      },
+      "GuardsIn": {
+        "properties": {
+          "audience_fingerprint": {
+            "maxLength": 64,
+            "title": "Audience Fingerprint",
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 2000,
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary",
+          "audience_fingerprint"
+        ],
+        "title": "GuardsIn",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -5308,6 +5428,27 @@
         "title": "LintIssueOut",
         "type": "object"
       },
+      "LintOut": {
+        "properties": {
+          "clean": {
+            "title": "Clean",
+            "type": "boolean"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/LintStepOut"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "clean",
+          "steps"
+        ],
+        "title": "LintOut",
+        "type": "object"
+      },
       "LintRule": {
         "enum": [
           "syntax",
@@ -5322,6 +5463,27 @@
         ],
         "title": "LintRule",
         "type": "string"
+      },
+      "LintStepOut": {
+        "properties": {
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/LintIssueOut"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "position",
+          "errors"
+        ],
+        "title": "LintStepOut",
+        "type": "object"
       },
       "ListCreate": {
         "properties": {
@@ -5879,6 +6041,38 @@
         ],
         "title": "MetSource",
         "type": "string"
+      },
+      "MissingOut": {
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "enrollment_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Enrollment Ids",
+            "type": "array"
+          },
+          "requirement": {
+            "title": "Requirement",
+            "type": "string"
+          },
+          "step_positions": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Step Positions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "requirement",
+          "detail"
+        ],
+        "title": "MissingOut",
+        "type": "object"
       },
       "Neq": {
         "additionalProperties": false,
@@ -6450,6 +6644,45 @@
         "title": "PreferredNameOut",
         "type": "object"
       },
+      "PreviewsIn": {
+        "properties": {
+          "enrollment_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Enrollment Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "enrollment_ids"
+        ],
+        "title": "PreviewsIn",
+        "type": "object"
+      },
+      "PreviewsOut": {
+        "properties": {
+          "content_fingerprint": {
+            "title": "Content Fingerprint",
+            "type": "string"
+          },
+          "enrollments": {
+            "items": {
+              "$ref": "#/components/schemas/EnrollmentPreviewOut"
+            },
+            "title": "Enrollments",
+            "type": "array"
+          }
+        },
+        "required": [
+          "content_fingerprint",
+          "enrollments"
+        ],
+        "title": "PreviewsOut",
+        "type": "object"
+      },
       "ProtectionOut": {
         "description": "One row of the posture report (spec section 9): what it is, whether it is in\nforce, and anything wrong with it. ``status`` is `netkeeper.services.posture.Status`'s\nvalue (``on``, ``off``, ``unknown``); ``off``/``unknown`` always carry a warning.",
         "properties": {
@@ -6526,6 +6759,58 @@
           "field"
         ],
         "title": "RevertFieldIn",
+        "type": "object"
+      },
+      "ReviewOut": {
+        "properties": {
+          "audience_fingerprint": {
+            "title": "Audience Fingerprint",
+            "type": "string"
+          },
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "integer"
+          },
+          "content_fingerprint": {
+            "title": "Content Fingerprint",
+            "type": "string"
+          },
+          "guard_summary": {
+            "title": "Guard Summary",
+            "type": "string"
+          },
+          "guards_acknowledged": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guards Acknowledged"
+          },
+          "missing": {
+            "items": {
+              "$ref": "#/components/schemas/MissingOut"
+            },
+            "title": "Missing",
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CampaignStatus"
+          }
+        },
+        "required": [
+          "campaign_id",
+          "status",
+          "content_fingerprint",
+          "audience_fingerprint",
+          "guard_summary",
+          "guards_acknowledged",
+          "missing"
+        ],
+        "title": "ReviewOut",
         "type": "object"
       },
       "RollbackAcquiredOut": {
@@ -7363,6 +7648,80 @@
         "title": "StartsWith",
         "type": "object"
       },
+      "StepPreviewOut": {
+        "properties": {
+          "body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body"
+          },
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/LintIssueOut"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "to_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Address"
+          }
+        },
+        "required": [
+          "position",
+          "channel",
+          "to_address",
+          "subject",
+          "body",
+          "issues",
+          "error"
+        ],
+        "title": "StepPreviewOut",
+        "type": "object"
+      },
       "SyncRunKind": {
         "description": "Spec 8.4's run kinds. ``inbox`` and ``message_send`` have no runner yet.",
         "enum": [
@@ -7997,6 +8356,54 @@
           "issues"
         ],
         "title": "TemplatePreviewOut",
+        "type": "object"
+      },
+      "TestSendIn": {
+        "properties": {
+          "enrollment_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enrollment Id"
+          },
+          "step_id": {
+            "title": "Step Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "step_id"
+        ],
+        "title": "TestSendIn",
+        "type": "object"
+      },
+      "TestSendOut": {
+        "properties": {
+          "sent_at": {
+            "format": "date-time",
+            "title": "Sent At",
+            "type": "string"
+          },
+          "step_id": {
+            "title": "Step Id",
+            "type": "integer"
+          },
+          "to_address": {
+            "title": "To Address",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_id",
+          "to_address",
+          "sent_at"
+        ],
+        "title": "TestSendOut",
         "type": "object"
       },
       "TimelineInteraction": {
@@ -9584,6 +9991,494 @@
         "summary": "Run Autotag Rule",
         "tags": [
           "autotag-rules"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/activate": {
+      "post": {
+        "description": "``reviewing`` to ``active``: ``409`` with ``missing`` unless every review\nrequirement is recorded and current, checked in this one writer transaction.",
+        "operationId": "activate_campaign_api_v1_campaigns__campaign_id__activate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, step or enrollment for this user"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivationRefusedOut"
+                }
+              }
+            },
+            "description": "The review is not complete (``missing`` lists what is not), or the campaign cannot be activated in its state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Activate Campaign",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/review": {
+      "get": {
+        "description": "Where the review stands: the fingerprints, the guard summary, what is missing.",
+        "operationId": "get_review_api_v1_campaigns__campaign_id__review_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, step or enrollment for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Review",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/review/approve": {
+      "post": {
+        "description": "Approve viewed previews, for the ``content_fingerprint`` they were shown with.",
+        "operationId": "approve_previews_api_v1_campaigns__campaign_id__review_approve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApproveIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, step or enrollment for this user"
+          },
+          "409": {
+            "description": "Refused in the campaign's state; the detail says why"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Approve Previews",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/review/guards/acknowledge": {
+      "post": {
+        "description": "Acknowledge the guard summary; refused unless it is still the current one.",
+        "operationId": "acknowledge_guards_api_v1_campaigns__campaign_id__review_guards_acknowledge_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GuardsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, step or enrollment for this user"
+          },
+          "409": {
+            "description": "Refused in the campaign's state; the detail says why"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Acknowledge Guards",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/review/lint": {
+      "post": {
+        "description": "Lint every step's template; the result is recorded only when there is no error.",
+        "operationId": "lint_campaign_api_v1_campaigns__campaign_id__review_lint_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LintOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, step or enrollment for this user"
+          },
+          "409": {
+            "description": "Refused in the campaign's state; the detail says why"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Lint Campaign",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/review/previews": {
+      "post": {
+        "description": "The rendered previews of enrollments the person looked up. Each must be approved.",
+        "operationId": "view_previews_api_v1_campaigns__campaign_id__review_previews_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, step or enrollment for this user"
+          },
+          "409": {
+            "description": "Refused in the campaign's state; the detail says why"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "View Previews",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/review/sample": {
+      "post": {
+        "description": "The sample's rendered previews, drawn by the server once per audience.",
+        "operationId": "sample_previews_api_v1_campaigns__campaign_id__review_sample_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, step or enrollment for this user"
+          },
+          "409": {
+            "description": "Refused in the campaign's state; the detail says why"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sample Previews",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/review/start": {
+      "post": {
+        "description": "``draft`` to ``reviewing``: needs a step and someone enrolled.",
+        "operationId": "start_review_api_v1_campaigns__campaign_id__review_start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, step or enrollment for this user"
+          },
+          "409": {
+            "description": "Refused in the campaign's state; the detail says why"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Review",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/review/test-send": {
+      "post": {
+        "description": "Send one email step, rendered for an enrollment, to the campaign mailbox's own\naddress. Needs the mailbox armed for send. Never a campaign message: it counts\ntoward no cap or recency and advances no enrollment.",
+        "operationId": "test_send_api_v1_campaigns__campaign_id__review_test_send_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestSendIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestSendOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, step or enrollment for this user"
+          },
+          "409": {
+            "description": "Refused in the campaign's state; the detail says why"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "502": {
+            "description": "Gmail refused or failed the test send; nothing recorded"
+          }
+        },
+        "summary": "Test Send",
+        "tags": [
+          "campaigns"
         ]
       }
     },
