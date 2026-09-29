@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -115,9 +115,13 @@ class CampaignSummaryOut(BaseModel):
     steps: int
     enrollments: dict[EnrollmentStatus, int]
     created_at: datetime
+    next_action_at: datetime | None = None
+    """The soonest due time of an active enrollment, while the campaign is active."""
 
 
 class StepOut(BaseModel):
+    id: int
+    """What ``POST .../review/test-send`` takes as ``step_id``."""
     position: int
     channel: TemplateChannel
     mode: StepMode
@@ -150,6 +154,34 @@ class CampaignOut(BaseModel):
     """What the review gate still needs, for a ``draft`` or ``reviewing`` campaign."""
 
 
+class EnrollmentOut(BaseModel):
+    id: int
+    contact_id: int
+    contact_name: str
+    email: str | None
+    status: EnrollmentStatus
+    current_step: int | None
+    next_action_at: datetime | None
+    exit_reason: str | None
+    replied_at: datetime | None
+
+
+class EnrollmentPageOut(BaseModel):
+    items: list[EnrollmentOut]
+    total: int
+
+
+Limit = Annotated[int, Query(ge=1, le=200, description="Enrollments per page.")]
+Offset = Annotated[int, Query(ge=0, description="Enrollments to skip.")]
+Search = Annotated[
+    str,
+    Query(
+        max_length=service.ENROLLMENT_SEARCH_MAX,
+        description="Part of the contact's name or an address, any case.",
+    ),
+]
+
+
 def _settings(request: Request) -> Settings:
     settings: Settings = request.app.state.settings
     return settings
@@ -165,6 +197,7 @@ def _summary_out(row: service.CampaignSummary) -> CampaignSummaryOut:
         steps=row.steps,
         enrollments=dict(row.enrollments),
         created_at=c.created_at,
+        next_action_at=row.next_action_at,
     )
 
 
@@ -184,6 +217,7 @@ def _campaign_out(detail: service.CampaignDetail) -> CampaignOut:
         created_at=c.created_at,
         steps=[
             StepOut(
+                id=s.step.id,
                 position=s.step.position,
                 channel=s.step.channel,
                 mode=s.step.mode,
@@ -266,6 +300,45 @@ def get_campaign(
     """One campaign: steps and their progress, enrollments, next fire, what review misses."""
     with translate_errors():
         return _detail(session, user, campaign_id, request)
+
+
+@router.get(
+    "/campaigns/{campaign_id}/enrollments",
+    operation_id="list_campaign_enrollments",
+    responses=NOT_FOUND,
+)
+def list_enrollments(
+    campaign_id: int,
+    session: SessionDep,
+    user: CurrentUser,
+    q: Search = "",
+    status: EnrollmentStatus | None = None,
+    limit: Limit = 50,
+    offset: Offset = 0,
+) -> EnrollmentPageOut:
+    """One campaign's enrollments, oldest first: who, their status, their next fire.
+    ``q`` finds one by name or address, as the review screen's search does."""
+    with translate_errors():
+        page = service.list_enrollments(
+            session, user, campaign_id, q=q, status=status, limit=limit, offset=offset
+        )
+    return EnrollmentPageOut(
+        items=[
+            EnrollmentOut(
+                id=row.enrollment.id,
+                contact_id=row.enrollment.contact_id,
+                contact_name=row.contact_name,
+                email=row.email,
+                status=row.enrollment.status,
+                current_step=row.enrollment.current_step,
+                next_action_at=row.enrollment.next_action_at,
+                exit_reason=row.enrollment.exit_reason,
+                replied_at=row.enrollment.replied_at,
+            )
+            for row in page.items
+        ],
+        total=page.total,
+    )
 
 
 @router.post(
