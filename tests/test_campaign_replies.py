@@ -292,6 +292,7 @@ def test_a_bounce_marks_the_message_the_address_and_the_enrollment(mail: Mail) -
     assert (enrollment.status, enrollment.exit_reason) == (EnrollmentStatus.BOUNCED, "bounced")
     [message] = mail.messages(enrollment_id)  # the notice itself is not stored
     assert message.status is MessageStatus.BOUNCED
+    assert message.bounced_at is not None  # the inbox's time for it (#300)
     statuses = {
         (a.contact_id, a.email): a.status
         for a in mail.read(lambda s: list(s.scalars(scoped(mail.user, ContactEmail))))
@@ -418,6 +419,12 @@ def test_an_unsubscribe_phrase_opts_out_and_sets_do_not_contact(mail: Mail) -> N
     assert contact.do_not_contact_reason is not None
     assert "unsubscribe" in contact.do_not_contact_reason
     assert len(inbound(mail, enrollment_id)) == 1
+    asks = [
+        m.asks_unsubscribe
+        for m in mail.messages(enrollment_id)
+        if m.direction is MessageDirection.IN
+    ]
+    assert asks == [True]  # the inbox's kind for it (#300)
     assert mail.tick(NOW + WEEK + timedelta(hours=1)).fired == []
 
 
@@ -432,6 +439,12 @@ def test_a_word_that_only_contains_a_phrase_is_not_an_unsubscribe(mail: Mail) ->
     )
     mail.tick(NOW + timedelta(hours=2))
     assert mail.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
+    asks = [
+        m.asks_unsubscribe
+        for m in mail.messages(enrollment_id)
+        if m.direction is MessageDirection.IN
+    ]
+    assert asks == [False]
 
 
 # --- history expiry and idempotency ----------------------------------------------------------
