@@ -4514,6 +4514,19 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HandledIn": {
+        "properties": {
+          "handled": {
+            "title": "Handled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "handled"
+        ],
+        "title": "HandledIn",
+        "type": "object"
+      },
       "HasEmail": {
         "additionalProperties": false,
         "description": "At least one email row, optionally with the given ``status``.",
@@ -5544,6 +5557,137 @@
           "reply_detection"
         ],
         "title": "InboundOut",
+        "type": "object"
+      },
+      "InboxItemOut": {
+        "properties": {
+          "campaign_id": {
+            "title": "Campaign Id",
+            "type": "integer"
+          },
+          "campaign_name": {
+            "title": "Campaign Name",
+            "type": "string"
+          },
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "contact_name": {
+            "title": "Contact Name",
+            "type": "string"
+          },
+          "enrollment_id": {
+            "title": "Enrollment Id",
+            "type": "integer"
+          },
+          "enrollment_status": {
+            "$ref": "#/components/schemas/EnrollmentStatus"
+          },
+          "handled_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Handled At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/InboxKind"
+          },
+          "received_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Received At"
+          },
+          "snippet": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snippet"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "contact_id",
+          "contact_name",
+          "campaign_id",
+          "campaign_name",
+          "enrollment_id",
+          "enrollment_status",
+          "subject",
+          "snippet",
+          "received_at",
+          "handled_at"
+        ],
+        "title": "InboxItemOut",
+        "type": "object"
+      },
+      "InboxKind": {
+        "enum": [
+          "reply",
+          "unsubscribe",
+          "bounce"
+        ],
+        "title": "InboxKind",
+        "type": "string"
+      },
+      "InboxPageOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/InboxItemOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "unhandled": {
+            "title": "Unhandled",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "unhandled"
+        ],
+        "title": "InboxPageOut",
         "type": "object"
       },
       "InteractionIn": {
@@ -14050,6 +14194,173 @@
         "summary": "List Import Rows",
         "tags": [
           "imports"
+        ]
+      }
+    },
+    "/api/v1/inbox": {
+      "get": {
+        "description": "Replies, unsubscribe replies and bounces, newest first.",
+        "operationId": "list_inbox",
+        "parameters": [
+          {
+            "description": "`false` for the unhandled items, `true` for the handled; omit for all.",
+            "in": "query",
+            "name": "handled",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`false` for the unhandled items, `true` for the handled; omit for all.",
+              "title": "Handled"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/InboxKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "in": "query",
+            "name": "enrollment_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Enrollment Id"
+            }
+          },
+          {
+            "description": "Items per page.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Items per page.",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Items to skip.",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboxPageOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Inbox",
+        "tags": [
+          "inbox"
+        ]
+      }
+    },
+    "/api/v1/inbox/{message_id}/handled": {
+      "put": {
+        "description": "Mark an item handled or not. Marking it handled again keeps the first time.",
+        "operationId": "set_inbox_handled",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "title": "Message Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HandledIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboxItemOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such inbox item"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Handled",
+        "tags": [
+          "inbox"
         ]
       }
     },

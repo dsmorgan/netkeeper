@@ -1323,6 +1323,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/inbox": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Inbox
+         * @description Replies, unsubscribe replies and bounces, newest first.
+         */
+        get: operations["list_inbox"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inbox/{message_id}/handled": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Handled
+         * @description Mark an item handled or not. Marking it handled again keeps the first time.
+         */
+        put: operations["set_inbox_handled"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/interactions/{interaction_id}": {
         parameters: {
             query?: never;
@@ -3700,6 +3740,11 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** HandledIn */
+        HandledIn: {
+            /** Handled */
+            handled: boolean;
+        };
         /**
          * HasEmail
          * @description At least one email row, optionally with the given ``status``.
@@ -4091,6 +4136,45 @@ export interface components {
              * Format: date-time
              */
             since: string;
+        };
+        /** InboxItemOut */
+        InboxItemOut: {
+            /** Campaign Id */
+            campaign_id: number;
+            /** Campaign Name */
+            campaign_name: string;
+            /** Contact Id */
+            contact_id: number;
+            /** Contact Name */
+            contact_name: string;
+            /** Enrollment Id */
+            enrollment_id: number;
+            enrollment_status: components["schemas"]["EnrollmentStatus"];
+            /** Handled At */
+            handled_at: string | null;
+            /** Id */
+            id: number;
+            kind: components["schemas"]["InboxKind"];
+            /** Received At */
+            received_at: string | null;
+            /** Snippet */
+            snippet: string | null;
+            /** Subject */
+            subject: string | null;
+        };
+        /**
+         * InboxKind
+         * @enum {string}
+         */
+        InboxKind: "reply" | "unsubscribe" | "bounce";
+        /** InboxPageOut */
+        InboxPageOut: {
+            /** Items */
+            items: components["schemas"]["InboxItemOut"][];
+            /** Total */
+            total: number;
+            /** Unhandled */
+            unhandled: number;
         };
         /**
          * InteractionIn
@@ -8792,6 +8876,86 @@ export interface operations {
                 };
             };
             /** @description No such import run, row, contact, or preset */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_inbox: {
+        parameters: {
+            query?: {
+                /** @description `false` for the unhandled items, `true` for the handled; omit for all. */
+                handled?: boolean | null;
+                kind?: components["schemas"]["InboxKind"] | null;
+                enrollment_id?: number | null;
+                /** @description Items per page. */
+                limit?: number;
+                /** @description Items to skip. */
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InboxPageOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_inbox_handled: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                message_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HandledIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InboxItemOut"];
+                };
+            };
+            /** @description No such inbox item */
             404: {
                 headers: {
                     [name: string]: unknown;

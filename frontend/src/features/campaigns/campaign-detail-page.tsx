@@ -384,7 +384,18 @@ function EnrollmentsCard({ campaignId }: { campaignId: number }) {
                     <td className="py-2 pr-3 text-muted-foreground">
                       {formatWhen(row.next_action_at)}
                     </td>
-                    <td className="py-2 text-muted-foreground">{row.exit_reason ?? ''}</td>
+                    <td className="py-2 text-muted-foreground">
+                      {row.exit_reason ?? ''}
+                      {(row.replied_at !== null || row.status === 'bounced') && (
+                        <Link
+                          to="/inbox"
+                          search={{ enrollment: row.id }}
+                          className="ml-2 underline underline-offset-4"
+                        >
+                          View in inbox
+                        </Link>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

@@ -93,6 +93,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.models import Message as MessageRow
+from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import campaign_engine as engine
 
@@ -523,6 +524,7 @@ def record_reply(session: Session, user: User, reply: Reply) -> bool:
         status=MessageStatus.RECEIVED,
         subject=None if subject is None else subject[:MESSAGE_SUBJECT_MAX_LENGTH],
         snippet=message.snippet[:MESSAGE_SNIPPET_MAX_LENGTH],
+        asks_unsubscribe=reply.unsubscribe,
         sent_at=message.internal_date,
         gmail_message_id=message.id,
         gmail_thread_id=message.thread_id,
@@ -567,6 +569,7 @@ def record_bounce(session: Session, user: User, bounce: Bounce) -> bool:
     if message is None or enrollment is None or message.status is MessageStatus.BOUNCED:
         return False
     message.status = MessageStatus.BOUNCED
+    message.bounced_at = utcnow()
     if bounce.address is not None:
         rows = list(
             session.scalars(
