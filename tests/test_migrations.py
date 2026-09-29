@@ -2139,3 +2139,54 @@ def test_0025_downgrades_to_mailboxes_and_messages_without_it(migration_engine: 
     assert "snippet" not in {c["name"] for c in inspector.get_columns("messages")}
     with migration_engine.begin() as connection:
         assert _count(connection, "messages") == 1
+
+
+# --- the inbox (0026, #300) ---------------------------------------------------------------
+
+
+def test_0026_fills_in_the_inbox_columns_for_existing_messages(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0025")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)  # message 1: sent
+        _insert_message(connection, id=2, enrollment_id=1, contact_id=1, status="bounced")
+        for id, subject, snippet in (
+            (3, "Re: Catching up", "Good to hear from you"),
+            (4, "Re: Catching up", "Please REMOVE ME from this list"),
+            (5, "Unsubscribe", None),
+            (6, "Re: Catching up", "I unsubscribed from everything"),  # not a whole word
+        ):
+            _insert_message(
+                connection, id=id, enrollment_id=1, contact_id=1, direction="in", status="received"
+            )
+            connection.execute(
+                text("UPDATE messages SET subject = :s, snippet = :n WHERE id = :id"),
+                {"s": subject, "n": snippet, "id": id},
+            )
+    migrations.upgrade(migration_engine, "0026")
+    with migration_engine.begin() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT id, asks_unsubscribe, bounced_at IS NOT NULL, handled_at"
+                " FROM messages ORDER BY id"
+            )
+        ).all()
+    assert [tuple(r) for r in rows] == [
+        (1, False, False, None),
+        (2, False, True, None),
+        (3, False, False, None),
+        (4, True, False, None),
+        (5, True, False, None),
+        (6, False, False, None),
+    ]
+
+
+def test_0026_downgrades_to_messages_without_it(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0026")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+        connection.execute(text("UPDATE messages SET handled_at = :t"), {"t": STAMP})
+    migrations.downgrade(migration_engine, "0025")
+    columns = {c["name"] for c in inspect(migration_engine).get_columns("messages")}
+    assert columns.isdisjoint({"handled_at", "bounced_at", "asks_unsubscribe"})
+    with migration_engine.begin() as connection:
+        assert _count(connection, "messages") == 1

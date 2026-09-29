@@ -27,6 +27,8 @@ from netkeeper.models import (
     ImportRun,
     InteractionKind,
     ListKind,
+    MessageDirection,
+    MessageStatus,
     RuleField,
     SyncRunKind,
     SyncRunStatus,
@@ -443,6 +445,25 @@ def _seed_enrollments(session: Session, user: User) -> int:
     return 2
 
 
+def _seed_inbox(session: Session, user: User) -> int:
+    """A reply and a bounce in one of ``user``'s campaigns, and a sent message that is
+    neither (P3-11b)."""
+    campaign = factories.make_campaign(session, user)
+    enrollment = factories.make_enrollment(session, campaign, factories.make_contact(session, user))
+    factories.make_message(session, enrollment)
+    factories.make_message(session, enrollment, status=MessageStatus.BOUNCED, bounced_at=SEED_AT)
+    factories.make_message(
+        session,
+        enrollment,
+        direction=MessageDirection.IN,
+        status=MessageStatus.RECEIVED,
+        subject="Re: Hello",
+        snippet="Good to hear from you",
+        sent_at=SEED_AT,
+    )
+    return 2
+
+
 def _own_campaign(session: Session, user: User) -> dict[str, str]:
     """``campaign_id`` of the user's first campaign; the placeholder points nowhere when
     they have none, which the endpoint answers ``404``."""
@@ -522,6 +543,7 @@ REGISTRY: list[ListEndpoint] = [
         paged_count,
         path_params=_own_campaign,
     ),
+    ListEndpoint(f"{API_PREFIX}/inbox", _seed_inbox, paged_count),
     ListEndpoint(f"{API_PREFIX}/dashboard/next-fires", _seed_next_fires, paged_count),
     ListEndpoint(f"{API_PREFIX}/dashboard/changed-jobs", _seed_changed_jobs, paged_count),
 ]

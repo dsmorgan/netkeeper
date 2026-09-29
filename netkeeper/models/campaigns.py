@@ -52,6 +52,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     inspect,
     text,
 )
@@ -393,6 +394,14 @@ class Message(UserOwned, TimestampMixin, Base):
     # An inbound message's snippet, as Gmail gives it (P3-08; 0025): the reply poll
     # stores the subject and this, never the body (spec 11.7). NULL for outbound.
     snippet: Mapped[str | None] = mapped_column(String(MESSAGE_SNIPPET_MAX_LENGTH))
+    # The inbox (P3-11b; 0026). Whether an inbound message asked to unsubscribe (spec
+    # 11.7's phrases), when detection found an outbound one bounced, and when a person
+    # marked either handled. NULL, or false, for everything else.
+    asks_unsubscribe: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    bounced_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    handled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     scheduled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     gmail_message_id: Mapped[str | None] = mapped_column(String(200))
