@@ -1,17 +1,21 @@
 import { createFileRoute } from '@tanstack/react-router'
 
-import { PlaceholderPage } from '@/components/placeholder-page'
+import { InboxPage } from '@/features/inbox/inbox-page'
+
+interface InboxSearch {
+  enrollment?: number
+}
 
 export const Route = createFileRoute('/inbox')({
-  component: InboxPage,
+  validateSearch: (search: Record<string, unknown>): InboxSearch => {
+    const enrollment = Number(search.enrollment)
+    return Number.isInteger(enrollment) && enrollment > 0 ? { enrollment } : {}
+  },
+  component: Inbox,
 })
 
-function InboxPage() {
-  return (
-    <PlaceholderPage
-      title="Inbox"
-      phase={3}
-      purpose="Detected replies across campaigns, with mark-handled and add-note."
-    />
-  )
+function Inbox() {
+  const { enrollment } = Route.useSearch()
+  // Keyed so following "every enrollment" starts the filters afresh.
+  return <InboxPage key={enrollment ?? 'all'} enrollment={enrollment} />
 }

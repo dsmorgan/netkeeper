@@ -28,9 +28,8 @@ describe('app shell', () => {
     expect(links.map((link) => link.getAttribute('href'))).toEqual(EXPECTED_HREFS)
   })
 
-  it('marks the current section active and shows its placeholder', async () => {
-    // A route that is still a placeholder. Every phase-1 and phase-2 screen has
-    // landed, /templates in P3-10 and /campaigns in P3-11a; /inbox is the last.
+  it('marks the current section active', async () => {
+    // Every page has landed: /inbox, in P3-11b, was the last placeholder.
     await renderApp('/inbox')
 
     const nav = screen.getByRole('navigation', { name: 'Primary' })
@@ -42,19 +41,5 @@ describe('app shell', () => {
       'data-status',
       'active',
     )
-    expect(await screen.findByText('This page arrives in phase 3.')).toBeInTheDocument()
-  })
-
-  it('renders every placeholder route with its phase', async () => {
-    // A route drops off this list when its own page lands: /contacts in P1-12,
-    // /triage in P1-14, /lists and /exports in P1-15, /imports in P1-13,
-    // /linkedin in P2-12, /templates in P3-10, /campaigns in P3-11a. Each lane removes its own entry, so keep every
-    // deletion when this conflicts.
-    const phases: Array<[string, number]> = [['/inbox', 3]]
-    for (const [path, phase] of phases) {
-      const { unmount } = await renderApp(path)
-      expect(await screen.findByText(`This page arrives in phase ${phase}.`)).toBeInTheDocument()
-      unmount()
-    }
   })
 })
