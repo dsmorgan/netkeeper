@@ -18,7 +18,7 @@ from campaign_fakes import ARMED_FOR_SEND, NOW, SETTINGS, make_mailbox
 from sqlalchemy.orm import Session, sessionmaker
 from test_campaign_sender import WEEK, Mail, make_mail
 
-from netkeeper.campaigns.gmail import GmailTransient, MessageRef
+from netkeeper.campaigns.gmail import GmailTransient, Message, MessageRef
 from netkeeper.campaigns.gmail_fake import FakeGmail
 from netkeeper.config import Settings
 from netkeeper.db import session_scope
@@ -145,6 +145,9 @@ def test_the_detection_constants_are_pinned() -> None:
     assert frozenset({"mailer-daemon", "postmaster"}) == replies.DAEMON_LOCAL_PARTS
     assert replies.SEARCH_MAX == 20
     assert {s.value for s in replies.LIVE} == {"active", "paused"}
+    assert replies.POLL_MAX_READS == 50
+    assert replies.STALE_AFTER_POLLS == 2
+    assert frozenset({"auto_reply", "bulk", "junk"}) == replies.AUTO_REPLY_PRECEDENCE
 
 
 # --- replies ----------------------------------------------------------------------------
@@ -202,21 +205,75 @@ def test_a_reply_from_the_contacts_address_outside_the_thread_counts(mail: Mail)
     assert mail.tick(NOW + WEEK + timedelta(hours=1)).fired == []
 
 
-def test_mail_from_anyone_else_or_from_before_the_first_send_is_not_a_reply(mail: Mail) -> None:
-    mail.gmail.deliver(fresh_email(ADA, "Old thread", "From last year."), at=NOW - WEEK)
+@pytest.mark.parametrize("path", ["history", "scan"])
+def test_mail_from_anyone_else_or_from_before_the_first_send_is_not_a_reply(
+    mail: Mail, path: str
+) -> None:
+    """A stranger answering in the watched thread, and the contact's own mail dated before
+    the first send (arriving late, after the baseline), reach ``classify`` on both paths,
+    and neither is a reply."""
     enrollment_id = mail.enroll(ADA)
     send_first(mail)
+    mail.gmail.reply(first_sent(mail), sender="carol@example.test", at=NOW + timedelta(hours=1))
+    mail.gmail.deliver(fresh_email(ADA, "Old thread", "From last year."), at=NOW - WEEK)
     mail.gmail.deliver(
         fresh_email("bob@example.test", "Hi", "Unrelated."), at=NOW + timedelta(hours=1)
     )
-    set_mailbox(mail, history_id=None)  # the scan reads the thread and searches from: too
+    if path == "scan":
+        set_mailbox(mail, history_id=None)
+    mail.gmail.calls.clear()
+
+    mail.tick(NOW + timedelta(hours=2))
+
+    polled = {method for method, _ in mail.gmail.calls}
+    assert ("threads.get" in polled) is (path == "scan")
+    assert ("history.list" in polled) is (path == "history")
+    assert mail.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+    assert inbound(mail, enrollment_id) == []
+    assert interactions(mail, InteractionKind.EMAIL_IN) == []
+
+
+def test_the_persons_own_mail_from_the_contacts_address_is_not_a_reply(mail: Mail) -> None:
+    """Mail labelled ``SENT`` or ``DRAFT`` is the person's, whatever its ``From`` says."""
+    enrollment_id = mail.enroll(ADA)
+    send_first(mail)
+    for label in ("SENT", "DRAFT"):
+        mail.gmail.deliver(
+            fresh_email(ADA, f"Note {label}", "Mine."),
+            at=NOW + timedelta(hours=1),
+            labels=(label, "INBOX"),
+        )
+    set_mailbox(mail, history_id=None)  # the from: search finds them
 
     mail.tick(NOW + timedelta(hours=2))
 
     assert mail.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
     assert inbound(mail, enrollment_id) == []
-    [(_, outcome)] = mail.tick(NOW + WEEK + timedelta(hours=1)).fired
-    assert outcome.outcome is SendOutcome.SENT
+
+
+def test_a_completed_enrollment_is_watched_for_thirty_days(
+    session_factory: sessionmaker[Session],
+) -> None:
+    mail = make_mail(session_factory, modes=(StepMode.SEND,), same_thread=(False,))
+    mail.sender = poller(mail)
+    early, late = mail.enroll(ADA), mail.enroll("grace@example.test")
+    mail.tick(NOW)
+    mail.tick(NOW + timedelta(minutes=5))  # the spacing: the second goes out now
+    mail.tick(NOW + timedelta(minutes=6))  # baseline
+    assert (
+        mail.enrollment(early).status is mail.enrollment(late).status is EnrollmentStatus.COMPLETED
+    )
+    to_early, to_late = (MessageRef(m.id, m.thread_id) for m in mail.gmail.sent())
+
+    mail.gmail.reply(to_early, sender=ADA, at=NOW + timedelta(days=29))
+    mail.tick(NOW + timedelta(days=29, hours=1))
+    mail.gmail.reply(to_late, sender="grace@example.test", at=NOW + timedelta(days=31))
+    mail.tick(NOW + timedelta(days=31, hours=1))
+
+    assert len(inbound(mail, early)) == 1  # recorded; the status stays completed
+    assert mail.enrollment(early).status is EnrollmentStatus.COMPLETED
+    assert mail.enrollment(early).replied_at == NOW + timedelta(days=29)
+    assert inbound(mail, late) == []  # past the window: not watched
 
 
 # --- bounces ------------------------------------------------------------------------------
@@ -225,6 +282,8 @@ def test_mail_from_anyone_else_or_from_before_the_first_send_is_not_a_reply(mail
 def test_a_bounce_marks_the_message_the_address_and_the_enrollment(mail: Mail) -> None:
     enrollment_id = mail.enroll(ADA)
     send_first(mail)
+    # Another contact of the user holds the same address: only the enrollment's is marked.
+    other = mail.write(lambda s: factories.make_contact(s, mail.user, emails=[ADA]).id)
     mail.gmail.bounce(first_sent(mail), at=NOW + timedelta(minutes=5))
 
     mail.tick(NOW + timedelta(minutes=30))
@@ -233,8 +292,14 @@ def test_a_bounce_marks_the_message_the_address_and_the_enrollment(mail: Mail) -
     assert (enrollment.status, enrollment.exit_reason) == (EnrollmentStatus.BOUNCED, "bounced")
     [message] = mail.messages(enrollment_id)  # the notice itself is not stored
     assert message.status is MessageStatus.BOUNCED
-    [address] = mail.read(lambda s: list(s.scalars(scoped(mail.user, ContactEmail))))
-    assert (address.email, address.status) == (ADA, EmailStatus.BOUNCED)
+    statuses = {
+        (a.contact_id, a.email): a.status
+        for a in mail.read(lambda s: list(s.scalars(scoped(mail.user, ContactEmail))))
+    }
+    assert statuses == {
+        (enrollment.contact_id, ADA): EmailStatus.BOUNCED,
+        (other, ADA): EmailStatus.OK,
+    }
     assert interactions(mail, InteractionKind.EMAIL_IN) == []
     assert mail.tick(NOW + WEEK + timedelta(hours=1)).fired == []
 
@@ -251,6 +316,81 @@ def test_a_notice_citing_the_message_id_outside_the_thread_is_a_bounce(mail: Mai
     mail.tick(NOW + timedelta(minutes=30))
 
     assert mail.enrollment(enrollment_id).status is EnrollmentStatus.BOUNCED
+
+
+@pytest.mark.parametrize(
+    ("sender", "subject"),
+    [
+        (None, None),  # Gmail's own "(Delay)" notice
+        ("postmaster@mx.example.net", "Warning: message delayed; still trying"),
+        ("MAILER-DAEMON@mx.example.net", "Delivery delayed: failure is not final"),
+    ],
+)
+def test_a_delivery_delayed_notice_is_not_a_bounce(
+    mail: Mail, sender: str | None, subject: str | None
+) -> None:
+    enrollment_id = mail.enroll(ADA)
+    send_first(mail)
+    if sender is None:
+        mail.gmail.bounce(first_sent(mail), at=NOW + timedelta(minutes=5), delayed=True)
+    else:
+        original = mail.gmail.get_message(first_sent(mail).id, purpose="test")
+        notice = fresh_email(sender, subject or "", "Still trying.")
+        notice["References"] = original.header("Message-ID") or ""
+        mail.gmail.deliver(notice, at=NOW + timedelta(minutes=5))
+
+    mail.tick(NOW + timedelta(minutes=30))
+
+    assert mail.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+    [message] = mail.messages(enrollment_id)
+    assert message.status is MessageStatus.SENT
+    [address] = mail.read(lambda s: list(s.scalars(scoped(mail.user, ContactEmail))))
+    assert address.status is EmailStatus.OK
+    # A delay notice in the thread doesn't hold the follow-up either.
+    [(_, outcome)] = mail.tick(NOW + WEEK + timedelta(hours=1)).fired
+    assert outcome.outcome is SendOutcome.SENT
+
+
+# --- auto-replies (#296 review: ignored) ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("header", "value"),
+    [
+        ("Auto-Submitted", "auto-replied"),
+        ("X-Autoreply", "yes"),
+        ("Precedence", "auto_reply"),
+        ("Precedence", "bulk"),
+    ],
+)
+def test_an_auto_reply_is_not_a_reply_and_does_not_hold_the_follow_up(
+    mail: Mail, header: str, value: str
+) -> None:
+    enrollment_id = mail.enroll(ADA)
+    send_first(mail)
+    original = mail.gmail.get_message(first_sent(mail).id, purpose="test")
+    ooo = fresh_email(ADA, "Re: Hello", "I am out of the office until Monday.")
+    ooo["In-Reply-To"] = ooo["References"] = original.header("Message-ID") or ""
+    ooo[header] = value
+    ref = mail.gmail.deliver(ooo, at=NOW + timedelta(minutes=5))
+    assert ref.thread_id == original.thread_id  # in the campaign thread
+
+    mail.tick(NOW + timedelta(hours=1))
+    assert mail.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+    assert inbound(mail, enrollment_id) == []
+
+    [(_, outcome)] = mail.tick(NOW + WEEK + timedelta(hours=1)).fired  # the pre-send read
+    assert outcome.outcome is SendOutcome.SENT
+
+
+def test_auto_submitted_no_is_a_person_writing(mail: Mail) -> None:
+    enrollment_id = mail.enroll(ADA)
+    send_first(mail)
+    message = fresh_email(ADA, "Hi back", "Real answer.")
+    message["Auto-Submitted"] = "no"
+    mail.gmail.deliver(message, at=NOW + timedelta(minutes=5))
+    mail.tick(NOW + timedelta(hours=1))
+    assert mail.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
 
 
 # --- unsubscribe ----------------------------------------------------------------------------
@@ -347,6 +487,101 @@ def test_a_gmail_failure_leaves_the_history_where_it_was(mail: Mail) -> None:
 
     mail.tick(NOW + timedelta(hours=3))
     assert mail.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
+
+
+def test_history_skips_mail_that_never_reaches_the_inbox(mail: Mail) -> None:
+    """History is read for ``INBOX`` only: the person's own sent mail costs no read."""
+    enrollment_id = mail.enroll(ADA)
+    send_first(mail)
+    mail.gmail.send(fresh_email("me@example.com", "Unrelated", "x"), purpose="test")
+    mail.gmail.deliver(fresh_email(ADA, "Archived", "Filtered away."), labels=("Label_9",))
+    mail.gmail.calls.clear()
+
+    mail.tick(NOW + timedelta(hours=1))
+
+    assert ("messages.get" in {m for m, _ in mail.gmail.calls}) is False
+    assert mail.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+
+
+def test_a_busy_inbox_is_read_a_budget_at_a_time_without_skipping(
+    mail: Mail, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(replies, "POLL_MAX_READS", 3)
+    enrollment_id = mail.enroll(ADA)
+    send_first(mail)
+    start = history_id(mail)
+    for n in range(7):
+        mail.gmail.deliver(fresh_email(f"n{n}@example.test", f"News {n}", "x"))
+    reply = mail.gmail.reply(first_sent(mail), sender=ADA, at=NOW + timedelta(hours=1))
+
+    mail.gmail.calls.clear()
+    mail.tick(NOW + timedelta(hours=2))  # 3 read; the history moves only past those
+    assert [m for m, _ in mail.gmail.calls].count("messages.get") == 3
+    first = history_id(mail)
+    assert start is not None and first is not None and start < first < mail.gmail.history_id
+    assert mail.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+
+    # Not caught up: the next tick polls again at once, not an interval later.
+    mail.sender = poller(mail, every=timedelta(days=1))
+    mail.sender._replies_polled.clear()
+    mail.tick(NOW + timedelta(hours=2, minutes=1))  # sets the interval's clock; 3 more
+    mail.tick(NOW + timedelta(hours=2, minutes=2))  # the last 2, with the reply
+    assert mail.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
+    assert [m.gmail_message_id for m in mail.messages(enrollment_id)][-1] == reply.id
+    assert mail.read(lambda s: mailbox_of(mail, s).replies_polled_at) == NOW + timedelta(
+        hours=2, minutes=2
+    )  # caught up only now
+
+
+def test_a_failed_read_keeps_what_was_read_before_it(mail: Mail) -> None:
+    enrollment_id = mail.enroll(ADA)
+    send_first(mail)
+    start = history_id(mail)
+    mail.gmail.reply(first_sent(mail), sender=ADA, at=NOW + timedelta(hours=1))
+    mail.gmail.deliver(fresh_email("n@example.test", "News", "x"))
+
+    reads = {"n": 0}
+    real = mail.gmail.get_message
+
+    def flaky(message_id: str, *, purpose: str) -> Message:
+        reads["n"] += 1
+        if reads["n"] == 2:
+            raise GmailTransient("down", code="unavailable")
+        return real(message_id, purpose=purpose)
+
+    mail.gmail.get_message = flaky  # type: ignore[method-assign]
+    mail.tick(NOW + timedelta(hours=2))
+
+    # The reply (read first) is recorded; the history moves to just before the news item.
+    assert mail.enrollment(enrollment_id).status is EnrollmentStatus.REPLIED
+    moved = history_id(mail)
+    assert start is not None and moved is not None and start < moved < mail.gmail.history_id
+
+
+# --- the stale-poll hold (#296 review) ---------------------------------------------------------
+
+
+def test_a_new_conversation_waits_while_replies_are_not_polled(
+    session_factory: sessionmaker[Session],
+) -> None:
+    mail = make_mail(session_factory, modes=(StepMode.SEND,) * 2, same_thread=(False, False))
+    mail.sender = poller(mail, every=timedelta(minutes=10))
+    enrollment_id = mail.enroll(ADA)
+    mail.tick(NOW)
+    mail.tick(NOW + timedelta(minutes=10))  # the baseline scan
+    polled = mail.read(lambda s: mailbox_of(mail, s).replies_polled_at)
+    assert polled == NOW + timedelta(minutes=10)
+    due = NOW + WEEK
+    mail.gmail.fail_next("history.list", GmailTransient("down", code="unavailable"))
+
+    [(_, outcome)] = mail.tick(due).fired  # the poll failed: last success a week ago
+    assert outcome.outcome is SendOutcome.NOT_SENT
+    assert outcome.error is not None and "not been polled" in outcome.error
+    assert len(mail.gmail.sent()) == 1
+
+    [(_, outcome)] = mail.tick(due + timedelta(minutes=16)).fired  # polled first: goes out
+    assert outcome.outcome is SendOutcome.SENT
+    assert mail.enrollment(enrollment_id).status is EnrollmentStatus.COMPLETED
 
 
 # --- arming and users --------------------------------------------------------------------------

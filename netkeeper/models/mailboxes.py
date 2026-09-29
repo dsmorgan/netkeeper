@@ -120,6 +120,9 @@ class Mailbox(UserOwned, TimestampMixin, Base):
     # The reply poll's place in Gmail's history (P3-08; 0025): the ``historyId`` the
     # next ``history.list`` starts from. NULL until the first poll sets a baseline.
     history_id: Mapped[int | None] = mapped_column(BigInteger)
+    # When the reply poll last read everything up to then (P3-08; 0025). A follow-up that
+    # starts a new conversation is held while this is too old (``campaign_sender``).
+    replies_polled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     @property
     def arm(self) -> MailboxArm | None:

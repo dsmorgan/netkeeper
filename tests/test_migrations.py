@@ -2117,9 +2117,9 @@ def test_0025_starts_every_mailbox_without_a_history_and_every_message_without_a
         _insert_mailbox(connection, id=1)
     migrations.upgrade(migration_engine, "0025")
     with migration_engine.begin() as connection:
-        assert connection.execute(text("SELECT history_id FROM mailboxes")).scalars().all() == [
-            None
-        ]
+        assert connection.execute(
+            text("SELECT history_id, replies_polled_at FROM mailboxes")
+        ).one() == (None, None)
         assert connection.execute(text("SELECT snippet FROM messages")).scalars().all() == [None]
         # Gmail's historyId can outgrow a 32-bit integer.
         connection.execute(text("UPDATE mailboxes SET history_id = 9007199254740993"))
@@ -2134,7 +2134,8 @@ def test_0025_downgrades_to_mailboxes_and_messages_without_it(migration_engine: 
         connection.execute(text("UPDATE messages SET snippet = 'Thanks'"))
     migrations.downgrade(migration_engine, "0024")
     inspector = inspect(migration_engine)
-    assert "history_id" not in {c["name"] for c in inspector.get_columns("mailboxes")}
+    mailbox_columns = {c["name"] for c in inspector.get_columns("mailboxes")}
+    assert mailbox_columns.isdisjoint({"history_id", "replies_polled_at"})
     assert "snippet" not in {c["name"] for c in inspector.get_columns("messages")}
     with migration_engine.begin() as connection:
         assert _count(connection, "messages") == 1

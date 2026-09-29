@@ -15,23 +15,28 @@ Gmail call, as in reconcile (#277).
 
 How it reads Gmail
 ------------------
-- **History.** ``history.list`` from the mailbox's stored ``history_id``; every
-  message added since is read (metadata only), whatever thread it is in. That
-  one read catches a reply in the thread and one from the contact's address in a
-  fresh email alike, at the cost of one ``messages.get`` per message received.
+- **History.** ``history.list`` from the mailbox's stored ``history_id``, for
+  ``INBOX``; every message added there since is read (metadata only), whatever
+  thread it is in. That one read catches a reply in the thread and one from the
+  contact's address in a fresh email alike, at the cost of one ``messages.get``
+  per message received, at most :data:`POLL_MAX_READS` a poll. A poll that stops
+  short (the budget, a failed read) moves ``history_id`` only to just before the
+  first message it did not read, and the next tick polls again.
 - **Scan.** With no ``history_id`` yet, or one Gmail no longer keeps (a 404),
   the poll takes ``profile().history_id`` first, reads every watched thread, and
   searches ``from:<address> after:<first send>`` for each watched address (spec
   11.7, step 3), then stores that id as the new baseline. Taking it first means
   nothing that arrives during the scan is missed: the next history read covers it.
-- A Gmail failure stops the mailbox's poll without moving its ``history_id``, so
-  the next poll reads the same messages again. Recording is idempotent.
+- A failure of the history call or the scan leaves ``history_id`` as it was.
+  Recording is idempotent. ``replies_polled_at`` is set only by a poll that read
+  everything up to then; the sender holds a new conversation while it is old.
 
 What a message means
 --------------------
 A message netkeeper or the person sent (``SENT`` or ``DRAFT``) is skipped.
 
-- **Bounce**: from a mailer daemon (``mailer-daemon@`` or ``postmaster@``), in a
+- **Bounce**: a hard-failure notice (:func:`is_hard_bounce`; a delay notice is
+  nothing) from a mailer daemon (``mailer-daemon@`` or ``postmaster@``), in a
   watched thread or citing one of its sent messages' Message-IDs in
   ``In-Reply-To`` or ``References``. The cited message (or the newest sent one in
   the thread) is ``bounced``, so is the address it went to (read from Gmail's
@@ -46,8 +51,8 @@ A message netkeeper or the person sent (``SENT`` or ``DRAFT``) is skipped.
   :data:`UNSUBSCRIBE_PHRASES`. The contact is set ``do_not_contact`` with a reason
   (undone from the contact page), and a live enrollment becomes ``opted_out``.
 
-An auto-reply (out of office) from the contact's address counts as a reply: the
-conservative direction, since nothing further is sent.
+An automatic answer (:func:`is_auto_reply`: out of office and the like) is ignored
+(#296 review): it is no answer, and the sender's pre-send thread read ignores it too.
 
 netkeeper deletes nothing in Gmail (ADR 0003): this module reads, and adds the
 campaign label to a reply.
@@ -67,7 +72,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.compose import campaign_label
-from netkeeper.campaigns.gmail import Gmail, GmailError, GmailNotFound, Message
+from netkeeper.campaigns.gmail import Gmail, GmailError, GmailNotFound, History, Message
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import session_scope
 from netkeeper.models import (
@@ -112,6 +117,18 @@ DAEMON_LOCAL_PARTS: Final = frozenset({"mailer-daemon", "postmaster"})
 SEARCH_MAX: Final = 20
 """At most this many messages one ``from:`` search of the scan reads."""
 
+POLL_MAX_READS: Final = 50
+"""At most this many ``messages.get`` one history read makes per mailbox and poll. The
+rest wait for the next tick's poll, which comes at once (the sender asks for it)."""
+
+STALE_AFTER_POLLS: Final = 2
+"""A mailbox whose last complete poll is older than this many poll intervals holds its
+follow-ups that start a new conversation (:meth:`GmailSender.send`): nothing reads the
+thread for them before they go, so the poll is all that would see a reply."""
+
+AUTO_REPLY_PRECEDENCE: Final = frozenset({"auto_reply", "bulk", "junk"})
+"""``Precedence`` values that mark a message as automatic."""
+
 LIVE: Final = frozenset({EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED})
 """What detection moves to ``replied``, ``bounced`` or ``opted_out`` (spec 11.3)."""
 
@@ -121,6 +138,46 @@ _UNSUBSCRIBE: Final = re.compile(
 _MSGID: Final = re.compile(r"<[^<>\s]+>")
 _SEARCHABLE: Final = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+")
 _OWN: Final = frozenset({"SENT", "DRAFT"})
+_INBOX: Final = "INBOX"
+_FAILURE: Final = re.compile(
+    r"\b(?:failure|failed|undeliverable|undelivered|not delivered|returned|rejected)\b",
+    re.IGNORECASE,
+)
+_DELAY: Final = re.compile(r"\b(?:delay|delayed|warning|still trying|temporar\w*)\b", re.IGNORECASE)
+
+
+def sender_of(message: Message) -> str:
+    """The ``From`` address, lower-cased; empty when there is none."""
+    return parseaddr(message.header("From") or "")[1].lower()
+
+
+def is_auto_reply(message: Message) -> bool:
+    """Whether the message says it was sent automatically (RFC 3834 ``Auto-Submitted``
+    other than ``no``, ``X-Autoreply``, or ``Precedence: auto_reply``, ``bulk`` or ``junk``):
+    an out-of-office answer is not a reply."""
+    auto = (message.header("Auto-Submitted") or "").strip().lower()
+    if auto and auto != "no":
+        return True
+    if message.header("X-Autoreply") is not None:
+        return True
+    return (message.header("Precedence") or "").strip().lower() in AUTO_REPLY_PRECEDENCE
+
+
+def is_daemon(message: Message) -> bool:
+    """Whether a mail system sent it: ``mailer-daemon@`` or ``postmaster@``."""
+    return sender_of(message).partition("@")[0] in DAEMON_LOCAL_PARTS
+
+
+def is_hard_bounce(message: Message) -> bool:
+    """A mail system's notice that delivery **failed**, not that it is delayed: it names a
+    failed recipient (``X-Failed-Recipients``), or its subject says it failed and does not
+    say it is delayed. Only the metadata is read, never the body's DSN part."""
+    if not is_daemon(message):
+        return False
+    if (message.header("X-Failed-Recipients") or "").strip():
+        return True
+    subject = message.header("Subject") or ""
+    return not _DELAY.search(subject) and bool(_FAILURE.search(subject))
 
 
 # --- what is watched --------------------------------------------------------------------
@@ -151,13 +208,18 @@ class Watch:
 
 @dataclass(frozen=True, slots=True)
 class MailboxWatch:
+    """An armed mailbox and what it watches; ``watches`` may be empty (nothing to read)."""
+
     mailbox_id: int
     history_id: int | None
     watches: tuple[Watch, ...]
 
 
 def reply_work(session: Session, user: User, *, now: datetime) -> list[MailboxWatch]:
-    """Each armed mailbox of ``user`` with something to watch (the module docstring)."""
+    """Each armed mailbox of ``user``, with what it watches (the module docstring)."""
+    mailboxes = {m.id: m for m in session.scalars(scoped(user, Mailbox)) if m.arm is not None}
+    if not mailboxes:
+        return []
     enrollments = list(
         session.scalars(
             scoped(user, Enrollment).where(
@@ -165,22 +227,11 @@ def reply_work(session: Session, user: User, *, now: datetime) -> list[MailboxWa
             )
         )
     )
-    if not enrollments:
-        return []
     campaigns = {
         c.id: c
         for c in session.scalars(
             scoped(user, Campaign).where(Campaign.id.in_({e.campaign_id for e in enrollments}))
         )
-    }
-    mailboxes = {
-        m.id: m
-        for m in session.scalars(
-            scoped(user, Mailbox).where(
-                Mailbox.id.in_({c.mailbox_id for c in campaigns.values() if c.mailbox_id})
-            )
-        )
-        if m.arm is not None
     }
     sent: dict[int, list[Sent]] = {}
     for row in session.scalars(
@@ -207,7 +258,7 @@ def reply_work(session: Session, user: User, *, now: datetime) -> list[MailboxWa
         .where(ContactEmail.contact_id.in_({e.contact_id for e in enrollments}))
     ):
         addresses.setdefault(contact_id, set()).add(address.lower())
-    by_mailbox: dict[int, list[Watch]] = {}
+    by_mailbox: dict[int, list[Watch]] = {mailbox_id: [] for mailbox_id in mailboxes}
     for enrollment in enrollments:
         campaign = campaigns[enrollment.campaign_id]
         mailbox = mailboxes.get(campaign.mailbox_id or 0)
@@ -254,6 +305,16 @@ class Bounce:
     at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class PollResult:
+    """What one mailbox's poll found; ``history_id`` to store (None: leave it), and
+    whether it read everything up to now (``caught_up``)."""
+
+    found: list[Reply | Bounce]
+    history_id: int | None
+    caught_up: bool
+
+
 @dataclass
 class _Poll:
     gmail: Gmail
@@ -262,21 +323,55 @@ class _Poll:
     seen: set[str] = field(default_factory=set)
     _cited: dict[str, tuple[Watch, Sent, str | None]] | None = None
 
-    def run(self) -> tuple[list[Reply | Bounce], int]:
-        """What the mailbox received, and the ``history_id`` to read from next."""
+    def run(self) -> PollResult:
+        """Read what the mailbox received since its ``history_id`` (the module)."""
         own = {s.gmail_message_id for w in self.work.watches for s in w.sent}
         self.seen |= own
-        if self.work.history_id is not None:
+        start = self.work.history_id
+        if start is not None:
             try:
-                history = self.gmail.history(self.work.history_id, purpose=self.purpose)
+                # Replies and notices arrive in the inbox; the person's own sent mail,
+                # drafts and archived newsletters never cost a read.
+                history = self.gmail.history(start, label_id=_INBOX, purpose=self.purpose)
             except GmailNotFound:
                 log.info("mailbox %d: Gmail's history expired; scanning", self.work.mailbox_id)
             else:
-                return self.classify(self.read(r.id for r in history.messages_added)), (
-                    history.history_id
-                )
+                return self.history(start, history)
         baseline = self.gmail.profile(purpose=self.purpose).history_id
-        return self.classify(self.scan()), baseline
+        return PollResult(self.classify(self.scan()), baseline, caught_up=True)
+
+    def history(self, start: int, history: History) -> PollResult:
+        """The history's messages in order, at most :data:`POLL_MAX_READS` reads. Stopped
+        part way (the budget, or a Gmail failure), the ``history_id`` moves only to just
+        before the first message not read, so nothing unread is ever skipped."""
+        messages: list[Message] = []
+        stop: int | None = None
+        reads = 0
+        for index, ref in enumerate(history.messages_added):
+            if ref.id in self.seen:
+                continue
+            if reads >= POLL_MAX_READS:
+                stop = index
+                break
+            reads += 1
+            try:
+                messages.append(self.gmail.get_message(ref.id, purpose=self.purpose))
+            except GmailNotFound:  # deleted since it arrived
+                pass
+            except GmailError as exc:
+                log.warning("mailbox %d: a read failed (%s)", self.work.mailbox_id, exc.code)
+                stop = index
+                break
+            self.seen.add(ref.id)
+        found = self.classify(messages)
+        if stop is None:
+            return PollResult(found, history.history_id, caught_up=True)
+        resume: int | None = None
+        if len(history.record_ids) == len(history.messages_added):
+            resume = history.record_ids[stop] - 1
+        return PollResult(
+            found, resume if resume is not None and resume > start else None, caught_up=False
+        )
 
     def read(self, ids: Iterable[str]) -> list[Message]:
         found: list[Message] = []
@@ -318,13 +413,14 @@ class _Poll:
         for message in messages:
             if message.label_ids & _OWN:
                 continue
-            sender = parseaddr(message.header("From") or "")[1].lower()
-            local = sender.partition("@")[0]
-            if local in DAEMON_LOCAL_PARTS:
-                bounce = self.bounce(message)
+            if is_daemon(message):
+                bounce = self.bounce(message) if is_hard_bounce(message) else None
                 if bounce is not None:
                     found.append(bounce)
                 continue
+            if is_auto_reply(message):  # out of office, not an answer (#296 review)
+                continue
+            sender = sender_of(message)
             in_thread = [w for w in self.work.watches if message.thread_id in w.threads]
             candidates = in_thread or list(self.work.watches)
             for watch in candidates:
@@ -495,10 +591,16 @@ def record_bounce(session: Session, user: User, bounce: Bounce) -> bool:
     return True
 
 
-def _store_history(session: Session, user: User, mailbox_id: int, history_id: int) -> None:
+def _store_poll(
+    session: Session, user: User, mailbox_id: int, result: PollResult, *, now: datetime
+) -> None:
     mailbox = get_scoped(session, user, Mailbox, mailbox_id)
-    if mailbox is not None:
-        mailbox.history_id = history_id
+    if mailbox is None:
+        return
+    if result.history_id is not None:
+        mailbox.history_id = result.history_id
+    if result.caught_up:
+        mailbox.replies_polled_at = now
 
 
 # --- the poll ----------------------------------------------------------------------------
@@ -514,30 +616,42 @@ def poll_replies(
     open_gmail: Callable[[int, int], Gmail],
     now: datetime,
     label: Labeler | None = None,
-) -> int:
-    """One poll of every armed mailbox of the user (the module). Blocking. The number of
-    replies and bounces newly recorded."""
+) -> bool:
+    """One poll of every armed mailbox of the user (the module). Blocking. True when every
+    mailbox read everything up to now; False when one stopped part way or failed, and the
+    next tick should poll again.
+
+    A mailbox with nothing to watch gets no Gmail call: it is caught up by definition.
+    ``replies_polled_at`` is set only for a mailbox that caught up, and it is what
+    :meth:`~netkeeper.services.campaign_sender.GmailSender.send` reads to hold a new
+    conversation while replies may be going unseen."""
     with session_scope(factory) as session:
         user = session.get(User, user_id)
         if user is None:
-            return 0
+            return True
         work = reply_work(session, user, now=now)
-    recorded = 0
+    caught_up = True
     for mailbox in work:
-        purpose = f"reply poll of mailbox {mailbox.mailbox_id}"
-        try:
-            gmail = open_gmail(user_id, mailbox.mailbox_id)
-            found, history_id = _Poll(gmail, mailbox, purpose).run()
-        except Exception as exc:  # the next poll reads the same messages again
-            code = exc.code if isinstance(exc, GmailError) else type(exc).__name__
-            log.warning("mailbox %d: the reply poll waits (%s)", mailbox.mailbox_id, code)
-            continue
+        gmail: Gmail | None = None
+        if not mailbox.watches:
+            result = PollResult([], None, caught_up=True)
+        else:
+            purpose = f"reply poll of mailbox {mailbox.mailbox_id}"
+            try:
+                gmail = open_gmail(user_id, mailbox.mailbox_id)
+                result = _Poll(gmail, mailbox, purpose).run()
+            except Exception as exc:  # the next poll reads the same messages again
+                code = exc.code if isinstance(exc, GmailError) else type(exc).__name__
+                log.warning("mailbox %d: the reply poll waits (%s)", mailbox.mailbox_id, code)
+                caught_up = False
+                continue
+        caught_up = caught_up and result.caught_up
         new: list[Reply | Bounce] = []
         with session_scope(factory, write=True) as session:
             user = session.get(User, user_id)
             if user is None:
-                return recorded
-            for item in found:
+                return caught_up
+            for item in result.found:
                 done = (
                     record_reply(session, user, item)
                     if isinstance(item, Reply)
@@ -545,10 +659,9 @@ def poll_replies(
                 )
                 if done:
                     new.append(item)
-            _store_history(session, user, mailbox.mailbox_id, history_id)
-        recorded += len(new)
-        if label is not None:
+            _store_poll(session, user, mailbox.mailbox_id, result, now=now)
+        if label is not None and gmail is not None:
             for item in new:
                 if isinstance(item, Reply):
                     label(gmail, mailbox.mailbox_id, item.label, item.message.id)
-    return recorded
+    return caught_up

@@ -264,6 +264,7 @@ class FakeGmail:
         if start_history_id < self._history_floor:
             raise GmailNotFound("Requested entity was not found.", code="notFound")
         added: list[MessageRef] = []
+        record_ids: list[int] = []
         for history_id, message_id in self._history:
             stored = self._messages.get(message_id) or self._deleted[message_id]
             if history_id <= start_history_id:
@@ -271,7 +272,10 @@ class FakeGmail:
             if label_id is not None and label_id not in stored.labels:
                 continue
             added.append(MessageRef(stored.id, stored.thread_id))
-        return History(history_id=self._history_id, messages_added=tuple(added))
+            record_ids.append(history_id)
+        return History(
+            history_id=self._history_id, messages_added=tuple(added), record_ids=tuple(record_ids)
+        )
 
     # --- the other side: people and servers ------------------------------------------
 
@@ -305,17 +309,25 @@ class FakeGmail:
         message.set_content(body)
         return self.deliver(message, at=at)
 
-    def bounce(self, to: MessageRef, *, at: datetime | None = None) -> MessageRef:
-        """Gmail's delivery-failure notice for the message ``to``, in its thread."""
+    def bounce(
+        self, to: MessageRef, *, at: datetime | None = None, delayed: bool = False
+    ) -> MessageRef:
+        """Gmail's delivery-failure notice for the message ``to``, in its thread. With
+        ``delayed``, its "still trying" notice instead, which names no failed recipient."""
         original = self._get(to.id)
         message = EmailMessage()
         message["From"] = f"Mail Delivery Subsystem <{MAILER_DAEMON}>"
         message["To"] = self.address
-        message["Subject"] = f"Delivery Status Notification (Failure) {original.header('Subject')}"
+        kind = "Delay" if delayed else "Failure"
+        message["Subject"] = f"Delivery Status Notification ({kind}) {original.header('Subject')}"
         message["In-Reply-To"] = original.message_id()
         message["References"] = original.message_id()
         message["Auto-Submitted"] = "auto-replied"
-        message.set_content("Address not found. Your message wasn't delivered.")
+        if delayed:
+            message.set_content("Delivery incomplete. Gmail will retry for 46 more hours.")
+        else:
+            message["X-Failed-Recipients"] = original.header("To") or ""
+            message.set_content("Address not found. Your message wasn't delivered.")
         stored = self._add(
             message, thread_id=None, labels={"INBOX", "UNREAD"}, outbound=False, at=at
         )
