@@ -47,6 +47,7 @@ from netkeeper.models import (
     Enrollment,
     EnrollmentStatus,
     Mailbox,
+    MailboxStatus,
     Message,
     MessageDirection,
     MessageStatus,
@@ -227,6 +228,9 @@ def create_campaign(
     if taken is not None:
         raise CampaignConflict(f"a campaign named {cleaned!r} already exists")
     mailbox = None if mailbox_id is None else _mailbox(session, user, mailbox_id)
+    if mailbox is not None and mailbox.status is not MailboxStatus.OK:
+        # A draft on a mailbox that cannot send would only fail at review or at the tick.
+        raise CampaignConflict(f"{mailbox.email} is {mailbox.status}; reconnect it first")
     built: list[CampaignStep] = []
     for position, spec in enumerate(steps, start=1):
         earlier_email = any(s.channel is TemplateChannel.EMAIL for s in built)
@@ -550,17 +554,19 @@ def list_enrollments(
         stmt = stmt.where(Enrollment.status == status)
     text = q.strip().lower()[:ENROLLMENT_SEARCH_MAX]
     if text:
-        pattern = f"%{text}%"
+        # Bound, so never injection; escaped so `%` or `_` in a search means itself.
+        literal = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{literal}%"
         by_email = (
             scoped(user, ContactEmail)
             .with_only_columns(ContactEmail.contact_id)
-            .where(func.lower(ContactEmail.email).like(pattern))
+            .where(func.lower(ContactEmail.email).like(pattern, escape="\\"))
         )
         stmt = stmt.where(
             or_(
-                func.lower(Contact.first_name).like(pattern),
-                func.lower(Contact.preferred_name).like(pattern),
-                func.lower(Contact.last_name).like(pattern),
+                func.lower(Contact.first_name).like(pattern, escape="\\"),
+                func.lower(Contact.preferred_name).like(pattern, escape="\\"),
+                func.lower(Contact.last_name).like(pattern, escape="\\"),
                 Contact.id.in_(by_email),
             )
         )

@@ -156,10 +156,30 @@ function merge(shown: EnrollmentPreview[], incoming: EnrollmentPreview[]) {
   return [...byId.values()]
 }
 
-function usePreviewApproval(campaignId: number, onChange: () => Promise<unknown>) {
+/** Whether a refusal says the thing shown is no longer current (a stale fingerprint). */
+function isStale(error: unknown): boolean {
+  return error instanceof CampaignApiError && error.status === 409
+}
+
+const STALE_PREVIEW =
+  'Something changed since this preview was shown (the contact, a template or the audience), ' +
+  'so it was refreshed. Read it again before approving.'
+
+/**
+ * Previews on show and their approval. A 409 on approve means a fingerprint went
+ * stale: the review is refreshed and `reload` renders the refused previews again,
+ * so the next approval carries the fingerprint of what is on screen now.
+ */
+function usePreviewApproval(
+  campaignId: number,
+  onChange: () => Promise<unknown>,
+  reload: (stale: EnrollmentPreview[], shown: EnrollmentPreview[]) => Promise<EnrollmentPreview[]>,
+) {
   const [shown, setShown] = useState<EnrollmentPreview[]>([])
+  const [notice, setNotice] = useState<string | null>(null)
   const approve = useMutation({
     mutationFn: (previews: EnrollmentPreview[]) => approvePreviews(campaignId, previews),
+    onMutate: () => setNotice(null),
     onSuccess: async (_review, previews) => {
       const ids = new Set(previews.map((p) => p.enrollment_id))
       setShown((current) =>
@@ -167,8 +187,32 @@ function usePreviewApproval(campaignId: number, onChange: () => Promise<unknown>
       )
       await onChange()
     },
+    onError: async (error, previews) => {
+      if (!isStale(error)) return
+      const ids = new Set(previews.map((p) => p.enrollment_id))
+      let refreshed: EnrollmentPreview[]
+      try {
+        refreshed = await reload(previews, shown)
+      } catch {
+        // Nothing current to show for them: drop the stale ones rather than keep them.
+        refreshed = shown.filter((p) => !ids.has(p.enrollment_id))
+      }
+      setShown(refreshed)
+      setNotice(STALE_PREVIEW)
+      await onChange()
+    },
   })
-  return { shown, setShown, approve }
+  const refusal = approve.isError && !isStale(approve.error) ? approve.error : null
+  return { shown, setShown, approve, notice, refusal }
+}
+
+function StaleNotice({ notice }: { notice: string | null }) {
+  if (notice === null) return null
+  return (
+    <p role="status" className="rounded-lg bg-amber-500/10 px-3 py-2 text-sm">
+      {notice}
+    </p>
+  )
 }
 
 function PreviewList({
@@ -260,7 +304,13 @@ function SampleSection({
   missing: Missing[]
   onChange: () => Promise<unknown>
 }) {
-  const { shown, setShown, approve } = usePreviewApproval(campaignId, onChange)
+  const { shown, setShown, approve, notice, refusal } = usePreviewApproval(
+    campaignId,
+    onChange,
+    // The draw is kept while the audience is, so this re-renders it with current
+    // fingerprints; a changed audience gives a new draw and the old one goes.
+    async () => (await samplePreviews(campaignId)).enrollments,
+  )
   const sample = useMutation({
     mutationFn: () => samplePreviews(campaignId),
     onSuccess: async (previews) => {
@@ -284,7 +334,8 @@ function SampleSection({
         {shown.length === 0 ? 'Show the sample' : 'Show the sample again'}
       </Button>
       {sample.isError && <ErrorNote label="The sample was not drawn." error={sample.error} />}
-      {approve.isError && <ErrorNote label="Not approved." error={approve.error} />}
+      <StaleNotice notice={notice} />
+      {refusal !== null && <ErrorNote label="Not approved." error={refusal} />}
       <PreviewList
         previews={shown}
         onApprove={(previews) => approve.mutate(previews)}
@@ -309,7 +360,19 @@ function SearchSection({
     ...enrollmentsQuery(campaignId, submitted ?? '', 'pending', 0, 8),
     enabled: submitted !== null,
   })
-  const { shown, setShown, approve } = usePreviewApproval(campaignId, onChange)
+  const { shown, setShown, approve, notice, refusal } = usePreviewApproval(
+    campaignId,
+    onChange,
+    async (stale, current) => {
+      const ids = new Set(stale.map((p) => p.enrollment_id))
+      const kept = current.filter((p) => !ids.has(p.enrollment_id))
+      const again = await viewPreviews(
+        campaignId,
+        stale.map((p) => p.enrollment_id),
+      )
+      return merge(kept, again.enrollments)
+    },
+  )
   const view = useMutation({
     mutationFn: (ids: number[]) => viewPreviews(campaignId, ids),
     onSuccess: async (previews) => {
@@ -383,7 +446,8 @@ function SearchSection({
           </ul>
         ))}
       {view.isError && <ErrorNote label="The preview did not render." error={view.error} />}
-      {approve.isError && <ErrorNote label="Not approved." error={approve.error} />}
+      <StaleNotice notice={notice} />
+      {refusal !== null && <ErrorNote label="Not approved." error={refusal} />}
       <PreviewList
         previews={shown}
         onApprove={(previews) => approve.mutate(previews)}
@@ -538,7 +602,21 @@ function GuardsSection({
   onAcknowledge: () => Promise<unknown>
   onChange: () => Promise<unknown>
 }) {
-  const ack = useMutation({ mutationFn: onAcknowledge, onSuccess: onChange })
+  const [notice, setNotice] = useState<string | null>(null)
+  const ack = useMutation({
+    mutationFn: onAcknowledge,
+    onMutate: () => setNotice(null),
+    onSuccess: onChange,
+    onError: async (error) => {
+      if (!isStale(error)) return
+      // The audience or the guard results moved: fetch the summary as it is now.
+      setNotice(
+        'The guard results changed since the summary was shown, so it was refreshed. ' +
+          'Read it again before acknowledging.',
+      )
+      await onChange()
+    },
+  })
   const done = !isMissing(missing, 'guards') && acknowledged !== null
   return (
     <Section title="Guard summary">
@@ -555,7 +633,10 @@ function GuardsSection({
           Acknowledge this summary
         </Button>
       )}
-      {ack.isError && <ErrorNote label="Not acknowledged." error={ack.error} />}
+      <StaleNotice notice={notice} />
+      {ack.isError && !isStale(ack.error) && (
+        <ErrorNote label="Not acknowledged." error={ack.error} />
+      )}
     </Section>
   )
 }
@@ -585,10 +666,20 @@ function ActivateSection({
       <p className="text-sm text-muted-foreground">
         {missing.length === 0
           ? 'Every requirement is met.'
-          : `${missing.length} ${missing.length === 1 ? 'requirement is' : 'requirements are'} still missing; activation will be refused until they are met.`}
+          : `${missing.length} ${missing.length === 1 ? 'requirement is' : 'requirements are'} still missing. Activate is available once every one is met.`}
       </p>
+      {missing.length > 0 && (
+        <ul aria-label="Missing before activation" className="list-disc pl-5 text-sm">
+          {missing.map((m, index) => (
+            <li key={index}>
+              {REQUIREMENT_LABELS[m.requirement] ?? m.requirement}: {missingText(m)}
+            </li>
+          ))}
+        </ul>
+      )}
       <Button
         className="w-fit"
+        disabled={missing.length > 0}
         onClick={() => {
           activate.reset()
           setOpen(true)

@@ -43,6 +43,7 @@ describe('review flow', () => {
       'Guard summary acknowledged: missing, the guard summary for the current audience is not acknowledged',
     ])
     expect(section('Activate').getByText(/4 requirements are still missing/)).toBeVisible()
+    expect(section('Activate').getByRole('button', { name: 'Activate' })).toBeDisabled()
   })
 
   it('starts the review of a draft, and shows why it will not', async () => {
@@ -311,11 +312,27 @@ describe('review flow', () => {
     })
   })
 
+  it('keeps Activate disabled while anything is missing, and lists what', async () => {
+    mockFetch(campaignBackend(reviewing()))
+    await renderApp('/campaigns/5')
+
+    const activate = within(await screen.findByRole('region', { name: 'Activate' }))
+    expect(activate.getByRole('button', { name: 'Activate' })).toBeDisabled()
+    const listed = within(activate.getByRole('list', { name: 'Missing before activation' }))
+    expect(listed.getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      'Sampled previews approved: no sample was drawn for the current audience',
+      'Test send of each email step: email steps with no current test send: steps 1, 2',
+      'Lint clean: no lint result for the current steps and templates',
+      'Guard summary acknowledged: the guard summary for the current audience is not acknowledged',
+    ])
+  })
+
   it('shows what is missing when activation is refused', async () => {
     const calls: Call[] = []
     mockFetch(
       campaignBackend(
-        reviewing(),
+        // The page last saw nothing missing; the gate, checking again, disagrees.
+        reviewing({ missing: [] }),
         {
           'POST /api/v1/campaigns/5/activate': () =>
             jsonResponse(
@@ -380,5 +397,191 @@ describe('review flow', () => {
     expect(await screen.findByRole('button', { name: 'Pause' })).toBeVisible()
     expect(screen.queryByRole('heading', { name: 'Review' })).toBeNull()
     expect(calls.filter((c) => c.path.endsWith('/activate'))).toHaveLength(1)
+  })
+
+  it('refreshes a sampled preview whose fingerprint went stale, and approves the new one', async () => {
+    const calls: Call[] = []
+    let draws = 0
+    let refusedOnce = false
+    mockFetch(
+      campaignBackend(
+        reviewing(),
+        {
+          'POST /api/v1/campaigns/5/review/sample': () => {
+            draws += 1
+            return jsonResponse({
+              content_fingerprint: 'c0ffee',
+              enrollments: [
+                draws === 1
+                  ? preview()
+                  : preview({
+                      fingerprint: 'fp-rosalind-222222',
+                      steps: preview().steps.map((step) => ({ ...step, body: 'Hi Ros' })),
+                    }),
+              ],
+            })
+          },
+          'POST /api/v1/campaigns/5/review/approve': () => {
+            if (!refusedOnce) {
+              refusedOnce = true
+              return jsonResponse(
+                { detail: "enrollment 301's preview changed since it was shown; look again" },
+                409,
+              )
+            }
+            return jsonResponse(review())
+          },
+        },
+        calls,
+      ),
+    )
+    await renderApp('/campaigns/5')
+
+    await screen.findByRole('list', { name: 'Review checklist' })
+    fireEvent.click(section('Sampled previews').getByRole('button', { name: 'Show the sample' }))
+    const first = within(
+      await screen.findByRole('listitem', { name: 'Preview for Rosalind Quillfeather' }),
+    )
+    fireEvent.click(first.getByRole('button', { name: 'Approve' }))
+
+    expect(await section('Sampled previews').findByRole('status')).toHaveTextContent(
+      'Something changed since this preview was shown',
+    )
+    const card = within(screen.getByRole('listitem', { name: 'Preview for Rosalind Quillfeather' }))
+    expect(card.getByText('Hi Ros')).toBeVisible()
+    expect(card.queryByText('Hi Rosalind')).toBeNull()
+    expect(section('Sampled previews').queryByRole('alert')).toBeNull()
+    const reviewReads = calls.filter((c) => c.method === 'GET' && c.path.endsWith('/review'))
+    expect(reviewReads.length).toBeGreaterThan(1)
+
+    fireEvent.click(card.getByRole('button', { name: 'Approve' }))
+
+    await waitFor(() => expect(card.getByText('Approved')).toBeVisible())
+    const approvals = calls.filter((c) => c.path.endsWith('/review/approve')).map((c) => c.body)
+    expect(approvals).toEqual([
+      { previews: [{ enrollment_id: 301, fingerprint: 'fp-rosalind-000000' }] },
+      { previews: [{ enrollment_id: 301, fingerprint: 'fp-rosalind-222222' }] },
+    ])
+  })
+
+  it('re-renders a searched preview whose fingerprint went stale', async () => {
+    const calls: Call[] = []
+    let renders = 0
+    let refusedOnce = false
+    mockFetch(
+      campaignBackend(
+        reviewing({
+          missing: [
+            {
+              requirement: 'searched_previews',
+              detail: 'viewed previews not approved',
+              enrollment_ids: [302],
+              step_positions: [],
+            },
+          ],
+        }),
+        {
+          'POST /api/v1/campaigns/5/review/previews': () => {
+            renders += 1
+            return jsonResponse({
+              content_fingerprint: 'c0ffee',
+              enrollments: [
+                preview({
+                  enrollment_id: 302,
+                  contact_name: 'Tobias Marrowbone',
+                  sampled: false,
+                  fingerprint: renders === 1 ? 'fp-tobias-111111' : 'fp-tobias-333333',
+                }),
+              ],
+            })
+          },
+          'POST /api/v1/campaigns/5/review/approve': () => {
+            if (!refusedOnce) {
+              refusedOnce = true
+              return jsonResponse({ detail: 'the preview changed' }, 409)
+            }
+            return jsonResponse(review())
+          },
+        },
+        calls,
+      ),
+    )
+    await renderApp('/campaigns/5')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Show it' }))
+    const card = within(
+      await screen.findByRole('listitem', { name: 'Preview for Tobias Marrowbone' }),
+    )
+    fireEvent.click(card.getByRole('button', { name: 'Approve' }))
+
+    expect(await section('Search for anyone').findByRole('status')).toHaveTextContent(
+      'so it was refreshed',
+    )
+    await waitFor(() => expect(card.getByText('fingerprint fp-tobias-33')).toBeVisible())
+    fireEvent.click(card.getByRole('button', { name: 'Approve' }))
+
+    await waitFor(() => expect(card.getByText('Approved')).toBeVisible())
+    expect(calls.filter((c) => c.path.endsWith('/review/previews')).map((c) => c.body)).toEqual([
+      { enrollment_ids: [302] },
+      { enrollment_ids: [302] },
+    ])
+    expect(calls.filter((c) => c.path.endsWith('/review/approve')).at(-1)?.body).toEqual({
+      previews: [{ enrollment_id: 302, fingerprint: 'fp-tobias-333333' }],
+    })
+  })
+
+  it('refreshes the guard summary when it changed since it was shown', async () => {
+    const calls: Call[] = []
+    const state = reviewing()
+    let refusedOnce = false
+    mockFetch(
+      campaignBackend(
+        state,
+        {
+          'POST /api/v1/campaigns/5/review/guards/acknowledge': () => {
+            if (!refusedOnce) {
+              refusedOnce = true
+              state.review = {
+                ...state.review,
+                audience_fingerprint: 'aud1ence-2',
+                guard_summary: '3 in audience, 2 excluded: 2 do-not-contact',
+              }
+              return jsonResponse(
+                { detail: 'the guard results changed; they are now: 3 in audience, 2 excluded' },
+                409,
+              )
+            }
+            state.review = {
+              ...state.review,
+              guards_acknowledged: '2030-06-15T12:00:00Z',
+              missing: ALL_MISSING.filter((m) => m.requirement !== 'guards'),
+            }
+            return jsonResponse(state.review)
+          },
+        },
+        calls,
+      ),
+    )
+    await renderApp('/campaigns/5')
+
+    const guards = within(await screen.findByRole('region', { name: 'Guard summary' }))
+    fireEvent.click(guards.getByRole('button', { name: 'Acknowledge this summary' }))
+
+    expect(await guards.findByRole('status')).toHaveTextContent(
+      'The guard results changed since the summary was shown',
+    )
+    expect(await guards.findByText('3 in audience, 2 excluded: 2 do-not-contact')).toBeVisible()
+    expect(guards.queryByRole('alert')).toBeNull()
+
+    fireEvent.click(guards.getByRole('button', { name: 'Acknowledge this summary' }))
+
+    expect(await guards.findByText('Acknowledged.')).toBeVisible()
+    expect(calls.filter((c) => c.path.endsWith('/guards/acknowledge')).map((c) => c.body)).toEqual([
+      { summary: '3 in audience, 1 excluded: 1 do-not-contact', audience_fingerprint: 'aud1ence' },
+      {
+        summary: '3 in audience, 2 excluded: 2 do-not-contact',
+        audience_fingerprint: 'aud1ence-2',
+      },
+    ])
   })
 })

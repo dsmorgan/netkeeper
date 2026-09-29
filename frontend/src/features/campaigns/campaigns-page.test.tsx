@@ -4,7 +4,17 @@ import { describe, expect, it } from 'vitest'
 import { jsonResponse, mockFetch } from '@/test/fetch'
 import { renderApp } from '@/test/render'
 
-import { STEPS, campaign, campaignBackend, review, summary, type Call } from './test-support'
+import { mailbox } from '@/features/mailboxes/test-support'
+
+import {
+  MAILBOX,
+  STEPS,
+  campaign,
+  campaignBackend,
+  review,
+  summary,
+  type Call,
+} from './test-support'
 
 function rowOf(name: string): HTMLElement {
   const row = screen.getByRole('link', { name }).closest('tr')
@@ -85,7 +95,15 @@ describe('campaign builder', () => {
     mockFetch(
       campaignBackend(
         state,
-        { 'POST /api/v1/campaigns': () => jsonResponse(state.campaign, 201) },
+        {
+          'POST /api/v1/campaigns': () => jsonResponse(state.campaign, 201),
+          'GET /api/v1/mailboxes': () =>
+            jsonResponse([
+              MAILBOX,
+              mailbox({ id: 4, email: 'stale@sender.example', status: 'reauth_required' }),
+              mailbox({ id: 6, email: 'off@sender.example', status: 'disabled' }),
+            ]),
+        },
         calls,
       ),
     )
@@ -97,6 +115,11 @@ describe('campaign builder', () => {
 
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Autumn reconnect' } })
     await screen.findByRole('option', { name: 'me@sender.example' })
+    expect(
+      screen.getByRole('option', { name: 'stale@sender.example (needs reauth)' }),
+    ).toBeDisabled()
+    expect(screen.getByRole('option', { name: 'off@sender.example (disabled)' })).toBeDisabled()
+    expect(screen.getByRole('option', { name: 'me@sender.example' })).toBeEnabled()
     fireEvent.change(screen.getByLabelText('Mailbox'), { target: { value: '3' } })
     await screen.findAllByRole('option', { name: 'Catching up (email)' })
     const first = within(screen.getByRole('listitem', { name: 'Step 1' }))

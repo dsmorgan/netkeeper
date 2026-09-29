@@ -36,6 +36,11 @@ import { CONDITION_LABELS, MODE_LABELS } from './format'
 
 const MAX_STEPS = 10
 
+const MAILBOX_BLOCKED: Record<string, string> = {
+  reauth_required: 'needs reauth',
+  disabled: 'disabled',
+}
+
 interface StepDraft {
   key: number
   templateId: number | null
@@ -169,14 +174,16 @@ export function CampaignBuilderPage() {
                 {mailboxes.isPending ? 'Loading mailboxes…' : 'No mailbox (LinkedIn steps only)'}
               </option>
               {connected.map((m) => (
-                <option key={m.id} value={m.id}>
+                // Only an `ok` mailbox can send; the server refuses the others too.
+                <option key={m.id} value={m.id} disabled={m.status !== 'ok'}>
                   {m.email}
+                  {m.status === 'ok' ? '' : ` (${MAILBOX_BLOCKED[m.status]})`}
                 </option>
               ))}
             </Select>
-            {mailboxes.isSuccess && connected.length === 0 && (
+            {mailboxes.isSuccess && !connected.some((m) => m.status === 'ok') && (
               <p className="text-sm text-muted-foreground">
-                No mailbox is connected. Connect Gmail in Settings to use email steps.
+                No mailbox can send. Connect or reauthorize Gmail in Settings to use email steps.
               </p>
             )}
           </div>
