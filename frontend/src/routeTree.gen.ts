@@ -10,7 +10,6 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as CampaignsRouteImport } from './routes/campaigns'
 import { Route as ExportsRouteImport } from './routes/exports'
 import { Route as ImportsRouteImport } from './routes/imports'
 import { Route as InboxRouteImport } from './routes/inbox'
@@ -19,6 +18,9 @@ import { Route as ListsRouteImport } from './routes/lists'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as TemplatesRouteImport } from './routes/templates'
 import { Route as TriageRouteImport } from './routes/triage'
+import { Route as CampaignsIndexRouteImport } from './routes/campaigns.index'
+import { Route as CampaignsCampaignIdRouteImport } from './routes/campaigns.$campaignId'
+import { Route as CampaignsNewRouteImport } from './routes/campaigns.new'
 import { Route as ContactsIndexRouteImport } from './routes/contacts.index'
 import { Route as ContactsContactIdRouteImport } from './routes/contacts.$contactId'
 import { Route as ImportsIndexRouteImport } from './routes/imports.index'
@@ -28,11 +30,6 @@ import { Route as ImportsRunsRunIdRouteImport } from './routes/imports.runs.$run
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CampaignsRoute = CampaignsRouteImport.update({
-  id: '/campaigns',
-  path: '/campaigns',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ExportsRoute = ExportsRouteImport.update({
@@ -75,6 +72,21 @@ const TriageRoute = TriageRouteImport.update({
   path: '/triage',
   getParentRoute: () => rootRouteImport,
 } as any)
+const CampaignsIndexRoute = CampaignsIndexRouteImport.update({
+  id: '/campaigns/',
+  path: '/campaigns/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CampaignsCampaignIdRoute = CampaignsCampaignIdRouteImport.update({
+  id: '/campaigns/$campaignId',
+  path: '/campaigns/$campaignId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CampaignsNewRoute = CampaignsNewRouteImport.update({
+  id: '/campaigns/new',
+  path: '/campaigns/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ContactsIndexRoute = ContactsIndexRouteImport.update({
   id: '/contacts/',
   path: '/contacts/',
@@ -103,7 +115,6 @@ const ImportsRunsRunIdRoute = ImportsRunsRunIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/campaigns': typeof CampaignsRoute
   '/exports': typeof ExportsRoute
   '/imports': typeof ImportsRouteWithChildren
   '/inbox': typeof InboxRoute
@@ -112,7 +123,10 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRoute
   '/templates': typeof TemplatesRoute
   '/triage': typeof TriageRoute
+  '/campaigns/$campaignId': typeof CampaignsCampaignIdRoute
+  '/campaigns/new': typeof CampaignsNewRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
+  '/campaigns/': typeof CampaignsIndexRoute
   '/contacts/': typeof ContactsIndexRoute
   '/imports/': typeof ImportsIndexRoute
   '/imports/runs/$runId': typeof ImportsRunsRunIdRoute
@@ -120,7 +134,6 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/campaigns': typeof CampaignsRoute
   '/exports': typeof ExportsRoute
   '/inbox': typeof InboxRoute
   '/linkedin': typeof LinkedinRoute
@@ -128,7 +141,10 @@ export interface FileRoutesByTo {
   '/settings': typeof SettingsRoute
   '/templates': typeof TemplatesRoute
   '/triage': typeof TriageRoute
+  '/campaigns/$campaignId': typeof CampaignsCampaignIdRoute
+  '/campaigns/new': typeof CampaignsNewRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
+  '/campaigns': typeof CampaignsIndexRoute
   '/contacts': typeof ContactsIndexRoute
   '/imports': typeof ImportsIndexRoute
   '/imports/runs/$runId': typeof ImportsRunsRunIdRoute
@@ -137,7 +153,6 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/campaigns': typeof CampaignsRoute
   '/exports': typeof ExportsRoute
   '/imports': typeof ImportsRouteWithChildren
   '/inbox': typeof InboxRoute
@@ -146,7 +161,10 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRoute
   '/templates': typeof TemplatesRoute
   '/triage': typeof TriageRoute
+  '/campaigns/$campaignId': typeof CampaignsCampaignIdRoute
+  '/campaigns/new': typeof CampaignsNewRoute
   '/contacts/$contactId': typeof ContactsContactIdRoute
+  '/campaigns/': typeof CampaignsIndexRoute
   '/contacts/': typeof ContactsIndexRoute
   '/imports/': typeof ImportsIndexRoute
   '/imports/runs/$runId': typeof ImportsRunsRunIdRoute
@@ -156,7 +174,6 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/campaigns'
     | '/exports'
     | '/imports'
     | '/inbox'
@@ -165,7 +182,10 @@ export interface FileRouteTypes {
     | '/settings'
     | '/templates'
     | '/triage'
+    | '/campaigns/$campaignId'
+    | '/campaigns/new'
     | '/contacts/$contactId'
+    | '/campaigns/'
     | '/contacts/'
     | '/imports/'
     | '/imports/runs/$runId'
@@ -173,7 +193,6 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/campaigns'
     | '/exports'
     | '/inbox'
     | '/linkedin'
@@ -181,7 +200,10 @@ export interface FileRouteTypes {
     | '/settings'
     | '/templates'
     | '/triage'
+    | '/campaigns/$campaignId'
+    | '/campaigns/new'
     | '/contacts/$contactId'
+    | '/campaigns'
     | '/contacts'
     | '/imports'
     | '/imports/runs/$runId'
@@ -189,7 +211,6 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
-    | '/campaigns'
     | '/exports'
     | '/imports'
     | '/inbox'
@@ -198,7 +219,10 @@ export interface FileRouteTypes {
     | '/settings'
     | '/templates'
     | '/triage'
+    | '/campaigns/$campaignId'
+    | '/campaigns/new'
     | '/contacts/$contactId'
+    | '/campaigns/'
     | '/contacts/'
     | '/imports/'
     | '/imports/runs/$runId'
@@ -207,7 +231,6 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  CampaignsRoute: typeof CampaignsRoute
   ExportsRoute: typeof ExportsRoute
   ImportsRoute: typeof ImportsRouteWithChildren
   InboxRoute: typeof InboxRoute
@@ -216,7 +239,10 @@ export interface RootRouteChildren {
   SettingsRoute: typeof SettingsRoute
   TemplatesRoute: typeof TemplatesRoute
   TriageRoute: typeof TriageRoute
+  CampaignsCampaignIdRoute: typeof CampaignsCampaignIdRoute
+  CampaignsNewRoute: typeof CampaignsNewRoute
   ContactsContactIdRoute: typeof ContactsContactIdRoute
+  CampaignsIndexRoute: typeof CampaignsIndexRoute
   ContactsIndexRoute: typeof ContactsIndexRoute
 }
 
@@ -227,13 +253,6 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/campaigns': {
-      id: '/campaigns'
-      path: '/campaigns'
-      fullPath: '/campaigns'
-      preLoaderRoute: typeof CampaignsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/exports': {
@@ -292,6 +311,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TriageRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/campaigns/': {
+      id: '/campaigns/'
+      path: '/campaigns'
+      fullPath: '/campaigns/'
+      preLoaderRoute: typeof CampaignsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/campaigns/$campaignId': {
+      id: '/campaigns/$campaignId'
+      path: '/campaigns/$campaignId'
+      fullPath: '/campaigns/$campaignId'
+      preLoaderRoute: typeof CampaignsCampaignIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/campaigns/new': {
+      id: '/campaigns/new'
+      path: '/campaigns/new'
+      fullPath: '/campaigns/new'
+      preLoaderRoute: typeof CampaignsNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/contacts/': {
       id: '/contacts/'
       path: '/contacts'
@@ -347,7 +387,6 @@ const ImportsRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  CampaignsRoute: CampaignsRoute,
   ExportsRoute: ExportsRoute,
   ImportsRoute: ImportsRouteWithChildren,
   InboxRoute: InboxRoute,
@@ -356,7 +395,10 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsRoute: SettingsRoute,
   TemplatesRoute: TemplatesRoute,
   TriageRoute: TriageRoute,
+  CampaignsCampaignIdRoute: CampaignsCampaignIdRoute,
+  CampaignsNewRoute: CampaignsNewRoute,
   ContactsContactIdRoute: ContactsContactIdRoute,
+  CampaignsIndexRoute: CampaignsIndexRoute,
   ContactsIndexRoute: ContactsIndexRoute,
 }
 export const routeTree = rootRouteImport
