@@ -222,6 +222,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/campaigns/{campaign_id}/enrollments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Enrollments
+         * @description One campaign's enrollments, oldest first: who, their status, their next fire.
+         *     ``q`` finds one by name or address, as the review screen's search does.
+         */
+        get: operations["list_campaign_enrollments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/campaigns/{campaign_id}/pause": {
         parameters: {
             query?: never;
@@ -2877,6 +2898,8 @@ export interface components {
             mailbox_id: number | null;
             /** Name */
             name: string;
+            /** Next Action At */
+            next_action_at?: string | null;
             status: components["schemas"]["CampaignStatus"];
             /** Steps */
             steps: number;
@@ -3537,6 +3560,33 @@ export interface components {
              * @enum {string}
              */
             op: "enrolled_in";
+        };
+        /** EnrollmentOut */
+        EnrollmentOut: {
+            /** Contact Id */
+            contact_id: number;
+            /** Contact Name */
+            contact_name: string;
+            /** Current Step */
+            current_step: number | null;
+            /** Email */
+            email: string | null;
+            /** Exit Reason */
+            exit_reason: string | null;
+            /** Id */
+            id: number;
+            /** Next Action At */
+            next_action_at: string | null;
+            /** Replied At */
+            replied_at: string | null;
+            status: components["schemas"]["EnrollmentStatus"];
+        };
+        /** EnrollmentPageOut */
+        EnrollmentPageOut: {
+            /** Items */
+            items: components["schemas"]["EnrollmentOut"][];
+            /** Total */
+            total: number;
         };
         /** EnrollmentPreviewOut */
         EnrollmentPreviewOut: {
@@ -5099,6 +5149,8 @@ export interface components {
             delay_days: number;
             /** Fired */
             fired: number;
+            /** Id */
+            id: number;
             mode: components["schemas"]["StepMode"];
             /** Position */
             position: number;
@@ -6343,6 +6395,52 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    list_campaign_enrollments: {
+        parameters: {
+            query?: {
+                /** @description Part of the contact's name or an address, any case. */
+                q?: string;
+                status?: components["schemas"]["EnrollmentStatus"] | null;
+                /** @description Enrollments per page. */
+                limit?: number;
+                /** @description Enrollments to skip. */
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrollmentPageOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

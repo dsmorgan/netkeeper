@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import func, true
+from sqlalchemy import func, or_, true
 from sqlalchemy.orm import Session
 
 from netkeeper.campaigns import templates as template_service
@@ -42,9 +42,12 @@ from netkeeper.models import (
     Campaign,
     CampaignStatus,
     CampaignStep,
+    Contact,
+    ContactEmail,
     Enrollment,
     EnrollmentStatus,
     Mailbox,
+    MailboxStatus,
     Message,
     MessageDirection,
     MessageStatus,
@@ -225,6 +228,9 @@ def create_campaign(
     if taken is not None:
         raise CampaignConflict(f"a campaign named {cleaned!r} already exists")
     mailbox = None if mailbox_id is None else _mailbox(session, user, mailbox_id)
+    if mailbox is not None and mailbox.status is not MailboxStatus.OK:
+        # A draft on a mailbox that cannot send would only fail at review or at the tick.
+        raise CampaignConflict(f"{mailbox.email} is {mailbox.status}; reconnect it first")
     built: list[CampaignStep] = []
     for position, spec in enumerate(steps, start=1):
         earlier_email = any(s.channel is TemplateChannel.EMAIL for s in built)
@@ -379,6 +385,8 @@ class CampaignSummary:
     campaign: Campaign
     steps: int
     enrollments: Mapping[EnrollmentStatus, int]
+    next_action_at: datetime | None = None
+    """The soonest due time of an active enrollment, while the campaign is active."""
 
 
 def list_campaigns(session: Session, user: User) -> list[CampaignSummary]:
@@ -395,7 +403,20 @@ def list_campaigns(session: Session, user: User) -> list[CampaignSummary]:
             .group_by(CampaignStep.campaign_id)
         ).tuples():
             steps[campaign_id] = n
-    return [CampaignSummary(c, steps[c.id], dict(counts[c.id])) for c in rows]
+    active = [c.id for c in rows if c.status is CampaignStatus.ACTIVE]
+    next_at: dict[int, datetime | None] = {}
+    if active:
+        for campaign_id, due in session.execute(
+            scoped(user, Enrollment)
+            .with_only_columns(Enrollment.campaign_id, func.min(Enrollment.next_action_at))
+            .where(
+                Enrollment.campaign_id.in_(active),
+                Enrollment.status == EnrollmentStatus.ACTIVE,
+            )
+            .group_by(Enrollment.campaign_id)
+        ).tuples():
+            next_at[campaign_id] = due
+    return [CampaignSummary(c, steps[c.id], dict(counts[c.id]), next_at.get(c.id)) for c in rows]
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,6 +508,95 @@ def campaign_status(
         enrollments=dict(_enrollment_counts(session, user, [campaign_id])[campaign_id]),
         next_action_at=next_at,
         missing=gaps,
+    )
+
+
+ENROLLMENT_SEARCH_MAX: Final = 200
+"""The longest search text :func:`list_enrollments` takes."""
+
+
+@dataclass(frozen=True, slots=True)
+class EnrollmentRow:
+    enrollment: Enrollment
+    contact_name: str
+    email: str | None
+    """The contact's primary address, for finding someone by it."""
+
+
+@dataclass(frozen=True, slots=True)
+class EnrollmentPage:
+    items: tuple[EnrollmentRow, ...]
+    total: int
+
+
+def list_enrollments(
+    session: Session,
+    user: User,
+    campaign_id: int,
+    *,
+    q: str = "",
+    status: EnrollmentStatus | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> EnrollmentPage:
+    """One campaign's enrollments, oldest first, with each contact's name.
+
+    ``q`` matches the contact's first, preferred or last name, or an address, as a
+    case-insensitive substring; ``status`` keeps one status. The review screen finds
+    an enrollment to preview with it, and the campaign page lists them (P3-11)."""
+    get_campaign(session, user, campaign_id)
+    stmt = (
+        scoped(user, Enrollment)
+        .join(Contact, Contact.id == Enrollment.contact_id)
+        .where(Enrollment.campaign_id == campaign_id, Contact.user_id == user.id)
+    )
+    if status is not None:
+        stmt = stmt.where(Enrollment.status == status)
+    text = q.strip().lower()[:ENROLLMENT_SEARCH_MAX]
+    if text:
+        # Bound, so never injection; escaped so `%` or `_` in a search means itself.
+        literal = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{literal}%"
+        by_email = (
+            scoped(user, ContactEmail)
+            .with_only_columns(ContactEmail.contact_id)
+            .where(func.lower(ContactEmail.email).like(pattern, escape="\\"))
+        )
+        stmt = stmt.where(
+            or_(
+                func.lower(Contact.first_name).like(pattern, escape="\\"),
+                func.lower(Contact.preferred_name).like(pattern, escape="\\"),
+                func.lower(Contact.last_name).like(pattern, escape="\\"),
+                Contact.id.in_(by_email),
+            )
+        )
+    total = session.scalar(stmt.with_only_columns(func.count(Enrollment.id))) or 0
+    rows = session.execute(
+        stmt.with_only_columns(Enrollment, Contact)
+        .order_by(Enrollment.id)
+        .limit(limit)
+        .offset(offset)
+    ).tuples()
+    pairs = list(rows)
+    emails: dict[int, str] = {}
+    if pairs:
+        for contact_id, email in session.execute(
+            scoped(user, ContactEmail)
+            .with_only_columns(ContactEmail.contact_id, ContactEmail.email)
+            .where(ContactEmail.contact_id.in_([c.id for _, c in pairs]))
+            .order_by(ContactEmail.is_primary.desc(), ContactEmail.id)
+        ).tuples():
+            emails.setdefault(contact_id, email)
+    return EnrollmentPage(
+        items=tuple(
+            EnrollmentRow(
+                enrollment,
+                f"{contact.preferred_name or contact.first_name} {contact.last_name}".strip(),
+                emails.get(contact.id),
+            )
+            for enrollment, contact in pairs
+        ),
+        total=total,
     )
 
 

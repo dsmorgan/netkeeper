@@ -1298,6 +1298,18 @@
             "title": "Name",
             "type": "string"
           },
+          "next_action_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Action At"
+          },
           "status": {
             "$ref": "#/components/schemas/CampaignStatus"
           },
@@ -3309,6 +3321,116 @@
           "campaign_id"
         ],
         "title": "EnrolledIn",
+        "type": "object"
+      },
+      "EnrollmentOut": {
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "contact_name": {
+            "title": "Contact Name",
+            "type": "string"
+          },
+          "current_step": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Step"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "exit_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Reason"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "next_action_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Action At"
+          },
+          "replied_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replied At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/EnrollmentStatus"
+          }
+        },
+        "required": [
+          "id",
+          "contact_id",
+          "contact_name",
+          "email",
+          "status",
+          "current_step",
+          "next_action_at",
+          "exit_reason",
+          "replied_at"
+        ],
+        "title": "EnrollmentOut",
+        "type": "object"
+      },
+      "EnrollmentPageOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EnrollmentOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "EnrollmentPageOut",
         "type": "object"
       },
       "EnrollmentPreviewOut": {
@@ -8140,6 +8262,10 @@
             "title": "Fired",
             "type": "integer"
           },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
           "mode": {
             "$ref": "#/components/schemas/StepMode"
           },
@@ -8169,6 +8295,7 @@
           }
         },
         "required": [
+          "id",
           "position",
           "channel",
           "mode",
@@ -10744,6 +10871,108 @@
           }
         },
         "summary": "Enroll",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/enrollments": {
+      "get": {
+        "description": "One campaign's enrollments, oldest first: who, their status, their next fire.\n``q`` finds one by name or address, as the review screen's search does.",
+        "operationId": "list_campaign_enrollments",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Part of the contact's name or an address, any case.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "description": "Part of the contact's name or an address, any case.",
+              "maxLength": 200,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/EnrollmentStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "description": "Enrollments per page.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Enrollments per page.",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Enrollments to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Enrollments to skip.",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollmentPageOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Enrollments",
         "tags": [
           "campaigns"
         ]

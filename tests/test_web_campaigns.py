@@ -6,6 +6,7 @@ that nothing under ``/campaigns`` itself activates a campaign.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import factories
@@ -24,6 +25,8 @@ from netkeeper.models import (
     Enrollment,
     EnrollmentStatus,
     ListKind,
+    Mailbox,
+    MailboxStatus,
     Template,
     TemplateChannel,
     User,
@@ -350,3 +353,139 @@ async def test_enroll_refuses_a_list_and_a_filter_together(
     status = (await client.get(base)).json()
     assert (status["source_list_id"], status["filter"]) == (seed["list_id"], None)
     assert _pending_contacts(running_app, created["id"]) == []
+
+
+async def test_enrollments_list_searches_and_pages(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    seed = _seed(running_app)
+    created = await _create(client, seed)
+    base = f"/api/v1/campaigns/{created['id']}"
+    assert (await client.post(f"{base}/enroll", json={}, headers=CSRF)).status_code == 200
+
+    listed = (await client.get(f"{base}/enrollments")).json()
+
+    assert listed["total"] == 2
+    assert [(e["contact_id"], e["status"], e["email"]) for e in listed["items"]] == [
+        (seed["contacts"][0], "pending", "p0@contacts.example"),
+        (seed["contacts"][1], "pending", "p1@contacts.example"),
+    ]
+    found = (await client.get(f"{base}/enrollments", params={"q": "P1@CONTACTS"})).json()
+    assert [e["contact_id"] for e in found["items"]] == [seed["contacts"][1]]
+    assert found["total"] == 1
+    paged = (await client.get(f"{base}/enrollments", params={"limit": 1, "offset": 1})).json()
+    assert (paged["total"], len(paged["items"])) == (2, 1)
+    none = (await client.get(f"{base}/enrollments", params={"status": "active"})).json()
+    assert none == {"items": [], "total": 0}
+    assert (await client.get("/api/v1/campaigns/999/enrollments")).status_code == 404
+
+
+async def test_steps_carry_the_id_test_send_takes(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    seed = _seed(running_app)
+    created = await _create(client, seed)
+
+    ids = [s["id"] for s in created["steps"]]
+
+    assert len(set(ids)) == 3
+    assert all(isinstance(i, int) for i in ids)
+
+
+async def test_list_answers_the_next_fire_of_an_active_campaign(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        campaign = factories.make_campaign(session, user)  # active
+        for hour in (15, 9):
+            factories.make_enrollment(
+                session,
+                campaign,
+                factories.make_contact(session, user),
+                next_action_at=datetime(2030, 1, 2, hour, tzinfo=UTC),
+            )
+        campaign_id = campaign.id
+
+    listed = {c["id"]: c for c in (await client.get("/api/v1/campaigns")).json()}
+
+    assert listed[campaign_id]["next_action_at"] == "2030-01-02T09:00:00Z"
+    await client.post(f"/api/v1/campaigns/{campaign_id}/pause", headers=CSRF)
+    listed = {c["id"]: c for c in (await client.get("/api/v1/campaigns")).json()}
+    assert listed[campaign_id]["next_action_at"] is None
+
+
+async def test_create_refuses_a_mailbox_that_cannot_send(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    seed = _seed(running_app)
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    for status in (MailboxStatus.REAUTH_REQUIRED, MailboxStatus.DISABLED):
+        with session_scope(factory, write=True) as session:
+            mailbox = session.scalars(
+                scoped(_local(session), Mailbox).where(Mailbox.id == seed["mailbox_id"])
+            ).one()
+            mailbox.status = status
+
+        response = await client.post(
+            "/api/v1/campaigns", json=_body(seed, name=f"On {status}"), headers=CSRF
+        )
+
+        assert response.status_code == 409, response.text
+        assert str(status) in response.json()["detail"]
+    assert (await client.get("/api/v1/campaigns")).json() == []
+
+
+async def test_enrollment_search_treats_wildcards_literally(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    seed = _seed(running_app)
+    created = await _create(client, seed)
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        odd = [
+            factories.make_contact(session, user, last_name=name, emails=[f"w{n}@odd.example"]).id
+            for n, name in enumerate(("100% Kettle", "Under_score", "Back\\slash"))
+        ]
+    base = f"/api/v1/campaigns/{created['id']}"
+    enrolled = await client.post(f"{base}/enroll", json={"contact_ids": odd}, headers=CSRF)
+    assert enrolled.json()["pending"] == 5
+
+    async def found(q: str) -> list[int]:
+        body = (await client.get(f"{base}/enrollments", params={"q": q})).json()
+        return [e["contact_id"] for e in body["items"]]
+
+    assert await found("%") == [odd[0]]
+    assert await found("_") == [odd[1]]
+    assert await found("\\") == [odd[2]]
+    assert await found("0%") == [odd[0]]
+
+
+async def test_the_next_send_counts_only_active_enrollments(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        campaign = factories.make_campaign(session, user)  # active
+        factories.make_enrollment(
+            session,
+            campaign,
+            factories.make_contact(session, user),
+            next_action_at=datetime(2030, 1, 2, 15, tzinfo=UTC),
+        )
+        for hour, status in ((6, EnrollmentStatus.PAUSED), (7, EnrollmentStatus.REPLIED)):
+            factories.make_enrollment(
+                session,
+                campaign,
+                factories.make_contact(session, user),
+                status=status,
+                next_action_at=datetime(2030, 1, 2, hour, tzinfo=UTC),
+            )
+        campaign_id = campaign.id
+
+    listed = {c["id"]: c for c in (await client.get("/api/v1/campaigns")).json()}
+
+    assert listed[campaign_id]["next_action_at"] == "2030-01-02T15:00:00Z"

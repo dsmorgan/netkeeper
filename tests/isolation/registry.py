@@ -19,6 +19,7 @@ from netkeeper.crm import tags as tag_service
 from netkeeper.crm.filters import parse_filter
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.models import (
+    Campaign,
     Contact,
     ContactList,
     ContactSnapshot,
@@ -34,6 +35,7 @@ from netkeeper.models import (
     TemplateChannel,
     User,
 )
+from netkeeper.models.base import utcnow
 from netkeeper.scoping import scoped
 from netkeeper.services import campaigns as campaign_service
 from netkeeper.services import enrich_plan, runs
@@ -428,6 +430,26 @@ def _seed_changed_jobs(session: Session, user: User) -> int:
     return 1
 
 
+def _seed_enrollments(session: Session, user: User) -> int:
+    """One draft campaign of ``user`` with two contacts enrolled (P3-11)."""
+    _seed_campaigns(session, user)
+    campaign = session.scalars(scoped(user, Campaign).order_by(Campaign.id)).first()
+    assert campaign is not None
+    contacts = [
+        factories.make_contact(session, user, emails=[f"enr{n}-{user.id}@example.test"]).id
+        for n in range(2)
+    ]
+    campaign_service.enroll(session, user, campaign.id, now=utcnow(), contact_ids=contacts)
+    return 2
+
+
+def _own_campaign(session: Session, user: User) -> dict[str, str]:
+    """``campaign_id`` of the user's first campaign; the placeholder points nowhere when
+    they have none, which the endpoint answers ``404``."""
+    campaign = session.scalars(scoped(user, Campaign).order_by(Campaign.id)).first()
+    return {"campaign_id": "0" if campaign is None else str(campaign.id)}
+
+
 REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/contacts", seed_contacts, paged_count),
     ListEndpoint(
@@ -494,6 +516,12 @@ REGISTRY: list[ListEndpoint] = [
     ListEndpoint(f"{API_PREFIX}/linkedin/pins", _seed_pins, array_count),
     ListEndpoint(f"{API_PREFIX}/mailboxes", _seed_mailboxes, array_count),
     ListEndpoint(f"{API_PREFIX}/campaigns", _seed_campaigns, array_count),
+    ListEndpoint(
+        f"{API_PREFIX}/campaigns/{{campaign_id}}/enrollments",
+        _seed_enrollments,
+        paged_count,
+        path_params=_own_campaign,
+    ),
     ListEndpoint(f"{API_PREFIX}/dashboard/next-fires", _seed_next_fires, paged_count),
     ListEndpoint(f"{API_PREFIX}/dashboard/changed-jobs", _seed_changed_jobs, paged_count),
 ]

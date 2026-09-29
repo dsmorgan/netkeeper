@@ -30,11 +30,11 @@ describe('app shell', () => {
 
   it('marks the current section active and shows its placeholder', async () => {
     // A route that is still a placeholder. Every phase-1 and phase-2 screen has
-    // landed, and /templates in P3-10; move it on again when /campaigns is real.
-    await renderApp('/campaigns')
+    // landed, /templates in P3-10 and /campaigns in P3-11a; /inbox is the last.
+    await renderApp('/inbox')
 
     const nav = screen.getByRole('navigation', { name: 'Primary' })
-    expect(within(nav).getByRole('link', { name: 'Campaigns' })).toHaveAttribute(
+    expect(within(nav).getByRole('link', { name: 'Inbox' })).toHaveAttribute(
       'data-status',
       'active',
     )
@@ -48,12 +48,9 @@ describe('app shell', () => {
   it('renders every placeholder route with its phase', async () => {
     // A route drops off this list when its own page lands: /contacts in P1-12,
     // /triage in P1-14, /lists and /exports in P1-15, /imports in P1-13,
-    // /linkedin in P2-12, /templates in P3-10. Each lane removes its own entry, so keep every
+    // /linkedin in P2-12, /templates in P3-10, /campaigns in P3-11a. Each lane removes its own entry, so keep every
     // deletion when this conflicts.
-    const phases: Array<[string, number]> = [
-      ['/campaigns', 3],
-      ['/inbox', 3],
-    ]
+    const phases: Array<[string, number]> = [['/inbox', 3]]
     for (const [path, phase] of phases) {
       const { unmount } = await renderApp(path)
       expect(await screen.findByText(`This page arrives in phase ${phase}.`)).toBeInTheDocument()
