@@ -68,6 +68,7 @@ from netkeeper.services.mailboxes import MailboxNotReady
 EMAIL = TemplateChannel.EMAIL
 WEEK = timedelta(days=7)
 LATER = engine_module.RECONCILE_AFTER + timedelta(minutes=1)
+NO_REPLY_POLL = timedelta(days=3650)
 
 
 @dataclass
@@ -244,6 +245,10 @@ def make_mail(
         opener=opener or (lambda user_id, mailbox_id: gmail),
         clock=clock,
         drafts_every=timedelta(0),
+        # The reply poll (P3-08) runs once, at the first tick, with nothing sent to watch,
+        # and not again: its Gmail calls stay out of these tests' scripted failures.
+        # tests/test_campaign_replies.py covers it.
+        replies_every=NO_REPLY_POLL,
     )
     return Mail(factory, user, mailbox, campaign, gmail, clock, sender)
 

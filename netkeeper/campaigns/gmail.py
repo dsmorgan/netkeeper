@@ -94,6 +94,11 @@ METADATA_HEADERS: Final = (
     "In-Reply-To",
     "References",
     "Auto-Submitted",
+    # Reply detection (P3-08): an auto-reply is not a reply, and a notice that names a
+    # failed recipient is a hard bounce.
+    "X-Autoreply",
+    "Precedence",
+    "X-Failed-Recipients",
 )
 
 #: Longest purpose a call may log.
@@ -227,10 +232,13 @@ class Draft:
 @dataclass(frozen=True, slots=True)
 class History:
     """What :meth:`Gmail.history` found: messages added since the start, in history
-    order, and the ``history_id`` to start from next time."""
+    order, and the ``history_id`` to start from next time. ``record_ids`` is, for each
+    of ``messages_added``, the id of the history record that added it, so a reader that
+    stops part way can start again just before the first message it did not finish."""
 
     history_id: int
     messages_added: tuple[MessageRef, ...]
+    record_ids: tuple[int, ...] = ()
 
 
 # --- the interface -----------------------------------------------------------------
@@ -595,6 +603,7 @@ class GmailClient:
         self, start_history_id: int, *, label_id: str | None = None, purpose: str
     ) -> History:
         added: list[MessageRef] = []
+        record_ids: list[int] = []
         seen: set[str] = set()
         token: str | None = None
         latest = start_history_id
@@ -614,9 +623,12 @@ class GmailClient:
                     if ref.id not in seen:
                         seen.add(ref.id)
                         added.append(ref)
+                        record_ids.append(int(record.get("id", latest)))
             token = body.get("nextPageToken")
             if not token:
-                return History(history_id=latest, messages_added=tuple(added))
+                return History(
+                    history_id=latest, messages_added=tuple(added), record_ids=tuple(record_ids)
+                )
 
     # --- plumbing --------------------------------------------------------------------
 

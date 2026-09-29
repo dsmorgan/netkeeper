@@ -61,6 +61,10 @@ Each tick, before anything is chosen, :meth:`GmailSender.reconcile` looks up wha
   thread and then sends is sent outside the thread the poll reads, so it reads
   as ``discarded``. That is the conservative direction (nothing more is sent);
   confirm it at the first live draft run (#277).
+- **Replies and bounces** (P3-08; every ``replies_every``, per user, last):
+  :func:`netkeeper.services.campaign_replies.poll_replies`. A ``same_thread``
+  follow-up whose thread holds a message from the other side since the first
+  step sends nothing (``not_sent``) and asks for a poll on the next tick.
 
 Arming (#277)
 -------------
@@ -119,6 +123,7 @@ from netkeeper.models import Mailbox, MailboxArm, MessageStatus, StepMode, Templ
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped
 from netkeeper.services import campaign_engine as engine
+from netkeeper.services import campaign_replies as replies
 from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.campaign_engine import Firing, SendOutcome, SendResult, Tracked
 from netkeeper.services.mailboxes import MailboxNotFound, MailboxNotReady, open_gmail
@@ -212,9 +217,10 @@ class GmailSender:
         opener: GmailOpener | None = None,
         clock: Callable[[], datetime] = utcnow,
         drafts_every: timedelta = DRAFTS_POLL_EVERY,
+        replies_every: timedelta = replies.REPLY_POLL_EVERY,
     ) -> None:
-        if drafts_every < timedelta(0):
-            raise ValueError("the drafts poll interval cannot be negative")
+        if drafts_every < timedelta(0) or replies_every < timedelta(0):
+            raise ValueError("a poll interval cannot be negative")
         self._factory = factory
         self._open: GmailOpener = opener or (
             lambda user_id, mailbox_id: open_gmail(factory, user_id, mailbox_id)
@@ -222,6 +228,8 @@ class GmailSender:
         self._clock = clock
         self._drafts_every = drafts_every
         self._drafts_polled: dict[int, datetime] = {}
+        self._replies_every = replies_every
+        self._replies_polled: dict[int, datetime] = {}
         self._label_ids: dict[tuple[int, str], str] = {}
 
     # --- arming (#277) ----------------------------------------------------------------
@@ -243,13 +251,34 @@ class GmailSender:
             return "the mailbox is armed for drafts only; nothing was sent"
         return None
 
+    def _replies_stale(self, firing: Firing) -> str | None:
+        """Why a follow-up that starts a new conversation must wait: the reply poll has not
+        caught up within :data:`~netkeeper.services.campaign_replies.STALE_AFTER_POLLS`
+        intervals (#296 review). A ``same_thread`` follow-up reads its thread before it
+        goes, so it needs no poll; a first step has nothing to be replied to yet."""
+        if firing.step_position <= 1 or firing.mailbox_id is None:
+            return None
+        if firing.same_thread and firing.thread_id is not None:
+            return None
+        with session_scope(self._factory) as session:
+            user = session.get(User, firing.user_id)
+            mailbox = (
+                None if user is None else get_scoped(session, user, Mailbox, firing.mailbox_id)
+            )
+            polled = None if mailbox is None else mailbox.replies_polled_at
+        limit = replies.STALE_AFTER_POLLS * self._replies_every
+        if polled is not None and self._clock() - polled <= limit:
+            return None
+        self._replies_polled.pop(firing.user_id, None)  # poll on the next tick
+        return "replies have not been polled recently; nothing was sent"
+
     # --- sending ---------------------------------------------------------------------
 
     def send(self, firing: Firing) -> SendResult:
         """Send or draft one firing. Never raises for a Gmail failure."""
         verb = "draft" if firing.mode is StepMode.DRAFT else "send"
         purpose = f"{verb} step {firing.step_position} for enrollment {firing.enrollment_id}"
-        refused = self._disarmed_for(firing)
+        refused = self._disarmed_for(firing) or self._replies_stale(firing)
         if refused is not None:
             return _not_sent(firing, refused)
         try:
@@ -353,6 +382,19 @@ class GmailSender:
         ]
         if not cited:
             raise _NotSent("the earlier step is not in its Gmail thread; nothing was sent")
+        if any(
+            not m.label_ids & {_SENT, _DRAFT}
+            and m.internal_date >= earlier[0].internal_date
+            and not _automatic(m)
+            for m in thread.messages
+        ):
+            # A reply (or a bounce notice) landed after the claim's reply check (P3-08):
+            # nothing goes out, and the next tick's reply poll records it before the
+            # retry is claimed, so the claim ends the enrollment instead.
+            self._replies_polled.pop(firing.user_id, None)
+            raise _NotSent(
+                "a message from the other side is in the thread; nothing was sent", retry=True
+            )
         return _Threading(
             thread_id=thread.id,
             subject=reply_subject(earlier[0].header("Subject")),
@@ -471,6 +513,19 @@ class GmailSender:
                 [t for t in drafts if t.mailbox_id == mailbox_id],
                 verify=unverified[mailbox_id],
             )
+        last_replies = self._replies_polled.get(user_id)
+        if last_replies is None or now - last_replies >= self._replies_every:
+            self._replies_polled[user_id] = now
+            caught_up = replies.poll_replies(
+                factory, user_id, open_gmail=self._open, now=now, label=self._label_reply
+            )
+            if not caught_up:  # the rest waits for the next tick, not the next interval
+                self._replies_polled.pop(user_id, None)
+
+    def _label_reply(self, gmail: Gmail, mailbox_id: int, name: str, gmail_message_id: str) -> None:
+        purpose = f"label a reply in mailbox {mailbox_id}"
+        label_id = self._label_named(gmail, mailbox_id, name, purpose)
+        self._apply_label(gmail, gmail_message_id, label_id, purpose)
 
 
 class _Reconcile:
@@ -666,6 +721,14 @@ def _others_in_thread(
         log.info("the draft's thread could not be read (%s); nothing is known in it", exc.code)
         return ()
     return tuple(m.id for m in thread.messages if m.id != gmail_message_id)
+
+
+def _automatic(message: Message) -> bool:
+    """An out-of-office answer, or a mail system's notice that is not a hard bounce: neither
+    holds a follow-up (#296 review). A hard bounce does, until the poll records it."""
+    if replies.is_daemon(message):
+        return not replies.is_hard_bounce(message)
+    return replies.is_auto_reply(message)
 
 
 def _not_sent(firing: Firing, reason: str) -> SendResult:
