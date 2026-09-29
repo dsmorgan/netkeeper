@@ -621,6 +621,19 @@ def _end(
     log.info("enrollment %d is %s (%s)", enrollment.id, status, reason)
 
 
+def end_enrollment(
+    session: Session,
+    user: User,
+    enrollment: Enrollment,
+    status: EnrollmentStatus,
+    reason: str,
+) -> None:
+    """Detection's end of an enrollment (P3-08): ``replied``, ``bounced`` or ``opted_out``.
+    Changes no message, as :func:`_end` does not."""
+    _require_writer(session, "end_enrollment")
+    _end(session, user, enrollment, status, reason)
+
+
 def schedule_next(
     session: Session, user: User, enrollment_id: int, *, settings: Settings, now: datetime
 ) -> Enrollment:

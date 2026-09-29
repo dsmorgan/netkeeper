@@ -34,7 +34,7 @@ import enum
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import CheckConstraint, Integer, String, UniqueConstraint, text
+from sqlalchemy import BigInteger, CheckConstraint, Integer, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from netkeeper.models.base import Base, TimestampMixin, UserOwned, UTCDateTime, string_enum
@@ -117,6 +117,9 @@ class Mailbox(UserOwned, TimestampMixin, Base):
     send_armed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     armed_by: Mapped[str | None] = mapped_column(String(MAILBOX_ARMED_BY_MAX_LENGTH))
     message_id_verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # The reply poll's place in Gmail's history (P3-08; 0025): the ``historyId`` the
+    # next ``history.list`` starts from. NULL until the first poll sets a baseline.
+    history_id: Mapped[int | None] = mapped_column(BigInteger)
 
     @property
     def arm(self) -> MailboxArm | None:

@@ -23,6 +23,7 @@ import logging
 import pkgutil
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import timedelta
 from types import ModuleType
 
 from fastapi import APIRouter, FastAPI
@@ -128,7 +129,7 @@ def create_app(
                 sender = (
                     campaign_sender
                     if campaign_sender is not None
-                    else _gmail_sender(app.state.session_factory, gmail)
+                    else _gmail_sender(app.state.session_factory, gmail, resolved)
                 )
                 campaigns = CampaignEngine(app.state.session_factory, resolved, sender)
                 teardown.push_async_callback(campaigns.stop)
@@ -191,13 +192,17 @@ def _start(app: FastAPI, engine: Engine, settings: Settings) -> TaskRunner:
     return tasks
 
 
-def _gmail_sender(factory: sessionmaker[Session], endpoints: GoogleEndpoints | None) -> GmailSender:
-    """``serve``'s campaign sender: Gmail, on armed mailboxes only (#277)."""
+def _gmail_sender(
+    factory: sessionmaker[Session], endpoints: GoogleEndpoints | None, settings: Settings
+) -> GmailSender:
+    """``serve``'s campaign sender: Gmail, on armed mailboxes only (#277), polling for
+    replies every ``[campaigns] reply_poll_minutes`` (P3-08)."""
     return GmailSender(
         factory,
         opener=lambda user_id, mailbox_id: open_gmail(
             factory, user_id, mailbox_id, endpoints=endpoints
         ),
+        replies_every=timedelta(minutes=_poll_minutes(settings)),
     )
 
 

@@ -63,6 +63,7 @@ TEMPLATE_NAME_MAX_LENGTH = 200
 TEMPLATE_SUBJECT_MAX_LENGTH = 500
 CAMPAIGN_NAME_MAX_LENGTH = 200
 MESSAGE_SUBJECT_MAX_LENGTH = 1000
+MESSAGE_SNIPPET_MAX_LENGTH = 500
 
 
 class TemplateChannel(enum.StrEnum):
@@ -389,6 +390,9 @@ class Message(UserOwned, TimestampMixin, Base):
     # The text as rendered for this contact, stored so what was sent never depends on a
     # template that may have changed since (spec 11.1).
     body_rendered: Mapped[str | None] = mapped_column(Text)
+    # An inbound message's snippet, as Gmail gives it (P3-08; 0025): the reply poll
+    # stores the subject and this, never the body (spec 11.7). NULL for outbound.
+    snippet: Mapped[str | None] = mapped_column(String(MESSAGE_SNIPPET_MAX_LENGTH))
     scheduled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     gmail_message_id: Mapped[str | None] = mapped_column(String(200))

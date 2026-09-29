@@ -61,6 +61,7 @@ from netkeeper.models import (
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services.campaign_engine import (
     Firing,
+    Sender,
     SendOutcome,
     SendResult,
     run_tick,
@@ -119,11 +120,18 @@ def simulate_campaign(
     end: datetime,
     seed: int = 0,
     max_ticks: int = MAX_TICKS,
+    sender: Sender | None = None,
 ) -> CampaignSimulation:
-    """Tick every local user's campaigns from ``start`` until ``end`` or nothing is left to do."""
+    """Tick every local user's campaigns from ``start`` until ``end`` or nothing is left to do.
+
+    ``sender`` replaces the :class:`SimulatedSender`: a test passes a Gmail sender over
+    :class:`~netkeeper.campaigns.gmail_fake.FakeGmail` to replay replies too (P3-08). It
+    reads the virtual time from its ``reconcile``'s ``now``; ``firings`` lists only what
+    the default sender was handed.
+    """
     if start.tzinfo is None or end.tzinfo is None:
         raise ValueError("the simulation's times must be timezone-aware")
-    sender = SimulatedSender(random.Random(seed))  # noqa: S311 -- deterministic replay
+    simulated = SimulatedSender(random.Random(seed))  # noqa: S311 -- deterministic replay
     spacing = random.Random(seed + 1)  # noqa: S311 -- deterministic replay
     now = _next_minute(start)
     ticks = 0
@@ -131,9 +139,13 @@ def simulate_campaign(
         if ticks >= max_ticks:
             raise RuntimeError(f"the campaign schedule stopped moving after {ticks} ticks")
         ticks += 1
-        sender.now = now
+        simulated.now = now
         results = run_tick(
-            factory, settings=settings, sender=sender, clock=_frozen(now), rng=spacing
+            factory,
+            settings=settings,
+            sender=sender or simulated,
+            clock=_frozen(now),
+            rng=spacing,
         )
         if any(result.fired for result in results):
             now += timedelta(minutes=1)
@@ -142,7 +154,7 @@ def simulate_campaign(
         if not wakes:
             break
         now = _next_minute(max(min(wakes), now + timedelta(minutes=1)))
-    return CampaignSimulation(tuple(sender.firings), ticks, min(now, end))
+    return CampaignSimulation(tuple(simulated.firings), ticks, min(now, end))
 
 
 # --- a real campaign's schedule, replayed in a scratch database (P3-13) -------------
