@@ -4,6 +4,8 @@ export type ContactRow = components['schemas']['ContactRow']
 export type ContactDetail = components['schemas']['ContactDetail']
 export type ContactPage = components['schemas']['ContactPage']
 export type ContactPatch = components['schemas']['ContactPatch']
+export type ContactCreate = components['schemas']['ContactCreate']
+export type DuplicateContact = components['schemas']['DuplicateContact']
 export type ContactMet = components['schemas']['ContactMet']
 export type ContactSource = components['schemas']['ContactSource']
 /**

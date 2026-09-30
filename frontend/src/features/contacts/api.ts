@@ -15,12 +15,14 @@ import type {
   BulkAction,
   BulkCountOut,
   BulkSelection,
+  ContactCreate,
   ContactDetail,
   ContactMet,
   ContactPage,
   ContactPatch,
   ContactTagOut,
   ContactList,
+  DuplicateContact,
   FilterTree,
   ProvenanceField,
   SavedView,
@@ -202,6 +204,61 @@ export const tagsQuery = queryOptions({
   staleTime: 60_000,
   retry: false,
 })
+
+// --- adding a contact by hand (#303) ----------------------------------------
+
+/** What adding a contact came to: the new contact, or the one already there. */
+export type CreateContactResult =
+  { kind: 'created'; contact: ContactDetail } | { kind: 'duplicate'; duplicate: DuplicateContact }
+
+function isDuplicate(body: unknown): body is DuplicateContact {
+  return (
+    body !== null &&
+    typeof body === 'object' &&
+    'detail' in body &&
+    body.detail === 'duplicate' &&
+    'contact_id' in body &&
+    typeof body.contact_id === 'number'
+  )
+}
+
+/**
+ * Adds one contact, with the dedup and checks an import runs. Someone the email
+ * or the LinkedIn URL already finds (or the name and company, unless
+ * `allow_name_match`) comes back as `duplicate`, naming who is already there;
+ * any other refusal throws an {@link ApiFailure} whose body {@link fieldErrors} reads.
+ */
+export async function createContact(body: ContactCreate): Promise<CreateContactResult> {
+  const { data, error, response } = await api.POST('/api/v1/contacts', { body })
+  if (data !== undefined) return { kind: 'created', contact: data }
+  if (response.status === 409 && isDuplicate(error)) return { kind: 'duplicate', duplicate: error }
+  fail('add contact', response.status, error)
+}
+
+/**
+ * A `422`'s problems by the body field they name (`loc: ["body", field]`), the
+ * shape both a schema refusal and the service's own checks answer in. Problems
+ * that name no field are left out; the failure's message still carries them.
+ */
+export function fieldErrors(error: unknown): Record<string, string> {
+  if (!(error instanceof ApiFailure) || error.status !== 422) return {}
+  const { body } = error
+  if (body === null || typeof body !== 'object' || !('detail' in body)) return {}
+  const { detail } = body
+  if (!Array.isArray(detail)) return {}
+  const found: Record<string, string> = {}
+  for (const item of detail as unknown[]) {
+    if (item === null || typeof item !== 'object') continue
+    const loc = 'loc' in item ? item.loc : undefined
+    const msg = 'msg' in item ? item.msg : undefined
+    if (!Array.isArray(loc) || typeof msg !== 'string') continue
+    const field: unknown = loc[1]
+    if (loc[0] === 'body' && typeof field === 'string' && !(field in found)) {
+      found[field] = msg.replace(/^Value error, /, '')
+    }
+  }
+  return found
+}
 
 // --- writes on one contact --------------------------------------------------
 
