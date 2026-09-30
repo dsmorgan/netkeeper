@@ -41,6 +41,7 @@ from netkeeper.models import (
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped, unscoped
 from netkeeper.services import campaign_engine, campaign_review
+from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.campaign_guards import Reason, check_enrollment
 from netkeeper.services.campaign_sender import GmailSender
 
@@ -723,7 +724,7 @@ async def test_a_disarm_after_the_first_check_sends_and_drafts_nothing(
     arm: dict[str, Any],
 ) -> None:
     """The recheck just before the Gmail call: disarmed after the test was prepared, it
-    opens no Gmail client and records nothing."""
+    makes no Gmail call and records nothing."""
     s = _build(running_app, arm=arm)
     _change_arming_after_prepare(
         s, monkeypatch, {"armed_at": None, "send_armed_at": None, "armed_by": None}
@@ -733,7 +734,7 @@ async def test_a_disarm_after_the_first_check_sends_and_drafts_nothing(
     )
     assert response.status_code == 409
     assert response.json()["detail"] == "the mailbox is no longer armed"
-    assert (s.opened, s.gmail.calls) == ([], [])
+    assert s.gmail.calls == []
     with session_scope(s.factory) as session:
         assert session.scalar(unscoped(select(func.count()).select_from(TestSend))) == 0
 
@@ -878,7 +879,8 @@ def _drafts_check(s: Setup, app: FastAPI, *, at: datetime) -> GmailSender:
 
 def _mailbox(s: Setup) -> Mailbox:
     with session_scope(s.factory) as session:
-        mailbox = session.scalars(unscoped(select(Mailbox))).one()
+        mailbox = session.scalars(unscoped(select(Mailbox).order_by(Mailbox.id))).first()
+        assert mailbox is not None
         session.expunge(mailbox)
         return mailbox
 
@@ -986,4 +988,111 @@ async def test_a_sent_test_is_not_searched_for(
 
 
 def test_the_drafts_check_searches_at_most_three_test_drafts() -> None:
-    assert campaign_review.TEST_DRAFTS_CHECKED == 3
+    assert mailbox_service.TEST_DRAFTS_CHECKED == 3
+
+
+async def test_an_arming_changed_while_the_client_opens_decides_the_test(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """The arming is read after the Gmail client is opened (its Keychain reads), just
+    before the call: a mailbox taken back to drafts meanwhile only gets a draft."""
+    s = _build(running_app, arm=ARMED_FOR_SEND)
+
+    def open_then_take_back_to_drafts(user_id: int, mailbox_id: int) -> FakeGmail:
+        with session_scope(s.factory, write=True) as session:
+            mailbox = get_scoped(session, _local(session), Mailbox, mailbox_id)
+            assert mailbox is not None
+            mailbox.send_armed_at = None
+        return s.gmail
+
+    running_app.state.gmail_opener = open_then_take_back_to_drafts
+    body = await _ok(
+        await client.post(
+            f"{s.base}/review/test-send", json={"step_id": s.step_ids[0]}, headers=CSRF
+        )
+    )
+    assert body["drafted"] is True
+    assert [m for m, _ in s.gmail.calls] == ["drafts.create"]
+
+
+async def _arm_to_send(client: httpx.AsyncClient, s: Setup) -> httpx.Response:
+    mailbox_id = _mailbox(s).id
+    return await client.post(
+        f"/api/v1/mailboxes/{mailbox_id}/arm", json={"mode": "send"}, headers=CSRF
+    )
+
+
+async def test_a_failed_test_draft_search_verifies_nothing(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """A Gmail error in the test-draft search is not a find: the mailbox stays unverified,
+    arming to send is still refused, and nothing is recorded as not found."""
+    s = _build(running_app, arm=ARMED_FOR_DRAFTS)
+    await _test_send_all(client, s)
+    s.gmail.fail_next("messages.list", GmailRateLimited("slow down", code="rateLimitExceeded"))
+    _drafts_check(s, running_app, at=utcnow())
+    assert _mailbox(s).message_id_verified_at is None
+    refused = await _arm_to_send(client, s)
+    assert refused.status_code == 409
+    assert "has been found by its Message-ID yet" in refused.json()["detail"]
+    with session_scope(s.factory) as session:
+        assert set(session.scalars(unscoped(select(TestSend.not_found_at)))) == {None}
+
+
+async def test_a_test_draft_not_found_is_named_when_arming_to_send_is_refused(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app, arm=ARMED_FOR_DRAFTS)
+    await _test_send_all(client, s)
+    before = (await _arm_to_send(client, s)).json()["detail"]
+    assert "test draft was found" not in before  # not searched for yet
+    for draft_id in list(s.gmail.drafts()):
+        s.gmail.discard_draft(draft_id)
+    _drafts_check(s, running_app, at=utcnow())
+    refused = await _arm_to_send(client, s)
+    assert refused.status_code == 409
+    assert "no netkeeper test draft was found in the Drafts of" in refused.json()["detail"]
+    assert "make a new test draft" in refused.json()["detail"]
+    await _test_send_all(client, s)  # a new test draft: not searched for yet
+    assert "test draft was found" not in (await _arm_to_send(client, s)).json()["detail"]
+    _drafts_check(s, running_app, at=utcnow())
+    assert (await _arm_to_send(client, s)).status_code == 200
+
+
+async def test_a_mailboxs_test_drafts_are_searched_only_in_that_mailbox(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """Two armed, unverified mailboxes: A's test drafts (to A's own address) are never
+    searched for in B's Gmail, and do not verify B."""
+    s = _build(running_app, arm=ARMED_FOR_DRAFTS)
+    await _test_send_all(client, s)
+    with session_scope(s.factory, write=True) as session:
+        other = make_mailbox(
+            session, _local(session), email="other@example.test", **ARMED_FOR_DRAFTS
+        )
+        a_id, b_id = _mailbox_ids(session)
+        assert b_id == other.id
+    b_gmail = FakeGmail("other@example.test", mailbox_id=b_id)
+    boxes = {a_id: s.gmail, b_id: b_gmail}
+    with session_scope(s.factory) as session:
+        checks = campaign_review.test_drafts_to_verify(session, _local(session))
+    assert {c.mailbox_id for c in checks} == {a_id}
+    sender = GmailSender(
+        s.factory,
+        opener=lambda user_id, mailbox_id: boxes[mailbox_id],
+        drafts_every=timedelta(0),
+        replies_every=timedelta(days=3650),
+    )
+    with session_scope(s.factory) as session:
+        user_id = _local(session).id
+    sender.reconcile(s.factory, user_id, settings=running_app.state.settings, now=utcnow())
+    assert not [p for m, p in b_gmail.calls if "test draft" in p]
+    with session_scope(s.factory) as session:
+        rows = session.execute(unscoped(select(Mailbox.id, Mailbox.message_id_verified_at))).all()
+    verified = {row[0]: row[1] for row in rows}
+    assert verified[a_id] is not None
+    assert verified[b_id] is None
+
+
+def _mailbox_ids(session: Session) -> list[int]:
+    return list(session.scalars(unscoped(select(Mailbox.id).order_by(Mailbox.id))))

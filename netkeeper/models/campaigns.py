@@ -466,7 +466,8 @@ class TestSend(UserOwned, TimestampMixin, Base):
     On a mailbox armed for drafts only, the test is a Gmail draft instead (#304):
     ``gmail_draft_id`` is set, and ``sent_at`` is when it was drafted. The drafts
     check searches for ``rfc822_message_id``, the Message-ID the test went in
-    with, to verify the mailbox (:attr:`Mailbox.message_id_verified_at`).
+    with, to verify the mailbox (:attr:`Mailbox.message_id_verified_at`), and sets
+    ``not_found_at`` when a search found nothing, so a refused arming to send can say so.
     """
 
     __tablename__ = "campaign_test_sends"
@@ -484,6 +485,7 @@ class TestSend(UserOwned, TimestampMixin, Base):
     gmail_message_id: Mapped[str | None] = mapped_column(String(200))
     gmail_draft_id: Mapped[str | None] = mapped_column(String(200))
     rfc822_message_id: Mapped[str | None] = mapped_column(String(200))
+    not_found_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     sent_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
 
 

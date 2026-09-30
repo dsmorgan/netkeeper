@@ -371,11 +371,13 @@ def test_send(
     purpose = f"test {what}"
     draft_id: str | None = None
     try:
+        # The client first (it reads the Keychain), then the arming, read last before the
+        # Gmail call. The access token is fetched lazily, inside that call.
+        gmail = _opener(request)(user.id, plan.mailbox_id)
         with session_scope(factory) as session:
             arming = service.test_send_arming(session, user, plan.mailbox_id)
         if arming is None:
             raise HTTPException(status_code=409, detail="the mailbox is no longer armed")
-        gmail = _opener(request)(user.id, plan.mailbox_id)
         if arming is MailboxArm.SEND:
             purpose = f"test send {what}"
             ref = gmail.send(plan.message, purpose=purpose)

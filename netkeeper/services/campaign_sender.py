@@ -674,7 +674,10 @@ class _Reconcile:
     ) -> bool:
         """Search for the mailbox's test drafts by Message-ID, newest first, until one is
         found; found, the mailbox is verified (#304). True when one was found. Not found,
-        or a Gmail error, is not a failure: the next poll tries again."""
+        or a Gmail error, is not a failure: the next poll tries again. None found is
+        recorded on the test drafts (``not_found_at``), for arming's refusal to show; a
+        Gmail error records nothing."""
+        found = None
         for check in checks:
             purpose = f"Message-ID check of test draft {check.test_send_id}"
             try:
@@ -688,10 +691,12 @@ class _Reconcile:
                 return False
             if found is not None:
                 break
-        else:
-            log.info("mailbox %d: no test draft found by its Message-ID yet", mailbox_id)
-            return False
         now = self.now
+        if found is None:
+            log.info("mailbox %d: no test draft found by its Message-ID yet", mailbox_id)
+            ids = [c.test_send_id for c in checks]
+            self.write(lambda s, u: review.record_test_drafts_not_found(s, u, ids, now=now))
+            return False
         self.write(
             lambda s, u: mailbox_service.record_message_id_verified(s, u, mailbox_id, now=now)
         )

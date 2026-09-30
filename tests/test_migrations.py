@@ -2194,7 +2194,7 @@ def test_0026_downgrades_to_messages_without_it(migration_engine: Engine) -> Non
 
 # --- test drafts (0027, #304) -------------------------------------------------------------
 
-_TEST_DRAFT_COLUMNS = ("gmail_draft_id", "rfc822_message_id")
+_TEST_DRAFT_COLUMNS = ("gmail_draft_id", "rfc822_message_id", "not_found_at")
 
 
 def _insert_test_send(connection: Connection) -> None:
@@ -2221,7 +2221,7 @@ def test_0027_keeps_every_existing_test_send_as_sent(migration_engine: Engine) -
                 " FROM campaign_test_sends"
             )
         ).one()
-    assert tuple(row) == ("m1", None, None)
+    assert tuple(row) == ("m1", None, None, None)
 
 
 def test_0027_downgrades_to_test_sends_without_it(migration_engine: Engine) -> None:

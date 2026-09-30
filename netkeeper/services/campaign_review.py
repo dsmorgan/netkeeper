@@ -58,7 +58,6 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Final
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
 from netkeeper.campaigns.compose import ComposeError, build_message
@@ -832,15 +831,10 @@ class TestDraftCheck:
     rfc822_message_id: str
 
 
-TEST_DRAFTS_CHECKED: Final = 3
-"""The most test drafts one drafts check searches for, per mailbox, newest first."""
-
-
 def test_drafts_to_verify(session: Session, user: User) -> list[TestDraftCheck]:
     """The user's test drafts to search for by Message-ID: on each armed mailbox not yet
-    verified, up to :data:`TEST_DRAFTS_CHECKED` of the test drafts made there, newest
-    first. A test draft is made there when it is addressed to the mailbox's own address,
-    as every test is. Nothing for a disarmed or verified mailbox."""
+    verified, its :func:`~netkeeper.services.mailboxes.recent_test_drafts`, newest first.
+    Nothing for a disarmed or verified mailbox."""
     out: list[TestDraftCheck] = []
     unverified = session.scalars(
         scoped(user, Mailbox)
@@ -848,23 +842,23 @@ def test_drafts_to_verify(session: Session, user: User) -> list[TestDraftCheck]:
         .order_by(Mailbox.id)
         .execution_options(populate_existing=True)
     )
-    for mailbox in unverified:
-        rows = session.scalars(
-            scoped(user, TestSend)
-            .where(
-                TestSend.gmail_draft_id.is_not(None),
-                TestSend.rfc822_message_id.is_not(None),
-                func.lower(TestSend.to_address) == mailbox.email.lower(),
-            )
-            .order_by(TestSend.sent_at.desc(), TestSend.id.desc())
-            .limit(TEST_DRAFTS_CHECKED)
-        )
+    for mailbox in list(unverified):
         out.extend(
             TestDraftCheck(mailbox.id, row.id, row.rfc822_message_id)
-            for row in rows
+            for row in mailboxes.recent_test_drafts(session, user, mailbox)
             if row.rfc822_message_id is not None
         )
     return out
+
+
+def record_test_drafts_not_found(
+    session: Session, user: User, test_send_ids: Collection[int], *, now: datetime
+) -> None:
+    """The drafts check searched for these test drafts and found none of them."""
+    _require_writer(session, "record_test_drafts_not_found")
+    for row in session.scalars(scoped(user, TestSend).where(TestSend.id.in_(test_send_ids))):
+        row.not_found_at = now
+    session.flush()
 
 
 # --- the gate -----------------------------------------------------------------------
