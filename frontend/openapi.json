@@ -9190,7 +9190,12 @@
         "type": "object"
       },
       "TestSendOut": {
+        "description": "A test Gmail accepted. ``drafted`` when the mailbox was armed for drafts only: the\ntest is a draft in the mailbox's Drafts, and ``sent_at`` is when it was drafted.",
         "properties": {
+          "drafted": {
+            "title": "Drafted",
+            "type": "boolean"
+          },
           "sent_at": {
             "format": "date-time",
             "title": "Sent At",
@@ -9208,7 +9213,8 @@
         "required": [
           "step_id",
           "to_address",
-          "sent_at"
+          "sent_at",
+          "drafted"
         ],
         "title": "TestSendOut",
         "type": "object"
@@ -11592,7 +11598,7 @@
     },
     "/api/v1/campaigns/{campaign_id}/review/test-send": {
       "post": {
-        "description": "Send one email step, rendered for an enrollment, to the campaign mailbox's own\naddress. Needs the mailbox armed for send. Never a campaign message: it counts\ntoward no cap or recency and advances no enrollment.",
+        "description": "Test one email step, rendered for an enrollment, addressed to the campaign\nmailbox's own address. Follows the mailbox's arming, read again just before the\nGmail call: armed to send, it is sent; armed for drafts only, it is a draft in the\nmailbox's Drafts (never ``messages.send``); disarmed, ``409``. Never a campaign\nmessage: it counts toward no cap or recency and advances no enrollment.",
         "operationId": "test_send_api_v1_campaigns__campaign_id__review_test_send_post",
         "parameters": [
           {

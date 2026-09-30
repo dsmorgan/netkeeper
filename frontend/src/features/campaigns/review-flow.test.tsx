@@ -235,7 +235,7 @@ describe('review flow', () => {
     )
   })
 
-  it('says a test send goes only to your own mailbox, and shows why one was refused', async () => {
+  it('says a test goes only to your own mailbox, and shows why one was refused', async () => {
     const calls: Call[] = []
     mockFetch(
       campaignBackend(
@@ -246,7 +246,7 @@ describe('review flow', () => {
               ? jsonResponse(
                   {
                     detail:
-                      'me@sender.example is not armed for send; a test send needs `gmail arm --send`',
+                      'me@sender.example is not armed; arm it for drafts (`gmail arm`) to make the test a draft in your Drafts, or to send (`gmail arm --send`) to send it to you',
                   },
                   409,
                 )
@@ -254,6 +254,7 @@ describe('review flow', () => {
                   step_id: 102,
                   to_address: 'me@sender.example',
                   sent_at: '2030-06-15T12:00:00Z',
+                  drafted: false,
                 }),
         },
         calls,
@@ -265,12 +266,13 @@ describe('review flow', () => {
     const sends = section('Test sends')
     expect(sends.getByText(/your own address, me@sender.example/)).toBeVisible()
     expect(sends.getByText(/never goes to a contact/)).toBeVisible()
-    expect(sends.getByText(/armed for send/)).toBeVisible()
+    expect(sends.getByText(/Armed for drafts, the test is a draft in your Drafts/)).toBeVisible()
+    expect(sends.queryByText(/must be armed for send/)).toBeNull()
 
     fireEvent.click(sends.getByRole('button', { name: 'Send a test of step 1' }))
     const refusal = await sends.findByRole('alert')
     expect(refusal).toHaveTextContent("Step 1's test was not sent.")
-    expect(refusal).toHaveTextContent('is not armed for send')
+    expect(refusal).toHaveTextContent('is not armed')
 
     fireEvent.click(sends.getByRole('button', { name: 'Send a test of step 2' }))
     expect(await sends.findByText(/Sent to me@sender.example at/)).toBeVisible()
@@ -278,6 +280,29 @@ describe('review flow', () => {
       { step_id: 101 },
       { step_id: 102 },
     ])
+  })
+
+  it('says a test on a mailbox armed for drafts is a draft in your Drafts', async () => {
+    mockFetch(
+      campaignBackend(reviewing(), {
+        'POST /api/v1/campaigns/5/review/test-send': () =>
+          jsonResponse({
+            step_id: 101,
+            to_address: 'me@sender.example',
+            sent_at: '2030-06-15T12:00:00Z',
+            drafted: true,
+          }),
+      }),
+    )
+    await renderApp('/campaigns/5')
+
+    await screen.findByRole('list', { name: 'Review checklist' })
+    const sends = section('Test sends')
+    fireEvent.click(sends.getByRole('button', { name: 'Send a test of step 1' }))
+    expect(
+      await sends.findByText(/Test draft to me@sender.example created in your Drafts at/),
+    ).toBeVisible()
+    expect(sends.queryByText(/Sent to/)).toBeNull()
   })
 
   it('acknowledges the guard summary exactly as shown', async () => {

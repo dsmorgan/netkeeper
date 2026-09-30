@@ -307,7 +307,8 @@ def arm(
         if mailbox.message_id_verified_at is None:
             raise ArmRefused(
                 f"no draft on {mailbox.email} has been found by its Message-ID yet; while it"
-                " is armed for drafts, `serve` checks the first draft it makes"
+                " is armed for drafts, `serve` checks the first draft it makes, a campaign's"
+                " test draft included"
             )
         if mailbox.send_armed_at is None:
             mailbox.send_armed_at = now

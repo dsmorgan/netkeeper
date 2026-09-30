@@ -226,7 +226,10 @@ export async function lintCampaign(id: number): Promise<LintResult> {
   return data
 }
 
-/** Send one email step to the campaign mailbox's own address. Refused (409) unless armed for send. */
+/**
+ * Test one email step, addressed to the campaign mailbox's own address: a draft in its
+ * Drafts while Gmail is armed for drafts, sent once armed to send. Refused (409) when disarmed.
+ */
 export async function testSend(id: number, stepId: number): Promise<TestSend> {
   const { data, error, response } = await api.POST(
     '/api/v1/campaigns/{campaign_id}/review/test-send',

@@ -6,7 +6,7 @@ Every Gmail call goes to a :class:`FakeGmail` set as ``app.state.gmail_opener``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import factories
@@ -42,8 +42,10 @@ from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped, unscoped
 from netkeeper.services import campaign_engine, campaign_review
 from netkeeper.services.campaign_guards import Reason, check_enrollment
+from netkeeper.services.campaign_sender import GmailSender
 
 CSRF = {"X-Netkeeper-Client": "1"}
+ARMED_FOR_DRAFTS: dict[str, Any] = {"armed_at": utcnow() - timedelta(days=1), "armed_by": "test"}
 REQUIREMENTS = ("sample_previews", "searched_previews", "test_sends", "lint", "guards")
 
 
@@ -545,12 +547,46 @@ async def test_a_test_send_goes_only_to_the_mailboxs_own_address(
     assert [method for method, _ in s.gmail.calls] == ["messages.send"]
 
 
-async def test_a_test_send_is_never_counted_and_never_advances_an_enrollment(
+async def test_a_mailbox_armed_for_drafts_gets_a_test_draft_and_never_a_send(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
-    s = _build(running_app, people=1)
+    """#304: armed for drafts only, the test is a Gmail draft to the mailbox itself, in
+    no thread, and ``messages.send`` is never called (#277)."""
+    s = _build(running_app, people=1, arm=ARMED_FOR_DRAFTS)
+    body = await _ok(
+        await client.post(
+            f"{s.base}/review/test-send",
+            json={"step_id": s.step_ids[0], "enrollment_id": s.enrollment_ids[0]},
+            headers=CSRF,
+        )
+    )
+    assert (body["to_address"], body["drafted"]) == (s.mailbox_email, True)
+    assert [method for method, _ in s.gmail.calls] == ["drafts.create"]
+    assert s.gmail.sent() == []
+    [(draft_id, ref)] = s.gmail.drafts().items()
+    assert ref.thread_id == ref.id  # a thread of its own
+    raw = s.gmail.raw(ref.id)
+    assert raw["To"] == s.mailbox_email
+    assert raw["Subject"] == "[Test] Hello"
+    assert "First" in raw.get_content()
+    assert s.contact_emails[0] not in " ".join(f"{k}: {v}" for k, v in raw.items())
+    with session_scope(s.factory) as session:
+        row = session.scalars(unscoped(select(TestSend))).one()
+        assert (row.gmail_draft_id, row.gmail_message_id) == (draft_id, ref.id)
+        assert row.rfc822_message_id == raw["Message-ID"]
+    review = await _review(client, s)
+    [untested] = [m for m in review["missing"] if m["requirement"] == "test_sends"]
+    assert untested["step_positions"] == [2]  # step 1's test draft counts
+
+
+@pytest.mark.parametrize("arm", [ARMED_FOR_SEND, ARMED_FOR_DRAFTS], ids=["sent", "drafted"])
+async def test_a_test_send_is_never_counted_and_never_advances_an_enrollment(
+    client: httpx.AsyncClient, running_app: FastAPI, arm: dict[str, Any]
+) -> None:
+    s = _build(running_app, people=1, arm=arm)
     await _test_send_all(client, s)
-    assert len(s.gmail.sent()) == 2
+    tests = len(s.gmail.sent()) if arm is ARMED_FOR_SEND else len(s.gmail.drafts())
+    assert tests == 2
     now = utcnow()
     with session_scope(s.factory) as session:
         user = _local(session)
@@ -575,26 +611,15 @@ async def test_a_test_send_is_never_counted_and_never_advances_an_enrollment(
         assert Reason.CONTACTED_RECENTLY not in verdict.reasons
 
 
-@pytest.mark.parametrize(
-    "arm",
-    [
-        pytest.param({}, id="disarmed"),
-        pytest.param({"armed_at": utcnow(), "armed_by": "test"}, id="armed-for-drafts"),
-        pytest.param(
-            {"armed_at": utcnow(), "armed_by": "test", "message_id_verified_at": utcnow()},
-            id="verified-but-drafts-only",
-        ),
-    ],
-)
-async def test_a_test_send_is_refused_unless_the_mailbox_is_armed_for_send(
-    client: httpx.AsyncClient, running_app: FastAPI, arm: dict[str, Any]
+async def test_a_test_send_is_refused_on_a_disarmed_mailbox(
+    client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
-    s = _build(running_app, arm=arm)
+    s = _build(running_app, arm={})
     response = await client.post(
         f"{s.base}/review/test-send", json={"step_id": s.step_ids[0]}, headers=CSRF
     )
     assert response.status_code == 409
-    assert "is not armed for send" in response.json()["detail"]  # the first check
+    assert "is not armed;" in response.json()["detail"]  # the first check
     assert (s.opened, s.gmail.calls) == ([], [])
     with session_scope(s.factory) as session:
         assert session.scalar(unscoped(select(func.count()).select_from(TestSend))) == 0
@@ -672,22 +697,10 @@ async def test_another_users_campaign_is_404(
         )
 
 
-@pytest.mark.parametrize(
-    "then",
-    [
-        pytest.param({"armed_at": None, "send_armed_at": None, "armed_by": None}, id="disarmed"),
-        pytest.param({"send_armed_at": None}, id="back-to-drafts"),
-    ],
-)
-async def test_an_arming_changed_after_the_first_check_sends_nothing(
-    client: httpx.AsyncClient,
-    running_app: FastAPI,
-    monkeypatch: pytest.MonkeyPatch,
-    then: dict[str, Any],
+def _change_arming_after_prepare(
+    s: Setup, monkeypatch: pytest.MonkeyPatch, then: dict[str, Any]
 ) -> None:
-    """The recheck just before the Gmail call: disarmed, or taken back to drafts, after
-    the test send was prepared, it opens no Gmail client."""
-    s = _build(running_app)
+    """Change the mailbox's arming between the first check and the Gmail call."""
     prepare = campaign_review.prepare_test_send
 
     def prepare_then_change(*args: Any, **kwargs: Any) -> campaign_review.TestSendPlan:
@@ -700,12 +713,67 @@ async def test_an_arming_changed_after_the_first_check_sends_nothing(
         return plan
 
     monkeypatch.setattr(campaign_review, "prepare_test_send", prepare_then_change)
+
+
+@pytest.mark.parametrize("arm", [ARMED_FOR_SEND, ARMED_FOR_DRAFTS], ids=["send", "drafts"])
+async def test_a_disarm_after_the_first_check_sends_and_drafts_nothing(
+    client: httpx.AsyncClient,
+    running_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    arm: dict[str, Any],
+) -> None:
+    """The recheck just before the Gmail call: disarmed after the test was prepared, it
+    opens no Gmail client and records nothing."""
+    s = _build(running_app, arm=arm)
+    _change_arming_after_prepare(
+        s, monkeypatch, {"armed_at": None, "send_armed_at": None, "armed_by": None}
+    )
     response = await client.post(
         f"{s.base}/review/test-send", json={"step_id": s.step_ids[0]}, headers=CSRF
     )
     assert response.status_code == 409
-    assert response.json()["detail"] == "the mailbox is no longer armed for send"
+    assert response.json()["detail"] == "the mailbox is no longer armed"
     assert (s.opened, s.gmail.calls) == ([], [])
+    with session_scope(s.factory) as session:
+        assert session.scalar(unscoped(select(func.count()).select_from(TestSend))) == 0
+
+
+@pytest.mark.parametrize(
+    ("arm", "then", "method"),
+    [
+        pytest.param(ARMED_FOR_SEND, {"send_armed_at": None}, "drafts.create", id="send-to-drafts"),
+        pytest.param(
+            ARMED_FOR_DRAFTS,
+            {"send_armed_at": utcnow(), "message_id_verified_at": utcnow()},
+            "messages.send",
+            id="drafts-to-send",
+        ),
+    ],
+)
+async def test_an_arming_changed_after_the_first_check_decides_the_test(
+    client: httpx.AsyncClient,
+    running_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    arm: dict[str, Any],
+    then: dict[str, Any],
+    method: str,
+) -> None:
+    """The arming read just before the Gmail call decides: taken back to drafts, the test
+    is only drafted, never sent; armed to send meanwhile, it is sent, as the person now
+    armed it to, and only ever to the mailbox itself."""
+    s = _build(running_app, arm=arm)
+    _change_arming_after_prepare(s, monkeypatch, then)
+    body = await _ok(
+        await client.post(
+            f"{s.base}/review/test-send", json={"step_id": s.step_ids[0]}, headers=CSRF
+        )
+    )
+    assert [m for m, _ in s.gmail.calls] == [method]
+    assert body["drafted"] is (method == "drafts.create")
+    assert body["to_address"] == s.mailbox_email
+    with session_scope(s.factory) as session:
+        row = session.scalars(unscoped(select(TestSend))).one()
+        assert (row.gmail_draft_id is not None) is (method == "drafts.create")
 
 
 @pytest.mark.parametrize("edit", ["renamed", "new_email"])
@@ -788,3 +856,134 @@ async def test_a_test_send_renders_for_the_first_sampled_enrollment(
     [sent] = s.gmail.sent()
     first = sample["enrollments"][0]
     assert first["steps"][0]["body"] in s.gmail.raw(sent.id).get_content()
+
+
+# --- a fresh mailbox, end to end (#304) --------------------------------------------------
+
+
+def _drafts_check(s: Setup, app: FastAPI, *, at: datetime) -> GmailSender:
+    """The drafts check ``serve`` runs each tick: :meth:`GmailSender.reconcile`."""
+    sender = GmailSender(
+        s.factory,
+        opener=lambda user_id, mailbox_id: s.gmail,
+        clock=lambda: at,
+        drafts_every=timedelta(0),
+        replies_every=timedelta(days=3650),
+    )
+    with session_scope(s.factory) as session:
+        user_id = _local(session).id
+    sender.reconcile(s.factory, user_id, settings=app.state.settings, now=at)
+    return sender
+
+
+def _mailbox(s: Setup) -> Mailbox:
+    with session_scope(s.factory) as session:
+        mailbox = session.scalars(unscoped(select(Mailbox))).one()
+        session.expunge(mailbox)
+        return mailbox
+
+
+async def test_a_fresh_mailbox_goes_from_disarmed_to_armed_to_send_with_no_manual_step(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """The CP6 deadlock (#304): connect, arm for drafts, a test draft of each step, the
+    gate satisfied, activate, the drafts check verifies a test draft's Message-ID, and
+    arming to send is allowed. Nothing is sent on the way."""
+    s = _build(running_app, arm={})  # connected, and disarmed as every mailbox starts
+    mailbox_id = _mailbox(s).id
+    arm = f"/api/v1/mailboxes/{mailbox_id}/arm"
+    refused = await client.post(arm, json={"mode": "send"}, headers=CSRF)
+    assert refused.status_code == 409  # not armed for drafts yet
+    await _ok(await client.post(arm, json={"mode": "draft"}, headers=CSRF))
+    refused = await client.post(arm, json={"mode": "send"}, headers=CSRF)
+    assert refused.status_code == 409  # no draft found by its Message-ID yet
+
+    await _complete(client, s)  # each email step's test is a draft
+    assert len(s.gmail.drafts()) == len(s.email_step_ids) == 2
+    assert _missing(await _review(client, s)) == set()
+    await _ok(await client.post(f"{s.base}/activate", headers=CSRF))
+    assert _campaign(s)[0] is CampaignStatus.ACTIVE
+
+    now = utcnow()
+    _drafts_check(s, running_app, at=now)
+    assert _mailbox(s).message_id_verified_at == now
+    searches = [p for m, p in s.gmail.calls if m == "messages.list" and "test draft" in p]
+    assert len(searches) == 1  # the newest test draft, found at once
+
+    body = await _ok(await client.post(arm, json={"mode": "send"}, headers=CSRF))
+    assert body["arm"] == "send"
+    methods = {m for m, _ in s.gmail.calls}
+    assert "messages.send" not in methods
+    assert len(s.gmail.drafts()) == 2  # netkeeper deleted neither test draft
+    with session_scope(s.factory) as session:
+        for table in (Message, Interaction):
+            assert session.scalar(unscoped(select(func.count()).select_from(table))) == 0
+
+
+async def test_the_drafts_check_verifies_a_test_draft_before_any_campaign_is_active(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app, arm=ARMED_FOR_DRAFTS)
+    await _test_send_all(client, s)
+    assert _campaign(s)[0] is CampaignStatus.REVIEWING
+    now = utcnow()
+    _drafts_check(s, running_app, at=now)
+    assert _mailbox(s).message_id_verified_at == now
+
+
+async def test_a_test_draft_not_found_leaves_the_mailbox_unverified(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """A test draft the person discarded, or Gmail's search not caught up: nothing is
+    verified, nothing is deleted, and the next check tries again."""
+    s = _build(running_app, arm=ARMED_FOR_DRAFTS)
+    await _test_send_all(client, s)
+    for draft_id in list(s.gmail.drafts()):
+        s.gmail.discard_draft(draft_id)
+    _drafts_check(s, running_app, at=utcnow())
+    assert _mailbox(s).message_id_verified_at is None
+    searches = [p for m, p in s.gmail.calls if m == "messages.list" and "test draft" in p]
+    assert len(searches) == 2  # each test draft, newest first
+    assert all(m in {"drafts.create", "messages.list"} for m, p in s.gmail.calls if "test" in p)
+
+
+@pytest.mark.parametrize(
+    "arm",
+    [
+        pytest.param({}, id="disarmed"),
+        pytest.param({**ARMED_FOR_DRAFTS, "message_id_verified_at": utcnow()}, id="verified"),
+    ],
+)
+async def test_the_drafts_check_skips_a_disarmed_or_verified_mailbox(
+    client: httpx.AsyncClient, running_app: FastAPI, arm: dict[str, Any]
+) -> None:
+    s = _build(running_app, arm=ARMED_FOR_DRAFTS)
+    await _test_send_all(client, s)
+    with session_scope(s.factory, write=True) as session:
+        mailbox = session.scalars(unscoped(select(Mailbox))).one()
+        mailbox.armed_at = None
+        mailbox.armed_by = None
+        for name, value in arm.items():
+            setattr(mailbox, name, value)
+    with session_scope(s.factory) as session:
+        assert campaign_review.test_drafts_to_verify(session, _local(session)) == []
+    calls = len(s.gmail.calls)
+    _drafts_check(s, running_app, at=utcnow())
+    assert not [p for m, p in s.gmail.calls[calls:] if "test draft" in p]
+
+
+async def test_a_sent_test_is_not_searched_for(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app, arm=ARMED_FOR_SEND)
+    await _test_send_all(client, s)
+    with session_scope(s.factory, write=True) as session:
+        mailbox = session.scalars(unscoped(select(Mailbox))).one()
+        mailbox.message_id_verified_at = None
+        mailbox.send_armed_at = None
+    with session_scope(s.factory) as session:
+        assert campaign_review.test_drafts_to_verify(session, _local(session)) == []
+
+
+def test_the_drafts_check_searches_at_most_three_test_drafts() -> None:
+    assert campaign_review.TEST_DRAFTS_CHECKED == 3

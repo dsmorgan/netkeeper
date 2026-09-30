@@ -79,9 +79,12 @@ touches only a mailbox a person armed (:func:`netkeeper.services.mailboxes.arm`)
   armed for send (disarmed or taken back to drafts since the claim) sends nothing:
   its claim is given back (``not_sent``). No ``messages.send``, ever.
 - **The Message-ID check**: until one has passed, each drafts poll of an armed
-  mailbox searches for its oldest waiting draft by Message-ID. Found, the mailbox
-  is recorded verified, which arming for send requires: the first live check that
-  Gmail keeps the Message-ID netkeeper sets, which reconcile depends on.
+  mailbox searches by Message-ID for its newest test drafts (the review's test of a
+  step on a mailbox armed for drafts only, #304) and for its oldest waiting
+  campaign draft. Found, the mailbox is recorded verified, which arming for send
+  requires: the first live check that Gmail keeps the Message-ID netkeeper sets,
+  which reconcile depends on. A test draft is only searched for: it is never a
+  campaign message, and netkeeper never touches it otherwise.
 
 netkeeper deletes nothing in Gmail (ADR 0003). A draft whose message a merge
 discarded stays in Gmail for the person (#273, question 2).
@@ -124,6 +127,7 @@ from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped
 from netkeeper.services import campaign_engine as engine
 from netkeeper.services import campaign_replies as replies
+from netkeeper.services import campaign_review as review
 from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.campaign_engine import Firing, SendOutcome, SendResult, Tracked
 from netkeeper.services.mailboxes import MailboxNotFound, MailboxNotReady, open_gmail
@@ -493,12 +497,27 @@ class GmailSender:
                 mailbox = get_scoped(session, user, Mailbox, mailbox_id)
                 if mailbox is not None and mailbox.arm is not None:
                     unverified[mailbox_id] = mailbox.message_id_verified_at is None
+            test_drafts = review.test_drafts_to_verify(session, user)
         last = self._drafts_polled.get(user_id)
         poll = last is None or now - last >= self._drafts_every
         drafts = work.drafts if poll else ()
-        if drafts:
+        checks = test_drafts if poll else ()
+        if drafts or checks:
             self._drafts_polled[user_id] = now
         run = _Reconcile(self, factory, user_id, settings, now)
+        # Test drafts first (#304): a mailbox verified by one skips the campaign draft's
+        # search below. Before any campaign is active, they are the only drafts there are.
+        for mailbox_id in sorted({c.mailbox_id for c in checks}):
+            try:
+                gmail = self._open(user_id, mailbox_id)
+            except (MailboxNotReady, MailboxNotFound) as exc:
+                log.info(
+                    "mailbox %d is not ready; the Message-ID check waits (%s)", mailbox_id, exc
+                )
+                continue
+            mine = [c for c in checks if c.mailbox_id == mailbox_id]
+            if run.verify_test_drafts(gmail, mailbox_id, mine) and mailbox_id in unverified:
+                unverified[mailbox_id] = False
         for mailbox_id in sorted({t.mailbox_id for t in (*work.leftovers, *drafts)}):
             if mailbox_id not in unverified:
                 continue
@@ -649,6 +668,34 @@ class _Reconcile:
         self.write(
             lambda s, u: mailbox_service.record_message_id_verified(s, u, mailbox_id, now=now)
         )
+
+    def verify_test_drafts(
+        self, gmail: Gmail, mailbox_id: int, checks: Collection[review.TestDraftCheck]
+    ) -> bool:
+        """Search for the mailbox's test drafts by Message-ID, newest first, until one is
+        found; found, the mailbox is verified (#304). True when one was found. Not found,
+        or a Gmail error, is not a failure: the next poll tries again."""
+        for check in checks:
+            purpose = f"Message-ID check of test draft {check.test_send_id}"
+            try:
+                found = find_by_message_id(gmail, check.rfc822_message_id, purpose=purpose)
+            except GmailError as exc:
+                log.warning(
+                    "test draft %d could not be looked up in Gmail (%s); it waits",
+                    check.test_send_id,
+                    exc.code,
+                )
+                return False
+            if found is not None:
+                break
+        else:
+            log.info("mailbox %d: no test draft found by its Message-ID yet", mailbox_id)
+            return False
+        now = self.now
+        self.write(
+            lambda s, u: mailbox_service.record_message_id_verified(s, u, mailbox_id, now=now)
+        )
+        return True
 
     def draft(self, gmail: Gmail, tracked: Tracked, present: Collection[str]) -> None:
         if tracked.gmail_draft_id in present:

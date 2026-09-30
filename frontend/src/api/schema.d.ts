@@ -434,9 +434,11 @@ export interface paths {
         put?: never;
         /**
          * Test Send
-         * @description Send one email step, rendered for an enrollment, to the campaign mailbox's own
-         *     address. Needs the mailbox armed for send. Never a campaign message: it counts
-         *     toward no cap or recency and advances no enrollment.
+         * @description Test one email step, rendered for an enrollment, addressed to the campaign
+         *     mailbox's own address. Follows the mailbox's arming, read again just before the
+         *     Gmail call: armed to send, it is sent; armed for drafts only, it is a draft in the
+         *     mailbox's Drafts (never ``messages.send``); disarmed, ``409``. Never a campaign
+         *     message: it counts toward no cap or recency and advances no enrollment.
          */
         post: operations["test_send_api_v1_campaigns__campaign_id__review_test_send_post"];
         delete?: never;
@@ -5529,8 +5531,14 @@ export interface components {
             /** Step Id */
             step_id: number;
         };
-        /** TestSendOut */
+        /**
+         * TestSendOut
+         * @description A test Gmail accepted. ``drafted`` when the mailbox was armed for drafts only: the
+         *     test is a draft in the mailbox's Drafts, and ``sent_at`` is when it was drafted.
+         */
         TestSendOut: {
+            /** Drafted */
+            drafted: boolean;
             /**
              * Sent At
              * Format: date-time
