@@ -28,14 +28,14 @@ from netkeeper import __version__, migrations
 from netkeeper.campaigns import gmail_oauth
 from netkeeper.campaigns.render import me_fields
 from netkeeper.config import ConfigError, Settings, load_settings, render_toml
-from netkeeper.crm import import_runs
+from netkeeper.crm import import_runs, new_contact
 from netkeeper.crm.archive import ArchiveImport, import_archive
 from netkeeper.crm.archive_check import open_checked_archive
 from netkeeper.crm.contacts import ContactStats, contact_stats
 from netkeeper.crm.exports import ExportError, ExportFormat, ExportPreset, export_stream
 from netkeeper.crm.filters import FilterError, FilterTree, SortKey, parse_filter, parse_sort
 from netkeeper.crm.lists import ListCount, find_list, list_lists, list_views, member_counts
-from netkeeper.crm.tags import ensure_default_rules, list_tags, run_rules
+from netkeeper.crm.tags import ensure_default_rules, find_tag, list_tags, run_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.linkedin.activity_lock import SINGLE_ACCOUNT_KEY, account_key
 from netkeeper.linkedin.archive import ArchiveFormatError
@@ -132,7 +132,7 @@ lists_app = typer.Typer(
 import_app = typer.Typer(
     help="Bring contacts in from a LinkedIn archive or a CSV.", no_args_is_help=True
 )
-contacts_app = typer.Typer(help="Inspect your contacts.", no_args_is_help=True)
+contacts_app = typer.Typer(help="Inspect and add contacts.", no_args_is_help=True)
 browser_app = typer.Typer(
     help="The Chrome netkeeper attaches to (it never starts one).", no_args_is_help=True
 )
@@ -2590,6 +2590,89 @@ def contacts_stats() -> None:
         f"total ({stats.total}) counts live contacts only: not archived, not merged away. "
         "archived and merged away are separate counts of what total leaves out."
     )
+
+
+@contacts_app.command("add")
+def contacts_add(
+    first_name: Annotated[str | None, typer.Option("--first-name", help="First name.")] = None,
+    last_name: Annotated[str | None, typer.Option("--last-name", help="Last name.")] = None,
+    email: Annotated[str | None, typer.Option("--email", help="Email address.")] = None,
+    company: Annotated[str | None, typer.Option("--company", help="Current company.")] = None,
+    title: Annotated[str | None, typer.Option("--title", help="Current title.")] = None,
+    linkedin: Annotated[
+        str | None,
+        typer.Option("--linkedin", help="LinkedIn profile URL (https://www.linkedin.com/in/...)."),
+    ] = None,
+    tag: Annotated[
+        list[str] | None,
+        typer.Option("--tag", help="Put this tag (name or ID) on the contact. Repeatable."),
+    ] = None,
+    list_name: Annotated[
+        str | None, typer.Option("--list", help="Add the contact to this static list (name or ID).")
+    ] = None,
+    allow_name_match: Annotated[
+        bool,
+        typer.Option(
+            "--allow-name-match",
+            help="Add even when a contact with the same name and company exists.",
+        ),
+    ] = False,
+) -> None:
+    """Add one contact by hand (POST /contacts), with the same dedup and checks as an import.
+
+    Needs --first-name or --last-name. Someone already in your contacts, by email or
+    LinkedIn URL, is never added twice: the command names the existing contact and
+    exits 1. So does a match on first name, last name, and company, unless
+    --allow-name-match.
+    """
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            new = new_contact.NewContact(
+                first_name=first_name,
+                last_name=last_name,
+                email=email,
+                current_company=company,
+                current_title=title,
+                li_url=linkedin,
+                tag_ids=tuple(_tag_id_or_exit(session, user, which) for which in tag or ()),
+                list_id=_list_id_or_exit(session, user, list_name),
+            )
+            try:
+                contact = new_contact.create_contact(
+                    session, user, new, allow_name_match=allow_name_match
+                )
+            except new_contact.Invalid as exc:
+                typer.echo(f"error: {exc.field}: {exc.message}", err=True)
+                raise typer.Exit(code=1) from exc
+            except new_contact.Duplicate as exc:
+                archived = " (archived)" if exc.archived else ""
+                hint = "; pass --allow-name-match to add anyway" if exc.matched_by == "name" else ""
+                typer.echo(
+                    f"error: already a contact: {exc.contact_id}{archived}, "
+                    f"matched by {exc.matched_by}{hint}",
+                    err=True,
+                )
+                raise typer.Exit(code=1) from exc
+            name = " ".join(part for part in (contact.first_name, contact.last_name) if part)
+            line = f"added contact {contact.id}: {name}"
+    finally:
+        engine.dispose()
+    typer.echo(line)
+
+
+def _tag_id_or_exit(session: Session, user: User, which: str) -> int:
+    """The id of the user's tag named by its name or id."""
+    found = find_tag(session, user, which)
+    if found is not None:
+        return found.id
+    if which.isdigit():
+        return int(which)  # the service refuses an id that is not the user's
+    typer.echo(f"error: no tag {which!r}", err=True)
+    raise typer.Exit(code=1)
 
 
 def _stats_rows(stats: ContactStats) -> list[tuple[str, str]]:

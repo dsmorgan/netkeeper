@@ -729,6 +729,44 @@ class ContactPatch(BaseModel):
     do_not_contact_reason: str | None = None
 
 
+class ContactCreate(BaseModel):
+    """One contact added by hand (#303). Needs a first or a last name; the rest is optional.
+
+    Checked as an import checks a row: one email address, a LinkedIn profile URL.
+    ``tag_ids`` and ``list_id`` (a static list) put the new contact straight on
+    them. A contact the email or the LinkedIn URL already finds answers ``409``
+    with that contact; so does one whose first name, last name, and company all
+    match, unless ``allow_name_match`` says to add it anyway.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    current_company: str | None = None
+    current_title: str | None = None
+    li_url: str | None = None
+    tag_ids: list[int] = Field(default_factory=list)
+    list_id: int | None = None
+    allow_name_match: bool = False
+
+
+class DuplicateContact(BaseModel):
+    """The ``409`` body of adding someone already in the address book (#303).
+
+    ``contact_id`` is the contact to open, the first of ``contact_ids``.
+    ``matched_by``: ``linkedin`` (the profile URL), ``email``, or ``name``
+    (first name, last name, and company; send ``allow_name_match`` to add anyway).
+    """
+
+    detail: Literal["duplicate"]
+    contact_id: int
+    contact_ids: list[int]
+    matched_by: Literal["linkedin", "email", "name"]
+    archived: bool
+
+
 class RevertFieldIn(BaseModel):
     """The field to put back to its last synced value (spec 10.5, CP1 #28)."""
 
