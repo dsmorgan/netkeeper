@@ -230,6 +230,77 @@ describe('add contact', () => {
     expect(within(form).getByLabelText('Email')).toHaveAttribute('aria-invalid', 'false')
   })
 
+  it('links a tag or list refusal to its control, and a new choice clears it', async () => {
+    serve(() =>
+      jsonResponse(
+        {
+          detail: [
+            { loc: ['body', 'tag_ids'], msg: 'no tag 3', type: 'value_error' },
+            { loc: ['body', 'list_id'], msg: 'no list 5', type: 'value_error' },
+          ],
+        },
+        422,
+      ),
+    )
+    await renderApp('/contacts')
+    const form = await openForm()
+    type(form, 'First name', 'Wren')
+    const tag = await within(form).findByRole('checkbox', { name: 'friends' })
+    fireEvent.click(tag)
+    const list = await within(form).findByLabelText('Add to list')
+    fireEvent.change(list, { target: { value: '5' } })
+    submit(form)
+
+    const tagError = await within(form).findByText('no tag 3')
+    const listError = within(form).getByText('no list 5')
+    const tags = within(form).getByRole('group', { name: 'Tags' })
+    expect(tags).toHaveAttribute('aria-describedby', tagError.id)
+    expect(list).toHaveAttribute('aria-describedby', listError.id)
+    expect(list).toHaveAttribute('aria-invalid', 'true')
+    // Both named fields sit beside their controls; nothing is said twice in an alert.
+    expect(within(form).queryByRole('alert')).toBeNull()
+
+    fireEvent.change(list, { target: { value: '' } })
+    expect(within(form).queryByText('no tag 3')).toBeNull()
+    expect(within(form).queryByText('no list 5')).toBeNull()
+    expect(list).not.toHaveAttribute('aria-describedby')
+    expect(within(form).queryByRole('alert')).toBeNull()
+  })
+
+  it('drops the duplicate banner when a tag changes', async () => {
+    serve(() =>
+      jsonResponse(
+        {
+          detail: 'duplicate',
+          contact_id: 7,
+          contact_ids: [7],
+          matched_by: 'name',
+          archived: false,
+        },
+        409,
+      ),
+    )
+    await renderApp('/contacts')
+    const form = await openForm()
+    type(form, 'First name', 'Ada')
+    submit(form)
+    expect(await within(form).findByRole('alert')).toHaveTextContent('contact 7')
+
+    fireEvent.click(await within(form).findByRole('checkbox', { name: 'friends' }))
+    expect(within(form).queryByRole('alert')).toBeNull()
+  })
+
+  it('takes a LinkedIn URL with a port, as the backend does', async () => {
+    const seen = serve(() => jsonResponse(contactDetail({ id: 42 }), 201))
+    const { router } = await renderApp('/contacts')
+    const form = await openForm()
+    type(form, 'First name', 'Wren')
+    type(form, 'LinkedIn URL', 'https://www.linkedin.com:443/in/wren-fake/')
+    submit(form)
+    await waitFor(() => expect(router.state.location.pathname).toBe('/contacts/42'))
+    expect(posts(seen)).toHaveLength(1)
+  })
+
   it('says a failure that names no field on its own', async () => {
     serve(() => jsonResponse({ detail: 'database is locked' }, 503))
     await renderApp('/contacts')

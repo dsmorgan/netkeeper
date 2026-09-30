@@ -119,6 +119,8 @@ def test_a_last_name_alone_is_enough(writer: Session, user: User) -> None:
         (NewContact(first_name="Ada", email="not-an-address"), "email"),
         (NewContact(first_name="Ada", email="ada@localhost"), "email"),
         (NewContact(first_name="Ada", email="a@x.test, b@y.test"), "email"),
+        # Passes the importer's loose check; single_address refuses the comment (#269).
+        (NewContact(first_name="Ada", email="a(b)@ex.test"), "email"),
         (NewContact(first_name="Ada", email="Ada <ada@x.test>"), "email"),
         (NewContact(first_name="Ada", li_url="https://example.test/in/ada"), "li_url"),
         (NewContact(first_name="Ada", li_url="https://www.linkedin.com/company/x"), "li_url"),
@@ -160,6 +162,7 @@ def test_a_duplicate_by_email_ignores_case_and_spaces(writer: Session, user: Use
         "HTTPS://WWW.LINKEDIN.COM/in/ADA-Quill-Fake",
         "linkedin.com/in/ada-quill-fake?utm_source=share",
         "https://uk.linkedin.com/in/ada%2Dquill%2Dfake",
+        "https://www.linkedin.com:443/in/ada-quill-fake/",
     ],
 )
 def test_a_duplicate_by_linkedin_url_however_it_is_spelled(
@@ -212,6 +215,22 @@ def test_a_duplicate_of_a_merged_away_contact_names_the_survivor(
     with pytest.raises(Duplicate) as caught:
         create_contact(writer, user, NewContact(first_name="X", email="merged@example.test"))
     assert caught.value.contact_id == survivor.id
+
+
+def test_a_duplicate_reached_only_through_the_merge_chain_names_the_end_of_it(
+    writer: Session, user: User
+) -> None:
+    """The address stays on the merged-away row, as rows merged before a merge moved
+    children did: only following ``merged_into_id`` twice reaches the contact to open."""
+    survivor = factories.make_contact(writer, user)
+    middle = factories.make_contact(writer, user, merged_into_id=survivor.id)
+    factories.make_contact(writer, user, emails=["chain@example.test"], merged_into_id=middle.id)
+    assert survivor.emails == []
+    with pytest.raises(Duplicate) as caught:
+        create_contact(writer, user, NewContact(first_name="X", email="CHAIN@example.test"))
+    assert caught.value.contact_id == survivor.id
+    assert caught.value.contact_ids == (survivor.id,)
+    assert caught.value.matched_by == "email"
 
 
 def test_a_name_and_company_match_is_a_duplicate_unless_allowed(
@@ -442,6 +461,12 @@ async def test_post_contacts_answers_409_with_the_existing_contact(
     [
         ({}, "first_name"),
         ({"first_name": "Ada", "email": "nope"}, "email"),
+        ({"first_name": "Ada", "email": "a(b)@ex.test"}, "email"),
+        ({"first_name": "Ada", "tag_ids": [2**70]}, "tag_ids"),
+        ({"first_name": "Ada", "tag_ids": [0]}, "tag_ids"),
+        ({"first_name": "Ada", "tag_ids": list(range(1, 52))}, "tag_ids"),
+        ({"first_name": "Ada", "list_id": 2**70}, "list_id"),
+        ({"first_name": "Ada", "list_id": 2**31}, "list_id"),
         ({"first_name": "Ada", "li_url": "https://example.test/ada"}, "li_url"),
         ({"first_name": "Ada", "tag_ids": [424242]}, "tag_ids"),
         ({"first_name": "Ada", "list_id": 424242}, "list_id"),
@@ -453,7 +478,8 @@ async def test_post_contacts_names_the_field_it_refuses(
     response = await _create(client, **body)
     assert response.status_code == 422, response.text
     [problem] = response.json()["detail"]
-    assert problem["loc"] == ["body", field]
+    # A schema refusal of one list item adds its index: ["body", "tag_ids", 0].
+    assert problem["loc"][:2] == ["body", field]
     assert problem["msg"]
 
 
@@ -524,6 +550,12 @@ def test_cli_contacts_add_creates_with_tags_and_list(cli_db: sessionmaker[Sessio
         assert session.scalar(scoped_count(user, ListMember)) == 1
 
 
+def test_cli_contacts_add_help_documents_the_duplicate_exit_status() -> None:
+    result = CliRunner().invoke(cli, ["contacts", "add", "--help"])
+    assert result.exit_code == 0
+    assert "exits 3" in " ".join(result.stdout.split())
+
+
 def test_cli_contacts_add_refuses_a_duplicate_and_a_bad_value(
     cli_db: sessionmaker[Session],
 ) -> None:
@@ -542,13 +574,14 @@ def test_cli_contacts_add_refuses_a_duplicate_and_a_bad_value(
     dup = runner.invoke(
         cli, ["contacts", "add", "--first-name", "X", "--email", "ADA@example.test"]
     )
-    assert dup.exit_code == 1
+    # Its own status, pinned literally: neither 1 (any other refusal) nor 2 (usage).
+    assert dup.exit_code == 3
     assert f"error: already a contact: {existing}, matched by email" in dup.stderr
 
     by_name = ["contacts", "add", "--first-name", "Ada", "--last-name", "Quill"]
     by_name += ["--company", "Blueleaf"]
     refused = runner.invoke(cli, by_name)
-    assert refused.exit_code == 1
+    assert refused.exit_code == 3
     assert "--allow-name-match" in refused.stderr
     assert runner.invoke(cli, [*by_name, "--allow-name-match"]).exit_code == 0
 

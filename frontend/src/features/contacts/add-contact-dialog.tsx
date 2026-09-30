@@ -76,8 +76,12 @@ const EMPTY: Draft = {
 
 /** The importer's loose check (`is_email_address`): one @, a dot in the domain, no spaces. */
 const EMAIL = /^[^@\s,;<>]+@[^@\s,;<>]+\.[A-Za-z]{2,}$/
-/** A profile URL on linkedin.com or a country subdomain, with or without the scheme. */
-const LINKEDIN_PROFILE = /^(https?:\/\/)?([a-z0-9-]+\.)*linkedin\.com\/in\/[^/?#\s]+\/?([?#]\S*)?$/i
+/**
+ * A profile URL on linkedin.com or a country subdomain, with or without the scheme
+ * or a port: what the backend's `public_id_from_url` reads, which ignores the port.
+ */
+const LINKEDIN_PROFILE =
+  /^(https?:\/\/)?([a-z0-9-]+\.)*linkedin\.com(:\d+)?\/in\/[^/?#\s]+\/?([?#]\S*)?$/i
 
 const MATCHED_BY: Record<DuplicateContact['matched_by'], string> = {
   email: 'that email address',
@@ -167,6 +171,8 @@ export function AddContactForm({ onDone }: { onDone: () => void }) {
   const [listId, setListId] = useState<number | null>(null)
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({})
   const [duplicate, setDuplicate] = useState<DuplicateContact | null>(null)
+  // A refusal that names no field (a failure that is not a 422, say) is said on its own.
+  const [failure, setFailure] = useState<string | null>(null)
 
   const staticLists = (lists.data ?? []).filter((list) => list.kind === 'static')
 
@@ -187,14 +193,18 @@ export function AddContactForm({ onDone }: { onDone: () => void }) {
         params: { contactId: String(result.contact.id) },
       })
     },
-    onError: (error: Error) => setErrors(fieldErrors(error)),
+    onError: (error: Error) => {
+      const found = fieldErrors(error)
+      setErrors(found)
+      setFailure(Object.keys(found).length > 0 ? null : error.message)
+    },
   })
 
   const submit = (allowNameMatch: boolean) => {
     const found = validateDraft(draft)
     setErrors(found)
     setDuplicate(null)
-    add.reset()
+    setFailure(null)
     if (Object.keys(found).length > 0) return
     add.mutate(allowNameMatch)
   }
@@ -211,8 +221,11 @@ export function AddContactForm({ onDone }: { onDone: () => void }) {
     setErrors((current) => ({ ...current, [name]: undefined }))
   }
 
-  // A refusal that names no field (a failure that is not a 422, say) is said on its own.
-  const unplaced = add.isError && !Object.values(errors).some((problem) => problem !== undefined)
+  /** A tag or the list changed: what the backend said about the old choice no longer holds. */
+  const chose = () => {
+    setDuplicate(null)
+    setErrors((current) => ({ ...current, tag_ids: undefined, list_id: undefined }))
+  }
 
   return (
     <form noValidate onSubmit={onSubmit} className="grid gap-3" aria-label="Add a contact">
@@ -252,28 +265,34 @@ export function AddContactForm({ onDone }: { onDone: () => void }) {
       </div>
 
       {tags.isSuccess && tags.data.length > 0 && (
-        <fieldset className="grid gap-1.5">
+        <fieldset
+          className="grid gap-1.5"
+          aria-describedby={errors.tag_ids !== undefined ? 'add-contact-tags-error' : undefined}
+        >
           <legend className="mb-1 text-sm font-medium">Tags</legend>
           <div className="flex flex-wrap gap-x-4 gap-y-1.5">
             {tags.data.map((tag) => (
               <Label key={tag.id} className="font-normal">
                 <Checkbox
                   checked={tagIds.has(tag.id)}
-                  onCheckedChange={(checked) =>
+                  onCheckedChange={(checked) => {
+                    chose()
                     setTagIds((current) => {
                       const next = new Set(current)
                       if (checked === true) next.add(tag.id)
                       else next.delete(tag.id)
                       return next
                     })
-                  }
+                  }}
                 />
                 {tag.name}
               </Label>
             ))}
           </div>
           {errors.tag_ids !== undefined && (
-            <p className="text-xs text-destructive">{errors.tag_ids}</p>
+            <p id="add-contact-tags-error" className="text-xs text-destructive">
+              {errors.tag_ids}
+            </p>
           )}
         </fieldset>
       )}
@@ -285,9 +304,12 @@ export function AddContactForm({ onDone }: { onDone: () => void }) {
             id="add-contact-list"
             className="w-full"
             value={listId === null ? '' : String(listId)}
-            onChange={(event) =>
+            aria-invalid={errors.list_id !== undefined}
+            aria-describedby={errors.list_id !== undefined ? 'add-contact-list-error' : undefined}
+            onChange={(event) => {
+              chose()
               setListId(event.target.value === '' ? null : Number(event.target.value))
-            }
+            }}
           >
             <option value="">No list</option>
             {staticLists.map((list) => (
@@ -297,7 +319,9 @@ export function AddContactForm({ onDone }: { onDone: () => void }) {
             ))}
           </Select>
           {errors.list_id !== undefined && (
-            <p className="text-xs text-destructive">{errors.list_id}</p>
+            <p id="add-contact-list-error" className="text-xs text-destructive">
+              {errors.list_id}
+            </p>
           )}
         </div>
       )}
@@ -335,9 +359,9 @@ export function AddContactForm({ onDone }: { onDone: () => void }) {
         </div>
       )}
 
-      {unplaced && (
+      {failure !== null && (
         <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-destructive">
-          {add.error.message}
+          {failure}
         </p>
       )}
 

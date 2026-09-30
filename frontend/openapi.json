@@ -1553,6 +1553,8 @@
           "list_id": {
             "anyOf": [
               {
+                "maximum": 2147483647.0,
+                "minimum": 1.0,
                 "type": "integer"
               },
               {
@@ -1563,8 +1565,11 @@
           },
           "tag_ids": {
             "items": {
+              "maximum": 2147483647.0,
+              "minimum": 1.0,
               "type": "integer"
             },
+            "maxItems": 50,
             "title": "Tag Ids",
             "type": "array"
           }

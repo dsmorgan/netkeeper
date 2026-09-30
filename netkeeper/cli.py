@@ -2592,6 +2592,14 @@ def contacts_stats() -> None:
     )
 
 
+CONTACT_EXISTS_EXIT: Final = 3
+"""``netkeeper contacts add``'s exit status when the person is already a contact.
+
+Not 1 (every other refusal) or 2 (Click's usage error), so a script adding
+contacts from a list can skip the ones already there and stop on anything else.
+"""
+
+
 @contacts_app.command("add")
 def contacts_add(
     first_name: Annotated[str | None, typer.Option("--first-name", help="First name.")] = None,
@@ -2622,8 +2630,9 @@ def contacts_add(
 
     Needs --first-name or --last-name. Someone already in your contacts, by email or
     LinkedIn URL, is never added twice: the command names the existing contact and
-    exits 1. So does a match on first name, last name, and company, unless
-    --allow-name-match.
+    exits 3. So does a match on first name, last name, and company, unless
+    --allow-name-match. Any other refusal, such as a value that does not hold up or
+    an unknown tag or list, exits 1.
     """
     engine = make_engine(database_url())
     try:
@@ -2656,7 +2665,7 @@ def contacts_add(
                     f"matched by {exc.matched_by}{hint}",
                     err=True,
                 )
-                raise typer.Exit(code=1) from exc
+                raise typer.Exit(code=CONTACT_EXISTS_EXIT) from exc
             name = " ".join(part for part in (contact.first_name, contact.last_name) if part)
             line = f"added contact {contact.id}: {name}"
     finally:

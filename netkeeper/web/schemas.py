@@ -21,6 +21,7 @@ from netkeeper.crm.filters import FilterTree, SortKey
 from netkeeper.crm.importer import ImportField
 from netkeeper.crm.interactions import TimelineEntry
 from netkeeper.crm.lists import MAX_COLUMNS
+from netkeeper.crm.new_contact import MAX_TAGS as MAX_NEW_CONTACT_TAGS
 from netkeeper.crm.tags import PATTERN_MAX_LENGTH, InvalidPattern, compile_pattern
 from netkeeper.linkedin.archive import ArchiveRefusalCode
 from netkeeper.models import (
@@ -729,6 +730,16 @@ class ContactPatch(BaseModel):
     do_not_contact_reason: str | None = None
 
 
+MAX_ROW_ID = 2**31 - 1
+"""The highest row id a request body may name: an ``INTEGER`` primary key on PostgreSQL.
+
+Past it, SQLite raises ``OverflowError`` on the bind parameter and the request
+would answer 500 rather than 422 (#303 review, the same failure as #88).
+"""
+
+RowId = Annotated[int, Field(ge=1, le=MAX_ROW_ID)]
+
+
 class ContactCreate(BaseModel):
     """One contact added by hand (#303). Needs a first or a last name; the rest is optional.
 
@@ -747,8 +758,8 @@ class ContactCreate(BaseModel):
     current_company: str | None = None
     current_title: str | None = None
     li_url: str | None = None
-    tag_ids: list[int] = Field(default_factory=list)
-    list_id: int | None = None
+    tag_ids: list[RowId] = Field(default_factory=list, max_length=MAX_NEW_CONTACT_TAGS)
+    list_id: RowId | None = None
     allow_name_match: bool = False
 
 
