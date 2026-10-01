@@ -773,7 +773,11 @@ def apply_harvest(
 
     ``last_enriched_at`` is set, and ``enrich_priority`` cleared, only by an
     applied harvest, and not by one whose Contact info came from a streamed copy
-    and holds no email and no phone (#207 review): that one stays due. An applied
+    and holds no email and no phone (#207 review): that one stays due, and is
+    visited again after :data:`~netkeeper.services.enrich_plan.ENRICH_RETRY_AFTER`
+    (7 days), not after the stale-day schedule. Someone who shares nothing and whose
+    overlay is always read from a copy is revisited weekly that way (#196 item 13).
+    An applied
     harvest does **not** clear ``li_disconnected_at``: a profile that can be
     looked up is not proof of a connection, and only a sync that sees the contact
     in the connections list clears it. Nothing is committed; the session must be a

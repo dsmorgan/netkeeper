@@ -205,7 +205,9 @@ class PageProfiles:
         self._path = ""
         self._url = ""
         self._screen: bytes | None = None
-        self._components: list[tuple[bytes, str | None]] = []
+        #: Each lazy card kept: its body, its request, and whether the body is the
+        #: body tap's streamed copy (#203; noted on the read, #196 item 12).
+        self._components: list[tuple[bytes, str | None, bool]] = []
         self._redirects: list[str] = []
         self._stopped: Answer[None] | None = None
         self._clicked = False
@@ -273,9 +275,8 @@ class PageProfiles:
             # The member's id first, from the screen alone: a lazy card whose request
             # names another member, by slug or by id, is never read as this one's.
             urn = parse_profile_urn(self._screen, slug=self._slug)
-            kept = [
-                body for body, request in self._components if _names_only(request, self._slug, urn)
-            ]
+            named = [c for c in self._components if _names_only(c[1], self._slug, urn)]
+            kept = [body for body, _, _ in named]
             if len(kept) < len(self._components):
                 log.info(
                     "enrichment: skipped %d lazy card(s) that name another member",
@@ -285,7 +286,11 @@ class PageProfiles:
         except RouteChanged:
             log.warning("enrichment: the profile answered in a shape the parser does not know")
             return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
-        return Answer(Outcome.OK, self._url, details)
+        # #196 item 12: a lazy card read from a copy is only noted, as the overlay's
+        # is. Positions are upserted and never removed, and the copy passed the same
+        # whole-answer checks; keeping the contact due would only add visits.
+        from_copy = any(copied for _, _, copied in named)
+        return Answer(Outcome.OK, self._url, details, from_copy=from_copy)
 
     async def read_contact_info(
         self, profile: ProfileDetails, *, back: ScrollPlan, pause_s: float
@@ -579,7 +584,7 @@ class PageProfiles:
         if len(self._components) >= MAX_COMPONENTS:
             log.warning("enrichment: more lazy cards than a profile loads; unreadable")
             return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True)
-        self._components.append((body, response.request_body))
+        self._components.append((body, response.request_body, response.body is None))
         return None
 
     async def _read_overlay(self) -> Answer[ContactInfo]:

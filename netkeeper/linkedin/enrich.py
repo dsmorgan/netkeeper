@@ -303,7 +303,8 @@ class EnrichResult:
     ``lost`` one fixed line per unreadable visit whose answer's body the browser
     could not hand over (#197), naming the visit by its number in this run; and
     ``copied`` one fixed line per visit whose Contact info was read from the body
-    tap's streamed copy instead (#207 review).
+    tap's streamed copy instead (#207 review), and one per visit that kept a lazy
+    card read from such a copy (#196 item 12).
     """
 
     reason: StopReason
@@ -338,7 +339,8 @@ class Answer[T]:
     ``lost`` is set on an unparsed answer whose body the browser could not hand
     over (#197): which answer it was and why, in fixed words, never the
     exception's message. ``from_copy`` marks an ``Ok`` value read from the body tap's
-    streamed copy of an answer whose own body was lost (#203).
+    streamed copy of an answer whose own body was lost (#203): for a profile, one
+    read with at least one lazy card from a copy (#196 item 12).
     """
 
     outcome: Outcome
@@ -604,6 +606,9 @@ async def run_enrichment(
                 contact_info=None if info is None else info.value,
                 contact_info_from_copy=info is not None and info.from_copy,
             )
+            if details.from_copy:
+                # #196 item 12: noted only; the harvest is applied as any other.
+                copied.append(f"visit {visits}: a lazy card was read from a streamed copy")
             if info is not None and info.from_copy:
                 copied.append(f"visit {visits}: the Contact info was read from a streamed copy")
         else:

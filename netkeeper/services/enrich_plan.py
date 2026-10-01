@@ -35,8 +35,15 @@ before the next, so it cannot head every run, and spec 9.8's NotFound streak
 three consecutive days. A visit whose harvest was applied does not wait (#172):
 it wrote something, so ``last_enriched_at`` is as new as
 ``li_enrich_attempted_at``, and only a fresh ask (``enrich_priority``, which
-the harvest cleared) brings the contact back before it goes stale. A pin
-overrides the tiers and the wait, never the eligibility.
+the harvest cleared) brings the contact back before it goes stale. One applied
+harvest does wait: one kept due because its Contact info came from a streamed copy
+with no email and no phone (#207 review) leaves ``last_enriched_at`` behind, so it
+waits :data:`ENRICH_RETRY_AFTER` like a visit that wrote nothing. A person who
+shares no email and no phone, and whose overlay answer is always aborted and read
+from a copy, is therefore visited every 7 days rather than every
+``enrich_stale_days`` (#196 item 13). That is bounded -- one visit a week, inside
+the run's budget like any other -- and ends the first time the overlay's own body
+reads. A pin overrides the tiers and the wait, never the eligibility.
 
 **Pins (spec 9.6).** At most :data:`MAX_PINS`, stored in ``settings_kv`` per
 account. A pin is removed when a run finishes with that contact (harvested or

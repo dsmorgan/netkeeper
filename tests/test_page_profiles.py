@@ -1308,6 +1308,9 @@ async def test_a_lost_lazy_card_reads_from_its_whole_streamed_copy(
     assert [p.title for p in harvest.details.positions] == ["Staff Engineer"]
     assert "read a lazy card from the copy streamed as it arrived" in caplog.text
     assert "fake-lost-slug" not in caplog.text
+    # #196 item 12: the run notes it; the harvest is applied like any other.
+    assert out.result.copied == ("visit 1: a lazy card was read from a streamed copy",)
+    assert harvest.contact_info is not None and not harvest.contact_info_from_copy
 
 
 @pytest.mark.parametrize("how", ["half", "rows", "orphan", "none"])
@@ -1320,6 +1323,7 @@ async def test_a_lost_lazy_card_without_a_whole_copy_is_still_skipped(
     (harvest,) = out.harvests
     assert harvest.outcome is Outcome.OK and harvest.details is not None
     assert harvest.details.positions == ()
+    assert out.result.copied == ()
     assert "skipped a lazy card that could not be read" in caplog.text
     assert "read a lazy card from the copy" not in caplog.text
     not_whole = "the streamed copy of a lost answer is not whole; not used"
