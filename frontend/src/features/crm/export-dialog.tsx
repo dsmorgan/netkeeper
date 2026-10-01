@@ -54,6 +54,22 @@ import { EXPORT_PRESETS } from './export-presets'
 import { emptyTree, validateTree } from './tree'
 import type { ExportFormat, ExportPreset, FilterTree } from './types'
 
+/**
+ * Why the file can hold fewer contacts than the headline count, as one
+ * sentence, or null when it holds them all. A vCard's own reason (contacts
+ * waiting for review, #254) is named here rather than left to the preset's
+ * caveat, which for most presets says nothing about review.
+ */
+function fewerRowsNote(presetDrops: boolean, isVcard: boolean): string | null {
+  if (presetDrops && isVcard) {
+    return 'The file may hold fewer: a vCard leaves out contacts waiting for review, and this preset leaves out others, as explained below.'
+  }
+  if (presetDrops)
+    return 'The file may hold fewer: this preset leaves some out, as explained below.'
+  if (isVcard) return 'The file may hold fewer: a vCard leaves out contacts waiting for review.'
+  return null
+}
+
 const FORMATS: ReadonlyArray<{ value: ExportFormat; label: string; note: string }> = [
   { value: 'csv', label: 'CSV', note: 'One row per contact, for a spreadsheet or a mail merge.' },
   { value: 'json', label: 'JSON', note: 'An array of objects, with the child rows nested.' },
@@ -129,6 +145,7 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
   const effectiveFormat = allowed.includes(format) ? format : (allowed[0] ?? format)
   const chosenFormat = FORMATS.find((candidate) => candidate.value === effectiveFormat)
   const isCsv = effectiveFormat === 'csv'
+  const fewer = fewerRowsNote(chosen?.dropsRows === true, effectiveFormat === 'vcard')
   const href = exportUrl({
     preset,
     format: effectiveFormat,
@@ -149,12 +166,7 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
           <>
             <strong>{count.data.total.toLocaleString()}</strong> contacts selected —{' '}
             <span className="text-muted-foreground">{count.data.describe}</span>
-            {chosen?.dropsRows === true && (
-              <> The file may hold fewer: this preset leaves some out, as explained below.</>
-            )}
-            {chosen?.dropsRows !== true && effectiveFormat === 'vcard' && (
-              <> The file may hold fewer: a vCard leaves out contacts waiting for review.</>
-            )}
+            {fewer !== null && <> {fewer}</>}
           </>
         )}
       </p>
@@ -182,7 +194,7 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
           {preset === 'campaign-audience' && listCount !== undefined && (
             <p className="mt-1">
               This list counts {listCount.toLocaleString()} contacts; the file will hold that many
-              minus anyone marked do-not-contact.
+              minus anyone marked do-not-contact or waiting for review.
             </p>
           )}
         </Callout>

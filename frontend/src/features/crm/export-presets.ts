@@ -53,7 +53,7 @@ export const EXPORT_PRESETS: readonly PresetSpec[] = [
     label: 'Campaign audience',
     description: 'The campaign merge fields plus the recipient email, ready for a mail merge.',
     caveat:
-      'Everyone marked do-not-contact is left out, because a mail-merge file is a send path once it leaves this tool. Expect fewer rows than the count above — that gap is the point, not a miscount.',
+      'Everyone marked do-not-contact is left out, because a mail-merge file is a send path once it leaves this tool, and so is everyone waiting for review, who is not somebody to reach until confirmed. Expect fewer rows than the count above — that gap is the point, not a miscount.',
     dropsRows: true,
   },
   {

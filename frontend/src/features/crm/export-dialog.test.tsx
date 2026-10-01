@@ -143,7 +143,8 @@ describe('the export form', () => {
     expect(screen.getByText(/that gap is the point, not a miscount/)).toBeInTheDocument()
     expect(
       screen.getByText(/This list counts 40 contacts; the file will hold that many/),
-    ).toBeInTheDocument()
+    ).toHaveTextContent('minus anyone marked do-not-contact or waiting for review.')
+    expect(screen.getByText(/and so is everyone waiting for review/)).toBeInTheDocument()
   })
 
   it('says linkedin-archive drops rows too, like nine-column', () => {
@@ -185,6 +186,29 @@ describe('the export form', () => {
 
     fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'json' } })
     expect(headline).not.toHaveTextContent('may hold fewer')
+  })
+
+  it.each(['nine-column', 'linkedin-archive'] as const)(
+    'names review itself for %s as vCard, since that caveat does not mention it',
+    async (preset) => {
+      mockApi(countRoute(214))
+      renderWithClient(<ExportForm filter={FILTER} />)
+      fireEvent.change(screen.getByLabelText('Preset'), { target: { value: preset } })
+      fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'vcard' } })
+      const headline = (await screen.findByText('214')).closest('[role="status"]')
+      expect(headline).toHaveTextContent(
+        'a vCard leaves out contacts waiting for review, and this preset leaves out others',
+      )
+    },
+  )
+
+  it('gives macOS Contacts one "may hold fewer" sentence, not two', async () => {
+    mockApi(countRoute(214))
+    renderWithClient(<ExportForm filter={FILTER} />)
+    fireEvent.change(screen.getByLabelText('Preset'), { target: { value: 'macos-contacts' } })
+    const headline = (await screen.findByText('214')).closest('[role="status"]')
+    expect(headline?.textContent?.match(/may hold fewer/g)).toHaveLength(1)
+    expect(headline).toHaveTextContent('a vCard leaves out contacts waiting for review')
   })
 
   it('makes no claim about the presets that carry no caveat', () => {
