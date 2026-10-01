@@ -33,7 +33,8 @@ How it reads Gmail
 
 What a message means
 --------------------
-A message netkeeper or the person sent (``SENT`` or ``DRAFT``) is skipped.
+A message netkeeper or the person sent (``SENT``, ``DRAFT``, or ``SCHEDULED``, #278)
+is skipped.
 
 - **Bounce**: a hard-failure notice (:func:`is_hard_bounce`; a delay notice is
   nothing) from a mailer daemon (``mailer-daemon@`` or ``postmaster@``), in a
@@ -140,7 +141,7 @@ _UNSUBSCRIBE: Final = re.compile(
 )
 _MSGID: Final = re.compile(r"<[^<>\s]+>")
 _SEARCHABLE: Final = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+")
-_OWN: Final = frozenset({"SENT", "DRAFT"})
+_OWN: Final = frozenset({"SENT", "DRAFT", "SCHEDULED"})
 _INBOX: Final = "INBOX"
 _FAILURE: Final = re.compile(
     r"\b(?:failure|failed|undeliverable|undelivered|not delivered|returned|rejected)\b",
