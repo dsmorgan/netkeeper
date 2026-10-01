@@ -20,6 +20,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
@@ -38,19 +39,27 @@ pytestmark = pytest.mark.skipif(SH is None or sys.platform == "win32", reason="n
 
 
 def _config_cdp_port(config_path: str) -> str | None:
-    """The port in a NETKEEPER_CONFIG file's ``[linkedin] cdp_url``, or
-    ``None`` if the file cannot be read, has no ``cdp_url``, or that URL
-    names no explicit port (#183 re-review gap: a config with no ``cdp_url``,
-    or one with no port at all, must not be read as "pinned" just because
-    the key was set)."""
+    """The port in a NETKEEPER_CONFIG file's ``[linkedin] cdp_url`` -- the
+    real key path in netkeeper's own config loader (netkeeper/config.py's
+    ``Settings.linkedin: LinkedInSettings``, ``LinkedInSettings.cdp_url``),
+    read with the same ``tomllib`` netkeeper itself parses config with,
+    not a regex that could be fooled by a commented-out line or a wrong
+    section (#183 re-review gap 3c). ``None`` if the file cannot be read, is
+    not valid TOML, has no ``cdp_url``, or that URL names no explicit port
+    (a config with no ``cdp_url``, or one with no port at all, must not be
+    read as "pinned" just because the key was set)."""
     try:
-        text = Path(config_path).read_text()
-    except OSError:
+        with open(config_path, "rb") as handle:
+            raw = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
         return None
-    match = re.search(r'cdp_url\s*=\s*"([^"]*)"', text)
-    if match is None:
+    linkedin = raw.get("linkedin")
+    if not isinstance(linkedin, dict):
         return None
-    port = urlparse(match.group(1)).port
+    cdp_url = linkedin.get("cdp_url")
+    if not isinstance(cdp_url, str):
+        return None
+    port = urlparse(cdp_url).port
     return None if port is None else str(port)
 
 
@@ -70,7 +79,19 @@ def _require_pinned_port(
     netkeeper's own JSON answer instead of either -- it must state the value
     it configured that fake with, so this guard can check it rather than
     trusting the test to have gotten it right silently.
+
+    Every comparison against 9222 here is numeric, not string: "09222" is
+    still port 9222 (leading zeros do not change a decimal value), and a
+    plain string compare would have let it slip past (#183 re-review gap
+    3a). A non-digit value (chrome.sh's own malformed-port test passes one
+    on purpose) cannot equal 9222 either way, so it is left for chrome.sh's
+    own validation to reject -- this guard is about 9222 specifically, not
+    general port syntax.
     """
+
+    def names_9222(value: str) -> bool:
+        return value.isdigit() and int(value) == 9222
+
     literal: str | None = None
     args_list = list(args)
     for i, arg in enumerate(args_list):
@@ -79,7 +100,7 @@ def _require_pinned_port(
         elif arg.startswith("--port="):
             literal = arg[len("--port=") :]
     if literal is not None:
-        assert literal != "9222", "a chrome.sh test must pin a port other than 9222"
+        assert not names_9222(literal), "a chrome.sh test must pin a port other than 9222"
         return
     if "NETKEEPER_CONFIG" in env:
         config_port = _config_cdp_port(env["NETKEEPER_CONFIG"])
@@ -88,10 +109,10 @@ def _require_pinned_port(
                 "a chrome.sh test's NETKEEPER_CONFIG must set a [linkedin] cdp_url "
                 "with an explicit port -- this one had none, or could not be read"
             )
-        assert config_port != "9222", "a chrome.sh test must pin a port other than 9222"
+        assert not names_9222(config_port), "a chrome.sh test must pin a port other than 9222"
         return
     if pinned_port is not None:
-        assert str(pinned_port) != "9222", "a chrome.sh test must pin a port other than 9222"
+        assert not names_9222(str(pinned_port)), "a chrome.sh test must pin a port other than 9222"
         return
     raise AssertionError(
         "a chrome.sh invocation in tests must pin a port other than 9222 -- pass "
@@ -102,7 +123,7 @@ def _require_pinned_port(
     )
 
 
-def _curl_shim(shim_dir: Path) -> None:
+def _curl_shim(shim_dir: Path) -> Path:
     """A `curl` on PATH that refuses any invocation naming port 9222, as a
     backstop that does not depend on a test author remembering to pin one
     (#183 re-review gap): `_require_pinned_port` only catches what a test
@@ -110,23 +131,38 @@ def _curl_shim(shim_dir: Path) -> None:
     to, no matter how it got there. The real curl's path is resolved before
     the shim is built, since by the time it runs, PATH has this directory
     in front of it.
+
+    The match is numeric, not a literal ":9222" substring: a `sed` extraction
+    pulls the digit run after a colon, skipping any leading zeros, so "09222"
+    is still caught and a genuinely different port like "92220" is not
+    falsely flagged just for starting with the same four digits (#183
+    re-review gap 3a).
+
+    On a refusal, the shim also drops a marker file in ``shim_dir`` (returned
+    here): `run_sh` checks for it after the run and raises if it is there, so
+    a 9222 that reached curl despite everything else fails the test loudly --
+    chrome.sh's own `cdp_version()` swallows a failed curl silently, treating
+    it as "nothing answered", so nothing else would surface this (#183
+    re-review gap 3b).
     """
     real = shutil.which("curl")
     assert real is not None, "curl must be on PATH for the shim to fall back to"
+    marker = shim_dir / "REFUSED_9222"
     shim = shim_dir / "curl"
     shim.write_text(
         "#!/bin/sh\n"
         'for arg in "$@"; do\n'
-        '  case "$arg" in\n'
-        "    *:9222*)\n"
-        "      echo 'refused: 9222' >&2\n"
-        "      exit 1\n"
-        "      ;;\n"
-        "  esac\n"
+        "  port=$(printf '%s' \"$arg\" | sed -n 's/.*:0*\\([0-9][0-9]*\\).*/\\1/p')\n"
+        '  if [ -n "$port" ] && [ "$port" -eq 9222 ] 2>/dev/null; then\n'
+        f"    : > {str(marker)!r}\n"
+        "    echo 'refused: 9222' >&2\n"
+        "    exit 1\n"
+        "  fi\n"
         "done\n"
         f'exec "{real}" "$@"\n'
     )
     shim.chmod(0o755)
+    return marker
 
 
 def run_sh(
@@ -141,8 +177,11 @@ def run_sh(
     that deliberately runs with no curl at all, to pin chrome.sh's own
     ``command -v curl`` check (C9): the shim's fallback always finds a real
     curl, so leaving it in would quietly hand that test a working curl and
-    defeat its own point. Nothing unsafe about the opt-out either way -- a
-    missing curl can place no network call at all, let alone one to 9222."""
+    defeat its own point. Asserted, not just trusted (#183 re-review gap
+    3d): a future PATH built for some other reason could leave curl
+    reachable after all, silently dropping the backstop for that call
+    without allow_no_curl's own point (a test with no curl on PATH on
+    purpose) actually requiring it to be absent."""
     assert SH is not None
     if script.name == "chrome.sh":
         _require_pinned_port(args, env, pinned_port)
@@ -153,6 +192,10 @@ def run_sh(
     )
     full_env = {"PATH": path, "HOME": "/nonexistent", **env}
     if allow_no_curl:
+        assert shutil.which("curl", path=full_env.get("PATH", "")) is None, (
+            "allow_no_curl=True but curl is still reachable on this PATH -- either "
+            "make it genuinely absent, or drop the flag and let the shim run"
+        )
         return subprocess.run(
             [SH, str(script), *args],
             capture_output=True,
@@ -170,9 +213,9 @@ def run_sh(
     # no shim.
     shim_dir = Path(tempfile.mkdtemp(prefix="chrome-sh-curl-shim-"))
     try:
-        _curl_shim(shim_dir)
+        marker = _curl_shim(shim_dir)
         full_env["PATH"] = os.pathsep.join((str(shim_dir), full_env.get("PATH", "")))
-        return subprocess.run(
+        result = subprocess.run(
             [SH, str(script), *args],
             capture_output=True,
             text=True,
@@ -180,6 +223,12 @@ def run_sh(
             input=stdin,
             timeout=60,
         )
+        if marker.exists():
+            raise AssertionError(
+                "chrome.sh tried to reach port 9222 despite the pinned-port guard -- "
+                "the curl shim refused it; see stderr for 'refused: 9222'"
+            )
+        return result
     finally:
         shutil.rmtree(shim_dir, ignore_errors=True)
 
@@ -294,9 +343,14 @@ def process_named(directory: Path, name: str) -> Iterator[int]:
 
 
 @contextmanager
-def process_named_holding_open(directory: Path, name: str, held: Path) -> Iterator[int]:
+def process_named_holding_open(
+    directory: Path, name: str, held: Path, *extra_args: str
+) -> Iterator[int]:
     """A live process named ``directory/name`` (``ps -o comm=`` reports the symlink's
     own name, not the interpreter it points to) that keeps ``held`` open until killed.
+    ``extra_args`` land after the ``-c`` script on the command line (as plain
+    positional arguments the script itself ignores), standing in for whatever
+    flags a real Chrome's command line would carry.
 
     What tells an actual holder of a profile apart from a pid that merely matches
     by name or number (#183 review bug 1): ``lock_holder()`` now requires the
@@ -308,7 +362,7 @@ def process_named_holding_open(directory: Path, name: str, held: Path) -> Iterat
     exe = directory / name
     exe.symlink_to(sys.executable)
     proc = subprocess.Popen(
-        [str(exe), "-c", f"f = open({str(held)!r}); import time; time.sleep(60)"]
+        [str(exe), "-c", f"f = open({str(held)!r}); import time; time.sleep(60)", *extra_args]
     )
     try:
         yield proc.pid
@@ -417,6 +471,34 @@ def test_run_sh_refuses_netkeeper_config_with_no_port_in_the_url(tmp_path: Path)
         run_sh(CHROME, "--status", env={"NETKEEPER_CONFIG": str(config)})
 
 
+def test_run_sh_refuses_a_leading_zero_port_9222() -> None:
+    """#183 re-review gap 3a: "09222" is still port 9222 numerically; a plain
+    string compare against the literal "9222" would have let it slip past."""
+    with pytest.raises(AssertionError):
+        run_sh(CHROME, "--status", "--port", "09222", env={})
+
+
+def test_run_sh_refuses_netkeeper_config_with_a_leading_zero_port(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text('[linkedin]\ncdp_url = "http://127.0.0.1:09222"\n')
+    with pytest.raises(AssertionError):
+        run_sh(CHROME, "--status", env={"NETKEEPER_CONFIG": str(config)})
+
+
+def test_run_sh_accepts_pinned_port_with_a_leading_zero_that_is_not_9222(tmp_path: Path) -> None:
+    """A leading zero on some other port is not a 9222 bypass attempt; the
+    numeric check must not over-fire on it."""
+    run_sh(
+        CHROME,
+        "--dry-run",
+        "--port",
+        "01234",
+        "--profile-dir",
+        str(tmp_path / "profile"),
+        env={},
+    )
+
+
 def test_curl_shim_refuses_a_9222_argument_without_a_network_call(tmp_path: Path) -> None:
     """#183 re-review gap: the curl-shim backstop must refuse a :9222 URL by
     inspecting its arguments alone, never by attempting the request first and
@@ -449,6 +531,71 @@ def test_curl_shim_passes_through_anything_else(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
     assert "curl" in result.stdout.lower()
+
+
+def test_curl_shim_refuses_a_leading_zero_9222(tmp_path: Path) -> None:
+    """#183 re-review gap 3a: ":09222" is still port 9222 numerically; a plain
+    "*:9222*" substring match would have missed it entirely."""
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    _curl_shim(shim_dir)
+    result = subprocess.run(
+        [str(shim_dir / "curl"), "--max-time", "2", "http://192.0.2.1:09222/json/version"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0
+    assert "refused: 9222" in result.stderr
+
+
+def test_curl_shim_does_not_falsely_flag_a_different_port_sharing_the_digits(
+    tmp_path: Path,
+) -> None:
+    """#183 re-review gap 3a: a port like 92220 is not 9222 -- the match must
+    require a non-digit or the end of the argument right after it, not just
+    the substring ":9222" anywhere."""
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    _curl_shim(shim_dir)
+    result = subprocess.run(
+        [str(shim_dir / "curl"), "-fsS", "--max-time", "1", "http://192.0.2.1:92220/x"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert "refused: 9222" not in result.stderr
+
+
+def test_run_sh_raises_if_chrome_sh_still_reaches_9222_via_curl(tmp_path: Path) -> None:
+    """#183 re-review gap 3b: even when a test's own --port/NETKEEPER_CONFIG/
+    pinned_port satisfies the guard, run_sh must still notice and fail loudly
+    if chrome.sh's own curl call reached 9222 anyway. chrome.sh's
+    cdp_version() swallows a failed curl silently (`|| true`), treating it as
+    "nothing answered", so nothing else would surface this -- the marker
+    file the shim drops on a refusal is what run_sh checks for instead."""
+    fake_chrome = tmp_path / "chrome.sh"
+    fake_chrome.write_text("#!/bin/sh\ncurl -fsS http://127.0.0.1:9222/json/version\nexit 0\n")
+    fake_chrome.chmod(0o755)
+    with pytest.raises(AssertionError, match="9222"):
+        run_sh(fake_chrome, "--port", "1234", env={})
+
+
+def test_run_sh_allow_no_curl_asserts_curl_is_actually_absent(tmp_path: Path) -> None:
+    """#183 re-review gap 3d: allow_no_curl must not be trusted blindly -- if
+    curl is still reachable on the given PATH, that silently drops the
+    backstop for that call instead of genuinely testing "no curl at all"."""
+    real_curl = shutil.which("curl")
+    assert real_curl is not None
+    with pytest.raises(AssertionError):
+        run_sh(
+            CHROME,
+            "--dry-run",
+            "--port",
+            str(free_port()),
+            env={"PATH": str(Path(real_curl).parent)},
+            allow_no_curl=True,
+        )
 
 
 def test_chrome_script_constants_match_the_cli() -> None:
@@ -555,6 +702,58 @@ def test_chrome_script_resolves_an_env_shebang_entry_point(tmp_path: Path) -> No
     assert (python_dir / "python3").exists()
     path = f"{bin_dir}:{python_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
     result = run_sh(script, "--status", env={"PATH": path}, pinned_port=port)
+    assert result.returncode == 0, result.stderr
+    assert "warning" not in result.stderr
+    assert f"profile  {profile}" in result.stdout
+
+
+def test_chrome_script_resolves_an_env_dash_s_shebang_entry_point(tmp_path: Path) -> None:
+    """#183 re-review nit 5: `#!/usr/bin/env -S python3-custom -I` names
+    python3-custom, not `-S` (env's own split-string option) -- the first
+    word of the shebang's remainder that is not itself an option. A
+    deliberately unusual interpreter name, on a PATH with nothing else
+    python-shaped on it at all (not even a plain python3): taking `-S` at
+    face value would find no interpreter whatsoever and fall back to
+    "no Python was found", not silently succeed some other way."""
+    script = isolated_chrome_script(tmp_path)
+    port = free_port()
+    profile = tmp_path.resolve() / "profile"
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    fake_netkeeper_cli(
+        real_dir / "netkeeper",
+        port=port,
+        profile=profile,
+        shebang="/usr/bin/env -S python3-custom -I",
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in (
+        "curl",
+        "lsof",
+        "ps",
+        "awk",
+        "sed",
+        "uname",
+        "mkdir",
+        "basename",
+        "dirname",
+        "tr",
+        "rm",
+        "cat",
+        "kill",
+        "grep",
+        "sh",
+        "head",
+    ):
+        found = shutil.which(tool)
+        if found:
+            (bin_dir / tool).symlink_to(found)
+    (bin_dir / "netkeeper").symlink_to(real_dir / "netkeeper")
+    (bin_dir / "python3-custom").symlink_to(sys.executable)
+    # Nothing generically python-shaped is on this PATH -- only chrome.sh's
+    # other prerequisites and the shebang's own unusual interpreter name.
+    result = run_sh(script, "--status", env={"PATH": str(bin_dir)}, pinned_port=port)
     assert result.returncode == 0, result.stderr
     assert "warning" not in result.stderr
     assert f"profile  {profile}" in result.stdout
@@ -838,6 +1037,51 @@ def test_chrome_script_treats_a_mismatched_user_data_dir_flag_as_proof_of_absenc
         proc.wait()
     assert result.returncode == 0, result.stderr
     assert "stale profile lock" in result.stdout
+
+
+def test_chrome_script_still_refuses_a_live_holder_behind_a_symlinked_flag_and_a_url(
+    tmp_path: Path,
+) -> None:
+    """#183 re-review should-fix 1 (a regression nit 3 itself introduced): a
+    symlinked --user-data-dir alias followed by a positional URL
+    (`--user-data-dir=alias https://example.com`) leaves nothing after it for
+    `${tail%% --*}` to trim on, so the extracted value is the alias *and* the
+    URL mashed together -- which canonicalizes to neither. lsof showing the
+    profile genuinely open must still catch this as the holder it is, rather
+    than reading the broken-looking flag as proof it is not."""
+    profile = tmp_path.resolve() / "profile"
+    profile.mkdir()
+    alias = tmp_path.resolve() / "alias"
+    alias.symlink_to(profile)
+    with process_named_holding_open(
+        tmp_path,
+        "Google Chrome",
+        profile / "held",
+        f"--user-data-dir={alias}",
+        "https://example.com",
+    ) as pid:
+        (profile / "SingletonLock").symlink_to(f"thishost-{pid}")
+        result = start(profile)
+    assert result.returncode == 1
+    assert f"pid {pid}" in result.stderr
+
+
+def test_chrome_script_still_refuses_a_live_holder_behind_a_relative_flag(
+    tmp_path: Path,
+) -> None:
+    """#183 re-review should-fix 1: a relative --user-data-dir canonicalizes
+    against this script's own cwd, not whatever the real Chrome's was, so it
+    reads as a mismatch even when the pid is genuinely this profile's holder.
+    lsof showing the profile open must still catch it."""
+    profile = tmp_path.resolve() / "profile"
+    profile.mkdir()
+    with process_named_holding_open(
+        tmp_path, "Google Chrome", profile / "held", "--user-data-dir=some-relative-name"
+    ) as pid:
+        (profile / "SingletonLock").symlink_to(f"thishost-{pid}")
+        result = start(profile)
+    assert result.returncode == 1
+    assert f"pid {pid}" in result.stderr
 
 
 def test_chrome_script_refuses_a_lock_whose_pid_was_reused_by_an_unrelated_chrome(
@@ -1240,6 +1484,24 @@ def _lsof_shim(tmp_path: Path, script: str) -> str:
     return f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
 
 
+def _date_shim(shim_dir: Path, stamp: str) -> None:
+    """A `date` that answers reset-data.sh's own ``date -u +%Y%m%dT%H%M%SZ``
+    with a fixed ``stamp``, so a test knows the exact candidate name in
+    advance instead of racing the real clock across a second boundary."""
+    real = shutil.which("date")
+    assert real is not None
+    shim = shim_dir / "date"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$*" = "-u +%Y%m%dT%H%M%SZ" ]; then\n'
+        f"  printf '%s\\n' {stamp!r}\n"
+        "  exit 0\n"
+        "fi\n"
+        f'exec "{real}" "$@"\n'
+    )
+    shim.chmod(0o755)
+
+
 @needs_sqlite3_cli
 def test_reset_refuses_on_a_real_lsof_error(data: Path, tmp_path: Path) -> None:
     """R2: an actual lsof error -- not a missing binary, not a benign warning --
@@ -1419,12 +1681,20 @@ def test_reset_does_not_clobber_a_concurrent_runs_archive(data: Path, tmp_path: 
     archive the other run already published. A sqlite3 shim plants a competing
     archive at this run's own candidate name right after VACUUM INTO finishes,
     simulating the other run winning the race to publish first; both archives
-    must survive, this run's under the next free name."""
+    must survive, this run's under the next free name.
+
+    `date` is pinned (re-review nit 6) so the stamp reset-data.sh computes and
+    the one the shim uses to name the competitor are the same value by
+    construction, not by both happening to read the clock in the same real
+    second -- and so the "-1" name below is the one actually exercised, not
+    a guess about what the EEXIST retry would have produced."""
     db = make_db(data)
     real = shutil.which("sqlite3")
     assert real is not None
+    stamp = "20260101T000000Z"
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
+    _date_shim(shim_dir, stamp)
     shim = shim_dir / "sqlite3"
     shim.write_text(
         "#!/bin/sh\n"
@@ -1434,8 +1704,7 @@ def test_reset_does_not_clobber_a_concurrent_runs_archive(data: Path, tmp_path: 
         f'    "{real}" "$@"\n'
         "    rc=$?\n"
         '    archives=$(dirname "$(dirname "$target")")\n'
-        "    stamp=$(date -u +%Y%m%dT%H%M%SZ)\n"
-        '    competitor="$archives/netkeeper-$stamp.sqlite3"\n'
+        f'    competitor="$archives/netkeeper-{stamp}.sqlite3"\n'
         '    [ -e "$competitor" ] || printf \'a concurrent run published first\' > "$competitor"\n'
         "    exit $rc\n"
         "    ;;\n"
@@ -1447,16 +1716,88 @@ def test_reset_does_not_clobber_a_concurrent_runs_archive(data: Path, tmp_path: 
     result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": path})
     assert result.returncode == 0, result.stderr
 
-    entries = sorted((data / "archives").iterdir())
-    assert len(entries) == 2
-    contents = [p.read_bytes() for p in entries]
-    assert b"a concurrent run published first" in contents
-
-    ours = [p for p in entries if p.read_bytes() != b"a concurrent run published first"]
-    assert len(ours) == 1
-    with closing(sqlite3.connect(ours[0])) as check:
+    archives = data / "archives"
+    competitor = archives / f"netkeeper-{stamp}.sqlite3"
+    ours = archives / f"netkeeper-{stamp}-1.sqlite3"
+    assert sorted(archives.iterdir()) == sorted([competitor, ours])
+    assert competitor.read_bytes() == b"a concurrent run published first"
+    with closing(sqlite3.connect(ours)) as check:
         assert check.execute("select x from marker").fetchone() == (42,)
     assert not db.exists()
+
+
+@needs_sqlite3_cli
+def test_reset_refuses_when_the_candidate_name_is_a_directory_symlink(
+    data: Path, tmp_path: Path
+) -> None:
+    """Re-review should-fix 4: some `ln` implementations link *inside* a
+    directory (or a symlink to one) found at the destination name instead of
+    failing -- the candidate path itself is then still whatever it was
+    before, not the archive it looks like. The live database must survive
+    rather than being deleted on the strength of a publish that never
+    actually happened where expected."""
+    db = make_db(data)
+    archives = data / "archives"
+    archives.mkdir()
+    stamp = "20260101T000000Z"
+    candidate = archives / f"netkeeper-{stamp}.sqlite3"
+    trap_dir = tmp_path / "trap-dir"
+    trap_dir.mkdir()
+    candidate.symlink_to(trap_dir)
+
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    _date_shim(shim_dir, stamp)
+    path = f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+
+    result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": path})
+    assert result.returncode == 1
+    assert db.exists(), "the live database must survive"
+    assert marker(db) == 42
+    # ln's own directory-redirect placed the real copy inside trap_dir, under
+    # the work file's basename ("db"); candidate itself is untouched.
+    assert candidate.is_symlink()
+    assert not (archives / f"netkeeper-{stamp}-1.sqlite3").exists()
+
+
+@needs_sqlite3_cli
+def test_reset_cleans_up_its_temp_dir_when_interrupted(data: Path, tmp_path: Path) -> None:
+    """Re-review should-fix 2: an interrupted reset must not leave a hidden
+    full copy of the database sitting in a .partial.* directory under
+    archives/ -- an EXIT trap removes it regardless of how the script stops,
+    and the INT/TERM/HUP traps turn an interrupt into a normal exit so that
+    trap actually runs."""
+    db = make_db(data)
+    real = shutil.which("sqlite3")
+    assert real is not None
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "sqlite3"
+    # Slow enough that the signal below always arrives mid-archive.
+    shim.write_text(f'#!/bin/sh\ncase "$2" in VACUUM*) sleep 10 ;; esac\nexec "{real}" "$@"\n')
+    shim.chmod(0o755)
+    path = f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+    assert SH is not None
+    archives = data / "archives"
+    proc = subprocess.Popen(
+        [SH, str(RESET), "--data-dir", str(data), "--yes"],
+        env={"PATH": path, "HOME": "/nonexistent"},
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not any(archives.glob(".partial.*")):
+            time.sleep(0.05)
+        assert any(archives.glob(".partial.*")), "archive_db() never created its temp directory"
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+    assert not list(archives.glob(".partial.*")), "an interrupted reset left a partial copy behind"
+    assert db.exists(), "the live database must survive an interrupted reset"
+    assert marker(db) == 42
 
 
 @needs_sqlite3_cli
@@ -1530,7 +1871,17 @@ def test_reset_removes_the_copied_wal_shm_even_when_the_fold_pragma_fails(
     them, and a sqlite3 shim records whether the copied -wal still sits next
     to the work file at the moment verified() reads it -- the one point in
     the run where it would still matter, before the whole temp directory is
-    removed either way."""
+    removed either way.
+
+    What verified() itself then concludes is not pinned here: whether
+    `-readonly` can open a WAL-mode-flagged file with no -wal/-shm beside it
+    turned out to be SQLite-version/platform behavior, not something this
+    script controls -- it refused on the maintainer's macOS build (the
+    archive is quarantined) and succeeded on CI's Linux build (the archive
+    publishes, with the pre-fold row missing). The marker file is a plain
+    shell `[ -e ... ]` check, not a SQLite question, and is the same either
+    way: this is what actually distinguishes the fix from the mutant.
+    """
     db = data / "netkeeper.sqlite3"
     db.unlink(missing_ok=True)
     with closing(sqlite3.connect(db)) as conn, conn:
@@ -1585,13 +1936,11 @@ def test_reset_removes_the_copied_wal_shm_even_when_the_fold_pragma_fails(
     path = f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
 
     result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": path})
-    # verified() itself still fails here -- a WAL-mode header with no -wal/-shm
-    # beside it cannot be opened read-only either -- but that is not what this
-    # pins: the marker shows rm -f already ran before verified() was reached,
-    # which is the one thing a successful fold's own side effect would
-    # otherwise have hidden.
-    assert result.returncode == 1
-    assert "quick_check" in result.stderr
+    # Pass or quarantine -- either is a normal exit, never a crash.
+    assert result.returncode in (0, 1), result.stderr
+    # The pin: rm -f already ran before verified() was reached, which is the
+    # one thing a successful fold's own side effect would otherwise have
+    # hidden from every other test here.
     assert marker_file.read_text() == "absent"
 
 

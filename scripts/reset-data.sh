@@ -235,7 +235,9 @@ quarantine_partial() {
       failed="$archives/netkeeper-$stamp-$n.sqlite3.failed"
       n=$((n + 1))
     done
-    mv -- "$tmp/db" "$failed"
+    # A clear die(), not a bare mv whose own failure would abort under set -e
+    # with nothing said about why (#183 re-review should-fix 2).
+    mv -- "$tmp/db" "$failed" || die "could not move the partial archive to $failed for inspection"
     printf '%s\n' "$failed"
   fi
   rm -rf -- "$tmp"
@@ -264,6 +266,14 @@ archive_db() {
     return 0
   fi
   tmp=$(mktemp -d "$archives/.partial.XXXXXX") || die "could not create a temporary directory under $archives"
+  # An interrupted reset (Ctrl-C, a killed session) must not leave a hidden
+  # full copy of the database sitting in archives/ under a dot-prefixed name
+  # (#183 re-review should-fix 2). The EXIT trap is the backstop for every
+  # exit path, including the ordinary ones that already clean up themselves;
+  # the signal traps turn an interrupt into a normal exit so that trap runs,
+  # instead of the shell's own default response to the signal bypassing it.
+  trap 'rm -rf -- "$tmp"' EXIT
+  trap 'exit 130' INT TERM HUP
   work="$tmp/db"
   quoted=$(printf '%s' "$work" | sed "s/'/''/g")
   if ! sqlite3 "$db" "VACUUM INTO '$quoted'"; then
@@ -291,7 +301,11 @@ archive_db() {
   candidate="$archives/netkeeper-$stamp.sqlite3"
   n=1
   while ! ln -- "$work" "$candidate" 2>/dev/null; do
-    if [ -e "$candidate" ]; then
+    # -e alone misses a dangling symlink (its target does not exist, so -e
+    # reads false even though the name itself is taken); -L catches that too,
+    # so a dangling symlink at a candidate name is skipped like any other
+    # taken one rather than tried again and mistaken for a real failure.
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
       # Another run published this name first (or, non-concurrently, an
       # earlier reset this same second already has it): try the next one.
       candidate="$archives/netkeeper-$stamp-$n.sqlite3"
@@ -299,11 +313,26 @@ archive_db() {
       continue
     fi
     failed=$(quarantine_partial "$tmp")
+    publish_fail_note="(a filesystem without hard-link support -- some network mounts -- fails this way too)"
     if [ -n "$failed" ]; then
-      die "could not publish the archive to $candidate; moved it to $failed for inspection. The database was left in place."
+      die "could not publish the archive to $candidate; moved it to $failed for inspection. The database was left in place. $publish_fail_note"
     fi
-    die "could not publish the archive to $candidate. The database was left in place."
+    die "could not publish the archive to $candidate. The database was left in place. $publish_fail_note"
   done
+  # Some `ln` implementations link *inside* a directory (or a symlink to one)
+  # found at the destination name, instead of failing: $candidate itself is
+  # then still whatever it was before, not the archive it looks like. Caught
+  # here, before remove_db() ever runs, rather than after the live database
+  # is already gone on the strength of a publish that never actually happened
+  # where expected (#183 re-review should-fix 4).
+  if ! { [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ "$candidate" -ef "$work" ]; }; then
+    failed=$(quarantine_partial "$tmp")
+    note="a directory or a symlink to one was already there"
+    if [ -n "$failed" ]; then
+      die "$candidate did not end up as the archive itself ($note); moved the real copy to $failed for inspection. The database was left in place."
+    fi
+    die "$candidate did not end up as the archive itself ($note). The database was left in place."
+  fi
   rm -rf -- "$tmp"
   printf 'archived %s (%s, verified)\n' "$candidate" "$(human_size "$candidate")"
 }
