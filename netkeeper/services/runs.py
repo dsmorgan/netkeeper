@@ -609,7 +609,8 @@ async def recording(
         raise
     except BrowserUnavailable as exc:
         # Chrome went away mid-run (#177): the same reason as a run that could not
-        # attach at all, so the run reads "Chrome was not reachable", not "error".
+        # attach at all, so the run reads "Chrome was not reachable or went away
+        # mid-run", not "error".
         await off_loop(
             _finish_quietly,
             factory,
