@@ -55,10 +55,15 @@ Each tick, before anything is chosen, :meth:`GmailSender.reconcile` looks up wha
   message counts only when it is the draft's own message id kept, or is no
   older than the draft's claim and is not one the thread held when the draft
   was made: an earlier step, or a note the person sent before, is never the
-  draft (#273 review). A draft gone with nothing sent is ``discarded`` and its
-  enrollment ``removed``, on the second poll that finds it gone, not the first
-  (undo send). *Known limitation* (#280): a draft the person edits into a new
-  thread and then sends is sent outside the thread the poll reads, so it reads
+  draft (#273 review). A draft gone with nothing sent is searched for in
+  Scheduled (``in:scheduled rfc822msgid:``, #278): Gmail's Schedule send moves a
+  draft there, out of ``drafts.list``, until it goes out. Found, it stays
+  ``drafted`` until it is seen sent, and is dated then, so the next step counts
+  from the real send. A failed search changes nothing. A draft gone with
+  nothing sent and nothing scheduled is ``discarded`` and its enrollment
+  ``removed``, on the second poll that finds it gone, not the first (undo send).
+  *Known limitation* (#280): a draft the person edits into a new thread and then
+  sends is sent outside the thread the poll reads, so it reads
   as ``discarded``. That is the conservative direction (nothing more is sent);
   confirm it at the first live draft run (#277).
 - **Replies and bounces** (P3-08; every ``replies_every``, per user, last):
@@ -148,6 +153,9 @@ since a client is not thread-safe. Raises :class:`MailboxNotReady` or :class:`Ma
 
 _SENT: Final = "SENT"
 _DRAFT: Final = "DRAFT"
+_SCHEDULED: Final = "SCHEDULED"
+_OWN: Final = frozenset({_SENT, _DRAFT, _SCHEDULED})
+"""Labels of a message the mailbox wrote: sent, a draft, or waiting in Scheduled (#278)."""
 
 
 class _NotSent(Exception):
@@ -175,34 +183,56 @@ class Found:
     message: Message
     sent: bool
     draft_id: str | None = None
+    scheduled: bool = False
+
+
+def _message_id_query(rfc822_message_id: str, folder: str) -> str:
+    """A search for one Message-ID in ``folder``. Raises :class:`ValueError` for a value
+    that is not one ``<local@domain>`` Message-ID, so nothing else reaches the query."""
+    if not is_message_id(rfc822_message_id):
+        raise ValueError("not a Message-ID")
+    return f"rfc822msgid:{rfc822_message_id.strip('<>')} in:{folder}"
 
 
 def find_by_message_id(gmail: Gmail, rfc822_message_id: str, *, purpose: str) -> Found | None:
     """The message Gmail holds with this Message-ID, in any folder, or None.
 
-    A message that is not a draft counts as sent, whatever else its labels say (a
-    sent message the person moved to Trash is still sent). A draft's id is read
-    from ``drafts.list``. Raises :class:`GmailError`.
+    A message that is neither a draft nor waiting in Scheduled counts as sent,
+    whatever else its labels say (a sent message the person moved to Trash is still
+    sent). A draft's id is read from ``drafts.list``. A scheduled message (Gmail's
+    Schedule send, #278) is found unsent, with no draft id. Raises :class:`GmailError`.
     """
-    if not is_message_id(rfc822_message_id):
-        raise ValueError("not a Message-ID")
-    query = f"rfc822msgid:{rfc822_message_id.strip('<>')} in:anywhere"
+    query = _message_id_query(rfc822_message_id, "anywhere")
     messages: list[Message] = []
     for ref in gmail.search(query, max_results=FIND_MAX, purpose=purpose):
         try:
             messages.append(gmail.get_message(ref.id, purpose=purpose))
         except GmailNotFound:  # deleted between the search and the read
             continue
-    sent = sorted((m for m in messages if _DRAFT not in m.label_ids), key=lambda m: m.internal_date)
+    sent = sorted(
+        (m for m in messages if not m.label_ids & {_DRAFT, _SCHEDULED}),
+        key=lambda m: m.internal_date,
+    )
     if sent:
         return Found(sent[0], sent=True)
     if not messages:
         return None
+    scheduled = [m for m in messages if _SCHEDULED in m.label_ids]
+    if scheduled:
+        return Found(scheduled[0], sent=False, scheduled=True)
     draft = messages[0]
     draft_id = next(
         (d.id for d in gmail.list_drafts(purpose=purpose) if d.message.id == draft.id), None
     )
     return Found(draft, sent=False, draft_id=draft_id)
+
+
+def is_scheduled(gmail: Gmail, rfc822_message_id: str, *, purpose: str) -> bool:
+    """Whether a message with this Message-ID waits in Gmail's Scheduled: a draft the
+    person sent with Schedule send, not delivered yet (#278). Raises :class:`GmailError`
+    and, for a value that is not a Message-ID, :class:`ValueError`."""
+    query = _message_id_query(rfc822_message_id, "scheduled")
+    return bool(gmail.search(query, max_results=1, purpose=purpose))
 
 
 class GmailSender:
@@ -387,7 +417,7 @@ class GmailSender:
         if not cited:
             raise _NotSent("the earlier step is not in its Gmail thread; nothing was sent")
         if any(
-            not m.label_ids & {_SENT, _DRAFT}
+            not m.label_ids & _OWN
             and m.internal_date >= earlier[0].internal_date
             and not _automatic(m)
             for m in thread.messages
@@ -649,6 +679,8 @@ class _Reconcile:
                     thread_known=known,
                 )
             )
+        elif found.scheduled:
+            log.info("message %d waits in Gmail's Scheduled; it waits", tracked.message_id)
         else:
             log.info("message %d is a Gmail draft not listed yet; it waits", tracked.message_id)
 
@@ -710,6 +742,17 @@ class _Reconcile:
         purpose = self.purpose(tracked, "drafts poll for")
         sent = self.sent_in_thread(gmail, tracked, purpose)
         if sent is None:
+            # Schedule send moves a draft out of drafts.list before anything is sent
+            # (#278): it stays drafted until it is seen sent. A failed search raises
+            # (the guard leaves the message as it is); only "not there" goes on.
+            if is_scheduled(gmail, tracked.rfc822_message_id, purpose=purpose):
+                log.info(
+                    "message %d: its draft waits in Gmail's Scheduled; it stays drafted",
+                    tracked.message_id,
+                )
+                if tracked.marked_missing:
+                    self.write(lambda s, u: engine.settle_draft_present(s, u, tracked.message_id))
+                return
             self.write(lambda s, u: engine.settle_draft_missing(s, u, tracked.message_id))
             return
         settings = self.settings

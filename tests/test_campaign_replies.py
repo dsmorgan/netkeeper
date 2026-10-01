@@ -236,10 +236,11 @@ def test_mail_from_anyone_else_or_from_before_the_first_send_is_not_a_reply(
 
 
 def test_the_persons_own_mail_from_the_contacts_address_is_not_a_reply(mail: Mail) -> None:
-    """Mail labelled ``SENT`` or ``DRAFT`` is the person's, whatever its ``From`` says."""
+    """Mail labelled ``SENT``, ``DRAFT`` or ``SCHEDULED`` (#278) is the person's, whatever
+    its ``From`` says."""
     enrollment_id = mail.enroll(ADA)
     send_first(mail)
-    for label in ("SENT", "DRAFT"):
+    for label in ("SENT", "DRAFT", "SCHEDULED"):
         mail.gmail.deliver(
             fresh_email(ADA, f"Note {label}", "Mine."),
             at=NOW + timedelta(hours=1),
@@ -251,6 +252,37 @@ def test_the_persons_own_mail_from_the_contacts_address_is_not_a_reply(mail: Mai
 
     assert mail.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
     assert inbound(mail, enrollment_id) == []
+
+
+def test_a_reply_to_a_scheduled_draft_once_delivered_ends_the_enrollment(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#278 leaves the reply poll (#296) as it was: a draft the person scheduled is
+    watched once it is delivered, and the reply to it ends the enrollment."""
+    mail = make_mail(session_factory, modes=(StepMode.DRAFT,) * 2, same_thread=(False, True))
+    mail.sender = poller(mail)
+    enrollment_id = mail.enroll(ADA)
+    mail.tick(NOW)
+    [draft_id] = mail.gmail.drafts()
+    scheduled = mail.gmail.schedule_draft(draft_id, at=NOW + timedelta(minutes=5))
+    mail.tick(NOW + timedelta(hours=1))
+    mail.tick(NOW + timedelta(hours=2))
+    assert mail.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+
+    delivered_at = NOW + timedelta(days=1)
+    mail.gmail.send_scheduled(scheduled, at=delivered_at)
+    mail.tick(delivered_at + timedelta(minutes=1))  # the drafts poll sees it sent
+    mail.tick(delivered_at + timedelta(minutes=2))  # the reply poll sets its baseline
+    mail.gmail.reply(scheduled, sender=f"Ada <{ADA}>", at=delivered_at + timedelta(hours=1))
+    mail.tick(delivered_at + timedelta(hours=2))
+
+    enrollment = mail.enrollment(enrollment_id)
+    assert (enrollment.status, enrollment.replied_at) == (
+        EnrollmentStatus.REPLIED,
+        delivered_at + timedelta(hours=1),
+    )
+    assert mail.tick(delivered_at + WEEK + timedelta(hours=1)).fired == []
+    assert mail.gmail.drafts() == {}
 
 
 def test_a_completed_enrollment_is_watched_for_thirty_days(

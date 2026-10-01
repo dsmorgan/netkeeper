@@ -256,6 +256,52 @@ def test_a_draft_sent_keeping_its_id_becomes_the_sent_message(gmail: FakeGmail) 
     assert [m.id for m in gmail.sent()] == [sent.id]
 
 
+@pytest.mark.parametrize("keep_id", [False, True])
+def test_a_scheduled_draft_leaves_drafts_waits_in_scheduled_then_is_sent(
+    gmail: FakeGmail, clock: Clock, keep_id: bool
+) -> None:
+    """#278: Schedule send. The draft leaves ``drafts.list``, its message waits in
+    Scheduled with its Message-ID, sent to no one, then is ``SENT`` when delivered."""
+    first = gmail.send(_mail(), purpose="send step 1")
+    draft = gmail.create_draft(
+        _mail("Re: Catching up", msgid="<s2@example.com>", reply_to="<s1@example.com>"),
+        thread_id=first.thread_id,
+        purpose="draft step 2",
+    )
+    scheduled = gmail.schedule_draft(draft.id, keep_id=keep_id)
+
+    assert gmail.drafts() == {}
+    assert gmail.list_drafts(purpose="drafts poll") == []
+    assert (scheduled.id == draft.message.id) is keep_id
+    assert scheduled.thread_id == first.thread_id
+    assert gmail.get_message(scheduled.id, purpose="read").label_ids == {"SCHEDULED"}
+    assert gmail.scheduled() == [scheduled]
+    assert [m.id for m in gmail.sent()] == [first.id]
+    by_id = "rfc822msgid:s2@example.com"
+    assert gmail.search(f"{by_id} in:scheduled", purpose="find") == [scheduled]
+    assert gmail.search(f"{by_id} in:anywhere", purpose="find") == [scheduled]
+    assert gmail.search(f"{by_id} in:drafts", purpose="find") == []
+    assert gmail.search(f"{by_id} in:sent", purpose="find") == []
+
+    clock.advance(60 * 24)
+    delivered = gmail.send_scheduled(scheduled)
+    assert delivered == scheduled
+    message = gmail.get_message(delivered.id, purpose="read")
+    assert (message.label_ids, message.internal_date) == (frozenset({"SENT"}), clock.now)
+    assert gmail.scheduled() == []
+    assert gmail.search(f"{by_id} in:scheduled", purpose="find") == []
+    assert gmail.search(f"{by_id} in:sent", purpose="find") == [delivered]
+    with pytest.raises(ValueError, match="not a scheduled message"):
+        gmail.send_scheduled(delivered)
+
+
+def test_a_draft_with_no_recipient_cannot_be_scheduled(gmail: FakeGmail) -> None:
+    draft = gmail.create_draft(_mail(to=""), purpose="draft step 1")
+    with pytest.raises(GmailRejected):
+        gmail.schedule_draft(draft.id)
+    assert list(gmail.drafts()) == [draft.id]
+
+
 def test_list_drafts_names_every_draft_and_its_message(gmail: FakeGmail) -> None:
     first = gmail.create_draft(_mail(), purpose="draft step 1")
     second = gmail.create_draft(_mail("Other", msgid="<s2@example.com>"), purpose="draft step 1")
@@ -502,7 +548,8 @@ def test_labels(gmail: FakeGmail) -> None:
 
 
 @pytest.mark.parametrize(
-    ("add", "remove"), [(["DRAFT"], []), (["SENT"], []), ([], ["SENT"]), ([], ["DRAFT"])]
+    ("add", "remove"),
+    [(["DRAFT"], []), (["SENT"], []), ([], ["SENT"]), ([], ["DRAFT"]), (["SCHEDULED"], [])],
 )
 def test_modify_labels_refuses_draft_and_sent(
     gmail: FakeGmail, add: list[str], remove: list[str]

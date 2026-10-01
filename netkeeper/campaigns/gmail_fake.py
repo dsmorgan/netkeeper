@@ -14,6 +14,12 @@ get it wrong:
   person's part, :meth:`FakeGmail.send_draft`) removes the draft and adds a
   ``SENT`` message with a new id in the same thread, or, with ``keep_id``, turns
   the draft's own message into the sent one.
+- **Scheduled.** Schedule send (the person's part, :meth:`FakeGmail.schedule_draft`)
+  takes a draft out of ``drafts.list`` and leaves its message labelled
+  ``SCHEDULED`` (new id, or the draft's own with ``keep_id``), Message-ID kept,
+  in the same thread, sent to no one. :meth:`FakeGmail.send_scheduled` is Gmail
+  delivering it later: it becomes ``SENT`` at the delivery time, id kept.
+  ``in:scheduled`` finds it until then (#278).
 - **History.** One ``history_id`` that only grows: every added message, label
   change and draft moves it on, and each message carries the id of its last
   change. :meth:`FakeGmail.history` returns the messages added after a start,
@@ -31,7 +37,7 @@ get it wrong:
 - **Labels.** ``modify_labels`` refuses ``DRAFT`` and ``SENT``, which Gmail
   does not let a client add or remove.
 - **Search.** ``from:`` and ``to:`` (whole words, as Gmail matches them),
-  ``rfc822msgid:``, ``in:`` (``inbox``, ``sent``, ``drafts``, and ``anywhere``,
+  ``rfc822msgid:``, ``in:`` (``inbox``, ``sent``, ``drafts``, ``scheduled``, and ``anywhere``,
   the one search that includes spam and trash), ``label:``, and
   ``after:``/``before:`` with epoch seconds only (Gmail reads a ``YYYY/MM/DD``
   date in Pacific time, a trap for the engine). Terms are ANDed. Anything else
@@ -81,17 +87,31 @@ from netkeeper.models.base import utcnow
 log = logging.getLogger(__name__)
 
 #: Gmail's system labels the engine reads.
-SYSTEM_LABELS: Final = ("INBOX", "SENT", "DRAFT", "UNREAD", "SPAM", "TRASH", "IMPORTANT")
+SYSTEM_LABELS: Final = (
+    "INBOX",
+    "SENT",
+    "DRAFT",
+    "SCHEDULED",
+    "UNREAD",
+    "SPAM",
+    "TRASH",
+    "IMPORTANT",
+)
 
 #: System labels Gmail refuses in ``messages.modify``.
-UNMODIFIABLE_LABELS: Final = frozenset({"DRAFT", "SENT"})
+UNMODIFIABLE_LABELS: Final = frozenset({"DRAFT", "SENT", "SCHEDULED"})
 
 #: The address Gmail's bounce notices come from (spec 11.5).
 MAILER_DAEMON: Final = "mailer-daemon@googlemail.com"
 
 _PREFIX: Final = re.compile(r"^\s*(?:re|fwd?|aw)\s*:\s*", re.IGNORECASE)
 _MSGID: Final = re.compile(r"<[^<>\s]+>")
-_IN_FOLDERS: Final = {"inbox": "INBOX", "sent": "SENT", "drafts": "DRAFT"}
+_IN_FOLDERS: Final = {
+    "inbox": "INBOX",
+    "sent": "SENT",
+    "drafts": "DRAFT",
+    "scheduled": "SCHEDULED",
+}
 
 
 def normalize_subject(subject: str | None) -> str:
@@ -362,6 +382,44 @@ class FakeGmail:
         self._store(sent)
         return MessageRef(sent.id, sent.thread_id)
 
+    def schedule_draft(
+        self, draft_id: str, *, at: datetime | None = None, keep_id: bool = False
+    ) -> MessageRef:
+        """The person pressing Schedule send on a draft: the draft leaves ``drafts.list``
+        and its message waits, ``SCHEDULED``, in the same thread, Message-ID kept, sent
+        to no one until :meth:`send_scheduled`. A new message id unless ``keep_id``, as
+        with :meth:`send_draft`. ``at`` is when Gmail files it (its internal date until
+        it is delivered)."""
+        draft = self._messages[self._drafts[draft_id]]
+        _require_recipient(draft.parsed)
+        del self._drafts[draft_id]
+        if keep_id:
+            draft.labels = {"SCHEDULED"}
+            draft.internal_date = at or self.clock()
+            draft.history_id = self._bump()
+            return MessageRef(draft.id, draft.thread_id)
+        self._remove(draft)
+        scheduled = _Stored(
+            id=self._new_id(),
+            thread_id=draft.thread_id,
+            labels={"SCHEDULED"},
+            history_id=self._bump(),
+            internal_date=at or self.clock(),
+            parsed=draft.parsed,
+        )
+        self._store(scheduled)
+        return MessageRef(scheduled.id, scheduled.thread_id)
+
+    def send_scheduled(self, message: MessageRef, *, at: datetime | None = None) -> MessageRef:
+        """Gmail delivering a scheduled message at its time: ``SENT`` from ``at``, id kept."""
+        stored = self._get(message.id)
+        if "SCHEDULED" not in stored.labels:
+            raise ValueError("not a scheduled message")
+        stored.labels = {"SENT"}
+        stored.internal_date = at or self.clock()
+        stored.history_id = self._bump()
+        return MessageRef(stored.id, stored.thread_id)
+
     def discard_draft(self, draft_id: str) -> None:
         """The person deleting a draft instead of sending it."""
         self._remove(self._messages[self._drafts.pop(draft_id)])
@@ -401,6 +459,14 @@ class FakeGmail:
     def sent(self) -> list[Message]:
         """Every ``SENT`` message, oldest first."""
         return [self._view(stored) for stored in self._messages.values() if "SENT" in stored.labels]
+
+    def scheduled(self) -> list[MessageRef]:
+        """Every message waiting in Scheduled."""
+        return [
+            MessageRef(stored.id, stored.thread_id)
+            for stored in self._messages.values()
+            if "SCHEDULED" in stored.labels
+        ]
 
     def wire_snippet(self, message_id: str) -> str:
         """The snippet as Gmail's API would send it, before :func:`snippet_text`."""
