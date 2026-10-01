@@ -12,6 +12,7 @@ const ENTRIES: DoNotSendEntry[] = [
     id: 2,
     email: 'name+nk1@example.test',
     reason: 'opted_out',
+    bounced: true,
     contact_id: 7,
     created_at: '2026-09-30T10:00:00Z',
   },
@@ -19,6 +20,7 @@ const ENTRIES: DoNotSendEntry[] = [
     id: 1,
     email: 'ada@example.test',
     reason: 'bounced',
+    bounced: true,
     contact_id: null,
     created_at: '2026-09-29T10:00:00Z',
   },
@@ -73,5 +75,22 @@ describe('DoNotSendSection', () => {
     await waitFor(() => expect(deleted).toEqual([1]))
     await waitFor(() => expect(screen.queryByText('ada@example.test')).not.toBeInTheDocument())
     expect(screen.getByText('name+nk1@example.test')).toBeInTheDocument()
+  })
+
+  it('warns that a bounce goes with an opt-out entry', async () => {
+    renderSection(ENTRIES)
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove name+nk1@example.test' }))
+    expect(
+      await screen.findByText(
+        'This address also bounced; removing the entry allows email to it again.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('does not warn for an entry that is itself the bounce', async () => {
+    renderSection(ENTRIES)
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove ada@example.test' }))
+    await screen.findByText(/Campaigns may send to ada@example.test again/)
+    expect(screen.queryByText(/This address also bounced/)).not.toBeInTheDocument()
   })
 })

@@ -3301,6 +3301,10 @@
       },
       "DoNotSendOut": {
         "properties": {
+          "bounced": {
+            "title": "Bounced",
+            "type": "boolean"
+          },
           "contact_id": {
             "anyOf": [
               {
@@ -3333,6 +3337,7 @@
           "id",
           "email",
           "reason",
+          "bounced",
           "contact_id",
           "created_at"
         ],

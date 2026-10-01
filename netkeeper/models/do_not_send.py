@@ -13,7 +13,7 @@ from __future__ import annotations
 import enum
 from typing import Final
 
-from sqlalchemy import ForeignKey, String, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from netkeeper.models.base import Base, TimestampMixin, UserOwned, string_enum
@@ -51,6 +51,11 @@ class DoNotSendAddress(UserOwned, TimestampMixin, Base):
     ``contact_id`` is the contact the address was found on, for display; it is
     cleared, not cascaded, when that contact is deleted, because the entry is about
     the address.
+
+    ``reason`` is the strongest reason the address is listed for
+    (:data:`DO_NOT_SEND_RANK`). ``bounced`` records that a message to it bounced, or
+    a person marked it bounced, whatever ``reason`` says: an opt-out outranks a
+    bounce, and a person removing the opt-out is warned that the bounce goes with it.
     """
 
     __tablename__ = "do_not_send_addresses"
@@ -61,6 +66,7 @@ class DoNotSendAddress(UserOwned, TimestampMixin, Base):
     reason: Mapped[DoNotSendReason] = mapped_column(
         string_enum(DoNotSendReason, "do_not_send_reason"), nullable=False
     )
+    bounced: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     contact_id: Mapped[int | None] = mapped_column(
         ForeignKey("contacts.id", ondelete="SET NULL"), index=True
     )

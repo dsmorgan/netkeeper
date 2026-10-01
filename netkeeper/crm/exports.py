@@ -66,12 +66,14 @@ Five presets:
   the preset is that someone pastes it straight into a mailing tool. Nor is a
   contact waiting for review (``needs_review_at``, #184): one read off a
   connections-page card is not somebody to reach until it is confirmed.
-  Its email column skips a ``bounced`` address and takes the next address that
-  has not bounced, if there is one (spec 11.9, "channel address present and not
-  bounced"; #77). A contact left with no address stays in the file with an
-  empty email cell, as a contact with no email at all always has: the row still
-  carries a LinkedIn URL, and a bounce leaves the contact eligible for LinkedIn
-  steps (spec 11.5).
+  Nor is a contact holding any address the do-not-send list has as
+  ``opted_out`` (#238), even when the contact itself never got ``do_not_contact``.
+  Its email column skips a ``bounced`` address, and any address on the
+  do-not-send list, and takes the next one, if there is one (spec 11.9, "channel
+  address present and not bounced"; #77, #238). A contact left with no address
+  stays in the file with an empty email cell, as a contact with no email at all
+  always has: the row still carries a LinkedIn URL, and a bounce leaves the
+  contact eligible for LinkedIn steps (spec 11.5).
 - ``macos-contacts`` (vCard only, P6-02, #249): a vCard 3.0 file for macOS
   Contacts, the version it imports most reliably, where every other preset's
   vCard is 4.0. Each contact carries every email, phone, and link, its notes,
@@ -122,19 +124,29 @@ import contextlib
 import csv
 import json
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, tzinfo
 from typing import Any, Final, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import ColumnElement, Select, and_
+from sqlalchemy import ColumnElement, Select, and_, exists
 from sqlalchemy.orm import Session, selectinload
 
-from netkeeper.crm.contacts import sendable_email
+from netkeeper.crm import do_not_send
 from netkeeper.crm.filters import FilterTree, SortKey, apply_sort, compile_filter, paginate
 from netkeeper.crm.identity import phone_key
-from netkeeper.models import Contact, EmailKind, EmailStatus, PhoneKind, User
+from netkeeper.models import (
+    Contact,
+    ContactEmail,
+    DoNotSendAddress,
+    DoNotSendReason,
+    EmailKind,
+    EmailStatus,
+    PhoneKind,
+    User,
+)
+from netkeeper.scoping import scoped
 
 ExportFormat = Literal["csv", "json", "vcard"]
 ExportPreset = Literal[
@@ -240,20 +252,27 @@ def _primary_email(contact: Contact) -> str | None:
     return contact.emails[0].email if contact.emails else None
 
 
-def _sendable_email(contact: Contact) -> str | None:
-    """The first address that has not bounced, primary first; ``campaign-audience`` only.
+def _sendable_email(contact: Contact, listed: Collection[str] = frozenset()) -> str | None:
+    """The first address that has not bounced and is not in ``listed``, primary first;
+    ``campaign-audience`` only.
+
+    ``listed`` is the user's do-not-send list (#238): an address on it is skipped
+    as a bounce is, whichever contact it was found on.
 
     ``Contact.emails`` is ordered ``is_primary DESC, id ASC``, so this is the
     primary unless the primary bounced. A mail-merge file is a send path by
     proxy, and spec 11.9 guards every send on "channel address present and not
-    bounced" (#77). An ``invalid`` address is still exported: the guard names
-    bounces only, and the maintainer confirmed keeping it (#215). The
+    bounced" (#77). An ``invalid`` status alone still exports the address
+    (#215), but not once the address is on the do-not-send list, which marking it
+    invalid by hand does (#238). The
     re-importable presets keep :func:`_primary_email`, bounced or not, by the
     same decision: they are a copy of the data, not a send list. The campaign
     guards refuse ``invalid`` too (#226); a file is not a send.
     """
-    email = sendable_email(contact, refuse=(EmailStatus.BOUNCED,))
-    return None if email is None else email.email
+    for email in contact.emails:
+        if email.status is not EmailStatus.BOUNCED and email.email not in listed:
+            return email.email
+    return None
 
 
 def _primary_phone(contact: Contact) -> str | None:
@@ -366,6 +385,16 @@ CAMPAIGN_AUDIENCE: Final[tuple[_Column, ...]] = (
     ),
     _Column("LinkedIn Profile URL", "linkedin_profile_url", lambda c, _today: c.li_url, "url"),
 )
+
+
+def _campaign_audience_columns(listed: Collection[str]) -> tuple[_Column, ...]:
+    """:data:`CAMPAIGN_AUDIENCE` with its email column skipping the do-not-send list."""
+    email, *rest = CAMPAIGN_AUDIENCE
+    column = _Column(
+        email.header, email.json_key, lambda c, _today: _sendable_email(c, listed), email.role
+    )
+    return (column, *rest)
+
 
 _COLUMN_PRESETS: Final[dict[ExportPreset, tuple[_Column, ...] | None]] = {
     "nine-column": NINE_COLUMN,
@@ -842,10 +871,14 @@ def export_stream(
         raise ExportError(f"the {preset} preset is vCard only; ask for format vcard")
     today = _local_today(user, now)
     held_out: list[ColumnElement[bool]] = []
+    listed: frozenset[str] = frozenset()
     if preset in ("campaign-audience", "macos-contacts"):
         held_out.append(Contact.do_not_contact.is_(False))
     if preset == "campaign-audience" or output_format == "vcard":
         held_out.append(Contact.needs_review_at.is_(None))
+    if preset == "campaign-audience":
+        held_out.append(~_holds_an_opted_out_address(user))
+        listed = frozenset(entry.email for entry in do_not_send.entries(session, user))
     extra_where = and_(*held_out) if held_out else None
     base = _contacts_statement(session, user, tree, sort, now=now, extra_where=extra_where)
     return _render(
@@ -857,6 +890,28 @@ def export_stream(
         headerless=headerless,
         today=today,
         cell=_spreadsheet_safe if spreadsheet_safe else _as_is,
+        listed=listed,
+    )
+
+
+def _holds_an_opted_out_address(user: User) -> ColumnElement[bool]:
+    """The contact holds an address the do-not-send list has as ``opted_out`` (#238).
+
+    Such a contact is left out of ``campaign-audience`` as a ``do_not_contact`` one
+    is: its owner asked not to be contacted, even on a contact row that never
+    recorded it.
+    """
+    return exists(
+        scoped(user, ContactEmail)
+        .with_only_columns(ContactEmail.id)
+        .join(
+            DoNotSendAddress,
+            and_(DoNotSendAddress.user_id == user.id, DoNotSendAddress.email == ContactEmail.email),
+        )
+        .where(
+            ContactEmail.contact_id == Contact.id,
+            DoNotSendAddress.reason == DoNotSendReason.OPTED_OUT,
+        )
     )
 
 
@@ -870,6 +925,7 @@ def _render(
     headerless: bool,
     today: date,
     cell: Callable[[str], str],
+    listed: Collection[str] = frozenset(),
 ) -> Iterator[str]:
     """:func:`export_stream`'s body, once everything that can fail early has.
 
@@ -880,6 +936,8 @@ def _render(
         yield from _macos_contacts(user, contacts)
         return
     columns = _COLUMN_PRESETS[preset]
+    if preset == "campaign-audience":
+        columns = _campaign_audience_columns(listed)
     if columns is None:  # "full"
         if output_format == "csv":
             yield from _full_csv(contacts, headerless=headerless, cell=cell)
