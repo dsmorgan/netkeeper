@@ -36,6 +36,7 @@ from netkeeper.services.budgets import (
     configured_default,
     consume,
     profile_visit_risk_warning,
+    profile_visit_week_note,
     status,
 )
 
@@ -552,3 +553,33 @@ def test_status_does_not_need_a_writer_session(
         session, owner, ACCOUNT, ActionClass.CONNECTION_PAGES, now=NOW, settings=DEFAULT_SETTINGS
     )
     assert result.day.count == 0
+
+
+@pytest.mark.parametrize(
+    ("day", "week", "expected"),
+    [
+        (60, None, None),  # derived: nothing to note
+        (60, 300, None),  # exactly 5 x daily
+        (100, 600, None),  # above 5 x daily
+        (1000, 1250, None),  # day clamps to 250; 1,250 is 5 x that
+        (1000, 2000, None),  # week clamps to 1,250, still 5 x the clamped day
+        (
+            1000,
+            300,
+            "The weekly limit (300) is below 5 times your daily limit (250); remove"
+            " profile_visits_per_week from config.toml to use 5 times daily (1,250).",
+        ),
+        (
+            101,
+            500,
+            "The weekly limit (500) is below 5 times your daily limit (101); remove"
+            " profile_visits_per_week from config.toml to use 5 times daily (505).",
+        ),
+    ],
+)
+def test_an_explicit_week_below_five_times_the_daily_limit_gets_a_note(
+    day: int, week: int | None, expected: str | None
+) -> None:
+    """#319 review S3: compared against the limits in force, after both clamps."""
+    settings = _settings(profile_visits_per_day=day, profile_visits_per_week=week)
+    assert profile_visit_week_note(settings) == expected

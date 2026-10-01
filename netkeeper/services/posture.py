@@ -86,6 +86,7 @@ from netkeeper.services.budgets import (
     BudgetSnapshot,
     configured_default,
     profile_visit_risk_warning,
+    profile_visit_week_note,
 )
 from netkeeper.services.budgets import status as budget_status
 from netkeeper.services.linkedin_accounts import find_account, scheduled_runs_armed
@@ -204,12 +205,19 @@ class Status(enum.StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Protection:
-    """One protection: what it is, whether it is in force, and anything wrong with it."""
+    """One protection: what it is, whether it is in force, and anything wrong with it.
+
+    ``notes`` are things the reader should know that are not wrong: a choice
+    the user is entitled to make, such as profile visits above 100 a day
+    (#318). They are listed with the protection and in the report, and they
+    never affect :attr:`PostureReport.ok`, the verdict, or the exit code.
+    """
 
     name: str
     status: Status
     value: str
     warnings: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status is not Status.ON and not self.warnings:
@@ -346,6 +354,15 @@ class PostureReport:
         )
 
     @property
+    def notes(self) -> tuple[str, ...]:
+        """Every protection's notes, prefixed like :attr:`warnings`. They never affect ``ok``."""
+        return tuple(
+            f"{protection.name}: {note}"
+            for protection in self.protections
+            for note in protection.notes
+        )
+
+    @property
     def disabled(self) -> tuple[Protection, ...]:
         """The protections that are not in force, whether off or unknown."""
         return tuple(
@@ -354,7 +371,10 @@ class PostureReport:
 
     @property
     def ok(self) -> bool:
-        """True only when nothing warned. Any protection that is off makes this false."""
+        """True only when nothing warned. Any protection that is off makes this false.
+
+        Notes (:attr:`notes`) do not count: they describe a choice, not a fault.
+        """
         return not self.warnings
 
 
@@ -1176,6 +1196,7 @@ def _budget(action: ActionClass, snapshot: BudgetSnapshot, settings: Settings) -
     """One action class's day and week counters against their limits (spec 9.6)."""
     budget = settings.linkedin.budget
     warnings: list[str] = []
+    notes: list[str] = []
     parts = [f"{snapshot.day.count}/{snapshot.day.limit} today"]
     if snapshot.week is not None:
         parts.append(f"{snapshot.week.count}/{snapshot.week.limit} this week")
@@ -1188,9 +1209,13 @@ def _budget(action: ActionClass, snapshot: BudgetSnapshot, settings: Settings) -
             " says something the tool will not do"
         )
     if action is ActionClass.PROFILE_VISITS:
+        # Both are the user's call (#318), so they are notes: listed, never gating.
         risk = profile_visit_risk_warning(budget)
         if risk is not None:
-            warnings.append(risk)
+            notes.append(risk)
+        short_week = profile_visit_week_note(budget)
+        if short_week is not None:
+            notes.append(short_week)
     hard_week = HARD_MAX_PER_WEEK.get(action)
     asked_week = configured_default(action, budget, "week")
     if hard_week is not None and asked_week is not None and asked_week > hard_week:
@@ -1216,6 +1241,7 @@ def _budget(action: ActionClass, snapshot: BudgetSnapshot, settings: Settings) -
         status=Status.ON,
         value=f"{', '.join(parts)} ({ceiling})",
         warnings=tuple(warnings),
+        notes=tuple(notes),
     )
 
 
@@ -1746,6 +1772,10 @@ def render(report: PostureReport) -> str:
         lines.append("")
         for warning in report.warnings:
             lines.extend(_wrapped(warning, first="warning: ", rest="         "))
+    if report.notes:
+        lines.append("")
+        for note in report.notes:
+            lines.extend(_wrapped(note, first="note: ", rest="      "))
     if report.gaps:
         lines.append("")
         lines.append("not covered by this report:")

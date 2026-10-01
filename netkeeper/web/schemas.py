@@ -1938,12 +1938,14 @@ class LinkedInStatusOut(BaseModel):
 class ProtectionOut(BaseModel):
     """One row of the posture report (spec section 9): what it is, whether it is in
     force, and anything wrong with it. ``status`` is `netkeeper.services.posture.Status`'s
-    value (``on``, ``off``, ``unknown``); ``off``/``unknown`` always carry a warning."""
+    value (``on``, ``off``, ``unknown``); ``off``/``unknown`` always carry a warning.
+    ``notes`` describe a choice the user made, not a fault, and never affect ``ok``."""
 
     name: str
     status: str
     value: str
     warnings: list[str]
+    notes: list[str]
 
 
 class PostureOut(BaseModel):
@@ -1956,7 +1958,9 @@ class PostureOut(BaseModel):
     preflight` is the live check, still a terminal command only.
 
     ``gaps`` are known limits of what this report can see, not warnings; they
-    never affect ``ok``. ``verdict`` is `netkeeper.services.posture.verdict()`'s
+    never affect ``ok``. Neither do ``notes``: a choice the user is entitled to
+    make, such as profile visits above 100 a day (#318).
+    ``verdict`` is `netkeeper.services.posture.verdict()`'s
     own sentence, exactly as `netkeeper posture` prints it -- "nothing is
     misconfigured" on a clean report, never "you are safe" (that module's own
     docstring says why: this reads configuration and counters, not whether the
@@ -1968,6 +1972,7 @@ class PostureOut(BaseModel):
     local_time: datetime
     protections: list[ProtectionOut]
     warnings: list[str]
+    notes: list[str]
     gaps: list[str]
     ok: bool
     verdict: str

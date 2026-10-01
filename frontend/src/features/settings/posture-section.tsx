@@ -130,6 +130,14 @@ function ProtectionDetail({ row }: { row: Protection }) {
           ))}
         </ul>
       )}
+      {/* Notes describe a choice, not a fault (#318): shown, never counted against the verdict. */}
+      {row.notes.length > 0 && (
+        <ul className="mt-1 space-y-1 text-amber-800 dark:text-amber-300" aria-label="Notes">
+          {row.notes.map((note) => (
+            <li key={note}>{renderInlineMarkdown(note)}</li>
+          ))}
+        </ul>
+      )}
     </>
   )
 }

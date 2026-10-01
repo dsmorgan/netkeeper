@@ -29,15 +29,17 @@ const CLEAN: Posture = {
   timezone: 'America/New_York',
   local_time: '2026-09-24T06:00:00-04:00',
   protections: [
-    { name: 'browser mode', status: 'on', value: 'attach only', warnings: [] },
+    { name: 'browser mode', status: 'on', value: 'attach only', warnings: [], notes: [] },
     {
       name: 'linkedin session',
       status: 'unknown',
       value: 'not probed',
       warnings: ['no browser probe was run, so the session is unknown'],
+      notes: [],
     },
   ],
   warnings: ['linkedin session: no browser probe was run, so the session is unknown'],
+  notes: [],
   gaps: ['two budgets are not enforced by any running code today'],
   ok: false,
   verdict: 'NOT clear: no protection is disabled, but 1 warning needs reading',
@@ -74,7 +76,7 @@ describe('PostureSection', () => {
     ).toBeInTheDocument()
   })
 
-  it('shows the profile-visit risk warning under the profile_visits budget (#318)', async () => {
+  it('shows the profile-visit risk as a note under the profile_visits budget, verdict clear (#318)', async () => {
     const risk =
       'Profile visits are set to 150 a day, above the 100 a day netkeeper was designed around.' +
       ' More visits a day make it more likely that LinkedIn restricts your account or asks you' +
@@ -87,13 +89,20 @@ describe('PostureSection', () => {
           name: 'budget profile_visits',
           status: 'on',
           value: '0/150 today, 0/750 this week (hard max 250/day, 1250/week)',
-          warnings: [risk],
+          warnings: [],
+          notes: [risk],
         },
       ],
+      warnings: [],
+      notes: [`budget profile_visits: ${risk}`],
+      ok: true,
+      verdict: 'nothing is misconfigured: 3 protections, none of them disabled',
     })
     const table = await screen.findByTestId('posture-table')
     const row = within(table).getByText('budget profile_visits').closest('tr') as HTMLElement
-    expect(within(row).getByText(risk)).toBeInTheDocument()
+    const notes = within(row).getByRole('list', { name: 'Notes' })
+    expect(within(notes).getByText(risk)).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent(/^nothing is misconfigured/)
   })
 
   it('renders markdown in a gap, not literal asterisks or backticks (review179r2)', async () => {

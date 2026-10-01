@@ -332,7 +332,13 @@ async def test_budget_carries_the_risk_warning_above_100_a_day(
     app = create_app(settings, engine=bare_engine)
     async with app.router.lifespan_context(app), client_for(app) as client:
         budget = (await client.get("/api/v1/linkedin/budget")).json()
+        report = (await client.get("/api/v1/posture")).json()
 
+    # Posture lists it as a note on the budget row, never as a warning (#319 review S1).
+    row = next(r for r in report["protections"] if r["name"] == "budget profile_visits")
+    assert row["notes"] == [budget["risk_warning"]] and row["warnings"] == []
+    assert report["notes"] == [f"budget profile_visits: {budget['risk_warning']}"]
+    assert not any("Profile visits are set to" in w for w in report["warnings"])
     assert budget["risk_warning"] == budgets.profile_visit_risk_warning(settings.linkedin.budget)
     assert budget["risk_warning"].startswith("Profile visits are set to 150 a day")
     visits = {row["action"]: row for row in budget["budgets"]}["profile_visits"]

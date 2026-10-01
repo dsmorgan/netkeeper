@@ -27,6 +27,7 @@ describe('settings', () => {
           local_time: '2026-09-24T06:00:00-04:00',
           protections: [],
           warnings: [],
+          notes: [],
           gaps: [],
           ok: false,
           verdict: 'NOT clear: no protection is disabled, but 1 warning needs reading',
