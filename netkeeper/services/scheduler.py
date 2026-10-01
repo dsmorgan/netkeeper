@@ -287,6 +287,18 @@ RETRY_MAX_MINUTES: Final = 50.0
 # account loads for no reason the next day does not also serve. Snapped into
 # active hours like every due time.
 NOT_DONE_RETRY: Final = timedelta(days=1)
+#: How late a fire may run and still keep its cadence anchored to its due time
+#: (#309 re-review, F1). A fire that ran later than this -- the machine slept with
+#: ``serve`` alive, for up to just under an interval, so the hot path fired it on
+#: waking rather than as a catch-up -- has its next fire a whole interval after it
+#: actually ran, not ``due + interval``, which could be minutes away. Five minutes is
+#: five heartbeats (:data:`DEFAULT_HEARTBEAT_INTERVAL`): an on-time fire is at most
+#: about one heartbeat plus the poll's own work late, so it never drifts; anything
+#: later is a stall, and the only effect of anchoring it is a later next fire. A fire
+#: held up by a long run in the same heartbeat is anchored too, which only pushes
+#: its next fire later by that run's length.
+LATE_FIRE_SLACK: Final = timedelta(minutes=5)
+
 #: Up to this much is added to a not-done re-offer, so it never lands at exactly the
 #: same time of day as the fire that was not done (#201 review, M1). At most one
 #: re-offer per interval: a re-offer that is not done either waits for the normal one.
@@ -761,7 +773,10 @@ def record_fired(
 
     Anchored to ``due`` -- the time this fire *was scheduled for* -- not
     ``now``, so the cadence never drifts with polling latency or how long the
-    handler took to run. The new due time is never a pending catch-up.
+    handler took to run. A fire that ran more than :data:`LATE_FIRE_SLACK` after
+    its due time (a machine that slept with the process alive) is anchored to
+    ``now`` instead, so the next fire is a whole interval after it ran, never
+    minutes after it. The new due time is never a pending catch-up.
 
     ``handler_ran`` is False for a heat-skipped fire: the cadence moves on,
     but the kind has not yet *run*, so a ``run_on_first_setup`` kind keeps its
@@ -775,8 +790,23 @@ def record_fired(
         raise RuntimeError(
             f"record_fired: no established schedule for account {account_id}/{kind.value}"
         )
+    ran = max(due, now or due)
     if not handler_ran and not state.fired_once and schedule.run_on_first_setup:
-        next_due = max(due, now or due) + FIRST_SETUP_RETRY
+        next_due = ran + FIRST_SETUP_RETRY
+    elif state.resume_due is not None and schedule.interval < NOT_DONE_RETRY:
+        # The re-offer logic below needs an interval of at least NOT_DONE_RETRY
+        # (#309 re-review, F2), and offer_again never parks a re-offer for a shorter
+        # one. A state that carries one anyway is refused that logic: the next fire
+        # is a whole interval after this one ran, and never before the due time the
+        # re-offer stood in front of.
+        log.warning(
+            "scheduler: %s for account %d carries a re-offer its %s interval cannot"
+            " have; ignoring it",
+            kind.value,
+            account_id,
+            schedule.interval,
+        )
+        next_due = max(state.resume_due, ran + schedule.interval)
     elif state.resume_due is not None:
         # This fire was a not-done re-offer (#200): the cadence goes back to the
         # normal due time it stood in front of, not a week past the re-offer --
@@ -784,11 +814,14 @@ def record_fired(
         # that fired late, after a restart's catch-up or a sleep, would otherwise
         # put the normal fire minutes after it; the next fire is instead a whole
         # interval after this one actually ran.
-        ran = max(due, now or due)
         if state.resume_due >= ran + NOT_DONE_RETRY:
             next_due = state.resume_due
         else:
             next_due = ran + schedule.interval
+    elif ran - due > LATE_FIRE_SLACK:
+        # A fire that ran late (#309 re-review, F1): a whole interval after it ran,
+        # which is max(due + interval, now + interval), never sooner.
+        next_due = ran + schedule.interval
     else:
         next_due = due + schedule.interval
     next_due = _snap_to_active_hours(
