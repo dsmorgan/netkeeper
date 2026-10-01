@@ -570,9 +570,10 @@ def test_a_scheduled_draft_stays_drafted_until_delivered_and_the_follow_up_count
 ) -> None:
     """#278: Schedule send takes the draft out of ``drafts.list`` before anything is sent.
     Found in Scheduled, it stays ``drafted`` however many polls pass, even labelled
-    ``SENT`` as well (#278 review). Once delivered, it is ``sent`` no earlier than the
-    poll that saw it go out, whether or not Gmail re-dated it, and step 2 is due a week
-    after that, never a week after the date it was scheduled."""
+    ``SENT`` as well (#278 review). Once delivered, it is ``sent`` at Gmail's date, or,
+    when Gmail kept the date it was scheduled, at the last poll that saw it in
+    Scheduled: never after the delivery, never back at the scheduling date. Step 2 is
+    due a week after that."""
     enrollment_id = drafts.enroll()
     drafts.tick()
     [message] = drafts.messages(enrollment_id)
@@ -602,9 +603,10 @@ def test_a_scheduled_draft_stays_drafted_until_delivered_and_the_follow_up_count
 
     delivered_at = NOW + timedelta(days=2, hours=9)
     drafts.gmail.send_scheduled(scheduled, at=delivered_at, keep_date=keep_date)
-    seen = delivered_at + timedelta(minutes=4)
-    drafts.tick(seen)
+    drafts.tick(delivered_at + timedelta(minutes=4))
 
+    # The last poll that saw it in Scheduled was at 30 hours.
+    seen = NOW + timedelta(hours=30) if keep_date else delivered_at
     [message] = drafts.messages(enrollment_id)
     assert (message.status, message.sent_at, message.error) == (MessageStatus.SENT, seen, None)
     assert message.gmail_message_id == scheduled.id
@@ -697,6 +699,28 @@ def test_a_draft_marked_missing_then_found_scheduled_is_no_longer_missing(drafts
     assert drafts.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
 
 
+def test_the_sighting_in_scheduled_dates_the_send_even_after_a_missing_mark(
+    drafts: Mail,
+) -> None:
+    """#278 re-review: a lagging search marks the scheduled draft missing, replacing its
+    ``SCHEDULED_IN_GMAIL`` mark. The stamped sighting, not the mark, dates the send."""
+    enrollment_id = drafts.enroll()
+    drafts.tick()
+    [draft_id] = drafts.gmail.drafts()
+    scheduled = drafts.gmail.schedule_draft(draft_id, at=NOW + timedelta(minutes=5))
+    sighting = NOW + timedelta(hours=1)
+    drafts.tick(sighting)
+    drafts.gmail.lag = 2  # the Scheduled and the Drafts searches both find nothing
+    drafts.tick(NOW + timedelta(hours=2))
+    assert drafts.messages(enrollment_id)[0].error == DRAFT_MISSING
+
+    delivered_at = NOW + timedelta(hours=2, minutes=5)
+    drafts.gmail.send_scheduled(scheduled, at=delivered_at, keep_date=True)
+    drafts.tick(NOW + timedelta(hours=3))
+    [message] = drafts.messages(enrollment_id)
+    assert (message.status, message.sent_at) == (MessageStatus.SENT, sighting)
+
+
 def test_a_scheduled_draft_the_person_deletes_is_discarded(drafts: Mail) -> None:
     """#278: a scheduled message deleted before it went out is gone like a deleted draft."""
     enrollment_id = drafts.enroll()
@@ -715,7 +739,8 @@ def test_a_leftover_found_scheduled_waits_and_is_sent_when_delivered(drafts: Mai
     """#278: a draft whose answer was lost and that the person then scheduled is found by
     its Message-ID unsent. It stays ``scheduled`` with no miss counted, is searched again
     only every ``RECONCILE_SEARCH_EVERY`` (#278 review), never ``sent`` before Gmail
-    delivers it, and is dated no earlier than the search that found it sent."""
+    delivers it, and, with Gmail keeping the scheduling date, is dated by the last search
+    that found it in Scheduled."""
     enrollment_id = drafts.enroll()
     with pytest.raises(Crash):
         drafts.tick(sender=CrashAfterSend(drafts.sender))
@@ -751,30 +776,47 @@ def test_a_leftover_found_scheduled_waits_and_is_sent_when_delivered(drafts: Mai
 
     delivered_at = NOW + timedelta(days=1)
     drafts.gmail.send_scheduled(scheduled, at=delivered_at, keep_date=True)
-    seen = delivered_at + timedelta(minutes=5)
-    drafts.tick(seen)
+    drafts.tick(delivered_at + timedelta(minutes=5))
     [message] = drafts.messages(enrollment_id)
-    assert (message.status, message.sent_at) == (MessageStatus.SENT, seen)
-    assert drafts.enrollment(enrollment_id).next_action_at == seen + WEEK
+    assert (message.status, message.sent_at) == (MessageStatus.SENT, first + every)
+    assert drafts.enrollment(enrollment_id).next_action_at == first + every + WEEK
+
+
+def persons_own_draft(mail: Mail) -> Draft:
+    note = EmailMessage()
+    note["To"] = "someone@example.test"
+    note["Subject"] = "Lunch?"
+    note.set_content("Free on Thursday?")
+    return mail.gmail.create_draft(note, purpose="the person")
 
 
 def test_a_canceled_schedule_back_in_drafts_under_a_new_id_is_followed(drafts: Mail) -> None:
     """#278 review: canceling a Schedule send puts the message back in Drafts under a new
     draft id. Found there by its Message-ID, it is followed under the new ids, not
-    discarded, and is sent from there as any draft is."""
+    discarded, and is sent from there as any draft is. Of the drafts listed, only the one
+    with its Message-ID is taken: never another netkeeper draft, never the person's."""
     enrollment_id = drafts.enroll()
+    other_id = drafts.enroll("bea@example.test")
     drafts.tick()
-    [draft_id] = drafts.gmail.drafts()
-    scheduled = drafts.gmail.schedule_draft(draft_id)
+    drafts.tick(NOW + timedelta(minutes=30))
+    [message] = drafts.messages(enrollment_id)
+    [other] = drafts.messages(other_id)
+    assert other.gmail_draft_id is not None
+    scheduled = drafts.gmail.schedule_draft(message.gmail_draft_id or "")
     drafts.tick(NOW + timedelta(hours=1))
     back = drafts.gmail.cancel_scheduled(scheduled)
-    assert back.id != draft_id
+    assert back.id != message.gmail_draft_id
+    own = persons_own_draft(drafts)
+    assert list(drafts.gmail.drafts()) == [other.gmail_draft_id, back.id, own.id]
 
     for hours in (2, 3, 4):
         drafts.tick(NOW + timedelta(hours=hours))
         [message] = drafts.messages(enrollment_id)
         assert (message.status, message.error) == (MessageStatus.DRAFTED, None)
         assert (message.gmail_draft_id, message.gmail_message_id) == (back.id, back.message.id)
+        assert [
+            (m.status, m.gmail_draft_id, m.gmail_message_id) for m in drafts.messages(other_id)
+        ] == [(MessageStatus.DRAFTED, other.gmail_draft_id, other.gmail_message_id)]
     assert drafts.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
 
     sent_at = NOW + timedelta(hours=5)
@@ -782,6 +824,56 @@ def test_a_canceled_schedule_back_in_drafts_under_a_new_id_is_followed(drafts: M
     drafts.tick(NOW + timedelta(hours=6))
     [message] = drafts.messages(enrollment_id)
     assert (message.status, message.sent_at) == (MessageStatus.SENT, sent_at)
+    assert own.id in drafts.gmail.drafts()
+
+
+def test_a_canceled_schedule_in_drafts_but_not_listed_yet_waits(drafts: Mail) -> None:
+    """#278 review (M4): found in Drafts by its Message-ID but missing from the listing
+    read just before, it is neither marked missing nor adopted; the next poll adopts it."""
+    enrollment_id = drafts.enroll()
+    drafts.tick()
+    [draft_id] = drafts.gmail.drafts()
+    scheduled = drafts.gmail.schedule_draft(draft_id)
+    drafts.tick(NOW + timedelta(hours=1))
+    back = drafts.gmail.cancel_scheduled(scheduled)
+    before = drafted_state(drafts, enrollment_id)
+    assert before[0][1] == engine_module.SCHEDULED_IN_GMAIL
+
+    drafts.gmail.unlisted = 1
+    drafts.tick(NOW + timedelta(hours=2))
+    assert drafted_state(drafts, enrollment_id) == before
+    drafts.tick(NOW + timedelta(hours=3))
+    [message] = drafts.messages(enrollment_id)
+    assert (message.gmail_draft_id, message.error) == (back.id, None)
+
+
+def test_a_canceled_schedule_back_under_the_same_draft_id_clears_its_mark(
+    drafts: Mail,
+) -> None:
+    """#278 review (M6): a Schedule send canceled back to the same draft id is listed
+    again. The ``SCHEDULED_IN_GMAIL`` mark is cleared, and a later send is dated by Gmail,
+    not late."""
+    enrollment_id = drafts.enroll()
+    drafts.tick()
+    [draft_id] = drafts.gmail.drafts()
+    scheduled = drafts.gmail.schedule_draft(draft_id)
+    drafts.tick(NOW + timedelta(hours=1))
+    back = drafts.gmail.cancel_scheduled(scheduled, same_draft_id=True)
+    assert back.id == draft_id
+
+    drafts.tick(NOW + timedelta(hours=2))
+    [message] = drafts.messages(enrollment_id)
+    assert (message.status, message.error, message.gmail_draft_id) == (
+        MessageStatus.DRAFTED,
+        None,
+        draft_id,
+    )
+    sent_at = NOW + timedelta(hours=3)
+    drafts.gmail.send_draft(draft_id, at=sent_at)
+    drafts.tick(NOW + timedelta(hours=4))
+    [message] = drafts.messages(enrollment_id)
+    assert (message.status, message.sent_at) == (MessageStatus.SENT, sent_at)
+    assert drafts.enrollment(enrollment_id).next_action_at == sent_at + WEEK
 
 
 def test_a_drafts_search_error_changes_nothing(drafts: Mail) -> None:

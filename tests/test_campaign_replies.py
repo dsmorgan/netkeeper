@@ -16,7 +16,7 @@ import factories
 import pytest
 from campaign_fakes import ARMED_FOR_SEND, NOW, SETTINGS, make_mailbox
 from sqlalchemy.orm import Session, sessionmaker
-from test_campaign_sender import WEEK, Mail, make_mail
+from test_campaign_sender import LATER, WEEK, Crash, CrashAfterSend, Mail, make_mail
 
 from netkeeper.campaigns.gmail import GmailTransient, Message, MessageRef
 from netkeeper.campaigns.gmail_fake import FakeGmail
@@ -44,6 +44,7 @@ from netkeeper.models import (
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import campaign_replies as replies
 from netkeeper.services.campaign_engine import (
+    RECONCILE_SEARCH_EVERY,
     REVIEW_GATE,
     Firing,
     SendOutcome,
@@ -283,6 +284,80 @@ def test_a_reply_to_a_scheduled_draft_once_delivered_ends_the_enrollment(
     )
     assert mail.tick(delivered_at + WEEK + timedelta(hours=1)).fired == []
     assert mail.gmail.drafts() == {}
+
+
+def _reply_in_the_gap(mail: Mail, to: MessageRef, at: datetime, *, in_thread: bool) -> None:
+    if in_thread:
+        mail.gmail.reply(to, sender=f"Ada <{ADA}>", at=at)
+    else:
+        mail.gmail.deliver(fresh_email(ADA, "Quick question", "Saw your note."), at=at)
+
+
+def _never_followed_up(mail: Mail, enrollment_id: int, after: datetime) -> None:
+    enrollment = mail.enrollment(enrollment_id)
+    assert (enrollment.status, enrollment.exit_reason) == (EnrollmentStatus.REPLIED, "replied")
+    for days in (7, 8, 30):
+        assert mail.tick(after + timedelta(days=days)).fired == []
+    assert mail.gmail.drafts() == {}
+    outbound = [m for m in mail.messages(enrollment_id) if m.direction is MessageDirection.OUT]
+    assert len(outbound) == 1
+
+
+@pytest.mark.parametrize("keep_date", [False, True])
+@pytest.mark.parametrize("in_thread", [False, True])
+def test_a_reply_between_a_scheduled_delivery_and_the_next_poll_is_recorded(
+    session_factory: sessionmaker[Session], in_thread: bool, keep_date: bool
+) -> None:
+    """#278 re-review: a reply that lands after Gmail delivers a scheduled draft but
+    before the drafts poll sees it sent is after ``sent_at``, whether or not Gmail
+    re-dated the message, so it ends the enrollment and step 2 never goes out."""
+    mail = make_mail(session_factory, modes=(StepMode.DRAFT,) * 2, same_thread=(False, True))
+    mail.sender = poller(mail)
+    enrollment_id = mail.enroll(ADA)
+    mail.tick(NOW)
+    [draft_id] = mail.gmail.drafts()
+    scheduled = mail.gmail.schedule_draft(draft_id, at=NOW + timedelta(minutes=5))
+    delivered_at = NOW + timedelta(days=1)
+    mail.tick(NOW + timedelta(hours=1))
+    mail.tick(delivered_at - timedelta(minutes=10))  # the last poll that sees it scheduled
+
+    mail.gmail.send_scheduled(scheduled, at=delivered_at, keep_date=keep_date)
+    _reply_in_the_gap(mail, scheduled, delivered_at + timedelta(seconds=30), in_thread=in_thread)
+    mail.tick(delivered_at + timedelta(minutes=1))
+
+    [sent] = [m for m in mail.messages(enrollment_id) if m.direction is MessageDirection.OUT]
+    assert sent.status is MessageStatus.SENT
+    assert sent.sent_at is not None and sent.sent_at <= delivered_at
+    _never_followed_up(mail, enrollment_id, delivered_at)
+
+
+@pytest.mark.parametrize("in_thread", [False, True])
+def test_a_reply_in_a_scheduled_leftovers_search_gap_is_recorded(
+    session_factory: sessionmaker[Session], in_thread: bool
+) -> None:
+    """#278 re-review: a leftover found in Scheduled is searched only every
+    ``RECONCILE_SEARCH_EVERY``. A delivery and a reply inside that gap, with Gmail keeping
+    the scheduling date, still date the send before the reply."""
+    mail = make_mail(session_factory, modes=(StepMode.DRAFT,) * 2, same_thread=(False, True))
+    mail.sender = poller(mail)
+    enrollment_id = mail.enroll(ADA)
+    with pytest.raises(Crash):
+        mail.tick(NOW, sender=CrashAfterSend(mail.sender))
+    [draft_id] = mail.gmail.drafts()
+    scheduled = mail.gmail.schedule_draft(draft_id)
+    first = NOW + LATER
+    mail.tick(first)  # found in Scheduled; the next search is RECONCILE_SEARCH_EVERY later
+
+    delivered_at = first + timedelta(minutes=5)
+    mail.gmail.send_scheduled(scheduled, at=delivered_at, keep_date=True)
+    _reply_in_the_gap(mail, scheduled, delivered_at + timedelta(minutes=1), in_thread=in_thread)
+    mail.tick(delivered_at + timedelta(minutes=2))  # inside the gap: not searched
+    assert mail.messages(enrollment_id)[0].status is MessageStatus.SCHEDULED
+    mail.tick(first + RECONCILE_SEARCH_EVERY)
+
+    [sent] = [m for m in mail.messages(enrollment_id) if m.direction is MessageDirection.OUT]
+    assert (sent.status, sent.sent_at) == (MessageStatus.SENT, first)
+    _never_followed_up(mail, enrollment_id, delivered_at)
 
 
 def test_a_completed_enrollment_is_watched_for_thirty_days(

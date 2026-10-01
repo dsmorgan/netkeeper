@@ -1644,8 +1644,8 @@ draft the person just sent (undo send, scheduled send) may not show as sent at o
 
 SCHEDULED_IN_GMAIL: Final = "waiting in Gmail's Scheduled; recorded as sent once it goes out"
 """``messages.error`` of a draft (or a leftover) seen in Gmail's Scheduled (#278): the
-person used Schedule send. It is never discarded while it is there, and once it is seen
-sent it is dated no earlier than the poll that saw it (:func:`seen_sent_at`)."""
+person used Schedule send. It is never discarded while it is there. For display and
+for clearing only: the dating of its send never reads it (:func:`seen_sent_at`)."""
 
 DRAFT_DISCARDED_REASON: Final = "draft_discarded"
 """``exit_reason`` of an enrollment whose draft the person deleted (spec 11.5)."""
@@ -1681,6 +1681,9 @@ class Tracked:
     label: str
     thread_known: frozenset[str] = frozenset()
     seen_scheduled: bool = False
+    #: The last time a search found it waiting in Gmail's Scheduled, so not yet sent
+    #: (#278 review); None when that is not known. See :func:`seen_in_scheduled_at`.
+    seen_in_scheduled_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1758,6 +1761,7 @@ def _tracked(
                 gmail_draft_id=message.gmail_draft_id,
                 marked_missing=message.error == DRAFT_MISSING,
                 seen_scheduled=message.error == SCHEDULED_IN_GMAIL,
+                seen_in_scheduled_at=seen_in_scheduled_at(message),
                 label=campaign_label(mailbox.label_prefix, campaign_name),
                 thread_known=(
                     _thread_known(session, user, message)
@@ -2042,12 +2046,17 @@ def settle_draft_present(session: Session, user: User, message_id: int) -> None:
 
 
 def settle_seen_scheduled(session: Session, user: User, message_id: int, *, now: datetime) -> None:
-    """The message waits in Gmail's Scheduled (#278): marked
-    (:data:`SCHEDULED_IN_GMAIL`), never discarded while it is there. A ``drafted`` one
-    loses a missing mark. A leftover (``scheduled``) is stamped searched at ``now``,
-    with no miss counted, so it is searched again only after
+    """A search at ``now`` found the message waiting in Gmail's Scheduled (#278): marked
+    (:data:`SCHEDULED_IN_GMAIL`), never discarded while it is there; a ``drafted`` one
+    loses a missing mark.
+
+    ``now`` is stamped in ``reconcile_last_miss_at`` with ``reconcile_first_miss_at``
+    and ``reconcile_misses`` cleared (#278 review): a lower bound on the delivery that
+    dates the send (:func:`seen_in_scheduled_at`). For a leftover (``scheduled``) it
+    is also the search time, so it is searched again only after
     :data:`RECONCILE_SEARCH_EVERY` and never holds a :data:`RECONCILE_BATCH` slot each
-    tick (#278 review)."""
+    tick; its earlier misses were Gmail's search lagging, since Gmail has it. Nothing
+    reads these columns for a ``drafted`` message otherwise."""
     _require_writer(session, "settle_seen_scheduled")
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
@@ -2057,8 +2066,9 @@ def settle_seen_scheduled(session: Session, user: User, message_id: int, *, now:
     if message is None:
         return
     message.error = SCHEDULED_IN_GMAIL
-    if message.status is MessageStatus.SCHEDULED:
-        message.reconcile_last_miss_at = now
+    message.reconcile_misses = 0
+    message.reconcile_first_miss_at = None
+    message.reconcile_last_miss_at = now
     session.flush()
 
 
@@ -2085,12 +2095,31 @@ def settle_draft_moved(
     log.info("message %d: its draft is back in Gmail's Drafts under a new id", message_id)
 
 
-def seen_sent_at(tracked: Tracked, internal_date: datetime, now: datetime) -> datetime:
-    """When a message found sent went out, for the next step's delay. Gmail's internal
-    date, except for a message seen waiting in Scheduled (#278 review): Gmail may keep
-    the date it was scheduled, so it is dated no earlier than ``now``, the poll that
-    first saw it sent. Late by at most a poll, never early."""
-    return max(internal_date, now) if tracked.seen_scheduled else internal_date
+def seen_in_scheduled_at(message: Message) -> datetime | None:
+    """The last time a search found ``message`` in Gmail's Scheduled, or None.
+
+    :func:`settle_seen_scheduled` stamps it in ``reconcile_last_miss_at`` and clears
+    ``reconcile_first_miss_at``. :func:`settle_not_sent` always sets the first-miss
+    time with the last, so a last time with no first one is a sighting in Scheduled.
+    A leftover that missed after one (Gmail's search lagging, or the scheduled
+    message deleted) has it overwritten and falls back to Gmail's date. The
+    ``SCHEDULED_IN_GMAIL`` mark is never read for this: a missing mark replaces it.
+    """
+    if message.reconcile_first_miss_at is not None:
+        return None
+    return message.reconcile_last_miss_at
+
+
+def seen_sent_at(tracked: Tracked, internal_date: datetime) -> datetime:
+    """When a message found sent went out, for the next step's delay and the reply poll.
+
+    Gmail's internal date, but for a message seen waiting in Scheduled no earlier than
+    the last time it was seen there (#278 review): Gmail may keep the date it was
+    scheduled. Both are no later than the delivery, so a reply that came right after
+    it, before the poll that saw it sent, is still after ``sent_at`` and is recorded.
+    The follow-up may count from up to a drafts poll before the delivery."""
+    seen = tracked.seen_in_scheduled_at
+    return internal_date if seen is None else max(internal_date, seen)
 
 
 def tick_user(
