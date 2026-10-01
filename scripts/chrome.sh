@@ -256,14 +256,13 @@ lock_holder() {
   # alias followed by a positional URL (`--user-data-dir=alias
   # https://example.com`, nothing else `${tail%% --*}` can trim on) drags the
   # URL into the extracted value too, so a real match still looks like a
-  # mismatch. Either misreads a live holder as stale and lets a second Chrome
-  # start on a profile already in use (#183 re-review should-fix 1 -- a
-  # regression nit 3 itself introduced). So a mismatch only rules the pid out
-  # when lsof *also* has nothing on it; lsof actually showing this profile
-  # open overrides the mismatched flag, and lsof answering nothing at all
-  # still falls through to the fail-closed rule below exactly as when there
-  # was no flag to go on in the first place.
-  flag_mismatched=no
+  # mismatch. Treating that mismatch as proof of absence (an earlier version
+  # of this check did) misreads a live holder as stale and lets a second
+  # Chrome start on a profile already in use -- so a mismatch never rules the
+  # pid out by itself; only lsof actually answering, and finding nothing
+  # under this profile, may call it stale. lsof answering nothing at all
+  # falls through to the fail-closed rule below exactly as when there was no
+  # flag to go on in the first place (#183 re-review round 3 should-fix 1).
   tail=$(printf '%s' "$cmd" | sed -n 's/.*--user-data-dir=//p')
   if [ -n "$tail" ]; then
     flag=${tail%% --*}
@@ -271,13 +270,9 @@ lock_holder() {
       printf '%s\n' "$pid"
       return 0
     fi
-    flag_mismatched=yes
   fi
   lsof_out=$(lsof -a -p "$pid" -Fn 2>/dev/null)
   if [ -z "$lsof_out" ]; then
-    if [ "$flag_mismatched" = yes ]; then
-      return 0
-    fi
     # Nothing back at all -- a startup race, or lsof lacking permission to
     # inspect it (sandboxing can hide even a same-user process's open files) --
     # is not proof there is no holder; fail closed rather than clear a lock a

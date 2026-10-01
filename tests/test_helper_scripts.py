@@ -996,13 +996,16 @@ def test_chrome_script_treats_lock_holder_as_present_when_lsof_answers_nothing(
     assert f"pid {pid}" in result.stderr
 
 
-def test_chrome_script_treats_a_mismatched_user_data_dir_flag_as_proof_of_absence(
+def test_chrome_script_fails_closed_when_flag_is_mismatched_and_lsof_is_empty(
     tmp_path: Path,
 ) -> None:
-    """#183 re-review nit 3: a --user-data-dir naming a different profile is
-    positive evidence this pid is not the holder. The empty-lsof fail-closed
-    rule must not override that -- it is for when there is no flag to go on
-    at all, not for second-guessing one that says otherwise."""
+    """#183 re-review round 3 should-fix 1: a mismatched --user-data-dir is
+    not, on its own, proof this pid is not the holder -- a relative flag, or
+    one mangled by a positional argument (round 2's should-fix 1), looks
+    exactly like a genuine mismatch for a real holder too. Only lsof actually
+    answering and finding nothing under the profile may call a lock stale;
+    lsof answering nothing at all must fail closed exactly as when there was
+    no flag to go on in the first place, mismatch or not."""
     profile = tmp_path.resolve() / "profile"
     profile.mkdir()
     other = tmp_path.resolve() / "other-profile"
@@ -1019,7 +1022,7 @@ def test_chrome_script_treats_a_mismatched_user_data_dir_flag_as_proof_of_absenc
         real = shutil.which("lsof")
         assert real is not None
         # Empty on -Fn, as if nothing were open -- the fail-closed case this
-        # must NOT trigger, because the mismatched flag already answers it.
+        # must still trigger despite the mismatched flag.
         shim.write_text(f'#!/bin/sh\ncase "$*" in *-Fn*) exit 0 ;; esac\nexec "{real}" "$@"\n')
         shim.chmod(0o755)
         path = f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
@@ -1035,8 +1038,8 @@ def test_chrome_script_treats_a_mismatched_user_data_dir_flag_as_proof_of_absenc
     finally:
         proc.kill()
         proc.wait()
-    assert result.returncode == 0, result.stderr
-    assert "stale profile lock" in result.stdout
+    assert result.returncode == 1
+    assert f"pid {proc.pid}" in result.stderr
 
 
 def test_chrome_script_still_refuses_a_live_holder_behind_a_symlinked_flag_and_a_url(
@@ -1761,6 +1764,96 @@ def test_reset_refuses_when_the_candidate_name_is_a_directory_symlink(
 
 
 @needs_sqlite3_cli
+def test_reset_treats_a_dangling_symlink_at_the_candidate_name_as_taken(
+    data: Path, tmp_path: Path
+) -> None:
+    """Re-review round 3 nit 3: -e alone misses a dangling symlink (its
+    target does not exist, so -e reads false even though the name itself is
+    taken). A dangling symlink at the candidate name must be skipped like
+    any other taken one -- retried under -1 -- not mistaken for a free name
+    (which would make `ln` fail outright, read as a genuine publish
+    failure)."""
+    db = make_db(data)
+    archives = data / "archives"
+    archives.mkdir()
+    stamp = "20260101T000000Z"
+    candidate = archives / f"netkeeper-{stamp}.sqlite3"
+    candidate.symlink_to(archives / "does-not-exist")
+    assert not candidate.exists()  # -e is false: the target is missing
+    assert candidate.is_symlink()  # but -L is true: the name is still taken
+
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    _date_shim(shim_dir, stamp)
+    path = f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+
+    result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": path})
+    assert result.returncode == 0, result.stderr
+    assert not db.exists()
+    published = archives / f"netkeeper-{stamp}-1.sqlite3"
+    assert published.exists()
+    with closing(sqlite3.connect(published)) as check:
+        assert check.execute("select x from marker").fetchone() == (42,)
+    # The dangling symlink itself is untouched -- only skipped past.
+    assert candidate.is_symlink() and not candidate.exists()
+
+
+@needs_sqlite3_cli
+def test_reset_dies_clearly_when_quarantine_mv_itself_fails(data: Path, tmp_path: Path) -> None:
+    """Re-review round 3 nit 3: quarantine_partial's own mv failure must not
+    abort silently under set -e, nor (since it is called directly, not as
+    `x=$(quarantine_partial ...)`) report from inside a vanished subshell
+    while the original sat in $tmp, about to be removed by the EXIT trap --
+    it must die with a message naming where the data actually, accurately,
+    still is."""
+    db = make_db(data)
+    real_sqlite3 = shutil.which("sqlite3")
+    assert real_sqlite3 is not None
+    real_mv = shutil.which("mv")
+    assert real_mv is not None
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+
+    # VACUUM "succeeds" but writes garbage, so verified() fails and
+    # archive_db() reaches quarantine_partial().
+    sqlite_shim = shim_dir / "sqlite3"
+    sqlite_shim.write_text(
+        "#!/bin/sh\n"
+        'case "$2" in\n'
+        "  VACUUM*)\n"
+        "    target=$(printf '%s' \"$2\" | sed -n \"s/^VACUUM INTO '\\\\(.*\\\\)'\\$/\\\\1/p\")\n"
+        "    printf 'not a real database' > \"$target\"\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "esac\n"
+        f'exec "{real_sqlite3}" "$@"\n'
+    )
+    sqlite_shim.chmod(0o755)
+
+    mv_shim = shim_dir / "mv"
+    mv_shim.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  *.failed) echo 'mv: simulated failure' >&2; exit 1 ;;\n"
+        "esac\n"
+        f'exec "{real_mv}" "$@"\n'
+    )
+    mv_shim.chmod(0o755)
+
+    path = f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+    result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": path})
+    assert result.returncode == 1
+    assert "could not move the partial archive" in result.stderr
+    assert marker(db) == 42
+    archives = data / "archives"
+    # Nothing survives anywhere: not published, not quarantined (mv itself
+    # failed), and the temp directory is gone too -- the EXIT trap's job.
+    assert not list(archives.glob("*.sqlite3"))
+    assert not list(archives.glob("*.sqlite3.failed"))
+    assert not list(archives.glob(".partial.*"))
+
+
+@needs_sqlite3_cli
 def test_reset_cleans_up_its_temp_dir_when_interrupted(data: Path, tmp_path: Path) -> None:
     """Re-review should-fix 2: an interrupted reset must not leave a hidden
     full copy of the database sitting in a .partial.* directory under
@@ -1859,29 +1952,23 @@ def test_reset_folds_the_wal_when_vacuum_into_is_refused(data: Path, tmp_path: P
 
 
 @needs_sqlite3_cli
-def test_reset_removes_the_copied_wal_shm_even_when_the_fold_pragma_fails(
-    data: Path, tmp_path: Path
-) -> None:
-    """Re-review nit 5: pin the explicit `rm -f -- "$work-wal" "$work-shm"` in
-    the raw-copy fallback. When the fold (wal_checkpoint/journal_mode) pragma
-    succeeds, it already removes those files itself as a side effect, which
-    left this line a surviving mutant -- untested, because its own absence
-    changed nothing observable. Forcing the fold pragma to fail too (not just
-    VACUUM INTO) makes this explicit cleanup the only thing that would remove
-    them, and a sqlite3 shim records whether the copied -wal still sits next
-    to the work file at the moment verified() reads it -- the one point in
-    the run where it would still matter, before the whole temp directory is
-    removed either way.
+def test_reset_dies_when_the_wal_fold_pragma_fails(data: Path, tmp_path: Path) -> None:
+    """Re-review round 3 should-fix 2: a failed WAL fold (the
+    wal_checkpoint/journal_mode pragma, in the raw-copy fallback) is now
+    fatal rather than a swallowed `|| true` warning -- quietly publishing an
+    archive missing whatever was still in the WAL, with no sign anything was
+    wrong, is worse than refusing. This holds the same on macOS and on
+    Linux: unlike the old pin (nit 5, which read the copied -wal's presence
+    at the moment SQLite's `-readonly` tried to open it -- a question CI's
+    Linux build and the maintainer's macOS build answered differently), the
+    fatal check here is the pragma's own exit status plus a plain `-s` file
+    check, neither of which depends on SQLite's WAL-without-sidecars
+    behavior at all.
 
-    What verified() itself then concludes is not pinned here: whether
-    `-readonly` can open a WAL-mode-flagged file with no -wal/-shm beside it
-    turned out to be SQLite-version/platform behavior, not something this
-    script controls -- it refused on the maintainer's macOS build (the
-    archive is quarantined) and succeeded on CI's Linux build (the archive
-    publishes, with the pre-fold row missing). The marker file is a plain
-    shell `[ -e ... ]` check, not a SQLite question, and is the same either
-    way: this is what actually distinguishes the fix from the mutant.
-    """
+    The marker records whether the copied -wal genuinely had content at the
+    moment the (shimmed, failing) fold was attempted, proving the test's own
+    setup is real -- not a vacuous pass because there was nothing to fold in
+    the first place."""
     db = data / "netkeeper.sqlite3"
     db.unlink(missing_ok=True)
     with closing(sqlite3.connect(db)) as conn, conn:
@@ -1904,14 +1991,17 @@ def test_reset_removes_the_copied_wal_shm_even_when_the_fold_pragma_fails(
         with closing(sqlite3.connect(db)) as writer, writer:
             writer.execute("PRAGMA wal_autocheckpoint=0")
             writer.execute("INSERT INTO marker VALUES (42)")
-        assert Path(f"{db}-wal").stat().st_size > 0, "test setup needs a pending WAL"
+        wal_size_before = Path(f"{db}-wal").stat().st_size
+        assert wal_size_before > 0, "test setup needs a pending WAL"
     finally:
+        # Released before reset-data.sh runs: held open any longer and
+        # refuse_if_in_use() would refuse for an unrelated reason.
         reader.kill()
         reader.wait()
 
     real = shutil.which("sqlite3")
     assert real is not None
-    marker_file = tmp_path / "wal-at-verify-time"
+    marker_file = tmp_path / "wal-at-fold-attempt"
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
     shim = shim_dir / "sqlite3"
@@ -1919,15 +2009,13 @@ def test_reset_removes_the_copied_wal_shm_even_when_the_fold_pragma_fails(
         "#!/bin/sh\n"
         'case "$2" in\n'
         "  VACUUM*) exit 1 ;;\n"
-        "  *wal_checkpoint*) exit 1 ;;\n"
-        "esac\n"
-        'case "$3" in\n'
-        "  *quick_check*)\n"
-        '    if [ -e "$2-wal" ]; then\n'
+        "  *wal_checkpoint*)\n"
+        '    if [ -s "$1-wal" ]; then\n'
         f"      printf present > {str(marker_file)!r}\n"
         "    else\n"
         f"      printf absent > {str(marker_file)!r}\n"
         "    fi\n"
+        "    exit 1\n"
         "    ;;\n"
         "esac\n"
         f'exec "{real}" "$@"\n'
@@ -1936,12 +2024,14 @@ def test_reset_removes_the_copied_wal_shm_even_when_the_fold_pragma_fails(
     path = f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
 
     result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": path})
-    # Pass or quarantine -- either is a normal exit, never a crash.
-    assert result.returncode in (0, 1), result.stderr
-    # The pin: rm -f already ran before verified() was reached, which is the
-    # one thing a successful fold's own side effect would otherwise have
-    # hidden from every other test here.
-    assert marker_file.read_text() == "absent"
+    assert result.returncode == 1
+    assert "could not fold the WAL" in result.stderr
+    assert marker_file.read_text() == "present"
+    # The live database (and its own -wal, untouched) must survive -- this
+    # run never got anywhere near remove_db().
+    assert db.exists()
+    assert Path(f"{db}-wal").stat().st_size == wal_size_before
+    assert not list((data / "archives").glob("*.sqlite3"))
 
 
 @needs_sqlite3_cli
