@@ -387,6 +387,18 @@ async def _page_log(run: BrowserRun) -> dict[str, Any]:
     return log
 
 
+def _contact_info_clicks(log: dict[str, Any]) -> list[dict[str, Any]]:
+    """The clicks the page saw on a Contact info link.
+
+    The no-click tests count only these (#196 item 3): the smoke Chrome is a real,
+    windowed browser that comes to the front (#195), and a person or the OS clicking
+    it lands a trusted click on the filler content that netkeeper never made. A click
+    netkeeper made can only be on Contact info, and would also send the overlay's
+    request, which those tests check separately.
+    """
+    return [click for click in log["clicks"] if click.get("text") == "Contact info"]
+
+
 def _target(person: Person, urn: str | None = None) -> EnrichTarget:
     return EnrichTarget(person.n, person.slug, urn or person.urn)
 
@@ -432,7 +444,7 @@ async def test_a_page_without_exactly_one_control_gets_no_click(
     _Replica.controls = controls
     _, harvests, _, log = await _visit(provider, site, [_target(PRIYA)])
     assert [h.outcome for h in harvests] == [Outcome.ROUTE_CHANGED]
-    assert log["clicks"] == [] and log["keys"] == 0
+    assert _contact_info_clicks(log) == [] and log["keys"] == 0
     assert all(r["path"] != NAVIGATION_PATH for r in _Replica.received)
 
 
@@ -444,7 +456,7 @@ async def test_a_profile_under_another_urn_gets_no_click(
     )
     (harvest,) = harvests
     assert harvest.outcome is Outcome.OK and harvest.contact_info is None
-    assert log["clicks"] == []
+    assert _contact_info_clicks(log) == []
     assert all(r["path"] != NAVIGATION_PATH for r in _Replica.received)
 
 

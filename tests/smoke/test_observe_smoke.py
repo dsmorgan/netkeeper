@@ -16,27 +16,26 @@ every request it sent, and the two lists are the same, headers included.
 sits across the top of the viewport, over a centered content column -- the
 ``html``/``body`` do not scroll at all. That much the #149 capture supports (it
 shows flagship-web's RSC payloads, not its rendered layout), but *what actually
-scrolls* under that header is an assumption either way, so two plausible shapes
-are both tested (:data:`_LAYOUTS`, below): ``<main>`` scrolling itself, flanked by
+scrolls* under that header is an assumption either way, so two plausible shapes are
+both tested (:data:`_LAYOUTS`, below): ``<main>`` scrolling itself, flanked by
 non-scrolling rails, and ``<main>`` as a plain in-flow element inside a scrolling
-ancestor, which makes ``<main>``'s own box the whole list's height rather than the
-viewport's sliver of it. Both are why the bug in #192 went uncaught here before:
-Playwright's ``mouse.wheel`` fires at the virtual pointer's position, which starts
-at (0, 0) and sits under the fixed header, not over the scrolling column, so a
-wheel replay that never moved the pointer first scrolled nothing.
-``BrowserRun.scroll`` rests the pointer over the content before its first wheel
-event now (``_rest_pointer_over_content``), reading ``<main>``'s own on-screen box
-rather than guessing at the viewport (#192 review, F1) -- a guess that missed the
-centered column entirely on a wide window, and had nowhere reliable to land on a
+column flanked by the same rails, which makes ``<main>``'s own box the whole list's
+height rather than the viewport's sliver of it. Both are why the bug in #192 went
+uncaught here before: Playwright's ``mouse.wheel`` fires at the virtual pointer's
+position, which starts at (0, 0) and sits under the fixed header, not over the
+scrolling column, so a wheel replay that never moved the pointer first scrolled
+nothing. ``BrowserRun.scroll`` rests the pointer over the content before its first
+wheel event now (``_rest_pointer_over_content``), reading ``<main>``'s own on-screen
+box rather than guessing at the viewport (#192 review, F1) -- a guess that missed
+the centered column entirely on a wide window, and had nowhere reliable to land on a
 narrow one -- near the top of that box, not its center (#192 review round 2, N1),
 since a tall in-flow ``<main>``'s center can sit far below the real window. Without
 those fixes, ``test_a_real_page_loads_its_own_pages_and_the_run_reads_them_all``
-below stalls and ends ``RouteChanged`` instead of ``END_OF_LIST`` -- checked by
-hand against the code from before each fix, and recorded in the PR's description
-rather than as a test of code that no longer exists to run. Run at several window
-sizes (560, 740, 1280, 2200px wide) to cover a phone-width netkeeper Chrome window,
-the maintainer's MacBook Air split-screen width, an ordinary laptop, and an
-ultrawide.
+below stalls and ends ``RouteChanged`` instead of ``END_OF_LIST`` -- checked by hand
+against the code from before each fix, and recorded in the PR's description rather
+than as a test of code that no longer exists to run. Run at several window sizes
+(560, 740, 1280, 2200px wide) to cover a phone-width netkeeper Chrome window, the
+maintainer's MacBook Air split-screen width, an ordinary laptop, and an ultrawide.
 
 Start Chrome first with the command ``netkeeper browser launch`` prints, and point
 ``NETKEEPER_CDP_URL`` at it.
@@ -143,22 +142,33 @@ _RAILS_LAYOUT_CSS = """
 """
 
 #: **"ancestor-scroll"**: ``<main>`` is a plain in-flow element -- no height or
-#: overflow of its own -- centered under the header by margin alone; its
-#: *ancestor* (``#scroll``) is the actual scrolling element. ``<main>``'s own
-#: rendered height is then the whole list's height, not the viewport's sliver of
-#: it, and grows as more pages load: the #192 review round 2, N1 case (measured
-#: on a real page at ``{x:240, y:56, w:800, h:2300}`` at 1280px wide), which
-#: centering on the box's full height -- rather than staying near its top -- got
-#: wrong again.
+#: overflow of its own -- inside a centered column (``#scroll``) that is the actual
+#: scrolling element, flanked by non-scrolling left and right rails like the "rails"
+#: layout's. ``<main>``'s own rendered height is then the whole list's height, not
+#: the viewport's sliver of it, and grows as more pages load: the #192 review round
+#: 2, N1 case. The reviewer measured ``<main>`` at ``{x:240, y:56, w:800, h:2300}``
+#: at 1280px wide on this replica, not on a real page. Centering on the box's full
+#: height -- rather than staying near its top -- aims the pointer far below the
+#: window (y≈1206 there). The rails matter (#196 item 4): with a full-width
+#: scroller, Chrome routed that off-screen wheel to the scroller anyway and the
+#: layout passed on the old code; with the column flanked by rails, it does not,
+#: and only a pointer that stays near ``<main>``'s top scrolls the list.
 _ANCESTOR_SCROLL_LAYOUT_CSS = """
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; }
   #nav { position: fixed; top: 0; left: 0; right: 0; height: 56px;
          background: #0a66c2; z-index: 10; }
-  #scroll { position: fixed; top: 56px; left: 0; right: 0; bottom: 0; overflow-y: auto; }
-  main { display: block; width: min(800px, 100vw); margin: 0 auto; background: #fff; }
+  #rail-left, #rail-right { position: fixed; top: 56px; bottom: 0; width: 50%;
+         background: #f3f2ef; overflow: hidden; }
+  #rail-left { left: 0; }
+  #rail-right { right: 0; }
+  #scroll { position: fixed; top: 56px; bottom: 0; left: 50%; transform: translateX(-50%);
+         width: min(800px, 100vw); background: #fff; overflow-y: auto; z-index: 5; }
+  main { display: block; background: #fff; }
 </style>
 <div id="nav"></div>
+<div id="rail-left"></div>
+<div id="rail-right"></div>
 <div id="scroll">
   <main>
     <div id="list"></div>

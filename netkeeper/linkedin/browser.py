@@ -776,6 +776,8 @@ class BrowserRun:
             target_x = box_x + box_w / 2
             target_y = box_top + min(box_h / 2, REST_VISIBLE_SPAN_PX)
             jitter_x = (max(box_x, 0.0), box_x + box_w)
+            # A backstop: today's ±40px wobble never comes near it, but a wider one
+            # would stop here (pinned by a test, #196 item 5).
             jitter_y_high = box_top + min(box_h, REST_VISIBLE_SPAN_PX * 2)
             known_height = _known_viewport_height(page)
             if known_height is not None:

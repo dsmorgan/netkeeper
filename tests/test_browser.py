@@ -25,7 +25,7 @@ from netkeeper.linkedin.browser import (
     BrowserRun,
     BrowserUnavailable,
 )
-from netkeeper.linkedin.pacing import ScrollPlan, ScrollStep
+from netkeeper.linkedin.pacing import RestPlan, RestStep, ScrollPlan, ScrollStep
 
 CDP_URL = "http://127.0.0.1:9222"
 LOCAL_PAGE = "http://127.0.0.1:8123/replica/profile.html"
@@ -772,6 +772,45 @@ async def test_scroll_stays_within_the_visible_span_of_a_tall_content_box() -> N
     assert moves
     assert all(y <= 400 for _, y in moves), moves
     assert all(y >= browser.REST_MIN_Y_PX for _, y in moves), moves
+
+
+@pytest.mark.parametrize(
+    ("height", "high"),
+    [(2300.0, 100.0 + 2 * 250), (60.0, 100.0 + 60)],
+    ids=["tall-box", "short-box"],
+)
+async def test_the_rest_jitter_never_reaches_past_its_upper_bound(
+    monkeypatch: pytest.MonkeyPatch, height: float, high: float
+) -> None:
+    """#196 item 5: the ordinary ±40px jitter never comes near the upper bound on the
+    rest point's waypoints, so a plan with a far wider wobble pins it: never more than
+    twice :data:`REST_VISIBLE_SPAN_PX` below the box's top, and never past the bottom
+    of a short box -- and never above the box's top either."""
+    wide = RestPlan(
+        steps=(
+            RestStep(dx=0, dy=5000, pause_s=0.0),
+            RestStep(dx=0, dy=-5000, pause_s=0.0),
+            RestStep(dx=0, dy=0, pause_s=0.0),
+        )
+    )
+    monkeypatch.setattr(browser, "rest_pointer_like_a_person", lambda rng: wide)
+    connector = FakeConnector()
+    provider = make_provider(connector)
+    context = connector.browsers[0].context_list[0]
+
+    async with provider.run() as run:
+        page = cast(FakePage, await run.ensure_page())
+        page.content_boxes[browser.CONTENT_LANDMARK_SELECTOR] = {
+            "x": 0.0,
+            "y": 100.0,
+            "width": 800.0,
+            "height": height,
+        }
+        await run.scroll(make_plan(dwell_s=0.0), sleep=Sleeper(), rng=random.Random(4))
+
+    ys = [y for _, y in only_page(context).mouse.moves]
+    assert ys[:2] == [high, 100.0], ys
+    assert browser.REST_VISIBLE_SPAN_PX == 250
 
 
 async def test_scroll_caps_a_tall_box_jitter_at_the_known_viewport_height() -> None:
