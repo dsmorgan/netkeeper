@@ -156,7 +156,7 @@ describe('GmailSection', () => {
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Disconnect' }))
     expect(await screen.findByText('disconnected')).toBeInTheDocument()
-    expect(screen.getByText(/Connect one in the setup guide’s last step/)).toBeInTheDocument()
+    expect(screen.getByText(/Connect one in step 7 of the setup guide/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Connect your mailbox/ }))
     expect(screen.getByRole('button', { name: 'Connect Gmail' })).toBeEnabled()
   })

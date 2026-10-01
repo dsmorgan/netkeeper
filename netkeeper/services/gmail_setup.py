@@ -23,6 +23,7 @@ command and never runs one), so the wizard shows the ``gcloud`` commands to copy
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -83,23 +84,23 @@ def validate(project_id: str | None, sender_email: str | None, done: list[str]) 
 
 
 def load(session: Session, user: User) -> GmailSetup:
-    """The user's progress, or an empty one. A stored value that no longer validates
-    (say, a step renamed since) is kept as far as it still makes sense."""
+    """The user's progress, or an empty one. Each stored field is checked on its own,
+    so one that no longer validates (say, a step renamed since) loses only itself."""
     raw = get_setting(session, user, SETTING_KEY)
     if not isinstance(raw, dict):
         return GmailSetup()
-    project = _str(raw.get("project_id"))
-    email = _str(raw.get("sender_email"))
     done_raw = raw.get("done")
     done = [step for step in done_raw if step in MANUAL_STEPS] if isinstance(done_raw, list) else []
-    try:
-        return validate(project, email, done)
-    except InvalidSetup:
-        return GmailSetup(done=tuple(step for step in MANUAL_STEPS if step in done))
+    return GmailSetup(
+        project_id=_valid(lambda: validate(_str(raw.get("project_id")), None, []).project_id),
+        sender_email=_valid(lambda: validate(None, _str(raw.get("sender_email")), []).sender_email),
+        done=validate(None, None, done).done,
+    )
 
 
 def save(session: Session, user: User, setup: GmailSetup) -> GmailSetup:
-    """Store ``setup`` for ``user``, replacing what was there."""
+    """Store ``setup`` for ``user``, replacing what was there. The value holds exactly
+    these three keys, and nothing secret (``tests/test_gmail_setup.py`` pins them)."""
     set_setting(
         session,
         user,
@@ -111,6 +112,13 @@ def save(session: Session, user: User, setup: GmailSetup) -> GmailSetup:
         },
     )
     return setup
+
+
+def _valid(field: Callable[[], str | None]) -> str | None:
+    try:
+        return field()
+    except InvalidSetup:
+        return None
 
 
 def _str(value: Any) -> str | None:
