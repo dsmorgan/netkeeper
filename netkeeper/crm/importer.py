@@ -557,7 +557,7 @@ def map_row(
                 continue
             scalars[field.value] = converted
         elif field is ImportField.EMAIL:
-            if not _EMAIL.match(value):
+            if not is_email_address(value):
                 problems.append(f"{header}: {value!r} is not an email address")
                 continue
             emails.append(IncomingEmail(email=value, is_primary=not emails))
@@ -590,6 +590,16 @@ def map_row(
         **scalars,  # type: ignore[arg-type]
     )
     return MappedRow(incoming, tuple(problems))
+
+
+def is_email_address(value: str) -> bool:
+    """Whether ``value`` looks like one email address: the importer's loose check.
+
+    One ``@``, a dot in the domain, no spaces or list separators. Adding a
+    contact by hand (:mod:`netkeeper.crm.new_contact`) runs the same check, so a
+    value an import would drop is refused there too.
+    """
+    return _EMAIL.match(value.strip()) is not None
 
 
 def _scalar(field: ImportField, value: str, header: str, problems: list[str]) -> str | date | None:

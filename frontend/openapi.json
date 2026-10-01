@@ -1475,6 +1475,108 @@
         "title": "ConnectedWithinDays",
         "type": "object"
       },
+      "ContactCreate": {
+        "additionalProperties": false,
+        "description": "One contact added by hand (#303). Needs a first or a last name; the rest is optional.\n\nChecked as an import checks a row: one email address, a LinkedIn profile URL.\n``tag_ids`` and ``list_id`` (a static list) put the new contact straight on\nthem. A contact the email or the LinkedIn URL already finds answers ``409``\nwith that contact; so does one whose first name, last name, and company all\nmatch, unless ``allow_name_match`` says to add it anyway.",
+        "properties": {
+          "allow_name_match": {
+            "default": false,
+            "title": "Allow Name Match",
+            "type": "boolean"
+          },
+          "current_company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Company"
+          },
+          "current_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Title"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          },
+          "li_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Li Url"
+          },
+          "list_id": {
+            "anyOf": [
+              {
+                "maximum": 2147483647.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "List Id"
+          },
+          "tag_ids": {
+            "items": {
+              "maximum": 2147483647.0,
+              "minimum": 1.0,
+              "type": "integer"
+            },
+            "maxItems": 50,
+            "title": "Tag Ids",
+            "type": "array"
+          }
+        },
+        "title": "ContactCreate",
+        "type": "object"
+      },
       "ContactDetail": {
         "description": "A contact in full: every scalar, its children, and its provenance (spec 8.1, 10.5).\n\n``timeline`` is the newest page of interactions and snapshots interleaved,\nthe same shape ``GET /contacts/{id}/timeline`` pages through, so the detail\nscreen renders in one request; ask that endpoint for older entries.\n\n``field_sources`` says which source last wrote each LinkedIn field;\n``synced_values`` what the automated sources last reported;\n``overridden_fields`` the ones a manual edit hides a different synced value\non, each with a revert available. ``resolved_from`` is set when the id asked\nfor belongs to a merged-away contact and this is its survivor.",
         "properties": {
@@ -3182,6 +3284,49 @@
           "actual_count"
         ],
         "title": "CountMismatch",
+        "type": "object"
+      },
+      "DuplicateContact": {
+        "description": "The ``409`` body of adding someone already in the address book (#303).\n\n``contact_id`` is the contact to open, the first of ``contact_ids``.\n``matched_by``: ``linkedin`` (the profile URL), ``email``, or ``name``\n(first name, last name, and company; send ``allow_name_match`` to add anyway).",
+        "properties": {
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "contact_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Contact Ids",
+            "type": "array"
+          },
+          "detail": {
+            "const": "duplicate",
+            "title": "Detail",
+            "type": "string"
+          },
+          "matched_by": {
+            "enum": [
+              "linkedin",
+              "email",
+              "name"
+            ],
+            "title": "Matched By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail",
+          "contact_id",
+          "contact_ids",
+          "matched_by",
+          "archived"
+        ],
+        "title": "DuplicateContact",
         "type": "object"
       },
       "EmailContains": {
@@ -11726,6 +11871,49 @@
           }
         },
         "summary": "Search Contacts",
+        "tags": [
+          "contacts"
+        ]
+      },
+      "post": {
+        "description": "Add one contact by hand (#303), with the dedup and checks an import runs.\n\nThe contact's source is `manual`. A match by LinkedIn URL or email answers\n`409` naming the contact already there, never a second one; so does a match\nby first name, last name, and company unless `allow_name_match` is set. The\nnew contact takes `tag_ids` and joins the static list `list_id`, and the\nauto-tag rules run over it. A `422` names the field in `loc`, as a schema\nrefusal does.",
+        "operationId": "create_contact",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContactCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DuplicateContact"
+                }
+              }
+            },
+            "description": "The person is already a contact"
+          },
+          "422": {
+            "description": "A value does not hold up, or a tag or list is not yours"
+          }
+        },
+        "summary": "Create Contact",
         "tags": [
           "contacts"
         ]

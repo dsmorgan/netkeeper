@@ -460,7 +460,18 @@ export interface paths {
          */
         get: operations["search_contacts"];
         put?: never;
-        post?: never;
+        /**
+         * Create Contact
+         * @description Add one contact by hand (#303), with the dedup and checks an import runs.
+         *
+         *     The contact's source is `manual`. A match by LinkedIn URL or email answers
+         *     `409` naming the contact already there, never a second one; so does a match
+         *     by first name, last name, and company unless `allow_name_match` is set. The
+         *     new contact takes `tag_ids` and joins the static list `list_id`, and the
+         *     auto-tag rules run over it. A `422` names the field in `loc`, as a schema
+         *     refusal does.
+         */
+        post: operations["create_contact"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3018,6 +3029,39 @@ export interface components {
             op: "connected_within_days";
         };
         /**
+         * ContactCreate
+         * @description One contact added by hand (#303). Needs a first or a last name; the rest is optional.
+         *
+         *     Checked as an import checks a row: one email address, a LinkedIn profile URL.
+         *     ``tag_ids`` and ``list_id`` (a static list) put the new contact straight on
+         *     them. A contact the email or the LinkedIn URL already finds answers ``409``
+         *     with that contact; so does one whose first name, last name, and company all
+         *     match, unless ``allow_name_match`` says to add it anyway.
+         */
+        ContactCreate: {
+            /**
+             * Allow Name Match
+             * @default false
+             */
+            allow_name_match: boolean;
+            /** Current Company */
+            current_company?: string | null;
+            /** Current Title */
+            current_title?: string | null;
+            /** Email */
+            email?: string | null;
+            /** First Name */
+            first_name?: string | null;
+            /** Last Name */
+            last_name?: string | null;
+            /** Li Url */
+            li_url?: string | null;
+            /** List Id */
+            list_id?: number | null;
+            /** Tag Ids */
+            tag_ids?: number[];
+        };
+        /**
          * ContactDetail
          * @description A contact in full: every scalar, its children, and its provenance (spec 8.1, 10.5).
          *
@@ -3539,6 +3583,32 @@ export interface components {
             detail: "count mismatch";
             /** Expected Count */
             expected_count: number;
+        };
+        /**
+         * DuplicateContact
+         * @description The ``409`` body of adding someone already in the address book (#303).
+         *
+         *     ``contact_id`` is the contact to open, the first of ``contact_ids``.
+         *     ``matched_by``: ``linkedin`` (the profile URL), ``email``, or ``name``
+         *     (first name, last name, and company; send ``allow_name_match`` to add anyway).
+         */
+        DuplicateContact: {
+            /** Archived */
+            archived: boolean;
+            /** Contact Id */
+            contact_id: number;
+            /** Contact Ids */
+            contact_ids: number[];
+            /**
+             * Detail
+             * @constant
+             */
+            detail: "duplicate";
+            /**
+             * Matched By
+             * @enum {string}
+             */
+            matched_by: "linkedin" | "email" | "name";
         };
         /**
          * EmailContains
@@ -7035,6 +7105,46 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    create_contact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactDetail"];
+                };
+            };
+            /** @description The person is already a contact */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DuplicateContact"];
+                };
+            };
+            /** @description A value does not hold up, or a tag or list is not yours */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

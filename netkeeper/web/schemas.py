@@ -21,6 +21,7 @@ from netkeeper.crm.filters import FilterTree, SortKey
 from netkeeper.crm.importer import ImportField
 from netkeeper.crm.interactions import TimelineEntry
 from netkeeper.crm.lists import MAX_COLUMNS
+from netkeeper.crm.new_contact import MAX_TAGS as MAX_NEW_CONTACT_TAGS
 from netkeeper.crm.tags import PATTERN_MAX_LENGTH, InvalidPattern, compile_pattern
 from netkeeper.linkedin.archive import ArchiveRefusalCode
 from netkeeper.models import (
@@ -727,6 +728,54 @@ class ContactPatch(BaseModel):
     met: ContactMet | None = None
     do_not_contact: bool | None = None
     do_not_contact_reason: str | None = None
+
+
+MAX_ROW_ID = 2**31 - 1
+"""The highest row id a request body may name: an ``INTEGER`` primary key on PostgreSQL.
+
+Past it, SQLite raises ``OverflowError`` on the bind parameter and the request
+would answer 500 rather than 422 (#303 review, the same failure as #88).
+"""
+
+RowId = Annotated[int, Field(ge=1, le=MAX_ROW_ID)]
+
+
+class ContactCreate(BaseModel):
+    """One contact added by hand (#303). Needs a first or a last name; the rest is optional.
+
+    Checked as an import checks a row: one email address, a LinkedIn profile URL.
+    ``tag_ids`` and ``list_id`` (a static list) put the new contact straight on
+    them. A contact the email or the LinkedIn URL already finds answers ``409``
+    with that contact; so does one whose first name, last name, and company all
+    match, unless ``allow_name_match`` says to add it anyway.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    current_company: str | None = None
+    current_title: str | None = None
+    li_url: str | None = None
+    tag_ids: list[RowId] = Field(default_factory=list, max_length=MAX_NEW_CONTACT_TAGS)
+    list_id: RowId | None = None
+    allow_name_match: bool = False
+
+
+class DuplicateContact(BaseModel):
+    """The ``409`` body of adding someone already in the address book (#303).
+
+    ``contact_id`` is the contact to open, the first of ``contact_ids``.
+    ``matched_by``: ``linkedin`` (the profile URL), ``email``, or ``name``
+    (first name, last name, and company; send ``allow_name_match`` to add anyway).
+    """
+
+    detail: Literal["duplicate"]
+    contact_id: int
+    contact_ids: list[int]
+    matched_by: Literal["linkedin", "email", "name"]
+    archived: bool
 
 
 class RevertFieldIn(BaseModel):

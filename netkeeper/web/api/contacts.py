@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from netkeeper.crm import contacts as service
 from netkeeper.crm import interactions as timeline_service
+from netkeeper.crm import new_contact
 from netkeeper.crm.confirmation import InvalidToken, selection_digest
 from netkeeper.crm.filters import FilterError, FilterTree
 from netkeeper.crm.provenance import overridden_fields
@@ -50,6 +51,7 @@ from netkeeper.web.schemas import (
     BulkOut,
     BulkSelection,
     ConfirmationRejected,
+    ContactCreate,
     ContactDetail,
     ContactEmailIn,
     ContactEmailOut,
@@ -67,6 +69,7 @@ from netkeeper.web.schemas import (
     ContactRow,
     ContactStatsOut,
     CountMismatch,
+    DuplicateContact,
     MergedConflict,
     MergeIn,
     RevertFieldIn,
@@ -199,6 +202,58 @@ def get_contact_stats(user: CurrentUser, session: SessionDep) -> ContactStatsOut
     """
     stats = service.contact_stats(session, user)
     return ContactStatsOut.model_validate(stats)
+
+
+@router.post(
+    "/contacts",
+    operation_id="create_contact",
+    status_code=201,
+    responses={
+        409: {"model": DuplicateContact, "description": "The person is already a contact"},
+        422: {"description": "A value does not hold up, or a tag or list is not yours"},
+    },
+)
+def create_contact(body: ContactCreate, user: CurrentUser, session: SessionDep) -> ContactDetail:
+    """Add one contact by hand (#303), with the dedup and checks an import runs.
+
+    The contact's source is `manual`. A match by LinkedIn URL or email answers
+    `409` naming the contact already there, never a second one; so does a match
+    by first name, last name, and company unless `allow_name_match` is set. The
+    new contact takes `tag_ids` and joins the static list `list_id`, and the
+    auto-tag rules run over it. A `422` names the field in `loc`, as a schema
+    refusal does.
+    """
+    new = new_contact.NewContact(
+        first_name=body.first_name,
+        last_name=body.last_name,
+        email=body.email,
+        current_company=body.current_company,
+        current_title=body.current_title,
+        li_url=body.li_url,
+        tag_ids=tuple(body.tag_ids),
+        list_id=body.list_id,
+    )
+    try:
+        contact = new_contact.create_contact(
+            session, user, new, allow_name_match=body.allow_name_match
+        )
+    except new_contact.Duplicate as exc:
+        raise ApiError(
+            409,
+            {
+                "detail": "duplicate",
+                "contact_id": exc.contact_id,
+                "contact_ids": list(exc.contact_ids),
+                "matched_by": exc.matched_by,
+                "archived": exc.archived,
+            },
+        ) from exc
+    except new_contact.Invalid as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=[{"loc": ["body", exc.field], "msg": exc.message, "type": "value_error"}],
+        ) from exc
+    return _detail(session, user, contact, None)
 
 
 # --- one contact ------------------------------------------------------------

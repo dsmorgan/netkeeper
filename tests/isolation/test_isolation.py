@@ -15,11 +15,22 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.crm import import_runs as import_service
+from netkeeper.crm import lists as list_service
+from netkeeper.crm import tags as tag_service
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
-from netkeeper.models import InteractionKind, User, UserKind
+from netkeeper.models import (
+    Contact,
+    ContactTag,
+    InteractionKind,
+    ListKind,
+    ListMember,
+    User,
+    UserKind,
+)
 from netkeeper.models.base import utcnow
+from netkeeper.scoping import scoped_count
 from netkeeper.services.linkedin_session import flag_session
 from netkeeper.web.app import API_PREFIX
 from netkeeper.web.security import CLIENT_HEADER, CLIENT_HEADER_VALUE
@@ -113,6 +124,59 @@ async def _post(
     )
     parsed: dict[str, Any] = response.json()
     return parsed
+
+
+# --- adding a contact by hand (#303) -------------------------------------------
+
+
+async def test_adding_a_contact_is_isolated(running_app: FastAPI) -> None:
+    """A create is not a list operation, so ``POST /contacts`` is not in ``REGISTRY``;
+    it reads the address book to deduplicate and writes tags and lists, so it gets the
+    two-user treatment here.
+
+    B adding the person A already has is no duplicate of A's contact, never names
+    A's contact id, and B cannot put the new contact on A's tag or A's list.
+    """
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        a = User(kind=UserKind.HOSTED, display_name="A")
+        b = User(kind=UserKind.HOSTED, display_name="B")
+        session.add_all([a, b])
+        session.flush()
+        a_contact = factories.make_contact(
+            session, a, li_public_id="same-person-fake", emails=["same@example.test"]
+        )
+        a_tag = tag_service.create_tag(session, a, "a-only")
+        a_list = list_service.create_list(session, a, "A only", ListKind.STATIC)
+        a_id, b_id = a.id, b.id
+        a_contact_id, a_tag_id, a_list_id = a_contact.id, a_tag.id, a_list.id
+
+    same = {
+        "first_name": "Same",
+        "last_name": "Person",
+        "email": "SAME@example.test",
+        "li_url": "https://www.linkedin.com/in/same-person-fake",
+    }
+    # A gets the duplicate; B, adding the very same person, gets a contact of B's own.
+    refused = await _post(running_app, a_id, "/contacts", same, want=409)
+    assert refused["contact_id"] == a_contact_id
+    created = await _post(running_app, b_id, "/contacts", same, want=201)
+    assert created["id"] != a_contact_id
+    # And B's is now B's duplicate, not A's.
+    again = await _post(running_app, b_id, "/contacts", same, want=409)
+    assert again["contact_ids"] == [created["id"]]
+
+    # A's tag and list do not exist for B.
+    for extra in ({"tag_ids": [a_tag_id]}, {"list_id": a_list_id}):
+        await _post(running_app, b_id, "/contacts", {"first_name": "Other", **extra}, want=422)
+
+    with session_scope(factory) as session:
+        a_now, b_now = session.get(User, a_id), session.get(User, b_id)
+        assert a_now is not None and b_now is not None
+        assert session.scalar(scoped_count(a_now, Contact)) == 1
+        assert session.scalar(scoped_count(b_now, Contact)) == 1
+        assert session.scalar(scoped_count(a_now, ContactTag)) == 0
+        assert session.scalar(scoped_count(a_now, ListMember)) == 0
 
 
 # --- deleting a draft import run ---------------------------------------------

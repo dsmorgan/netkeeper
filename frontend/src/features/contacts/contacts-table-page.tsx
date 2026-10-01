@@ -16,6 +16,7 @@ import {
   untagContact,
   viewsQuery,
 } from './api'
+import { AddContactDialog } from './add-contact-dialog'
 import { BulkBar } from './bulk-actions'
 import { COLUMNS_BY_ID, knownColumns, type ColumnId, type ColumnSpec } from './columns'
 import { ColumnPicker } from './column-picker'
@@ -260,6 +261,7 @@ export function ContactsTablePage({ search, onNavigate }: ContactsTablePageProps
             columns={columnIds}
             onChange={(ids: readonly ColumnId[]) => setColumns(ids)}
           />
+          <AddContactDialog />
         </div>
       </div>
 
