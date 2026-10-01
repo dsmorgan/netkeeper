@@ -780,6 +780,59 @@ async def test_what_the_page_already_answered_decides_before_a_timeout(
     assert site.navigations == [f"/in/{PRIYA.slug}/"]
 
 
+@pytest.mark.parametrize("move", ["redirect_to", "silently_to"])
+@pytest.mark.parametrize(
+    ("landing", "outcome"),
+    [("status:429", Outcome.THROTTLED), ("status:999", Outcome.THROTTLED)],
+    ids=["429", "999"],
+)
+async def test_a_throttle_on_the_renamed_profile_before_a_timeout_stops_the_run(
+    landing: str, outcome: Outcome, move: str
+) -> None:
+    """#196 item 7: Priya's slug redirects to a renamed one (or the tab ends up on it
+    with no redirect seen), the renamed profile's document answers a throttle, and then
+    the navigation times out. That throttle is this visit's: the run stops, and the
+    next person is never visited."""
+    renamed = replace(PRIYA, public_id="priya-renamed-fake")
+    first = ProfilePage(PRIYA, goto_error=navigation_timeout(), **{move: renamed.slug})
+    site = ProfileSite([first, ProfilePage(renamed, landing=landing), ProfilePage(MATEO)])
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.result.reason is StopReason.RESPONSE and out.result.outcome is outcome
+    assert out.harvests == [] and out.result.lost == ()
+    assert f"/in/{MATEO.slug}/" not in site.navigations
+
+
+@pytest.mark.parametrize(
+    ("stale", "outcome"),
+    [
+        (Stale("POST", COMPONENT_PATH, b"", status=429), Outcome.THROTTLED),
+        (Stale("POST", NAVIGATION_PATH, b"", status=999), Outcome.THROTTLED),
+        (
+            Stale("POST", COMPONENT_PATH, b"", status=302, headers={"location": CHECKPOINT_URL}),
+            Outcome.CHECKPOINT,
+        ),
+        (
+            Stale("POST", NAVIGATION_PATH, b"", status=302, headers={"location": LOGIN_URL}),
+            Outcome.LOGGED_OUT,
+        ),
+    ],
+    ids=["card-429", "overlay-999", "card-to-checkpoint", "overlay-to-login"],
+)
+async def test_a_lazy_card_or_overlay_throttle_before_a_timeout_stops_the_run(
+    stale: Stale, outcome: Outcome
+) -> None:
+    """#196 item 8: a lazy card's or an overlay's answer, queued before the profile's
+    navigation timed out, says throttle or wall. The run stops as it says, and the next
+    person is never visited."""
+    site = ProfileSite(
+        [ProfilePage(PRIYA, goto_error=navigation_timeout()), ProfilePage(MATEO)], stale=[stale]
+    )
+    out = await visit(site, [target(PRIYA), target(MATEO)])
+    assert out.result.reason is StopReason.RESPONSE and out.result.outcome is outcome
+    assert out.harvests == [] and out.result.lost == ()
+    assert site.navigations == [f"/in/{PRIYA.slug}/"]
+
+
 async def test_a_screen_request_404_before_a_timeout_is_only_unreadable() -> None:
     """As the landing reads it: the screen request's 404 is one unreadable visit, never
     NotFound and never a stop, so the next person is still visited."""
@@ -1075,6 +1128,45 @@ async def test_a_tab_that_ends_on_another_profile_with_no_redirect_is_unreadable
     site = ProfileSite([ProfilePage(PRIYA, silently_to=MATEO.slug), ProfilePage(MATEO)])
     out = await visit(site, [target(PRIYA, urn=MATEO.urn)])
     assert out.outcomes == [Outcome.ROUTE_CHANGED] and site.clicks == []
+
+
+async def test_a_stale_redirect_from_another_page_leads_nowhere_this_visit_accepts() -> None:
+    """#196 item 1: as the tab leaves Mateo's page, a redirect Mateo's document received
+    (to Hana) arrives first; then the tab ends on Hana's profile with no redirect of its
+    own. That stale redirect did not come from the slug asked for or from any target of
+    this visit's own redirects, so it does not make Hana's profile this visit's."""
+    stale = [
+        Stale(
+            "GET",
+            f"/in/{MATEO.slug}/",
+            b"",
+            status=301,
+            headers={"location": f"{ORIGIN}/in/{HANA.slug}/"},
+        )
+    ]
+    site = ProfileSite([ProfilePage(PRIYA, silently_to=HANA.slug), ProfilePage(HANA)], stale=stale)
+    out = await visit(site, [target(PRIYA, urn=HANA.urn)])
+    assert out.outcomes == [Outcome.ROUTE_CHANGED] and site.clicks == []
+
+
+async def test_a_redirect_chain_is_followed_through_each_of_its_own_targets() -> None:
+    """The other side of #196 item 1: Priya's slug redirects to a renamed slug, which
+    redirects again. The second redirect's request is the first's target, so the
+    profile it lands on is this visit's."""
+    first = replace(PRIYA, public_id="priya-renamed-fake")
+    second = replace(PRIYA, public_id="priya-renamed-again-fake")
+    site = ProfileSite(
+        [
+            ProfilePage(PRIYA, redirect_to=first.slug),
+            ProfilePage(first, redirect_to=second.slug),
+            ProfilePage(second),
+        ]
+    )
+    out = await visit(site, [target(PRIYA)])
+    (harvest,) = out.harvests
+    assert harvest.outcome is Outcome.OK and harvest.details is not None
+    assert harvest.details.public_id == second.slug
+    assert [slug for slug, _, _ in site.clicks] == [second.slug]
 
 
 async def test_only_the_documents_404_is_not_found() -> None:

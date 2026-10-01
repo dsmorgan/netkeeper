@@ -433,22 +433,26 @@ class PageProfiles:
             # The tab never committed to the profile (#198 review, L3): record the
             # profile asked for, masked, rather than wherever the tab still is.
             self._url = masked(self.profile_url(self._requested))
-        said = await self._queued_answers()
+        tab = profile_slug(urlsplit(page.url).path) if self._on_origin(page.url) else None
+        said = await self._queued_answers(tab)
         if said is not None:
             return said
         lost = f"the profile could not be opened ({NAVIGATION_TIMED_OUT})"
         log.info("enrichment: %s", lost)
         return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True, lost=lost)
 
-    async def _queued_answers(self) -> Answer[None] | None:
+    async def _queued_answers(self, tab: str | None) -> Answer[None] | None:
         """What the answers already queued for this visit say, read without waiting.
 
         The same classification as :meth:`_read_screen` (#198 review, H1): a lazy card
         or overlay's throttle or wall stops the run; a redirect is judged by
         :meth:`_redirect`; this profile's document answering ``404`` is ``NotFound``
         (its screen request's, unreadable), and any other status that is not ``200`` is
-        that outcome. Answers for another
-        profile, and ``200`` answers, say nothing here: the page never loaded.
+        that outcome. "This profile" is the slug asked for, any slug this visit's
+        redirects led to, and ``tab``, the profile the tab itself is on (#196 item 7):
+        a throttle on the renamed profile a redirect led to stops the run too. Answers
+        for another profile, and ``200`` answers, say nothing here: the page never
+        loaded.
         """
         observation = self._observation
         assert observation is not None
@@ -463,7 +467,9 @@ class PageProfiles:
             else:
                 blocked = None
                 slug = _answer_slug(response)
-                if slug is not None and same_slug(slug, self._requested):
+                if slug is not None and (
+                    self._in_chain(slug) or (tab is not None and same_slug(slug, tab))
+                ):
                     if response.status == 404:
                         # As the landing reads it: the document's 404 is NotFound,
                         # the screen request's only an unreadable visit.
@@ -493,17 +499,33 @@ class PageProfiles:
         return Answer(Outcome.ROUTE_CHANGED, self._url, unparsed=True, lost=self._lost_screen)
 
     def _redirect(self, response: ObservedResponse) -> Answer[None] | None:
-        """A redirect: a wall is that wall, another profile is followed, else unreadable."""
+        """A redirect: a wall is that wall, another profile is followed, else unreadable.
+
+        A redirect to another profile is followed only when it came from this visit's
+        own chain (#196 item 1): its request is for the slug asked for, or for a target
+        an earlier redirect of this visit already led to. A stale redirect from another
+        page leads nowhere this visit accepts; a wall on it still stops the run.
+        """
         target = urljoin(response.url, response.location or "")
         outcome = classify(response.status, masked(target), "")
         if outcome in (Outcome.CHECKPOINT, Outcome.LOGGED_OUT):
             return Answer(outcome, masked(target))
         renamed = profile_slug(urlsplit(target).path) if self._on_origin(target) else None
         if renamed is not None:
-            self._redirects.append(renamed)
+            if self._in_chain(_answer_slug(response)):
+                self._redirects.append(renamed)
+            else:
+                log.info("enrichment: skipped a redirect that another page received")
             return None  # a renamed profile: the tab's own url says where it landed
         log.warning("enrichment: the profile redirected somewhere that is not a profile")
         return Answer(Outcome.ROUTE_CHANGED, masked(target), unparsed=True)
+
+    def _in_chain(self, slug: str | None) -> bool:
+        """Whether ``slug`` is the profile asked for, or one this visit's redirects led to."""
+        return slug is not None and (
+            same_slug(slug, self._requested)
+            or any(same_slug(slug, target) for target in self._redirects)
+        )
 
     # --- lazy cards and the overlay --------------------------------------------------
 

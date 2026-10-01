@@ -271,6 +271,9 @@ class Stale:
     path: str
     body: bytes
     post_data: str | None = None
+    #: A stale redirect (#196 item 1): its status, and its ``location`` header.
+    status: int = 200
+    headers: Mapping[str, str] | None = None
 
 
 class ProfileSite(FakeContext):
@@ -339,10 +342,11 @@ class ProfileSite(FakeContext):
                 tab,
                 stale.method,
                 f"{self.origin}{stale.path}",
-                200,
+                stale.status,
                 stale.body,
                 "fetch",
                 stale.post_data,
+                headers=stale.headers,
             )
         self.stale = []
         tab.scrolled = False
@@ -362,13 +366,15 @@ class ProfileSite(FakeContext):
             page = self.profiles[page.silently_to.casefold()]
             tab.profile = page
             url = target
-        elif page.redirect_to is not None:
-            target = f"{self.origin}/in/{page.redirect_to}/"
-            self._send(tab, "GET", url, 301, b"", "document", headers={"location": target})
-            tab._url = target
-            page = self.profiles[page.redirect_to.casefold()]
-            tab.profile = page
-            url = target
+        else:
+            # A chain of renames is followed hop by hop, each its own redirect.
+            while page.redirect_to is not None:
+                target = f"{self.origin}/in/{page.redirect_to}/"
+                self._send(tab, "GET", url, 301, b"", "document", headers={"location": target})
+                tab._url = target
+                page = self.profiles[page.redirect_to.casefold()]
+                tab.profile = page
+                url = target
         if page.redirect_location is not None:
             location = {"location": page.redirect_location}
             self._send(tab, "GET", url, 302, b"", "document", headers=location)
