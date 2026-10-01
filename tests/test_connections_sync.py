@@ -1216,6 +1216,42 @@ async def test_a_browser_unavailable_run_does_not_move_the_breaker(
     assert not _breaker_tripped(session_factory, user_id, report.account_id)
 
 
+@dataclass
+class _LosesBrowserAfter:
+    """Answers ``pages`` pages from ``source``, then Chrome goes away."""
+
+    source: ConnectionsSource
+    pages: int
+    endpoint: str = "loses-browser"
+
+    async def fetch_page(self, *, start: int, count: int) -> SourcePage:
+        if self.pages == 0:
+            raise BrowserUnavailable("the run's tab was replaced mid-read")
+        self.pages -= 1
+        return await self.source.fetch_page(start=start, count=count)
+
+
+async def test_losing_the_browser_mid_run_is_browser_unavailable_not_error(
+    session_factory: sessionmaker[Session], user_id: int
+) -> None:
+    """#177: Chrome going away after a page was read is recorded like a run that
+    could not attach at all, not as a generic error."""
+    with pytest.raises(BrowserUnavailable):
+        await _sync(
+            session_factory, user_id, _LosesBrowserAfter(FakeConnectionsSource(_many(100)), 1)
+        )
+
+    with session_scope(session_factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        (run,) = session.scalars(scoped(user, SyncRun)).all()
+        assert (run.status, run.stop_reason, run.error) == (
+            SyncRunStatus.FAILED,
+            "browser_unavailable",
+            "BrowserUnavailable: the run's tab was replaced mid-read",
+        )
+
+
 @pytest.mark.parametrize(
     "scripted", [THROTTLED, CHECKPOINT, LOGGED_OUT], ids=["throttled", "checkpoint", "logged-out"]
 )

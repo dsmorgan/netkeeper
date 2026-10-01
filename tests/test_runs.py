@@ -1029,7 +1029,9 @@ def test_cancelling_a_run_left_behind_fails_it(writer: Session, user: User) -> N
     returned = runs.request_cancel(
         writer, user, left.id, now=NOW + runs.STALE_AFTER, browser_held=lambda account_id: False
     )
-    assert returned.status is SyncRunStatus.FAILED and returned.cancel_requested_at is None
+    assert returned.status is SyncRunStatus.FAILED
+    # #177 G1: the flag is set too, so a runner this process cannot see still stops.
+    assert returned.cancel_requested_at == NOW + runs.STALE_AFTER
 
 
 def test_cancelling_a_live_run_only_flags_it(writer: Session, user: User) -> None:

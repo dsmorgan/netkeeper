@@ -41,7 +41,15 @@ from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.linkedin.enrich import StopReason
 from netkeeper.linkedin.pacing import plan_enrichment
-from netkeeper.models import Contact, ContactMet, SyncRun, SyncRunKind, SyncRunTrigger, User
+from netkeeper.models import (
+    Contact,
+    ContactMet,
+    SyncRun,
+    SyncRunKind,
+    SyncRunStatus,
+    SyncRunTrigger,
+    User,
+)
 from netkeeper.scoping import get_scoped
 from netkeeper.services import budgets, enrich_plan, runs
 from netkeeper.services import heat as heat_service
@@ -682,6 +690,31 @@ async def test_a_run_that_dies_is_marked_aborted_and_resumes_where_it_stopped(
     again = FakeBrowser.of(people)
     await _enrich(session_factory, user_id, again, resume_of=died.id)
     assert again.visited() == [p.slug for p in people[2:]]
+
+
+async def test_losing_the_browser_mid_run_is_browser_unavailable_not_error(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#177: Chrome going away mid-run reads like a run that could not attach at all."""
+    from netkeeper.linkedin.browser import BrowserUnavailable
+
+    people = _people(4)
+    user_id, _ = _setup(session_factory, people)
+    browser = FakeBrowser.of(people)
+
+    def chrome_goes(kind: str, value: object) -> None:
+        if kind == "goto" and len(browser.visited()) == 3:
+            raise BrowserUnavailable("lost the tab while finding Contact info")
+
+    browser.on_event = chrome_goes
+    with pytest.raises(BrowserUnavailable):
+        await _enrich(session_factory, user_id, browser)
+
+    lost = _last_run(session_factory, user_id)
+    plan = _read(session_factory, user_id, lambda s, u: enrich_plan.load_plan(s, u, lost.id))
+    assert (lost.status, lost.stop_reason) == (SyncRunStatus.FAILED, "browser_unavailable")
+    assert lost.error == "BrowserUnavailable: lost the tab while finding Contact info"
+    assert (plan.status, len(plan.completed)) == ("failed", 2)
 
 
 async def test_resuming_an_unknown_plan_is_refused(session_factory: sessionmaker[Session]) -> None:
