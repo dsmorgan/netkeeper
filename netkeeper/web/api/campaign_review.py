@@ -63,6 +63,25 @@ class MissingOut(BaseModel):
     step_positions: list[int] = Field(default_factory=list)
 
 
+class RefusedOut(BaseModel):
+    """A ``409`` body. ``code`` is ``stale`` when what the person was shown changed since
+    (show it again, then retry); ``None`` for any other refusal."""
+
+    detail: str
+    code: str | None = None
+
+
+STALE_CODE = "stale"
+"""The ``code`` of a ``409`` refused only because what was shown is no longer current."""
+STALE: Responses = {
+    409: {
+        "model": RefusedOut,
+        "description": "Refused in the campaign's state; the detail says why. ``code`` is "
+        "``stale`` when only a fingerprint went stale: show it again and retry",
+    }
+}
+
+
 class ActivationRefusedOut(BaseModel):
     """The ``409`` body of an activation refused for an incomplete review."""
 
@@ -162,6 +181,8 @@ def translate_errors() -> Iterator[None]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except service.ReviewIncomplete as exc:
         raise ApiError(409, _refused(exc)) from exc
+    except service.ReviewStale as exc:
+        raise ApiError(409, RefusedOut(detail=str(exc), code=STALE_CODE).model_dump()) from exc
     except service.ReviewConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -277,7 +298,7 @@ def view_previews(
         )
 
 
-@router.post("/campaigns/{campaign_id}/review/approve", responses={**NOT_FOUND, **CONFLICT})
+@router.post("/campaigns/{campaign_id}/review/approve", responses={**NOT_FOUND, **STALE})
 def approve_previews(
     campaign_id: int, body: ApproveIn, request: Request, session: SessionDep, user: CurrentUser
 ) -> ReviewOut:
@@ -313,9 +334,7 @@ def lint_campaign(
     )
 
 
-@router.post(
-    "/campaigns/{campaign_id}/review/guards/acknowledge", responses={**NOT_FOUND, **CONFLICT}
-)
+@router.post("/campaigns/{campaign_id}/review/guards/acknowledge", responses={**NOT_FOUND, **STALE})
 def acknowledge_guards(
     campaign_id: int, body: GuardsIn, request: Request, session: SessionDep, user: CurrentUser
 ) -> ReviewOut:

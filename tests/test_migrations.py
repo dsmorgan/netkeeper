@@ -2162,6 +2162,17 @@ def test_0026_fills_in_the_inbox_columns_for_existing_messages(migration_engine:
                 text("UPDATE messages SET subject = :s, snippet = :n WHERE id = :id"),
                 {"s": subject, "n": snippet, "id": id},
             )
+        # Outbound: only an inbound message can ask to unsubscribe, whatever it says (#299).
+        _insert_message(connection, id=7, enrollment_id=1, contact_id=1)
+        connection.execute(text("UPDATE messages SET subject = 'Unsubscribe' WHERE id = 7"))
+        # The bounce's own updated_at, unlike every other row's, so bounced_at shows its source.
+        connection.execute(
+            text("UPDATE messages SET updated_at = :t WHERE id = 2"),
+            {"t": "2026-03-04 05:06:07"},
+        )
+        before = connection.execute(
+            text("SELECT id, status, updated_at FROM messages ORDER BY id")
+        ).all()
     migrations.upgrade(migration_engine, "0026")
     with migration_engine.begin() as connection:
         rows = connection.execute(
@@ -2170,6 +2181,12 @@ def test_0026_fills_in_the_inbox_columns_for_existing_messages(migration_engine:
                 " FROM messages ORDER BY id"
             )
         ).all()
+        after = connection.execute(
+            text("SELECT id, status, updated_at FROM messages ORDER BY id")
+        ).all()
+        bounced = connection.execute(
+            text("SELECT bounced_at, updated_at FROM messages WHERE id = 2")
+        ).one()
     assert [tuple(r) for r in rows] == [
         (1, False, False, None),
         (2, False, True, None),
@@ -2177,7 +2194,10 @@ def test_0026_fills_in_the_inbox_columns_for_existing_messages(migration_engine:
         (4, True, False, None),
         (5, True, False, None),
         (6, False, False, None),
+        (7, False, False, None),
     ]
+    assert bounced.bounced_at == bounced.updated_at
+    assert [tuple(r) for r in after] == [tuple(r) for r in before]
 
 
 def test_0026_downgrades_to_messages_without_it(migration_engine: Engine) -> None:

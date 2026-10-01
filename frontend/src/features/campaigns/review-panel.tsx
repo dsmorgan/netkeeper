@@ -157,9 +157,13 @@ function merge(shown: EnrollmentPreview[], incoming: EnrollmentPreview[]) {
   return [...byId.values()]
 }
 
-/** Whether a refusal says the thing shown is no longer current (a stale fingerprint). */
+/**
+ * Whether a refusal says the thing shown is no longer current (a stale fingerprint).
+ * Only the server's `code: stale` counts: any other 409 (the campaign no longer under
+ * review, an enrollment no longer pending) is a real refusal, shown as an error.
+ */
 function isStale(error: unknown): boolean {
-  return error instanceof CampaignApiError && error.status === 409
+  return error instanceof CampaignApiError && error.status === 409 && error.code === 'stale'
 }
 
 const STALE_PREVIEW =

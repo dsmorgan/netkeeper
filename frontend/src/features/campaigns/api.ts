@@ -39,6 +39,8 @@ export type EnrollmentPage = Schemas['EnrollmentPageOut']
 export class CampaignApiError extends Error {
   readonly status: number
   readonly missing: Missing[] | null
+  /** `stale` when only what was shown went out of date (show it again, then retry). */
+  readonly code: string | null
 
   constructor(status: number, body: unknown, fallback: string) {
     super(detailMessage(body) ?? `${fallback} (HTTP ${status})`)
@@ -50,6 +52,13 @@ export class CampaignApiError extends Error {
       'missing' in body &&
       Array.isArray((body as { missing: unknown }).missing)
         ? (body as { missing: Missing[] }).missing
+        : null
+    this.code =
+      body !== null &&
+      typeof body === 'object' &&
+      'code' in body &&
+      typeof (body as { code: unknown }).code === 'string'
+        ? (body as { code: string }).code
         : null
   }
 }

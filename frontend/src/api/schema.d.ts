@@ -5007,6 +5007,17 @@ export interface components {
             /** Warnings */
             warnings: string[];
         };
+        /**
+         * RefusedOut
+         * @description A ``409`` body. ``code`` is ``stale`` when what the person was shown changed since
+         *     (show it again, then retry); ``None`` for any other refusal.
+         */
+        RefusedOut: {
+            /** Code */
+            code?: string | null;
+            /** Detail */
+            detail: string;
+        };
         /** RepliedIn */
         RepliedIn: {
             /** Campaign Id */
@@ -6843,12 +6854,14 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Refused in the campaign's state; the detail says why */
+            /** @description Refused in the campaign's state; the detail says why. ``code`` is ``stale`` when only a fingerprint went stale: show it again and retry */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["RefusedOut"];
+                };
             };
             /** @description Validation Error */
             422: {
@@ -6892,12 +6905,14 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Refused in the campaign's state; the detail says why */
+            /** @description Refused in the campaign's state; the detail says why. ``code`` is ``stale`` when only a fingerprint went stale: show it again and retry */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["RefusedOut"];
+                };
             };
             /** @description Validation Error */
             422: {

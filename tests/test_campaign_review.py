@@ -29,6 +29,7 @@ from netkeeper.models import (
     EnrollmentStatus,
     Interaction,
     Mailbox,
+    MailboxStatus,
     Message,
     ReviewPreview,
     StepMode,
@@ -402,6 +403,7 @@ async def test_an_approval_for_previews_that_changed_since_is_refused(
     )
     assert response.status_code == 409
     assert "changed since they were viewed" in response.json()["detail"]
+    assert response.json()["code"] == "stale"  # show it again and retry (#299)
 
 
 async def test_previews_never_viewed_cannot_be_approved(
@@ -415,6 +417,7 @@ async def test_previews_never_viewed_cannot_be_approved(
     )
     assert response.status_code == 409
     assert "not viewed" in response.json()["detail"]
+    assert response.json().get("code") is None  # a real refusal, not a stale one (#299)
 
 
 async def test_an_enrollment_no_longer_pending_cannot_be_approved(
@@ -431,6 +434,7 @@ async def test_an_enrollment_no_longer_pending_cannot_be_approved(
     response = await client.post(f"{s.base}/review/approve", json=_approval([first]), headers=CSRF)
     assert response.status_code == 409
     assert "not pending" in response.json()["detail"]
+    assert response.json().get("code") is None  # a real refusal, not a stale one (#299)
     with session_scope(s.factory) as session:
         row = session.scalars(
             unscoped(select(ReviewPreview)).where(
@@ -454,7 +458,69 @@ async def test_a_summary_that_is_not_the_current_one_is_not_acknowledged(
         headers=CSRF,
     )
     assert response.status_code == 409
+    assert response.json()["code"] == "stale"
     assert review["guard_summary"] == "12 in audience, none excluded"
+
+
+async def test_an_approval_on_a_campaign_no_longer_reviewing_is_a_real_refusal(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """Only a stale fingerprint answers ``code: stale``; a campaign moved on is not one
+    that showing the previews again can fix (#299)."""
+    s = _build(running_app)
+    sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
+    with session_scope(s.factory, write=True) as session:
+        campaign = session.scalars(unscoped(select(Campaign))).one()
+        campaign.status = CampaignStatus.DRAFT
+    approve = await client.post(
+        f"{s.base}/review/approve", json=_approval(sample["enrollments"]), headers=CSRF
+    )
+    review = await _review(client, s)
+    ack = await client.post(
+        f"{s.base}/review/guards/acknowledge",
+        json={
+            "summary": review["guard_summary"],
+            "audience_fingerprint": review["audience_fingerprint"],
+        },
+        headers=CSRF,
+    )
+    for response in (approve, ack):
+        assert response.status_code == 409
+        assert "not reviewing" in response.json()["detail"]
+        assert response.json().get("code") is None
+
+
+@pytest.mark.parametrize("status", [MailboxStatus.REAUTH_REQUIRED, MailboxStatus.DISABLED])
+async def test_a_mailbox_that_broke_after_its_test_send_blocks_activation(
+    client: httpx.AsyncClient, running_app: FastAPI, status: MailboxStatus
+) -> None:
+    """The gate reads the mailbox's health, not only the send path (#299)."""
+    s = _build(running_app)
+    await _complete(client, s)
+    assert _missing(await _review(client, s)) == set()
+    with session_scope(s.factory, write=True) as session:
+        mailbox = session.scalars(unscoped(select(Mailbox))).one()
+        mailbox.status = status
+    response = await client.post(f"{s.base}/activate", headers=CSRF)
+    assert response.status_code == 409
+    [gap] = response.json()["missing"]
+    assert gap["requirement"] == "mailbox"
+    assert gap["detail"] == f"{s.mailbox_email} is {status}, not ok"
+    status_now, approved_at, enrollments = _campaign(s)
+    assert (status_now, approved_at) == (CampaignStatus.REVIEWING, None)
+    assert set(enrollments) == {EnrollmentStatus.PENDING}
+    with session_scope(s.factory, write=True) as session:
+        session.scalars(unscoped(select(Mailbox))).one().status = MailboxStatus.OK
+    assert (await client.post(f"{s.base}/activate", headers=CSRF)).status_code == 200
+
+
+async def test_a_linkedin_only_campaign_needs_no_mailbox_health(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app, channels=(TemplateChannel.LINKEDIN,))
+    with session_scope(s.factory, write=True) as session:
+        session.scalars(unscoped(select(Mailbox))).one().status = MailboxStatus.DISABLED
+    assert "mailbox" not in _missing(await _review(client, s))
 
 
 # --- the sample, lint, the transition -----------------------------------------------
