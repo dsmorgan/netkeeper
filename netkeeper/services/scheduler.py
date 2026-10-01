@@ -777,13 +777,18 @@ def record_fired(
         )
     if not handler_ran and not state.fired_once and schedule.run_on_first_setup:
         next_due = max(due, now or due) + FIRST_SETUP_RETRY
-    elif state.resume_due is not None and state.resume_due >= max(due, now or due) + NOT_DONE_RETRY:
+    elif state.resume_due is not None:
         # This fire was a not-done re-offer (#200): the cadence goes back to the
         # normal due time it stood in front of, not a week past the re-offer --
         # only while that is still a day or more away (#309 review). A re-offer
         # that fired late, after a restart's catch-up or a sleep, would otherwise
-        # put the normal fire minutes after it; it moves on a whole interval instead.
-        next_due = state.resume_due
+        # put the normal fire minutes after it; the next fire is instead a whole
+        # interval after this one actually ran.
+        ran = max(due, now or due)
+        if state.resume_due >= ran + NOT_DONE_RETRY:
+            next_due = state.resume_due
+        else:
+            next_due = ran + schedule.interval
     else:
         next_due = due + schedule.interval
     next_due = _snap_to_active_hours(

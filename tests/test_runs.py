@@ -638,8 +638,8 @@ async def test_a_re_offer_that_fires_late_after_a_sleep_never_doubles_the_full_s
 ) -> None:
     """#309 review, the same on main before #196: the machine slept through the
     re-offer and woke 30 minutes before the weekly time, so the re-offer fires then
-    (it lapsed by less than an interval, so it is no catch-up). Its next fire is the
-    re-offer's due time plus an interval -- a day or more later, never minutes."""
+    (it lapsed by less than an interval, so it is no catch-up). Its next fire is a
+    whole interval after it actually ran, never minutes later."""
     with session_scope(session_factory, write=True) as session:
         owner = factories.make_user(session, timezone="UTC")
     weekly = scheduler.JobSchedule(scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7))
@@ -649,8 +649,8 @@ async def test_a_re_offer_that_fires_late_after_a_sleep_never_doubles_the_full_s
     woke = weekly_time - timedelta(minutes=30)
     fired = await _fire_weekly(session_factory, owner, weekly, woke, scheduler.JobOutcome.NOT_DONE)
     assert fired.due == first.next_due and not fired.is_catchup
-    assert fired.next_due == first.next_due + timedelta(days=7)
-    assert fired.next_due - woke >= scheduler.NOT_DONE_RETRY
+    assert fired.next_due == woke + timedelta(days=7)
+    assert fired.next_due > first.next_due + timedelta(days=7)  # later than due + interval
 
 
 async def test_a_retried_re_offer_is_still_a_re_offer(
