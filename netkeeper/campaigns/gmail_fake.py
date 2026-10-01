@@ -166,6 +166,7 @@ class FakeGmail:
         self._messages: dict[str, _Stored] = {}
         self._threads: dict[str, list[str]] = {}
         self._drafts: dict[str, str] = {}  # draft id -> message id
+        self._scheduled_from: dict[str, str] = {}  # scheduled message id -> its draft id
         self._labels: dict[str, Label] = {
             name: Label(id=name, name=name, type="system") for name in SYSTEM_LABELS
         }
@@ -408,6 +409,7 @@ class FakeGmail:
             draft.labels = labels
             draft.internal_date = at or self.clock()
             draft.history_id = self._bump()
+            self._scheduled_from[draft.id] = draft_id
             return MessageRef(draft.id, draft.thread_id)
         self._remove(draft)
         scheduled = _Stored(
@@ -419,6 +421,7 @@ class FakeGmail:
             parsed=draft.parsed,
         )
         self._store(scheduled)
+        self._scheduled_from[scheduled.id] = draft_id
         return MessageRef(scheduled.id, scheduled.thread_id)
 
     def send_scheduled(
@@ -434,10 +437,12 @@ class FakeGmail:
         stored.history_id = self._bump()
         return MessageRef(stored.id, stored.thread_id)
 
-    def cancel_scheduled(self, message: MessageRef) -> Draft:
+    def cancel_scheduled(self, message: MessageRef, *, same_draft_id: bool = False) -> Draft:
         """The person canceling a Schedule send: the message goes back to Drafts as a
-        new draft, with a new draft id and message id, Message-ID kept (#278 review)."""
+        new draft, with a new draft id and message id, Message-ID kept (#278 review).
+        With ``same_draft_id``, under the draft id it had before it was scheduled."""
         stored = self._scheduled(message)
+        earlier = self._scheduled_from.pop(stored.id)
         self._remove(stored)
         draft = _Stored(
             id=self._new_id(),
@@ -448,7 +453,7 @@ class FakeGmail:
             parsed=stored.parsed,
         )
         self._store(draft)
-        draft_id = f"r{next(self._drafts_made)}"
+        draft_id = earlier if same_draft_id else f"r{next(self._drafts_made)}"
         self._drafts[draft_id] = draft.id
         return Draft(id=draft_id, message=MessageRef(draft.id, draft.thread_id))
 

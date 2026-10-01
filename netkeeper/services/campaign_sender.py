@@ -59,8 +59,10 @@ Each tick, before anything is chosen, :meth:`GmailSender.reconcile` looks up wha
   Scheduled (``in:scheduled rfc822msgid:``, #278): Gmail's Schedule send moves a
   draft there, out of ``drafts.list``, until it goes out. Found, it stays
   ``drafted`` (marked ``SCHEDULED_IN_GMAIL``) until it is seen sent, and is then
-  dated no earlier than the poll that saw it, since Gmail may keep the date it
-  was scheduled (:func:`~netkeeper.services.campaign_engine.seen_sent_at`). Not
+  dated no earlier than the last poll that saw it in Scheduled, since Gmail may
+  keep the date it was scheduled
+  (:func:`~netkeeper.services.campaign_engine.seen_sent_at`). Never later than the
+  delivery, so a reply right after it still counts. Not
   there, it is searched for in Drafts: a canceled Schedule send comes back under
   a new draft id, which it then follows. A failed search changes nothing. A
   ``SCHEDULED`` message is never sent, even labelled ``SENT`` too. A draft gone
@@ -664,7 +666,7 @@ class _Reconcile:
             return
         ref = found.message
         if found.sent:
-            at = engine.seen_sent_at(tracked, ref.internal_date, now)
+            at = engine.seen_sent_at(tracked, ref.internal_date)
             self.write(
                 lambda s, u: engine.settle_sent(
                     s,
@@ -765,7 +767,7 @@ class _Reconcile:
         if sent is None:
             self.not_seen_sent(gmail, tracked, by_message, purpose)
             return
-        settings, at = self.settings, engine.seen_sent_at(tracked, sent.internal_date, self.now)
+        settings, at = self.settings, engine.seen_sent_at(tracked, sent.internal_date)
         self.write(
             lambda s, u: engine.settle_sent(
                 s,
@@ -796,8 +798,8 @@ class _Reconcile:
             log.info(
                 "message %d: its draft waits in Gmail's Scheduled; it stays drafted", message_id
             )
-            if tracked.marked_missing or not tracked.seen_scheduled:
-                self.write(lambda s, u: engine.settle_seen_scheduled(s, u, message_id, now=now))
+            # Stamped every time: the last sighting dates the send (#278 review).
+            self.write(lambda s, u: engine.settle_seen_scheduled(s, u, message_id, now=now))
             return
         query = _message_id_query(tracked.rfc822_message_id, "drafts")
         refs = gmail.search(query, max_results=FIND_MAX, purpose=purpose)
