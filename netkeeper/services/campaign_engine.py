@@ -884,8 +884,15 @@ def _next_step_join(user: User) -> ColumnElement[bool]:
     )
 
 
-def _selected(user: User, now: datetime) -> Select[tuple[Enrollment]]:
-    """Due enrollments, selected on status (#242 review), never on the due time alone."""
+def _selectable(user: User) -> Select[tuple[Enrollment]]:
+    """Enrollments the tick selects when their due time comes, whenever that is.
+
+    The one definition of what the tick fires, with the due time left open:
+    :func:`_selected` bounds it by ``now`` for the tick, :func:`upcoming` lists it
+    for the dashboard, and :func:`_next_due` finds the soonest after ``now``, so
+    none of them can drift from the others (#286). Selection is on status, never
+    on the due time alone (#242 review).
+    """
     return (
         scoped(user, Enrollment)
         .join(Campaign, Campaign.id == Enrollment.campaign_id)
@@ -895,9 +902,18 @@ def _selected(user: User, now: datetime) -> Select[tuple[Enrollment]]:
             Campaign.status == CampaignStatus.ACTIVE,
             Enrollment.status == EnrollmentStatus.ACTIVE,
             Enrollment.next_action_at.is_not(None),
-            Enrollment.next_action_at <= now,
         )
     )
+
+
+def _not_on_linkedin() -> ColumnElement[bool]:
+    """The next step, if any, is not on LinkedIn: the tick never fires one that is (P4)."""
+    return or_(CampaignStep.id.is_(None), CampaignStep.channel != TemplateChannel.LINKEDIN)
+
+
+def _selected(user: User, now: datetime) -> Select[tuple[Enrollment]]:
+    """Due enrollments, selected on status (#242 review), never on the due time alone."""
+    return _selectable(user).where(Enrollment.next_action_at <= now)
 
 
 def _due(
@@ -916,11 +932,7 @@ def _due(
     tick (a cap, a mailbox needing re-authorization ...), and those whose next step
     is on LinkedIn (P4), which keep their due time (review of #264).
     """
-    statement = (
-        _selected(user, now)
-        .add_columns(CampaignStep)
-        .where(or_(CampaignStep.id.is_(None), CampaignStep.channel != TemplateChannel.LINKEDIN))
-    )
+    statement = _selected(user, now).add_columns(CampaignStep).where(_not_on_linkedin())
     if seen:
         statement = statement.where(Enrollment.id.not_in(sorted(seen)))
     if campaigns:
@@ -964,26 +976,17 @@ class UpcomingFire:
 def upcoming(session: Session, user: User, *, limit: int) -> tuple[list[UpcomingFire], int]:
     """The next ``limit`` fires, soonest first, and how many there are in all.
 
-    A read for the dashboard: nothing here changes a row. It selects what
-    :func:`_selected` selects, with no bound on the due time, so a row already
-    due is the next tick's and is listed first. As in :func:`_next_due`, a row
-    whose next step is on LinkedIn is left out: the tick never fires it (P4).
-    Selection is on status, never on the due time alone (#242 review): a held
-    pause keeps its ``next_action_at`` and is not listed.
+    A read for the dashboard: nothing here changes a row. It is
+    :func:`_selectable`, the tick's own selection with no bound on the due time,
+    so a row already due is the next tick's and is listed first. As in
+    :func:`_due`, a row whose next step is on LinkedIn is left out: the tick
+    never fires it (P4). A held pause keeps its ``next_action_at`` and is not
+    listed (#242 review).
     """
     statement = (
-        scoped(user, Enrollment)
-        .join(Campaign, Campaign.id == Enrollment.campaign_id)
-        .outerjoin(CampaignStep, _next_step_join(user))
+        _selectable(user)
         .join(Contact, Contact.id == Enrollment.contact_id)
-        .where(
-            Campaign.user_id == user.id,
-            Contact.user_id == user.id,
-            Campaign.status == CampaignStatus.ACTIVE,
-            Enrollment.status == EnrollmentStatus.ACTIVE,
-            Enrollment.next_action_at.is_not(None),
-            or_(CampaignStep.id.is_(None), CampaignStep.channel != TemplateChannel.LINKEDIN),
-        )
+        .where(Contact.user_id == user.id, _not_on_linkedin())
     )
     total = session.scalar(statement.with_only_columns(func.count(Enrollment.id)).order_by(None))
     rows = session.execute(
@@ -1007,24 +1010,9 @@ def upcoming(session: Session, user: User, *, limit: int) -> tuple[list[Upcoming
 
 def _next_due(session: Session, user: User, now: datetime) -> datetime | None:
     return session.scalar(
-        scoped(user, Enrollment)
+        _selectable(user)
         .with_only_columns(func.min(Enrollment.next_action_at))
-        .join(Campaign, Campaign.id == Enrollment.campaign_id)
-        .outerjoin(
-            CampaignStep,
-            and_(
-                CampaignStep.user_id == user.id,
-                CampaignStep.campaign_id == Enrollment.campaign_id,
-                CampaignStep.position == func.coalesce(Enrollment.current_step, 0) + 1,
-            ),
-        )
-        .where(
-            Campaign.user_id == user.id,
-            Campaign.status == CampaignStatus.ACTIVE,
-            Enrollment.status == EnrollmentStatus.ACTIVE,
-            Enrollment.next_action_at > now,
-            or_(CampaignStep.id.is_(None), CampaignStep.channel != TemplateChannel.LINKEDIN),
-        )
+        .where(Enrollment.next_action_at > now, _not_on_linkedin())
     )
 
 

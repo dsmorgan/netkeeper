@@ -961,7 +961,10 @@ export interface paths {
         };
         /**
          * List Changed Jobs
-         * @description Live contacts whose position changed in the last 30 days, newest first (spec 9.8).
+         * @description Live contacts netkeeper saw change position in the last 30 days, newest first (spec 9.8).
+         *
+         *     A change is one an enrichment visit noticed (a contact snapshot), dated when
+         *     it was noticed, not the start date on the profile (#286).
          */
         get: operations["list_changed_jobs"];
         put?: never;
@@ -2960,14 +2963,11 @@ export interface components {
         };
         /**
          * ChangedJobOut
-         * @description A live contact whose position changed recently: a reason to reconnect (spec 9.8).
+         * @description A live contact netkeeper saw change position recently: a reason to reconnect (spec 9.8).
+         *
+         *     ``current_title`` and ``current_company`` are the contact's now, after the change.
          */
         ChangedJobOut: {
-            /**
-             * Changed On
-             * Format: date
-             */
-            changed_on: string;
             /** Contact Id */
             contact_id: number;
             /** Contact Name */
@@ -2976,6 +2976,11 @@ export interface components {
             current_company: string | null;
             /** Current Title */
             current_title: string | null;
+            /**
+             * Noticed At
+             * Format: date-time
+             */
+            noticed_at: string;
         };
         /** ChangedJobPage */
         ChangedJobPage: {

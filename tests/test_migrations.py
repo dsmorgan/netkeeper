@@ -2238,3 +2238,39 @@ def test_0027_downgrades_to_test_sends_without_it(migration_engine: Engine) -> N
     assert columns.isdisjoint(_TEST_DRAFT_COLUMNS)
     with migration_engine.begin() as connection:
         assert _count(connection, "campaign_test_sends") == 1
+
+
+# --- snapshot position change (0028, #286) -------------------------------------------------
+
+
+def _seed_a_snapshot(connection: Connection) -> None:
+    _seed_users(connection, 1)
+    _insert_contact(connection, id=1, user_id=1)
+    _insert_children(connection, user_id=1, contact_id=1)
+
+
+def test_0028_marks_every_existing_snapshot_as_no_position_change(
+    migration_engine: Engine,
+) -> None:
+    """What replaced an old snapshot's values was never kept, so it cannot claim a move."""
+    migrations.upgrade(migration_engine, "0027")
+    with migration_engine.begin() as connection:
+        _seed_a_snapshot(connection)
+    migrations.upgrade(migration_engine, "0028")
+    with migration_engine.begin() as connection:
+        row = connection.execute(
+            text("SELECT headline, position_changed FROM contact_snapshots")
+        ).one()
+    assert (row.headline, bool(row.position_changed)) == ("then", False)
+
+
+def test_0028_downgrades_to_snapshots_without_it(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0028")
+    with migration_engine.begin() as connection:
+        _seed_a_snapshot(connection)
+        connection.execute(text("UPDATE contact_snapshots SET position_changed = true"))
+    migrations.downgrade(migration_engine, "0027")
+    columns = {c["name"] for c in inspect(migration_engine).get_columns("contact_snapshots")}
+    assert "position_changed" not in columns
+    with migration_engine.begin() as connection:
+        assert _count(connection, "contact_snapshots") == 1

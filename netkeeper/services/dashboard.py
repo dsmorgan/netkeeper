@@ -7,13 +7,16 @@ flag and runs (``/linkedin/*``, P2-10), and the mailbox (``/mailboxes``,
 This module holds the three reads that had no home:
 
 - **Changed jobs** (spec 9.8, "the single best reason to reconnect"): live
-  contacts whose ``last_position_change`` falls in the last
-  :data:`CHANGED_JOBS_DAYS` days. ``last_position_change`` means what the merge
-  field means (:func:`netkeeper.campaigns.templates.contact_fields`): the
-  latest start or end date on or before today among the contact's positions.
-  Leaving a job counts (#232), and a start still in the future does not
-  (#255). A contact who is archived, merged away, or do-not-contact is not a
-  prompt to reach out.
+  contacts with a ``contact_snapshot`` marked ``position_changed`` and written
+  by the sync's own visits (source ``sync``) in the last
+  :data:`CHANGED_JOBS_WINDOW`, dated by the snapshot's ``observed_at``: when
+  netkeeper noticed the change, not the start date on the profile, which
+  people often fill in late (#286). A new headline or location alone is not a
+  job change, and neither is a title or company an import wrote: an import
+  restates a file, it does not notice anything. The ``last_position_change``
+  merge field (spec 11.1) still reads the positions' dates; a template says
+  "congrats on the move" by the profile's calendar. A contact who is archived,
+  merged away, or do-not-contact is not a prompt to reach out.
 - **Inbound this week**: interactions of kind ``email_in`` or ``li_in`` in the
   last seven days. This is not a reply count. Reply detection is P3-08 and is
   not built yet, so the dashboard says so, and shows this count as what it is.
@@ -29,20 +32,27 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta, tzinfo
+from datetime import datetime, timedelta
 from typing import Final
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import func, select, union_all
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from netkeeper.models import Contact, ContactPosition, Interaction, InteractionKind, User
+from netkeeper.models import (
+    Contact,
+    ContactSnapshot,
+    ContactSource,
+    Interaction,
+    InteractionKind,
+    User,
+)
 from netkeeper.scoping import scoped
 
 log = logging.getLogger(__name__)
 
 #: Spec 9.8: 'The dashboard surfaces "changed jobs in the last 30 days"'.
 CHANGED_JOBS_DAYS: Final = 30
+CHANGED_JOBS_WINDOW: Final = timedelta(days=CHANGED_JOBS_DAYS)
 
 #: "This week" on the dashboard is the last seven days, not the calendar week,
 #: so Monday morning does not read as an empty week.
@@ -54,36 +64,32 @@ INBOUND_KINDS: Final = (InteractionKind.EMAIL_IN, InteractionKind.LI_IN)
 @dataclass(frozen=True, slots=True)
 class ChangedJob:
     contact: Contact
-    changed_on: date
-
-
-def local_today(user: User, now: datetime) -> date:
-    """``now`` as a date in the user's own timezone (UTC when it is unknown)."""
-    return now.astimezone(_zone(user)).date()
+    noticed_at: datetime
 
 
 def changed_jobs(
-    session: Session, user: User, *, today: date, limit: int
+    session: Session, user: User, *, now: datetime, limit: int
 ) -> tuple[list[ChangedJob], int]:
-    """Live contacts whose position changed in the last :data:`CHANGED_JOBS_DAYS` days.
+    """Live contacts netkeeper saw change position in the last :data:`CHANGED_JOBS_WINDOW`.
 
-    Newest change first, then by contact id; the total is the count before
-    ``limit``. A change is a position's ``started_on`` or ``ended_on`` between
-    ``today - CHANGED_JOBS_DAYS`` and ``today``, both inclusive; each contact is
-    listed once, at its latest.
+    A change is a ``contact_snapshot`` with ``position_changed`` set and source
+    ``sync``, observed between ``now - CHANGED_JOBS_WINDOW`` and ``now``, both
+    inclusive. Each contact is listed once, at its latest such snapshot; newest
+    first, then by contact id. The total is the count before ``limit``.
     """
-    since = today - timedelta(days=CHANGED_JOBS_DAYS)
-    days = union_all(
-        *(
-            select(ContactPosition.contact_id.label("contact_id"), column.label("day")).where(
-                ContactPosition.user_id == user.id, column >= since, column <= today
-            )
-            for column in (ContactPosition.started_on, ContactPosition.ended_on)
-        )
-    ).subquery()
     latest = (
-        select(days.c.contact_id, func.max(days.c.day).label("changed_on"))
-        .group_by(days.c.contact_id)
+        select(
+            ContactSnapshot.contact_id.label("contact_id"),
+            func.max(ContactSnapshot.observed_at).label("noticed_at"),
+        )
+        .where(
+            ContactSnapshot.user_id == user.id,
+            ContactSnapshot.position_changed.is_(True),
+            ContactSnapshot.source == ContactSource.SYNC,
+            ContactSnapshot.observed_at >= now - CHANGED_JOBS_WINDOW,
+            ContactSnapshot.observed_at <= now,
+        )
+        .group_by(ContactSnapshot.contact_id)
         .subquery()
     )
     statement = (
@@ -97,11 +103,11 @@ def changed_jobs(
     )
     total = session.scalar(statement.with_only_columns(func.count(Contact.id)).order_by(None))
     rows = session.execute(
-        statement.add_columns(latest.c.changed_on)
-        .order_by(latest.c.changed_on.desc(), Contact.id)
+        statement.add_columns(latest.c.noticed_at)
+        .order_by(latest.c.noticed_at.desc(), Contact.id)
         .limit(limit)
     ).tuples()
-    return [ChangedJob(contact=contact, changed_on=day) for contact, day in rows], total or 0
+    return [ChangedJob(contact=contact, noticed_at=at) for contact, at in rows], total or 0
 
 
 def inbound_since(session: Session, user: User, *, now: datetime) -> tuple[int, datetime]:
@@ -121,13 +127,3 @@ def inbound_since(session: Session, user: User, *, now: datetime) -> tuple[int, 
         )
     )
     return count or 0, since
-
-
-def _zone(user: User) -> tzinfo:
-    try:
-        return ZoneInfo(user.timezone)
-    except (ZoneInfoNotFoundError, ValueError):
-        log.warning(
-            "user %s has unknown timezone %r; the dashboard uses UTC", user.id, user.timezone
-        )
-        return UTC

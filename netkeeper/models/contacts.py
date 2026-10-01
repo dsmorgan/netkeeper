@@ -41,6 +41,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     inspect,
     text,
 )
@@ -515,7 +516,12 @@ class ContactSnapshot(ContactChild, Base):
     """The headline and job as they were, written when any of them changes (spec 9.8).
 
     ``observed_at`` is when the change was seen, so "changed jobs in the last 30
-    days" is a query over ``(user_id, observed_at)``.
+    days" is a query over ``(user_id, observed_at)``. The row holds the values
+    *before* the change, so ``position_changed`` records, when the row is written,
+    whether the change replaced a non-empty ``current_title`` or
+    ``current_company`` with a different value: a position change, as opposed to
+    a new headline or location only. A first fill (from empty) is not one. Rows
+    written before migration 0028 hold false: what replaced them was not kept.
     """
 
     __tablename__ = "contact_snapshots"
@@ -526,6 +532,9 @@ class ContactSnapshot(ContactChild, Base):
     current_title: Mapped[str | None] = mapped_column(String(300))
     current_company: Mapped[str | None] = mapped_column(String(300))
     location: Mapped[str | None] = mapped_column(String(300))
+    position_changed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
 
     contact: Mapped[Contact] = relationship(back_populates="snapshots")
 

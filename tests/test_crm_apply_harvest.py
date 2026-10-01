@@ -40,6 +40,7 @@ from netkeeper.models import (
     User,
 )
 from netkeeper.scoping import scoped
+from netkeeper.services import dashboard
 
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
 PRIYA, MATEO, HANA, TOMASZ, AIKO = PROFILES
@@ -268,7 +269,39 @@ def test_a_new_job_writes_a_snapshot_of_the_old_one(writer: Session, user: User)
         "Fictional Robotics Co",
     )
     assert snapshot.observed_at == NOW + timedelta(days=30)
+    assert snapshot.position_changed  # #286: the dashboard's "changed jobs"
     assert counts.snapshots == 1 and counts.applied == 2
+
+
+def test_a_new_headline_or_a_first_job_is_not_a_position_change(
+    writer: Session, user: User
+) -> None:
+    """#286: only a title or company replacing a known one is a job change."""
+    contact = _stored(writer, user, PRIYA, headline="An old headline", location="Elsewhere")
+
+    apply_harvest(writer, user, _harvest(contact, PRIYA))  # fills title and company
+
+    (snapshot,) = contact.snapshots
+    assert (snapshot.headline, snapshot.current_title) == ("An old headline", None)
+    assert not snapshot.position_changed
+
+
+def test_the_dashboard_dates_a_new_job_by_when_the_visit_saw_it(
+    writer: Session, user: User
+) -> None:
+    """#286: the move started months ago by the profile; netkeeper noticed it today."""
+    contact = _stored(writer, user, PRIYA)
+    apply_harvest(writer, user, _harvest(contact, PRIYA))
+    moved = replace(
+        PRIYA, jobs=(Job("Principal Engineer", "Madeup Mobility", start=(2025, 11)), *PRIYA.jobs)
+    )
+    seen = NOW + timedelta(days=60)
+
+    apply_harvest(writer, user, _harvest(contact, moved, at=seen))
+
+    [row], total = dashboard.changed_jobs(writer, user, now=seen + timedelta(days=1), limit=10)
+    assert (row.contact.id, row.noticed_at, total) == (contact.id, seen, 1)
+    assert row.contact.current_company == "Madeup Mobility"
 
 
 def test_the_same_harvest_twice_writes_no_snapshot(writer: Session, user: User) -> None:

@@ -1331,13 +1331,8 @@
         "type": "object"
       },
       "ChangedJobOut": {
-        "description": "A live contact whose position changed recently: a reason to reconnect (spec 9.8).",
+        "description": "A live contact netkeeper saw change position recently: a reason to reconnect (spec 9.8).\n\n``current_title`` and ``current_company`` are the contact's now, after the change.",
         "properties": {
-          "changed_on": {
-            "format": "date",
-            "title": "Changed On",
-            "type": "string"
-          },
           "contact_id": {
             "title": "Contact Id",
             "type": "integer"
@@ -1367,6 +1362,11 @@
               }
             ],
             "title": "Current Title"
+          },
+          "noticed_at": {
+            "format": "date-time",
+            "title": "Noticed At",
+            "type": "string"
           }
         },
         "required": [
@@ -1374,7 +1374,7 @@
           "contact_name",
           "current_title",
           "current_company",
-          "changed_on"
+          "noticed_at"
         ],
         "title": "ChangedJobOut",
         "type": "object"
@@ -13473,7 +13473,7 @@
     },
     "/api/v1/dashboard/changed-jobs": {
       "get": {
-        "description": "Live contacts whose position changed in the last 30 days, newest first (spec 9.8).",
+        "description": "Live contacts netkeeper saw change position in the last 30 days, newest first (spec 9.8).\n\nA change is one an enrichment visit noticed (a contact snapshot), dated when\nit was noticed, not the start date on the profile (#286).",
         "operationId": "list_changed_jobs",
         "parameters": [
           {

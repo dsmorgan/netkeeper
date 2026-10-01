@@ -71,9 +71,12 @@ def list_changed_jobs(
     session: SessionDep,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = 10,
 ) -> ChangedJobPage:
-    """Live contacts whose position changed in the last 30 days, newest first (spec 9.8)."""
-    today = service.local_today(user, utcnow())
-    rows, total = service.changed_jobs(session, user, today=today, limit=limit)
+    """Live contacts netkeeper saw change position in the last 30 days, newest first (spec 9.8).
+
+    A change is one an enrichment visit noticed (a contact snapshot), dated when
+    it was noticed, not the start date on the profile (#286).
+    """
+    rows, total = service.changed_jobs(session, user, now=utcnow(), limit=limit)
     return ChangedJobPage(
         items=[
             ChangedJobOut(
@@ -81,7 +84,7 @@ def list_changed_jobs(
                 contact_name=_name(row.contact),
                 current_title=row.contact.current_title,
                 current_company=row.contact.current_company,
-                changed_on=row.changed_on,
+                noticed_at=row.noticed_at,
             )
             for row in rows
         ],

@@ -84,6 +84,9 @@ log = logging.getLogger(__name__)
 
 # A change to any of these on an existing contact writes a contact_snapshot (spec 8.1, 9.8).
 JOB_FIELDS: Final[tuple[str, ...]] = ("headline", "current_title", "current_company", "location")
+# Of those, the ones whose change is a position change: the dashboard's "changed
+# jobs" (spec 9.8, #286). A first fill from empty is not one.
+POSITION_FIELDS: Final[tuple[str, ...]] = ("current_title", "current_company")
 
 # More decided wins in a merge: a person who said "met" is not un-met by a duplicate.
 MET_RANK: Final[dict[ContactMet, int]] = {
@@ -558,7 +561,8 @@ def apply(
     ``field_sources`` for every provided field. An existing contact takes each
     provided field only when :func:`~netkeeper.crm.provenance.may_overwrite`
     allows it; a slug change keeps the old slug in ``contact_aliases``; a change
-    to any job field writes a ``contact_snapshot`` of the values before it. Either
+    to any job field writes a ``contact_snapshot`` of the values before it,
+    marked ``position_changed`` when the title or company changed. Either
     way, a row from any source but ``manual`` also notes every provided field in
     ``synced_values`` with its source and ``observed_at``, whether or not the
     live column took it (unless a newer observation is already noted), so a
@@ -672,6 +676,10 @@ def _update(
                 user_id=user.id,
                 source=incoming.source,
                 observed_at=incoming.observed_at,
+                position_changed=any(
+                    before[name] not in (None, "") and before[name] != getattr(contact, name)
+                    for name in POSITION_FIELDS
+                ),
                 **before,
             )
         )
