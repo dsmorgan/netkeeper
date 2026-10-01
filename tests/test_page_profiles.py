@@ -794,7 +794,8 @@ async def test_a_throttle_on_the_renamed_profile_before_a_timeout_stops_the_run(
     the navigation times out. That throttle is this visit's: the run stops, and the
     next person is never visited."""
     renamed = replace(PRIYA, public_id="priya-renamed-fake")
-    first = ProfilePage(PRIYA, goto_error=navigation_timeout(), **{move: renamed.slug})
+    first = ProfilePage(PRIYA, goto_error=navigation_timeout())
+    setattr(first, move, renamed.slug)
     site = ProfileSite([first, ProfilePage(renamed, landing=landing), ProfilePage(MATEO)])
     out = await visit(site, [target(PRIYA), target(MATEO)])
     assert out.result.reason is StopReason.RESPONSE and out.result.outcome is outcome
