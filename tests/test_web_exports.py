@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+from datetime import UTC, datetime
 
 import factories
 import httpx
@@ -143,6 +144,32 @@ async def test_macos_contacts_vcard_download(
     assert response.text.startswith("BEGIN:VCARD\r\nVERSION:3.0\r\n")
     assert "CATEGORIES:Fake Tag\r\n" in response.text
     assert "X-ADDRESSBOOKSERVER-KIND:group\r\n" in response.text
+
+
+@pytest.mark.parametrize("preset", [None, "macos-contacts"])
+async def test_vcard_download_leaves_out_a_contact_waiting_for_review(
+    client: httpx.AsyncClient, running_app: FastAPI, preset: str | None
+) -> None:
+    """#254: through the API too, a vCard never carries a contact waiting for review.
+
+    ``None`` sends no preset, so the endpoint's default (``full``) applies."""
+    with session_scope(_factory(running_app), write=True) as session:
+        user = _local_user(session)
+        factories.make_contact(session, user, first_name="Confirmed", emails=["kept@example.test"])
+        factories.make_contact(
+            session,
+            user,
+            first_name="Waiting",
+            emails=["card@example.test"],
+            needs_review_at=datetime(2026, 9, 24, tzinfo=UTC),
+        )
+    params = {"format": "vcard"} if preset is None else {"format": "vcard", "preset": preset}
+    response = await client.get("/api/v1/exports", params=params)
+    assert response.status_code == 200
+    assert response.text.count("BEGIN:VCARD") == 1
+    assert "kept@example.test" in response.text
+    assert "card@example.test" not in response.text
+    assert "Waiting" not in response.text
 
 
 @pytest.mark.parametrize("output_format", ["csv", "json"])
