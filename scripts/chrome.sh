@@ -125,16 +125,27 @@ if [ -n "$netkeeper_bin" ]; then
   shebang=$(head -n1 "$netkeeper_bin" 2>/dev/null) || shebang=
   case $shebang in
     '#!/usr/bin/env '*)
-      word=${shebang#'#!/usr/bin/env '}
-      word=${word%% *}
-      case $(basename "$word") in
-        python*) netkeeper_python=$(command -v "$word" 2>/dev/null) || netkeeper_python= ;;
-      esac
+      # The first word that is not one of env's own options (-S, -i, -u NAME,
+      # ...): `#!/usr/bin/env -S python3 -I` names python3, not -S (#183
+      # re-review nit 5).
+      word=
+      for candidate_word in ${shebang#'#!/usr/bin/env '}; do
+        case $candidate_word in
+          -*) continue ;;
+        esac
+        word=$candidate_word
+        break
+      done
+      if [ -n "$word" ]; then
+        case $(basename -- "$word") in
+          python*) netkeeper_python=$(command -v "$word" 2>/dev/null) || netkeeper_python= ;;
+        esac
+      fi
       ;;
     '#!'*)
       candidate=${shebang#'#!'}
       candidate=${candidate%% *}
-      case $(basename "$candidate") in
+      case $(basename -- "$candidate") in
         python*) [ -x "$candidate" ] && netkeeper_python=$candidate ;;
       esac
       ;;
@@ -238,6 +249,21 @@ lock_holder() {
   # --user-data-dir, canonicalized the same way $profile is, is one
   # independent sign (catches a spelling profile_pids() cannot match); lsof
   # showing a file open under it is the other (#183 review nit 3).
+  #
+  # A --user-data-dir that does not canonicalize to $profile is NOT on its own
+  # proof the pid is some other Chrome: a relative flag canonicalizes against
+  # this script's own cwd, not whatever the real Chrome's was, and a symlinked
+  # alias followed by a positional URL (`--user-data-dir=alias
+  # https://example.com`, nothing else `${tail%% --*}` can trim on) drags the
+  # URL into the extracted value too, so a real match still looks like a
+  # mismatch. Either misreads a live holder as stale and lets a second Chrome
+  # start on a profile already in use (#183 re-review should-fix 1 -- a
+  # regression nit 3 itself introduced). So a mismatch only rules the pid out
+  # when lsof *also* has nothing on it; lsof actually showing this profile
+  # open overrides the mismatched flag, and lsof answering nothing at all
+  # still falls through to the fail-closed rule below exactly as when there
+  # was no flag to go on in the first place.
+  flag_mismatched=no
   tail=$(printf '%s' "$cmd" | sed -n 's/.*--user-data-dir=//p')
   if [ -n "$tail" ]; then
     flag=${tail%% --*}
@@ -245,14 +271,13 @@ lock_holder() {
       printf '%s\n' "$pid"
       return 0
     fi
-    # A --user-data-dir naming a different profile is positive evidence this
-    # pid is not this profile's holder, not merely the absence of evidence
-    # that it is -- lsof's fail-closed rule below is for when there is no
-    # flag to go on at all, not for overriding this (#183 re-review nit 3).
-    return 0
+    flag_mismatched=yes
   fi
   lsof_out=$(lsof -a -p "$pid" -Fn 2>/dev/null)
   if [ -z "$lsof_out" ]; then
+    if [ "$flag_mismatched" = yes ]; then
+      return 0
+    fi
     # Nothing back at all -- a startup race, or lsof lacking permission to
     # inspect it (sandboxing can hide even a same-user process's open files) --
     # is not proof there is no holder; fail closed rather than clear a lock a
