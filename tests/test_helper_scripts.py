@@ -35,10 +35,55 @@ SH = shutil.which("sh")
 pytestmark = pytest.mark.skipif(SH is None or sys.platform == "win32", reason="needs a POSIX sh")
 
 
+def _require_pinned_port(
+    args: tuple[str, ...], env: dict[str, str], pinned_port: int | str | None
+) -> None:
+    """Refuse to run chrome.sh in a test unless this call pins its port away
+    from 9222 -- the real default, and David's real Chrome's port.
+
+    Falling through to chrome.sh's own DEFAULT_PORT, on a machine where a real
+    `netkeeper` and a real Chrome both happen to be reachable, reaches that
+    real Chrome: a #183 re-review probe did exactly this. ``--port`` is the
+    direct way to pin it; ``NETKEEPER_CONFIG`` (a test's own ``cdp_url``) is
+    another; ``pinned_port`` is for a test that controls the port through a
+    fake netkeeper's own JSON answer instead of either -- it must state the
+    value it configured that fake with, so this guard can check it rather
+    than trusting the test to have gotten it right silently.
+    """
+    literal: str | None = None
+    args_list = list(args)
+    for i, arg in enumerate(args_list):
+        if arg == "--port" and i + 1 < len(args_list):
+            literal = args_list[i + 1]
+        elif arg.startswith("--port="):
+            literal = arg[len("--port=") :]
+    if literal is not None:
+        assert literal != "9222", "a chrome.sh test must pin a port other than 9222"
+        return
+    if "NETKEEPER_CONFIG" in env:
+        return
+    if pinned_port is not None:
+        assert str(pinned_port) != "9222", "a chrome.sh test must pin a port other than 9222"
+        return
+    raise AssertionError(
+        "a chrome.sh invocation in tests must pin a port other than 9222 -- pass "
+        "--port, set NETKEEPER_CONFIG, or pass run_sh(..., pinned_port=N) for a "
+        "fake netkeeper's own JSON answer. Never let a test fall through to the "
+        "real default: that can reach a real Chrome on a machine where one is "
+        "actually running on it."
+    )
+
+
 def run_sh(
-    script: Path, *args: str, env: dict[str, str], stdin: str | None = None
+    script: Path,
+    *args: str,
+    env: dict[str, str],
+    stdin: str | None = None,
+    pinned_port: int | str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     assert SH is not None
+    if script.name == "chrome.sh":
+        _require_pinned_port(args, env, pinned_port)
     # The interpreter's own bin first: chrome.sh finds netkeeper as <repo>/.venv/bin or on
     # PATH, and a sibling worktree has no .venv of its own (#210).
     path = os.pathsep.join(
@@ -78,15 +123,22 @@ def isolated_chrome_script(tmp_path: Path) -> Path:
 
 
 def fake_netkeeper_cli(
-    path: Path, *, port: int | str, profile: Path, remote: str | None = None
+    path: Path,
+    *,
+    port: int | str,
+    profile: Path,
+    remote: str | None = None,
+    shebang: str | None = None,
 ) -> None:
     """A stand-in `netkeeper` whose `browser launch --json` answers like the real
     CLI's, with a real python shebang -- enough for chrome.sh to ask it for the
     port and profile the way it would ask the genuine one. ``port`` may be a
-    non-numeric string, to simulate a malformed answer.
+    non-numeric string, to simulate a malformed answer. ``shebang`` defaults to
+    a direct absolute-path interpreter (what `uv sync`/pip normally write);
+    pass e.g. ``"/usr/bin/env python3"`` for an env-style entry point instead.
     """
     path.write_text(
-        f"#!{sys.executable}\n"
+        f"#!{shebang or sys.executable}\n"
         "import json, sys\n"
         "if sys.argv[1:4] == ['browser', 'launch', '--json']:\n"
         "    print(json.dumps({\n"
@@ -98,6 +150,25 @@ def fake_netkeeper_cli(
         "    sys.exit(0)\n"
         "sys.exit(1)\n",
         encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def fake_netkeeper_cli_sh_shim(path: Path, *, port: int, profile: Path) -> None:
+    """A stand-in `netkeeper` whose entry point is itself a ``#!/bin/sh``
+    relaunch shim (what `uv tool`'s distlib-style launcher uses) rather than
+    python directly. The JSON it prints must still get parsed by a *real*
+    python found separately -- never by handing the json.load snippet to this
+    shell itself (#183 re-review should-fix 2).
+    """
+    path.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = browser ] && [ "$2" = launch ] && [ "$3" = --json ]; then\n'
+        f'  printf \'{{"cdp_url": "http://127.0.0.1:{port}", "port": {port},'
+        f' "profile": "{profile}", "remote": null}}\'\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n"
     )
     path.chmod(0o755)
 
@@ -204,6 +275,32 @@ def start(profile: Path, *extra: str, port: int | None = None) -> subprocess.Com
 # --- chrome.sh -------------------------------------------------------------------
 
 
+def test_run_sh_refuses_an_unpinned_chrome_invocation() -> None:
+    """Safety gap: the harness itself must refuse to run chrome.sh without an
+    explicit, non-9222 port pinned some way -- a re-review probe reached
+    David's real Chrome by falling through to chrome.sh's own default."""
+    with pytest.raises(AssertionError):
+        run_sh(CHROME, "--status", env={})
+
+
+def test_run_sh_refuses_an_explicit_port_9222() -> None:
+    with pytest.raises(AssertionError):
+        run_sh(CHROME, "--status", "--port", "9222", env={})
+
+
+def test_run_sh_refuses_pinned_port_9222() -> None:
+    with pytest.raises(AssertionError):
+        run_sh(CHROME, "--status", env={}, pinned_port=9222)
+
+
+def test_run_sh_accepts_netkeeper_config_with_no_explicit_port(tmp_path: Path) -> None:
+    """NETKEEPER_CONFIG alone satisfies the guard: the test's own cdp_url pins
+    the port, even with no --port flag on the command line."""
+    config = tmp_path / "config.toml"
+    config.write_text(f'[linkedin]\ncdp_url = "http://127.0.0.1:{free_port()}"\n')
+    run_sh(CHROME, "--dry-run", env={"NETKEEPER_CONFIG": str(config)})
+
+
 def test_chrome_script_constants_match_the_cli() -> None:
     """The fallback profile name and port are the ones `browser launch` uses."""
     text = CHROME.read_text()
@@ -276,11 +373,107 @@ def test_chrome_script_finds_port_and_profile_through_a_symlinked_netkeeper(
     bin_dir.mkdir()
     (bin_dir / "netkeeper").symlink_to(real_dir / "netkeeper")  # no python beside the symlink
     path = f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
-    result = run_sh(script, "--status", env={"PATH": path})
+    result = run_sh(script, "--status", env={"PATH": path}, pinned_port=port)
     assert result.returncode == 0, result.stderr
     assert "warning" not in result.stderr
     assert f"profile  {profile}" in result.stdout
     assert f"port     {port}: nothing is listening" in result.stdout
+
+
+def test_chrome_script_resolves_an_env_shebang_entry_point(tmp_path: Path) -> None:
+    """#183 re-review should-fix 2: an `#!/usr/bin/env python3` entry point
+    (not a direct absolute-path shebang) must be resolved through PATH and
+    used to parse the JSON -- honoring whatever custom profile it answers
+    with, the same as a direct-shebang entry point would."""
+    script = isolated_chrome_script(tmp_path)
+    port = free_port()
+    profile = tmp_path.resolve() / "a custom profile"
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    fake_netkeeper_cli(
+        real_dir / "netkeeper", port=port, profile=profile, shebang="/usr/bin/env python3"
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "netkeeper").symlink_to(real_dir / "netkeeper")
+    # python3 must resolve through PATH for /usr/bin/env to find it; the venv
+    # this suite runs under always has one beside `python` (uv/pip's doing).
+    python_dir = Path(sys.executable).parent
+    assert (python_dir / "python3").exists()
+    path = f"{bin_dir}:{python_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+    result = run_sh(script, "--status", env={"PATH": path}, pinned_port=port)
+    assert result.returncode == 0, result.stderr
+    assert "warning" not in result.stderr
+    assert f"profile  {profile}" in result.stdout
+
+
+def test_chrome_script_falls_back_to_python3_for_a_sh_shim_entry_point(tmp_path: Path) -> None:
+    """#183 re-review should-fix 2: an entry point that is itself a
+    ``#!/bin/sh`` relaunch shim (uv tool's distlib-style launcher) must never
+    be handed the json.load snippet -- that is not python, and running it
+    under sh would just fail or garble. It falls back to plain `python3` on
+    PATH to parse the answer instead."""
+    script = isolated_chrome_script(tmp_path)
+    port = free_port()
+    profile = tmp_path.resolve() / "profile"
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    fake_netkeeper_cli_sh_shim(real_dir / "netkeeper", port=port, profile=profile)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "netkeeper").symlink_to(real_dir / "netkeeper")
+    python_dir = Path(sys.executable).parent
+    path = f"{bin_dir}:{python_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+    result = run_sh(script, "--status", env={"PATH": path}, pinned_port=port)
+    assert result.returncode == 0, result.stderr
+    assert "warning" not in result.stderr
+    assert f"profile  {profile}" in result.stdout
+
+
+def test_chrome_script_warns_when_no_python_can_parse_a_sh_shim_answer(tmp_path: Path) -> None:
+    """#183 re-review should-fix 2: when netkeeper answered but no python could
+    be found to parse it, the warning must say so specifically, not the
+    generic "could not ask netkeeper" (which means something else: it was
+    never asked at all, or never answered)."""
+    script = isolated_chrome_script(tmp_path)
+    port = free_port()
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    fake_netkeeper_cli_sh_shim(
+        real_dir / "netkeeper", port=port, profile=tmp_path.resolve() / "profile"
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "netkeeper").symlink_to(real_dir / "netkeeper")
+    # Everything chrome.sh needs except any python: no python3 for it to fall
+    # back to.
+    minimal_bin = tmp_path / "minimal-bin"
+    minimal_bin.mkdir()
+    for tool in (
+        "sh",
+        "curl",
+        "lsof",
+        "ps",
+        "awk",
+        "sed",
+        "uname",
+        "mkdir",
+        "basename",
+        "dirname",
+        "tr",
+        "rm",
+        "cat",
+        "kill",
+        "grep",
+        "head",
+    ):
+        found = shutil.which(tool)
+        if found:
+            (minimal_bin / tool).symlink_to(found)
+    path = f"{bin_dir}:{minimal_bin}"
+    result = run_sh(script, "--dry-run", "--port", str(free_port()), env={"PATH": path})
+    assert result.returncode == 0, result.stderr
+    assert "netkeeper answered but no Python was found to parse it" in result.stderr
 
 
 def test_chrome_script_round_trips_a_non_ascii_profile_path(tmp_path: Path) -> None:
@@ -315,7 +508,7 @@ def test_chrome_script_refuses_a_non_numeric_port_from_json(tmp_path: Path) -> N
     bin_dir.mkdir()
     (bin_dir / "netkeeper").symlink_to(real_dir / "netkeeper")
     path = f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
-    result = run_sh(script, "--dry-run", env={"PATH": path})
+    result = run_sh(script, "--dry-run", env={"PATH": path}, pinned_port="not-a-port")
     assert result.returncode == 1
     assert "must be a number" in result.stderr
 
@@ -370,6 +563,10 @@ def test_chrome_script_trusts_the_locks_pid_over_the_command_line(tmp_path: Path
     assert result.returncode == 1
     assert f"pid {pid}" in result.stderr
     assert f"(per {profile}/SingletonLock)" in result.stderr
+    # #183 re-review nit 4: an escape hatch for when the heuristics are wrong.
+    assert (
+        f"If pid {pid} isn't netkeeper's Chrome, remove {profile}/SingletonLock." in result.stderr
+    )
     assert (profile / "SingletonLock").is_symlink()
 
 
@@ -447,6 +644,49 @@ def test_chrome_script_treats_lock_holder_as_present_when_lsof_answers_nothing(
     assert f"pid {pid}" in result.stderr
 
 
+def test_chrome_script_treats_a_mismatched_user_data_dir_flag_as_proof_of_absence(
+    tmp_path: Path,
+) -> None:
+    """#183 re-review nit 3: a --user-data-dir naming a different profile is
+    positive evidence this pid is not the holder. The empty-lsof fail-closed
+    rule must not override that -- it is for when there is no flag to go on
+    at all, not for second-guessing one that says otherwise."""
+    profile = tmp_path.resolve() / "profile"
+    profile.mkdir()
+    other = tmp_path.resolve() / "other-profile"
+    exe = tmp_path / "Google Chrome"
+    exe.symlink_to(sys.executable)
+    proc = subprocess.Popen(
+        [str(exe), "-c", "import time; time.sleep(60)", f"--user-data-dir={other}"]
+    )
+    try:
+        (profile / "SingletonLock").symlink_to(f"thishost-{proc.pid}")
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "lsof"
+        real = shutil.which("lsof")
+        assert real is not None
+        # Empty on -Fn, as if nothing were open -- the fail-closed case this
+        # must NOT trigger, because the mismatched flag already answers it.
+        shim.write_text(f'#!/bin/sh\ncase "$*" in *-Fn*) exit 0 ;; esac\nexec "{real}" "$@"\n')
+        shim.chmod(0o755)
+        path = f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+        result = run_sh(
+            CHROME,
+            "--dry-run",
+            "--port",
+            str(free_port()),
+            "--profile-dir",
+            str(profile),
+            env={"PATH": path},
+        )
+    finally:
+        proc.kill()
+        proc.wait()
+    assert result.returncode == 0, result.stderr
+    assert "stale profile lock" in result.stdout
+
+
 def test_chrome_script_refuses_a_lock_whose_pid_was_reused_by_an_unrelated_chrome(
     tmp_path: Path,
 ) -> None:
@@ -507,11 +747,15 @@ def test_chrome_script_reports_a_holder_on_a_different_port(tmp_path: Path) -> N
     has one, just not this one -- "without the debugging port" is the wrong
     message for it."""
     profile = tmp_path.resolve() / "profile"
-    with process_with_args("--remote-debugging-port=9333", f"--user-data-dir={profile}"):
+    with process_with_args("--remote-debugging-port=9333", f"--user-data-dir={profile}") as pid:
         result = start(profile, port=free_port())
     assert result.returncode == 1
     assert "on port 9333" in result.stderr
     assert "without the debugging port" not in result.stderr
+    # #183 re-review nit 4: an escape hatch for when the heuristics are wrong.
+    assert (
+        f"If pid {pid} isn't netkeeper's Chrome, remove {profile}/SingletonLock." in result.stderr
+    )
 
 
 def _bin_dir_without(tmp_path: Path, missing: str) -> Path:
@@ -1015,6 +1259,53 @@ def test_reset_quarantines_a_partial_archive_when_the_raw_copy_fails(
 
 
 @needs_sqlite3_cli
+def test_reset_does_not_clobber_a_concurrent_runs_archive(data: Path, tmp_path: Path) -> None:
+    """Re-review should-fix 1: a second reset landing on the same stamp must not
+    let this run's raw-copy fallback or quarantine step delete or rename an
+    archive the other run already published. A sqlite3 shim plants a competing
+    archive at this run's own candidate name right after VACUUM INTO finishes,
+    simulating the other run winning the race to publish first; both archives
+    must survive, this run's under the next free name."""
+    db = make_db(data)
+    real = shutil.which("sqlite3")
+    assert real is not None
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "sqlite3"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'case "$2" in\n'
+        "  VACUUM*)\n"
+        "    target=$(printf '%s' \"$2\" | sed -n \"s/^VACUUM INTO '\\\\(.*\\\\)'\\$/\\\\1/p\")\n"
+        f'    "{real}" "$@"\n'
+        "    rc=$?\n"
+        '    archives=$(dirname "$(dirname "$target")")\n'
+        "    stamp=$(date -u +%Y%m%dT%H%M%SZ)\n"
+        '    competitor="$archives/netkeeper-$stamp.sqlite3"\n'
+        '    [ -e "$competitor" ] || printf \'a concurrent run published first\' > "$competitor"\n'
+        "    exit $rc\n"
+        "    ;;\n"
+        "esac\n"
+        f'exec "{real}" "$@"\n'
+    )
+    shim.chmod(0o755)
+    path = f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+    result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": path})
+    assert result.returncode == 0, result.stderr
+
+    entries = sorted((data / "archives").iterdir())
+    assert len(entries) == 2
+    contents = [p.read_bytes() for p in entries]
+    assert b"a concurrent run published first" in contents
+
+    ours = [p for p in entries if p.read_bytes() != b"a concurrent run published first"]
+    assert len(ours) == 1
+    with closing(sqlite3.connect(ours[0])) as check:
+        assert check.execute("select x from marker").fetchone() == (42,)
+    assert not db.exists()
+
+
+@needs_sqlite3_cli
 def test_reset_folds_the_wal_when_vacuum_into_is_refused(data: Path, tmp_path: Path) -> None:
     """R9: VACUUM INTO can be refused (a read-only filesystem, a locked-down
     sqlite3 build); the raw-copy-and-fold fallback must still produce a
@@ -1070,6 +1361,84 @@ def test_reset_folds_the_wal_when_vacuum_into_is_refused(data: Path, tmp_path: P
     with closing(sqlite3.connect(archive)) as check:
         rows = check.execute("SELECT x FROM marker ORDER BY x").fetchall()
     assert rows == [(1,), (42,)]
+
+
+@needs_sqlite3_cli
+def test_reset_removes_the_copied_wal_shm_even_when_the_fold_pragma_fails(
+    data: Path, tmp_path: Path
+) -> None:
+    """Re-review nit 5: pin the explicit `rm -f -- "$work-wal" "$work-shm"` in
+    the raw-copy fallback. When the fold (wal_checkpoint/journal_mode) pragma
+    succeeds, it already removes those files itself as a side effect, which
+    left this line a surviving mutant -- untested, because its own absence
+    changed nothing observable. Forcing the fold pragma to fail too (not just
+    VACUUM INTO) makes this explicit cleanup the only thing that would remove
+    them, and a sqlite3 shim records whether the copied -wal still sits next
+    to the work file at the moment verified() reads it -- the one point in
+    the run where it would still matter, before the whole temp directory is
+    removed either way."""
+    db = data / "netkeeper.sqlite3"
+    db.unlink(missing_ok=True)
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE marker (x integer)")
+        conn.execute("INSERT INTO marker VALUES (1)")
+    reader = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sqlite3, time\n"
+            f"conn = sqlite3.connect({str(db)!r})\n"
+            "conn.execute('BEGIN')\n"
+            "conn.execute('SELECT * FROM marker').fetchall()\n"
+            "time.sleep(30)\n",
+        ]
+    )
+    try:
+        time.sleep(0.3)
+        with closing(sqlite3.connect(db)) as writer, writer:
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute("INSERT INTO marker VALUES (42)")
+        assert Path(f"{db}-wal").stat().st_size > 0, "test setup needs a pending WAL"
+    finally:
+        reader.kill()
+        reader.wait()
+
+    real = shutil.which("sqlite3")
+    assert real is not None
+    marker_file = tmp_path / "wal-at-verify-time"
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "sqlite3"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'case "$2" in\n'
+        "  VACUUM*) exit 1 ;;\n"
+        "  *wal_checkpoint*) exit 1 ;;\n"
+        "esac\n"
+        'case "$3" in\n'
+        "  *quick_check*)\n"
+        '    if [ -e "$2-wal" ]; then\n'
+        f"      printf present > {str(marker_file)!r}\n"
+        "    else\n"
+        f"      printf absent > {str(marker_file)!r}\n"
+        "    fi\n"
+        "    ;;\n"
+        "esac\n"
+        f'exec "{real}" "$@"\n'
+    )
+    shim.chmod(0o755)
+    path = f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+
+    result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": path})
+    # verified() itself still fails here -- a WAL-mode header with no -wal/-shm
+    # beside it cannot be opened read-only either -- but that is not what this
+    # pins: the marker shows rm -f already ran before verified() was reached,
+    # which is the one thing a successful fold's own side effect would
+    # otherwise have hidden.
+    assert result.returncode == 1
+    assert "quick_check" in result.stderr
+    assert marker_file.read_text() == "absent"
 
 
 @needs_sqlite3_cli

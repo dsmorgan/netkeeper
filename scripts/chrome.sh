@@ -105,25 +105,42 @@ elif command -v netkeeper >/dev/null 2>&1; then
   netkeeper_bin=$(command -v netkeeper)
 fi
 
-# The python netkeeper's own entry point names on its shebang line: reading it
-# with `head` follows a symlink transparently, straight to the real
-# console-script wherever it lives, so a `uv tool`/pipx install's symlinked
-# `netkeeper` on PATH still finds its interpreter even with nothing of that
-# name sitting beside the symlink itself (#183 review bug 3/should-fix 2). An
-# earlier version of this parsed the JSON with sed instead of asking for a
-# real interpreter at all; that mangled a profile path with a quote, a
-# backslash, or non-ASCII text in it (json.dumps escapes the last as \uXXXX),
-# so a real parser is worth finding a real interpreter for.
+# The python netkeeper was installed with, so a real json parser is available
+# without assuming one sits beside `netkeeper` on PATH (#183 review bug 3/
+# should-fix 2: sed parsing the JSON directly instead mangled a profile path
+# with a quote, a backslash, or non-ASCII text -- json.dumps escapes the last
+# as \uXXXX). Three shapes, tried in order, and read with `head` so a symlinked
+# entry point (a `uv tool`/pipx install) resolves through it transparently:
+#   - a direct interpreter shebang (`#!/path/to/python3`, what `uv sync`/pip
+#     normally write), accepted only when its own basename looks like python;
+#   - an `env` shebang (`#!/usr/bin/env python3`), resolved the same way
+#     through PATH;
+#   - anything else -- notably `uv tool`'s own `#!/bin/sh` relaunch shim --
+#     which is never handed the snippet (it is not python), falling back
+#     instead to plain `python3` on PATH: the snippet only needs stdlib json,
+#     never the entry point's own interpreter specifically (#183 re-review
+#     should-fix 2).
 netkeeper_python=
 if [ -n "$netkeeper_bin" ]; then
   shebang=$(head -n1 "$netkeeper_bin" 2>/dev/null) || shebang=
   case $shebang in
+    '#!/usr/bin/env '*)
+      word=${shebang#'#!/usr/bin/env '}
+      word=${word%% *}
+      case $(basename "$word") in
+        python*) netkeeper_python=$(command -v "$word" 2>/dev/null) || netkeeper_python= ;;
+      esac
+      ;;
     '#!'*)
       candidate=${shebang#'#!'}
-      [ -x "$candidate" ] && netkeeper_python=$candidate
+      candidate=${candidate%% *}
+      case $(basename "$candidate") in
+        python*) [ -x "$candidate" ] && netkeeper_python=$candidate ;;
+      esac
       ;;
   esac
 fi
+[ -n "$netkeeper_python" ] || netkeeper_python=$(command -v python3 2>/dev/null) || netkeeper_python=
 
 if [ -z "$port" ] || [ -z "$profile" ]; then
   answer=
@@ -152,7 +169,11 @@ print(d["port"]); print(d["profile"]); print(d["remote"] or "")' 2>/dev/null) ||
     [ -n "$port" ] || port=$asked_port
     [ -n "$profile" ] || profile=$asked_profile
   else
-    printf 'warning: could not ask netkeeper for its port and profile; using the defaults\n' >&2
+    if [ -n "$answer" ] && [ -z "$netkeeper_python" ]; then
+      printf 'warning: netkeeper answered but no Python was found to parse it; using the defaults\n' >&2
+    else
+      printf 'warning: could not ask netkeeper for its port and profile; using the defaults\n' >&2
+    fi
     [ -n "$port" ] || port=$DEFAULT_PORT
     if [ -z "$profile" ]; then
       [ -n "$data_dir" ] || data_dir=${NETKEEPER_DATA:-"$HOME/Library/Application Support/netkeeper"}
@@ -224,6 +245,11 @@ lock_holder() {
       printf '%s\n' "$pid"
       return 0
     fi
+    # A --user-data-dir naming a different profile is positive evidence this
+    # pid is not this profile's holder, not merely the absence of evidence
+    # that it is -- lsof's fail-closed rule below is for when there is no
+    # flag to go on at all, not for overriding this (#183 re-review nit 3).
+    return 0
   fi
   lsof_out=$(lsof -a -p "$pid" -Fn 2>/dev/null)
   if [ -z "$lsof_out" ]; then
@@ -300,10 +326,13 @@ if [ -n "$pids" ] || [ -n "$holder" ]; then
   via=
   [ -n "$pids" ] || via=" (per $profile/SingletonLock)"
   other_port=$(holder_other_port "$running_pid")
+  # #183 re-review nit 4: an escape hatch for the one case none of this is
+  # proof against -- the heuristics above are still a guess, not a guarantee.
+  escape="If pid $running_pid isn't netkeeper's Chrome, remove $profile/SingletonLock."
   if [ -n "$other_port" ] && [ "$other_port" != "$port" ]; then
-    die "Chrome is running on this profile on port $other_port, not $port (pid $running_pid$via). Use --port $other_port to match it, or quit that window with Cmd-Q and run this again."
+    die "Chrome is running on this profile on port $other_port, not $port (pid $running_pid$via). Use --port $other_port to match it, or quit that window with Cmd-Q and run this again. $escape"
   fi
-  die "Chrome is running on this profile without the debugging port (pid $running_pid$via). Quit that window with Cmd-Q, then run this again: a running Chrome cannot gain the port."
+  die "Chrome is running on this profile without the debugging port (pid $running_pid$via). Quit that window with Cmd-Q, then run this again: a running Chrome cannot gain the port. $escape"
 fi
 
 # A Chrome that crashed leaves these behind. Nothing holds the profile (checked
