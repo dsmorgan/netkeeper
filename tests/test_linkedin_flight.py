@@ -177,6 +177,24 @@ def test_every_id_bearing_marker_to_a_missing_row_is_not_whole(marker: str) -> N
     assert _whole(b'9:{"x":1}\n0:["$","div",null,{"children":"' + marker.encode() + b'"}]\n')
 
 
+@pytest.mark.parametrize("start", [b"R", b"X"])
+def test_a_stream_cut_after_its_first_chunk_is_not_whole(start: bytes) -> None:
+    """#196 item 10: an ``$R`` stream (or ``$X`` async iterable) cut after its first
+    chunk still has its root, every row the root reaches, and no orphan. Only the
+    missing ``C`` row says it was cut."""
+    root = b'0:["$","div",null,{"children":"$' + start + b'9"}]\n'
+    started = b"9:" + start + b"\n"
+    chunk = b'9:{"chunk":1}\n'
+    assert not _whole(started + chunk + root)
+    assert _whole(started + chunk + b"9:C\n" + root)
+    assert _whole(started + chunk + b'9:C{"last":true}\n' + root)
+
+
+def test_a_close_for_another_stream_does_not_close_this_one() -> None:
+    root = b'0:["$","div",null,{"children":"$R9"}]\n'
+    assert not _whole(b'9:R\n9:{"chunk":1}\n8:C\n' + root)
+
+
 def test_an_orphan_row_is_not_whole() -> None:
     """A row nothing reaches from the root: a whole answer sends none."""
     assert not _whole(b'5:{"stray":true}\n0:["$","div",null,{}]\n')
