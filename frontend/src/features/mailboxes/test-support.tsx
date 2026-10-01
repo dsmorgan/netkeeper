@@ -46,11 +46,23 @@ export function status(overrides: Partial<MailboxStatus> = {}): MailboxStatus {
   }
 }
 
+/** The guided setup's progress (#302) before anything is stored. */
+export function emptySetup(overrides: Record<string, unknown> = {}) {
+  return {
+    project_id: null,
+    sender_email: null,
+    done: [],
+    steps: ['project', 'gmail_api', 'branding', 'test_user', 'client_created', 'published'],
+    ...overrides,
+  }
+}
+
 type Handler = (body: unknown) => Response
 
 /**
  * A fake backend: `routes` keyed `"METHOD /path"`, the status and list routes
  * reading `current()` on every call, so a test can change what the next fetch sees.
+ * `GET /gmail-setup` answers an empty setup unless a route says otherwise.
  */
 export function renderWithBackend(
   ui: ReactNode,
@@ -67,6 +79,9 @@ export function renderWithBackend(
     if (route !== undefined) return route(body)
     if (pathname === '/api/v1/mailboxes/status') return jsonResponse(current())
     if (pathname === '/api/v1/mailboxes') return jsonResponse(current().mailboxes)
+    if (request.method === 'GET' && pathname === '/api/v1/gmail-setup') {
+      return jsonResponse(emptySetup())
+    }
     return jsonResponse({ detail: `unexpected ${request.method} ${pathname}` }, 500)
   })
   const source = new FakeEventSource('/api/v1/events')

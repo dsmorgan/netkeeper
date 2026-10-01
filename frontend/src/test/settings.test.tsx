@@ -33,6 +33,9 @@ describe('settings', () => {
         })
       }
       if (pathname === '/api/v1/mailboxes') return jsonResponse([])
+      if (pathname === '/api/v1/gmail-setup') {
+        return jsonResponse({ project_id: null, sender_email: null, done: [], steps: [] })
+      }
       if (pathname === '/api/v1/mailboxes/status') {
         return jsonResponse({
           client_configured: false,

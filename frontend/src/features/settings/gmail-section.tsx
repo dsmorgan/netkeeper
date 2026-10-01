@@ -5,8 +5,6 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import {
   ARM_LABEL,
   armMailbox,
@@ -18,11 +16,13 @@ import {
   mailboxStatusQuery,
   navigation,
   reasonText,
-  saveClient,
   startAuthorization,
   type Mailbox,
   type MailboxArm,
 } from '@/features/mailboxes/api'
+
+import { ClientForm } from './client-form'
+import { GmailSetupWizard } from './gmail-setup-wizard'
 
 /** What the OAuth callback said, from `/settings?gmail=...&reason=...`. */
 export interface GmailOutcome {
@@ -46,29 +46,18 @@ function when(value: string | null): string {
 
 /**
  * Gmail auth (spec 11.5, P3-01): the OAuth client from your own Cloud project,
- * then one authorization on Google's page. The token lives in the Keychain; this
+ * then one authorization on Google's page, guided step by step (#302). The token lives in the Keychain; this
  * page only ever sees the mailbox's address and health.
  */
 export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
   const queryClient = useQueryClient()
   const status = useQuery(mailboxStatusQuery)
   const [editingClient, setEditingClient] = useState(false)
-  const [clientId, setClientId] = useState('')
-  const [clientSecret, setClientSecret] = useState('')
   const [disconnecting, setDisconnecting] = useState<Mailbox | null>(null)
   const [arming, setArming] = useState<{ mailbox: Mailbox; mode: MailboxArm } | null>(null)
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: mailboxKeys.all })
 
-  const save = useMutation({
-    mutationFn: saveClient,
-    onSuccess: async () => {
-      setEditingClient(false)
-      setClientId('')
-      setClientSecret('')
-      await refresh()
-    },
-  })
   const connect = useMutation({
     mutationFn: startAuthorization,
     onSuccess: (url) => navigation.assign(url),
@@ -93,15 +82,15 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
   const disarm = useMutation({ mutationFn: disarmMailbox, onSettled: refresh })
 
   const live = status.data?.mailboxes.filter((mailbox) => mailbox.status !== 'disabled') ?? []
-  const showClientForm = status.isSuccess && (!status.data.client_configured || editingClient)
 
   return (
     <Card size="sm">
       <CardHeader>
         <CardTitle level={2}>Gmail</CardTitle>
         <CardDescription>
-          The account campaigns send from. Set up your own Google Cloud project and OAuth client
-          first, as <code className="font-mono">docs/gmail-setup.md</code> describes.
+          The account campaigns send from, through an OAuth client in your own Google Cloud project.
+          The setup guide below walks you through it;{' '}
+          <code className="font-mono">docs/gmail-setup.md</code> has the same steps.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4 text-sm">
@@ -120,9 +109,23 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
         {status.isError && <p role="alert">{message(status.error)}</p>}
 
         {status.isSuccess && (
+          <GmailSetupWizard
+            status={status.data}
+            outcomeReason={outcome.gmail === 'error' ? outcome.reason : undefined}
+            onConnect={() => connect.mutate(null)}
+            connecting={connect.isPending}
+          />
+        )}
+
+        {status.isSuccess && status.data.client_configured && (
           <section aria-label="OAuth client" className="space-y-2">
-            <h3 className="font-medium">1. OAuth client</h3>
-            {status.data.client_configured && !editingClient && (
+            <h3 className="font-medium">OAuth client</h3>
+            {editingClient ? (
+              <ClientForm
+                onCancel={() => setEditingClient(false)}
+                onSaved={() => setEditingClient(false)}
+              />
+            ) : (
               <div className="flex flex-wrap items-center gap-2">
                 <code className="font-mono text-xs break-all">{status.data.client_id}</code>
                 <Button variant="ghost" size="sm" onClick={() => setEditingClient(true)}>
@@ -130,63 +133,12 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
                 </Button>
               </div>
             )}
-            {showClientForm && (
-              <form
-                className="grid gap-2"
-                onSubmit={(event) => {
-                  event.preventDefault()
-                  save.mutate({ client_id: clientId, client_secret: clientSecret })
-                }}
-              >
-                <Label htmlFor="gmail-client-id">Client ID</Label>
-                <Input
-                  id="gmail-client-id"
-                  value={clientId}
-                  onChange={(event) => setClientId(event.target.value)}
-                  placeholder="….apps.googleusercontent.com"
-                  autoComplete="off"
-                  required
-                />
-                <Label htmlFor="gmail-client-secret">Client secret</Label>
-                <Input
-                  id="gmail-client-secret"
-                  type="password"
-                  value={clientSecret}
-                  onChange={(event) => setClientSecret(event.target.value)}
-                  autoComplete="off"
-                  required
-                />
-                <p className="text-xs text-muted-foreground">
-                  Stored in the Keychain, never in the database.
-                </p>
-                {save.isError && (
-                  <p role="alert" className="text-destructive">
-                    {message(save.error)}
-                  </p>
-                )}
-                <div className="flex gap-2">
-                  <Button type="submit" size="sm" disabled={save.isPending}>
-                    {save.isPending ? 'Saving…' : 'Save client'}
-                  </Button>
-                  {editingClient && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setEditingClient(false)}
-                    >
-                      Cancel
-                    </Button>
-                  )}
-                </div>
-              </form>
-            )}
           </section>
         )}
 
-        {status.isSuccess && (
+        {status.isSuccess && status.data.mailboxes.length > 0 && (
           <section aria-label="Mailbox" className="space-y-2">
-            <h3 className="font-medium">2. Mailbox</h3>
+            <h3 className="font-medium">Mailbox</h3>
             {status.data.mailboxes.length > 0 && (
               <ul className="space-y-2">
                 {status.data.mailboxes.map((mailbox) => (
@@ -289,27 +241,16 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
               </p>
             )}
             {live.length === 0 && (
-              <div className="space-y-2">
-                <p className="text-muted-foreground">
-                  {status.data.client_configured
-                    ? 'Authorize the Gmail account on Google’s page. Google asks for read, compose, send and label access (gmail.modify); netkeeper never deletes mail.'
-                    : 'Save the OAuth client first.'}
-                </p>
-                <Button
-                  size="sm"
-                  onClick={() => connect.mutate(null)}
-                  disabled={!status.data.client_configured || connect.isPending}
-                >
-                  {connect.isPending ? 'Opening Google…' : 'Connect Gmail'}
-                </Button>
-              </div>
-            )}
-            {connect.isError && (
-              <p role="alert" className="text-destructive">
-                {message(connect.error)}
+              <p className="text-muted-foreground">
+                No mailbox is connected. Connect one in the setup guide’s last step.
               </p>
             )}
           </section>
+        )}
+        {connect.isError && (
+          <p role="alert" className="text-destructive">
+            {message(connect.error)}
+          </p>
         )}
       </CardContent>
 

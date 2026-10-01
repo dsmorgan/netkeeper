@@ -4601,6 +4601,93 @@
           }
         }
       },
+      "GmailSetupIn": {
+        "description": "The whole of the wizard's progress; a ``PUT`` replaces what was stored.",
+        "properties": {
+          "done": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 6,
+            "title": "Done",
+            "type": "array"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "sender_email": {
+            "anyOf": [
+              {
+                "maxLength": 320,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sender Email"
+          }
+        },
+        "title": "GmailSetupIn",
+        "type": "object"
+      },
+      "GmailSetupOut": {
+        "properties": {
+          "done": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Done",
+            "type": "array"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "sender_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sender Email"
+          },
+          "steps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "project_id",
+          "sender_email",
+          "done",
+          "steps"
+        ],
+        "title": "GmailSetupOut",
+        "type": "object"
+      },
       "Gt": {
         "additionalProperties": false,
         "properties": {
@@ -13937,6 +14024,61 @@
         "summary": "Export contacts as CSV, JSON, or vCard",
         "tags": [
           "exports"
+        ]
+      }
+    },
+    "/api/v1/gmail-setup": {
+      "get": {
+        "description": "Where the wizard is: the project, the sending address, the steps marked done.",
+        "operationId": "get_gmail_setup_api_v1_gmail_setup_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GmailSetupOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Gmail Setup",
+        "tags": [
+          "gmail-setup"
+        ]
+      },
+      "put": {
+        "description": "Replace the wizard's progress; answers it as stored (normalized, in order).",
+        "operationId": "put_gmail_setup_api_v1_gmail_setup_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GmailSetupIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GmailSetupOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "A project ID, address or step the wizard can't use"
+          }
+        },
+        "summary": "Put Gmail Setup",
+        "tags": [
+          "gmail-setup"
         ]
       }
     },
