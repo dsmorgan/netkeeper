@@ -73,6 +73,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.compose import campaign_label
 from netkeeper.campaigns.gmail import Gmail, GmailError, GmailNotFound, History, Message
+from netkeeper.crm import do_not_send
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import session_scope
 from netkeeper.models import (
@@ -82,6 +83,7 @@ from netkeeper.models import (
     Contact,
     ContactEmail,
     ContactSource,
+    DoNotSendReason,
     EmailStatus,
     Enrollment,
     EnrollmentStatus,
@@ -549,6 +551,12 @@ def record_reply(session: Session, user: User, reply: Reply) -> bool:
             contact.do_not_contact_reason = (
                 f"asked to unsubscribe in a reply to a campaign (message {row.id})"
             )
+        if contact is not None:
+            # Every address of theirs, so another contact holding one is not mailed (#238).
+            for email in contact.emails:
+                do_not_send.add(
+                    session, user, email.email, DoNotSendReason.OPTED_OUT, contact_id=contact.id
+                )
     if enrollment.status in LIVE:
         if reply.unsubscribe:
             engine.end_enrollment(
@@ -585,6 +593,10 @@ def record_bounce(session: Session, user: User, bounce: Bounce) -> bool:
             log.warning(
                 "message %d bounced, but its address is no longer on the contact", message.id
             )
+        # On the list whether or not a contact still holds it (#238).
+        do_not_send.add(
+            session, user, bounce.address, DoNotSendReason.BOUNCED, contact_id=message.contact_id
+        )
     if enrollment.status in LIVE:
         engine.end_enrollment(session, user, enrollment, EnrollmentStatus.BOUNCED, "bounced")
     session.flush()

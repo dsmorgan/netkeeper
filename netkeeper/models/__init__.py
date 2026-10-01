@@ -51,6 +51,7 @@ from netkeeper.models.contacts import (
     normalize_public_id,
     single_address,
 )
+from netkeeper.models.do_not_send import DO_NOT_SEND_RANK, DoNotSendAddress, DoNotSendReason
 from netkeeper.models.imports import (
     IMPORT_TABLES,
     FieldChange,
@@ -105,6 +106,7 @@ __all__ = [
     "CAMPAIGN_TABLES",
     "CONTACT_CHILDREN",
     "DEFAULT_ACCOUNT_LABEL",
+    "DO_NOT_SEND_RANK",
     "IMPORT_TABLES",
     "LIST_NAME_MAX_LENGTH",
     "LIST_TABLES",
@@ -137,6 +139,8 @@ __all__ = [
     "ContactSource",
     "ContactTag",
     "ContactTagSuppression",
+    "DoNotSendAddress",
+    "DoNotSendReason",
     "EmailKind",
     "EmailStatus",
     "Enrollment",

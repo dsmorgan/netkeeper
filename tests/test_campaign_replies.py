@@ -21,11 +21,13 @@ from test_campaign_sender import WEEK, Mail, make_mail
 from netkeeper.campaigns.gmail import GmailTransient, Message, MessageRef
 from netkeeper.campaigns.gmail_fake import FakeGmail
 from netkeeper.config import Settings
+from netkeeper.crm import do_not_send
 from netkeeper.db import session_scope
 from netkeeper.models import (
     CampaignStatus,
     Contact,
     ContactEmail,
+    DoNotSendReason,
     EmailStatus,
     Enrollment,
     EnrollmentStatus,
@@ -301,6 +303,11 @@ def test_a_bounce_marks_the_message_the_address_and_the_enrollment(mail: Mail) -
         (enrollment.contact_id, ADA): EmailStatus.BOUNCED,
         (other, ADA): EmailStatus.OK,
     }
+    # The address itself is on the do-not-send list, so the other contact is not mailed (#238).
+    listed = mail.read(
+        lambda s: [(e.email, e.reason, e.contact_id) for e in do_not_send.entries(s, mail.user)]
+    )
+    assert listed == [(ADA, DoNotSendReason.BOUNCED, enrollment.contact_id)]
     assert interactions(mail, InteractionKind.EMAIL_IN) == []
     assert mail.tick(NOW + WEEK + timedelta(hours=1)).fired == []
 
@@ -418,6 +425,10 @@ def test_an_unsubscribe_phrase_opts_out_and_sets_do_not_contact(mail: Mail) -> N
     assert contact is not None and contact.do_not_contact
     assert contact.do_not_contact_reason is not None
     assert "unsubscribe" in contact.do_not_contact_reason
+    listed = mail.read(
+        lambda s: [(e.email, e.reason, e.contact_id) for e in do_not_send.entries(s, mail.user)]
+    )
+    assert listed == [(ADA, DoNotSendReason.OPTED_OUT, contact.id)]  # #238
     assert len(inbound(mail, enrollment_id)) == 1
     asks = [
         m.asks_unsubscribe

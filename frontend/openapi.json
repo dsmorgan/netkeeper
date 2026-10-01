@@ -3286,6 +3286,70 @@
         "title": "CountMismatch",
         "type": "object"
       },
+      "DoNotSendIn": {
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "title": "DoNotSendIn",
+        "type": "object"
+      },
+      "DoNotSendOut": {
+        "properties": {
+          "contact_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Id"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/DoNotSendReason"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "reason",
+          "contact_id",
+          "created_at"
+        ],
+        "title": "DoNotSendOut",
+        "type": "object"
+      },
+      "DoNotSendReason": {
+        "description": "Why an address is on the list.",
+        "enum": [
+          "manual",
+          "invalid",
+          "bounced",
+          "opted_out"
+        ],
+        "title": "DoNotSendReason",
+        "type": "string"
+      },
       "DuplicateContact": {
         "description": "The ``409`` body of adding someone already in the address book (#303).\n\n``contact_id`` is the contact to open, the first of ``contact_ids``.\n``matched_by``: ``linkedin`` (the profile URL), ``email``, or ``name``\n(first name, last name, and company; send ``allow_name_match`` to add anyway).",
         "properties": {
@@ -13582,6 +13646,104 @@
         "summary": "List Next Fires",
         "tags": [
           "dashboard"
+        ]
+      }
+    },
+    "/api/v1/do-not-send": {
+      "get": {
+        "description": "Every address on the do-not-send list, newest first.",
+        "operationId": "list_do_not_send",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DoNotSendOut"
+                  },
+                  "title": "Response List Do Not Send",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Entries",
+        "tags": [
+          "do-not-send"
+        ]
+      },
+      "post": {
+        "description": "Put an address on the list by hand. An address already there keeps its reason.",
+        "operationId": "add_do_not_send",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DoNotSendIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DoNotSendOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Not one bare email address"
+          }
+        },
+        "summary": "Add Entry",
+        "tags": [
+          "do-not-send"
+        ]
+      }
+    },
+    "/api/v1/do-not-send/{entry_id}": {
+      "delete": {
+        "description": "Take an address off the list, so campaigns may send to it again.",
+        "operationId": "remove_do_not_send",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entry_id",
+            "required": true,
+            "schema": {
+              "title": "Entry Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such entry"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Entry",
+        "tags": [
+          "do-not-send"
         ]
       }
     },

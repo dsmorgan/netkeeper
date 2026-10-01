@@ -2274,3 +2274,120 @@ def test_0028_downgrades_to_snapshots_without_it(migration_engine: Engine) -> No
     assert "position_changed" not in columns
     with migration_engine.begin() as connection:
         assert _count(connection, "contact_snapshots") == 1
+
+
+# --- the do-not-send list (0029, #238) ------------------------------------------------------
+
+
+def _insert_email(
+    connection: Connection, *, contact_id: int, email: str, status: str, user_id: int = 1
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO contact_emails (user_id, contact_id, email, kind, is_primary, status,"
+            " source, observed_at, created_at, updated_at)"
+            " VALUES (:user_id, :contact_id, :email, 'other', false, :status, 'manual',"
+            " :t, :t, :t)"
+        ),
+        {
+            "user_id": user_id,
+            "contact_id": contact_id,
+            "email": email,
+            "status": status,
+            "t": STAMP,
+        },
+    )
+
+
+def _seed_address_statuses(connection: Connection) -> None:
+    """Contact 1 bounced at a@, contact 2 invalid at a@ and b@, contact 3 opted out at c@
+    and holds a@ as ok; user 2's contact 4 bounced at d@. Contact 5 holds e+x@ ok."""
+    _seed_users(connection, 1, 2)
+    for contact_id, user_id in ((1, 1), (2, 1), (3, 1), (4, 2), (5, 1)):
+        _insert_contact(connection, id=contact_id, user_id=user_id)
+    _insert_email(connection, contact_id=1, email="a@example.test", status="bounced")
+    _insert_email(connection, contact_id=2, email="a@example.test", status="invalid")
+    _insert_email(connection, contact_id=2, email="b@example.test", status="invalid")
+    _insert_email(connection, contact_id=3, email="c@example.test", status="ok")
+    _insert_email(connection, contact_id=3, email="a+x@example.test", status="ok")
+    _insert_email(connection, contact_id=4, email="d@example.test", status="bounced", user_id=2)
+    _insert_email(connection, contact_id=5, email="e+x@example.test", status="ok")
+    _insert_campaign(connection, id=1)
+    _insert_enrollment(connection, id=1, campaign_id=1, contact_id=3)
+    connection.execute(text("UPDATE enrollments SET status = 'opted_out' WHERE id = 1"))
+
+
+def test_0029_lists_every_bounced_invalid_and_opted_out_address(
+    migration_engine: Engine,
+) -> None:
+    """The strongest reason wins; a +tag is its own address; each user keeps their own."""
+    migrations.upgrade(migration_engine, "0028")
+    with migration_engine.begin() as connection:
+        _seed_address_statuses(connection)
+    migrations.upgrade(migration_engine, "0029")
+    with migration_engine.begin() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT user_id, email, reason, contact_id FROM do_not_send_addresses"
+                " ORDER BY user_id, email"
+            )
+        ).all()
+    assert [tuple(row) for row in rows] == [
+        (1, "a+x@example.test", "opted_out", 3),
+        (1, "a@example.test", "bounced", 1),
+        (1, "b@example.test", "invalid", 2),
+        (1, "c@example.test", "opted_out", 3),
+        (2, "d@example.test", "bounced", 4),
+    ]
+
+
+def test_0029_entries_outlive_their_contact_and_are_unique_per_user(
+    migration_engine: Engine,
+) -> None:
+    migrations.upgrade(migration_engine, "0029")
+    with migration_engine.begin() as connection:
+        _seed_address_statuses(connection)
+        connection.execute(
+            text(
+                "INSERT INTO do_not_send_addresses (user_id, email, reason, contact_id,"
+                " created_at, updated_at) VALUES (1, 'z@example.test', 'bounced', 1, :t, :t)"
+            ),
+            {"t": STAMP},
+        )
+        connection.execute(text("DELETE FROM contact_emails WHERE contact_id = 1"))
+        connection.execute(text("DELETE FROM contacts WHERE id = 1"))
+        row = connection.execute(
+            text("SELECT contact_id FROM do_not_send_addresses WHERE email = 'z@example.test'")
+        ).one()
+    assert row.contact_id is None
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO do_not_send_addresses (user_id, email, reason, contact_id,"
+                " created_at, updated_at) VALUES (1, 'z@example.test', 'manual', NULL, :t, :t)"
+            ),
+            {"t": STAMP},
+        )
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO do_not_send_addresses (user_id, email, reason, contact_id,"
+                " created_at, updated_at) VALUES (1, 'y@example.test', 'bogus', NULL, :t, :t)"
+            ),
+            {"t": STAMP},
+        )
+
+
+def test_0029_downgrades_to_no_list(migration_engine: Engine) -> None:
+    """The statuses on the contacts stay; only the list goes."""
+    migrations.upgrade(migration_engine, "0028")
+    with migration_engine.begin() as connection:
+        _seed_address_statuses(connection)
+    migrations.upgrade(migration_engine, "0029")
+    migrations.downgrade(migration_engine, "0028")
+    assert "do_not_send_addresses" not in inspect(migration_engine).get_table_names()
+    with migration_engine.begin() as connection:
+        assert _count(connection, "contact_emails") == 7
+    migrations.upgrade(migration_engine, "0029")  # and back up again, filled the same way
+    with migration_engine.begin() as connection:
+        assert _count(connection, "do_not_send_addresses") == 5

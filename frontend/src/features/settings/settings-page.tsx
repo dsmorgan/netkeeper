@@ -4,6 +4,7 @@ import { meQuery } from '@/api/queries'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 
+import { DoNotSendSection } from './do-not-send-section'
 import { type GmailOutcome, GmailSection } from './gmail-section'
 import { PostureSection } from './posture-section'
 
@@ -29,6 +30,8 @@ export function SettingsPage({ gmail = {} }: { gmail?: GmailOutcome }) {
       </Card>
 
       <GmailSection outcome={gmail} />
+
+      <DoNotSendSection />
 
       <PostureSection />
 

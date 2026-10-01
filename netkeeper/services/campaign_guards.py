@@ -50,6 +50,7 @@ from typing import Final
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, aliased, selectinload
 
+from netkeeper.crm import do_not_send
 from netkeeper.crm.contacts import sendable_email
 from netkeeper.crm.interactions import OUTBOUND_KINDS
 from netkeeper.models import (
@@ -58,6 +59,7 @@ from netkeeper.models import (
     CampaignStep,
     Contact,
     ContactEmail,
+    DoNotSendReason,
     EmailStatus,
     Enrollment,
     EnrollmentStatus,
@@ -87,6 +89,7 @@ class Reason(enum.StrEnum):
     NO_EMAIL = "no_email"
     EMAIL_BOUNCED = "email_bounced"
     EMAIL_INVALID = "email_invalid"
+    DO_NOT_SEND = "do_not_send"
     ADDRESS_BOUNCED_ELSEWHERE = "address_bounced_elsewhere"
     NO_LINKEDIN = "no_linkedin"
     DUPLICATE_ADDRESS = "duplicate_address"
@@ -146,6 +149,10 @@ class ContactFacts:
     address as bounced or invalid. ``duplicate_address``: the address is already
     on another enrollment in this campaign (see :func:`load_facts` for which).
     Both are ``False`` for a contact with no sendable address.
+
+    ``do_not_send`` is why the do-not-send list holds the contact's address (#238,
+    Part B), or ``None``: an opt-out on any of the contact's addresses, otherwise
+    the entry for its sendable address.
     """
 
     contact_id: int
@@ -161,6 +168,7 @@ class ContactFacts:
     last_outbound_at: datetime | None
     address_bounced_elsewhere: bool
     duplicate_address: bool
+    do_not_send: DoNotSendReason | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +259,22 @@ def has_channel_address(facts: ContactFacts, channel: TemplateChannel, *_: objec
     return Reason.UNKNOWN_CHANNEL if guard is None else guard(facts)
 
 
+def address_not_on_do_not_send(
+    facts: ContactFacts, channel: TemplateChannel, *_: object
+) -> Reason | None:
+    """The address is not on the do-not-send list (#238, Part B).
+
+    An opt-out excludes on every channel: its owner asked not to be contacted. Any
+    other entry (a bounce, an invalid address, one a person added) excludes email
+    steps only, as the contact's own address status does (spec 11.5).
+    """
+    if facts.do_not_send is None:
+        return None
+    if facts.do_not_send is DoNotSendReason.OPTED_OUT or channel is TemplateChannel.EMAIL:
+        return Reason.DO_NOT_SEND
+    return None
+
+
 def address_not_bounced_elsewhere(
     facts: ContactFacts, channel: TemplateChannel, *_: object
 ) -> Reason | None:
@@ -308,6 +332,7 @@ GUARDS: Final[tuple[Guard, ...]] = (
     not_do_not_contact,
     not_disconnected,
     has_channel_address,
+    address_not_on_do_not_send,
     address_not_bounced_elsewhere,
     not_duplicate_address,
     not_in_another_campaign,
@@ -434,6 +459,7 @@ _LABELS: Final[Mapping[Reason, str]] = {
     Reason.NO_EMAIL: "no email",
     Reason.EMAIL_BOUNCED: "bounced email",
     Reason.EMAIL_INVALID: "invalid email",
+    Reason.DO_NOT_SEND: "address on the do-not-send list",
     Reason.ADDRESS_BOUNCED_ELSEWHERE: "address bounced on another contact",
     Reason.NO_LINKEDIN: "no LinkedIn profile",
     Reason.DUPLICATE_ADDRESS: "address already in this campaign",
@@ -527,6 +553,9 @@ def load_facts(
         if email is not None:
             sendable[contact.id] = email.email
     bounced = _bounced_elsewhere(session, user, sendable)
+    listed = do_not_send.reasons(
+        session, user, (e.email for contact in contacts for e in contact.emails)
+    )
     duplicates = _duplicate_addresses(session, user, sendable, campaign_id, enrollment_id)
     facts: dict[int, ContactFacts] = {}
     for contact in contacts:
@@ -544,8 +573,18 @@ def load_facts(
             last_outbound_at=last_out.get(contact.id),
             address_bounced_elsewhere=contact.id in bounced,
             duplicate_address=contact.id in duplicates,
+            do_not_send=_listed(contact, sendable.get(contact.id), listed),
         )
     return facts
+
+
+def _listed(
+    contact: Contact, sendable: str | None, listed: Mapping[str, DoNotSendReason]
+) -> DoNotSendReason | None:
+    """Why the do-not-send list holds this contact's address: see :class:`ContactFacts`."""
+    if any(listed.get(e.email) is DoNotSendReason.OPTED_OUT for e in contact.emails):
+        return DoNotSendReason.OPTED_OUT
+    return None if sendable is None else listed.get(sendable)
 
 
 def _bounced_elsewhere(session: Session, user: User, sendable: Mapping[int, str]) -> set[int]:

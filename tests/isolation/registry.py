@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from netkeeper.campaigns import templates as template_service
 from netkeeper.config import Settings
+from netkeeper.crm import do_not_send
 from netkeeper.crm import import_runs as import_service
 from netkeeper.crm import lists as list_service
 from netkeeper.crm import positions as position_service
@@ -24,6 +25,7 @@ from netkeeper.models import (
     ContactList,
     ContactSnapshot,
     ContactSource,
+    DoNotSendReason,
     ImportRun,
     InteractionKind,
     ListKind,
@@ -474,6 +476,13 @@ def _seed_inbox(session: Session, user: User) -> int:
     return 2
 
 
+def _seed_do_not_send(session: Session, user: User) -> int:
+    """Two of ``user``'s addresses on the do-not-send list (#238): one by hand, one bounced."""
+    do_not_send.add_by_hand(session, user, f"hand-{user.id}@example.test")
+    do_not_send.add(session, user, f"bounced-{user.id}@example.test", DoNotSendReason.BOUNCED)
+    return 2
+
+
 def _own_campaign(session: Session, user: User) -> dict[str, str]:
     """``campaign_id`` of the user's first campaign; the placeholder points nowhere when
     they have none, which the endpoint answers ``404``."""
@@ -554,6 +563,7 @@ REGISTRY: list[ListEndpoint] = [
         path_params=_own_campaign,
     ),
     ListEndpoint(f"{API_PREFIX}/inbox", _seed_inbox, paged_count),
+    ListEndpoint(f"{API_PREFIX}/do-not-send", _seed_do_not_send, array_count),
     ListEndpoint(f"{API_PREFIX}/dashboard/next-fires", _seed_next_fires, paged_count),
     ListEndpoint(f"{API_PREFIX}/dashboard/changed-jobs", _seed_changed_jobs, paged_count),
 ]
