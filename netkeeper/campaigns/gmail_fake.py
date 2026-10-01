@@ -18,8 +18,12 @@ get it wrong:
   takes a draft out of ``drafts.list`` and leaves its message labelled
   ``SCHEDULED`` (new id, or the draft's own with ``keep_id``), Message-ID kept,
   in the same thread, sent to no one. :meth:`FakeGmail.send_scheduled` is Gmail
-  delivering it later: it becomes ``SENT`` at the delivery time, id kept.
-  ``in:scheduled`` finds it until then (#278).
+  delivering it later: it becomes ``SENT`` at the delivery time, id kept (or,
+  with ``keep_date``, its scheduling date). ``in:scheduled`` finds it until then
+  (#278). :meth:`FakeGmail.cancel_scheduled` puts it back in Drafts under a new
+  draft id and message id. Whether Gmail labels a scheduled message ``SENT`` as
+  well, and whether it re-dates it at delivery, is unconfirmed: ``with_sent`` and
+  ``keep_date`` let a test take either answer.
 - **History.** One ``history_id`` that only grows: every added message, label
   change and draft moves it on, and each message carries the id of its last
   change. :meth:`FakeGmail.history` returns the messages added after a start,
@@ -383,18 +387,25 @@ class FakeGmail:
         return MessageRef(sent.id, sent.thread_id)
 
     def schedule_draft(
-        self, draft_id: str, *, at: datetime | None = None, keep_id: bool = False
+        self,
+        draft_id: str,
+        *,
+        at: datetime | None = None,
+        keep_id: bool = False,
+        with_sent: bool = False,
     ) -> MessageRef:
         """The person pressing Schedule send on a draft: the draft leaves ``drafts.list``
         and its message waits, ``SCHEDULED``, in the same thread, Message-ID kept, sent
         to no one until :meth:`send_scheduled`. A new message id unless ``keep_id``, as
         with :meth:`send_draft`. ``at`` is when Gmail files it (its internal date until
-        it is delivered)."""
+        it is delivered). ``with_sent`` labels it ``SENT`` too, before it goes out:
+        whether Gmail does is unconfirmed, so the engine must read both right."""
         draft = self._messages[self._drafts[draft_id]]
         _require_recipient(draft.parsed)
         del self._drafts[draft_id]
+        labels = {"SCHEDULED", "SENT"} if with_sent else {"SCHEDULED"}
         if keep_id:
-            draft.labels = {"SCHEDULED"}
+            draft.labels = labels
             draft.internal_date = at or self.clock()
             draft.history_id = self._bump()
             return MessageRef(draft.id, draft.thread_id)
@@ -402,7 +413,7 @@ class FakeGmail:
         scheduled = _Stored(
             id=self._new_id(),
             thread_id=draft.thread_id,
-            labels={"SCHEDULED"},
+            labels=labels,
             history_id=self._bump(),
             internal_date=at or self.clock(),
             parsed=draft.parsed,
@@ -410,15 +421,36 @@ class FakeGmail:
         self._store(scheduled)
         return MessageRef(scheduled.id, scheduled.thread_id)
 
-    def send_scheduled(self, message: MessageRef, *, at: datetime | None = None) -> MessageRef:
-        """Gmail delivering a scheduled message at its time: ``SENT`` from ``at``, id kept."""
-        stored = self._get(message.id)
-        if "SCHEDULED" not in stored.labels:
-            raise ValueError("not a scheduled message")
+    def send_scheduled(
+        self, message: MessageRef, *, at: datetime | None = None, keep_date: bool = False
+    ) -> MessageRef:
+        """Gmail delivering a scheduled message at its time: ``SENT`` from ``at``, id kept.
+        With ``keep_date``, its internal date stays the one it was scheduled with:
+        whether Gmail re-dates it is unconfirmed (#278 review)."""
+        stored = self._scheduled(message)
         stored.labels = {"SENT"}
-        stored.internal_date = at or self.clock()
+        if not keep_date:
+            stored.internal_date = at or self.clock()
         stored.history_id = self._bump()
         return MessageRef(stored.id, stored.thread_id)
+
+    def cancel_scheduled(self, message: MessageRef) -> Draft:
+        """The person canceling a Schedule send: the message goes back to Drafts as a
+        new draft, with a new draft id and message id, Message-ID kept (#278 review)."""
+        stored = self._scheduled(message)
+        self._remove(stored)
+        draft = _Stored(
+            id=self._new_id(),
+            thread_id=stored.thread_id,
+            labels={"DRAFT"},
+            history_id=self._bump(),
+            internal_date=self.clock(),
+            parsed=stored.parsed,
+        )
+        self._store(draft)
+        draft_id = f"r{next(self._drafts_made)}"
+        self._drafts[draft_id] = draft.id
+        return Draft(id=draft_id, message=MessageRef(draft.id, draft.thread_id))
 
     def discard_draft(self, draft_id: str) -> None:
         """The person deleting a draft instead of sending it."""
@@ -488,6 +520,12 @@ class FakeGmail:
         queued = self._failures.get(method)
         if queued:
             raise queued.pop(0)
+
+    def _scheduled(self, message: MessageRef) -> _Stored:
+        stored = self._get(message.id)
+        if "SCHEDULED" not in stored.labels:
+            raise ValueError("not a scheduled message")
+        return stored
 
     def _bump(self) -> int:
         self._history_id += 1
