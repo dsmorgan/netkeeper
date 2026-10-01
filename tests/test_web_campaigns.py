@@ -11,6 +11,7 @@ from typing import Any
 
 import factories
 import httpx
+import pytest
 from campaign_fakes import make_mailbox
 from fastapi import FastAPI
 from sqlalchemy import select
@@ -202,7 +203,9 @@ async def test_enroll_from_a_filter_sets_the_source_on_a_draft_only(
 async def test_pause_and_resume(running_app: FastAPI, client: httpx.AsyncClient) -> None:
     factory: sessionmaker[Session] = running_app.state.session_factory
     with session_scope(factory, write=True) as session:
-        campaign_id = factories.make_campaign(session, _local(session)).id  # active
+        user = _local(session)
+        mailbox_id = make_mailbox(session, user).id
+        campaign_id = factories.make_campaign(session, user, mailbox_id=mailbox_id).id  # active
     base = f"/api/v1/campaigns/{campaign_id}"
 
     paused = await client.post(f"{base}/pause", headers=CSRF)
@@ -499,3 +502,46 @@ async def test_the_next_send_counts_only_active_enrollments(
 
     assert listed[campaign_id]["next_action_at"] == "2030-01-02T15:00:00Z"
     assert detail["next_action_at"] == "2030-01-02T15:00:00Z"  # the detail page's too (#299)
+
+
+@pytest.mark.parametrize("status", [MailboxStatus.REAUTH_REQUIRED, MailboxStatus.DISABLED])
+async def test_resume_is_refused_while_the_mailbox_is_not_ok(
+    running_app: FastAPI, client: httpx.AsyncClient, status: MailboxStatus
+) -> None:
+    """As activation is (#299): a mailbox that broke while the campaign was paused."""
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        mailbox = make_mailbox(session, user)
+        campaign_id = factories.make_campaign(
+            session, user, mailbox_id=mailbox.id, status=CampaignStatus.PAUSED
+        ).id
+        mailbox.status = status
+        email = mailbox.email
+    base = f"/api/v1/campaigns/{campaign_id}"
+
+    refused = await client.post(f"{base}/resume", headers=CSRF)
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == f"{email} is {status}, not ok"
+    assert (await client.get(base)).json()["status"] == "paused"
+    with session_scope(factory, write=True) as session:
+        session.scalars(scoped(_local(session), Mailbox)).one().status = MailboxStatus.OK
+    assert (await client.post(f"{base}/resume", headers=CSRF)).status_code == 200
+
+
+async def test_resume_of_a_linkedin_only_campaign_needs_no_mailbox(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        campaign_id = factories.make_campaign(
+            session,
+            _local(session),
+            channels=(TemplateChannel.LINKEDIN,),
+            status=CampaignStatus.PAUSED,
+        ).id
+
+    resumed = await client.post(f"/api/v1/campaigns/{campaign_id}/resume", headers=CSRF)
+
+    assert resumed.status_code == 200, resumed.text

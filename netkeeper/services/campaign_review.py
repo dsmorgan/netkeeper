@@ -922,9 +922,7 @@ def missing(
         out.append(
             Missing("test_sends", "email steps with no current test send", step_positions=untested)
         )
-    if any(step.channel is TemplateChannel.EMAIL for step in steps) and (
-        gap := _mailbox_gap(session, user, campaign)
-    ):
+    if gap := mailbox_gap(session, user, campaign):
         out.append(Missing("mailbox", gap))
     if not steps:
         out.append(Missing("lint", "the campaign has no steps"))
@@ -947,9 +945,14 @@ def missing(
     return out
 
 
-def _mailbox_gap(session: Session, user: User, campaign: Campaign) -> str | None:
-    """Why the campaign's mailbox cannot send now, or None when it is ``ok`` (#299): one
-    that went ``reauth_required`` or ``disabled`` after its test send blocks activation."""
+def mailbox_gap(session: Session, user: User, campaign: Campaign) -> str | None:
+    """Why the campaign's mailbox cannot send now, or None when it is ``ok`` or the
+    campaign has no email step (#299): one that went ``reauth_required`` or ``disabled``
+    after its test send blocks activation, and resuming
+    (:func:`netkeeper.services.campaigns.resume`)."""
+    steps = _steps(session, user, campaign.id)
+    if not any(step.channel is TemplateChannel.EMAIL for step in steps):
+        return None
     mailbox = (
         None
         if campaign.mailbox_id is None
