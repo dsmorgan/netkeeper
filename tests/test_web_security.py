@@ -1,5 +1,8 @@
+import json
+
 import httpx
 import pytest
+from starlette.types import Message, Receive, Scope, Send
 
 from netkeeper.web.security import (
     RULE_CLIENT_HEADER,
@@ -140,3 +143,95 @@ def test_the_host_names_are_loopback_only() -> None:
     assert host_violation({}, LOOPBACK_HOSTNAMES)
     for good in ("127.0.0.1:8000", "localhost", "[::1]:8000"):
         assert not host_violation({"host": good}, LOOPBACK_HOSTNAMES), good
+
+
+# #177 G2: a Host that is not a plain name and an optional port is refused. None of
+# these is one a browser sends; each is refused rather than parsed and guessed at.
+MALFORMED_HOSTS = [
+    # the four from the review
+    "evil.com@127.0.0.1",
+    "127.0.0.1/evil",
+    "127.0.0.1?x",
+    "localhost:abc",
+    # the rest of @ / ? # \ and whitespace
+    "localhost@evil.example",
+    "localhost#x",
+    "127.0.0.1\\evil",
+    "[::1]/x",
+    "127.0.0.1 ",
+    " localhost",
+    "local host",
+    "localhost\t",
+    "localhost:8000\r\n",
+    # ports that are not a number from 1 to 65535
+    "localhost:",
+    "[::1]:",
+    "localhost:0",
+    "localhost:65536",
+    "127.0.0.1:99999999",
+    "localhost:-1",
+    "localhost:+1",
+    "localhost:8o00",
+    "localhost:" + chr(0x661),  # an Arabic-Indic digit one
+    "localhost:80:80",
+]
+
+WELL_FORMED_LOOPBACK_HOSTS = [
+    "127.0.0.1",
+    "127.0.0.1:8000",
+    "localhost",
+    "localhost:5173",
+    "LOCALHOST:5173",
+    "[::1]",
+    "[::1]:8000",
+    "localhost:1",
+    "localhost:65535",
+]
+
+
+@pytest.mark.parametrize("host", MALFORMED_HOSTS)
+def test_a_malformed_host_is_refused(host: str) -> None:
+    from netkeeper.web.security import LOOPBACK_HOSTNAMES, host_violation
+
+    assert host_violation({"host": host}, LOOPBACK_HOSTNAMES)
+
+
+@pytest.mark.parametrize("host", WELL_FORMED_LOOPBACK_HOSTS)
+def test_a_well_formed_loopback_host_is_accepted(host: str) -> None:
+    from netkeeper.web.security import LOOPBACK_HOSTNAMES, host_violation
+
+    assert not host_violation({"host": host}, LOOPBACK_HOSTNAMES)
+
+
+@pytest.mark.parametrize(
+    "host", ["evil.com@127.0.0.1", "127.0.0.1/evil", "127.0.0.1?x", "localhost:abc"]
+)
+async def test_the_middleware_answers_421_for_a_malformed_host(host: str) -> None:
+    """The same four, through the middleware: refused before any route sees them."""
+    from netkeeper.web.security import RULE_HOST, CSRFMiddleware
+
+    reached: list[str] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        reached.append(scope["path"])
+
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: Scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/v1/health",
+        "scheme": "http",
+        "headers": [(b"host", host.encode("latin-1"))],
+    }
+    await CSRFMiddleware(app)(scope, receive, send)
+
+    assert reached == []
+    assert sent[0]["status"] == 421
+    assert json.loads(sent[1]["body"])["rule"] == RULE_HOST

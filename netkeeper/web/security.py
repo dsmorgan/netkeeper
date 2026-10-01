@@ -14,9 +14,19 @@ as itself, so the origin rule alone waves it through, header or not (a
 same-origin script may set any header). So every request, reads included, must
 name this machine in ``Host``: ``127.0.0.1``, ``localhost``, or ``::1``, plus
 the configured ``web.host``. Anything else answers ``421 Misdirected Request``.
-The port is not checked: the attacker's hostname is what gives a rebinding
-away, and the Vite dev server proxies ``/api`` with ``changeOrigin: false``, so
-a dev request arrives naming the dev server's own port (``localhost:5173``).
+The port's value is not checked: the attacker's hostname is what gives a
+rebinding away, and the Vite dev server proxies ``/api`` with ``changeOrigin:
+false``, so a dev request arrives naming the dev server's own port
+(``localhost:5173``). A ``Host`` that is not a plain name and an optional port
+is refused too (#177): one containing ``@``, ``/``, ``?``, ``#``, a backslash, or whitespace
+(``evil.example@127.0.0.1``, ``127.0.0.1/evil``), or with a port that is not a
+number from 1 to 65535 (``localhost:abc``). A browser never sends any of these,
+so none of them was a way around the check; refusing them keeps the parser from
+having to guess what they mean.
+
+With ``web.host = "0.0.0.0"`` (a container published on a LAN), a request to the
+machine's LAN address answers ``421`` as well. That is intended: there is no
+login, so the server answers only requests addressed to loopback (spec 15).
 """
 
 from __future__ import annotations
@@ -49,6 +59,8 @@ _MESSAGES = {
         " netkeeper only answers requests addressed to its loopback address"
     ),
 }
+#: Characters a ``Host`` header never contains (#177): user info, path, query, fragment.
+_NOT_IN_HOST = frozenset("@/?#\\")
 _SAME_ORIGIN_SITES = frozenset({"same-origin", "none"})
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
@@ -77,13 +89,26 @@ def csrf_violation(
 
 
 def host_violation(headers: Mapping[str, str], allowed: frozenset[str]) -> bool:
-    """Whether ``Host`` fails to name one of ``allowed`` (lower-cased hostnames, no port)."""
+    """Whether ``Host`` fails to name one of ``allowed`` (lower-cased hostnames, no port).
+
+    ``Host`` must be a name, or a bracketed IPv6 address, and an optional port
+    from 1 to 65535: nothing that reads as user info, a path, a query, or a
+    fragment, and no whitespace (#177).
+    """
     host = headers.get("host", "")
+    if not host or any(char in _NOT_IN_HOST or char.isspace() for char in host):
+        return True
+    if host.endswith(":"):  # a port separator with no port
+        return True
     try:
-        hostname = urlsplit(f"//{host}").hostname
+        parts = urlsplit(f"//{host}")
+        hostname = parts.hostname
+        port = parts.port  # ValueError when not a number from 0 to 65535
     except ValueError:
         return True
-    return not host or hostname is None or hostname.lower() not in allowed
+    if port == 0:
+        return True
+    return hostname is None or hostname.lower() not in allowed
 
 
 def rejection_message(rule: str) -> str:

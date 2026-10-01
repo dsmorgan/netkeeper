@@ -60,6 +60,7 @@ from netkeeper.config import LinkedInSettings
 from netkeeper.db import CancelledWhileFailing, is_writer, off_loop, session_scope
 from netkeeper.linkedin import activity_lock, pacing
 from netkeeper.linkedin.classify import Outcome
+from netkeeper.linkedin.errors import BrowserUnavailable
 from netkeeper.models import (
     JsonValue,
     SyncRun,
@@ -374,26 +375,39 @@ def request_cancel(
     :class:`RunFinished` for a run that already ended. A run left behind by a
     process that went away (see :func:`create_run`) has nobody to read the flag,
     so it is marked ``failed`` at once instead, and returned.
+
+    The flag is set first, stale or not (#177 G1). "Stale" is judged from this
+    process's lock files, so a live run in another data directory that shares
+    this database looks stale from here. Its runner still reads the flag, and
+    the ``failed`` status, and stops.
     """
     _require_writer(session)
     _require_aware(now)
     run = get_run(session, user, run_id)
     if run.status is not SyncRunStatus.RUNNING:
         raise RunFinished(f"run {run_id} already ended {run.status.value}")
-    if _stale(run, now=now, held=browser_held or browser_held_for(session)):
-        _fail_stale(run, now=now)
-        return run
     if run.cancel_requested_at is None:
         run.cancel_requested_at = now
         log.info("cancel requested for run %d", run_id)
+    if _stale(run, now=now, held=browser_held or browser_held_for(session)):
+        _fail_stale(run, now=now)
     return run
 
 
 def cancel_requested(session: Session, user: User, run_id: int) -> bool:
-    """Whether a person asked the run to stop. Read-only."""
-    statement = scoped(user, SyncRun).with_only_columns(SyncRun.cancel_requested_at)
-    value = session.scalar(statement.where(SyncRun.id == run_id))
-    return value is not None
+    """Whether the run must stop: a person asked it to, or it is no longer ``running``.
+
+    A run that something else already ended (marked ``failed`` as left behind by
+    another process that shares this database, #177 G1) has nobody waiting for
+    its work, so its runner stops at the next check as it would for a cancel.
+    A run that does not exist reads as not cancelled. Read-only.
+    """
+    statement = scoped(user, SyncRun).with_only_columns(SyncRun.cancel_requested_at, SyncRun.status)
+    row = session.execute(statement.where(SyncRun.id == run_id)).one_or_none()
+    if row is None:
+        return False
+    requested_at, status = row
+    return requested_at is not None or status is not SyncRunStatus.RUNNING
 
 
 def fail_interrupted_runs(
@@ -511,7 +525,7 @@ STOP_REASON_TEXT: Final[Mapping[str, str]] = {
     "answer_lost_breaker": "refused: the answer-lost limit is tripped",
     "no_runner": "refused: no runner for this kind",
     "browser_busy": "the browser was busy with another run",
-    "browser_unavailable": "Chrome was not reachable",
+    "browser_unavailable": "Chrome was not reachable or went away mid-run",
     "interrupted": "the netkeeper process running it stopped",
     "error": "an error stopped it",
 }
@@ -541,8 +555,9 @@ async def recording(
     unless the database write in flight when it landed failed too
     (:class:`~netkeeper.db.CancelledWhileFailing`, #266), which is ``failed``,
     "error"; any other exception is ``failed``, with the first line of its
-    message. A run
-    the block already finished is left as it is.
+    message, except a lost browser (:class:`~netkeeper.linkedin.errors.BrowserUnavailable`),
+    which is ``failed``, "browser_unavailable". A run the block already finished is
+    left as it is.
 
     The ending is written off the event loop (:func:`netkeeper.db.off_loop`,
     #259), after any database work the block still had in flight.
@@ -590,6 +605,20 @@ async def recording(
             SyncRunStatus.ABORTED,
             "interrupted",
             None,
+        )
+        raise
+    except BrowserUnavailable as exc:
+        # Chrome went away mid-run (#177): the same reason as a run that could not
+        # attach at all, so the run reads "Chrome was not reachable", not "error".
+        await off_loop(
+            _finish_quietly,
+            factory,
+            user_id,
+            run_id,
+            clock,
+            SyncRunStatus.FAILED,
+            "browser_unavailable",
+            exc,
         )
         raise
     except Exception as exc:

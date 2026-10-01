@@ -33,6 +33,9 @@ from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin.activity_lock import LEGACY_SHARED_KEY
 from netkeeper.linkedin.activity_lock import SINGLE_ACCOUNT_KEY as SINGLE_ACCOUNT_KEY
 from netkeeper.linkedin.body_tap import BodyTap
+from netkeeper.linkedin.errors import BrowserBusy as BrowserBusy
+from netkeeper.linkedin.errors import BrowserError as BrowserError
+from netkeeper.linkedin.errors import BrowserUnavailable as BrowserUnavailable
 from netkeeper.linkedin.observe import (
     ListenablePage,
     Observation,
@@ -51,27 +54,6 @@ ATTACH = "attach"
 #: the sidecar's Chrome has its own (spec 9.1). netkeeper never creates or writes it:
 #: Chrome does, when the user runs the command `netkeeper browser launch` prints.
 CHROME_PROFILE_DIRNAME = "chrome-profile"
-
-
-class BrowserError(RuntimeError):
-    """Base class for the ways a browser path gives up."""
-
-
-class BrowserUnavailable(BrowserError):
-    """Chrome is not reachable, or it went away mid-run and one reattach did not fix it.
-
-    The run aborts. Nothing retries it here: the scheduler parks a retry 20 to 50
-    minutes out (spec 9.9), and no code path may answer this by starting a browser.
-    """
-
-
-class BrowserBusy(BrowserError):
-    """Another run, in this process or another netkeeper process, holds the account's lock.
-
-    Two CDP clients on one browser drop each other's connection, so the caller waits
-    or reports ``busy`` (spec 9.9); it never opens a second browser to get around it.
-    The message names the holder (command, pid, since when) when the holder left a note.
-    """
 
 
 class PageLike(Protocol):
