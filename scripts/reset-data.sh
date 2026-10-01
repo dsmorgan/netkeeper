@@ -99,7 +99,15 @@ require_tools() {
 
 # Every process holding the database or its sidecars open, one pid per line.
 # lsof exits 1 both when nothing matches (the common case) and on some errors,
-# so an error is told apart by what it wrote to stderr.
+# so an error is told apart by what it wrote to stderr -- except a WARNING,
+# which lsof prints for a mount unrelated to our files (a stale network share)
+# while still answering the question we asked. A WARNING is two or three
+# lines -- "lsof: WARNING: ..." then one or two indented continuation lines
+# ("Output information may be incomplete.", "assuming ... from mount table")
+# that do not themselves start with "lsof: WARNING" -- so both are filtered by
+# what they look like (indented) rather than matched line by line; a real
+# error does not indent its lines. Only something left over after that means
+# lsof could not answer (#183 review bug 7).
 holders() {
   set --
   for suffix in '' '-wal' '-shm'; do
@@ -108,9 +116,10 @@ holders() {
   [ $# -gt 0 ] || return 0
   err=$(mktemp)
   out=$(lsof -t -- "$@" 2>"$err") || true
-  if [ -z "$out" ] && [ -s "$err" ]; then
+  real_err=$(grep -v -E '^lsof: WARNING|^[[:space:]]' "$err") || true
+  if [ -z "$out" ] && [ -n "$real_err" ]; then
     printf 'error: lsof could not check the database:\n' >&2
-    cat "$err" >&2
+    printf '%s\n' "$real_err" >&2
     rm -f "$err"
     exit 1
   fi
@@ -149,12 +158,35 @@ verified() {
 }
 
 list_archives() {
-  # Newest first: the UTC stamp in the name sorts by time. A glob, not ls, so a
-  # data directory with a space in it (the macOS default) stays one path.
+  # Newest first: the UTC stamp in the name sorts by time, and a plain string
+  # sort already agreed on that. Two archives can share a stamp (archive_path's
+  # "-1", "-2" suffixes, for two resets inside one second); plain sorting put
+  # the bare name ahead of its own "-1" even though "-1" was written after it
+  # ('.' sorts after '-'), listing the newer one second (#183 review bug 6). A
+  # tab-separated sort key -- the stamp, then the suffix zero-padded so it
+  # compares as a number -- fixes both at once; a tab rather than a space
+  # splits the key from the path even though the data directory's own path can
+  # itself contain a space (the macOS default). A glob, not ls, so that path
+  # stays one field no matter how it is spelled.
   for path in "$archives"/netkeeper-*.sqlite3; do
     [ -f "$path" ] || continue
     printf '%s\n' "$path"
-  done | sort -r | while IFS= read -r path; do
+  done | awk '
+    {
+      path = $0
+      name = path
+      sub(/^.*\//, "", name)
+      sub(/^netkeeper-/, "", name)
+      sub(/\.sqlite3$/, "", name)
+      if (match(name, /-[0-9]+$/)) {
+        suffix = substr(name, RSTART + 1, RLENGTH - 1) + 0
+        stamp = substr(name, 1, RSTART - 1)
+      } else {
+        suffix = 0
+        stamp = name
+      }
+      printf "%s\t%010d\t%s\n", stamp, suffix, path
+    }' | sort -r | cut -f3- | while IFS= read -r path; do
     printf '%s  %s\n' "$(basename "$path")" "$(human_size "$path")"
   done | grep . || printf 'no archives in %s\n' "$archives"
 }
@@ -205,6 +237,15 @@ archive_db() {
     rm -f -- "$target-wal" "$target-shm"
   fi
   if ! verified "$target"; then
+    # A failed archive stays out of archives/ rather than sitting there looking
+    # like a good one (#183 review bug 5): renamed aside when something was
+    # actually written, so it is still there to inspect.
+    if [ -e "$target" ]; then
+      failed="$target.failed"
+      rm -f -- "$failed"
+      mv -- "$target" "$failed"
+      die "the archive did not pass SQLite's quick_check; moved it to $failed for inspection. The database was left in place."
+    fi
     die "the archive $target did not pass SQLite's quick_check; the database was left in place"
   fi
   printf 'archived %s (%s, verified)\n' "$target" "$(human_size "$target")"

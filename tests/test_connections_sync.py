@@ -919,19 +919,30 @@ class CancelsOnFirstWait(Sleeps):
         await super().__call__(seconds)
 
 
-def test_the_pacing_seed_draws_a_first_wait_longer_than_one_slice() -> None:
-    """The cancel tests assert the run slept one full slice and stopped. That holds
-    only while ``_sync``'s seeded first wait is longer than a slice; if a change to
-    the seed or the pacing defaults breaks it, this says so rather than they."""
-    delay = profiles(SETTINGS.pacing).delay
-    first = human_delay(
-        random.Random(PACING_SEED),
-        median=delay.median,
-        sigma=delay.sigma,
-        tail_p=delay.tail_p,
-        tail_range=delay.tail_range,
-    )
-    assert first > 2 * CANCEL_SLICE_S
+class _FixedDelayRandom(random.Random):
+    """``human_delay``'s rng for the cancel-inside-the-wait test below, pinned so the
+    draw it produces is many slices long by construction.
+
+    The test used to trust ``_sync``'s shared seed (``PACING_SEED``) to draw
+    something over ``2 * CANCEL_SLICE_S`` on faith that a *separate* test asserted
+    so; a review of #182 saw it draw 4.86s against the 5.0s the test expected
+    once. The margin was never the real problem -- depending on the length of a
+    real pacing draw at all was, since any future change to the seed, the pacing
+    defaults, or the warm-cooldown multiplier could shrink it again without this
+    test noticing until it flaked. Overriding the two calls ``human_delay`` makes
+    removes that dependency instead of further widening the margin: the draw is
+    ``10 * CANCEL_SLICE_S`` every time, regardless of ``median``, ``sigma``, or any
+    multiplier applied to them, and the tail-pause branch never runs.
+    """
+
+    def lognormvariate(self, mu: float, sigma: float) -> float:
+        return 10 * CANCEL_SLICE_S
+
+    def random(self) -> float:
+        return 1.0  # always >= tail_p, so the distraction-pause branch never adds to it
+
+    def uniform(self, a: float, b: float) -> float:
+        raise AssertionError("the tail branch must not run: random() always returns 1.0")
 
 
 async def test_a_cancel_inside_the_wait_stops_before_the_next_page(
@@ -940,7 +951,7 @@ async def test_a_cancel_inside_the_wait_stops_before_the_next_page(
     fetch = FakeConnectionsSource(_many(200))
     sleeps = CancelsOnFirstWait(session_factory, user_id)
 
-    report = await _sync(session_factory, user_id, fetch, sleeps=sleeps)
+    report = await _sync(session_factory, user_id, fetch, sleeps=sleeps, rng=_FixedDelayRandom())
 
     assert fetch.starts == [0]
     assert sleeps.slices == [CANCEL_SLICE_S]  # one slice, then the flag was read
