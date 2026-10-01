@@ -1318,6 +1318,9 @@ export interface paths {
          *     Candidate rows with no decision answer ``409`` unless ``skip_undecided`` is
          *     set, in which case they are skipped and counted. A row that cannot be applied
          *     is skipped with its reason on the row; everything else still lands.
+         *     ``duplicate_groups`` names every 2+ new contacts this commit created from
+         *     rows whose name and company match each other, which spec 8.2 never folds
+         *     together on its own (#228).
          */
         post: operations["commit_import_run"];
         delete?: never;
@@ -3713,6 +3716,30 @@ export interface components {
             matched_by: "linkedin" | "email" | "name";
         };
         /**
+         * DuplicateContactOut
+         * @description One new contact a commit created, as a :class:`DuplicateGroupOut` names it.
+         */
+        DuplicateContactOut: {
+            /** Contact Id */
+            contact_id: number;
+            /** Row Number */
+            row_number: number;
+        };
+        /**
+         * DuplicateGroupOut
+         * @description Two or more new contacts one commit created from rows sharing a name and company (#228).
+         *
+         *     Spec 8.2 step 4 never matches two rows against each other, so a person
+         *     listed twice in the same file with no identifier becomes two new contacts;
+         *     this names them, it does not undo them. Merging the contacts a group names
+         *     is safe, but it means the run that created them can no longer be rolled
+         *     back (``RunMerged``).
+         */
+        DuplicateGroupOut: {
+            /** Contacts */
+            contacts: components["schemas"]["DuplicateContactOut"][];
+        };
+        /**
          * EmailContains
          * @description Any of the contact's emails contains ``value`` (case-insensitive, literal).
          */
@@ -4264,6 +4291,8 @@ export interface components {
             created_at: string;
             /** Created Count */
             created_count: number;
+            /** Duplicate Groups */
+            duplicate_groups?: components["schemas"]["DuplicateGroupOut"][];
             /** Filename */
             filename: string;
             /** Id */

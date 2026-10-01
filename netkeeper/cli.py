@@ -1776,8 +1776,9 @@ def import_csv_cmd(
             help="How to resolve a row that matches more than one contact: "
             "new (a separate contact) or skip (leave it out). Applies to every ambiguous "
             "row in the file at once, not one at a time, and to each row on its own: with "
-            "new, a person listed twice in the file becomes two new contacts. "
-            "Omitted: refuse and say which rows.",
+            "new, a person listed twice in the file becomes two new contacts, and the commit "
+            "result says so. Merging them afterwards is fine, but it means this import can no "
+            "longer be rolled back. Omitted: refuse and say which rows.",
         ),
     ] = None,
 ) -> None:
@@ -1819,6 +1820,8 @@ class _RunSnapshot:
     tagged_contacts: int = 0
     tags_added: int = 0
     candidate_rows: tuple[int, ...] = ()
+    duplicate_groups: tuple[import_runs.DuplicateGroup, ...] = ()
+    """New contacts this commit created that share a name and company with another row (#228)."""
 
 
 def _snapshot_of(run: ImportRun, *, candidate_rows: tuple[int, ...] = ()) -> _RunSnapshot:
@@ -1834,6 +1837,7 @@ def _snapshot_of(run: ImportRun, *, candidate_rows: tuple[int, ...] = ()) -> _Ru
         tagged_contacts=run.tagged_contacts,
         tags_added=run.tags_added,
         candidate_rows=candidate_rows,
+        duplicate_groups=tuple(import_runs.duplicate_groups(run)),
     )
 
 
@@ -1963,6 +1967,12 @@ def _run_report(label: str, run: _RunSnapshot) -> str:
     # draft has nothing to report here.
     if run.tagged_contacts:
         report += f"; {run.tags_added} tags added over {run.tagged_contacts} contacts"
+    warning = import_runs.duplicate_warning(run.duplicate_groups)
+    if warning is not None:
+        ids = ", ".join(
+            str(contact.contact_id) for group in run.duplicate_groups for contact in group.contacts
+        )
+        report += f"\nwarning: {warning} Contacts: {ids}."
     return report
 
 
@@ -1978,8 +1988,9 @@ def import_resume_cmd(
             help="How to resolve a row that matches more than one contact: "
             "new (a separate contact) or skip (leave it out). Applies to every row still "
             "undecided in the run at once, not one at a time, and to each row on its own: with "
-            "new, a person listed twice in the file becomes two new contacts. "
-            "Omitted: refuse and say which rows.",
+            "new, a person listed twice in the file becomes two new contacts, and the commit "
+            "result says so. Merging them afterwards is fine, but it means this import can no "
+            "longer be rolled back. Omitted: refuse and say which rows.",
         ),
     ] = None,
 ) -> None:

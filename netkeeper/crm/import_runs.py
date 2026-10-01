@@ -15,7 +15,11 @@ The flow this module implements, and what each step promises:
 4. :func:`commit` applies every row in the caller's transaction, so the whole
    file lands or none of it does, and records what each row did. The auto-tag
    rules then run over exactly the contacts it wrote, in that same transaction
-   (#64), and the run keeps their counts.
+   (#64), and the run keeps their counts. When the commit creates two or more
+   new contacts from rows whose name and company match each other, it records
+   the groups on ``report_json`` for :func:`duplicate_groups` to read back and
+   :func:`duplicate_warning` to word, without changing how any row resolved or
+   what it wrote (#228).
 5. :func:`rollback` undoes one run by id.
 6. :func:`delete_run` removes a run that never got past step 2 — a
    ``--dry-run``, or a commit refused for undecided candidates — so a draft
@@ -85,6 +89,7 @@ from netkeeper.crm.identity import (
     Matched,
     MergeInto,
     New,
+    name_company_key,
 )
 from netkeeper.crm.importer import (
     CsvImportError,
@@ -476,6 +481,14 @@ class _Outcome:
     effect: RowChanges | None = None
     problem: str | None = None
     decision: RowDecision | None = None
+    name_key: tuple[str, str, str] | None = None
+    """``identity.name_company_key`` of the row's incoming data, when it carries all three.
+
+    Read only by :func:`_duplicate_groups`, after a commit: two rows that reach
+    :class:`ImportResolution.CREATED` with the same key are each a separate
+    contact (spec 8.2 step 4 never folds them together), and that is worth a
+    warning even though nothing about how either row resolved changes (#228).
+    """
 
 
 @dataclass(frozen=True)
@@ -549,6 +562,124 @@ def created_effect() -> RowChanges:
     }
 
 
+# --- duplicate name-and-company warning (#228) -------------------------------
+
+
+@dataclass(frozen=True)
+class DuplicateContact:
+    """One new contact a commit created, as a :class:`DuplicateGroup` names it."""
+
+    contact_id: int
+    row_number: int
+
+
+@dataclass(frozen=True)
+class DuplicateGroup:
+    """Two or more new contacts one commit created from rows that share a name and company.
+
+    Spec 8.2 step 4 never matches two rows against each other, only a row
+    against a contact already on record, so a person listed twice in the same
+    file with no identifier becomes two new contacts rather than one (#90 item
+    2, #217 item 4) -- and folding them together here would be exactly the
+    match the spec rules out. This is a warning about what the file did, not a
+    different outcome: the rows resolve, and the commit writes, exactly as they
+    would without it.
+
+    Merging the contacts this names is one way to clean them up, but it is not
+    free: a run cannot be rolled back once a contact it created has been merged
+    into or out of (:class:`RunMerged`), so merging also means this import can
+    no longer be undone.
+    """
+
+    contacts: tuple[DuplicateContact, ...]
+
+
+REPORT_DUPLICATE_GROUPS_KEY: Final[str] = "duplicate_groups"
+"""The key a CSV commit's ``report_json`` keeps :class:`DuplicateGroup` list under."""
+
+
+def _duplicate_groups(outcomes: Sequence[_Outcome]) -> list[DuplicateGroup]:
+    """Every group of 2+ contacts this commit created from rows sharing a name and company.
+
+    Grouped by :func:`~netkeeper.crm.identity.name_company_key`, the same key
+    :func:`~netkeeper.crm.identity._resolve_name` matches on, over rows whose
+    outcome is :attr:`ImportResolution.CREATED` -- a row matched to a contact
+    that already existed before this commit, or one decided ``merge_into``, is
+    not a new contact and never joins a group. Ordered by each group's first
+    row, contacts within a group ordered by row number, so the result is stable
+    for anything that reports it.
+    """
+    by_key: dict[tuple[str, str, str], list[DuplicateContact]] = {}
+    for outcome in outcomes:
+        if outcome.resolution is not ImportResolution.CREATED or outcome.name_key is None:
+            continue
+        contact = DuplicateContact(
+            contact_id=cast(int, outcome.contact_id), row_number=outcome.row_number
+        )
+        by_key.setdefault(outcome.name_key, []).append(contact)
+    groups = [
+        DuplicateGroup(tuple(sorted(contacts, key=lambda c: c.row_number)))
+        for contacts in by_key.values()
+        if len(contacts) >= 2
+    ]
+    groups.sort(key=lambda group: group.contacts[0].row_number)
+    return groups
+
+
+def _duplicate_groups_json(groups: Sequence[DuplicateGroup]) -> list[dict[str, Any]]:
+    return [
+        {
+            "contacts": [
+                {"contact_id": contact.contact_id, "row_number": contact.row_number}
+                for contact in group.contacts
+            ]
+        }
+        for group in groups
+    ]
+
+
+def duplicate_groups(run: ImportRun) -> list[DuplicateGroup]:
+    """The name-and-company duplicate groups :func:`commit` recorded on ``run``, if any.
+
+    Empty for an archive run (that pipeline never creates two new contacts from
+    one file's rows matching each other: a row that would is left as a
+    candidate for a CSV import to decide instead, see
+    :mod:`netkeeper.crm.archive`), for a draft that has not been committed, and
+    for a commit that created no such group.
+    """
+    if run.source_kind is not ImportSourceKind.CSV or run.report_json is None:
+        return []
+    return [
+        DuplicateGroup(
+            tuple(
+                DuplicateContact(contact_id=contact["contact_id"], row_number=contact["row_number"])
+                for contact in group["contacts"]
+            )
+        )
+        for group in run.report_json.get(REPORT_DUPLICATE_GROUPS_KEY, [])
+    ]
+
+
+def duplicate_warning(groups: Sequence[DuplicateGroup]) -> str | None:
+    """The commit's warning line, or ``None`` when ``groups`` is empty.
+
+    One line regardless of how many groups there are, naming the total number of
+    contacts involved (spec 10.5's commit result, the CLI summary, and the
+    wizard's result step all show this same line; the run page lists the groups
+    themselves). Each group always has 2 or more contacts (:func:`_duplicate_groups`
+    drops any that do not), so the total is never 1. Says plainly that merging is
+    the one thing that costs this import its rollback (:class:`RunMerged`).
+    """
+    total = sum(len(group.contacts) for group in groups)
+    if not total:
+        return None
+    return (
+        f"{total} new contacts share a name and company with another row in this file. "
+        "They were kept as separate contacts, as spec 8.2 requires; merging any of them is "
+        "safe but means this import can no longer be rolled back."
+    )
+
+
 def _plan(contact: Contact | None, mapped: MappedRow) -> tuple[PlannedChange, ...]:
     """What the row would write to ``contact`` (or to a new contact when None).
 
@@ -619,6 +750,7 @@ def _process_row(
         return _Outcome(row_number, cells, ImportResolution.SKIPPED, problem=mapped.problem_text)
     resolution = identity.resolve(session, user, mapped.incoming)
     outcome = _Outcome(row_number, cells, ImportResolution.SKIPPED, problem=mapped.problem_text)
+    outcome.name_key = name_company_key(mapped.incoming)
 
     match resolution:
         case Matched(contact_id=contact_id, by=by):
@@ -1101,9 +1233,13 @@ def commit(
     ``CREATE_NEW`` decides each row on its own: a person listed twice in the file
     whose rows are both candidates becomes two new contacts, because the second
     row's candidates now include the first one's new contact and are still
-    ambiguous (#90). Nothing is committed here: the caller's transaction makes
-    the whole file land or none of it. ``RunNotDraft`` for a run that was
-    already committed or rolled back.
+    ambiguous (#90). That is left exactly as it is -- folding them together here
+    would be the name-and-company match spec 8.2 rules out -- but it is recorded
+    on ``run.report_json`` for :func:`duplicate_groups` to read back, so a
+    warning can name the contacts without changing how any row resolved (#228).
+    Nothing is committed here: the caller's transaction makes the whole file
+    land or none of it. ``RunNotDraft`` for a run that was already committed or
+    rolled back.
     """
     _require_writer(session)
     run = get_run(session, user, run_id)
@@ -1157,6 +1293,10 @@ def commit(
     if waiting and undecided is UndecidedPolicy.REFUSE:
         raise UndecidedCandidates(waiting)
     _recount(run, outcomes)
+    groups = _duplicate_groups(outcomes)
+    run.report_json = (
+        {REPORT_DUPLICATE_GROUPS_KEY: _duplicate_groups_json(groups)} if groups else None
+    )
     run.status = ImportStatus.COMMITTED
     run.committed_at = utcnow()
     # The rules, over the contacts this commit wrote and no others, in the same
@@ -1726,6 +1866,7 @@ def delete_preset(session: Session, user: User, name: str) -> None:
 
 __all__ = [
     "PREVIEW_ROWS",
+    "REPORT_DUPLICATE_GROUPS_KEY",
     "SAVED_PRESETS_KEY",
     "Acquired",
     "Candidate",
@@ -1735,6 +1876,8 @@ __all__ = [
     "CreatedContactsChanged",
     "CsvImportError",
     "Decision",
+    "DuplicateContact",
+    "DuplicateGroup",
     "DuplicatePreset",
     "EmptyFile",
     "ImportRunError",
@@ -1761,6 +1904,8 @@ __all__ = [
     "created_effect",
     "delete_preset",
     "delete_run",
+    "duplicate_groups",
+    "duplicate_warning",
     "get_run",
     "inspect_csv",
     "list_rows",

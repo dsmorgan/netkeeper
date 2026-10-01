@@ -499,4 +499,47 @@ describe('one import run', () => {
     expect(await screen.findByText(/a run can only be rolled back once/)).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Roll back this import' })).toBeNull()
   })
+
+  it('lists every contact and row a name-and-company duplicate group names (#228)', async () => {
+    const withDuplicates = {
+      ...COMMITTED_RUN,
+      duplicate_groups: [
+        {
+          contacts: [
+            { contact_id: 41, row_number: 2 },
+            { contact_id: 42, row_number: 4 },
+          ],
+        },
+        {
+          contacts: [
+            { contact_id: 43, row_number: 5 },
+            { contact_id: 44, row_number: 6 },
+            { contact_id: 45, row_number: 7 },
+          ],
+        },
+      ],
+    }
+    mockFetch(detailBackend(withDuplicates))
+    await renderApp('/imports/runs/7')
+
+    expect(
+      await screen.findByText('5 new contacts share a name and company with another row in this file.'),
+    ).toBeVisible()
+    expect(
+      screen.getByText(/Merging any of them by hand is safe, but it means this import/),
+    ).toBeVisible()
+    expect(screen.getByText(/contact #41 \(row 2\)/)).toBeVisible()
+    expect(screen.getByText(/contact #42 \(row 4\)/)).toBeVisible()
+    expect(screen.getByText(/contact #43 \(row 5\)/)).toBeVisible()
+    expect(screen.getByText(/contact #44 \(row 6\)/)).toBeVisible()
+    expect(screen.getByText(/contact #45 \(row 7\)/)).toBeVisible()
+  })
+
+  it('says nothing about duplicates when the commit made no such group', async () => {
+    mockFetch(detailBackend(COMMITTED_RUN))
+    await renderApp('/imports/runs/7')
+
+    expect(await screen.findByText('connections.csv')).toBeVisible()
+    expect(screen.queryByText(/share a name and company/)).toBeNull()
+  })
 })

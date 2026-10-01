@@ -9,7 +9,7 @@ import {
   RUN_STATUS_CLASSES,
   RUN_STATUS_LABELS,
 } from './fields'
-import type { Resolution, RunStatus } from './types'
+import type { DuplicateGroup, Resolution, RunStatus } from './types'
 
 /** What one row of the file is: a match, a candidate, a new contact, or skipped. */
 export function OutcomeBadge({ resolution }: { resolution: Resolution }) {
@@ -85,5 +85,52 @@ export function Note({
       <Icon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
       <div className="min-w-0 space-y-1">{children}</div>
     </div>
+  )
+}
+
+/**
+ * The name-and-company duplicate warning a commit's `duplicate_groups` carries (#228).
+ *
+ * Spec 8.2 step 4 never matches two rows against each other, only a row
+ * against a contact already on record, so a person listed twice in one file
+ * with no profile URL or email becomes two new contacts rather than one. This
+ * names them; it does not suggest anything should have resolved differently.
+ * `detail` lists each group's contacts and rows, for the run page; without it
+ * this is the one-line summary the wizard's result step shows.
+ */
+export function DuplicateGroupsNote({
+  groups,
+  detail = false,
+}: {
+  groups: readonly DuplicateGroup[]
+  detail?: boolean
+}) {
+  const total = groups.reduce((sum, group) => sum + group.contacts.length, 0)
+  if (total === 0) return null
+  return (
+    <Note tone="warn" role="status">
+      <p className="font-medium">
+        {total} new contacts share a name and company with another row in this file.
+      </p>
+      <p>
+        They were kept as separate contacts, as netkeeper&rsquo;s matching rules require: a name
+        and a company are never enough to fold two rows of the same file together. Merging any of
+        them by hand is safe, but it means this import can no longer be rolled back.
+      </p>
+      {detail && (
+        <ul className="list-disc space-y-1 pl-5">
+          {groups.map((group, index) => (
+            <li key={index}>
+              {group.contacts.map((contact, position) => (
+                <span key={contact.contact_id}>
+                  {position > 0 && ', '}
+                  contact #{contact.contact_id} (row {contact.row_number})
+                </span>
+              ))}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Note>
   )
 }

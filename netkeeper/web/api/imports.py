@@ -50,6 +50,7 @@ from netkeeper.models import (
     ImportResolution,
     ImportRow,
     ImportRun,
+    ImportSourceKind,
     ImportStatus,
 )
 from netkeeper.web.deps import CurrentUser, SessionDep
@@ -61,6 +62,8 @@ from netkeeper.web.schemas import (
     ArchiveMessageCountsOut,
     ArchiveRefusalOut,
     ArchiveReportOut,
+    DuplicateContactOut,
+    DuplicateGroupOut,
     ImportChangeOut,
     ImportCommitIn,
     ImportDecisionIn,
@@ -151,9 +154,19 @@ def run_out(run: ImportRun) -> ImportRunOut:
         updated_at=run.updated_at,
         archive=(
             ArchiveReportOut.model_validate(run.report_json)
-            if run.report_json is not None
+            if run.source_kind is ImportSourceKind.ARCHIVE and run.report_json is not None
             else None
         ),
+        duplicate_groups=[duplicate_group_out(group) for group in service.duplicate_groups(run)],
+    )
+
+
+def duplicate_group_out(group: service.DuplicateGroup) -> DuplicateGroupOut:
+    return DuplicateGroupOut(
+        contacts=[
+            DuplicateContactOut(contact_id=contact.contact_id, row_number=contact.row_number)
+            for contact in group.contacts
+        ]
     )
 
 
@@ -541,6 +554,9 @@ def commit_import_run(
     Candidate rows with no decision answer ``409`` unless ``skip_undecided`` is
     set, in which case they are skipped and counted. A row that cannot be applied
     is skipped with its reason on the row; everything else still lands.
+    ``duplicate_groups`` names every 2+ new contacts this commit created from
+    rows whose name and company match each other, which spec 8.2 never folds
+    together on its own (#228).
     """
     with translate_errors():
         run = service.commit(

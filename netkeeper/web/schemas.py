@@ -1032,6 +1032,26 @@ class ImportRunCreate(ImportInspectIn):
     source_kind: ImportSourceKind = ImportSourceKind.CSV
 
 
+class DuplicateContactOut(BaseModel):
+    """One new contact a commit created, as a :class:`DuplicateGroupOut` names it."""
+
+    contact_id: int
+    row_number: int
+
+
+class DuplicateGroupOut(BaseModel):
+    """Two or more new contacts one commit created from rows sharing a name and company (#228).
+
+    Spec 8.2 step 4 never matches two rows against each other, so a person
+    listed twice in the same file with no identifier becomes two new contacts;
+    this names them, it does not undo them. Merging the contacts a group names
+    is safe, but it means the run that created them can no longer be rolled
+    back (``RunMerged``).
+    """
+
+    contacts: list[DuplicateContactOut]
+
+
 class ImportRunOut(BaseModel):
     id: int
     source_kind: ImportSourceKind
@@ -1057,6 +1077,11 @@ class ImportRunOut(BaseModel):
 
     The counts above describe ``Connections.csv`` alone: updated rows count as
     matched, rows needing review as candidates.
+    """
+    duplicate_groups: list[DuplicateGroupOut] = Field(default_factory=list)
+    """For a ``csv`` run, every group of 2+ new contacts its commit created from rows that
+    share a name and company (#228). Empty on a draft, on an archive run, and on a commit
+    that created no such group.
     """
 
 
