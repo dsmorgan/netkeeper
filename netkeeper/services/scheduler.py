@@ -600,6 +600,9 @@ def establish_schedule(
     ``now`` under an *unchanged* fingerprint is downtime, not a settings
     change, and goes through :func:`compute_due`'s catch-up branch instead of
     being treated as fresh.
+    A re-offer's ``resume_due`` (:func:`offer_again`) survives that downtime path, so
+    the catch-up fire is still the re-offer: it is never re-offered, and the cadence
+    goes back to the normal due time afterwards (#196 item 9).
     """
     _require_writer(session, "scheduler.establish_schedule")
     fingerprint = ScheduleFingerprint.of(
@@ -632,12 +635,22 @@ def establish_schedule(
         end=active_end,
         respect_active_hours=schedule.respect_active_hours,
     )
+    # A re-offer that lapsed in downtime is still a re-offer (#196 item 9): its
+    # catch-up fire goes back to the normal due time it stood in front of, and is
+    # never re-offered. A timing change starts the schedule over, re-offer and all.
+    resume_due = existing.resume_due if existing is not None and prior_due is not None else None
     _store_state(
         session,
         user,
         account_id,
         kind,
-        _JobState(due=due, fingerprint=fingerprint, is_catchup=is_catchup, fired_once=fired_once),
+        _JobState(
+            due=due,
+            fingerprint=fingerprint,
+            is_catchup=is_catchup,
+            fired_once=fired_once,
+            resume_due=resume_due,
+        ),
     )
     return ScheduleResult(due=due, changed=True, is_catchup=is_catchup, reason=reason)
 
@@ -1001,6 +1014,7 @@ async def poll_and_fire(
                 user,
                 account_id,
                 kind,
+                reoffer=was_reoffer,
                 now=clock() if clock is not None else now,
                 schedule=schedule,
                 rng=rng if rng is not None else random.Random(),  # noqa: S311 -- jitter
@@ -1141,6 +1155,7 @@ def park_retry(
     tz: str,
     active_start: time = pacing.DEFAULT_ACTIVE_START,
     active_end: time = pacing.DEFAULT_ACTIVE_END,
+    reoffer: bool = False,
 ) -> datetime:
     """Park one retry of ``kind`` :data:`RETRY_MIN_MINUTES` to :data:`RETRY_MAX_MINUTES`
     after ``now`` (spec 9.9: the browser went away), and return the due time now stored.
@@ -1148,6 +1163,12 @@ def park_retry(
     A stored due time that is already sooner is kept: a retry never pushes a
     fire later. The parked time goes through active hours like every other due
     time, and is not a catch-up.
+
+    ``reoffer`` is true when the fire that could not reach the browser was a
+    re-offer (:func:`offer_again`). :func:`record_fired` has already cleared its
+    ``resume_due``, so the retry puts it back, as the due time the fire just
+    stored: the retry is still the re-offer, never re-offered, and its fire goes
+    back to the normal cadence (#196 item 9).
     """
     retry = now + timedelta(minutes=rng.uniform(RETRY_MIN_MINUTES, RETRY_MAX_MINUTES))
     retry = _snap_to_active_hours(
@@ -1165,7 +1186,18 @@ def park_retry(
             )
         if state.due <= retry:
             return state.due
-        _store_state(session, user, account_id, kind, replace(state, due=retry, is_catchup=False))
+        _store_state(
+            session,
+            user,
+            account_id,
+            kind,
+            replace(
+                state,
+                due=retry,
+                is_catchup=False,
+                resume_due=state.due if reoffer else state.resume_due,
+            ),
+        )
     log.info(
         "scheduler: %s for account %d could not reach the browser; retrying at %s",
         kind.value,

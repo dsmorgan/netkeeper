@@ -563,6 +563,87 @@ async def test_a_re_offer_that_is_done_goes_back_to_the_normal_cadence(
     assert done.next_due == due + timedelta(days=7)
 
 
+async def test_a_re_offer_that_lapses_in_downtime_is_still_a_re_offer(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#196 item 9, restart: ``serve`` comes back after the re-offer's due time, so the
+    schedule is re-established through the downtime catch-up path. That catch-up is
+    still the re-offer: not done again, it goes back to the weekly due time, never a
+    second re-offer a day later."""
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    weekly = scheduler.JobSchedule(scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7))
+    due = _establish(session_factory, owner, 1, weekly)
+    not_done = scheduler.JobOutcome.NOT_DONE
+
+    first = await _fire_weekly(session_factory, owner, weekly, due, not_done)
+    assert first.next_due < due + timedelta(days=2)
+    back = first.next_due + timedelta(hours=2)  # the restart, after the re-offer was due
+    with session_scope(session_factory, write=True) as session:
+        result = scheduler.establish_schedule(
+            session,
+            owner,
+            1,
+            weekly.kind,
+            now=back,
+            schedule=weekly,
+            rng=random.Random(0),
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        )
+        state = scheduler._load_state(session, owner, 1, weekly.kind)
+    assert result.is_catchup
+    assert state is not None and state.resume_due == due + timedelta(days=7)
+    again = await _fire_weekly(session_factory, owner, weekly, result.due, not_done)
+    assert again.next_due == due + timedelta(days=7)
+
+
+async def test_a_retried_re_offer_is_still_a_re_offer(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#196 item 9, retry: the re-offer could not reach the browser, so a retry is
+    parked. The retry is still the re-offer: not done, it goes back to the weekly due
+    time, never a second re-offer a day later."""
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    weekly = scheduler.JobSchedule(scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7))
+    due = _establish(session_factory, owner, 1, weekly)
+    not_done = scheduler.JobOutcome.NOT_DONE
+
+    first = await _fire_weekly(session_factory, owner, weekly, due, not_done)
+    retry = await _fire_weekly(
+        session_factory, owner, weekly, first.next_due, scheduler.JobOutcome.RETRY_LATER
+    )
+    assert retry.next_due < first.next_due + timedelta(hours=1)
+    with session_scope(session_factory) as session:
+        state = scheduler._load_state(session, owner, 1, weekly.kind)
+    assert state is not None and state.resume_due == due + timedelta(days=7)
+    again = await _fire_weekly(session_factory, owner, weekly, retry.next_due, not_done)
+    assert again.next_due == due + timedelta(days=7)
+
+
+async def test_a_retried_normal_fire_may_still_be_re_offered_once(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The other side of #196 item 9: a retry of an ordinary fire is not a re-offer, so
+    when it is not done it gets the one re-offer its interval allows."""
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    weekly = scheduler.JobSchedule(scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7))
+    due = _establish(session_factory, owner, 1, weekly)
+    retry = await _fire_weekly(
+        session_factory, owner, weekly, due, scheduler.JobOutcome.RETRY_LATER
+    )
+    with session_scope(session_factory) as session:
+        state = scheduler._load_state(session, owner, 1, weekly.kind)
+    assert state is not None and state.resume_due is None
+    first = await _fire_weekly(
+        session_factory, owner, weekly, retry.next_due, scheduler.JobOutcome.NOT_DONE
+    )
+    assert first.next_due < due + timedelta(days=2)
+
+
 async def test_a_re_offer_is_snapped_into_active_hours(
     session_factory: sessionmaker[Session],
 ) -> None:
