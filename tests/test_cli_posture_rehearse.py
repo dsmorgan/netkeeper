@@ -164,6 +164,38 @@ def test_posture_is_all_clear_when_the_probe_finds_a_session(
     assert "NOT clear" not in result.output
 
 
+def test_posture_stays_clear_and_exits_zero_above_100_a_day_with_the_note_listed(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#319 review S1: the profile-visit risk is a note, not a warning. A script
+    gated on `netkeeper posture` keeps passing; the reader still sees why."""
+
+    def logged_in(_settings: Settings) -> AttachBrowserProvider:
+        jar = [{"name": "li_at", "value": "fake", "domain": ".linkedin.com", "expires": -1}]
+        context = ReplayContext()
+        context.cookie_jar = list(jar)
+        context.evaluate_result = {
+            "userAgent": "Mozilla/5.0 Chrome/140.0.7339.80",
+            "languages": ["en-US"],
+            "timezone": "America/New_York",
+        }
+        return AttachBrowserProvider(
+            "http://127.0.0.1:9222", connector=FakeConnector([FakeBrowser([context])])
+        )
+
+    monkeypatch.setattr("netkeeper.cli._provider", logged_in)
+    config = tmp_path / "318-risky.toml"
+    config.write_text("[linkedin.budget]\nprofile_visits_per_day = 101\n", encoding="utf-8")
+
+    result = CliRunner().invoke(cli, ["--config", str(config), "posture"])
+
+    assert result.exit_code == 0, result.output
+    assert "nothing is misconfigured" in result.output
+    assert "NOT clear" not in result.output
+    assert "note: budget profile_visits: Profile visits are set to 101 a day" in result.output
+    assert "warning:" not in result.output
+
+
 @pytest.mark.parametrize(
     ("state", "expected"),
     [(LoginState.LOGGED_IN, True), (LoginState.NO_SESSION, False), (LoginState.UNKNOWN, None)],

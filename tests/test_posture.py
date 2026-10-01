@@ -78,6 +78,7 @@ from netkeeper.services.posture import (
     Status,
     posture,
     render,
+    verdict,
 )
 from netkeeper.services.scheduler import (
     CATCHUP_MAX_MINUTES,
@@ -436,9 +437,11 @@ CASES = [
         warns=("budget connection_pages",),
     ),
     Case(
+        # A note, not a warning (#319 review S1): the report stays clear.
         id="profile visits above the 100 a day netkeeper was designed around (#318)",
         settings=_budget(profile_visits_per_day=101),
-        warns=("budget profile_visits",),
+        warns=(),
+        expect_ok=True,
     ),
     Case(
         id="a weekly budget configured past spec 9.6's hard max",
@@ -690,23 +693,50 @@ def _warning_for(report: PostureReport, name: str) -> str:
     return " ".join(protection.warnings)
 
 
-def test_profile_visits_above_100_a_day_warn_in_the_report_text_and_still_enforce(
+def _notes_for(report: PostureReport, name: str) -> tuple[str, ...]:
+    return next(p for p in report.protections if p.name == name).notes
+
+
+def test_profile_visits_above_100_a_day_are_a_note_and_the_report_stays_clear(
     writer: Session,
 ) -> None:
-    """#318: above 100 a day the report says so, under the budget row, in the
-    words every other surface uses; the limit in force is still what was asked."""
+    """#318, #319 review S1: above 100 a day the report says so on the budget row
+    and in its text, as a note: ``ok`` stays true and the verdict stays clear."""
     user = _make_user(writer)
-    risky = _report(writer, user, settings=_budget(profile_visits_per_day=150))
+    risky = _report(writer, user, settings=_budget(profile_visits_per_day=101))
     calm = _report(writer, user, settings=_budget(profile_visits_per_day=100))
 
-    warning = _warning_for(risky, "budget profile_visits")
-    assert "set to 150 a day, above the 100 a day netkeeper was designed around" in warning
-    assert "restricts your account or asks you to verify it" in warning
+    (note,) = _notes_for(risky, "budget profile_visits")
+    assert note.startswith("Profile visits are set to 101 a day, above the 100 a day")
+    assert "restricts your account or asks you to verify it" in note
+    assert risky.ok is True
+    assert risky.warnings == ()
+    assert risky.notes == (f"budget profile_visits: {note}",)
+    assert verdict(risky).startswith("nothing is misconfigured")
     text = render(risky)
-    assert "Profile visits are set to 150 a day" in text
-    assert "0/150 today, 0/750 this week (hard max 250/day, 1250/week)" in text
-    calm_row = next(p for p in calm.protections if p.name == "budget profile_visits")
-    assert calm_row.warnings == ()
+    assert "note: budget profile_visits: Profile visits are set to 101 a day" in text
+    assert "0/101 today, 0/505 this week (hard max 250/day, 1250/week)" in text
+    assert _notes_for(calm, "budget profile_visits") == ()
+    assert calm.notes == ()
+
+
+def test_an_explicit_week_below_five_days_of_the_daily_limit_is_a_note(writer: Session) -> None:
+    """#319 review S3: a weekly value left over from before #318 caps the week
+    below what the day allows. That is allowed, so it is a note, not a warning."""
+    user = _make_user(writer)
+    short = _report(
+        writer, user, settings=_budget(profile_visits_per_day=100, profile_visits_per_week=300)
+    )
+    exact = _report(
+        writer, user, settings=_budget(profile_visits_per_day=60, profile_visits_per_week=300)
+    )
+
+    assert _notes_for(short, "budget profile_visits") == (
+        "The weekly limit (300) is below 5 times your daily limit (100); remove"
+        " profile_visits_per_week from config.toml to use 5 times daily (500).",
+    )
+    assert short.ok is True
+    assert _notes_for(exact, "budget profile_visits") == ()
 
 
 def test_a_protection_cannot_be_built_off_and_silent() -> None:

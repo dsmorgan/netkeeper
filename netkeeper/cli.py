@@ -258,14 +258,33 @@ def serve(
 
 @config_app.command("show")
 def config_show(ctx: typer.Context) -> None:
-    """Print the resolved settings as TOML, followed by a paths table."""
+    """Print the resolved settings as TOML, followed by a paths table.
+
+    An unset ``profile_visits_per_week`` has no TOML value to print, so the
+    weekly limit it derives (5 x the daily limit in force, #318) follows the
+    daily line as a comment.
+    """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
     source = "defaults" if settings.source_path is None else str(settings.source_path)
     paths = _PathsBlock(data_dir=str(data_dir()), config=source)
-    typer.echo(render_toml(settings), nl=False)
+    typer.echo(_with_derived_week(render_toml(settings), settings), nl=False)
     typer.echo()
     typer.echo(render_toml(paths, table="paths"), nl=False)
+
+
+def _with_derived_week(rendered: str, settings: Settings) -> str:
+    """``rendered`` with the derived weekly profile-visit limit noted, when it is derived."""
+    budget = settings.linkedin.budget
+    if budget.profile_visits_per_week is not None:
+        return rendered
+    week = budgets.configured_default(budgets.ActionClass.PROFILE_VISITS, budget, "week")
+    daily = f"profile_visits_per_day = {budget.profile_visits_per_day}\n"
+    comment = (
+        f"# profile_visits_per_week is unset: {week}"
+        f" ({budgets.PROFILE_VISIT_DAYS_PER_WEEK} x the daily limit in force)\n"
+    )
+    return rendered.replace(daily, daily + comment, 1)
 
 
 @db_app.command("upgrade")

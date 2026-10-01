@@ -341,6 +341,26 @@ def test_config_show_prints_settings_and_paths(isolated: Path) -> None:
     )
 
 
+def test_config_show_notes_the_derived_weekly_limit_when_it_is_unset(isolated: Path) -> None:
+    """#319 review N2: an unset key has no TOML value, so the derived one is a comment."""
+    unset = _write(isolated / "unset.toml", "[linkedin.budget]\nprofile_visits_per_day = 1000\n")
+    result = CliRunner().invoke(app, ["--config", str(unset), "config", "show"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "profile_visits_per_day = 1000\n"
+        "# profile_visits_per_week is unset: 1250 (5 x the daily limit in force)\n"
+    ) in result.stdout
+    assert "profile_visits_per_week" not in tomllib.loads(result.stdout)["linkedin"]["budget"]
+
+    defaults = CliRunner().invoke(app, ["config", "show"])
+    assert "# profile_visits_per_week is unset: 300 " in defaults.stdout
+
+    explicit = _write(isolated / "set.toml", "[linkedin.budget]\nprofile_visits_per_week = 420\n")
+    shown = CliRunner().invoke(app, ["--config", str(explicit), "config", "show"]).stdout
+    assert "is unset" not in shown
+    assert tomllib.loads(shown)["linkedin"]["budget"]["profile_visits_per_week"] == 420
+
+
 def test_config_show_reports_defaults(isolated: Path) -> None:
     result = CliRunner().invoke(app, ["config", "show"])
     assert result.exit_code == 0, result.output

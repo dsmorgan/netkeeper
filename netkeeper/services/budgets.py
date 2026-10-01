@@ -136,6 +136,30 @@ def _profile_visits_per_week(settings: BudgetSettings) -> int:
     return PROFILE_VISIT_DAYS_PER_WEEK * day
 
 
+def profile_visit_week_note(settings: BudgetSettings) -> str | None:
+    """A note when an explicit weekly limit is below 5 x the daily limit in force, or None.
+
+    Before #318 the weekly default was a fixed 300, so a config file written
+    then may still carry ``profile_visits_per_week = 300`` after its daily value
+    went up, quietly capping the week below what the day allows. That is a
+    legitimate choice, so this informs rather than gates, and says how to get
+    the derived value instead.
+    """
+    explicit = settings.profile_visits_per_week
+    if explicit is None:
+        return None
+    day = min(settings.profile_visits_per_day, HARD_MAX_PER_DAY[ActionClass.PROFILE_VISITS])
+    derived = PROFILE_VISIT_DAYS_PER_WEEK * day
+    week = min(explicit, HARD_MAX_PER_WEEK[ActionClass.PROFILE_VISITS])
+    if week >= derived:
+        return None
+    return (
+        f"The weekly limit ({week:,}) is below {PROFILE_VISIT_DAYS_PER_WEEK} times your daily"
+        f" limit ({day:,}); remove profile_visits_per_week from config.toml to use"
+        f" {PROFILE_VISIT_DAYS_PER_WEEK} times daily ({derived:,})."
+    )
+
+
 def profile_visit_risk_warning(settings: BudgetSettings) -> str | None:
     """The warning for a daily profile-visit limit above the design level, or None.
 
@@ -143,8 +167,9 @@ def profile_visit_risk_warning(settings: BudgetSettings) -> str | None:
     :data:`PROFILE_VISITS_DESIGN_LEVEL` is the user's call (#318): nothing
     refuses it and nothing asks for confirmation. Every place the budget is
     shown -- ``serve``'s startup log, ``netkeeper posture`` and the Settings
-    page, ``GET /linkedin/budget``, and arming scheduled runs -- shows this
-    same sentence, so it reads the same wherever the user meets it.
+    page (as a note, which never makes the report "NOT clear"),
+    ``GET /linkedin/budget``, and arming scheduled runs -- shows this same
+    sentence, so it reads the same wherever the user meets it.
     """
     day = min(settings.profile_visits_per_day, HARD_MAX_PER_DAY[ActionClass.PROFILE_VISITS])
     if day <= PROFILE_VISITS_DESIGN_LEVEL:

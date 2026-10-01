@@ -40,8 +40,9 @@ COOLDOWN_FLOOR: Final = 1.0
 # Why 0.01: it is the smallest score with an effect worth keeping. At 0.01 the
 # multiplier is 1.01 -- a 25 s delay median stretches by a quarter of a
 # second, inside the lognormal jitter (sigma 0.6) it rides on, and a
-# profile-visit budget (at most 100 by spec 9.6's hard max) loses at most the
-# one unit flooring always takes. Every score that should still stretch
+# profile-visit budget loses about 1%: at 100 a day or less, only the one unit
+# flooring always takes; at 250, spec 9.6's hard max since #318, three
+# (250 / 1.01 floors to 247). Every score that should still stretch
 # delays is far above it: one ``per_block`` (1.0) is 100 times larger, and
 # the skip threshold (2.5) 250 times. With the Appendix C defaults (6-hour
 # half-life) one throttle goes cold after about 40 hours
