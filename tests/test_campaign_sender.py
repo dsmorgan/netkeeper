@@ -928,6 +928,55 @@ def test_the_persons_scheduled_message_in_the_thread_never_blocks_or_threads_ste
     assert second["References"] == raw["Message-ID"]
 
 
+def test_a_scheduled_leftover_that_misses_again_after_days_does_not_give_up(
+    drafts: Mail,
+) -> None:
+    """#278 final review: misses while Gmail's search lags, then days in Scheduled, then
+    one more miss. The sighting started the count over, so the late miss is the first of
+    a new run: no give-up, and the delivery is recorded ``sent``."""
+    enrollment_id = drafts.enroll()
+    with pytest.raises(Crash):
+        drafts.tick(sender=CrashAfterSend(drafts.sender))
+    [draft_id] = drafts.gmail.drafts()
+    scheduled = drafts.gmail.schedule_draft(draft_id)
+    every = engine_module.RECONCILE_SEARCH_EVERY
+
+    def message() -> Message:
+        [row] = drafts.messages(enrollment_id)
+        return row
+
+    first = NOW + LATER
+    drafts.gmail.lag = 3
+    for n in range(3):
+        drafts.tick(first + n * every)
+    assert (message().status, message().reconcile_misses) == (MessageStatus.SCHEDULED, 3)
+    assert message().reconcile_first_miss_at == first
+
+    at = first + 3 * every
+    while at < first + timedelta(days=3):  # in Scheduled, found by every search
+        drafts.tick(at)
+        assert (message().status, message().error) == (
+            MessageStatus.SCHEDULED,
+            engine_module.SCHEDULED_IN_GMAIL,
+        )
+        at += timedelta(hours=6)
+
+    late_miss = at
+    drafts.gmail.lag = 1
+    drafts.tick(late_miss)
+    row = message()
+    assert row.status is MessageStatus.SCHEDULED
+    assert (row.reconcile_misses, row.reconcile_first_miss_at) == (1, late_miss)
+    assert row.error is not None and "(1 searches)" in row.error
+    assert drafts.enrollment(enrollment_id).status is EnrollmentStatus.ACTIVE
+
+    delivered_at = late_miss + timedelta(minutes=5)
+    drafts.gmail.send_scheduled(scheduled, at=delivered_at)
+    drafts.tick(late_miss + every)
+    assert (message().status, message().sent_at) == (MessageStatus.SENT, delivered_at)
+    assert drafts.enrollment(enrollment_id).next_action_at == delivered_at + WEEK
+
+
 def test_the_find_never_counts_a_scheduled_message_as_sent() -> None:
     gmail = FakeGmail("me@example.com")
     message = EmailMessage()
