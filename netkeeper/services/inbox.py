@@ -133,7 +133,8 @@ def list_inbox(
         .where(Enrollment.user_id == user.id, Campaign.user_id == user.id)
         .where(Contact.user_id == user.id)
         .with_only_columns(Message, Enrollment, Campaign, Contact)
-        .order_by(_ARRIVED.desc(), Message.id.desc())
+        # Explicit, so a NULL sorts last on Postgres too (its default puts it first).
+        .order_by(_ARRIVED.desc().nulls_last(), Message.id.desc())
         .limit(limit)
         .offset(offset)
     ).tuples()

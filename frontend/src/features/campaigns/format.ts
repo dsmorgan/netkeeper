@@ -50,6 +50,7 @@ export const REQUIREMENT_LABELS: Record<string, string> = {
   sample_previews: 'Sampled previews approved',
   searched_previews: 'Searched previews approved',
   test_sends: 'Test send of each email step',
+  mailbox: 'Mailbox ok',
   lint: 'Lint clean',
   guards: 'Guard summary acknowledged',
 }
@@ -61,6 +62,7 @@ export const REQUIREMENTS = [
   'sample_previews',
   'searched_previews',
   'test_sends',
+  'mailbox',
   'lint',
   'guards',
 ] as const

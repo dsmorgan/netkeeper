@@ -39,6 +39,7 @@ describe('review flow', () => {
       'Sampled previews approved: missing, no sample was drawn for the current audience',
       'Searched previews approved: done',
       'Test send of each email step: missing, email steps with no current test send: steps 1, 2',
+      'Mailbox ok: done',
       'Lint clean: missing, no lint result for the current steps and templates',
       'Guard summary acknowledged: missing, the guard summary for the current audience is not acknowledged',
     ])
@@ -450,7 +451,10 @@ describe('review flow', () => {
             if (!refusedOnce) {
               refusedOnce = true
               return jsonResponse(
-                { detail: "enrollment 301's preview changed since it was shown; look again" },
+                {
+                  detail: "enrollment 301's preview changed since it was shown; look again",
+                  code: 'stale',
+                },
                 409,
               )
             }
@@ -523,7 +527,7 @@ describe('review flow', () => {
           'POST /api/v1/campaigns/5/review/approve': () => {
             if (!refusedOnce) {
               refusedOnce = true
-              return jsonResponse({ detail: 'the preview changed' }, 409)
+              return jsonResponse({ detail: 'the preview changed', code: 'stale' }, 409)
             }
             return jsonResponse(review())
           },
@@ -572,7 +576,10 @@ describe('review flow', () => {
                 guard_summary: '3 in audience, 2 excluded: 2 do-not-contact',
               }
               return jsonResponse(
-                { detail: 'the guard results changed; they are now: 3 in audience, 2 excluded' },
+                {
+                  detail: 'the guard results changed; they are now: 3 in audience, 2 excluded',
+                  code: 'stale',
+                },
                 409,
               )
             }
@@ -608,5 +615,105 @@ describe('review flow', () => {
         audience_fingerprint: 'aud1ence-2',
       },
     ])
+  })
+
+  it('shows a real refusal of an approval as an error, and keeps the preview', async () => {
+    const calls: Call[] = []
+    mockFetch(
+      campaignBackend(
+        reviewing(),
+        {
+          'POST /api/v1/campaigns/5/review/sample': () =>
+            jsonResponse({ content_fingerprint: 'c0ffee', enrollments: [preview()] }),
+          'POST /api/v1/campaigns/5/review/approve': () =>
+            jsonResponse({ detail: 'enrollment 301 is not pending in this campaign' }, 409),
+        },
+        calls,
+      ),
+    )
+    await renderApp('/campaigns/5')
+
+    await screen.findByRole('list', { name: 'Review checklist' })
+    fireEvent.click(section('Sampled previews').getByRole('button', { name: 'Show the sample' }))
+    const card = within(
+      await screen.findByRole('listitem', { name: 'Preview for Rosalind Quillfeather' }),
+    )
+    fireEvent.click(card.getByRole('button', { name: 'Approve' }))
+
+    const refusal = await section('Sampled previews').findByRole('alert')
+    expect(refusal).toHaveTextContent('Not approved.')
+    expect(refusal).toHaveTextContent('enrollment 301 is not pending in this campaign')
+    expect(section('Sampled previews').queryByRole('status')).toBeNull()
+    expect(card.getByText('Hi Rosalind')).toBeVisible()
+    // Not taken for stale: the sample is not drawn again.
+    expect(calls.filter((c) => c.path.endsWith('/review/sample'))).toHaveLength(1)
+  })
+
+  it('drops a stale searched preview when it cannot be rendered again', async () => {
+    let renders = 0
+    mockFetch(
+      campaignBackend(
+        reviewing({
+          missing: [
+            {
+              requirement: 'searched_previews',
+              detail: 'viewed previews not approved',
+              enrollment_ids: [302],
+              step_positions: [],
+            },
+          ],
+        }),
+        {
+          'POST /api/v1/campaigns/5/review/previews': () => {
+            renders += 1
+            if (renders > 1) return jsonResponse({ detail: 'no such enrollment' }, 404)
+            return jsonResponse({
+              content_fingerprint: 'c0ffee',
+              enrollments: [
+                preview({
+                  enrollment_id: 302,
+                  contact_name: 'Tobias Marrowbone',
+                  sampled: false,
+                  fingerprint: 'fp-tobias-111111',
+                }),
+              ],
+            })
+          },
+          'POST /api/v1/campaigns/5/review/approve': () =>
+            jsonResponse({ detail: 'the preview changed', code: 'stale' }, 409),
+        },
+      ),
+    )
+    await renderApp('/campaigns/5')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Show it' }))
+    const card = await screen.findByRole('listitem', { name: 'Preview for Tobias Marrowbone' })
+    fireEvent.click(within(card).getByRole('button', { name: 'Approve' }))
+
+    expect(await section('Search for anyone').findByRole('status')).toHaveTextContent(
+      'so it was refreshed',
+    )
+    await waitFor(() =>
+      expect(screen.queryByRole('listitem', { name: 'Preview for Tobias Marrowbone' })).toBeNull(),
+    )
+    expect(renders).toBe(2)
+  })
+
+  it('shows a real refusal of the guard acknowledgement as an error', async () => {
+    mockFetch(
+      campaignBackend(reviewing(), {
+        'POST /api/v1/campaigns/5/review/guards/acknowledge': () =>
+          jsonResponse({ detail: 'campaign 5 is active, not reviewing' }, 409),
+      }),
+    )
+    await renderApp('/campaigns/5')
+
+    const guards = within(await screen.findByRole('region', { name: 'Guard summary' }))
+    fireEvent.click(guards.getByRole('button', { name: 'Acknowledge this summary' }))
+
+    const refusal = await guards.findByRole('alert')
+    expect(refusal).toHaveTextContent('Not acknowledged.')
+    expect(refusal).toHaveTextContent('campaign 5 is active, not reviewing')
+    expect(guards.queryByRole('status')).toBeNull()
   })
 })

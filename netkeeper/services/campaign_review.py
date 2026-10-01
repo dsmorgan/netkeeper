@@ -14,6 +14,8 @@ every requirement not met, unless each of these is recorded and still current:
   then :func:`record_test_send`).
 - ``lint``: every step's template found free of lint errors (:func:`record_lint`).
 - ``guards``: the guard summary acknowledged (:func:`acknowledge_guards`).
+- ``mailbox``: with an email step, the campaign's mailbox still ``ok``, not
+  ``reauth_required`` or ``disabled`` since its test send (#299).
 
 **Invalidated on change.** Every record carries the fingerprint of what it was
 made for, and counts only while that fingerprint is still the current one:
@@ -121,6 +123,12 @@ class ReviewNotFound(ReviewError, LookupError):
 
 class ReviewConflict(ReviewError, ValueError):
     """Refused in the campaign's current state; the message says why."""
+
+
+class ReviewStale(ReviewConflict):
+    """Refused because what the person was shown is no longer current: a preview's or the
+    guard summary's fingerprint changed since. Showing it again and retrying can succeed,
+    unlike any other :class:`ReviewConflict` (#299)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -599,7 +607,7 @@ def approve(
             session, user, content, pending[enrollment_id].contact_id, now.date()
         )
         if seen[enrollment_id] != current[enrollment_id]:
-            raise ReviewConflict(
+            raise ReviewStale(
                 f"enrollment {enrollment_id}'s previews changed since they were viewed;"
                 " view them again"
             )
@@ -662,9 +670,9 @@ def acknowledge_guards(
     audience = audience_fingerprint(session, user, campaign)
     summary = guard_summary(session, user, campaign, now=now)
     if audience_fingerprint_seen != audience:
-        raise ReviewConflict("the audience changed since the summary was shown; look again")
+        raise ReviewStale("the audience changed since the summary was shown; look again")
     if summary_seen != summary:
-        raise ReviewConflict(f"the guard results changed; they are now: {summary}")
+        raise ReviewStale(f"the guard results changed; they are now: {summary}")
     campaign.guards_acknowledged_at = now
     campaign.guards_fingerprint = audience
     campaign.guards_summary = summary
@@ -914,6 +922,10 @@ def missing(
         out.append(
             Missing("test_sends", "email steps with no current test send", step_positions=untested)
         )
+    if any(step.channel is TemplateChannel.EMAIL for step in steps) and (
+        gap := _mailbox_gap(session, user, campaign)
+    ):
+        out.append(Missing("mailbox", gap))
     if not steps:
         out.append(Missing("lint", "the campaign has no steps"))
     elif campaign.lint_fingerprint != content:
@@ -933,6 +945,25 @@ def missing(
             )
         )
     return out
+
+
+def _mailbox_gap(session: Session, user: User, campaign: Campaign) -> str | None:
+    """Why the campaign's mailbox cannot send now, or None when it is ``ok`` (#299): one
+    that went ``reauth_required`` or ``disabled`` after its test send blocks activation."""
+    mailbox = (
+        None
+        if campaign.mailbox_id is None
+        else session.scalars(
+            scoped(user, Mailbox)
+            .where(Mailbox.id == campaign.mailbox_id)
+            .execution_options(populate_existing=True)
+        ).first()
+    )
+    if mailbox is None:
+        return "the campaign has email steps and no mailbox"
+    if mailbox.status is not MailboxStatus.OK:
+        return f"{mailbox.email} is {mailbox.status}, not ok"
+    return None
 
 
 def activate(

@@ -449,16 +449,24 @@ async def test_enrollment_search_treats_wildcards_literally(
             factories.make_contact(session, user, last_name=name, emails=[f"w{n}@odd.example"]).id
             for n, name in enumerate(("100% Kettle", "Under_score", "Back\\slash"))
         ]
+        # Matched by its address alone, so the email subquery's escape is what keeps a
+        # `_` meaning itself there (#299).
+        by_email = factories.make_contact(
+            session, user, last_name="Plain", emails=["snake_case@odd.example"]
+        ).id
     base = f"/api/v1/campaigns/{created['id']}"
-    enrolled = await client.post(f"{base}/enroll", json={"contact_ids": odd}, headers=CSRF)
-    assert enrolled.json()["pending"] == 5
+    enrolled = await client.post(
+        f"{base}/enroll", json={"contact_ids": [*odd, by_email]}, headers=CSRF
+    )
+    assert enrolled.json()["pending"] == 6
 
     async def found(q: str) -> list[int]:
         body = (await client.get(f"{base}/enrollments", params={"q": q})).json()
         return [e["contact_id"] for e in body["items"]]
 
     assert await found("%") == [odd[0]]
-    assert await found("_") == [odd[1]]
+    assert sorted(await found("_")) == sorted([odd[1], by_email])
+    assert await found("e_c") == [by_email]
     assert await found("\\") == [odd[2]]
     assert await found("0%") == [odd[0]]
 
@@ -487,5 +495,7 @@ async def test_the_next_send_counts_only_active_enrollments(
         campaign_id = campaign.id
 
     listed = {c["id"]: c for c in (await client.get("/api/v1/campaigns")).json()}
+    detail = (await client.get(f"/api/v1/campaigns/{campaign_id}")).json()
 
     assert listed[campaign_id]["next_action_at"] == "2030-01-02T15:00:00Z"
+    assert detail["next_action_at"] == "2030-01-02T15:00:00Z"  # the detail page's too (#299)

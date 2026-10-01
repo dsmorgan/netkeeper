@@ -7581,6 +7581,31 @@
         "title": "ProtectionOut",
         "type": "object"
       },
+      "RefusedOut": {
+        "description": "A ``409`` body. ``code`` is ``stale`` when what the person was shown changed since\n(show it again, then retry); ``None`` for any other refusal.",
+        "properties": {
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "RefusedOut",
+        "type": "object"
+      },
       "RepliedIn": {
         "additionalProperties": false,
         "properties": {
@@ -11526,7 +11551,14 @@
             "description": "No such campaign, step or enrollment for this user"
           },
           "409": {
-            "description": "Refused in the campaign's state; the detail says why"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusedOut"
+                }
+              }
+            },
+            "description": "Refused in the campaign's state; the detail says why. ``code`` is ``stale`` when only a fingerprint went stale: show it again and retry"
           },
           "422": {
             "content": {
@@ -11585,7 +11617,14 @@
             "description": "No such campaign, step or enrollment for this user"
           },
           "409": {
-            "description": "Refused in the campaign's state; the detail says why"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusedOut"
+                }
+              }
+            },
+            "description": "Refused in the campaign's state; the detail says why. ``code`` is ``stale`` when only a fingerprint went stale: show it again and retry"
           },
           "422": {
             "content": {
