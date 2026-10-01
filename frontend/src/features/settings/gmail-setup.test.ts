@@ -31,6 +31,15 @@ describe('consoleLinks', () => {
     })
   })
 
+  it('encodes an unusual project ID rather than splicing it into the URL', () => {
+    const links = consoleLinks('a b&c=d#e/f?g')
+    expect(links.branding).toBe(
+      'https://console.cloud.google.com/auth/branding?project=a%20b%26c%3Dd%23e%2Ff%3Fg',
+    )
+    expect(new URL(links.createClient).searchParams.get('project')).toBe('a b&c=d#e/f?g')
+    expect(new URL(links.gmailApi).hash).toBe('')
+  })
+
   it('leaves the project off before there is one', () => {
     expect(consoleLinks(null).branding).toBe('https://console.cloud.google.com/auth/branding')
   })
@@ -103,6 +112,20 @@ describe('wizardSteps', () => {
     expect(setupComplete(steps)).toBe(true)
     expect(steps.find((step) => step.key === 'published')?.state).toBe('todo')
     expect(currentStep(steps)).toBe('published')
+  })
+
+  it('a mailbox that needs re-authorizing proves the console steps but is not connected', () => {
+    const stale = mailbox({ status: 'reauth_required', status_reason: 'invalid_grant' })
+    const steps = wizardSteps({ done: [] }, status({ mailboxes: [stale] }), undefined)
+    expect(states(steps)).toMatchObject({
+      project: 'done/checked',
+      gmail_api: 'done/checked',
+      test_user: 'done/checked',
+      client: 'done/checked',
+      connect: 'failing/checked',
+    })
+    expect(setupComplete(steps)).toBe(false)
+    expect(currentStep(steps)).toBe('connect')
   })
 
   it('a disconnected mailbox proves nothing', () => {

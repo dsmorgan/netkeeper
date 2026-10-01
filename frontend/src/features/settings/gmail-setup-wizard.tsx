@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import type { MailboxStatus } from '@/features/mailboxes/api'
+import { type MailboxStatus, reasonText } from '@/features/mailboxes/api'
 
 import { ClientForm } from './client-form'
 import { CopyValue } from './copy-button'
@@ -67,7 +67,7 @@ export function GmailSetupWizard({
 }: {
   status: MailboxStatus
   outcomeReason: string | undefined
-  onConnect: () => void
+  onConnect: (mailboxId: number | null) => void
   connecting: boolean
 }) {
   const queryClient = useQueryClient()
@@ -234,7 +234,7 @@ function StepBody({
     changes: Partial<Pick<GmailSetup, 'project_id' | 'sender_email' | 'done'>>,
   ) => Promise<GmailSetup>
   mark: (key: ManualStep, done: boolean) => Promise<void>
-  onConnect: () => void
+  onConnect: (mailboxId: number | null) => void
   connecting: boolean
   moveOn: () => void
 }) {
@@ -392,17 +392,36 @@ function StepBody({
         </>
       )
     case 'connect': {
-      const live = status.mailboxes.find((mailbox) => mailbox.status !== 'disabled')
-      if (live !== undefined) {
+      const connected = status.mailboxes.find((mailbox) => mailbox.status === 'ok')
+      if (connected !== undefined) {
         return (
           <p>
-            Connected: <strong>{live.email}</strong>. netkeeper checked that the token works and
-            that Gmail answers it.
+            Connected: <strong>{connected.email}</strong>. netkeeper checked that the token works
+            and that Gmail answers it.
           </p>
+        )
+      }
+      const stale = status.mailboxes.find((mailbox) => mailbox.status === 'reauth_required')
+      if (stale !== undefined) {
+        return (
+          <>
+            <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-destructive">
+              <strong>{stale.email}</strong> needs re-authorizing.{' '}
+              {reasonText(stale.status_reason) ?? 'Google no longer accepts its token.'}
+            </p>
+            <Button size="sm" onClick={() => onConnect(stale.id)} disabled={connecting}>
+              {connecting ? 'Opening Google…' : 'Re-authorize'}
+            </Button>
+          </>
         )
       }
       return (
         <>
+          <p>
+            Authorize the Gmail account on Google’s page. Google asks for read, compose, send and
+            label access (<code className="font-mono">gmail.modify</code>); netkeeper never deletes
+            mail.
+          </p>
           <p>
             Google’s page says <strong>Google hasn’t verified this app</strong>. That’s expected:
             the app is yours. Choose <strong>Advanced</strong>, then{' '}
@@ -411,7 +430,11 @@ function StepBody({
           {!status.client_configured && (
             <p className="text-muted-foreground">Save the OAuth client first.</p>
           )}
-          <Button size="sm" onClick={onConnect} disabled={!status.client_configured || connecting}>
+          <Button
+            size="sm"
+            onClick={() => onConnect(null)}
+            disabled={!status.client_configured || connecting}
+          >
             {connecting ? 'Opening Google…' : 'Connect Gmail'}
           </Button>
         </>
@@ -435,8 +458,10 @@ function StepBody({
           <p className="text-muted-foreground">
             A GitHub repository URL (github.com) isn’t a domain you own, so Google’s rules don’t
             allow it. netkeeper hasn’t confirmed whether the console refuses it for an app that’s
-            never submitted for verification. A GitHub Pages site (you.github.io) is a domain you
-            can verify in Google Search Console. If you have neither, stay in Testing.
+            never submitted for verification. A GitHub Pages site (you.github.io) probably fits:
+            github.io is a public suffix, so you should be able to verify you.github.io in Google
+            Search Console, but netkeeper hasn’t confirmed that either. If you have neither, stay in
+            Testing.
           </p>
           <MarkDone step={step} label="Done: it’s published" mark={mark} saving={saving} />
         </>

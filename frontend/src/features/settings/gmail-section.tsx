@@ -112,7 +112,7 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
           <GmailSetupWizard
             status={status.data}
             outcomeReason={outcome.gmail === 'error' ? outcome.reason : undefined}
-            onConnect={() => connect.mutate(null)}
+            onConnect={(mailboxId) => connect.mutate(mailboxId)}
             connecting={connect.isPending}
           />
         )}
@@ -242,7 +242,7 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
             )}
             {live.length === 0 && (
               <p className="text-muted-foreground">
-                No mailbox is connected. Connect one in the setup guide’s last step.
+                No mailbox is connected. Connect one in step 7 of the setup guide.
               </p>
             )}
           </section>

@@ -79,7 +79,7 @@ Google calls this the **Google Auth Platform** (older consoles call it **OAuth c
 3. **Audience:** choose **External**. (Internal is only available to Google Workspace organizations.)
 4. **Contact information:** your address. Accept the policy and choose **Create**.
 
-Leave the homepage and privacy policy links empty. You only need them to publish, which is optional (see [Publishing, later](#publishing-later)).
+Leave the homepage and privacy policy links empty. You only need them to publish, which is optional (step 10).
 
 You don't need to add the scope under **Data Access**. netkeeper requests it when you authorize.
 
@@ -133,7 +133,24 @@ On Google's page:
 
 Google sends your browser back to netkeeper. The web UI shows **Gmail is connected**. The command line prints `connected you@gmail.com (mailbox 1, cap 80/day)` and your browser shows a page you can close.
 
-## Publishing, later
+## 8. Check it
+
+- Settings shows the mailbox as **connected**, with its daily cap (`[campaigns] mailbox_daily_cap`, 80 by default and never more than 400) and when its token was last refreshed.
+- `netkeeper gmail status` lists it without asking Google.
+- `netkeeper gmail check` (or **Check now** in Settings) refreshes the token right away.
+
+While `netkeeper serve` runs, it refreshes every connected mailbox's token every `[campaigns] reply_poll_minutes` (10 by default).
+
+## 9. Arm the mailbox: drafts first, then send
+
+A connected mailbox does nothing on its own. `netkeeper serve` hands it campaign steps only once you arm it, and every mailbox starts disarmed. Arming takes two separate steps.
+
+1. **Arm for drafts**: **Arm for drafts** in Settings, or `netkeeper gmail arm you@gmail.com`. From the next minute, every due step on the mailbox becomes a Gmail draft, `send` steps included, and you send each one yourself. netkeeper never calls `messages.send` for a mailbox armed for drafts only.
+2. **Arm to send**: **Arm to send** in Settings, or `netkeeper gmail arm you@gmail.com --send`. From then on, `send` steps go out on their own. This step is refused until netkeeper has found one of its own drafts on the mailbox by its Message-ID. It checks the first draft it makes on its next drafts check, within about 10 minutes. On a new mailbox, that first draft is usually a campaign's test: while the mailbox is armed for drafts, **Send a test** in the campaign's review makes each step's test a draft addressed to you, with a `[Test]` subject, in your Drafts, and never sends it. The test draft counts for the review, so you can activate the campaign while armed for drafts, and the drafts check verifies the mailbox from it. netkeeper doesn't delete test drafts; discard them once the mailbox is armed to send. If you discard one before the drafts check finds it, **Arm to send** says no netkeeper test draft was found in your Drafts: make a new test draft from the campaign's review. That's the live check that Gmail keeps the Message-ID netkeeper sets, which netkeeper relies on to find out whether a send whose answer never came went out.
+
+**Disarm** (in Settings, or `netkeeper gmail disarm you@gmail.com`) undoes both steps. From the next minute, nothing more is claimed on the mailbox, and netkeeper makes no Gmail call for it. A step already handed to Gmail isn't recalled. Disconnecting disarms too, and a mailbox you connect again starts disarmed. Settings, the dashboard's mailbox card and `netkeeper gmail status` show the mode, since when, and who armed it.
+
+## 10. Publishing, later (optional)
 
 Publishing is optional. It changes one thing for you: the token stops expiring every 7 days.
 
@@ -155,27 +172,10 @@ Google's branding rules say the home page must be on a domain you own, the priva
 **Can you use a GitHub URL?**
 
 - A GitHub repository URL (`https://github.com/you/repo`) isn't on a domain you own, so Google's rules don't allow it. We haven't confirmed whether the console refuses it outright for an app that's never submitted for verification.
-- A GitHub Pages site (`https://you.github.io/`) is on a domain you can verify in Google Search Console, because `github.io` is a public suffix: each `you.github.io` counts as its own domain. A home page and a privacy page there fit Google's rules.
+- A GitHub Pages site (`https://you.github.io/`) probably fits Google's rules: `github.io` is on the Public Suffix List, so each `you.github.io` counts as its own domain, which you should be able to verify in Google Search Console. We haven't confirmed that Google accepts it either.
 - If you have neither, or don't want to publish pages about a tool only you use, stay in Testing and re-authorize once a week.
 
 To publish, fill in the two URLs and the authorized domain on **Branding**, then open **Audience**, choose **Publish app**, and confirm. Mark the guide's last step done if you like; it's only a note for you.
-
-## 8. Check it
-
-- Settings shows the mailbox as **connected**, with its daily cap (`[campaigns] mailbox_daily_cap`, 80 by default and never more than 400) and when its token was last refreshed.
-- `netkeeper gmail status` lists it without asking Google.
-- `netkeeper gmail check` (or **Check now** in Settings) refreshes the token right away.
-
-While `netkeeper serve` runs, it refreshes every connected mailbox's token every `[campaigns] reply_poll_minutes` (10 by default).
-
-## 9. Arm the mailbox: drafts first, then send
-
-A connected mailbox does nothing on its own. `netkeeper serve` hands it campaign steps only once you arm it, and every mailbox starts disarmed. Arming takes two separate steps.
-
-1. **Arm for drafts**: **Arm for drafts** in Settings, or `netkeeper gmail arm you@gmail.com`. From the next minute, every due step on the mailbox becomes a Gmail draft, `send` steps included, and you send each one yourself. netkeeper never calls `messages.send` for a mailbox armed for drafts only.
-2. **Arm to send**: **Arm to send** in Settings, or `netkeeper gmail arm you@gmail.com --send`. From then on, `send` steps go out on their own. This step is refused until netkeeper has found one of its own drafts on the mailbox by its Message-ID. It checks the first draft it makes on its next drafts check, within about 10 minutes. On a new mailbox, that first draft is usually a campaign's test: while the mailbox is armed for drafts, **Send a test** in the campaign's review makes each step's test a draft addressed to you, with a `[Test]` subject, in your Drafts, and never sends it. The test draft counts for the review, so you can activate the campaign while armed for drafts, and the drafts check verifies the mailbox from it. netkeeper doesn't delete test drafts; discard them once the mailbox is armed to send. If you discard one before the drafts check finds it, **Arm to send** says no netkeeper test draft was found in your Drafts: make a new test draft from the campaign's review. That's the live check that Gmail keeps the Message-ID netkeeper sets, which netkeeper relies on to find out whether a send whose answer never came went out.
-
-**Disarm** (in Settings, or `netkeeper gmail disarm you@gmail.com`) undoes both steps. From the next minute, nothing more is claimed on the mailbox, and netkeeper makes no Gmail call for it. A step already handed to Gmail isn't recalled. Disconnecting disarms too, and a mailbox you connect again starts disarmed. Settings, the dashboard's mailbox card and `netkeeper gmail status` show the mode, since when, and who armed it.
 
 ## When Google stops accepting the token
 
@@ -203,7 +203,7 @@ The Settings page and `netkeeper gmail status` show a short reason code:
 
 | Reason | What happened | What to do |
 |---|---|---|
-| `invalid_grant` | Google refused the token: it was revoked, or it's seven days old in Testing | Authorize again (step 7). To stop the 7-day expiry, publish (see [Publishing, later](#publishing-later)). |
+| `invalid_grant` | Google refused the token: it was revoked, or it's seven days old in Testing | Authorize again (step 7). To stop the 7-day expiry, publish (step 10). |
 | `invalid_client` | Google doesn't know the client: it was deleted, or its secret was reset | Create a client (step 5), save it (step 6), and authorize again |
 | `unauthorized_client` | Google won't let the client use the token: it isn't a Desktop app client, or the token was issued to a different client | Create a Desktop app client (step 5), save it (step 6), and authorize again |
 | `token_missing` | The Keychain has no token for the mailbox | Authorize again |

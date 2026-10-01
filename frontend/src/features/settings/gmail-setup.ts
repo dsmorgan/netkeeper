@@ -119,9 +119,9 @@ const TITLES: Record<StepKey, string> = {
 const API_OFF = new Set(['gmail_api_refused', 'accessNotConfigured'])
 
 /**
- * Each step and its state. A connected mailbox (or one that needs only
- * re-authorizing) proves every required step; a saved client proves the
- * console steps a client can't exist without.
+ * Each step and its state. A connected mailbox proves every required step. One
+ * that needs re-authorizing proves the console steps but fails the connect step.
+ * A saved client proves the console steps a client can't exist without.
  */
 export function wizardSteps(
   setup: Pick<GmailSetup, 'done'>,
@@ -129,10 +129,14 @@ export function wizardSteps(
   outcomeReason: string | undefined,
 ): WizardStep[] {
   const marked = new Set(setup.done)
+  // A mailbox that needs re-authorizing connected once, so it proves the console
+  // steps, but it isn't connected now: the connect step says so.
   const live = status.mailboxes.some((mailbox) => mailbox.status !== 'disabled')
+  const connected = status.mailboxes.some((mailbox) => mailbox.status === 'ok')
+  const reauth = !connected && status.mailboxes.some((m) => m.status === 'reauth_required')
   const client = status.client_configured
   const apiOff =
-    !live &&
+    !connected &&
     (API_OFF.has(outcomeReason ?? '') ||
       status.mailboxes.some((mailbox) => API_OFF.has(mailbox.status_reason ?? '')))
 
@@ -163,7 +167,7 @@ export function wizardSteps(
     {
       key: 'connect',
       title: TITLES.connect,
-      state: live ? 'done' : 'todo',
+      state: connected ? 'done' : reauth ? 'failing' : 'todo',
       source: 'checked',
       optional: false,
     },
@@ -185,7 +189,7 @@ export function currentStep(steps: WizardStep[]): StepKey {
   return next?.key ?? 'published'
 }
 
-/** Setup is complete once a mailbox is connected; publishing stays optional. */
+/** Setup is complete once a mailbox is connected (`ok`); publishing stays optional. */
 export function setupComplete(steps: WizardStep[]): boolean {
   return steps.every((step) => step.optional || step.state === 'done')
 }

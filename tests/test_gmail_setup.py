@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from netkeeper.db import session_scope
 from netkeeper.models import User
 from netkeeper.services import gmail_setup
-from netkeeper.services.settings_kv import set_setting
+from netkeeper.services.settings_kv import get_setting, set_setting
 
 CSRF = {"X-Netkeeper-Client": "1"}
 EMPTY = {
@@ -136,5 +136,38 @@ async def test_a_stored_value_that_no_longer_fits_degrades(
 
     with session_scope(factory, write=True) as session:
         user = session.scalars(select(User)).one()
+        set_setting(
+            session,
+            user,
+            gmail_setup.SETTING_KEY,
+            {"project_id": "BAD ID!", "sender_email": "me@example.com", "done": ["branding"]},
+        )
+    body = (await client.get("/api/v1/gmail-setup")).json()
+    assert body == {**EMPTY, "sender_email": "me@example.com", "done": ["branding"]}
+
+    with session_scope(factory, write=True) as session:
+        user = session.scalars(select(User)).one()
         set_setting(session, user, gmail_setup.SETTING_KEY, "not a dict")
     assert (await client.get("/api/v1/gmail-setup")).json() == EMPTY
+
+
+async def test_the_stored_value_holds_exactly_these_keys(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """Nothing secret (a client secret, a token) can ride along in ``settings_kv``."""
+    response = await _put(
+        client,
+        project_id="netkeeper-ab12cd",
+        sender_email="me@example.com",
+        done=["project"],
+        client_secret="s3cret",
+        refresh_token="rt",
+    )
+    assert response.status_code == 200
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory) as session:
+        user = session.scalars(select(User)).one()
+        stored = get_setting(session, user, gmail_setup.SETTING_KEY)
+    assert isinstance(stored, dict)
+    assert set(stored) == {"project_id", "sender_email", "done"}
+    assert "s3cret" not in str(stored) and "rt" not in stored.values()

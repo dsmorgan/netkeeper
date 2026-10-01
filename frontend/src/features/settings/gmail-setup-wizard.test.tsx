@@ -1,7 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { MailboxStatus } from '@/features/mailboxes/api'
+import { type MailboxStatus, navigation } from '@/features/mailboxes/api'
 import { emptySetup, mailbox, renderWithBackend, status } from '@/features/mailboxes/test-support'
 import { resetFakeEventSource } from '@/test/fake-event-source'
 import { jsonResponse } from '@/test/fetch'
@@ -244,10 +244,53 @@ describe('Gmail setup guide', () => {
     expect(
       screen.getByText(/A GitHub repository URL \(github.com\) isn’t a domain you own/),
     ).toBeInTheDocument()
+    expect(screen.getByText(/A GitHub repository URL/)).toHaveTextContent(
+      'netkeeper hasn’t confirmed that either',
+    )
     expect(within(step(/Connect your mailbox/)).getByText('checked')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Hide setup steps' }))
     expect(screen.getByText('Gmail setup is complete.')).toBeInTheDocument()
+  })
+
+  it('shows a mailbox that needs re-authorizing as not connected, and re-authorizes it', async () => {
+    vi.spyOn(navigation, 'assign').mockImplementation(() => {})
+    const stale = mailbox({ status: 'reauth_required', status_reason: 'invalid_grant' })
+    const { calls } = renderWithBackend(
+      <GmailSection outcome={{}} />,
+      () => status({ mailboxes: [stale] }),
+      {
+        'POST /api/v1/mailboxes/oauth/start': () =>
+          jsonResponse({ authorization_url: 'https://accounts.example/auth' }),
+      },
+    )
+    const connect = await screen.findByRole('button', { name: /Connect your mailbox/ })
+    expect(connect).toHaveAttribute('aria-expanded', 'true')
+    expect(within(connect).getByText('problem')).toBeInTheDocument()
+    expect(screen.queryByText('Gmail setup is complete.')).not.toBeInTheDocument()
+    expect(screen.queryByText(/checked that the token works/)).not.toBeInTheDocument()
+    const body = document.getElementById('gmail-step-connect') as HTMLElement
+    expect(within(body).getByRole('alert')).toHaveTextContent(
+      'sender@example.com needs re-authorizing',
+    )
+    fireEvent.click(within(body).getByRole('button', { name: 'Re-authorize' }))
+    await waitFor(() =>
+      expect(calls).toContainEqual({
+        method: 'POST',
+        path: '/api/v1/mailboxes/oauth/start',
+        body: { mailbox_id: 3 },
+      }),
+    )
+  })
+
+  it('explains the scope before connecting', async () => {
+    render(() => status(), {
+      project_id: PROJECT,
+      done: ['project', 'gmail_api', 'branding', 'test_user', 'client_created'],
+    })
+    const body = await screen.findByText(/Authorize the Gmail account on Google’s page/)
+    expect(body).toHaveTextContent('gmail.modify')
+    expect(body).toHaveTextContent('netkeeper never deletes mail')
   })
 
   it('opens any step on request', async () => {
