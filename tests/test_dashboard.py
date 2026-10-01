@@ -145,6 +145,22 @@ def test_next_fires_due_now_are_exactly_what_the_tick_selects(session: Session) 
     assert len(listed_due) == 3
 
 
+def test_a_step_due_exactly_now_is_the_ticks_not_the_next_due(session: Session) -> None:
+    """``_next_due`` is the soonest *after* now: a row due at now is this tick's to take."""
+    user = factories.make_user(session)
+    _due(session, user, NOW)
+    later = NOW + timedelta(minutes=5)
+    _due(session, user, later)
+
+    assert campaign_engine._next_due(session, user, NOW) == later
+    [first, *_], _ = campaign_engine.upcoming(session, user, limit=10)
+    assert first.due == NOW
+    assert [
+        e.id
+        for e, _ in campaign_engine._due(session, user, NOW, seen=(), campaigns=(), mailboxes=())
+    ] == [first.enrollment.id]
+
+
 def test_next_fires_limit_keeps_the_total(session: Session) -> None:
     user = factories.make_user(session)
     for hours in range(4):
