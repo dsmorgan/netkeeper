@@ -59,6 +59,49 @@ def chrome_flags(line: str) -> list[str]:
     return [f for f in re.findall(r"(?<!\S)--[a-z-]+", line) if f != "--args"]
 
 
+def isolated_chrome_script(tmp_path: Path) -> Path:
+    """A copy of chrome.sh under a fake repo root with no ``.venv`` of its own.
+
+    chrome.sh always prefers ``<repo>/.venv/bin/netkeeper`` over anything on
+    PATH, and this repo's own ``.venv`` exists once ``make install`` has run
+    -- so a test of the PATH/``command -v netkeeper`` branch (a `uv tool`/pipx
+    install, #183 review should-fix 2) has to run the script from somewhere
+    that branch actually gets a chance to run, not the real checkout.
+    """
+    repo = tmp_path / "isolated-repo"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True)
+    copy = scripts / "chrome.sh"
+    copy.write_text(CHROME.read_text())
+    copy.chmod(0o755)
+    return copy
+
+
+def fake_netkeeper_cli(
+    path: Path, *, port: int | str, profile: Path, remote: str | None = None
+) -> None:
+    """A stand-in `netkeeper` whose `browser launch --json` answers like the real
+    CLI's, with a real python shebang -- enough for chrome.sh to ask it for the
+    port and profile the way it would ask the genuine one. ``port`` may be a
+    non-numeric string, to simulate a malformed answer.
+    """
+    path.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "if sys.argv[1:4] == ['browser', 'launch', '--json']:\n"
+        "    print(json.dumps({\n"
+        f"        'cdp_url': 'http://127.0.0.1:{port}',\n"
+        f"        'port': {port!r},\n"
+        f"        'profile': {str(profile)!r},\n"
+        f"        'remote': {remote!r},\n"
+        "    }))\n"
+        "    sys.exit(0)\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -216,6 +259,67 @@ def test_chrome_script_refuses_a_cdp_url_on_another_host(tmp_path: Path) -> None
     assert "192.0.2.10" in result.stderr
 
 
+def test_chrome_script_finds_port_and_profile_through_a_symlinked_netkeeper(
+    tmp_path: Path,
+) -> None:
+    """#183 review should-fix 2: a `uv tool`/pipx install puts a symlink on
+    PATH with no interpreter beside it. Reading python from the entry point's
+    own shebang (which `head` follows straight through the symlink) must still
+    work, with no `<repo>/.venv` around to fall back on."""
+    script = isolated_chrome_script(tmp_path)
+    port = free_port()
+    profile = tmp_path.resolve() / "profile"
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    fake_netkeeper_cli(real_dir / "netkeeper", port=port, profile=profile)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "netkeeper").symlink_to(real_dir / "netkeeper")  # no python beside the symlink
+    path = f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+    result = run_sh(script, "--status", env={"PATH": path})
+    assert result.returncode == 0, result.stderr
+    assert "warning" not in result.stderr
+    assert f"profile  {profile}" in result.stdout
+    assert f"port     {port}: nothing is listening" in result.stdout
+
+
+def test_chrome_script_round_trips_a_non_ascii_profile_path(tmp_path: Path) -> None:
+    """#183 review should-fix 2: sed parsing the JSON directly mangled a
+    profile path containing a quote, a backslash, or non-ASCII text (json.dumps
+    escapes the last as \\uXXXX) -- a real parser must round-trip it intact."""
+    port = free_port()
+    config = tmp_path / "config.toml"
+    config.write_text(f'[linkedin]\ncdp_url = "http://127.0.0.1:{port}"\n')
+    data_dir = tmp_path / "José's Área"
+    result = run_sh(
+        CHROME,
+        "--status",
+        env={"NETKEEPER_DATA": str(data_dir), "NETKEEPER_CONFIG": str(config)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "warning" not in result.stderr
+    profile = data_dir.resolve() / browser_launch.CHROME_PROFILE_DIRNAME
+    assert f"profile  {profile}" in result.stdout
+
+
+def test_chrome_script_refuses_a_non_numeric_port_from_json(tmp_path: Path) -> None:
+    """#183 review nit 4: with a real parser, a malformed answer's port must
+    still be checked before reaching curl/lsof, not just --port's."""
+    script = isolated_chrome_script(tmp_path)
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    fake_netkeeper_cli(
+        real_dir / "netkeeper", port="not-a-port", profile=tmp_path.resolve() / "profile"
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "netkeeper").symlink_to(real_dir / "netkeeper")
+    path = f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+    result = run_sh(script, "--dry-run", env={"PATH": path})
+    assert result.returncode == 1
+    assert "must be a number" in result.stderr
+
+
 def test_chrome_script_normalizes_the_profile_spelling(tmp_path: Path) -> None:
     profile = tmp_path.resolve() / "profile"
     profile.mkdir()
@@ -256,7 +360,8 @@ def test_chrome_script_refuses_when_a_chrome_holds_the_profile_under_another_spe
 
 def test_chrome_script_trusts_the_locks_pid_over_the_command_line(tmp_path: Path) -> None:
     """A Chrome started with a spelling the script cannot match still holds its lock,
-    as long as it genuinely has the profile open."""
+    as long as it genuinely has the profile open. Found only through the lock
+    file, not a command-line match, so the message names it (#183 review bug 1)."""
     profile = tmp_path.resolve() / "profile"
     profile.mkdir()
     with process_named_holding_open(tmp_path, "Google Chrome", profile / "held") as pid:
@@ -264,7 +369,82 @@ def test_chrome_script_trusts_the_locks_pid_over_the_command_line(tmp_path: Path
         result = start(profile)
     assert result.returncode == 1
     assert f"pid {pid}" in result.stderr
+    assert f"(per {profile}/SingletonLock)" in result.stderr
     assert (profile / "SingletonLock").is_symlink()
+
+
+def test_chrome_script_does_not_count_a_file_open_in_a_profile_whose_name_merely_starts_the_same(
+    tmp_path: Path,
+) -> None:
+    """Pins the trailing slash in lock_holder()'s lsof check: a file open under
+    chrome-profile-old must not count as chrome-profile itself being open."""
+    profile = tmp_path.resolve() / "chrome-profile"
+    profile.mkdir()
+    sibling = tmp_path.resolve() / "chrome-profile-old"
+    with process_named_holding_open(tmp_path, "Google Chrome", sibling / "held") as pid:
+        (profile / "SingletonLock").symlink_to(f"thishost-{pid}")
+        result = start(profile)
+    assert result.returncode == 0, result.stderr
+    assert "stale profile lock" in result.stdout
+
+
+def test_chrome_script_accepts_a_holder_whose_own_flag_canonicalizes_to_the_profile(
+    tmp_path: Path,
+) -> None:
+    """#183 review nit 3: a holder's own --user-data-dir is read and
+    canonicalized the same way $profile is, so a spelling profile_pids()'s
+    plain substring match cannot catch (here, a symlinked alias) is still
+    recognized -- without needing lsof to show anything open under it."""
+    real_profile = tmp_path.resolve() / "real-profile"
+    real_profile.mkdir()
+    alias_profile = tmp_path.resolve() / "alias-profile"
+    alias_profile.symlink_to(real_profile)
+    exe = tmp_path / "Google Chrome"
+    exe.symlink_to(sys.executable)
+    proc = subprocess.Popen(
+        [str(exe), "-c", "import time; time.sleep(60)", f"--user-data-dir={alias_profile}"]
+    )
+    try:
+        (real_profile / "SingletonLock").symlink_to(f"thishost-{proc.pid}")
+        result = start(real_profile)
+    finally:
+        proc.kill()
+        proc.wait()
+    assert result.returncode == 1
+    assert f"pid {proc.pid}" in result.stderr
+
+
+def test_chrome_script_treats_lock_holder_as_present_when_lsof_answers_nothing(
+    tmp_path: Path,
+) -> None:
+    """#183 review nit 3: lsof returning nothing at all for a live, Chrome-named,
+    non-helper pid (a startup race, or no permission to inspect it) is not proof
+    there is no holder; lock_holder() must fail closed, not clear the lock."""
+    profile = tmp_path.resolve() / "profile"
+    profile.mkdir()
+    with process_named(tmp_path, "Google Chrome") as pid:
+        (profile / "SingletonLock").symlink_to(f"thishost-{pid}")
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "lsof"
+        real = shutil.which("lsof")
+        assert real is not None
+        # Silent on -Fn (the lock-holder check); real lsof for port_listener's
+        # -iTCP check, so the rest of the script still runs normally.
+        shim.write_text(f'#!/bin/sh\ncase "$*" in *-Fn*) exit 0 ;; esac\nexec "{real}" "$@"\n')
+        shim.chmod(0o755)
+        path = f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+        result = run_sh(
+            CHROME,
+            "--dry-run",
+            "--port",
+            str(free_port()),
+            "--profile-dir",
+            str(profile),
+            env={"PATH": path},
+        )
+    assert result.returncode == 1
+    assert f"pid {pid}" in result.stderr
 
 
 def test_chrome_script_refuses_a_lock_whose_pid_was_reused_by_an_unrelated_chrome(
@@ -792,6 +972,46 @@ def test_reset_renames_a_failed_archive_instead_of_leaving_it_behind(
     entries = sorted(p.name for p in (data / "archives").iterdir())
     assert len(entries) == 1
     assert entries[0].endswith(".failed")
+
+
+@needs_sqlite3_cli
+def test_reset_quarantines_a_partial_archive_when_the_raw_copy_fails(
+    data: Path, tmp_path: Path
+) -> None:
+    """Review should-fix 1: when the raw-copy fallback fails partway (an
+    unreadable -wal), the partial archive must not sit in archives/ looking
+    like a normal one, and must not appear in --list either."""
+    db = data / "netkeeper.sqlite3"
+    db.unlink(missing_ok=True)
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE marker (x integer)")
+        conn.execute("INSERT INTO marker VALUES (42)")
+    wal = Path(f"{db}-wal")
+    wal.touch(exist_ok=True)
+    wal.chmod(0o000)
+    try:
+        real = shutil.which("sqlite3")
+        assert real is not None
+        shim_dir = tmp_path / "shim"
+        shim_dir.mkdir()
+        shim = shim_dir / "sqlite3"
+        shim.write_text(f'#!/bin/sh\ncase "$2" in VACUUM*) exit 1 ;; esac\nexec "{real}" "$@"\n')
+        shim.chmod(0o755)
+        path = f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+        result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": path})
+        assert result.returncode == 1
+        assert "could not copy" in result.stderr
+
+        archives = data / "archives"
+        assert not list(archives.glob("*.sqlite3")), "a partial archive looks like a good one"
+        assert list(archives.glob("*.sqlite3.failed")), "the partial copy should be quarantined"
+
+        listed = run_sh(RESET, "--data-dir", str(data), "--list", env={})
+        assert listed.returncode == 0, listed.stderr
+        assert "no archives in" in listed.stdout
+    finally:
+        wal.chmod(0o644)  # so the temp directory's own teardown can remove it
 
 
 @needs_sqlite3_cli
