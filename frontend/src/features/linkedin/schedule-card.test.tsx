@@ -5,12 +5,24 @@ import { describe, expect, it } from 'vitest'
 import { jsonResponse, mockFetch } from '@/test/fetch'
 
 import { ScheduleCard } from './schedule-card'
-import { backend, SCHEDULE_ARMED, SCHEDULE_DISARMED, type Call, type Handler } from './test-support'
+import {
+  backend,
+  BUDGET,
+  RISK_WARNING,
+  SCHEDULE_ARMED,
+  SCHEDULE_DISARMED,
+  type Call,
+  type Handler,
+} from './test-support'
 
 function renderCard(handlers: Record<string, Handler> = {}, calls: Call[] = []) {
   mockFetch(
     backend(
-      { 'GET /api/v1/linkedin/schedule': () => jsonResponse(SCHEDULE_DISARMED), ...handlers },
+      {
+        'GET /api/v1/linkedin/schedule': () => jsonResponse(SCHEDULE_DISARMED),
+        'GET /api/v1/linkedin/budget': () => jsonResponse(BUDGET),
+        ...handlers,
+      },
       calls,
     ),
   )
@@ -42,6 +54,35 @@ describe('ScheduleCard', () => {
 
     // Nothing was sent yet: the dialog only opened, it did not arm anything.
     expect(calls.some((call) => call.path === '/api/v1/linkedin/schedule/arm')).toBe(false)
+  })
+
+  it('shows the profile-visit risk warning in the dialog above 100 a day, and still arms (#318)', async () => {
+    const { calls } = renderCard({
+      'GET /api/v1/linkedin/budget': () => jsonResponse({ ...BUDGET, risk_warning: RISK_WARNING }),
+      'POST /api/v1/linkedin/schedule/arm': () => jsonResponse(SCHEDULE_ARMED),
+    })
+    await screen.findByText('Disarmed — nothing runs on its own')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Arm scheduled runs' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(
+      await within(dialog).findByRole('note', { name: 'Profile-visit risk' }),
+    ).toHaveTextContent(RISK_WARNING)
+
+    // The warning informs; it does not stop arming.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Arm scheduled runs' }))
+    expect(await screen.findByText(/^Armed/)).toBeInTheDocument()
+    expect(calls.some((call) => call.path === '/api/v1/linkedin/schedule/arm')).toBe(true)
+  })
+
+  it('shows no risk warning in the dialog at 100 a day or below (#318)', async () => {
+    renderCard()
+    await screen.findByText('Disarmed — nothing runs on its own')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Arm scheduled runs' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent(/start contacting linkedin on their own/i)
+    expect(within(dialog).queryByRole('note', { name: 'Profile-visit risk' })).toBeNull()
   })
 
   it('sends confirm: true only once the dialog is confirmed', async () => {

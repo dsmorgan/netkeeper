@@ -272,6 +272,40 @@ def test_settings_are_frozen() -> None:
         settings.web = replace(settings.web, port=1)  # type: ignore[misc]
 
 
+# --- profile_visits_per_week: optional since #318 -----------------------------
+
+
+def test_an_absent_weekly_profile_visit_limit_is_none(isolated: Path) -> None:
+    path = _write(isolated / "c.toml", "[linkedin.budget]\nprofile_visits_per_day = 100\n")
+    budget = load_settings(path).linkedin.budget
+    assert budget.profile_visits_per_day == 100
+    assert budget.profile_visits_per_week is None
+
+
+def test_an_existing_config_that_sets_the_weekly_limit_still_loads_it(isolated: Path) -> None:
+    path = _write(isolated / "c.toml", "[linkedin.budget]\nprofile_visits_per_week = 420\n")
+    assert load_settings(path).linkedin.budget.profile_visits_per_week == 420
+
+
+def test_a_weekly_limit_of_the_wrong_type_is_still_an_error(isolated: Path) -> None:
+    path = _write(isolated / "c.toml", '[linkedin.budget]\nprofile_visits_per_week = "lots"\n')
+    with pytest.raises(ConfigError, match="profile_visits_per_week must be an integer"):
+        load_settings(path)
+
+
+def test_render_toml_leaves_an_unset_weekly_limit_out_and_round_trips_a_set_one(
+    isolated: Path,
+) -> None:
+    assert "profile_visits_per_week" not in render_toml(Settings())
+    explicit = load_settings(
+        _write(isolated / "c.toml", "[linkedin.budget]\nprofile_visits_per_week = 420\n")
+    )
+    rendered = render_toml(explicit)
+    assert "profile_visits_per_week = 420" in rendered
+    reloaded = load_settings(_write(isolated / "again.toml", rendered))
+    assert reloaded.linkedin.budget.profile_visits_per_week == 420
+
+
 # --- rendering and the CLI ----------------------------------------------------
 
 

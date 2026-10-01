@@ -86,7 +86,14 @@ export const BUDGET: BudgetStatus = {
     week_left: 240,
     remaining: 45,
   },
+  risk_warning: null,
 }
+
+/** What `GET /linkedin/budget` says about a daily profile-visit limit of 150 (#318). */
+export const RISK_WARNING =
+  'Profile visits are set to 150 a day, above the 100 a day netkeeper was designed around.' +
+  ' More visits a day make it more likely that LinkedIn restricts your account or asks you to' +
+  ' verify it. Heat still slows runs down after LinkedIn throttles a visit.'
 
 export const HEAT: Heat = {
   score: 0,

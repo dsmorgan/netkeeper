@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 
 import { budgetQuery, heatQuery } from './api'
 import { formatWhen } from './fields'
+import { RiskWarning } from './risk-warning'
 import { ACTION_CLASS_LABELS } from './types'
 
 function message(error: unknown): string {
@@ -33,6 +34,7 @@ export function BudgetPanel() {
         {budget.isError && <p role="alert">{message(budget.error)}</p>}
         {budget.isSuccess && (
           <>
+            <RiskWarning text={budget.data.risk_warning} />
             <ol className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
               <Step label="Warm-up" value={budget.data.profile_visits_today.ramp} />
               <Step label="After weekend" value={budget.data.profile_visits_today.after_weekend} />

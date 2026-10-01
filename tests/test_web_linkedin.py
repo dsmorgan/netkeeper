@@ -7,7 +7,9 @@ The start/watch/stop path and the disarmed-serve property are in
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import factories
 import httpx
@@ -23,6 +25,7 @@ from netkeeper.db import session_scope
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User, UserKind
 from netkeeper.services import budgets, enrich_plan, runs
 from netkeeper.services.linkedin_accounts import ensure_account
+from netkeeper.web.app import create_app
 
 #: These tests start runs by hand at whatever time the suite runs (#213).
 pytestmark = pytest.mark.usefixtures("inside_active_hours")
@@ -123,6 +126,7 @@ async def test_budget_heat_and_status_read_what_posture_reads(
     assert visits["day"]["count"] == 1 and visits["week"]["count"] == 1
     today = budget["profile_visits_today"]
     assert today["spent_today"] == 1 and today["ramp"] == settings.budget.warmup_start
+    assert budget["risk_warning"] is None  # 60 a day, the default
     assert (heat["score"], heat["tripped"], heat["threshold"]) == (0.0, False, 2.5)
     assert status == {
         "session_flag": None,
@@ -304,3 +308,32 @@ async def test_loopback_names_on_any_port_are_served(running_app: FastAPI, host:
     async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
         response = await client.get("/api/v1/me", headers={"host": host})
     assert response.status_code == 200
+
+
+async def test_budget_carries_the_risk_warning_above_100_a_day(
+    bare_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    _migrated_template: Path,
+) -> None:
+    """#318: ``risk_warning`` is the sentence ``netkeeper posture`` shows, and the
+    limit in force is still the one configured. It informs; nothing refuses."""
+    from conftest import _copy_template
+
+    _copy_template(_migrated_template, tmp_path / "bare")
+    monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", str(tmp_path / "no-dist"))
+    base = Settings()
+    settings = replace(
+        base,
+        linkedin=replace(
+            base.linkedin, budget=replace(base.linkedin.budget, profile_visits_per_day=150)
+        ),
+    )
+    app = create_app(settings, engine=bare_engine)
+    async with app.router.lifespan_context(app), client_for(app) as client:
+        budget = (await client.get("/api/v1/linkedin/budget")).json()
+
+    assert budget["risk_warning"] == budgets.profile_visit_risk_warning(settings.linkedin.budget)
+    assert budget["risk_warning"].startswith("Profile visits are set to 150 a day")
+    visits = {row["action"]: row for row in budget["budgets"]}["profile_visits"]
+    assert visits["day"]["limit"] == 150 and visits["week"]["limit"] == 750

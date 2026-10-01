@@ -2855,11 +2855,20 @@ export interface components {
             day: components["schemas"]["PeriodBudgetOut"];
             week: components["schemas"]["PeriodBudgetOut"] | null;
         };
-        /** BudgetStatusOut */
+        /**
+         * BudgetStatusOut
+         * @description Every action class's counters, today's profile-visit chain, and any risk warning.
+         *
+         *     ``risk_warning`` is set when the daily profile-visit limit is above the 100
+         *     a day netkeeper was designed around (#318): one plain sentence for the page
+         *     to show as it is. It never blocks anything.
+         */
         BudgetStatusOut: {
             /** Budgets */
             budgets: components["schemas"]["BudgetOut"][];
             profile_visits_today: components["schemas"]["TodaysVisitsOut"];
+            /** Risk Warning */
+            risk_warning: string | null;
         };
         /**
          * BulkCountIn

@@ -74,6 +74,7 @@ from netkeeper.linkedin.page_profiles import PageProfiles
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.services import route_breaker, runs
+from netkeeper.services.budgets import profile_visit_risk_warning
 from netkeeper.services.connections_sync import sync_connections
 from netkeeper.services.enrichment import enrich_contacts
 from netkeeper.services.events import Event, EventBus
@@ -442,7 +443,14 @@ def serve_extractor(
 
 
 def serve_app(settings: Settings) -> FastAPI:
-    """The app ``netkeeper serve`` runs: ``create_app`` with the extractor."""
+    """The app ``netkeeper serve`` runs: ``create_app`` with the extractor.
+
+    Logs the profile-visit risk warning (#318) once here, at startup, when the
+    daily limit is above the level netkeeper was designed around.
+    """
+    risk = profile_visit_risk_warning(settings.linkedin.budget)
+    if risk is not None:
+        log.warning("%s", risk)
     return create_app(settings, extractor=serve_extractor(settings))
 
 

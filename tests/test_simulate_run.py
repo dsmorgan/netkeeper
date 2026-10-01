@@ -224,7 +224,7 @@ async def _run_one_direct_fire(target_ordinals: frozenset[int]) -> sr._RunState:
     with ``target_ordinals`` as the units to throttle."""
     zone = ZoneInfo(DEFAULTS.linkedin.timezone)
     start = datetime.combine(sr.REFERENCE_START_DATE, time(0, 0), tzinfo=zone).astimezone(UTC)
-    cap = min(DEFAULTS.linkedin.budget.profile_visits_per_day, 100)
+    cap = min(DEFAULTS.linkedin.budget.profile_visits_per_day, 250)
 
     with sr.scratch_database() as factory:
         with session_scope(factory, write=True) as session:

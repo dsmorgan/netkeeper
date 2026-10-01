@@ -104,6 +104,41 @@ def test_arming_asks_first_and_no_leaves_it_disarmed(cli_db: sessionmaker[Sessio
     assert _armed(cli_db)
 
 
+def test_arming_shows_the_profile_visit_risk_warning_above_100_a_day_and_still_arms(
+    cli_db: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """#318: the warning comes before the question, --yes or not, and never stops arming."""
+    config = tmp_path / "risky.toml"
+    config.write_text("[linkedin.budget]\nprofile_visits_per_day = 180\n")
+    runner = CliRunner()
+
+    declined = runner.invoke(
+        cli, ["--config", str(config), "linkedin", "schedule", "arm"], input="n\n"
+    )
+    assert declined.exit_code == 1
+    warning = "warning: Profile visits are set to 180 a day, above the 100 a day"
+    assert warning in declined.output
+    assert declined.output.index(warning) < declined.output.index("arm scheduled LinkedIn runs?")
+    assert not _armed(cli_db)
+
+    armed = runner.invoke(cli, ["--config", str(config), "linkedin", "schedule", "arm", "--yes"])
+    assert armed.exit_code == 0, armed.output
+    assert warning in armed.output
+    assert _armed(cli_db)
+
+
+def test_arming_at_100_a_day_shows_no_risk_warning(
+    cli_db: sessionmaker[Session], tmp_path: Path
+) -> None:
+    config = tmp_path / "calm.toml"
+    config.write_text("[linkedin.budget]\nprofile_visits_per_day = 100\n")
+    result = CliRunner().invoke(
+        cli, ["--config", str(config), "linkedin", "schedule", "arm", "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "warning:" not in result.output
+
+
 def _trip_breaker(factory: sessionmaker[Session]) -> int:
     with session_scope(factory, write=True) as session:
         user = _user(session)
