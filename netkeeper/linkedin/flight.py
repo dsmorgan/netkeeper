@@ -11,6 +11,8 @@ line, where ``<id>`` is a hex number and ``<value>`` is JSON, or a tag and its d
 * ``1a:T3f,<63 bytes of text>`` -- ``T``: a text row, length-prefixed in hex bytes,
   which may itself contain newlines.
 * ``2:E{...}`` -- ``E``: the server's own error for that row.
+* ``5:R`` / ``5:X`` -- the start of a stream (``R``) or an async iterable (``X``)
+  whose chunks follow as rows of the same id, and ``5:C`` -- its close (#196 item 10).
 * ``:HL[...]`` and other upper-case tags -- hints about fonts, preloads, and the like.
 
 Rendered elements are four-item lists, ``["$", type, key, props]``, and a string of
@@ -72,11 +74,15 @@ class FlightPayload:
 
     ``rows`` holds every JSON model row by id. ``modules`` holds each ``I`` row's
     import (its data, unparsed beyond JSON). ``texts`` holds each ``T`` row's text.
+    ``streams`` holds the id of each ``R`` or ``X`` row (a stream started) and
+    ``closed`` the id of each ``C`` row (a stream closed).
     """
 
     rows: Mapping[str, object]
     modules: Mapping[str, object]
     texts: Mapping[str, str]
+    streams: frozenset[str] = frozenset()
+    closed: frozenset[str] = frozenset()
 
     def resolve(self, value: object) -> object | None:
         """The JSON row ``value`` refers to, or ``None`` when it is not a reference to one."""
@@ -130,8 +136,13 @@ def is_whole(payload: FlightPayload, *, endpoint: str) -> bool:
     reference reachable from it (:data:`_ROW_MARKER`) must name a model row, an ``I``
     import, or a ``T`` text row the copy holds; and every model row must be reachable
     from the root, since a whole answer sends none that nothing uses (#207 review).
+    A stream (``R``) or async iterable (``X``) that started and never closed (no
+    ``C`` row of its id) is a copy cut mid-stream, however whole its rows look
+    (#196 item 10).
     """
     if ROOT_ROW not in payload.rows:
+        return False
+    if not payload.streams <= payload.closed:
         return False
     reached = {ROOT_ROW}
     stack = [ROOT_ROW]
@@ -186,6 +197,8 @@ def parse_flight(body: bytes | str, *, endpoint: str) -> FlightPayload:
     rows: dict[str, object] = {}
     modules: dict[str, object] = {}
     texts: dict[str, str] = {}
+    streams: set[str] = set()
+    closed: set[str] = set()
     seen: set[str] = set()
     position = 0
     line = 0
@@ -227,10 +240,20 @@ def parse_flight(body: bytes | str, *, endpoint: str) -> FlightPayload:
             modules[row_id] = _json(value, endpoint, line)
         elif tag == "E":
             raise RouteChanged(endpoint, f"row {line}: the server sent an error row")
+        elif tag in ("R", "X"):
+            streams.add(row_id)
+        elif tag == "C":
+            closed.add(row_id)
         # Any other tag is a hint (fonts, preloads, debug info): nothing to read.
     if not rows:
         raise RouteChanged(endpoint, "a flight payload with no model rows")
-    return FlightPayload(rows=rows, modules=modules, texts=texts)
+    return FlightPayload(
+        rows=rows,
+        modules=modules,
+        texts=texts,
+        streams=frozenset(streams),
+        closed=frozenset(closed),
+    )
 
 
 def _text_bounds(data: bytes, cursor: int) -> tuple[int, int]:
