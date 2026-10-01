@@ -96,19 +96,21 @@ if [ -z "$port" ] || [ -z "$profile" ]; then
       answer=$("$netkeeper_bin" browser launch --json 2>/dev/null) || answer=
     fi
   fi
+  # Pulled straight from the one-line JSON `browser launch --json` prints, with
+  # sed rather than a sibling `python`: under `uv tool` or pipx, `netkeeper` on
+  # PATH is a symlink, so there is no interpreter next to it to find (#183 review
+  # bug 3) -- and parsing without one sidesteps that rather than chasing it
+  # through `readlink`.
   if [ -n "$answer" ]; then
-    # One field per line: port, profile, remote note (empty when none).
-    fields=$(printf '%s' "$answer" | "$(dirname "$netkeeper_bin")/python" -c '
-import json, sys
-d = json.load(sys.stdin)
-print(d["port"]); print(d["profile"]); print(d["remote"] or "")' 2>/dev/null) || fields=
+    asked_port=$(printf '%s' "$answer" | sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')
+    asked_profile=$(printf '%s' "$answer" | sed -n 's/.*"profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    remote=$(printf '%s' "$answer" | sed -n 's/.*"remote"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
   else
-    fields=
+    asked_port=
+    asked_profile=
+    remote=
   fi
-  if [ -n "$fields" ]; then
-    asked_port=$(printf '%s\n' "$fields" | sed -n 1p)
-    asked_profile=$(printf '%s\n' "$fields" | sed -n 2p)
-    remote=$(printf '%s\n' "$fields" | sed -n 3p)
+  if [ -n "$asked_port" ] && [ -n "$asked_profile" ]; then
     if [ -z "$port" ] && [ -n "$remote" ]; then
       die "$remote"
     fi
@@ -123,6 +125,12 @@ print(d["port"]); print(d["profile"]); print(d["remote"] or "")' 2>/dev/null) ||
     fi
   fi
 fi
+
+# #183 review bug 4: the port can come from netkeeper's own JSON, not just
+# --port, and that answer was never checked before being handed to curl/lsof.
+case $port in
+  *[!0-9]*) die "the port from \`netkeeper browser launch --json\` must be a number, not '$port'" ;;
+esac
 
 # One spelling of the profile, however it was given: absolute, symlinks
 # resolved, no trailing slash (pwd -P, and dirname/basename, drop it). Chrome gets this spelling, and every check
@@ -154,9 +162,13 @@ profile_pids() {
     index(line, ENVIRON["CHROME_SH_FLAG"] " ") { print $1 }'
 }
 
-# The pid Chrome wrote into the profile's lock, when that process is alive and
-# is a Chrome. Chrome's own check, and it does not care how the path was spelled
-# when that Chrome was started.
+# The pid Chrome wrote into the profile's lock, when that process is alive, is a
+# Chrome, is not one of its own helper processes, and actually has this profile
+# open. Chrome's own check for the first two, and it does not care how the path
+# was spelled when that Chrome was started; the last two guard against a pid
+# the crashed netkeeper Chrome once had, since reused by something else --
+# your everyday Chrome's main window, or one of its many `--type=` helpers --
+# which is not this profile's holder just because it is also a Chrome (#183 review).
 lock_holder() {
   target=$(readlink "$profile/SingletonLock" 2>/dev/null) || return 0
   pid=${target##*-}
@@ -166,8 +178,18 @@ lock_holder() {
   # Chrome's pid reused by anything else is no holder.
   exe=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
   case $(basename "$exe" | tr '[:upper:]' '[:lower:]') in
-    *chrome*|*chromium*) printf '%s\n' "$pid" ;;
+    *chrome*|*chromium*) ;;
+    *) return 0 ;;
   esac
+  # A renderer, GPU, or utility process never holds SingletonLock itself; a
+  # reused pid landing on one belongs to some other Chrome entirely.
+  case $(ps -o command= -p "$pid" 2>/dev/null) in
+    *" --type="*) return 0 ;;
+  esac
+  # The reused-pid case proper: confirm it has *this* profile's files open,
+  # not just that it is some Chrome or other.
+  lsof -a -p "$pid" -Fn 2>/dev/null | grep -qF "$profile/" || return 0
+  printf '%s\n' "$pid"
 }
 
 port_listener() {
@@ -180,6 +202,13 @@ browser_name() {
 
 first_line() {
   printf '%s\n' "$1" | sed -n 1p
+}
+
+# The --remote-debugging-port on a holder's own command line, when it has one
+# and it is not $port: #183 review bug 2, "without the debugging port" is the
+# wrong message for a Chrome that has one, just a different one.
+holder_other_port() {
+  ps -o command= -p "$1" 2>/dev/null | sed -n 's/.*--remote-debugging-port=\([0-9]*\).*/\1/p'
 }
 
 version=$(cdp_version)
@@ -219,7 +248,16 @@ listener=$(port_listener)
 [ -z "$listener" ] || die "port $port is held by $listener, which is not a debuggable Chrome. Free it, or use --port and set linkedin.cdp_url to match."
 
 if [ -n "$pids" ] || [ -n "$holder" ]; then
-  die "Chrome is running on this profile without the debugging port (pid $(first_line "${pids:-$holder}")). Quit that window with Cmd-Q, then run this again: a running Chrome cannot gain the port."
+  running_pid=$(first_line "${pids:-$holder}")
+  # Found only via the lock file, not a command-line match: say so, so the
+  # person can tell this apart from a guess (#183 review bug 1).
+  via=
+  [ -n "$pids" ] || via=" (per $profile/SingletonLock)"
+  other_port=$(holder_other_port "$running_pid")
+  if [ -n "$other_port" ] && [ "$other_port" != "$port" ]; then
+    die "Chrome is running on this profile on port $other_port, not $port (pid $running_pid$via). Use --port $other_port to match it, or quit that window with Cmd-Q and run this again."
+  fi
+  die "Chrome is running on this profile without the debugging port (pid $running_pid$via). Quit that window with Cmd-Q, then run this again: a running Chrome cannot gain the port."
 fi
 
 # A Chrome that crashed leaves these behind. Nothing holds the profile (checked

@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
@@ -87,6 +88,30 @@ def process_named(directory: Path, name: str) -> Iterator[int]:
     exe = directory / name
     exe.symlink_to(sleep)
     proc = subprocess.Popen([str(exe), "60"])
+    try:
+        yield proc.pid
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+@contextmanager
+def process_named_holding_open(directory: Path, name: str, held: Path) -> Iterator[int]:
+    """A live process named ``directory/name`` (``ps -o comm=`` reports the symlink's
+    own name, not the interpreter it points to) that keeps ``held`` open until killed.
+
+    What tells an actual holder of a profile apart from a pid that merely matches
+    by name or number (#183 review bug 1): ``lock_holder()`` now requires the
+    locking pid to have a file open under the profile, not just to be alive and
+    Chrome-named.
+    """
+    held.parent.mkdir(parents=True, exist_ok=True)
+    held.touch(exist_ok=True)
+    exe = directory / name
+    exe.symlink_to(sys.executable)
+    proc = subprocess.Popen(
+        [str(exe), "-c", f"f = open({str(held)!r}); import time; time.sleep(60)"]
+    )
     try:
         yield proc.pid
     finally:
@@ -230,15 +255,144 @@ def test_chrome_script_refuses_when_a_chrome_holds_the_profile_under_another_spe
 
 
 def test_chrome_script_trusts_the_locks_pid_over_the_command_line(tmp_path: Path) -> None:
-    """A Chrome started with a spelling the script cannot match still holds its lock."""
+    """A Chrome started with a spelling the script cannot match still holds its lock,
+    as long as it genuinely has the profile open."""
     profile = tmp_path.resolve() / "profile"
     profile.mkdir()
-    with process_named(tmp_path, "Google Chrome") as pid:
+    with process_named_holding_open(tmp_path, "Google Chrome", profile / "held") as pid:
         (profile / "SingletonLock").symlink_to(f"otherhost-{pid}")
         result = start(profile)
     assert result.returncode == 1
     assert f"pid {pid}" in result.stderr
     assert (profile / "SingletonLock").is_symlink()
+
+
+def test_chrome_script_refuses_a_lock_whose_pid_was_reused_by_an_unrelated_chrome(
+    tmp_path: Path,
+) -> None:
+    """#183 review bug 1: a lock naming a pid Chrome once held, since reused by an
+    entirely different Chrome (your everyday browser, not this profile's), must not
+    be mistaken for this profile's holder -- it is treated as stale instead."""
+    profile = tmp_path.resolve() / "profile"
+    profile.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    with process_named_holding_open(tmp_path, "Google Chrome", elsewhere / "held") as pid:
+        (profile / "SingletonLock").symlink_to(f"thishost-{pid}")
+        result = start(profile)
+    assert result.returncode == 0, result.stderr
+    assert "stale profile lock" in result.stdout
+
+
+def test_chrome_script_skips_a_reused_pid_that_is_now_a_helper_process(tmp_path: Path) -> None:
+    """#183 review bug 1: a `--type=` helper (renderer, GPU, utility) never holds
+    SingletonLock itself; a reused pid landing on one is not this profile's Chrome,
+    even with the profile's own files open for some unrelated reason."""
+    profile = tmp_path.resolve() / "profile"
+    profile.mkdir()
+    exe = tmp_path / "Google Chrome Helper"
+    exe.symlink_to(sys.executable)
+    held = profile / "held"
+    held.touch()
+    proc = subprocess.Popen(
+        [str(exe), "-c", f"f = open({str(held)!r}); import time; time.sleep(60)", "--type=renderer"]
+    )
+    try:
+        (profile / "SingletonLock").symlink_to(f"thishost-{proc.pid}")
+        result = start(profile)
+    finally:
+        proc.kill()
+        proc.wait()
+    assert result.returncode == 0, result.stderr
+    assert "stale profile lock" in result.stdout
+
+
+def test_chrome_script_treats_a_lock_naming_a_dead_pid_as_stale(tmp_path: Path) -> None:
+    """A lock naming a pid that is simply not running at all -- not merely some
+    other, live, non-Chrome process -- must also read as stale: the ``kill -0``
+    check, not only the executable-name check that follows it."""
+    profile = tmp_path.resolve() / "profile"
+    profile.mkdir()
+    proc = subprocess.Popen(["sh", "-c", "exit 0"])
+    proc.wait()
+    dead_pid = proc.pid
+    (profile / "SingletonLock").symlink_to(f"thishost-{dead_pid}")
+    result = start(profile)
+    assert result.returncode == 0, result.stderr
+    assert "stale profile lock" in result.stdout
+
+
+def test_chrome_script_reports_a_holder_on_a_different_port(tmp_path: Path) -> None:
+    """#183 review bug 2: a Chrome on this profile but a different debugging port
+    has one, just not this one -- "without the debugging port" is the wrong
+    message for it."""
+    profile = tmp_path.resolve() / "profile"
+    with process_with_args("--remote-debugging-port=9333", f"--user-data-dir={profile}"):
+        result = start(profile, port=free_port())
+    assert result.returncode == 1
+    assert "on port 9333" in result.stderr
+    assert "without the debugging port" not in result.stderr
+
+
+def _bin_dir_without(tmp_path: Path, missing: str) -> Path:
+    """A PATH containing everything chrome.sh needs except ``missing``."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in (
+        "curl",
+        "lsof",
+        "ps",
+        "awk",
+        "sed",
+        "uname",
+        "mkdir",
+        "basename",
+        "dirname",
+        "tr",
+        "rm",
+        "cat",
+        "kill",
+        "grep",
+        "sh",
+    ):
+        if tool == missing:
+            continue
+        found = shutil.which(tool)
+        if found:
+            (bin_dir / tool).symlink_to(found)
+    return bin_dir
+
+
+def test_chrome_script_refuses_without_curl(tmp_path: Path) -> None:
+    """#183 review C9: curl's own tool-requirement check, exercised on its own."""
+    bin_dir = _bin_dir_without(tmp_path, "curl")
+    result = run_sh(
+        CHROME,
+        "--dry-run",
+        "--port",
+        str(free_port()),
+        "--profile-dir",
+        str(tmp_path / "profile"),
+        env={"PATH": str(bin_dir)},
+    )
+    assert result.returncode == 1
+    assert "curl is needed" in result.stderr
+
+
+def test_chrome_script_refuses_without_lsof(tmp_path: Path) -> None:
+    """#183 review C15: lsof's own tool-requirement check, exercised on its own."""
+    bin_dir = _bin_dir_without(tmp_path, "lsof")
+    result = run_sh(
+        CHROME,
+        "--dry-run",
+        "--port",
+        str(free_port()),
+        "--profile-dir",
+        str(tmp_path / "profile"),
+        env={"PATH": str(bin_dir)},
+    )
+    assert result.returncode == 1
+    assert "lsof is needed" in result.stderr
 
 
 def test_chrome_script_treats_a_lock_naming_a_live_non_chrome_process_as_stale(
@@ -496,3 +650,272 @@ def test_reset_defaults_to_netkeeper_data(data: Path) -> None:
     result = run_sh(RESET, "--dry-run", env={"NETKEEPER_DATA": str(data)})
     assert result.returncode == 0, result.stderr
     assert str(db) in result.stdout
+
+
+def _lsof_shim(tmp_path: Path, script: str) -> str:
+    """A PATH with ``script`` standing in for lsof, the rest of PATH behind it."""
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "lsof"
+    shim.write_text(script)
+    shim.chmod(0o755)
+    return f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+
+
+@needs_sqlite3_cli
+def test_reset_refuses_on_a_real_lsof_error(data: Path, tmp_path: Path) -> None:
+    """R2: an actual lsof error -- not a missing binary, not a benign warning --
+    must still refuse the reset rather than read as "nothing holds it"."""
+    make_db(data)
+    path = _lsof_shim(tmp_path, "#!/bin/sh\nprintf 'lsof: permission denied\\n' >&2\nexit 1\n")
+    result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": path})
+    assert result.returncode == 1
+    assert "lsof could not check the database" in result.stderr
+    assert (data / "netkeeper.sqlite3").exists()
+
+
+@needs_sqlite3_cli
+def test_reset_ignores_a_benign_lsof_warning(data: Path, tmp_path: Path) -> None:
+    """#183 review bug 7: an unrelated WARNING on lsof's stderr (a stale network
+    mount it scans along the way) must not block a reset when nothing actually
+    holds the database. Real warnings run to two or three lines -- the
+    continuation lines matter too, not just the first."""
+    db = make_db(data)
+    real = shutil.which("lsof")
+    assert real is not None
+    path = _lsof_shim(
+        tmp_path,
+        "#!/bin/sh\n"
+        "printf 'lsof: WARNING: can'\"'\"'t stat() nfs file system /mnt/stale\\n"
+        "      Output information may be incomplete.\\n"
+        '      assuming "dev=1234" from mount table\\n\' >&2\n'
+        f'exec "{real}" "$@"\n',
+    )
+    result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": path})
+    assert result.returncode == 0, result.stderr
+    assert not db.exists()
+
+
+@needs_sqlite3_cli
+def test_reset_refuses_when_only_the_wal_sidecar_is_held_open(data: Path) -> None:
+    """R3: a holder on ``-wal`` alone, with no fd on the main file, must still
+    refuse the reset."""
+    db = make_db(data)
+    wal = Path(f"{db}-wal")
+    wal.write_bytes(b"")
+    proc = subprocess.Popen(
+        [sys.executable, "-c", f"f = open({str(wal)!r}, 'rb'); import time; time.sleep(30)"]
+    )
+    try:
+        time.sleep(0.3)  # let the interpreter actually get to the open() call
+        result = run_sh(RESET, "--data-dir", str(data), "--yes", env={})
+    finally:
+        proc.kill()
+        proc.wait()
+    assert result.returncode == 1
+    assert "open in another process" in result.stderr
+    assert marker(db) == 42
+
+
+@needs_sqlite3_cli
+def test_reset_rechecks_after_the_confirmation_prompt(data: Path) -> None:
+    """R4: a server that starts while the prompt is waiting on an answer must
+    still block the reset -- the check made again after it, not only the one
+    made before the prompt was shown."""
+    assert SH is not None
+    db = make_db(data)
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": "/nonexistent"}
+    proc = subprocess.Popen(
+        [SH, str(RESET), "--data-dir", str(data)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        time.sleep(0.3)  # the prompt is up, waiting on stdin
+        with closing(sqlite3.connect(db)) as holder:
+            holder.execute("select 1").fetchone()
+            assert proc.stdin is not None
+            proc.stdin.write("y\n")
+            proc.stdin.flush()
+            stdout, stderr = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert proc.returncode == 1, stdout
+    assert "open in another process" in stderr
+    assert marker(db) == 42
+    assert not (data / "archives").exists()
+
+
+def test_reset_script_verifies_the_archive_read_only() -> None:
+    """R6/R7: pin the literal `-readonly` flag on both of ``verified()``'s sqlite3
+    calls -- dropping either would let a corrupt archive be (re)written to
+    instead of failing, or silently create an empty file for a path that does
+    not exist instead of reporting it unreadable."""
+    text = RESET.read_text()
+    assert text.count("sqlite3 -readonly") == 2
+
+
+@needs_sqlite3_cli
+def test_reset_renames_a_failed_archive_instead_of_leaving_it_behind(
+    data: Path, tmp_path: Path
+) -> None:
+    """#183 review bug 5: an archive that was created but does not verify must not
+    sit in archives/ looking like a good one; it is renamed ``.failed`` instead."""
+    db = make_db(data)
+    real = shutil.which("sqlite3")
+    assert real is not None
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "sqlite3"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'case "$2" in\n'
+        "  VACUUM*)\n"
+        "    target=$(printf '%s' \"$2\" | sed -n \"s/^VACUUM INTO '\\\\(.*\\\\)'\\$/\\\\1/p\")\n"
+        "    printf 'not a real database' > \"$target\"\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "esac\n"
+        f'exec "{real}" "$@"\n'
+    )
+    shim.chmod(0o755)
+    path = f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+    result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": path})
+    assert result.returncode == 1
+    assert "quick_check" in result.stderr
+    assert marker(db) == 42
+    entries = sorted(p.name for p in (data / "archives").iterdir())
+    assert len(entries) == 1
+    assert entries[0].endswith(".failed")
+
+
+@needs_sqlite3_cli
+def test_reset_folds_the_wal_when_vacuum_into_is_refused(data: Path, tmp_path: Path) -> None:
+    """R9: VACUUM INTO can be refused (a read-only filesystem, a locked-down
+    sqlite3 build); the raw-copy-and-fold fallback must still produce a
+    complete, self-contained, verified archive with no leftover sidecars."""
+    db = data / "netkeeper.sqlite3"
+    db.unlink(missing_ok=True)
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE marker (x integer)")
+        conn.execute("INSERT INTO marker VALUES (1)")
+
+    # A concurrent reader blocks the WAL from being fully checkpointed away on
+    # close, so -wal still carries a real pending frame when reset-data.sh reads
+    # it -- not just an artifact of the fallback path running at all.
+    reader = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sqlite3, time\n"
+            f"conn = sqlite3.connect({str(db)!r})\n"
+            "conn.execute('BEGIN')\n"
+            "conn.execute('SELECT * FROM marker').fetchall()\n"
+            "time.sleep(30)\n",
+        ]
+    )
+    try:
+        time.sleep(0.3)
+        with closing(sqlite3.connect(db)) as writer, writer:
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute("INSERT INTO marker VALUES (42)")
+        assert Path(f"{db}-wal").stat().st_size > 0, "test setup needs a pending WAL"
+    finally:
+        reader.kill()
+        reader.wait()
+
+    real = shutil.which("sqlite3")
+    assert real is not None
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "sqlite3"
+    shim.write_text(f'#!/bin/sh\ncase "$2" in VACUUM*) exit 1 ;; esac\nexec "{real}" "$@"\n')
+    shim.chmod(0o755)
+    path = f"{shim_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+
+    result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": path})
+    assert result.returncode == 0, result.stderr
+    assert "copying the raw files instead" in result.stderr
+    assert "verified" in result.stdout
+
+    (archive,) = (data / "archives").iterdir()
+    assert not Path(f"{archive}-wal").exists()
+    assert not Path(f"{archive}-shm").exists()
+    with closing(sqlite3.connect(archive)) as check:
+        rows = check.execute("SELECT x FROM marker ORDER BY x").fetchall()
+    assert rows == [(1,), (42,)]
+
+
+@needs_sqlite3_cli
+def test_reset_removes_a_leftover_wal_sidecar(data: Path) -> None:
+    """R14: remove_db() must delete a leftover ``-wal``/``-shm``, not only the
+    main file."""
+    db = make_db(data)
+    wal = Path(f"{db}-wal")
+    shm = Path(f"{db}-shm")
+    wal.write_bytes(b"stale wal frames")
+    shm.write_bytes(b"stale shm")
+    result = run_sh(RESET, "--data-dir", str(data), "--yes", env={})
+    assert result.returncode == 0, result.stderr
+    assert not db.exists()
+    assert not wal.exists()
+    assert not shm.exists()
+
+
+def test_list_orders_a_same_second_collision_newest_first(data: Path) -> None:
+    """#183 review bug 6: ``-1`` was written after the bare name (the same
+    collision ``archive_path()`` resolves within one second), so it must list
+    first, not second."""
+    archives = data / "archives"
+    archives.mkdir()
+    (archives / "netkeeper-20260101T000000Z.sqlite3").write_bytes(b"first")
+    (archives / "netkeeper-20260101T000000Z-1.sqlite3").write_bytes(b"second, same second")
+    result = run_sh(RESET, "--data-dir", str(data), "--list", env={})
+    assert result.returncode == 0, result.stderr
+    names = [line.split("  ")[0] for line in result.stdout.splitlines()]
+    assert names == [
+        "netkeeper-20260101T000000Z-1.sqlite3",
+        "netkeeper-20260101T000000Z.sqlite3",
+    ]
+
+
+@needs_sqlite3_cli
+def test_reset_refuses_without_sqlite3(data: Path, tmp_path: Path) -> None:
+    """R16: sqlite3's own tool-requirement check, exercised with lsof present --
+    distinct from the missing-lsof test above."""
+    make_db(data)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in (
+        "lsof",
+        "sed",
+        "awk",
+        "date",
+        "mktemp",
+        "wc",
+        "tr",
+        "sort",
+        "basename",
+        "dirname",
+        "cp",
+        "rm",
+        "mkdir",
+        "ps",
+        "grep",
+        "cat",
+        "cut",
+        "sh",
+    ):
+        found = shutil.which(tool)
+        if found:
+            (bin_dir / tool).symlink_to(found)
+    result = run_sh(RESET, "--data-dir", str(data), "--yes", env={"PATH": str(bin_dir)})
+    assert result.returncode == 1
+    assert "sqlite3 is needed" in result.stderr
+    assert (data / "netkeeper.sqlite3").exists()
