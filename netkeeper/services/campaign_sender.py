@@ -58,9 +58,13 @@ Each tick, before anything is chosen, :meth:`GmailSender.reconcile` looks up wha
   draft (#273 review). A draft gone with nothing sent is searched for in
   Scheduled (``in:scheduled rfc822msgid:``, #278): Gmail's Schedule send moves a
   draft there, out of ``drafts.list``, until it goes out. Found, it stays
-  ``drafted`` until it is seen sent, and is dated then, so the next step counts
-  from the real send. A failed search changes nothing. A draft gone with
-  nothing sent and nothing scheduled is ``discarded`` and its enrollment
+  ``drafted`` (marked ``SCHEDULED_IN_GMAIL``) until it is seen sent, and is then
+  dated no earlier than the poll that saw it, since Gmail may keep the date it
+  was scheduled (:func:`~netkeeper.services.campaign_engine.seen_sent_at`). Not
+  there, it is searched for in Drafts: a canceled Schedule send comes back under
+  a new draft id, which it then follows. A failed search changes nothing. A
+  ``SCHEDULED`` message is never sent, even labelled ``SENT`` too. A draft gone
+  with nothing sent, scheduled, or in Drafts is ``discarded`` and its enrollment
   ``removed``, on the second poll that finds it gone, not the first (undo send).
   *Known limitation* (#280): a draft the person edits into a new thread and then
   sends is sent outside the thread the poll reads, so it reads
@@ -101,7 +105,7 @@ raises for one.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final
@@ -115,6 +119,7 @@ from netkeeper.campaigns.compose import (
     reply_subject,
 )
 from netkeeper.campaigns.gmail import (
+    Draft,
     Gmail,
     GmailAuthError,
     GmailError,
@@ -156,6 +161,14 @@ _DRAFT: Final = "DRAFT"
 _SCHEDULED: Final = "SCHEDULED"
 _OWN: Final = frozenset({_SENT, _DRAFT, _SCHEDULED})
 """Labels of a message the mailbox wrote: sent, a draft, or waiting in Scheduled (#278)."""
+_UNSENT: Final = frozenset({_DRAFT, _SCHEDULED})
+"""Labels that mean a message has not gone out, whatever else it carries (#278 review)."""
+
+
+def _is_sent(message: Message) -> bool:
+    """Sent, and neither a draft nor waiting in Scheduled (#278 review): Gmail may label a
+    scheduled message ``SENT`` before it goes out."""
+    return _SENT in message.label_ids and not message.label_ids & _UNSENT
 
 
 class _NotSent(Exception):
@@ -210,7 +223,7 @@ def find_by_message_id(gmail: Gmail, rfc822_message_id: str, *, purpose: str) ->
         except GmailNotFound:  # deleted between the search and the read
             continue
     sent = sorted(
-        (m for m in messages if not m.label_ids & {_DRAFT, _SCHEDULED}),
+        (m for m in messages if not m.label_ids & _UNSENT),
         key=lambda m: m.internal_date,
     )
     if sent:
@@ -408,7 +421,7 @@ class GmailSender:
                 f"the earlier step's thread could not be read ({exc.code}); nothing was sent",
                 retry=True,
             ) from exc
-        earlier = [m for m in thread.messages if _SENT in m.label_ids and _DRAFT not in m.label_ids]
+        earlier = [m for m in thread.messages if _is_sent(m)]
         cited = [
             value.strip()
             for m in earlier
@@ -616,14 +629,14 @@ class _Reconcile:
             oldest = min(drafts, key=lambda t: t.message_id)
             self.guarded(oldest, self.verify, gmail, oldest)
         try:
-            present = {
-                d.id for d in gmail.list_drafts(purpose=f"drafts poll for user {self.user_id}")
-            }
+            listed = gmail.list_drafts(purpose=f"drafts poll for user {self.user_id}")
         except GmailError as exc:
             log.warning("the drafts poll could not list drafts (%s); it waits", exc.code)
             return
+        present = {d.id: d for d in listed}
+        by_message = {d.message.id: d for d in listed}
         for tracked in drafts:
-            self.guarded(tracked, self.draft, gmail, tracked, present)
+            self.guarded(tracked, self.draft, gmail, tracked, present, by_message)
 
     @staticmethod
     def guarded[*Ts](tracked: Tracked, fn: Callable[[*Ts], None], *args: *Ts) -> None:
@@ -651,6 +664,7 @@ class _Reconcile:
             return
         ref = found.message
         if found.sent:
+            at = engine.seen_sent_at(tracked, ref.internal_date, now)
             self.write(
                 lambda s, u: engine.settle_sent(
                     s,
@@ -658,7 +672,7 @@ class _Reconcile:
                     settings,
                     tracked.message_id,
                     expect=(MessageStatus.SCHEDULED,),
-                    at=ref.internal_date,
+                    at=at,
                     gmail_message_id=ref.id,
                     gmail_thread_id=ref.thread_id,
                 )
@@ -681,6 +695,7 @@ class _Reconcile:
             )
         elif found.scheduled:
             log.info("message %d waits in Gmail's Scheduled; it waits", tracked.message_id)
+            self.write(lambda s, u: engine.settle_seen_scheduled(s, u, tracked.message_id, now=now))
         else:
             log.info("message %d is a Gmail draft not listed yet; it waits", tracked.message_id)
 
@@ -734,28 +749,23 @@ class _Reconcile:
         )
         return True
 
-    def draft(self, gmail: Gmail, tracked: Tracked, present: Collection[str]) -> None:
+    def draft(
+        self,
+        gmail: Gmail,
+        tracked: Tracked,
+        present: Mapping[str, Draft],
+        by_message: Mapping[str, Draft],
+    ) -> None:
         if tracked.gmail_draft_id in present:
-            if tracked.marked_missing:
+            if tracked.marked_missing or tracked.seen_scheduled:
                 self.write(lambda s, u: engine.settle_draft_present(s, u, tracked.message_id))
             return
         purpose = self.purpose(tracked, "drafts poll for")
         sent = self.sent_in_thread(gmail, tracked, purpose)
         if sent is None:
-            # Schedule send moves a draft out of drafts.list before anything is sent
-            # (#278): it stays drafted until it is seen sent. A failed search raises
-            # (the guard leaves the message as it is); only "not there" goes on.
-            if is_scheduled(gmail, tracked.rfc822_message_id, purpose=purpose):
-                log.info(
-                    "message %d: its draft waits in Gmail's Scheduled; it stays drafted",
-                    tracked.message_id,
-                )
-                if tracked.marked_missing:
-                    self.write(lambda s, u: engine.settle_draft_present(s, u, tracked.message_id))
-                return
-            self.write(lambda s, u: engine.settle_draft_missing(s, u, tracked.message_id))
+            self.not_seen_sent(gmail, tracked, by_message, purpose)
             return
-        settings = self.settings
+        settings, at = self.settings, engine.seen_sent_at(tracked, sent.internal_date, self.now)
         self.write(
             lambda s, u: engine.settle_sent(
                 s,
@@ -763,12 +773,51 @@ class _Reconcile:
                 settings,
                 tracked.message_id,
                 expect=(MessageStatus.DRAFTED,),
-                at=sent.internal_date,
+                at=at,
                 gmail_message_id=sent.id,
                 gmail_thread_id=sent.thread_id,
             )
         )
         self.label(gmail, tracked, sent.id, purpose)
+
+    def not_seen_sent(
+        self, gmail: Gmail, tracked: Tracked, by_message: Mapping[str, Draft], purpose: str
+    ) -> None:
+        """A draft gone from ``drafts.list`` with nothing sent in its thread (#278).
+
+        Schedule send moves a draft into Scheduled before anything is sent: found there,
+        it stays ``drafted`` until it is seen sent. A canceled Schedule send puts it
+        back in Drafts, possibly under a new draft id: found there, it is followed under
+        that id. Only a draft in neither is marked missing, then discarded. A failed
+        search raises, and the guard leaves the message as it is.
+        """
+        message_id, now = tracked.message_id, self.now
+        if is_scheduled(gmail, tracked.rfc822_message_id, purpose=purpose):
+            log.info(
+                "message %d: its draft waits in Gmail's Scheduled; it stays drafted", message_id
+            )
+            if tracked.marked_missing or not tracked.seen_scheduled:
+                self.write(lambda s, u: engine.settle_seen_scheduled(s, u, message_id, now=now))
+            return
+        query = _message_id_query(tracked.rfc822_message_id, "drafts")
+        refs = gmail.search(query, max_results=FIND_MAX, purpose=purpose)
+        moved = next((by_message[r.id] for r in refs if r.id in by_message), None)
+        if moved is not None:
+            self.write(
+                lambda s, u: engine.settle_draft_moved(
+                    s,
+                    u,
+                    message_id,
+                    gmail_draft_id=moved.id,
+                    gmail_message_id=moved.message.id,
+                    gmail_thread_id=moved.message.thread_id,
+                )
+            )
+            return
+        if refs:  # in Drafts, but not in the listing read just before: it waits
+            log.info("message %d: its draft is in Drafts but not listed yet; it waits", message_id)
+            return
+        self.write(lambda s, u: engine.settle_draft_missing(s, u, message_id))
 
     @staticmethod
     def sent_in_thread(gmail: Gmail, tracked: Tracked, purpose: str) -> Message | None:
@@ -788,7 +837,7 @@ class _Reconcile:
             thread = gmail.get_thread(tracked.gmail_thread_id, purpose=purpose)
         except GmailNotFound:
             return None
-        sent = [m for m in thread.messages if _SENT in m.label_ids and _DRAFT not in m.label_ids]
+        sent = [m for m in thread.messages if _is_sent(m)]
         kept = [m for m in sent if m.id == tracked.gmail_message_id]
         if kept:
             return kept[0]

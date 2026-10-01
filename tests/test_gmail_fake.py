@@ -295,6 +295,32 @@ def test_a_scheduled_draft_leaves_drafts_waits_in_scheduled_then_is_sent(
         gmail.send_scheduled(delivered)
 
 
+def test_schedule_send_can_label_sent_keep_its_date_and_be_canceled(
+    gmail: FakeGmail, clock: Clock
+) -> None:
+    """#278 review: the answers Gmail has not confirmed, each one a test can take."""
+    draft = gmail.create_draft(_mail(msgid="<s9@example.com>"), purpose="draft step 1")
+    scheduled_at = clock.now
+    scheduled = gmail.schedule_draft(draft.id, with_sent=True)
+    labels = gmail.get_message(scheduled.id, purpose="read").label_ids
+    assert labels == {"SCHEDULED", "SENT"}
+    assert gmail.search("rfc822msgid:s9@example.com in:scheduled", purpose="find") == [scheduled]
+
+    back = gmail.cancel_scheduled(scheduled)
+    assert (back.id == draft.id, back.message.id == scheduled.id) == (False, False)
+    assert gmail.list_drafts(purpose="drafts poll") == [back]
+    assert gmail.scheduled() == []
+    assert gmail.search("rfc822msgid:s9@example.com in:drafts", purpose="find") == [back.message]
+    with pytest.raises(ValueError, match="not a scheduled message"):
+        gmail.cancel_scheduled(back.message)
+
+    again = gmail.schedule_draft(back.id)
+    clock.advance(60)
+    delivered = gmail.send_scheduled(again, keep_date=True)
+    message = gmail.get_message(delivered.id, purpose="read")
+    assert (message.label_ids, message.internal_date) == (frozenset({"SENT"}), scheduled_at)
+
+
 def test_a_draft_with_no_recipient_cannot_be_scheduled(gmail: FakeGmail) -> None:
     draft = gmail.create_draft(_mail(to=""), purpose="draft step 1")
     with pytest.raises(GmailRejected):
