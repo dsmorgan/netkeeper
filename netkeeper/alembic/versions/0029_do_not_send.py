@@ -13,7 +13,9 @@ Existing data is carried over: every address a contact holds as ``bounced`` or
 out is listed as ``opted_out``. A contact opted out when it has an ``opted_out``
 enrollment or an inbound message that asked to unsubscribe
 (``messages.asks_unsubscribe``), which also covers a reply to an enrollment that
-had already completed. When an address has more than one reason, it keeps the
+had already completed. The message is enough: every address of that contact is
+listed, even if ``do_not_contact`` was cleared later, and including addresses the
+contact gained after the reply. When an address has more than one reason, it keeps the
 strongest: ``opted_out``, then ``bounced``, then ``invalid``. Its contact is the
 lowest contact id among the rows with that reason.
 

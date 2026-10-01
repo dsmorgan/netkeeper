@@ -2650,6 +2650,10 @@ def do_not_send_remove(
         )
         if also_bounced:
             question += ". This address also bounced; removing the entry allows email to it again"
+        question += (
+            ". While a contact still has it marked bounced or invalid, it stays blocked until"
+            " that contact's status is marked ok, and merging that contact lists it again"
+        )
         if not yes and not typer.confirm(question):
             typer.echo(f"cancelled: {address} stays on the list")
             raise typer.Exit(code=1)

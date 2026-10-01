@@ -722,9 +722,11 @@ def update_email(
     """Change an address's fields; the row becomes the person's own observation.
 
     ``ValueError`` for a new address that is not one bare address, as :func:`add_email`.
-    Marking an address ``bounced`` or ``invalid``, or changing the text of one that is,
-    puts the address on the do-not-send list;
+    Marking an address ``bounced`` or ``invalid`` puts it on the do-not-send list;
     marking it ``ok`` again does not take it off (:mod:`netkeeper.crm.do_not_send`).
+    Changing the text of a ``bounced`` or ``invalid`` address is a correction (``jon@``
+    to ``john@``): the verdict belonged to the old text, which stays listed, so the row
+    becomes ``ok`` unless the same change sets a status.
     """
     _require_writer(session)
     contact = live_contact(session, user, contact_id)
@@ -733,6 +735,11 @@ def update_email(
         address = single_address(IncomingEmail(changes["email"]).email)
         if any(other.email == address for other in contact.emails if other is not row):
             raise Conflict(f"the contact already has {address}")
+        if address != row.email:
+            # The old text keeps its verdict on the list; the corrected one starts clean.
+            do_not_send.add_for_status(session, user, row.email, row.status, contact_id=contact.id)
+            if "status" not in changes:
+                row.status = EmailStatus.OK
         row.email = address
     if "kind" in changes:
         row.kind = EmailKind(changes["kind"])
@@ -741,7 +748,7 @@ def update_email(
     _apply_primary(contact.emails, row, changes)
     _touch(row)
     session.flush()
-    if "status" in changes or "email" in changes:  # a bounced row's new address too
+    if "status" in changes:
         do_not_send.add_for_status(session, user, row.email, row.status, contact_id=contact.id)
     return row
 

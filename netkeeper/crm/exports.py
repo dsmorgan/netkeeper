@@ -262,9 +262,9 @@ def _sendable_email(contact: Contact, listed: Collection[str] = frozenset()) -> 
     ``Contact.emails`` is ordered ``is_primary DESC, id ASC``, so this is the
     primary unless the primary bounced. A mail-merge file is a send path by
     proxy, and spec 11.9 guards every send on "channel address present and not
-    bounced" (#77). An ``invalid`` status alone still exports the address
-    (#215), but not once the address is on the do-not-send list, which marking it
-    invalid by hand does (#238). The
+    bounced" (#77). Invalid addresses are left out too:
+    marking an address ``invalid`` lists it, and a listed address is skipped, apart
+    from one whose entry a person removed (#238, reversing #215 in practice). The
     re-importable presets keep :func:`_primary_email`, bounced or not, by the
     same decision: they are a copy of the data, not a send list. The campaign
     guards refuse ``invalid`` too (#226); a file is not a send.
