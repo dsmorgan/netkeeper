@@ -7,24 +7,66 @@ You need:
 - The Gmail account you want campaigns to send from.
 - netkeeper installed and its database set up (`netkeeper db upgrade`).
 - A browser where you can sign in to that Gmail account.
+- Optionally, the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) (`gcloud`), which can do steps 1 and 2 for you.
+
+## The setup guide in Settings
+
+The quickest way through is the setup guide on the Settings page. Run `netkeeper serve` and open <http://127.0.0.1:8000/settings>. Under **Gmail**, the guide shows one step at a time:
+
+- Each console step has a link to the exact page for your project, and a **Copy** button for every value you paste there (the project ID, the app name, your address, the client name).
+- netkeeper checks the steps it can see: whether the OAuth client is saved, and whether the mailbox is connected. Connecting proves the token works and the Gmail API is on, because netkeeper asks Gmail for your address before it stores anything. If Gmail refuses, the guide reopens step 2 and marks it as the problem.
+- You mark the rest done yourself, since netkeeper can't see into Google's console. You can reopen any step, and **Mark not done** undoes a step you marked by mistake.
+- When a mailbox is connected, the guide folds away. **Show setup steps** reopens it, for the optional publishing step.
+
+netkeeper never drives the Google console. Every link opens in your own browser, and netkeeper never runs `gcloud`: it shows the commands, and you run them. The rest of this page is the same steps in writing, for the command line or for reference.
 
 ## What netkeeper asks Google for
 
 One scope: `https://www.googleapis.com/auth/gmail.modify`. It lets netkeeper read mail (to see replies and bounces), write drafts, send, and add labels. It doesn't allow permanent deletion, and netkeeper never deletes mail.
 
-The refresh token goes into your macOS Keychain, under the service `netkeeper`, as `<user id>/gmail/mailbox/<mailbox id>`. The OAuth client's ID and secret are stored next to it as `<user id>/gmail/oauth_client`. Neither is ever written to the database or a log.
+The refresh token goes into your macOS Keychain, under the service `netkeeper`, as `<user id>/gmail/mailbox/<mailbox id>`. The OAuth client's ID and secret are stored next to it as `<user id>/gmail/oauth_client`. Neither is ever written to the database or a log. The setup guide's progress (the project ID, your address, and the steps you marked done) is stored in the database, since none of it is secret.
+
+## What `gcloud` can and can't do
+
+Two of the steps have public commands. The rest are console-only, so the guide links to them.
+
+| Step | `gcloud` or a public API | Console |
+|---|---|---|
+| 1. Create the project | `gcloud projects create` | **New project** |
+| 2. Enable the Gmail API | `gcloud services enable` | **APIs & Services** → **Library** |
+| 3. Consent screen (Branding, Audience) | None. The old IAP OAuth Admin API (`gcloud iap oauth-brands`) is deprecated, only made Internal brands, and never made an External one | **Google Auth Platform** → **Branding** |
+| 4. Test users | None | **Google Auth Platform** → **Audience** |
+| 5. Desktop OAuth client | None. `gcloud iap oauth-clients` made IAP clients only, and `gcloud iam oauth-clients` is for workforce identity federation, not Gmail | **Google Auth Platform** → **Clients** |
+| Publishing | None | **Google Auth Platform** → **Audience** |
 
 ## 1. Create a Google Cloud project
 
-1. Open <https://console.cloud.google.com/> and sign in. Any Google account can own the project; it doesn't have to be the one you send from.
-2. Open the project picker at the top of the page and choose **New project**.
-3. Name it something you'll recognize, such as `netkeeper`. Leave the organization as it is and choose **Create**.
-4. Make sure the new project is selected in the project picker before you go on.
+Pick a project ID. It must be 6 to 30 lowercase letters, digits or hyphens, start with a letter, and not end with a hyphen, and it must be unique across all of Google Cloud: `netkeeper-` plus a few random characters works well. The setup guide's **Suggest one** button makes one.
+
+**With `gcloud`:**
+
+```sh
+gcloud auth login
+gcloud projects create netkeeper-ab12cd --name=netkeeper
+```
+
+**In the console:**
+
+1. Open <https://console.cloud.google.com/projectcreate> and sign in. Any Google account can own the project; it doesn't have to be the one you send from.
+2. Name it `netkeeper`. Under the name, choose **Edit** next to the project ID and enter yours. Leave the organization as it is and choose **Create**.
+3. Make sure the new project is selected in the project picker before you go on.
+
+If you already have a project, use its ID instead.
 
 ## 2. Enable the Gmail API
 
-1. Go to **APIs & Services** → **Library**.
-2. Search for **Gmail API**, open it, and choose **Enable**.
+**With `gcloud`:**
+
+```sh
+gcloud services enable gmail.googleapis.com --project=netkeeper-ab12cd
+```
+
+**In the console:** open `https://console.cloud.google.com/apis/library/gmail.googleapis.com?project=<your project ID>` and choose **Enable**.
 
 If you skip this step, authorization still looks successful on Google's page. netkeeper then reports **"The Gmail API refused the token"** (`gmail_api_refused`), because it asks Gmail for your address before it stores anything.
 
@@ -32,41 +74,36 @@ If you skip this step, authorization still looks successful on Google's page. ne
 
 Google calls this the **Google Auth Platform** (older consoles call it **OAuth consent screen**).
 
-1. Go to **Google Auth Platform** → **Branding**, or choose **Get started** if the console offers it.
+1. Open `https://console.cloud.google.com/auth/branding?project=<your project ID>`, and choose **Get started** if the console offers it.
 2. **App name:** `netkeeper` (anything works; you're the only one who sees it). **User support email:** your address.
 3. **Audience:** choose **External**. (Internal is only available to Google Workspace organizations.)
 4. **Contact information:** your address. Accept the policy and choose **Create**.
 
-### Testing or published: choose now
-
-Look at **Audience** → **Publishing status**. There are two options, and the difference matters:
-
-| | Testing | In production (unverified) |
-|---|---|---|
-| Who can authorize | Only the test users you list | Any Google account (an unverified app is capped at 100 users) |
-| Token lifetime | **Expires after 7 days** | Persists until you revoke it |
-| Warning screen | "Google hasn't verified this app" | The same warning |
-
-**We recommend publishing.** In Testing, the token dies every seven days: netkeeper notices within one poll, marks the mailbox **needs re-authorizing**, pauses every email step, and shows a banner until you authorize again. That is safe, but it's a chore.
-
-- **To publish:** under **Audience**, choose **Publish app** and confirm. Google doesn't need to verify an app that only you use. You click through the warning once, in step 6.
-- **To stay in Testing:** under **Audience** → **Test users**, choose **Add users** and add the Gmail address you send from.
+Leave the homepage and privacy policy links empty. You only need them to publish, which is optional (see [Publishing, later](#publishing-later)).
 
 You don't need to add the scope under **Data Access**. netkeeper requests it when you authorize.
 
-## 4. Create the OAuth client
+## 4. Add yourself as a test user
 
-1. Go to **Google Auth Platform** → **Clients** (older consoles: **APIs & Services** → **Credentials** → **Create credentials** → **OAuth client ID**).
-2. Choose **Create client**.
-3. **Application type:** choose **Desktop app**. Don't choose **Web application**. netkeeper refuses a web client, because Google only sends a web client back to a fixed list of addresses, and netkeeper's address includes a port it picks at run time.
-4. Name it `netkeeper` and choose **Create**.
-5. Choose **Download JSON** and keep the file (`client_secret_….json`). It holds the client ID and client secret.
+A new app starts in **Testing**, and stays there unless you publish it. In Testing, only the test users you list can authorize the app, so add the address you send from:
 
-## 5. Give netkeeper the client
+1. Open `https://console.cloud.google.com/auth/audience?project=<your project ID>`.
+2. Under **Test users**, choose **Add users**, enter the Gmail address you send from, and save.
+
+In Testing, Google expires the token after **7 days**. netkeeper notices within one poll, marks the mailbox **needs re-authorizing**, pauses every email step, and shows a banner. Choose **Re-authorize** on the banner and click through Google's page again. That's safe, but it's a weekly chore. Publishing removes it.
+
+## 5. Create the OAuth client
+
+1. Open `https://console.cloud.google.com/auth/clients/create?project=<your project ID>` (older consoles: **APIs & Services** → **Credentials** → **Create credentials** → **OAuth client ID**).
+2. **Application type:** choose **Desktop app**. Don't choose **Web application**. netkeeper refuses a web client, because Google only sends a web client back to a fixed list of addresses, and netkeeper's address includes a port it picks at run time.
+3. Name it `netkeeper` and choose **Create**.
+4. Keep the dialog open, or choose **Download JSON** and keep the file (`client_secret_….json`). Either way, you need the client ID and client secret next.
+
+## 6. Give netkeeper the client
 
 Use either the web UI or the command line.
 
-**Web UI:** run `netkeeper serve`, open <http://127.0.0.1:8000/settings>, and under **Gmail** → **1. OAuth client**, paste the **Client ID** (it ends in `.apps.googleusercontent.com`) and the **Client secret**. Then choose **Save client**.
+**Web UI:** in the setup guide's step 6, paste the **Client ID** (it ends in `.apps.googleusercontent.com`) and the **Client secret**. Then choose **Save client**.
 
 **Command line:**
 
@@ -76,9 +113,9 @@ netkeeper gmail client ~/Downloads/client_secret_XXXX.json
 
 You can delete the downloaded file afterward. netkeeper keeps its own copy in the Keychain.
 
-## 6. Authorize your mailbox
+## 7. Authorize your mailbox
 
-**Web UI:** on the Settings page, under **2. Mailbox**, choose **Connect Gmail**. Your browser goes to Google.
+**Web UI:** in the setup guide's step 7, choose **Connect Gmail**. Your browser goes to Google.
 
 **Command line:**
 
@@ -90,13 +127,40 @@ netkeeper prints a Google URL and waits for up to five minutes. Open the URL in 
 
 On Google's page:
 
-1. Choose the Gmail account you send from.
+1. Choose the Gmail account you send from. It must be a test user (step 4).
 2. Google shows **"Google hasn't verified this app."** This is expected: the app is yours, and it hasn't been through Google's review. Choose **Advanced**, then **Go to netkeeper (unsafe)**.
 3. Google lists what netkeeper may do. Make sure the Gmail box is **ticked**. If you untick it, netkeeper refuses the result (`scope_not_granted`). Choose **Continue**.
 
 Google sends your browser back to netkeeper. The web UI shows **Gmail is connected**. The command line prints `connected you@gmail.com (mailbox 1, cap 80/day)` and your browser shows a page you can close.
 
-## 7. Check it
+## Publishing, later
+
+Publishing is optional. It changes one thing for you: the token stops expiring every 7 days.
+
+| | Testing (the default) | In production (unverified) |
+|---|---|---|
+| Who can authorize | Only the test users you list | Any Google account (an unverified app is capped at 100 users) |
+| Token lifetime | **Expires after 7 days** | Persists until you revoke it |
+| Warning screen | "Google hasn't verified this app" | The same warning |
+
+Google keeps **Audience** → **Publish app** disabled until **Branding** has all four of these:
+
+- an app name,
+- a user support email,
+- an **app home page** URL, and
+- a **privacy policy link** URL.
+
+Google's branding rules say the home page must be on a domain you own, the privacy policy must be on the home page's domain and linked from it, and both domains must be listed under **Branding** → **Authorized domains**. Google verifies ownership of those domains (through Google Search Console) when an app is submitted for verification. You don't submit netkeeper for verification, since only you use it.
+
+**Can you use a GitHub URL?**
+
+- A GitHub repository URL (`https://github.com/you/repo`) isn't on a domain you own, so Google's rules don't allow it. We haven't confirmed whether the console refuses it outright for an app that's never submitted for verification.
+- A GitHub Pages site (`https://you.github.io/`) is on a domain you can verify in Google Search Console, because `github.io` is a public suffix: each `you.github.io` counts as its own domain. A home page and a privacy page there fit Google's rules.
+- If you have neither, or don't want to publish pages about a tool only you use, stay in Testing and re-authorize once a week.
+
+To publish, fill in the two URLs and the authorized domain on **Branding**, then open **Audience**, choose **Publish app**, and confirm. Mark the guide's last step done if you like; it's only a note for you.
+
+## 8. Check it
 
 - Settings shows the mailbox as **connected**, with its daily cap (`[campaigns] mailbox_daily_cap`, 80 by default and never more than 400) and when its token was last refreshed.
 - `netkeeper gmail status` lists it without asking Google.
@@ -104,7 +168,7 @@ Google sends your browser back to netkeeper. The web UI shows **Gmail is connect
 
 While `netkeeper serve` runs, it refreshes every connected mailbox's token every `[campaigns] reply_poll_minutes` (10 by default).
 
-## 8. Arm the mailbox: drafts first, then send
+## 9. Arm the mailbox: drafts first, then send
 
 A connected mailbox does nothing on its own. `netkeeper serve` hands it campaign steps only once you arm it, and every mailbox starts disarmed. Arming takes two separate steps.
 
@@ -125,7 +189,7 @@ Any other failure changes nothing, because it says nothing certain about the tok
 
 To fix it, choose **Re-authorize** on the banner or in Settings, or run `netkeeper gmail login`. Google preselects the same account. The mailbox keeps its history and campaigns.
 
-If the client itself was deleted, create a new one (step 4) and save it (step 5) first.
+If the client itself was deleted, create a new one (step 5) and save it (step 6) first.
 
 ## Switching accounts or disconnecting
 
@@ -139,11 +203,11 @@ The Settings page and `netkeeper gmail status` show a short reason code:
 
 | Reason | What happened | What to do |
 |---|---|---|
-| `invalid_grant` | Google refused the token: it was revoked, or it's seven days old in Testing | Authorize again (step 6). Consider publishing (step 3). |
-| `invalid_client` | Google doesn't know the client: it was deleted, or its secret was reset | Create a client (step 4), save it (step 5), and authorize again |
-| `unauthorized_client` | Google won't let the client use the token: it isn't a Desktop app client, or the token was issued to a different client | Create a Desktop app client (step 4), save it (step 5), and authorize again |
+| `invalid_grant` | Google refused the token: it was revoked, or it's seven days old in Testing | Authorize again (step 7). To stop the 7-day expiry, publish (see [Publishing, later](#publishing-later)). |
+| `invalid_client` | Google doesn't know the client: it was deleted, or its secret was reset | Create a client (step 5), save it (step 6), and authorize again |
+| `unauthorized_client` | Google won't let the client use the token: it isn't a Desktop app client, or the token was issued to a different client | Create a Desktop app client (step 5), save it (step 6), and authorize again |
 | `token_missing` | The Keychain has no token for the mailbox | Authorize again |
-| `client_missing` | The Keychain has no OAuth client | Save the client (step 5), then authorize again |
+| `client_missing` | The Keychain has no OAuth client | Save the client (step 6), then authorize again |
 | `gmail_api_refused` | The token works, but the Gmail API is off in the project | Enable it (step 2), then authorize again |
 | `scope_not_granted` | The Gmail box was unticked on Google's page | Authorize again and leave it ticked |
 | `access_denied` | You chose **Cancel** on Google's page | Authorize again |
@@ -151,6 +215,8 @@ The Settings page and `netkeeper gmail status` show a short reason code:
 | `other_mailbox_connected` | A different Gmail account is already connected | Disconnect it first |
 | `keychain` | The Keychain refused to read or write | Unlock the login Keychain and try again |
 | `insufficientPermissions`, `accessNotConfigured`, `authError` | Gmail refused the token during a campaign's call (a send, a draft, a reply poll) | Check the Gmail API is enabled (step 2), then authorize again |
+
+If Google's own page stops you with **"Access blocked: netkeeper has not completed the Google verification process"** (`Error 403: access_denied`), the account you chose isn't a test user and the app is in Testing. Add it (step 4) and authorize again.
 
 A network failure, an error on Google's side, or a Gmail rate limit never marks a mailbox. netkeeper tries again at the next poll.
 

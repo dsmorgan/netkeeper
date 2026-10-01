@@ -202,7 +202,7 @@ def parse_client_file(text: str) -> OAuthClient:
     if "web" in data and "installed" not in data:
         raise ClientConfigError(
             "this is a Web application client; create a Desktop app client instead"
-            " (docs/gmail-setup.md, step 4)",
+            " (docs/gmail-setup.md, step 5)",
             code="web_client",
         )
     installed = data.get("installed")

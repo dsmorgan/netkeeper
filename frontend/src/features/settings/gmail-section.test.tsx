@@ -22,10 +22,13 @@ function renderSection(
 }
 
 describe('GmailSection', () => {
-  it('asks for the OAuth client first, and cannot connect without one', async () => {
+  it('asks for the OAuth client in the guide, and cannot connect without one', async () => {
     renderSection(() => status({ client_configured: false, client_id: null }))
-    expect(await screen.findByLabelText('Client ID')).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: /Save the client in netkeeper/ }))
+    expect(screen.getByLabelText('Client ID')).toBeInTheDocument()
     expect(screen.getByLabelText('Client secret')).toHaveAttribute('type', 'password')
+    expect(screen.queryByRole('region', { name: 'OAuth client' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Connect your mailbox/ }))
     expect(screen.getByRole('button', { name: 'Connect Gmail' })).toBeDisabled()
     expect(screen.getByText('Save the OAuth client first.')).toBeInTheDocument()
   })
@@ -38,7 +41,8 @@ describe('GmailSection', () => {
         return jsonResponse(current)
       },
     })
-    fireEvent.change(await screen.findByLabelText('Client ID'), {
+    fireEvent.click(await screen.findByRole('button', { name: /Save the client in netkeeper/ }))
+    fireEvent.change(screen.getByLabelText('Client ID'), {
       target: { value: 'abc.apps.googleusercontent.com' },
     })
     fireEvent.change(screen.getByLabelText('Client secret'), { target: { value: 's3cret' } })
@@ -51,9 +55,11 @@ describe('GmailSection', () => {
         body: { client_id: 'abc.apps.googleusercontent.com', client_secret: 's3cret' },
       }),
     )
-    expect(await screen.findByRole('button', { name: 'Connect Gmail' })).toBeEnabled()
+    expect(await screen.findByText('1234-fake.apps.googleusercontent.com')).toBeInTheDocument()
     expect(screen.queryByLabelText('Client ID')).not.toBeInTheDocument()
     expect(screen.queryByText('s3cret')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Connect your mailbox/ }))
+    expect(screen.getByRole('button', { name: 'Connect Gmail' })).toBeEnabled()
   })
 
   it('shows why a client was refused', async () => {
@@ -64,7 +70,8 @@ describe('GmailSection', () => {
           422,
         ),
     })
-    fireEvent.change(await screen.findByLabelText('Client ID'), { target: { value: 'my-project' } })
+    fireEvent.click(await screen.findByRole('button', { name: /Save the client in netkeeper/ }))
+    fireEvent.change(screen.getByLabelText('Client ID'), { target: { value: 'my-project' } })
     fireEvent.change(screen.getByLabelText('Client secret'), { target: { value: 's' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save client' }))
     expect(await screen.findByRole('alert')).toHaveTextContent(
@@ -78,7 +85,8 @@ describe('GmailSection', () => {
       'POST /api/v1/mailboxes/oauth/start': () =>
         jsonResponse({ authorization_url: 'https://accounts.example/auth' }),
     })
-    fireEvent.click(await screen.findByRole('button', { name: 'Connect Gmail' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Connect your mailbox/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Gmail' }))
     await waitFor(() => expect(assign).toHaveBeenCalledWith('https://accounts.example/auth'))
     expect(calls).toContainEqual({
       method: 'POST',
@@ -148,6 +156,8 @@ describe('GmailSection', () => {
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Disconnect' }))
     expect(await screen.findByText('disconnected')).toBeInTheDocument()
+    expect(screen.getByText(/Connect one in the setup guide’s last step/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Connect your mailbox/ }))
     expect(screen.getByRole('button', { name: 'Connect Gmail' })).toBeEnabled()
   })
 

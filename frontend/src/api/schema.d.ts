@@ -1104,6 +1104,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/gmail-setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Gmail Setup
+         * @description Where the wizard is: the project, the sending address, the steps marked done.
+         */
+        get: operations["get_gmail_setup_api_v1_gmail_setup_get"];
+        /**
+         * Put Gmail Setup
+         * @description Replace the wizard's progress; answers it as stored (normalized, in order).
+         */
+        put: operations["put_gmail_setup_api_v1_gmail_setup_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/health": {
         parameters: {
             query?: never;
@@ -3847,6 +3871,29 @@ export interface components {
              */
             include_archived: boolean;
             where?: components["schemas"]["FilterNode-Output"] | null;
+        };
+        /**
+         * GmailSetupIn
+         * @description The whole of the wizard's progress; a ``PUT`` replaces what was stored.
+         */
+        GmailSetupIn: {
+            /** Done */
+            done?: string[];
+            /** Project Id */
+            project_id?: string | null;
+            /** Sender Email */
+            sender_email?: string | null;
+        };
+        /** GmailSetupOut */
+        GmailSetupOut: {
+            /** Done */
+            done: string[];
+            /** Project Id */
+            project_id: string | null;
+            /** Sender Email */
+            sender_email: string | null;
+            /** Steps */
+            steps: string[];
         };
         /** Gt */
         Gt: {
@@ -8681,6 +8728,57 @@ export interface operations {
                 };
             };
             /** @description An invalid filter or sort, or a vCard-only preset as CSV or JSON */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_gmail_setup_api_v1_gmail_setup_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GmailSetupOut"];
+                };
+            };
+        };
+    };
+    put_gmail_setup_api_v1_gmail_setup_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GmailSetupIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GmailSetupOut"];
+                };
+            };
+            /** @description A project ID, address or step the wizard can't use */
             422: {
                 headers: {
                     [name: string]: unknown;
