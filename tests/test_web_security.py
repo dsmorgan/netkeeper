@@ -156,6 +156,8 @@ MALFORMED_HOSTS = [
     # the rest of @ / ? # \ and whitespace
     "localhost@evil.example",
     "localhost#x",
+    # Defense in depth: urlsplit keeps a backslash in the hostname, so the name
+    # check already refuses this; _NOT_IN_HOST refuses it before parsing.
     "127.0.0.1\\evil",
     "[::1]/x",
     "127.0.0.1 ",
