@@ -17,11 +17,13 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -35,6 +37,23 @@ SH = shutil.which("sh")
 pytestmark = pytest.mark.skipif(SH is None or sys.platform == "win32", reason="needs a POSIX sh")
 
 
+def _config_cdp_port(config_path: str) -> str | None:
+    """The port in a NETKEEPER_CONFIG file's ``[linkedin] cdp_url``, or
+    ``None`` if the file cannot be read, has no ``cdp_url``, or that URL
+    names no explicit port (#183 re-review gap: a config with no ``cdp_url``,
+    or one with no port at all, must not be read as "pinned" just because
+    the key was set)."""
+    try:
+        text = Path(config_path).read_text()
+    except OSError:
+        return None
+    match = re.search(r'cdp_url\s*=\s*"([^"]*)"', text)
+    if match is None:
+        return None
+    port = urlparse(match.group(1)).port
+    return None if port is None else str(port)
+
+
 def _require_pinned_port(
     args: tuple[str, ...], env: dict[str, str], pinned_port: int | str | None
 ) -> None:
@@ -45,10 +64,12 @@ def _require_pinned_port(
     `netkeeper` and a real Chrome both happen to be reachable, reaches that
     real Chrome: a #183 re-review probe did exactly this. ``--port`` is the
     direct way to pin it; ``NETKEEPER_CONFIG`` (a test's own ``cdp_url``) is
-    another; ``pinned_port`` is for a test that controls the port through a
-    fake netkeeper's own JSON answer instead of either -- it must state the
-    value it configured that fake with, so this guard can check it rather
-    than trusting the test to have gotten it right silently.
+    another -- read for real, not trusted on sight: a config with no
+    ``cdp_url``, or one that still says 9222, must not pass (#183 re-review
+    gap). ``pinned_port`` is for a test that controls the port through a fake
+    netkeeper's own JSON answer instead of either -- it must state the value
+    it configured that fake with, so this guard can check it rather than
+    trusting the test to have gotten it right silently.
     """
     literal: str | None = None
     args_list = list(args)
@@ -61,17 +82,51 @@ def _require_pinned_port(
         assert literal != "9222", "a chrome.sh test must pin a port other than 9222"
         return
     if "NETKEEPER_CONFIG" in env:
+        config_port = _config_cdp_port(env["NETKEEPER_CONFIG"])
+        if config_port is None:
+            raise AssertionError(
+                "a chrome.sh test's NETKEEPER_CONFIG must set a [linkedin] cdp_url "
+                "with an explicit port -- this one had none, or could not be read"
+            )
+        assert config_port != "9222", "a chrome.sh test must pin a port other than 9222"
         return
     if pinned_port is not None:
         assert str(pinned_port) != "9222", "a chrome.sh test must pin a port other than 9222"
         return
     raise AssertionError(
         "a chrome.sh invocation in tests must pin a port other than 9222 -- pass "
-        "--port, set NETKEEPER_CONFIG, or pass run_sh(..., pinned_port=N) for a "
-        "fake netkeeper's own JSON answer. Never let a test fall through to the "
-        "real default: that can reach a real Chrome on a machine where one is "
-        "actually running on it."
+        "--port, set NETKEEPER_CONFIG to a cdp_url with an explicit non-9222 port, "
+        "or pass run_sh(..., pinned_port=N) for a fake netkeeper's own JSON answer. "
+        "Never let a test fall through to the real default: that can reach a real "
+        "Chrome on a machine where one is actually running on it."
     )
+
+
+def _curl_shim(shim_dir: Path) -> None:
+    """A `curl` on PATH that refuses any invocation naming port 9222, as a
+    backstop that does not depend on a test author remembering to pin one
+    (#183 re-review gap): `_require_pinned_port` only catches what a test
+    *says* it will do; this catches what chrome.sh actually tries to connect
+    to, no matter how it got there. The real curl's path is resolved before
+    the shim is built, since by the time it runs, PATH has this directory
+    in front of it.
+    """
+    real = shutil.which("curl")
+    assert real is not None, "curl must be on PATH for the shim to fall back to"
+    shim = shim_dir / "curl"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in\n'
+        "    *:9222*)\n"
+        "      echo 'refused: 9222' >&2\n"
+        "      exit 1\n"
+        "      ;;\n"
+        "  esac\n"
+        "done\n"
+        f'exec "{real}" "$@"\n'
+    )
+    shim.chmod(0o755)
 
 
 def run_sh(
@@ -80,7 +135,14 @@ def run_sh(
     env: dict[str, str],
     stdin: str | None = None,
     pinned_port: int | str | None = None,
+    allow_no_curl: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    """``allow_no_curl`` skips the curl-shim backstop below, for the one test
+    that deliberately runs with no curl at all, to pin chrome.sh's own
+    ``command -v curl`` check (C9): the shim's fallback always finds a real
+    curl, so leaving it in would quietly hand that test a working curl and
+    defeat its own point. Nothing unsafe about the opt-out either way -- a
+    missing curl can place no network call at all, let alone one to 9222."""
     assert SH is not None
     if script.name == "chrome.sh":
         _require_pinned_port(args, env, pinned_port)
@@ -90,14 +152,36 @@ def run_sh(
         (str(Path(sys.executable).parent), os.environ.get("PATH", "/usr/bin:/bin"))
     )
     full_env = {"PATH": path, "HOME": "/nonexistent", **env}
-    return subprocess.run(
-        [SH, str(script), *args],
-        capture_output=True,
-        text=True,
-        env=full_env,
-        input=stdin,
-        timeout=60,
-    )
+    if allow_no_curl:
+        return subprocess.run(
+            [SH, str(script), *args],
+            capture_output=True,
+            text=True,
+            env=full_env,
+            input=stdin,
+            timeout=60,
+        )
+    # A curl shim ahead of whatever PATH was just built -- even a test's own
+    # custom one, which otherwise would have replaced the line above entirely:
+    # the backstop for #183's guard above, so a port 9222 that reached curl
+    # despite it is refused too, whether or not a test caller remembered to
+    # pin one. lsof and ps are read-only (they report on an existing
+    # listener; they never open a connection to it themselves), so they need
+    # no shim.
+    shim_dir = Path(tempfile.mkdtemp(prefix="chrome-sh-curl-shim-"))
+    try:
+        _curl_shim(shim_dir)
+        full_env["PATH"] = os.pathsep.join((str(shim_dir), full_env.get("PATH", "")))
+        return subprocess.run(
+            [SH, str(script), *args],
+            capture_output=True,
+            text=True,
+            env=full_env,
+            input=stdin,
+            timeout=60,
+        )
+    finally:
+        shutil.rmtree(shim_dir, ignore_errors=True)
 
 
 def chrome_flags(line: str) -> list[str]:
@@ -301,6 +385,72 @@ def test_run_sh_accepts_netkeeper_config_with_no_explicit_port(tmp_path: Path) -
     run_sh(CHROME, "--dry-run", env={"NETKEEPER_CONFIG": str(config)})
 
 
+def test_run_sh_refuses_netkeeper_config_with_no_cdp_url(tmp_path: Path) -> None:
+    """#183 re-review gap: a NETKEEPER_CONFIG with no cdp_url at all must not
+    be read as pinning anything -- it falls through to chrome.sh's own 9222
+    default exactly as surely as having no NETKEEPER_CONFIG would."""
+    config = tmp_path / "config.toml"
+    config.write_text("[linkedin]\n")
+    with pytest.raises(AssertionError):
+        run_sh(CHROME, "--status", env={"NETKEEPER_CONFIG": str(config)})
+
+
+def test_run_sh_refuses_netkeeper_config_with_an_unreadable_path(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError):
+        run_sh(CHROME, "--status", env={"NETKEEPER_CONFIG": str(tmp_path / "missing.toml")})
+
+
+def test_run_sh_refuses_netkeeper_config_with_port_9222(tmp_path: Path) -> None:
+    """#183 re-review gap: a cdp_url that still says 9222 must not pass either."""
+    config = tmp_path / "config.toml"
+    config.write_text('[linkedin]\ncdp_url = "http://127.0.0.1:9222"\n')
+    with pytest.raises(AssertionError):
+        run_sh(CHROME, "--status", env={"NETKEEPER_CONFIG": str(config)})
+
+
+def test_run_sh_refuses_netkeeper_config_with_no_port_in_the_url(tmp_path: Path) -> None:
+    """#183 re-review gap: a cdp_url naming no explicit port at all must not
+    pass either -- there is nothing here to confirm isn't 9222."""
+    config = tmp_path / "config.toml"
+    config.write_text('[linkedin]\ncdp_url = "http://127.0.0.1"\n')
+    with pytest.raises(AssertionError):
+        run_sh(CHROME, "--status", env={"NETKEEPER_CONFIG": str(config)})
+
+
+def test_curl_shim_refuses_a_9222_argument_without_a_network_call(tmp_path: Path) -> None:
+    """#183 re-review gap: the curl-shim backstop must refuse a :9222 URL by
+    inspecting its arguments alone, never by attempting the request first and
+    failing some other way. A non-routable address (RFC 5737) proves it: if
+    the shim fell through to a real request, this would hang or time out
+    instead of refusing at once."""
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    _curl_shim(shim_dir)
+    start = time.monotonic()
+    result = subprocess.run(
+        [str(shim_dir / "curl"), "-fsS", "--max-time", "2", "http://192.0.2.1:9222/json/version"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    elapsed = time.monotonic() - start
+    assert result.returncode != 0
+    assert "refused: 9222" in result.stderr
+    assert elapsed < 1, "the shim must refuse instantly, not attempt the request first"
+
+
+def test_curl_shim_passes_through_anything_else(tmp_path: Path) -> None:
+    """The shim must still work as curl for every other argument."""
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    _curl_shim(shim_dir)
+    result = subprocess.run(
+        [str(shim_dir / "curl"), "--version"], capture_output=True, text=True, timeout=5
+    )
+    assert result.returncode == 0
+    assert "curl" in result.stdout.lower()
+
+
 def test_chrome_script_constants_match_the_cli() -> None:
     """The fallback profile name and port are the ones `browser launch` uses."""
     text = CHROME.read_text()
@@ -346,7 +496,10 @@ def test_chrome_script_takes_port_and_profile_from_netkeepers_config(tmp_path: P
 
 def test_chrome_script_refuses_a_cdp_url_on_another_host(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
-    config.write_text('[linkedin]\ncdp_url = "http://192.0.2.10:9222"\n')
+    # 192.0.2.0/24 (RFC 5737) is non-routable: this test is about the host
+    # mismatch, not the port, so the port is deliberately not 9222 anyway (the
+    # run_sh guard below requires that of every NETKEEPER_CONFIG it is handed).
+    config.write_text('[linkedin]\ncdp_url = "http://192.0.2.10:9333"\n')
     result = run_sh(
         CHROME,
         "--dry-run",
@@ -798,6 +951,7 @@ def test_chrome_script_refuses_without_curl(tmp_path: Path) -> None:
         "--profile-dir",
         str(tmp_path / "profile"),
         env={"PATH": str(bin_dir)},
+        allow_no_curl=True,
     )
     assert result.returncode == 1
     assert "curl is needed" in result.stderr
