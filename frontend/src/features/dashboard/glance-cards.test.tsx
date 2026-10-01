@@ -438,6 +438,41 @@ describe('BudgetHeatCard', () => {
     ).toBeInTheDocument()
   })
 
+  it('says the cap is limiting, not reached, with one visit left this week', async () => {
+    renderCard(BudgetHeatCard, {
+      [BUDGET]: json({
+        ...budget({ spent_today: 2, after_heat: 10, week_left: 1, remaining: 1 }),
+        budgets: [
+          {
+            action: 'profile_visits',
+            day: { count: 2, limit: 10, remaining: 8 },
+            week: { count: 299, limit: 300, remaining: 1 },
+          },
+        ],
+      }),
+      [HEAT]: json(heat()),
+    })
+    const body = await card('Budget and heat')
+    expect(
+      await body.findByText('Limited by the weekly cap: 1 left this week (299 of 300).'),
+    ).toBeInTheDocument()
+    expect(body.queryByText(/Weekly cap reached/)).not.toBeInTheDocument()
+  })
+
+  it('gives no weekly reason when the week leaves exactly what today allows', async () => {
+    // A tie: both caps leave the same number, so today's allowance is named and the
+    // week is not (#286 review). Only a week that leaves less, or none, gets a reason.
+    renderCard(BudgetHeatCard, {
+      [BUDGET]: json(budget({ spent_today: 4, after_heat: 16, week_left: 12, remaining: 12 })),
+      [HEAT]: json(heat()),
+    })
+    const body = await card('Budget and heat')
+    expect(await body.findByText(/profile visits left today/)).toHaveTextContent(
+      '12 profile visits left today (4 spent of 16)',
+    )
+    expect(body.queryByText(/weekly cap/i)).not.toBeInTheDocument()
+  })
+
   it('gives no weekly reason when today is the limit', async () => {
     renderCard(BudgetHeatCard, {
       [BUDGET]: json(budget({ spent_today: 16, week_left: 80, remaining: 0 })),
