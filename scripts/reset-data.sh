@@ -202,8 +202,13 @@ confirm() {
   esac
 }
 
-# A name in $archives nothing else has taken. Two runs in one second must not
-# share one, or the second overwrites the first.
+# A name in $archives nothing else has taken, for the one-line preview shown
+# before the confirmation prompt. Best effort only, and not what decides the
+# real name: a second reset could still land on the same guess between this
+# check and archive_db() actually publishing, which is exactly the race
+# archive_db()'s own hard-link publish step is safe against (below). Two runs
+# guessing the same stamp is also why the loop checks at all -- one run in a
+# second is the common case, but never assume it is the only one.
 archive_path() {
   candidate="$archives/netkeeper-$stamp.sqlite3"
   n=1
@@ -214,59 +219,93 @@ archive_path() {
   printf '%s\n' "$candidate"
 }
 
-# Move $1's main file aside as .failed for inspection (removing an old one
-# first), and discard any -wal/-shm it accumulated along the way. Prints the
-# .failed path, or nothing when $1 itself was never created -- there is
-# nothing to quarantine, just the generic "nothing deleted" the caller falls
-# back to. Used both when the raw-copy fallback fails partway and when the
-# result does not verify, so a partial or corrupt archive never sits in
-# archives/ looking like a good one (#183 review bug 5 and should-fix 1).
-quarantine_archive() {
-  target=$1
-  rm -f -- "$target-wal" "$target-shm"
-  [ -e "$target" ] || return 0
-  failed="$target.failed"
-  rm -f -- "$failed"
-  mv -- "$target" "$failed"
-  printf '%s\n' "$failed"
+# On failure, move a run's own private temp copy (archive_db()'s $tmp) aside
+# as .failed for inspection, then remove that temp directory either way.
+# Prints the .failed path, or nothing when the copy was never created -- there
+# is nothing to quarantine, just the generic "nothing published" the caller
+# falls back to. There is no "the" archive to rename here, only this run's
+# own, still-private work: nothing another concurrent run has already
+# published is ever touched by this (#183 re-review should-fix 1).
+quarantine_partial() {
+  tmp=$1
+  if [ -e "$tmp/db" ]; then
+    failed="$archives/netkeeper-$stamp.sqlite3.failed"
+    n=1
+    while [ -e "$failed" ]; do
+      failed="$archives/netkeeper-$stamp-$n.sqlite3.failed"
+      n=$((n + 1))
+    done
+    mv -- "$tmp/db" "$failed"
+    printf '%s\n' "$failed"
+  fi
+  rm -rf -- "$tmp"
 }
 
-# Copy the live database to $1 and prove the copy is readable before anything is
-# deleted. VACUUM INTO writes one compacted file with the WAL already folded in.
-# If SQLite refuses, copy the raw files, then fold the WAL into the copy, so an
-# archive is always one self-contained file -- and verify it either way.
+# Copy the live database into a run-private temporary file under $archives and
+# prove it is readable there, before anything public exists. VACUUM INTO
+# writes one compacted file with the WAL already folded in; if SQLite refuses,
+# the raw files are copied and the WAL folded into the copy instead, so an
+# archive is always one self-contained file -- verified either way, while it
+# is still nobody else's.
+#
+# Publishing is a hard link (same filesystem: the temp directory is under
+# $archives for exactly this), which fails atomically with EEXIST if the name
+# is already taken, so two resets landing on the same stamp each end up with
+# their own archive instead of one clobbering the other's. A plain `cp` or
+# `mv` into the final name could not do that: this run's own raw-copy fallback
+# used to `rm -f` straight at the public name, and quarantining an unverified
+# result used to rename that same public path -- either one could catch
+# another run's already-finished, already-verified archive in the middle
+# (#183 re-review should-fix 1).
 archive_db() {
-  target=$1
   run mkdir -p "$archives"
   if [ "$dry_run" = yes ]; then
     printf '  would: sqlite3 %s "VACUUM INTO %s", then verify it\n' "$db" "$target"
     return 0
   fi
-  quoted=$(printf '%s' "$target" | sed "s/'/''/g")
+  tmp=$(mktemp -d "$archives/.partial.XXXXXX") || die "could not create a temporary directory under $archives"
+  work="$tmp/db"
+  quoted=$(printf '%s' "$work" | sed "s/'/''/g")
   if ! sqlite3 "$db" "VACUUM INTO '$quoted'"; then
     printf 'warning: VACUUM INTO failed; copying the raw files instead\n' >&2
-    rm -f -- "$target"
     for suffix in '' '-wal' '-shm'; do
       [ -f "$db$suffix" ] || continue
-      if ! cp -- "$db$suffix" "$target$suffix"; then
-        failed=$(quarantine_archive "$target")
+      if ! cp -- "$db$suffix" "$work$suffix"; then
+        failed=$(quarantine_partial "$tmp")
         if [ -n "$failed" ]; then
-          die "could not copy $db$suffix; moved the partial archive to $failed for inspection. The database was left in place."
+          die "could not copy $db$suffix; moved the partial copy to $failed for inspection. The database was left in place."
         fi
-        die "could not copy $db$suffix; nothing deleted"
+        die "could not copy $db$suffix; nothing published. The database was left in place."
       fi
     done
-    sqlite3 "$target" 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;' >/dev/null 2>&1 || true
-    rm -f -- "$target-wal" "$target-shm"
+    sqlite3 "$work" 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;' >/dev/null 2>&1 || true
+    rm -f -- "$work-wal" "$work-shm"
   fi
-  if ! verified "$target"; then
-    failed=$(quarantine_archive "$target")
+  if ! verified "$work"; then
+    failed=$(quarantine_partial "$tmp")
     if [ -n "$failed" ]; then
       die "the archive did not pass SQLite's quick_check; moved it to $failed for inspection. The database was left in place."
     fi
-    die "the archive $target did not pass SQLite's quick_check; the database was left in place"
+    die "the archive did not pass SQLite's quick_check; nothing published. The database was left in place."
   fi
-  printf 'archived %s (%s, verified)\n' "$target" "$(human_size "$target")"
+  candidate="$archives/netkeeper-$stamp.sqlite3"
+  n=1
+  while ! ln -- "$work" "$candidate" 2>/dev/null; do
+    if [ -e "$candidate" ]; then
+      # Another run published this name first (or, non-concurrently, an
+      # earlier reset this same second already has it): try the next one.
+      candidate="$archives/netkeeper-$stamp-$n.sqlite3"
+      n=$((n + 1))
+      continue
+    fi
+    failed=$(quarantine_partial "$tmp")
+    if [ -n "$failed" ]; then
+      die "could not publish the archive to $candidate; moved it to $failed for inspection. The database was left in place."
+    fi
+    die "could not publish the archive to $candidate. The database was left in place."
+  done
+  rm -rf -- "$tmp"
+  printf 'archived %s (%s, verified)\n' "$candidate" "$(human_size "$candidate")"
 }
 
 # The file and both sidecars, whichever exist. A -wal left next to a restored
@@ -298,7 +337,7 @@ case $mode in
     confirm 'Archive it and start from an empty database?'
     # Again: a server started while the prompt waited holds it now.
     refuse_if_in_use
-    archive_db "$target"
+    archive_db
     remove_db
     [ "$dry_run" = yes ] || printf 'removed %s\n' "$db"
     printf '\nStart the server to build a new one:\n'
@@ -323,7 +362,7 @@ case $mode in
     confirm "Replace $db with this archive?"
     refuse_if_in_use
     if [ -f "$db" ]; then
-      archive_db "$target"
+      archive_db
     fi
     remove_db
     run mkdir -p "$data_dir"
