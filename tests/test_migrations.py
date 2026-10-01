@@ -2190,3 +2190,51 @@ def test_0026_downgrades_to_messages_without_it(migration_engine: Engine) -> Non
     assert columns.isdisjoint({"handled_at", "bounced_at", "asks_unsubscribe"})
     with migration_engine.begin() as connection:
         assert _count(connection, "messages") == 1
+
+
+# --- test drafts (0027, #304) -------------------------------------------------------------
+
+_TEST_DRAFT_COLUMNS = ("gmail_draft_id", "rfc822_message_id", "not_found_at")
+
+
+def _insert_test_send(connection: Connection) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO campaign_test_sends (id, user_id, campaign_id, step_id, fingerprint,"
+            " to_address, gmail_message_id, sent_at, created_at, updated_at)"
+            " VALUES (1, 1, 1, 1, :f, 'me@example.test', 'm1', :t, :t, :t)"
+        ),
+        {"f": "0" * 64, "t": STAMP},
+    )
+
+
+def test_0027_keeps_every_existing_test_send_as_sent(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0026")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+        _insert_test_send(connection)
+    migrations.upgrade(migration_engine, "0027")
+    with migration_engine.begin() as connection:
+        row = connection.execute(
+            text(
+                f"SELECT gmail_message_id, {', '.join(_TEST_DRAFT_COLUMNS)}"
+                " FROM campaign_test_sends"
+            )
+        ).one()
+    assert tuple(row) == ("m1", None, None, None)
+
+
+def test_0027_downgrades_to_test_sends_without_it(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0027")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+        _insert_test_send(connection)
+        connection.execute(
+            text("UPDATE campaign_test_sends SET gmail_draft_id = 'r1', rfc822_message_id = :m"),
+            {"m": "<a@example.test>"},
+        )
+    migrations.downgrade(migration_engine, "0026")
+    columns = {c["name"] for c in inspect(migration_engine).get_columns("campaign_test_sends")}
+    assert columns.isdisjoint(_TEST_DRAFT_COLUMNS)
+    with migration_engine.begin() as connection:
+        assert _count(connection, "campaign_test_sends") == 1

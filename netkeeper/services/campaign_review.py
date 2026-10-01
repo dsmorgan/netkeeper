@@ -34,8 +34,16 @@ campaign mailbox's own address, is rendered for an enrollment but addressed to
 nobody else, has a ``[Test]`` subject, and is recorded in
 ``campaign_test_sends``, never in ``messages`` or ``interactions``. The caps,
 the recency guard and the engine read only those two, so a test send never
-counts toward a cap or recency and never advances an enrollment. It needs the
-mailbox armed for **send** (#277), checked before any Gmail call.
+counts toward a cap or recency and never advances an enrollment.
+
+**The test follows the mailbox's arming** (#277, #304), read when the test is
+prepared and again just before the Gmail call (:func:`test_send_arming`), which
+decides: armed for **send**, it is sent; armed for **drafts** only, it becomes a
+Gmail draft (``drafts.create``, never ``messages.send``) in the person's Drafts;
+disarmed, it is refused. A test draft counts for the review exactly as a test
+send does, and the drafts check searches for its Message-ID
+(:func:`test_drafts_to_verify`), so a fresh mailbox can be verified, and armed to
+send, before any campaign is active. netkeeper never deletes a test draft.
 """
 
 from __future__ import annotations
@@ -679,6 +687,7 @@ class TestSendPlan:
     mailbox_id: int
     to_address: str
     fingerprint: str
+    rfc822_message_id: str
     message: Any  # email.message.EmailMessage
 
 
@@ -696,7 +705,9 @@ def prepare_test_send(
     (the given one, else the first pending) and addressed to the campaign mailbox's
     own address, never the contact's.
 
-    Refused (:class:`ReviewConflict`) unless the mailbox is ``ok`` and armed for send.
+    Refused (:class:`ReviewConflict`) unless the mailbox is ``ok`` and armed, for
+    drafts or for send. Whether it is drafted or sent is decided just before the
+    Gmail call, by :func:`test_send_arming`.
     """
     campaign = _reviewing(session, user, campaign_id)
     step = get_scoped(session, user, CampaignStep, step_id)
@@ -711,9 +722,10 @@ def prepare_test_send(
     )
     if mailbox is None:
         raise ReviewConflict(f"campaign {campaign_id} has no mailbox")
-    if mailbox.arm is not MailboxArm.SEND:
+    if mailbox.arm is None:
         raise ReviewConflict(
-            f"{mailbox.email} is not armed for send; a test send needs `gmail arm --send`"
+            f"{mailbox.email} is not armed; arm it for drafts (`gmail arm`) to make the test"
+            " a draft in your Drafts, or to send (`gmail arm --send`) to send it to you"
         )
     if mailbox.status is not MailboxStatus.OK:
         raise ReviewConflict(f"{mailbox.email} is {mailbox.status}")
@@ -736,12 +748,13 @@ def prepare_test_send(
     if not rendered.subject:
         raise ReviewConflict(f"step {step.position} renders with no subject")
     to = mailbox.email
+    rfc822_message_id = f"<{secrets.token_hex(16)}@{to.rpartition('@')[2]}>"
     try:
         message = build_message(
             to=to,
             subject=TEST_SUBJECT_PREFIX + rendered.subject,
             body=rendered.body,
-            message_id=f"<{secrets.token_hex(16)}@{to.rpartition('@')[2]}>",
+            message_id=rfc822_message_id,
         )
     except ComposeError as exc:
         raise ReviewConflict(f"the test message cannot be built: {exc}") from exc
@@ -752,13 +765,22 @@ def prepare_test_send(
         mailbox.id,
         to,
         step_fingerprint(step, template, campaign, me),
+        rfc822_message_id,
         message,
     )
 
 
-def still_armed_for_send(session: Session, user: User, mailbox_id: int) -> bool:
-    """Read again just before the Gmail call, as the sender does before each write."""
-    return mailboxes.armed(session, user, mailbox_id) is MailboxArm.SEND
+def test_send_arming(session: Session, user: User, mailbox_id: int) -> MailboxArm | None:
+    """The mailbox's arming, read again just before the Gmail call, as the sender reads it
+    before each write. It decides the test: ``send`` sends it, ``draft`` drafts it, None
+    (disarmed since it was prepared) refuses it.
+
+    A mailbox armed to send after the test was prepared sends it: the message is the
+    same either way, addressed only to the mailbox itself, and sending is what the
+    person armed it for. One taken back to drafts drafts it, so a test is never sent
+    on a mailbox not armed for send at the moment of the call.
+    """
+    return mailboxes.armed(session, user, mailbox_id)
 
 
 def record_test_send(
@@ -767,10 +789,12 @@ def record_test_send(
     plan: TestSendPlan,
     *,
     gmail_message_id: str | None,
+    gmail_draft_id: str | None = None,
     now: datetime,
 ) -> TestSend:
-    """Record a test send Gmail accepted. Writes nothing but this row and the campaign's
-    ``test_sent_at``: no message, no interaction, no enrollment change."""
+    """Record a test Gmail accepted: sent, or drafted when ``gmail_draft_id`` is given.
+    Either counts for the step's fingerprint. Writes nothing but this row and the
+    campaign's ``test_sent_at``: no message, no interaction, no enrollment change."""
     _require_writer(session, "record_test_send")
     campaign = get_campaign(session, user, plan.campaign_id)
     row = TestSend(
@@ -780,13 +804,61 @@ def record_test_send(
         fingerprint=plan.fingerprint,
         to_address=plan.to_address,
         gmail_message_id=gmail_message_id,
+        gmail_draft_id=gmail_draft_id,
+        rfc822_message_id=plan.rfc822_message_id,
         sent_at=now,
     )
     session.add(row)
     campaign.test_sent_at = now
     session.flush()
-    log.info("campaign %d: step %d test sent", plan.campaign_id, plan.step_position)
+    log.info(
+        "campaign %d: step %d test %s",
+        plan.campaign_id,
+        plan.step_position,
+        "sent" if gmail_draft_id is None else "drafted",
+    )
     return row
+
+
+@dataclass(frozen=True, slots=True)
+class TestDraftCheck:
+    """A test draft whose Message-ID the drafts check searches for (#304)."""
+
+    __test__ = False  # not a pytest class, whatever its name
+
+    mailbox_id: int
+    test_send_id: int
+    rfc822_message_id: str
+
+
+def test_drafts_to_verify(session: Session, user: User) -> list[TestDraftCheck]:
+    """The user's test drafts to search for by Message-ID: on each armed mailbox not yet
+    verified, its :func:`~netkeeper.services.mailboxes.recent_test_drafts`, newest first.
+    Nothing for a disarmed or verified mailbox."""
+    out: list[TestDraftCheck] = []
+    unverified = session.scalars(
+        scoped(user, Mailbox)
+        .where(Mailbox.armed_at.is_not(None), Mailbox.message_id_verified_at.is_(None))
+        .order_by(Mailbox.id)
+        .execution_options(populate_existing=True)
+    )
+    for mailbox in list(unverified):
+        out.extend(
+            TestDraftCheck(mailbox.id, row.id, row.rfc822_message_id)
+            for row in mailboxes.recent_test_drafts(session, user, mailbox)
+            if row.rfc822_message_id is not None
+        )
+    return out
+
+
+def record_test_drafts_not_found(
+    session: Session, user: User, test_send_ids: Collection[int], *, now: datetime
+) -> None:
+    """The drafts check searched for these test drafts and found none of them."""
+    _require_writer(session, "record_test_drafts_not_found")
+    for row in session.scalars(scoped(user, TestSend).where(TestSend.id.in_(test_send_ids))):
+        row.not_found_at = now
+    session.flush()
 
 
 # --- the gate -----------------------------------------------------------------------

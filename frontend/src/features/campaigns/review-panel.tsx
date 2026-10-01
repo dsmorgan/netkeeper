@@ -4,9 +4,10 @@
  * The checklist at the top is the API's own `missing` list, so it never claims
  * a requirement is met that the gate would refuse. Each section below records
  * one requirement: sampled previews approved for the fingerprint they were shown
- * with, any enrollment you searched for, lint, a test send per email step to your
- * own mailbox, and the guard summary acknowledged as shown. Activation asks
- * first, and a `409` shows what is still missing.
+ * with, any enrollment you searched for, lint, a test per email step to your own
+ * mailbox (a draft in your Drafts while Gmail is armed for drafts, a message sent
+ * to you once it is armed to send), and the guard summary acknowledged as shown.
+ * Activation asks first, and a `409` shows what is still missing.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, CircleDashed } from 'lucide-react'
@@ -545,7 +546,8 @@ function TestSendSection({
     <Section title="Test sends">
       <p className="text-sm text-muted-foreground">
         Each email step goes once to your own address, {to}, with a [Test] subject. It never goes to
-        a contact and counts toward no cap. Gmail must be armed for send in Settings first.
+        a contact and counts toward no cap. Arm Gmail in Settings first. Armed for drafts, the test
+        is a draft in your Drafts, and netkeeper never sends it. Armed to send, it's sent to you.
       </p>
       {emailSteps.length === 0 ? (
         <p className="text-sm text-muted-foreground">No email steps, so no test send is needed.</p>
@@ -572,7 +574,9 @@ function TestSendSection({
                 </div>
                 {done !== undefined && (
                   <p role="status">
-                    Sent to {done.to_address} at {formatWhen(done.sent_at)}.
+                    {done.drafted
+                      ? `Test draft to ${done.to_address} created in your Drafts at ${formatWhen(done.sent_at)}.`
+                      : `Sent to ${done.to_address} at ${formatWhen(done.sent_at)}.`}
                   </p>
                 )}
                 {refusal !== undefined && (

@@ -10,7 +10,8 @@ The flow, for the campaign builder (P3-11):
    approves viewed previews, each with the ``fingerprint`` it came with.
 3. ``POST .../review/lint``, ``POST .../review/guards/acknowledge`` (with the
    summary and ``audience_fingerprint`` from ``GET .../review``), and
-   ``POST .../review/test-send`` for each email step.
+   ``POST .../review/test-send`` for each email step: sent on a mailbox armed to
+   send, drafted on one armed for drafts only.
 4. ``POST /campaigns/{id}/activate``: ``409`` with ``missing``, a list of every
    requirement not met, unless each is recorded and current.
 
@@ -35,7 +36,7 @@ from netkeeper.campaigns.gmail import Gmail, GmailError
 from netkeeper.campaigns.render import me_fields
 from netkeeper.config import Settings
 from netkeeper.db import session_scope
-from netkeeper.models import CampaignStatus, User
+from netkeeper.models import CampaignStatus, MailboxArm, User
 from netkeeper.models.base import utcnow
 from netkeeper.services import campaign_review as service
 from netkeeper.services.mailboxes import MailboxNotFound, MailboxNotReady, open_gmail
@@ -70,11 +71,15 @@ class ActivationRefusedOut(BaseModel):
 
 
 class TestSendOut(BaseModel):
+    """A test Gmail accepted. ``drafted`` when the mailbox was armed for drafts only: the
+    test is a draft in the mailbox's Drafts, and ``sent_at`` is when it was drafted."""
+
     __test__ = False  # not a pytest class, whatever its name
 
     step_id: int
     to_address: str
     sent_at: datetime
+    drafted: bool
 
 
 class ReviewOut(BaseModel):
@@ -345,9 +350,11 @@ def _opener(request: Request) -> GmailOpener:
 def test_send(
     campaign_id: int, body: TestSendIn, request: Request, user: CurrentUser
 ) -> TestSendOut:
-    """Send one email step, rendered for an enrollment, to the campaign mailbox's own
-    address. Needs the mailbox armed for send. Never a campaign message: it counts
-    toward no cap or recency and advances no enrollment."""
+    """Test one email step, rendered for an enrollment, addressed to the campaign
+    mailbox's own address. Follows the mailbox's arming, read again just before the
+    Gmail call: armed to send, it is sent; armed for drafts only, it is a draft in the
+    mailbox's Drafts (never ``messages.send``); disarmed, ``409``. Never a campaign
+    message: it counts toward no cap or recency and advances no enrollment."""
     factory: sessionmaker[Session] = request.app.state.session_factory
     me = _me(request)
     with session_scope(factory) as session, translate_errors():
@@ -360,15 +367,24 @@ def test_send(
             me=me,
             today=utcnow().date(),
         )
-    purpose = f"test send of step {plan.step_position} of campaign {plan.campaign_id}"
+    what = f"of step {plan.step_position} of campaign {plan.campaign_id}"
+    purpose = f"test {what}"
+    draft_id: str | None = None
     try:
-        with session_scope(factory) as session:
-            if not service.still_armed_for_send(session, user, plan.mailbox_id):
-                raise HTTPException(
-                    status_code=409, detail="the mailbox is no longer armed for send"
-                )
+        # The client first (it reads the Keychain), then the arming, read last before the
+        # Gmail call. The access token is fetched lazily, inside that call.
         gmail = _opener(request)(user.id, plan.mailbox_id)
-        ref = gmail.send(plan.message, purpose=purpose)
+        with session_scope(factory) as session:
+            arming = service.test_send_arming(session, user, plan.mailbox_id)
+        if arming is None:
+            raise HTTPException(status_code=409, detail="the mailbox is no longer armed")
+        if arming is MailboxArm.SEND:
+            purpose = f"test send {what}"
+            ref = gmail.send(plan.message, purpose=purpose)
+        else:  # armed for drafts only: never messages.send (#277, #304)
+            purpose = f"test draft {what}"
+            draft = gmail.create_draft(plan.message, purpose=purpose)
+            ref, draft_id = draft.message, draft.id
     except (MailboxNotFound, MailboxNotReady) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except GmailError as exc:
@@ -376,8 +392,15 @@ def test_send(
         raise HTTPException(status_code=502, detail=f"Gmail: {exc}") from exc
     now = utcnow()
     with session_scope(factory, write=True) as session, translate_errors():
-        row = service.record_test_send(session, user, plan, gmail_message_id=ref.id, now=now)
-        return TestSendOut(step_id=row.step_id, to_address=row.to_address, sent_at=row.sent_at)
+        row = service.record_test_send(
+            session, user, plan, gmail_message_id=ref.id, gmail_draft_id=draft_id, now=now
+        )
+        return TestSendOut(
+            step_id=row.step_id,
+            to_address=row.to_address,
+            sent_at=row.sent_at,
+            drafted=row.gmail_draft_id is not None,
+        )
 
 
 REFUSED: Responses = {

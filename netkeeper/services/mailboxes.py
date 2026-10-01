@@ -50,13 +50,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns import gmail_oauth
 from netkeeper.campaigns.gmail import GmailClient
 from netkeeper.db import session_scope
-from netkeeper.models import Mailbox, MailboxArm, MailboxStatus, User, UserKind
+from netkeeper.models import Mailbox, MailboxArm, MailboxStatus, TestSend, User, UserKind
 from netkeeper.models.base import utcnow
 from netkeeper.models.mailboxes import MAILBOX_ARMED_BY_MAX_LENGTH
 from netkeeper.scoping import get_scoped, scoped
@@ -305,9 +305,17 @@ def arm(
                 f"{mailbox.email} is not armed; arm it for drafts first and let a draft be made"
             )
         if mailbox.message_id_verified_at is None:
+            recent = recent_test_drafts(session, user, mailbox)
+            if recent and all(row.not_found_at is not None for row in recent):
+                raise ArmRefused(
+                    f"no netkeeper test draft was found in the Drafts of {mailbox.email} at the"
+                    " last check; if you discarded it, make a new test draft from a"
+                    " campaign's review"
+                )
             raise ArmRefused(
                 f"no draft on {mailbox.email} has been found by its Message-ID yet; while it"
-                " is armed for drafts, `serve` checks the first draft it makes"
+                " is armed for drafts, `serve` checks the first draft it makes, a campaign's"
+                " test draft included"
             )
         if mailbox.send_armed_at is None:
             mailbox.send_armed_at = now
@@ -315,6 +323,29 @@ def arm(
     session.flush()
     log.info("mailbox %d armed for %s by %s", mailbox.id, mailbox.arm, mailbox.armed_by)
     return mailbox
+
+
+TEST_DRAFTS_CHECKED: Final = 3
+"""The most test drafts one drafts check searches for, per mailbox, newest first (#304)."""
+
+
+def recent_test_drafts(session: Session, user: User, mailbox: Mailbox) -> list[TestSend]:
+    """The newest :data:`TEST_DRAFTS_CHECKED` campaign test drafts made on ``mailbox``
+    (#304): a test is always addressed to its mailbox's own address, so that address is
+    what ties a test draft to the mailbox it was made in."""
+    return list(
+        session.scalars(
+            scoped(user, TestSend)
+            .where(
+                TestSend.gmail_draft_id.is_not(None),
+                TestSend.rfc822_message_id.is_not(None),
+                func.lower(TestSend.to_address) == mailbox.email.lower(),
+            )
+            .order_by(TestSend.sent_at.desc(), TestSend.id.desc())
+            .limit(TEST_DRAFTS_CHECKED)
+            .execution_options(populate_existing=True)
+        )
+    )
 
 
 def disarm(session: Session, user: User, mailbox: Mailbox) -> Mailbox:
