@@ -2327,12 +2327,10 @@ def test_0029_lists_every_bounced_invalid_and_opted_out_address(
     migrations.upgrade(migration_engine, "0029")
     with migration_engine.begin() as connection:
         rows = connection.execute(
-            text(
-                "SELECT user_id, email, reason, bounced, contact_id FROM do_not_send_addresses"
-                " ORDER BY user_id, email"
-            )
+            text("SELECT user_id, email, reason, bounced, contact_id FROM do_not_send_addresses")
         ).all()
-    assert [(r.user_id, r.email, r.reason, bool(r.bounced), r.contact_id) for r in rows] == [
+    # Sorted here, not by ORDER BY: PostgreSQL's locale collation puts "a@" before "a+x@".
+    assert sorted((r.user_id, r.email, r.reason, bool(r.bounced), r.contact_id) for r in rows) == [
         (1, "a+x@example.test", "opted_out", False, 3),
         (1, "a@example.test", "bounced", True, 1),
         (1, "b@example.test", "invalid", False, 2),
@@ -2426,12 +2424,9 @@ def test_0029_lists_an_unsubscribe_on_a_completed_enrollment_with_its_bounce(
     migrations.upgrade(migration_engine, "0029")
     with migration_engine.begin() as connection:
         rows = connection.execute(
-            text(
-                "SELECT email, reason, bounced, contact_id FROM do_not_send_addresses"
-                " ORDER BY email"
-            )
+            text("SELECT email, reason, bounced, contact_id FROM do_not_send_addresses")
         ).all()
-    assert [(r.email, r.reason, bool(r.bounced), r.contact_id) for r in rows] == [
+    assert sorted((r.email, r.reason, bool(r.bounced), r.contact_id) for r in rows) == [
         ("old@example.test", "opted_out", True, 1),
         ("u@example.test", "opted_out", False, 1),
     ]
