@@ -263,7 +263,9 @@ INPUT_ROOTS = [PACKAGE]
 #: Nothing outside those may import the browser (the browser-callers rule below), so a
 #: page is never in reach there to type into or clear.
 BROWSER_ONLY_INPUTS = frozenset({"type", "clear"})
-BROWSER_ROOTS = (LINKEDIN, PACKAGE / "worker.py")
+#: ``cli.py`` is a browser caller (``preflight``, ``rehearse``, ``run``), so a page is in
+#: reach there too (#196 item 2).
+BROWSER_ROOTS = (LINKEDIN, PACKAGE / "worker.py", PACKAGE / "cli.py")
 #: The only places a page input is allowed: (file, enclosing function, name). Each must
 #: be reached exactly once.
 #:
@@ -275,10 +277,14 @@ BROWSER_ROOTS = (LINKEDIN, PACKAGE / "worker.py")
 #:   one reads every ``.move`` reference in the package, not only one on a ``mouse``.
 #:   The geometry read that method makes (``_content_box``'s ``bounding_box``) is not a
 #:   page input and is not listed.
+#: - Not a page input at all: ``cli.py`` reads a run event's ``type`` while it prints a
+#:   run's progress (#196 item 2). Listed by function, so a ``type`` anywhere else in
+#:   ``cli.py`` is still a finding.
 ALLOWED_INPUTS = frozenset(
     {
         (LINKEDIN / "browser.py", "BrowserRun.click_contact_info", "click"),
         (LINKEDIN / "browser.py", "BrowserRun._rest_pointer_over_content", "move"),
+        (PACKAGE / "cli.py", "_execute_printing.show", "type"),
     }
 )
 
@@ -435,13 +441,57 @@ def _attribute_name_arguments(node: ast.Call) -> list[ast.expr]:
     """
     func = node.func
     name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-    if name == "getattr" and isinstance(func, ast.Name):
+    if name == "getattr":
         return node.args[1:2]
     if name == "methodcaller":
         return node.args[:1]
-    if name == "attrgetter":
+    if name in ("attrgetter", "__getattribute__"):
+        # ``x.__getattribute__("name")`` names it first; ``object.__getattribute__(x,
+        # "name")`` second: every argument is read, and only a string is a name.
         return list(node.args)
     return []
+
+
+#: The callables that read an attribute named by a value (#196 item 11).
+DYNAMIC_ATTRIBUTE_READERS = frozenset({"getattr", "__getattribute__", "methodcaller", "attrgetter"})
+
+
+def dynamic_attribute_reads(source: str, path: Path = MEMORY) -> Iterator[Finding]:
+    """Every attribute read whose name the scanners cannot see (#207 review, #196 item 11).
+
+    The scanners read a name handed to ``getattr``, ``__getattribute__``,
+    ``methodcaller``, or ``attrgetter`` only as a string literal: ``getattr(x, "obs" +
+    "erve")`` reaches ``observe`` and names nothing. So where a page is in reach, each
+    of those is a finding when its name is not a literal (an expression, a ``*``
+    argument, no name at all), and when the reader itself is held rather than called
+    (``read = getattr``), since nothing on the later call says it is one.
+    """
+    tree = ast.parse(source)
+    called: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        if name not in DYNAMIC_ATTRIBUTE_READERS:
+            continue
+        called.add(id(func))
+        names = _attribute_name_arguments(node)
+        literal = [a for a in names if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+        starred = any(isinstance(a, ast.Starred) for a in node.args)
+        if name == "__getattribute__":
+            ok = len(literal) == 1 and not starred
+        else:
+            ok = bool(names) and len(literal) == len(names) and not starred
+        if not ok:
+            yield Finding(path, node.lineno, f"{name}() with a name that is not a literal")
+    for node in ast.walk(tree):
+        if id(node) in called:
+            continue
+        if isinstance(node, ast.Name) and node.id in DYNAMIC_ATTRIBUTE_READERS:
+            yield Finding(path, node.lineno, f"{node.id} held, not called")
+        elif isinstance(node, ast.Attribute) and node.attr in DYNAMIC_ATTRIBUTE_READERS:
+            yield Finding(path, node.lineno, f"{node.attr} held, not called")
 
 
 def imported_names(source: str, path: Path = MEMORY) -> Iterator[tuple[int, str]]:
@@ -1149,6 +1199,86 @@ def test_the_scanners_see_getattr_with_a_literal() -> None:
     # getattr names its attribute second; a default that happens to spell a listed
     # name is a value, not a reference.
     assert not list(launch_calls("getattr(obj, 'x', 'launch')\n"))
+
+
+def test_the_scanners_see_getattribute_with_a_literal() -> None:
+    """#196 item 11: ``__getattribute__`` names an attribute as plainly as ``getattr``."""
+    assert list(context_mutations("context.__getattribute__('new_cdp_session')(page)\n"))
+    assert list(launch_calls("object.__getattribute__(p.chromium, 'launch')()\n"))
+    assert [i.line for i, _ in name_reaches("run.__getattribute__('observe')(m)\n", "observe")]
+    assert list(tap_observations("run.__getattribute__('observe')(m, tap=True)\n"))
+
+
+def test_no_attribute_is_read_by_a_name_the_scanners_cannot_see() -> None:
+    """#207 review, #196 item 11: where a page is in reach -- the extractor, the worker,
+    the CLI -- every ``getattr``, ``__getattribute__``, ``methodcaller``, and
+    ``attrgetter`` names its attribute with a literal, so the tap, send, CDP session,
+    and launch scanners can read it."""
+    files = [
+        path
+        for root in BROWSER_ROOTS
+        for path in ([root] if root.is_file() else python_files(root))
+    ]
+    assert PACKAGE / "cli.py" in files and PACKAGE / "worker.py" in files
+    assert len(files) >= 20, "the scan found too few files; is the path right?"
+    findings = [
+        finding
+        for path in files
+        for finding in dynamic_attribute_reads(path.read_text(encoding="utf-8"), path)
+    ]
+    assert not findings, complain(findings, "an attribute named by a value, not a literal:")
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "getattr(x, 'obs' + 'erve')(m, tap=True)\n",
+        "getattr(x, name)\n",
+        "getattr(x, f'{a}')\n",
+        "getattr(*args)\n",
+        "builtins.getattr(x, name)\n",
+        "x.__getattribute__('obs' + 'erve')\n",
+        "x.__getattribute__(name)\n",
+        "object.__getattribute__(x, name)\n",
+        "getattr(x, '_open_body' + '_tap')\n",
+        "operator.methodcaller(name, m)\n",
+        "operator.attrgetter('send', name)\n",
+        "read = getattr\n",
+        "read = x.__getattribute__\n",
+        "fn = operator.attrgetter\n",
+    ],
+)
+def test_the_dynamic_attribute_scanner_catches_a_name_built_at_run_time(snippet: str) -> None:
+    assert list(dynamic_attribute_reads(snippet))
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "getattr(response, 'from_service_worker', None)\n",
+        "x.__getattribute__('url')\n",
+        "object.__getattribute__(x, 'url')\n",
+        "operator.methodcaller('url', 1)\n",
+        "operator.attrgetter('a', 'b.c')\n",
+    ],
+)
+def test_the_dynamic_attribute_scanner_passes_a_literal(snippet: str) -> None:
+    assert not list(dynamic_attribute_reads(snippet))
+
+
+def test_cli_is_scanned_for_typing_and_clearing() -> None:
+    """#196 item 2: ``cli.py`` reaches the browser, so a ``type`` or ``clear`` there is
+    a page input like anywhere in the extractor; only the one ``event.type`` read is
+    allowed, by its function."""
+    cli = PACKAGE / "cli.py"
+    assert _in_browser_roots(cli)
+    source = "async def run(page):\n    await page.type('#q', 'x')\n    await locator.clear()\n"
+    found = [
+        item
+        for item in page_inputs(source, cli)
+        if (item.path, item.function, item.name) not in ALLOWED_INPUTS
+    ]
+    assert sorted(i.name for i in found) == ["clear", "type"]
 
 
 def test_context_scanner_catches_a_mutation() -> None:
