@@ -1150,6 +1150,21 @@ async def test_a_stale_redirect_from_another_page_leads_nowhere_this_visit_accep
     assert out.outcomes == [Outcome.ROUTE_CHANGED] and site.clicks == []
 
 
+@pytest.mark.parametrize(
+    ("wall", "outcome"), [(CHECKPOINT_URL, Outcome.CHECKPOINT), (LOGIN_URL, Outcome.LOGGED_OUT)]
+)
+async def test_a_stale_redirect_to_a_wall_still_stops_the_run(wall: str, outcome: Outcome) -> None:
+    """#309 review, M8: a redirect another page received is never followed, but a wall
+    is a wall whoever's request it answered -- the wall check comes before the chain
+    check, so the run stops and the next person is never visited."""
+    stale = [Stale("GET", f"/in/{MATEO.slug}/", b"", status=302, headers={"location": wall})]
+    site = ProfileSite([ProfilePage(PRIYA), ProfilePage(HANA)], stale=stale)
+    out = await visit(site, [target(PRIYA), target(HANA)])
+    assert out.result.reason is StopReason.RESPONSE and out.result.outcome is outcome
+    assert out.harvests == [] and site.clicks == []
+    assert f"/in/{HANA.slug}/" not in site.navigations
+
+
 async def test_a_redirect_chain_is_followed_through_each_of_its_own_targets() -> None:
     """The other side of #196 item 1: Priya's slug redirects to a renamed slug, which
     redirects again. The second redirect's request is the first's target, so the

@@ -441,7 +441,7 @@ def _attribute_name_arguments(node: ast.Call) -> list[ast.expr]:
     """
     func = node.func
     name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-    if name == "getattr":
+    if name in ("getattr", "getattr_static"):
         return node.args[1:2]
     if name == "methodcaller":
         return node.args[:1]
@@ -453,7 +453,9 @@ def _attribute_name_arguments(node: ast.Call) -> list[ast.expr]:
 
 
 #: The callables that read an attribute named by a value (#196 item 11).
-DYNAMIC_ATTRIBUTE_READERS = frozenset({"getattr", "__getattribute__", "methodcaller", "attrgetter"})
+DYNAMIC_ATTRIBUTE_READERS = frozenset(
+    {"getattr", "getattr_static", "__getattribute__", "methodcaller", "attrgetter"}
+)
 
 
 def dynamic_attribute_reads(source: str, path: Path = MEMORY) -> Iterator[Finding]:
@@ -1209,6 +1211,23 @@ def test_the_scanners_see_getattribute_with_a_literal() -> None:
     assert list(tap_observations("run.__getattribute__('observe')(m, tap=True)\n"))
 
 
+def test_the_scanners_see_a_qualified_getattr_with_a_literal() -> None:
+    """#309 review, M10: ``builtins.getattr`` and ``inspect.getattr_static`` name an
+    attribute as plainly as a bare ``getattr``, for the launch, tap, and CDP scanners."""
+    assert list(launch_calls("await builtins.getattr(p.chromium, 'launch')()\n"))
+    assert list(launch_calls("await inspect.getattr_static(p.chromium, 'launch')()\n"))
+    assert list(tap_observations("builtins.getattr(run, 'observe')(m, tap=True)\n"))
+    assert list(tap_observations("inspect.getattr_static(run, 'observe')(m, tap=True)\n"))
+    source = (
+        "class BrowserRun:\n"
+        "    async def _open_body_tap(self, session):\n"
+        "        await builtins.getattr(session, 'send')('Network.setCookie', {})\n"
+        "        await inspect.getattr_static(session, 'send')('Network.setCookie', {})\n"
+    )
+    assert len(list(cdp_sends(source))) == 2
+    assert list(context_mutations("builtins.getattr(context, 'new_cdp_session')(page)\n"))
+
+
 def test_no_attribute_is_read_by_a_name_the_scanners_cannot_see() -> None:
     """#207 review, #196 item 11: where a page is in reach -- the extractor, the worker,
     the CLI -- every ``getattr``, ``__getattribute__``, ``methodcaller``, and
@@ -1246,6 +1265,8 @@ def test_no_attribute_is_read_by_a_name_the_scanners_cannot_see() -> None:
         "read = getattr\n",
         "read = x.__getattribute__\n",
         "fn = operator.attrgetter\n",
+        "inspect.getattr_static(x, name)\n",
+        "read = inspect.getattr_static\n",
     ],
 )
 def test_the_dynamic_attribute_scanner_catches_a_name_built_at_run_time(snippet: str) -> None:
@@ -1260,6 +1281,7 @@ def test_the_dynamic_attribute_scanner_catches_a_name_built_at_run_time(snippet:
         "object.__getattribute__(x, 'url')\n",
         "operator.methodcaller('url', 1)\n",
         "operator.attrgetter('a', 'b.c')\n",
+        "inspect.getattr_static(x, 'url')\n",
     ],
 )
 def test_the_dynamic_attribute_scanner_passes_a_literal(snippet: str) -> None:
