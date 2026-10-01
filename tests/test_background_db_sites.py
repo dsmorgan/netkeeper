@@ -247,6 +247,41 @@ async def test_worker_records_a_cancel_that_carries_a_failed_write_as_failed(
     )
 
 
+@pytest.mark.parametrize("carries_a_failed_write", [False, True])
+async def test_a_failed_ending_write_on_a_cancel_never_replaces_the_cancel(
+    session_factory: sessionmaker[Session],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    carries_a_failed_write: bool,
+) -> None:
+    """#294: the database just failed, so the worker's own ending write fails too. The
+    task still ends cancelled (``TaskRunner`` reads ``task.cancelled()``), and the
+    failed write is logged."""
+    run_id, user_id = _new_run(session_factory)
+    failing, hanging = _ProviderWhoseWriteFailsOnCancel(), _Provider()
+    worker = _worker(failing if carries_a_failed_write else hanging, session_factory)
+
+    def finish(*args: Any) -> None:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(worker, "_finish", finish)
+    task = asyncio.create_task(worker.execute(run_id, user_id))
+    if carries_a_failed_write:
+        assert await asyncio.to_thread(failing.started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.02)
+        failing.release.set()
+    else:
+        await asyncio.wait_for(hanging.entered.wait(), 5)
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert task.cancelled()
+    assert f"could not record how run {run_id} ended" in caplog.text
+    assert _run(session_factory, run_id, user_id).status is SyncRunStatus.RUNNING
+
+
 async def test_worker_finish_after_an_error_before_the_runner_stays_off_the_loop(
     engine: Engine, session_factory: sessionmaker[Session]
 ) -> None:

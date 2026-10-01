@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any
 
 from browser_fakes import FakeBrowser, FakeConnector, FakeContext
+from browser_guard import UNREACHABLE_CDP_URL
 from flagship_site import CHECKPOINT_URL, FlagshipSite
 from sqlalchemy.orm import Session, sessionmaker
 from voyager_pages import PEOPLE, Person
@@ -33,7 +34,7 @@ from netkeeper.services.events import EventBus
 from netkeeper.services.scheduled_runs import ServeExtractor
 from netkeeper.worker import BrowserWorker
 
-CDP_URL = "http://127.0.0.1:9222"
+CDP_URL = UNREACHABLE_CDP_URL  # never a real Chrome, even without the guard (#294)
 
 
 class ConnectionsContext(FlagshipSite):

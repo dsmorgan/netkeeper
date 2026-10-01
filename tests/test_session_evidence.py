@@ -293,6 +293,14 @@ def test_a_live_probe_still_takes_precedence(writer: Session, user: User) -> Non
             False,
         ),
         (SyncRunKind.CONNECTIONS_FULL, SyncRunStatus.COMPLETED, {}, False),
+        (
+            # A flag-worthy outcome counts against the run even when the flag was not
+            # recorded (#294, mutant M6).
+            SyncRunKind.CONNECTIONS_FULL,
+            SyncRunStatus.ABORTED,
+            {"connections": 12, "session_flagged": False, "outcome": "checkpoint"},
+            False,
+        ),
     ],
     ids=[
         "full-sync-completed",
@@ -303,6 +311,7 @@ def test_a_live_probe_still_takes_precedence(writer: Session, user: User) -> Non
         "no-flag-field",
         "failed",
         "no-counts",
+        "checkpoint-not-flagged",
     ],
 )
 def test_only_a_run_that_read_linkedin_and_flagged_nothing_is_evidence(

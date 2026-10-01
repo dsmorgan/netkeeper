@@ -26,6 +26,7 @@ import os
 import sys
 
 from browser_fakes import FakeBrowser, FakeConnector, FakeContext
+from browser_guard import UNREACHABLE_CDP_URL
 
 from netkeeper.linkedin.browser import (
     ActivityLocks,
@@ -34,7 +35,7 @@ from netkeeper.linkedin.browser import (
 )
 from netkeeper.linkedin.preflight import preflight
 
-CDP_URL = "http://127.0.0.1:9222"
+CDP_URL = UNREACHABLE_CDP_URL  # never a real Chrome, even without the guard (#294)
 
 
 def _emit(**fields: object) -> None:
