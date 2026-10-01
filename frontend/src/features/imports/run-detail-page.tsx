@@ -9,7 +9,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { ApiError, importKeys, rollbackRun, rowsQuery, runQuery } from './api'
 import { InvitationsCard, MessagesCard } from './archive-flow'
 import { RESOLUTION_LABELS, fieldLabel, formatWhen, rowLabel } from './fields'
-import { ErrorNote, Note, OutcomeBadge, RunStatusBadge } from './notes'
+import { DuplicateGroupsNote, ErrorNote, Note, OutcomeBadge, RunStatusBadge } from './notes'
 import { RunCounts } from './run-counts'
 import { SELECT_CLASS } from './styles'
 import type { ColumnMapping, ImportRun, Resolution, RollbackResult } from './types'
@@ -91,6 +91,8 @@ function RunDetail({ run }: { run: ImportRun }) {
           <InvitationsCard counts={run.archive.invitations} />
         </>
       )}
+
+      <DuplicateGroupsNote groups={run.duplicate_groups ?? []} detail />
 
       {run.status === 'draft' && (
         <Card>

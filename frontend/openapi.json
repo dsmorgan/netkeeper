@@ -3398,6 +3398,42 @@
         "title": "DuplicateContact",
         "type": "object"
       },
+      "DuplicateContactOut": {
+        "description": "One new contact a commit created, as a :class:`DuplicateGroupOut` names it.",
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "row_number": {
+            "title": "Row Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "contact_id",
+          "row_number"
+        ],
+        "title": "DuplicateContactOut",
+        "type": "object"
+      },
+      "DuplicateGroupOut": {
+        "description": "Two or more new contacts one commit created from rows sharing a name and company (#228).\n\nSpec 8.2 step 4 never matches two rows against each other, so a person\nlisted twice in the same file with no identifier becomes two new contacts;\nthis names them, it does not undo them. Merging the contacts a group names\nis safe, but it means the run that created them can no longer be rolled\nback (``RunMerged``).",
+        "properties": {
+          "contacts": {
+            "items": {
+              "$ref": "#/components/schemas/DuplicateContactOut"
+            },
+            "title": "Contacts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "contacts"
+        ],
+        "title": "DuplicateGroupOut",
+        "type": "object"
+      },
       "EmailContains": {
         "additionalProperties": false,
         "description": "Any of the contact's emails contains ``value`` (case-insensitive, literal).",
@@ -5697,6 +5733,13 @@
           "created_count": {
             "title": "Created Count",
             "type": "integer"
+          },
+          "duplicate_groups": {
+            "items": {
+              "$ref": "#/components/schemas/DuplicateGroupOut"
+            },
+            "title": "Duplicate Groups",
+            "type": "array"
           },
           "filename": {
             "title": "Filename",
@@ -14481,7 +14524,7 @@
     },
     "/api/v1/imports/{run_id}/commit": {
       "post": {
-        "description": "Apply every row of a draft run, in this request's one transaction.\n\nCandidate rows with no decision answer ``409`` unless ``skip_undecided`` is\nset, in which case they are skipped and counted. A row that cannot be applied\nis skipped with its reason on the row; everything else still lands.",
+        "description": "Apply every row of a draft run, in this request's one transaction.\n\nCandidate rows with no decision answer ``409`` unless ``skip_undecided`` is\nset, in which case they are skipped and counted. A row that cannot be applied\nis skipped with its reason on the row; everything else still lands.\n``duplicate_groups`` names every 2+ new contacts this commit created from\nrows whose name and company match each other, which spec 8.2 never folds\ntogether on its own (#228).",
         "operationId": "commit_import_run",
         "parameters": [
           {

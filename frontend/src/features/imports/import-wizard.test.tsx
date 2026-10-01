@@ -230,12 +230,53 @@ describe('import wizard', () => {
       'href',
       '/imports/runs/7',
     )
+    // COMMITTED_RUN carries no duplicate_groups: nothing shares a name and company (#228).
+    expect(screen.queryByText(/share a name and company/)).toBeNull()
 
     const committed = calls.find((call) => call.path === '/api/v1/imports/7/commit')
     expect(committed?.body).toEqual({
       decisions: [{ row_number: 3, kind: 'merge_into', contact_id: 12 }],
       skip_undecided: false,
     })
+  })
+
+  it('warns on the result step when the commit made two new contacts of one person (#228)', async () => {
+    const withDuplicates = {
+      ...COMMITTED_RUN,
+      duplicate_groups: [
+        {
+          contacts: [
+            { contact_id: 21, row_number: 2 },
+            { contact_id: 22, row_number: 3 },
+          ],
+        },
+      ],
+    }
+    mockFetch(
+      backend({
+        'GET /api/v1/imports/presets': () => jsonResponse(PRESETS),
+        'POST /api/v1/imports/inspect': () => jsonResponse(ARCHIVE_INSPECTION),
+        'POST /api/v1/imports': () => jsonResponse(DRAFT_RUN, 201),
+        'POST /api/v1/imports/7/preview': () => jsonResponse(PREVIEW_ROWS),
+        'GET /api/v1/imports/7/rows': () => jsonResponse({ items: [CANDIDATE_ROW], total: 1 }),
+        'POST /api/v1/imports/7/commit': commitLike([CANDIDATE_ROW.row_number], withDuplicates),
+      }),
+    )
+    await renderApp('/imports')
+    await reachCandidates()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create a new contact for the rest' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Go to commit' }))
+    await screen.findByText('Commit the import')
+    fireEvent.click(screen.getByRole('button', { name: 'Commit 4 rows' }))
+
+    await screen.findByText('Imported connections.csv')
+    expect(
+      screen.getByText('2 new contacts share a name and company with another row in this file.'),
+    ).toBeVisible()
+    expect(screen.getByText(/this import can no longer be rolled back/)).toBeVisible()
+    // The result step's summary, not the run page's per-contact listing.
+    expect(screen.queryByText(/row 2/)).toBeNull()
   })
 
   it('lets undecided candidates be skipped on purpose', async () => {

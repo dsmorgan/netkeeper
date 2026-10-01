@@ -392,6 +392,7 @@ def test_cli_import_csv_commits_and_matches_what_the_service_would_do(
     with cli_db() as session:
         user = ensure_local_user(session)
         assert session.scalar(scoped_count(user, Contact)) == 3
+    assert "warning" not in result.output  # nobody here shares a name and company (#228)
 
 
 def _seed_candidate(factory: sessionmaker[Session]) -> None:
@@ -493,13 +494,26 @@ def test_cli_import_csv_on_candidate_new_makes_a_repeated_person_two_contacts(
     assert result.exit_code == 0, result.output
     with cli_db() as session:
         user = ensure_local_user(session)
-        thaddeuses = session.scalar(
-            scoped_count(user, Contact).where(Contact.last_name == "Ravensworth")
+        twins = list(
+            session.scalars(scoped(user, Contact).where(Contact.last_name == "Ravensworth"))
         )
-        assert thaddeuses == 3  # the seeded one, plus one per row
+        assert len(twins) == 3  # the seeded one, plus one per row
+        new_ids = {contact.id for contact in twins} - {
+            min(contact.id for contact in twins)  # the contact _seed_candidate made
+        }
+
+    # #228: the two new Thaddeuses share a name and company with each other -- not
+    # with the seeded one, which this run never created -- so the commit warns.
+    assert (
+        "warning: 2 new contacts share a name and company with another row in this file."
+    ) in result.output
+    assert "this import can no longer be rolled back" in result.output
+    for contact_id in new_ids:
+        assert str(contact_id) in result.output
 
     help_text = CliRunner().invoke(cli, ["import", "csv", "--help"], env={"COLUMNS": "200"})
     assert "a person listed twice in the file becomes two new contacts" in help_text.output
+    assert "it means this import can no longer be rolled back" in help_text.output
 
 
 def test_cli_import_rollback_refuses_then_forces_when_a_created_contact_gained_a_note(

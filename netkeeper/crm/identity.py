@@ -528,16 +528,37 @@ def _resolve_email(session: Session, user: User, incoming: IncomingContact) -> R
     return Matched(contact.id, by="email")
 
 
+def name_company_key(incoming: IncomingContact) -> tuple[str, str, str] | None:
+    """The first name, last name, and company :func:`_resolve_name` matches on, case-folded.
+
+    ``None`` when the row does not carry all three, which is exactly when
+    :func:`_resolve_name` cannot produce a candidate for it either. Every field
+    ``IncomingContact`` holds is already trimmed (``__post_init__``), so lowering
+    the case is the only normalization left to do; this is the single place that
+    does it, so anything comparing two rows' name and company agrees with what
+    resolution itself would find (spec 8.2 step 4).
+    """
+    if not (incoming.first_name and incoming.last_name and incoming.current_company):
+        return None
+    return (
+        incoming.first_name.lower(),
+        incoming.last_name.lower(),
+        incoming.current_company.lower(),
+    )
+
+
 def _resolve_name(session: Session, user: User, incoming: IncomingContact) -> Resolution:
     """Step 4: first name, last name, and company, case-insensitive and trimmed; then step 5."""
-    if not (incoming.first_name and incoming.last_name and incoming.current_company):
+    key = name_company_key(incoming)
+    if key is None:
         return New()
+    first, last, company = key
     statement = (
         scoped(user, Contact)
         .where(
-            func.lower(func.trim(Contact.first_name)) == incoming.first_name.lower(),
-            func.lower(func.trim(Contact.last_name)) == incoming.last_name.lower(),
-            func.lower(func.trim(Contact.current_company)) == incoming.current_company.lower(),
+            func.lower(func.trim(Contact.first_name)) == first,
+            func.lower(func.trim(Contact.last_name)) == last,
+            func.lower(func.trim(Contact.current_company)) == company,
         )
         .order_by(Contact.id)
     )

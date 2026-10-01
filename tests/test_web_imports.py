@@ -325,6 +325,38 @@ async def test_a_commit_applies_the_decisions_it_is_given(
     fern = contact_by_slug(running_app, "fern-oglethorpe-qz")
     assert fern is not None and fern.current_title == "Head of Kites"
     assert contact_by_slug(running_app, "imogen-thistlewhite-qz") is not None
+    # Nobody here shares a name and company with anybody else in the file (#228).
+    assert body["duplicate_groups"] == []
+
+
+async def test_a_commit_warns_when_it_creates_two_contacts_sharing_a_name_and_company(
+    client: httpx.AsyncClient,
+) -> None:
+    """#228: spec 8.2 step 4 never folds two rows together, so a person with no profile
+    URL or email, listed twice with nothing else to go on, becomes two new contacts once
+    both rows are decided ``create_new`` -- and the commit result names them.
+    """
+    content = "First Name,Last Name,Company\nJordan,Vance,Acme Inc\nJordan,Vance,Acme Inc\n"
+    mapping = {"First Name": "first_name", "Last Name": "last_name", "Company": "current_company"}
+    run = await draft(client, content=content, mapping=mapping)
+    response = await client.post(
+        f"/api/v1/imports/{run['id']}/commit",
+        headers=CSRF,
+        json={"decisions": [{"row_number": 2, "kind": "create_new"}]},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["created_count"] == 2
+
+    groups = body["duplicate_groups"]
+    assert len(groups) == 1
+    contacts = groups[0]["contacts"]
+    assert [contact["row_number"] for contact in contacts] == [1, 2]
+    assert len({contact["contact_id"] for contact in contacts}) == 2
+
+    # The same thing, read back from GET, not only from the commit's own response.
+    reread = await client.get(f"/api/v1/imports/{run['id']}")
+    assert reread.json()["duplicate_groups"] == groups
 
 
 async def test_a_merge_decision_without_a_contact_is_a_bad_request(

@@ -37,6 +37,7 @@ from netkeeper.models import (
     EnrollmentStatus,
     ImportResolution,
     ImportRow,
+    ImportRun,
     ImportStatus,
     Interaction,
     InteractionKind,
@@ -1089,6 +1090,150 @@ def test_a_create_new_decision_makes_a_second_contact(writer: Session, user: Use
     assert len(twins) == 2
     assert twins[0].id == seeded["barnaby"].id
     assert twins[1].current_title == "Senior Wobbler"
+
+
+# --- the name-and-company duplicate warning (#228) --------------------------
+
+_NAME_MAPPING = {"First Name": "first_name", "Last Name": "last_name", "Company": "current_company"}
+
+
+def _run_of(session: Session, user: User, content: str) -> ImportRun:
+    """Draft ``content`` with :data:`_NAME_MAPPING` and commit it, deciding every candidate new.
+
+    ``CREATE_NEW`` is what makes two rows with no identifier at all land as two
+    contacts rather than one (spec 8.2 step 4 never folds them together) --
+    exactly the shape the warning is about.
+    """
+    run = import_runs.create_run(
+        session, user, filename="dupes.csv", content=content, mapping=_NAME_MAPPING
+    )
+    return import_runs.commit(
+        session, user, run.id, undecided=import_runs.UndecidedPolicy.CREATE_NEW
+    )
+
+
+def test_two_rows_with_the_same_name_and_company_warn_as_one_group(
+    writer: Session, user: User
+) -> None:
+    content = "First Name,Last Name,Company\nJordan,Vance,Acme Inc\nJordan,Vance,Acme Inc\n"
+    committed = _run_of(writer, user, content)
+
+    assert committed.created_count == 2
+    groups = import_runs.duplicate_groups(committed)
+    assert len(groups) == 1
+    (group,) = groups
+    assert [contact.row_number for contact in group.contacts] == [1, 2]
+    contact_ids = {contact.contact_id for contact in group.contacts}
+    assert len(contact_ids) == 2
+    assert committed.report_json == {
+        "duplicate_groups": [
+            {
+                "contacts": [
+                    {"contact_id": group.contacts[0].contact_id, "row_number": 1},
+                    {"contact_id": group.contacts[1].contact_id, "row_number": 2},
+                ]
+            }
+        ]
+    }
+
+
+def test_three_rows_with_the_same_name_and_company_warn_as_one_group_of_three(
+    writer: Session, user: User
+) -> None:
+    content = (
+        "First Name,Last Name,Company\n"
+        "Priya,Natarajan,Quill and Ink Press\n"
+        "Priya,Natarajan,Quill and Ink Press\n"
+        "Priya,Natarajan,Quill and Ink Press\n"
+    )
+    committed = _run_of(writer, user, content)
+
+    assert committed.created_count == 3
+    groups = import_runs.duplicate_groups(committed)
+    assert len(groups) == 1
+    (group,) = groups
+    assert [contact.row_number for contact in group.contacts] == [1, 2, 3]
+    assert len({contact.contact_id for contact in group.contacts}) == 3
+
+
+def test_the_warning_ignores_case_and_surrounding_whitespace(writer: Session, user: User) -> None:
+    """Candidate matching is case-insensitive and trimmed (spec 8.2 step 4); so is this."""
+    content = (
+        "First Name,Last Name,Company\n"
+        "Priya,Natarajan,Quill and Ink Press\n"
+        " priya , NATARAJAN ,  quill and ink press  \n"
+    )
+    committed = _run_of(writer, user, content)
+
+    assert committed.created_count == 2
+    groups = import_runs.duplicate_groups(committed)
+    assert len(groups) == 1
+    assert [contact.row_number for contact in groups[0].contacts] == [1, 2]
+
+
+def test_no_warning_for_rows_with_a_different_company(writer: Session, user: User) -> None:
+    content = "First Name,Last Name,Company\nJordan,Vance,Acme Inc\nJordan,Vance,Globex LLC\n"
+    committed = _run_of(writer, user, content)
+
+    assert committed.created_count == 2
+    assert import_runs.duplicate_groups(committed) == []
+
+
+def test_no_warning_for_rows_sharing_a_name_but_not_a_company(writer: Session, user: User) -> None:
+    """The item's own done-when case: a name alone is never enough to group (spec 8.2 step 4)."""
+    content = "First Name,Last Name,Company\nJordan,Vance,Acme Inc\nJordan,Vance,\n"
+    committed = _run_of(writer, user, content)
+
+    assert committed.created_count == 2
+    assert import_runs.duplicate_groups(committed) == []
+
+
+def test_no_warning_when_only_one_new_contact_matches_an_existing_one(
+    writer: Session, user: User
+) -> None:
+    """A row that matches an existing contact is not itself new, so a lone twin never groups."""
+    seed_existing(writer, user)
+    run = import_runs.create_run(writer, user, filename="sample.csv", content=LINKEDHELPER)
+    committed = import_runs.commit(writer, user, run.id, decisions={ROW_CANDIDATE: CreateNew()})
+
+    # Barnaby's twin (ROW_CANDIDATE) is the only new contact that shares a name and
+    # company with anybody -- and the contact it shares one with, Barnaby himself,
+    # already existed before this commit, so there is no second *new* contact to
+    # pair it with.
+    assert import_runs.duplicate_groups(committed) == []
+
+
+def test_no_groups_leaves_report_json_unset(writer: Session, user: User) -> None:
+    content = "First Name,Last Name,Company\nJordan,Vance,Acme Inc\n"
+    committed = _run_of(writer, user, content)
+
+    assert committed.report_json is None
+    assert import_runs.duplicate_groups(committed) == []
+
+
+def test_duplicate_groups_is_empty_for_a_draft_run(writer: Session, user: User) -> None:
+    content = "First Name,Last Name,Company\nJordan,Vance,Acme Inc\nJordan,Vance,Acme Inc\n"
+    run = import_runs.create_run(
+        writer, user, filename="dupes.csv", content=content, mapping=_NAME_MAPPING
+    )
+
+    assert import_runs.duplicate_groups(run) == []
+
+
+def test_duplicate_warning_words_the_total_and_the_rollback_cost() -> None:
+    assert import_runs.duplicate_warning([]) is None
+    group = import_runs.DuplicateGroup(
+        (
+            import_runs.DuplicateContact(contact_id=5, row_number=1),
+            import_runs.DuplicateContact(contact_id=6, row_number=2),
+        )
+    )
+    warning = import_runs.duplicate_warning([group])
+    assert warning is not None
+    assert warning.startswith(
+        "2 new contacts share a name and company with another row in this file."
+    )
+    assert "no longer be rolled back" in warning
 
 
 # --- the undecided policy (#136) ----------------------------------------------

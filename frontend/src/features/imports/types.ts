@@ -24,6 +24,17 @@ export type ImportRun = JsonOf<paths['/api/v1/imports/{run_id}']['get']['respons
 export type ImportRunPage = JsonOf<paths['/api/v1/imports']['get']['responses'][200]>
 export type RunStatus = ImportRun['status']
 
+/**
+ * Two or more new contacts one commit created from rows sharing a name and company (#228).
+ *
+ * Spec 8.2 step 4 never matches two rows against each other, so this is a
+ * warning about what the file did, not a different outcome: the contacts it
+ * names were created exactly as they would have been without it. Merging them
+ * is one way to clean them up, but it costs the run its rollback (`RunMerged`).
+ */
+export type DuplicateGroup = NonNullable<ImportRun['duplicate_groups']>[number]
+export type DuplicateContact = DuplicateGroup['contacts'][number]
+
 export type PreviewRow = JsonOf<
   paths['/api/v1/imports/{run_id}/preview']['post']['responses'][200]
 >[number]
