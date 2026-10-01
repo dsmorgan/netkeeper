@@ -174,6 +174,19 @@ describe('the export form', () => {
     },
   )
 
+  it('qualifies the headline count for any vCard, which leaves out contacts waiting for review', async () => {
+    mockApi(countRoute(214))
+    renderWithClient(<ExportForm filter={FILTER} />)
+    fireEvent.change(screen.getByLabelText('Preset'), { target: { value: 'full' } })
+    fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'vcard' } })
+    const headline = (await screen.findByText('214')).closest('[role="status"]')
+    expect(headline).toHaveTextContent('a vCard leaves out contacts waiting for review')
+    expect(screen.getByText(/Contacts waiting for review are left out\./)).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'json' } })
+    expect(headline).not.toHaveTextContent('may hold fewer')
+  })
+
   it('makes no claim about the presets that carry no caveat', () => {
     mockApi(countRoute())
     renderWithClient(<ExportForm filter={FILTER} />)

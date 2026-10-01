@@ -1046,6 +1046,7 @@ export interface paths {
          *     a spreadsheet would evaluate as formulas: safe to open in a spreadsheet, not
          *     safe to re-import (#76). Also CSV only. ``macos-contacts`` is vCard only
          *     (vCard 3.0 with a group per tag, for macOS Contacts); any other format is a 422.
+         *     Every vCard export, in any preset, leaves out contacts waiting for review (#254).
          */
         get: operations["export_contacts"];
         put?: never;
