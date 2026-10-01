@@ -599,6 +599,60 @@ async def test_a_re_offer_that_lapses_in_downtime_is_still_a_re_offer(
     assert again.next_due == due + timedelta(days=7)
 
 
+@pytest.mark.parametrize("outcome", [scheduler.JobOutcome.NOT_DONE, None], ids=["not-done", "done"])
+async def test_a_restart_just_before_the_weekly_time_never_doubles_the_full_sync(
+    session_factory: sessionmaker[Session], outcome: scheduler.JobOutcome | None
+) -> None:
+    """#309 review: the re-offer was due on day 1 and ``serve`` was down until 30
+    minutes before the weekly time. The catch-up fires minutes before it; going back to
+    the weekly time would fire a second full sync minutes later. The next one is a
+    whole interval after the catch-up instead."""
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    weekly = scheduler.JobSchedule(scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7))
+    due = _establish(session_factory, owner, 1, weekly)
+    first = await _fire_weekly(session_factory, owner, weekly, due, scheduler.JobOutcome.NOT_DONE)
+    weekly_time = due + timedelta(days=7)
+    back = weekly_time - timedelta(minutes=30)
+    with session_scope(session_factory, write=True) as session:
+        catchup = scheduler.establish_schedule(
+            session,
+            owner,
+            1,
+            weekly.kind,
+            now=back,
+            schedule=weekly,
+            rng=random.Random(0),
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        )
+    assert catchup.is_catchup and first.next_due < catchup.due < weekly_time
+    fired = await _fire_weekly(session_factory, owner, weekly, catchup.due, outcome)
+    assert fired.next_due == catchup.due + timedelta(days=7)
+    assert fired.next_due > weekly_time  # later than before the fix, never sooner
+
+
+async def test_a_re_offer_that_fires_late_after_a_sleep_never_doubles_the_full_sync(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#309 review, the same on main before #196: the machine slept through the
+    re-offer and woke 30 minutes before the weekly time, so the re-offer fires then
+    (it lapsed by less than an interval, so it is no catch-up). Its next fire is the
+    re-offer's due time plus an interval -- a day or more later, never minutes."""
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    weekly = scheduler.JobSchedule(scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7))
+    due = _establish(session_factory, owner, 1, weekly)
+    first = await _fire_weekly(session_factory, owner, weekly, due, scheduler.JobOutcome.NOT_DONE)
+    weekly_time = due + timedelta(days=7)
+    woke = weekly_time - timedelta(minutes=30)
+    fired = await _fire_weekly(session_factory, owner, weekly, woke, scheduler.JobOutcome.NOT_DONE)
+    assert fired.due == first.next_due and not fired.is_catchup
+    assert fired.next_due == first.next_due + timedelta(days=7)
+    assert fired.next_due - woke >= scheduler.NOT_DONE_RETRY
+
+
 async def test_a_retried_re_offer_is_still_a_re_offer(
     session_factory: sessionmaker[Session],
 ) -> None:
