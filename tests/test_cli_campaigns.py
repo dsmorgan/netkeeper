@@ -37,6 +37,7 @@ from netkeeper.models import (
     Enrollment,
     EnrollmentStatus,
     ListKind,
+    Mailbox,
     Message,
     StepCondition,
     StepMode,
@@ -357,7 +358,9 @@ def test_activate_after_a_complete_review_asks_then_activates(world: World) -> N
 
 def test_pause_and_resume_go_through_the_engine(world: World) -> None:
     with session_scope(world.factory, write=True) as session:
-        campaign_id = factories.make_campaign(session, _local(session)).id  # active
+        user = _local(session)
+        mailbox_id = session.scalars(scoped(user, Mailbox).with_only_columns(Mailbox.id)).one()
+        campaign_id = factories.make_campaign(session, user, mailbox_id=mailbox_id).id  # active
 
     assert f"campaign {campaign_id} paused" in _ok("campaigns", "pause", str(campaign_id))
     assert _campaign(world, campaign_id).status is CampaignStatus.PAUSED

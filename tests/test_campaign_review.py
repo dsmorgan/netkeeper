@@ -14,7 +14,7 @@ import httpx
 import pytest
 from campaign_fakes import ARMED_FOR_SEND, make_mailbox
 from fastapi import FastAPI
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.gmail import GmailRateLimited
@@ -514,6 +514,20 @@ async def test_a_mailbox_that_broke_after_its_test_send_blocks_activation(
     assert (await client.post(f"{s.base}/activate", headers=CSRF)).status_code == 200
 
 
+async def test_an_email_campaign_with_no_mailbox_is_missing_one(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app)
+    with session_scope(s.factory, write=True) as session:
+        # mailbox_id is locked outside draft, so the row is changed beneath the ORM.
+        session.execute(
+            unscoped(update(Campaign)).values(mailbox_id=None),
+            execution_options={"synchronize_session": False},
+        )
+    gaps = [m for m in (await _review(client, s))["missing"] if m["requirement"] == "mailbox"]
+    assert [g["detail"] for g in gaps] == ["the campaign has email steps and no mailbox"]
+
+
 async def test_a_linkedin_only_campaign_needs_no_mailbox_health(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
@@ -887,6 +901,7 @@ async def test_an_old_audience_fingerprint_is_not_acknowledged(
     )
     assert response.status_code == 409
     assert "audience changed" in response.json()["detail"]
+    assert response.json()["code"] == "stale"
 
 
 async def test_previews_viewed_in_an_earlier_sample_must_still_be_approved(

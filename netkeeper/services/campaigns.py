@@ -613,8 +613,14 @@ def pause(session: Session, user: User, campaign_id: int) -> Campaign:
 
 
 def resume(session: Session, user: User, campaign_id: int) -> Campaign:
-    """``paused`` to ``active`` (:func:`campaign_engine.resume_campaign`)."""
-    get_campaign(session, user, campaign_id)
+    """``paused`` to ``active`` (:func:`campaign_engine.resume_campaign`). Refused, as
+    activation is, while an email campaign's mailbox is not ``ok`` (#299)."""
+    campaign = get_campaign(session, user, campaign_id)
+    # Only a paused one: any other state keeps the engine's own refusal.
+    if campaign.status is CampaignStatus.PAUSED and (
+        gap := campaign_review.mailbox_gap(session, user, campaign)
+    ):
+        raise CampaignConflict(gap)
     try:
         return campaign_engine.resume_campaign(session, user, campaign_id)
     except campaign_engine.CampaignEngineError as exc:
