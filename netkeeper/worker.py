@@ -212,9 +212,11 @@ class BrowserWorker:
             # The process is shutting down. A cancel that landed inside the runner
             # was recorded there; one that landed while attaching was not. A cancel
             # that carries a failed database write is a failure (#266).
+            # Quietly: a failed write here must not replace the cancel (#294), or the
+            # task would end as a plain failure, not a cancelled one.
             failed = exc.error if isinstance(exc, CancelledWhileFailing) else None
             await off_loop(
-                self._finish,
+                self._finish_quietly,
                 run_id,
                 user_id,
                 SyncRunStatus.ABORTED if failed is None else SyncRunStatus.FAILED,
@@ -376,6 +378,16 @@ class BrowserWorker:
                 stop_reason=reason,
                 error=error,
             )
+
+    def _finish_quietly(
+        self, run_id: int, user_id: int, status: SyncRunStatus, reason: str, error: str
+    ) -> None:
+        """:meth:`_finish` on the way out of a cancel: a failed write is logged, never
+        raised, so the cancel itself always propagates (#294)."""
+        try:
+            self._finish(run_id, user_id, status, reason, error)
+        except Exception:
+            log.exception("could not record how run %d ended", run_id)
 
     def _status(self, run_id: int, user_id: int) -> str:
         with session_scope(self._factory) as session:

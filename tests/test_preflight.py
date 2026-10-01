@@ -24,13 +24,14 @@ from typing import Any
 
 import pytest
 from browser_fakes import FakeBrowser, FakeConnector, FakeContext
+from browser_guard import UNREACHABLE_CDP_URL
 from typer.testing import CliRunner
 
 from netkeeper.cli import app as cli
 from netkeeper.linkedin.browser import ActivityLocks, AttachBrowserProvider
 from netkeeper.linkedin.preflight import Fingerprint, LoginState, preflight
 
-CDP_URL = "http://127.0.0.1:9222"
+CDP_URL = UNREACHABLE_CDP_URL  # never a real Chrome, even without the guard (#294)
 BUSY_TIMEOUT_S = 1.0
 
 # Invented, and never a value any code path reads: the tests below assert that this

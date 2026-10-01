@@ -17,7 +17,7 @@ from typing import Any
 import factories
 import playwright.async_api
 import pytest
-from browser_guard import RealBrowserBlocked, is_personal_cdp
+from browser_guard import UNREACHABLE_CDP_URL, RealBrowserBlocked, is_personal_cdp
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.config import Settings
@@ -55,6 +55,19 @@ def spies(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
 def test_the_default_cdp_url_is_the_personal_port() -> None:
     """What the guard protects: the address a test falls back to without a config."""
     assert DEFAULT_CDP_URL == "http://127.0.0.1:9222"
+
+
+def test_the_fake_providers_point_at_a_port_where_no_chrome_listens() -> None:
+    """#294: the helpers that build ``AttachBrowserProvider`` with a fake connector,
+    including the child process the guard does not cover, never name port 9222, so
+    one that lost its ``connector=`` cannot reach a real Chrome."""
+    import activity_lock_proc
+    import run_fakes
+    import test_preflight
+
+    assert not is_personal_cdp(UNREACHABLE_CDP_URL)
+    for module in (activity_lock_proc, run_fakes, test_preflight):
+        assert module.CDP_URL == UNREACHABLE_CDP_URL, module.__name__
 
 
 async def test_the_real_attach_on_the_default_url_is_refused_before_any_socket(

@@ -28,3 +28,11 @@ def is_personal_cdp(url: str) -> bool:
         return True  # unparseable: refuse rather than guess
     # Any host: 127.0.0.1, localhost, ::1, or a LAN address forwarding to it.
     return port is None or port in _PERSONAL_CDP_PORTS
+
+
+#: A CDP address where nothing listens: port 1 on the loopback refuses at once. Helpers
+#: that hand a fake connector to ``AttachBrowserProvider`` use it, so a provider that
+#: lost its ``connector=`` fails instead of attaching to a real Chrome. Child processes
+#: (``activity_lock_proc.py``) run without ``conftest.py``'s guard, so this is all that
+#: stands between them and port 9222 (#294).
+UNREACHABLE_CDP_URL = "http://127.0.0.1:1"

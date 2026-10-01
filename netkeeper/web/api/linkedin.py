@@ -183,9 +183,10 @@ async def start_run(
     next opens, and where to change it, and records no run (#213).
     """
     executor = _executor(request)
-    account = ensure_account(session, user)
     try:
         runs.refuse_if_outside_active_hours(_settings(request), now=utcnow())
+        # After the hours check, so a refused request writes no row at all (#294).
+        account = ensure_account(session, user)
         runs.refuse_if_flagged_or_hot(
             session, user, account.id, now=utcnow(), settings=_settings(request)
         )
