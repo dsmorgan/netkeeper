@@ -2129,21 +2129,24 @@ class NextFirePage(BaseModel):
 
 
 class ChangedJobOut(BaseModel):
-    """A live contact whose position changed recently: a reason to reconnect (spec 9.8)."""
+    """A live contact netkeeper saw change position recently: a reason to reconnect (spec 9.8).
+
+    ``current_title`` and ``current_company`` are the contact's now, after the change.
+    """
 
     contact_id: int
     contact_name: str
     current_title: str | None
     current_company: str | None
-    changed_on: date
-    """``last_position_change``: the latest start or end date on or before today."""
+    noticed_at: datetime
+    """When netkeeper saw the change: the newest such snapshot's ``observed_at`` (#286)."""
 
 
 class ChangedJobPage(BaseModel):
     items: list[ChangedJobOut]
     total: int
     days: int
-    """The window: a change on or after ``today - days`` is listed."""
+    """The window: a change noticed in the last ``days`` days is listed."""
 
 
 class InboundOut(BaseModel):

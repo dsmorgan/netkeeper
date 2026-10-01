@@ -10,6 +10,7 @@ import { RUN_STATUS_CLASSES, formatWhen, stopReasonLabel } from '@/features/link
 import {
   RUN_KIND_LABELS,
   RUN_STATUS_LABELS,
+  type BudgetStatus,
   type Run,
   type RunKind,
 } from '@/features/linkedin/types'
@@ -83,11 +84,11 @@ function dueText(due: string, fetchedAt: number): string {
   return new Date(due).getTime() <= fetchedAt ? 'due now' : formatWhen(due)
 }
 
-/** A calendar date (`YYYY-MM-DD`) as the reader writes dates, without a timezone shift. */
-function formatDay(day: string): string {
-  const parsed = new Date(`${day}T00:00:00Z`)
-  if (Number.isNaN(parsed.getTime())) return day
-  return parsed.toLocaleDateString(undefined, { dateStyle: 'medium', timeZone: 'UTC' })
+/** The day of an instant, in the reader's own timezone, as the reader writes dates. */
+function formatDay(iso: string): string {
+  const parsed = new Date(iso)
+  if (Number.isNaN(parsed.getTime())) return iso
+  return parsed.toLocaleDateString(undefined, { dateStyle: 'medium' })
 }
 
 function stepText(fire: NextFire): string {
@@ -279,6 +280,25 @@ function LastRun({ run }: { run: Run }) {
 }
 
 /**
+ * Why the weekly cap, not today's allowance, sets what is left (#286), or null
+ * when it does not. Today's allowance is what heat leaves minus what is spent;
+ * the weekly cap limits when it leaves less, or nothing at all (then tomorrow
+ * does not bring more either).
+ */
+function weeklyCapReason(status: BudgetStatus): string | null {
+  const visits = status.profile_visits_today
+  const weekLeft = visits.week_left
+  if (weekLeft === null) return null
+  const dayLeft = Math.max(visits.after_heat - visits.spent_today, 0)
+  if (weekLeft > 0 && weekLeft >= dayLeft) return null
+  const week = status.budgets.find((row) => row.action === 'profile_visits')?.week ?? null
+  const used = week === null ? '' : ` (${week.count} of ${week.limit})`
+  return weekLeft === 0
+    ? `Weekly cap reached${used}.`
+    : `Limited by the weekly cap: ${weekLeft} left this week${used}.`
+}
+
+/**
  * Today's profile-visit budget and heat (spec 9.6, 9.7), as the LinkedIn page
  * shows them in full: `/linkedin/budget` and `/linkedin/heat` do the math.
  */
@@ -304,6 +324,9 @@ export function BudgetHeatCard() {
             {budget.data.profile_visits_today.after_heat})
           </span>
         </p>
+      )}
+      {budget.isSuccess && weeklyCapReason(budget.data) !== null && (
+        <Muted>{weeklyCapReason(budget.data)}</Muted>
       )}
       {heat.isPending ? (
         <Checking />
@@ -370,7 +393,11 @@ export function RepliesCard() {
   )
 }
 
-/** Contacts whose position changed recently: the best reason to reconnect (spec 9.8). */
+/**
+ * Contacts netkeeper saw change position recently: the best reason to reconnect
+ * (spec 9.8). A change is one an enrichment visit noticed, dated when it was
+ * noticed, not the start date on the profile, which people often fill in late (#286).
+ */
 export function ChangedJobsCard() {
   const changed = useQuery(changedJobsQuery)
 
@@ -379,7 +406,7 @@ export function ChangedJobsCard() {
       title="Changed jobs"
       description={
         changed.isSuccess
-          ? `Started or left a position in the last ${changed.data.days} days.`
+          ? `New positions netkeeper noticed in the last ${changed.data.days} days.`
           : undefined
       }
     >
@@ -388,7 +415,7 @@ export function ChangedJobsCard() {
       ) : changed.isError ? (
         <Failed what="Changed jobs" />
       ) : changed.data.items.length === 0 ? (
-        <Muted>Nobody's position changed in the last {changed.data.days} days.</Muted>
+        <Muted>netkeeper noticed no position changes in the last {changed.data.days} days.</Muted>
       ) : (
         <>
           <ul className="flex flex-col gap-1.5">
@@ -402,7 +429,10 @@ export function ChangedJobsCard() {
                   >
                     {row.contact_name || 'Unnamed contact'}
                   </Link>
-                  <span className="text-muted-foreground"> · {formatDay(row.changed_on)}</span>
+                  <span className="text-muted-foreground">
+                    {' '}
+                    · noticed {formatDay(row.noticed_at)}
+                  </span>
                 </span>
                 {(row.current_title !== null || row.current_company !== null) && (
                   <span className="text-xs text-muted-foreground">

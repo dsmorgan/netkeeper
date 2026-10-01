@@ -397,6 +397,59 @@ describe('BudgetHeatCard', () => {
     expect(await body.findByText(/pacing slowed 1.50×/)).toBeInTheDocument()
   })
 
+  it('says when the weekly cap is what leaves nothing today (#286)', async () => {
+    renderCard(BudgetHeatCard, {
+      [BUDGET]: json({
+        ...budget({ spent_today: 2, after_heat: 10, week_left: 0, remaining: 0 }),
+        budgets: [
+          {
+            action: 'profile_visits',
+            day: { count: 2, limit: 10, remaining: 8 },
+            week: { count: 300, limit: 300, remaining: 0 },
+          },
+        ],
+      }),
+      [HEAT]: json(heat()),
+    })
+    const body = await card('Budget and heat')
+    expect(await body.findByText(/profile visits left today/)).toHaveTextContent(
+      '0 profile visits left today (2 spent of 10)',
+    )
+    expect(body.getByText('Weekly cap reached (300 of 300).')).toBeInTheDocument()
+  })
+
+  it('says when the weekly cap leaves less than today allows', async () => {
+    renderCard(BudgetHeatCard, {
+      [BUDGET]: json({
+        ...budget({ spent_today: 2, after_heat: 10, week_left: 3, remaining: 3 }),
+        budgets: [
+          {
+            action: 'profile_visits',
+            day: { count: 2, limit: 10, remaining: 8 },
+            week: { count: 297, limit: 300, remaining: 3 },
+          },
+        ],
+      }),
+      [HEAT]: json(heat()),
+    })
+    const body = await card('Budget and heat')
+    expect(
+      await body.findByText('Limited by the weekly cap: 3 left this week (297 of 300).'),
+    ).toBeInTheDocument()
+  })
+
+  it('gives no weekly reason when today is the limit', async () => {
+    renderCard(BudgetHeatCard, {
+      [BUDGET]: json(budget({ spent_today: 16, week_left: 80, remaining: 0 })),
+      [HEAT]: json(heat()),
+    })
+    const body = await card('Budget and heat')
+    expect(await body.findByText(/profile visits left today/)).toHaveTextContent(
+      '0 profile visits left today (16 spent of 16)',
+    )
+    expect(body.queryByText(/weekly cap/i)).not.toBeInTheDocument()
+  })
+
   it('raises tripped heat as an alert with when runs resume', async () => {
     renderCard(BudgetHeatCard, {
       [BUDGET]: json(budget()),
@@ -463,7 +516,7 @@ describe('ChangedJobsCard', () => {
     renderCard(ChangedJobsCard, { [PATH]: json({ items: [], total: 0, days: 30 }) })
     const body = await card('Changed jobs')
     expect(
-      await body.findByText("Nobody's position changed in the last 30 days."),
+      await body.findByText('netkeeper noticed no position changes in the last 30 days.'),
     ).toBeInTheDocument()
   })
 
@@ -482,14 +535,14 @@ describe('ChangedJobsCard', () => {
             contact_name: 'Fictional Mover',
             current_title: 'Head of Tea',
             current_company: 'Kettle Ltd',
-            changed_on: '2026-09-01',
+            noticed_at: '2026-09-01T12:00:00Z',
           },
           {
             contact_id: 13,
             contact_name: 'Quiet Leaver',
             current_title: null,
             current_company: null,
-            changed_on: '2026-08-30',
+            noticed_at: '2026-08-30T12:00:00Z',
           },
         ],
         total: 4,
@@ -502,14 +555,16 @@ describe('ChangedJobsCard', () => {
       'href',
       '/contacts/12',
     )
-    // A calendar date stays the same day wherever the reader is.
-    expect(items[0]).toHaveTextContent('Sep 1, 2026')
+    // Midday UTC is the same day in every zone a test runs in.
+    expect(items[0]).toHaveTextContent('noticed Sep 1, 2026')
     expect(items[0]).toHaveTextContent('Head of Tea at Kettle Ltd')
     expect(within(items[1]!).getByRole('link', { name: 'Quiet Leaver' })).toHaveAttribute(
       'href',
       '/contacts/13',
     )
     expect(body.getByText('and 2 more')).toBeInTheDocument()
-    expect(body.getByText('Started or left a position in the last 30 days.')).toBeInTheDocument()
+    expect(
+      body.getByText('New positions netkeeper noticed in the last 30 days.'),
+    ).toBeInTheDocument()
   })
 })

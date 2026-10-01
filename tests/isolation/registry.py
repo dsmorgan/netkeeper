@@ -425,10 +425,20 @@ def _seed_campaigns(session: Session, user: User) -> int:
 
 
 def _seed_changed_jobs(session: Session, user: User) -> int:
-    """One contact of ``user`` who started a job two days ago (P3-12)."""
-    started = datetime.now(UTC).date() - timedelta(days=2)
-    position = {"title": "Seeded", "company": "Seed Co", "started_on": started}
-    factories.make_contact(session, user, positions=[position])
+    """One contact of ``user`` whom enrichment saw change job two days ago (P3-12, #286)."""
+    contact = factories.make_contact(session, user, current_title="Seeded", current_company="New")
+    session.add(
+        ContactSnapshot(
+            user_id=user.id,
+            contact_id=contact.id,
+            current_title="Seeded",
+            current_company="Seed Co",
+            position_changed=True,
+            source=ContactSource.SYNC,
+            observed_at=datetime.now(UTC) - timedelta(days=2),
+        )
+    )
+    session.flush()
     return 1
 
 

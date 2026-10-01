@@ -16,11 +16,13 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.campaigns.templates import contact_fields
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import session_scope
 from netkeeper.models import (
     CampaignStatus,
+    Contact,
+    ContactSnapshot,
+    ContactSource,
     EnrollmentStatus,
     InteractionKind,
     TemplateChannel,
@@ -112,6 +114,37 @@ def test_next_fires_agree_with_the_ticks_own_next_due(session: Session) -> None:
     assert fires[0].due == campaign_engine._next_due(session, user, NOW)
 
 
+def test_next_fires_due_now_are_exactly_what_the_tick_selects(session: Session) -> None:
+    """#286: ``upcoming`` and the tick share one selection, so they cannot drift.
+
+    Every row the tick's own query (``_due``) would pick up now is listed, and
+    every listed row due by now is one the tick would pick up.
+    """
+    user = factories.make_user(session)
+    _due(session, user, NOW - timedelta(hours=1))
+    _due(session, user, NOW)
+    _due(session, user, NOW + timedelta(hours=1))
+    _due(session, user, NOW - timedelta(hours=1), status=CampaignStatus.PAUSED)
+    _due(session, user, NOW - timedelta(hours=1), channels=(TemplateChannel.LINKEDIN,))
+    campaign = factories.make_campaign(session, user)
+    for status in (EnrollmentStatus.PAUSED, EnrollmentStatus.PENDING, EnrollmentStatus.ACTIVE):
+        factories.make_enrollment(
+            session,
+            campaign,
+            factories.make_contact(session, user),
+            status=status,
+            next_action_at=NOW - timedelta(minutes=1),
+        )
+    factories.make_enrollment(session, campaign, factories.make_contact(session, user))
+
+    fires, _ = campaign_engine.upcoming(session, user, limit=50)
+    tick = campaign_engine._due(session, user, NOW, seen=(), campaigns=(), mailboxes=())
+
+    listed_due = [fire.enrollment.id for fire in fires if fire.due <= NOW]
+    assert listed_due == [enrollment.id for enrollment, _ in tick]
+    assert len(listed_due) == 3
+
+
 def test_next_fires_limit_keeps_the_total(session: Session) -> None:
     user = factories.make_user(session)
     for hours in range(4):
@@ -127,66 +160,95 @@ def test_next_fires_limit_keeps_the_total(session: Session) -> None:
 
 
 def _changed(session: Session, user: User) -> list[int]:
-    rows, _ = service.changed_jobs(session, user, today=TODAY, limit=50)
+    rows, _ = service.changed_jobs(session, user, now=NOW, limit=50)
     return [row.contact.id for row in rows]
 
 
-def _with(session: Session, user: User, *positions: dict[str, Any], **overrides: Any) -> int:
-    return factories.make_contact(session, user, positions=positions, **overrides).id
-
-
-def test_a_start_or_an_end_in_the_last_30_days_is_a_changed_job(session: Session) -> None:
-    user = factories.make_user(session)
-    started = _with(session, user, {"started_on": TODAY - timedelta(days=3)})
-    left = _with(
-        session,
-        user,
-        {"started_on": date(2020, 1, 1), "ended_on": TODAY - timedelta(days=10)},
+def _noticed(
+    session: Session,
+    user: User,
+    at: datetime,
+    *,
+    contact_id: int | None = None,
+    position_changed: bool = True,
+    source: ContactSource = ContactSource.SYNC,
+    **overrides: Any,
+) -> int:
+    """A contact (or ``contact_id``) with a snapshot netkeeper wrote at ``at``."""
+    contact = (
+        factories.make_contact(session, user, **overrides)
+        if contact_id is None
+        else session.get_one(Contact, contact_id)
     )
-    edge = _with(session, user, {"started_on": TODAY - timedelta(days=30)})
-    _with(session, user, {"started_on": TODAY - timedelta(days=31)})
-    _with(session, user, {"started_on": None})
-    _with(session, user)
+    contact.snapshots.append(
+        ContactSnapshot(
+            user_id=user.id,
+            source=source,
+            observed_at=at,
+            current_title="Before",
+            current_company="Old Co",
+            position_changed=position_changed,
+        )
+    )
+    session.flush()
+    return contact.id
 
-    assert _changed(session, user) == [started, left, edge]
 
-
-def test_an_announced_future_start_is_not_a_change_yet(session: Session) -> None:
-    """#255: a position starting after today has not happened."""
+def test_a_position_change_noticed_in_the_last_30_days_is_a_changed_job(
+    session: Session,
+) -> None:
     user = factories.make_user(session)
-    _with(session, user, {"started_on": TODAY + timedelta(days=1)})
-    _with(session, user, {"started_on": date(2020, 1, 1), "ended_on": TODAY + timedelta(days=5)})
+    recent = _noticed(session, user, NOW - timedelta(days=3))
+    older = _noticed(session, user, NOW - timedelta(days=10))
+    edge = _noticed(session, user, NOW - timedelta(days=30))
+    _noticed(session, user, NOW - timedelta(days=30, seconds=1))
+    _noticed(session, user, NOW + timedelta(minutes=1))  # a clock skew is not "noticed yet"
+
+    assert _changed(session, user) == [recent, older, edge]
+
+
+def test_a_profile_start_date_alone_is_not_a_changed_job(session: Session) -> None:
+    """#286: the card counts what netkeeper noticed, not the dates on the profile."""
+    user = factories.make_user(session)
+    factories.make_contact(session, user, positions=[{"started_on": TODAY - timedelta(days=3)}])
+    factories.make_contact(
+        session, user, positions=[{"started_on": date(2020, 1, 1), "ended_on": TODAY}]
+    )
 
     assert _changed(session, user) == []
 
 
-def test_each_contact_is_listed_once_at_its_latest_change(session: Session) -> None:
+def test_a_new_headline_or_an_imported_job_is_not_a_changed_job(session: Session) -> None:
+    """Only a sync's snapshot marked ``position_changed`` counts: an import notices nothing."""
     user = factories.make_user(session)
-    contact = factories.make_contact(
-        session,
-        user,
-        positions=[
-            {"started_on": TODAY - timedelta(days=2)},
-            {"started_on": date(2021, 1, 1), "ended_on": TODAY - timedelta(days=20)},
-            {"started_on": TODAY + timedelta(days=9)},
-        ],
-    )
+    _noticed(session, user, NOW - timedelta(days=1), position_changed=False)
+    _noticed(session, user, NOW - timedelta(days=1), source=ContactSource.CSV)
+    _noticed(session, user, NOW - timedelta(days=1), source=ContactSource.ARCHIVE)
+    _noticed(session, user, NOW - timedelta(days=1), source=ContactSource.MANUAL)
 
-    [row], total = service.changed_jobs(session, user, today=TODAY, limit=10)
+    assert _changed(session, user) == []
 
-    assert row.contact.id == contact.id
+
+def test_each_contact_is_listed_once_at_its_latest_notice(session: Session) -> None:
+    user = factories.make_user(session)
+    contact = _noticed(session, user, NOW - timedelta(days=20))
+    _noticed(session, user, NOW - timedelta(days=2), contact_id=contact)
+    _noticed(session, user, NOW - timedelta(days=1), contact_id=contact, position_changed=False)
+
+    [row], total = service.changed_jobs(session, user, now=NOW, limit=10)
+
+    assert row.contact.id == contact
     assert total == 1
-    # The same date the merge field gives (#232, #255): one meaning of the phrase.
-    assert row.changed_on == contact_fields(contact, TODAY)["last_position_change"]
+    assert row.noticed_at == NOW - timedelta(days=2)
 
 
 def test_archived_merged_and_do_not_contact_are_not_prompts(session: Session) -> None:
     user = factories.make_user(session)
-    recent = {"started_on": TODAY - timedelta(days=1)}
-    live = _with(session, user, recent)
-    _with(session, user, recent, archived_at=NOW)
-    _with(session, user, recent, merged_into_id=live)
-    _with(session, user, recent, do_not_contact=True)
+    at = NOW - timedelta(days=1)
+    live = _noticed(session, user, at)
+    _noticed(session, user, at, archived_at=NOW)
+    _noticed(session, user, at, merged_into_id=live)
+    _noticed(session, user, at, do_not_contact=True)
 
     assert _changed(session, user) == [live]
 
@@ -194,21 +256,12 @@ def test_archived_merged_and_do_not_contact_are_not_prompts(session: Session) ->
 def test_changed_jobs_limit_keeps_the_total(session: Session) -> None:
     user = factories.make_user(session)
     for days in range(3):
-        _with(session, user, {"started_on": TODAY - timedelta(days=days)})
+        _noticed(session, user, NOW - timedelta(days=days))
 
-    rows, total = service.changed_jobs(session, user, today=TODAY, limit=2)
+    rows, total = service.changed_jobs(session, user, now=NOW, limit=2)
 
     assert len(rows) == 2
     assert total == 3
-
-
-def test_today_is_the_users_own_date(session: Session) -> None:
-    late_evening_in_la = datetime(2026, 9, 17, 3, 0, tzinfo=UTC)
-    west = factories.make_user(session, timezone="America/Los_Angeles")
-    unknown = factories.make_user(session, timezone="Nowhere/Special")
-
-    assert service.local_today(west, late_evening_in_la) == date(2026, 9, 16)
-    assert service.local_today(unknown, late_evening_in_la) == date(2026, 9, 17)
 
 
 # --- inbound this week -----------------------------------------------------------------
@@ -295,35 +348,33 @@ async def test_next_fires_endpoint_bounds_its_limit(client: httpx.AsyncClient) -
 
 
 async def test_changed_jobs_endpoint(client: httpx.AsyncClient, running_app: FastAPI) -> None:
+    noticed = utcnow() - timedelta(days=4)
     with session_scope(running_app.state.session_factory, write=True) as session:
         user = _local(session)
-        today = service.local_today(user, utcnow())
-        contact = factories.make_contact(
+        contact_id = _noticed(
             session,
             user,
+            noticed,
             first_name="Fictional",
             last_name="Mover",
             current_title="Head of Tea",
             current_company="Kettle Ltd",
-            positions=[{"started_on": today - timedelta(days=4)}],
+            # Started long ago by the profile's dates: the notice is what counts (#286).
+            positions=[{"started_on": date(2025, 1, 1)}],
         )
-        contact_id = contact.id
 
     body = (await client.get("/api/v1/dashboard/changed-jobs")).json()
 
-    assert body == {
-        "items": [
-            {
-                "contact_id": contact_id,
-                "contact_name": "Fictional Mover",
-                "current_title": "Head of Tea",
-                "current_company": "Kettle Ltd",
-                "changed_on": (today - timedelta(days=4)).isoformat(),
-            }
-        ],
-        "total": 1,
-        "days": 30,
+    [item] = body["items"]
+    assert item == {
+        "contact_id": contact_id,
+        "contact_name": "Fictional Mover",
+        "current_title": "Head of Tea",
+        "current_company": "Kettle Ltd",
+        "noticed_at": item["noticed_at"],
     }
+    assert datetime.fromisoformat(item["noticed_at"]) == noticed
+    assert (body["total"], body["days"]) == (1, 30)
 
 
 async def test_inbound_endpoint_says_replies_are_not_detected_yet(
