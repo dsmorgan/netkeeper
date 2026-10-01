@@ -84,9 +84,17 @@ Five presets:
   resolve without a lookup. A contact with ``do_not_contact`` set is left out,
   as ``campaign-audience`` leaves it out: Mail and Messages complete addresses
   from Contacts, so an address book is a send path by proxy too. Archived
-  contacts follow the filter as they do in every preset. Asking for this
+  contacts follow the filter as they do in every preset. Contacts waiting for
+  review are left out too, as in every vCard export (below). Asking for this
   preset as CSV or JSON raises :class:`ExportError` before anything renders.
   The import steps are in ``docs/macos-contacts.md``.
+
+Every vCard export, whatever the preset, leaves out contacts waiting for review
+(``needs_review_at``, #184; decided on #254). A vCard goes into an address
+book, where a card read off a connections page would sit beside real contacts
+with nothing to say it is unconfirmed, and Mail and Messages would offer its
+name. CSV and JSON keep them, except ``campaign-audience``, which never
+includes them.
 
 ``spreadsheet_safe`` (CSV only, off by default, #76) prefixes ``'`` to any cell
 whose first character, or first after leading whitespace, is one a spreadsheet
@@ -184,7 +192,8 @@ def _contacts_statement(
     ``campaign-audience`` uses it to hold out ``do_not_contact`` rows (and
     contacts waiting for review, #184) regardless
     of what the caller's own filter says, so that preset can never produce a
-    mail-merge file containing someone who asked to be left alone.
+    mail-merge file containing someone who asked to be left alone. Every vCard
+    export uses it to hold out contacts waiting for review (#254).
     """
     statement = compile_filter(user, tree, session=session, now=now)
     if extra_where is not None:
@@ -832,11 +841,12 @@ def export_stream(
     if preset in VCARD_ONLY_PRESETS and output_format != "vcard":
         raise ExportError(f"the {preset} preset is vCard only; ask for format vcard")
     today = _local_today(user, now)
-    extra_where: ColumnElement[bool] | None = None
-    if preset == "campaign-audience":
-        extra_where = and_(Contact.do_not_contact.is_(False), Contact.needs_review_at.is_(None))
-    elif preset == "macos-contacts":
-        extra_where = Contact.do_not_contact.is_(False)
+    held_out: list[ColumnElement[bool]] = []
+    if preset in ("campaign-audience", "macos-contacts"):
+        held_out.append(Contact.do_not_contact.is_(False))
+    if preset == "campaign-audience" or output_format == "vcard":
+        held_out.append(Contact.needs_review_at.is_(None))
+    extra_where = and_(*held_out) if held_out else None
     base = _contacts_statement(session, user, tree, sort, now=now, extra_where=extra_where)
     return _render(
         session,

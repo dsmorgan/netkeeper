@@ -14,7 +14,8 @@ interface PresetSpec {
   /**
    * The file can hold fewer rows than the filter counts: the backend skips
    * contacts that would not re-import (`_REIMPORTABLE_PRESETS`) or that are
-   * marked do-not-contact. The dialog's headline count says so.
+   * marked do-not-contact. The dialog's headline count says so. A vCard in any
+   * preset also drops contacts waiting for review; the dialog adds that itself.
    */
   dropsRows: boolean
   /** The only formats the backend accepts for this preset; omitted means all three. */
@@ -61,7 +62,7 @@ export const EXPORT_PRESETS: readonly PresetSpec[] = [
     description:
       'A vCard 3.0 file for macOS Contacts: one card per contact, with a Contacts group for each tag. See docs/macos-contacts.md for the import steps.',
     caveat:
-      'Everyone marked do-not-contact is left out, because Mail and Messages suggest addresses from Contacts. vCard only.',
+      'Everyone marked do-not-contact is left out, because Mail and Messages suggest addresses from Contacts. Contacts waiting for review are left out too, as in every vCard export. vCard only.',
     dropsRows: true,
     formats: ['vcard'],
   },

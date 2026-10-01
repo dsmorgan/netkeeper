@@ -25,6 +25,9 @@
  *
  * `macos-contacts` is vCard only (the backend answers 422 to anything else), so
  * picking it switches the format to vCard and disables the other two.
+ *
+ * Every vCard export, whatever the preset, leaves out contacts waiting for
+ * review (#254), so the headline count is qualified for any vCard too.
  */
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -54,7 +57,11 @@ import type { ExportFormat, ExportPreset, FilterTree } from './types'
 const FORMATS: ReadonlyArray<{ value: ExportFormat; label: string; note: string }> = [
   { value: 'csv', label: 'CSV', note: 'One row per contact, for a spreadsheet or a mail merge.' },
   { value: 'json', label: 'JSON', note: 'An array of objects, with the child rows nested.' },
-  { value: 'vcard', label: 'vCard', note: 'One card per contact, for an address book.' },
+  {
+    value: 'vcard',
+    label: 'vCard',
+    note: 'One card per contact, for an address book. Contacts waiting for review are left out.',
+  },
 ]
 
 export interface ExportDialogProps {
@@ -144,6 +151,9 @@ export function ExportForm({ filter, listCount }: Omit<ExportDialogProps, 'listN
             <span className="text-muted-foreground">{count.data.describe}</span>
             {chosen?.dropsRows === true && (
               <> The file may hold fewer: this preset leaves some out, as explained below.</>
+            )}
+            {chosen?.dropsRows !== true && effectiveFormat === 'vcard' && (
+              <> The file may hold fewer: a vCard leaves out contacts waiting for review.</>
             )}
           </>
         )}

@@ -8,6 +8,7 @@ netkeeper can write your contacts as a vCard file that macOS Contacts imports, w
 - The contact's tags, in the card's categories field.
 - One group card per tag, listing the contacts who carry that tag. A tag no exported contact carries gets no group.
 - No one marked do-not-contact. Mail and Messages suggest addresses from Contacts, so an address book counts as a way to reach someone.
+- No one waiting for review. A contact netkeeper created from a LinkedIn connections-page card stays out until you confirm it, so an unconfirmed name never lands in your address book. Every vCard export leaves these contacts out, whatever the preset.
 - Archived contacts only if your filter includes them, as with every other export.
 
 The file is vCard 3.0, the version Contacts imports most reliably. Every card has a stable ID, so exporting the same contacts twice gives the same cards.

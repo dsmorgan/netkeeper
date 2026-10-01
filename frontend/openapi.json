@@ -13608,7 +13608,7 @@
     },
     "/api/v1/exports": {
       "get": {
-        "description": "Stream ``preset`` in ``format`` for the contacts ``filter`` selects, in ``sort`` order.\n\n``headerless`` drops the CSV header row (the mailing-tool variant of\n``nine-column``; harmless, if unusual, on the other presets) and is ignored\nby the other two formats. ``spreadsheet_safe`` prefixes ``'`` to CSV cells\na spreadsheet would evaluate as formulas: safe to open in a spreadsheet, not\nsafe to re-import (#76). Also CSV only. ``macos-contacts`` is vCard only\n(vCard 3.0 with a group per tag, for macOS Contacts); any other format is a 422.",
+        "description": "Stream ``preset`` in ``format`` for the contacts ``filter`` selects, in ``sort`` order.\n\n``headerless`` drops the CSV header row (the mailing-tool variant of\n``nine-column``; harmless, if unusual, on the other presets) and is ignored\nby the other two formats. ``spreadsheet_safe`` prefixes ``'`` to CSV cells\na spreadsheet would evaluate as formulas: safe to open in a spreadsheet, not\nsafe to re-import (#76). Also CSV only. ``macos-contacts`` is vCard only\n(vCard 3.0 with a group per tag, for macOS Contacts); any other format is a 422.\nEvery vCard export, in any preset, leaves out contacts waiting for review (#254).",
         "operationId": "export_contacts",
         "parameters": [
           {

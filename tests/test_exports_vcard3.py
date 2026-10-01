@@ -362,6 +362,40 @@ def test_leaves_out_do_not_contact_archived_and_merged_contacts(session: Session
     assert _run(session, user, dnc_only) == ""
 
 
+def test_leaves_out_contacts_waiting_for_review_and_their_group_membership(
+    session: Session,
+) -> None:
+    """#254, David's decision: a card read off a connections page stays out of the
+    address book until it is confirmed, whatever the filter says; a confirmed
+    contact is in it as usual."""
+    user = factories.make_user(session)
+    confirmed = factories.make_contact(session, user, emails=["confirmed@example.test"])
+    waiting = factories.make_contact(
+        session,
+        user,
+        emails=["card@example.test"],
+        needs_review_at=datetime(2026, 9, 24, tzinfo=UTC),
+    )
+    _tag(session, user, "shared", confirmed, waiting)
+    _tag(session, user, "only-waiting", waiting)
+    session.commit()
+
+    text = _run(session, user)
+    assert "card@example.test" not in text
+    assert _contact_uid(user, waiting) not in text  # not even as a group member
+    contact_card, group = _cards(text)
+    assert _one(contact_card, "UID") == _contact_uid(user, confirmed)
+    assert _one(group, "FN") == "shared"  # a tag only the waiting contact carries has no group
+    assert _values(group, "X-ADDRESSBOOKSERVER-MEMBER") == [
+        f"urn:uuid:{_contact_uid(user, confirmed)}"
+    ]
+
+    waiting_only = parse_filter(
+        {"where": {"op": "gt", "field": "needs_review_at", "value": "2000-01-01T00:00:00Z"}}
+    )
+    assert _run(session, user, waiting_only) == ""
+
+
 def test_uids_are_stable_and_distinct(session: Session) -> None:
     """The same rows export the same UIDs every time; no two cards share one."""
     user = factories.make_user(session)

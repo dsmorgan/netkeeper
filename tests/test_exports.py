@@ -596,6 +596,49 @@ def test_campaign_audience_never_exports_a_contact_waiting_for_review(session: S
     assert len(full_rows) == 2  # other presets still export it
 
 
+@pytest.mark.parametrize(
+    "preset", ["nine-column", "linkedin-archive", "full", "campaign-audience", "macos-contacts"]
+)
+def test_every_vcard_preset_leaves_out_a_contact_waiting_for_review(
+    session: Session, preset: str
+) -> None:
+    """#254, David's decision: a vCard goes into an address book, and a card read
+    off a connections page does not belong there until it is confirmed."""
+    user = factories.make_user(session)
+    factories.make_contact(
+        session, user, first_name="Confirmed", last_name="Person", emails=["kept@example.test"]
+    )
+    factories.make_contact(
+        session,
+        user,
+        first_name="Waiting",
+        last_name="Card",
+        emails=["card@example.test"],
+        needs_review_at=datetime(2026, 9, 24, tzinfo=UTC),
+    )
+    text = _run(session, user, preset=preset, output_format="vcard")
+    assert text.count("BEGIN:VCARD") == 1
+    assert "kept@example.test" in text and "Confirmed" in text
+    assert "card@example.test" not in text and "Waiting" not in text
+
+
+@pytest.mark.parametrize("preset", ["nine-column", "linkedin-archive", "full"])
+@pytest.mark.parametrize("output_format", ["csv", "json"])
+def test_csv_and_json_still_carry_a_contact_waiting_for_review(
+    session: Session, preset: str, output_format: str
+) -> None:
+    """Only vCard was decided on #254; the other formats are unchanged outside
+    campaign-audience."""
+    user = factories.make_user(session)
+    factories.make_contact(
+        session,
+        user,
+        emails=["card@example.test"],
+        needs_review_at=datetime(2026, 9, 24, tzinfo=UTC),
+    )
+    assert "card@example.test" in _run(session, user, preset=preset, output_format=output_format)
+
+
 def test_campaign_audience_skips_a_bounced_primary_for_the_next_address(
     session: Session,
 ) -> None:
@@ -704,6 +747,21 @@ def test_vcard_fold_backs_off_on_a_continuation_line_too() -> None:
     """Continuation lines hold 74 octets after their space; the check applies there as well."""
     line = "NOTE:" + "a" * 143 + "€" + "b" * 5  # the € is octets 148-150
     assert _fold(line) == "NOTE:" + "a" * 70 + "\r\n " + "a" * 73 + "\r\n €" + "b" * 5
+
+
+def test_vcard_fold_backs_off_three_continuation_octets() -> None:
+    """A 4-octet character whose lead octet is three before the fold point: a
+    back-off capped at two steps would split it (#257 review)."""
+    line = "NOTE:" + "a" * 67 + "😀" + "b" * 5  # the emoji is octets 73-76
+    assert _fold(line) == "NOTE:" + "a" * 67 + "\r\n 😀" + "b" * 5
+
+
+def test_vcard_fold_recognizes_a_continuation_octet_above_0x9f() -> None:
+    """``ü``'s second octet is 0xBC; a ``0xE0`` mask would read it as a lead octet
+    and split the character (#257 review)."""
+    line = "NOTE:" + "a" * 69 + "ü" + "b" * 5  # the ü is octets 75-76
+    assert "ü".encode()[1] == 0xBC
+    assert _fold(line) == "NOTE:" + "a" * 69 + "\r\n ü" + "b" * 5
 
 
 def test_full_vcard_contains_begin_end_and_crlf_line_endings(session: Session) -> None:
