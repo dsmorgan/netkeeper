@@ -1858,8 +1858,16 @@ class TodaysVisitsOut(BaseModel):
 
 
 class BudgetStatusOut(BaseModel):
+    """Every action class's counters, today's profile-visit chain, and any risk warning.
+
+    ``risk_warning`` is set when the daily profile-visit limit is above the 100
+    a day netkeeper was designed around (#318): one plain sentence for the page
+    to show as it is. It never blocks anything.
+    """
+
     budgets: list[BudgetOut]
     profile_visits_today: TodaysVisitsOut
+    risk_warning: str | None
 
 
 class HeatOut(BaseModel):

@@ -85,6 +85,7 @@ from netkeeper.services.budgets import (
     ActionClass,
     BudgetSnapshot,
     configured_default,
+    profile_visit_risk_warning,
 )
 from netkeeper.services.budgets import status as budget_status
 from netkeeper.services.linkedin_accounts import find_account, scheduled_runs_armed
@@ -1186,6 +1187,10 @@ def _budget(action: ActionClass, snapshot: BudgetSnapshot, settings: Settings) -
             f" The clamp holds and {hard_day} is what is enforced, but the config file"
             " says something the tool will not do"
         )
+    if action is ActionClass.PROFILE_VISITS:
+        risk = profile_visit_risk_warning(budget)
+        if risk is not None:
+            warnings.append(risk)
     hard_week = HARD_MAX_PER_WEEK.get(action)
     asked_week = configured_default(action, budget, "week")
     if hard_week is not None and asked_week is not None and asked_week > hard_week:

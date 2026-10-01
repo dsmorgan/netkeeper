@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import Any
 
 import factories
 import pytest
@@ -32,7 +33,9 @@ from netkeeper.services.budgets import (
     BudgetExceeded,
     LocalPeriod,
     PeriodBudget,
+    configured_default,
     consume,
+    profile_visit_risk_warning,
     status,
 )
 
@@ -52,7 +55,7 @@ def user(writer: Session) -> User:
     return factories.make_user(writer)
 
 
-def _settings(**overrides: int) -> BudgetSettings:
+def _settings(**overrides: Any) -> BudgetSettings:
     return replace(DEFAULT_SETTINGS, **overrides)
 
 
@@ -301,18 +304,18 @@ def test_hard_max_per_day_matches_spec_9_6() -> None:
     """Pinned against the literal numbers in spec 9.6's table, not against the
     module's own constant: a self-referential ``== HARD_MAX_PER_DAY[...]``
     assertion would pass no matter what the dict said, including a bad merge
-    that raised ``profile_visits`` to 999 (ten times the reference workflow's
-    own stated guidance of 100)."""
+    that raised ``profile_visits`` to 999. Profile visits went from 100 to 250
+    in #318, by the maintainer's decision."""
     assert HARD_MAX_PER_DAY == {
         ActionClass.CONNECTION_PAGES: 400,
-        ActionClass.PROFILE_VISITS: 100,
+        ActionClass.PROFILE_VISITS: 250,
         ActionClass.INBOX_POLLS: 24,
         ActionClass.LI_MESSAGES_AUTO: 30,
     }
 
 
 def test_hard_max_per_week_matches_spec_9_6() -> None:
-    assert HARD_MAX_PER_WEEK == {ActionClass.PROFILE_VISITS: 500}
+    assert HARD_MAX_PER_WEEK == {ActionClass.PROFILE_VISITS: 1250}
 
 
 def test_a_configured_default_above_the_hard_max_is_clamped(writer: Session, user: User) -> None:
@@ -333,13 +336,69 @@ def test_a_configured_weekly_default_above_the_hard_max_is_clamped(
 ) -> None:
     """The week limit's own clamp, mirroring the day one above: dropping
     ``min(..., week_hard)`` from ``_limits_for`` leaves every other test green
-    (nothing else pushes a configured weekly default past 500), so it needs
+    (nothing else pushes a configured weekly default past 1,250), so it needs
     its own case."""
     settings = _settings(profile_visits_per_week=10_000)
     result = status(writer, user, ACCOUNT, ActionClass.PROFILE_VISITS, now=NOW, settings=settings)
     assert result.week is not None
-    assert result.week.limit == 500
+    assert result.week.limit == 1250
     assert result.week.limit < 10_000
+
+
+# --- #318: profile visits up to 250 a day, the week following the day ---------
+
+
+@pytest.mark.parametrize(("asked", "enforced"), [(250, 250), (251, 250), (10_000, 250)])
+def test_profile_visits_a_day_clamp_at_250(
+    writer: Session, user: User, asked: int, enforced: int
+) -> None:
+    settings = _settings(profile_visits_per_day=asked)
+    result = status(writer, user, ACCOUNT, ActionClass.PROFILE_VISITS, now=NOW, settings=settings)
+    assert result.day.limit == enforced
+
+
+@pytest.mark.parametrize(("day", "week"), [(60, 300), (100, 500), (250, 1250), (10_000, 1250)])
+def test_an_unset_weekly_limit_is_five_times_the_daily_one(
+    writer: Session, user: User, day: int, week: int
+) -> None:
+    """60 gives 300 and 100 gives 500, today's numbers; 250 gives the weekly
+    hard max. A daily value past its ceiling derives from the clamped 250, so
+    it does not also read as a weekly value past 1,250."""
+    settings = _settings(profile_visits_per_day=day, profile_visits_per_week=None)
+    result = status(writer, user, ACCOUNT, ActionClass.PROFILE_VISITS, now=NOW, settings=settings)
+    assert result.week is not None
+    assert result.week.limit == week
+    assert configured_default(ActionClass.PROFILE_VISITS, settings, "week") == week
+
+
+def test_the_default_weekly_limit_is_derived_from_the_default_daily_one() -> None:
+    assert DEFAULT_SETTINGS.profile_visits_per_week is None
+    assert configured_default(ActionClass.PROFILE_VISITS, DEFAULT_SETTINGS, "week") == 300
+
+
+@pytest.mark.parametrize(("asked", "enforced"), [(42, 42), (1250, 1250), (1251, 1250)])
+def test_an_explicit_weekly_limit_applies_clamped_to_1250(
+    writer: Session, user: User, asked: int, enforced: int
+) -> None:
+    settings = _settings(profile_visits_per_day=250, profile_visits_per_week=asked)
+    result = status(writer, user, ACCOUNT, ActionClass.PROFILE_VISITS, now=NOW, settings=settings)
+    assert result.week is not None
+    assert result.week.limit == enforced
+
+
+def test_no_risk_warning_at_or_below_100_a_day() -> None:
+    assert profile_visit_risk_warning(_settings(profile_visits_per_day=60)) is None
+    assert profile_visit_risk_warning(_settings(profile_visits_per_day=100)) is None
+
+
+def test_a_risk_warning_above_100_a_day_names_the_number_in_force() -> None:
+    assert profile_visit_risk_warning(_settings(profile_visits_per_day=101)) == (
+        "Profile visits are set to 101 a day, above the 100 a day netkeeper was designed"
+        " around. More visits a day make it more likely that LinkedIn restricts your account"
+        " or asks you to verify it. Heat still slows runs down after LinkedIn throttles a visit."
+    )
+    clamped = profile_visit_risk_warning(_settings(profile_visits_per_day=10_000))
+    assert clamped is not None and clamped.startswith("Profile visits are set to 250 a day")
 
 
 # --- week only applies where spec 9.6 says it does ----------------------------

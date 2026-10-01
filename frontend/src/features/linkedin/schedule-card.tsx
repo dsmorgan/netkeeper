@@ -6,8 +6,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { cn } from '@/lib/utils'
 
-import { armSchedule, disarmSchedule, linkedinKeys, scheduleQuery } from './api'
+import { armSchedule, budgetQuery, disarmSchedule, linkedinKeys, scheduleQuery } from './api'
 import { formatWhen } from './fields'
+import { RiskWarning } from './risk-warning'
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -20,10 +21,13 @@ function message(error: unknown): string {
  * UI goes through a confirmation dialog that says exactly that and sends
  * `confirm: true` (the API refuses arming without it); disarming is one
  * click, because backing out of "runs happen on their own" should never be
- * harder than turning it on.
+ * harder than turning it on. When the daily profile-visit limit is above
+ * 100, the dialog shows the budget's risk warning too (#318); it informs and
+ * does not block arming.
  */
 export function ScheduleCard() {
   const schedule = useQuery(scheduleQuery)
+  const budget = useQuery(budgetQuery)
   const queryClient = useQueryClient()
   const [asking, setAsking] = useState(false)
 
@@ -106,6 +110,7 @@ export function ScheduleCard() {
           Scheduled syncs and enrichment will start contacting LinkedIn on their own, within active
           hours, from now on — without you starting or watching each one.
         </p>
+        <RiskWarning text={budget.data?.risk_warning} />
         <p>
           You can disarm again with one click, any time, and a run already going is not cancelled by
           disarming.

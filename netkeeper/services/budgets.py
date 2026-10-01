@@ -79,16 +79,29 @@ Period = Literal["day", "week"]
 # Hard ceilings from spec 9.6's table. Not configurable, unlike the "default
 # per day" values in `BudgetSettings`: they are the absolute stop regardless
 # of how a user dials `config.toml` down or up, so `_limits_for` clamps the
-# configured default to this before it is ever enforced.
+# configured default to this before it is ever enforced. Profile visits went
+# from 100 to 250 a day in #318; anything above PROFILE_VISITS_DESIGN_LEVEL is
+# allowed, with a warning (`profile_visit_risk_warning`).
 HARD_MAX_PER_DAY: Final[dict[ActionClass, int]] = {
     ActionClass.CONNECTION_PAGES: 400,
-    ActionClass.PROFILE_VISITS: 100,
+    ActionClass.PROFILE_VISITS: 250,
     ActionClass.INBOX_POLLS: 24,
     ActionClass.LI_MESSAGES_AUTO: 30,
 }
+
+#: The weekly profile-visit limit, when config does not set one, is this many
+#: days of the daily limit in force (spec 9.6, #318): 60 a day gives 300 a week,
+#: 100 gives 500, 250 gives 1,250.
+PROFILE_VISIT_DAYS_PER_WEEK: Final = 5
+
 HARD_MAX_PER_WEEK: Final[dict[ActionClass, int]] = {
-    ActionClass.PROFILE_VISITS: 500,
+    ActionClass.PROFILE_VISITS: PROFILE_VISIT_DAYS_PER_WEEK * 250,
 }
+
+#: The profile visits a day netkeeper was designed around: the reference
+#: workflow's guidance. A daily limit above it is allowed, up to the hard max,
+#: and warned about wherever the budget is shown (#318).
+PROFILE_VISITS_DESIGN_LEVEL: Final = 100
 
 _DAY_DEFAULT: Final[dict[ActionClass, Callable[[BudgetSettings], int]]] = {
     ActionClass.CONNECTION_PAGES: lambda s: s.connection_pages_per_day,
@@ -104,8 +117,44 @@ _DAY_DEFAULT: Final[dict[ActionClass, Callable[[BudgetSettings], int]]] = {
 # without a matching default here fails loudly (KeyError) instead of silently
 # inheriting profile-visits' weekly setting.
 _WEEK_DEFAULT: Final[dict[ActionClass, Callable[[BudgetSettings], int]]] = {
-    ActionClass.PROFILE_VISITS: lambda s: s.profile_visits_per_week,
+    ActionClass.PROFILE_VISITS: lambda s: _profile_visits_per_week(s),
 }
+
+
+def _profile_visits_per_week(settings: BudgetSettings) -> int:
+    """The weekly profile-visit limit config asks for, before the weekly hard max.
+
+    An explicit ``profile_visits_per_week`` wins. Left unset (``None``), it
+    follows the daily limit in force -- the configured daily value clamped to
+    its hard max -- times :data:`PROFILE_VISIT_DAYS_PER_WEEK` (#318). Deriving
+    from the clamped daily value keeps a daily value past its ceiling from
+    also reading as a weekly value past its own.
+    """
+    if settings.profile_visits_per_week is not None:
+        return settings.profile_visits_per_week
+    day = min(settings.profile_visits_per_day, HARD_MAX_PER_DAY[ActionClass.PROFILE_VISITS])
+    return PROFILE_VISIT_DAYS_PER_WEEK * day
+
+
+def profile_visit_risk_warning(settings: BudgetSettings) -> str | None:
+    """The warning for a daily profile-visit limit above the design level, or None.
+
+    The limit in force (configured, clamped to the hard max) above
+    :data:`PROFILE_VISITS_DESIGN_LEVEL` is the user's call (#318): nothing
+    refuses it and nothing asks for confirmation. Every place the budget is
+    shown -- ``serve``'s startup log, ``netkeeper posture`` and the Settings
+    page, ``GET /linkedin/budget``, and arming scheduled runs -- shows this
+    same sentence, so it reads the same wherever the user meets it.
+    """
+    day = min(settings.profile_visits_per_day, HARD_MAX_PER_DAY[ActionClass.PROFILE_VISITS])
+    if day <= PROFILE_VISITS_DESIGN_LEVEL:
+        return None
+    return (
+        f"Profile visits are set to {day} a day, above the {PROFILE_VISITS_DESIGN_LEVEL} a day"
+        " netkeeper was designed around. More visits a day make it more likely that LinkedIn"
+        " restricts your account or asks you to verify it. Heat still slows runs down after"
+        " LinkedIn throttles a visit."
+    )
 
 
 class BudgetExceeded(RuntimeError):
@@ -250,7 +299,7 @@ def configured_default(
     :func:`status` and :func:`consume` only ever report the clamped limit,
     which is the right number to enforce and the wrong number to answer "has
     anything been configured past its ceiling" with -- a ``config.toml``
-    asking for 10,000 profile visits a day and one asking for exactly 100 are
+    asking for 10,000 profile visits a day and one asking for exactly 250 are
     indistinguishable once the clamp has run. ``netkeeper.services.posture``
     compares the two to warn about the first; a settings UI wants the same
     pair. ``None`` means this action has no limit for ``period`` (only

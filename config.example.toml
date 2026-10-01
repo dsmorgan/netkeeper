@@ -20,7 +20,8 @@ disconnect_after_misses = 2
 [linkedin.budget]
 connection_pages_per_day = 150
 profile_visits_per_day = 60
-profile_visits_per_week = 300
+# Unset, the weekly limit is 5 × the daily one (300 here). Set it to override.
+# profile_visits_per_week = 300
 inbox_polls_per_day = 8
 li_messages_auto_per_day = 15
 warmup_start = 20

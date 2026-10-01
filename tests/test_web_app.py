@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -19,7 +20,7 @@ from netkeeper.config import LinkedInSettings, Settings
 from netkeeper.db import make_session_factory
 from netkeeper.models import User, UserKind
 from netkeeper.web.app import API_PREFIX, create_app, discover_routers, openapi_json
-from netkeeper.worker import dev_app
+from netkeeper.worker import dev_app, serve_app
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 API_PATHS = {
@@ -230,6 +231,37 @@ def test_dev_app_sets_up_logging_then_builds_the_app(
         assert any(handler.get_name() == "netkeeper" for handler in root.handlers)
     finally:
         root.handlers[:] = before
+
+
+@pytest.mark.parametrize(("per_day", "warns"), [(101, True), (100, False)])
+def test_serve_app_logs_the_profile_visit_risk_once_above_100_a_day(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    per_day: int,
+    warns: bool,
+) -> None:
+    """#318: serve's startup says so once at WARNING; building the app attaches nothing."""
+    monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", str(tmp_path / "no-dist"))
+    base = Settings()
+    settings = replace(
+        base,
+        linkedin=replace(
+            base.linkedin, budget=replace(base.linkedin.budget, profile_visits_per_day=per_day)
+        ),
+    )
+    with caplog.at_level(logging.WARNING, logger="netkeeper.worker"):
+        serve_app(settings)
+    risk = [
+        record
+        for record in caplog.records
+        if record.name == "netkeeper.worker" and "Profile visits are set to" in record.getMessage()
+    ]
+    if warns:
+        assert len(risk) == 1 and risk[0].levelno == logging.WARNING
+        assert risk[0].getMessage().startswith("Profile visits are set to 101 a day")
+    else:
+        assert risk == []
 
 
 # --- router discovery -------------------------------------------------------

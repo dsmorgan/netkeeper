@@ -829,6 +829,7 @@
         "type": "object"
       },
       "BudgetStatusOut": {
+        "description": "Every action class's counters, today's profile-visit chain, and any risk warning.\n\n``risk_warning`` is set when the daily profile-visit limit is above the 100\na day netkeeper was designed around (#318): one plain sentence for the page\nto show as it is. It never blocks anything.",
         "properties": {
           "budgets": {
             "items": {
@@ -839,11 +840,23 @@
           },
           "profile_visits_today": {
             "$ref": "#/components/schemas/TodaysVisitsOut"
+          },
+          "risk_warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Risk Warning"
           }
         },
         "required": [
           "budgets",
-          "profile_visits_today"
+          "profile_visits_today",
+          "risk_warning"
         ],
         "title": "BudgetStatusOut",
         "type": "object"

@@ -74,6 +74,28 @@ describe('PostureSection', () => {
     ).toBeInTheDocument()
   })
 
+  it('shows the profile-visit risk warning under the profile_visits budget (#318)', async () => {
+    const risk =
+      'Profile visits are set to 150 a day, above the 100 a day netkeeper was designed around.' +
+      ' More visits a day make it more likely that LinkedIn restricts your account or asks you' +
+      ' to verify it. Heat still slows runs down after LinkedIn throttles a visit.'
+    renderSection({
+      ...CLEAN,
+      protections: [
+        ...CLEAN.protections,
+        {
+          name: 'budget profile_visits',
+          status: 'on',
+          value: '0/150 today, 0/750 this week (hard max 250/day, 1250/week)',
+          warnings: [risk],
+        },
+      ],
+    })
+    const table = await screen.findByTestId('posture-table')
+    const row = within(table).getByText('budget profile_visits').closest('tr') as HTMLElement
+    expect(within(row).getByText(risk)).toBeInTheDocument()
+  })
+
   it('renders markdown in a gap, not literal asterisks or backticks (review179r2)', async () => {
     renderSection({
       ...CLEAN,

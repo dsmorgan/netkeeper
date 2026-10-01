@@ -71,6 +71,7 @@ from netkeeper.models import (
 from netkeeper.paths import CONFIG_ENV, data_dir
 from netkeeper.scoping import install_scope_guard
 from netkeeper.services import (
+    budgets,
     campaign_review,
     enrich_plan,
     keychain,
@@ -1401,6 +1402,7 @@ def _streak_line(
 
 @schedule_app.command("arm")
 def linkedin_schedule_arm(
+    ctx: typer.Context,
     yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
 ) -> None:
     """Let `netkeeper serve` run LinkedIn jobs on its own schedule.
@@ -1409,7 +1411,11 @@ def linkedin_schedule_arm(
     the weekly full sync (due soon after arming if it has never run), the daily
     incremental sync, and enrichment run on their own, within your budgets and
     active hours. Arm only after a supervised run by hand has gone well.
+
+    When the daily profile-visit limit is above 100, it says so first, --yes or
+    not (#318). The warning informs; it does not stop arming.
     """
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
     engine = make_engine(database_url())
     try:
         factory = make_session_factory(engine)
@@ -1423,6 +1429,9 @@ def linkedin_schedule_arm(
         if already:
             typer.echo("scheduled LinkedIn runs are already armed")
             return
+        risk = budgets.profile_visit_risk_warning(settings.linkedin.budget)
+        if risk is not None:
+            typer.echo(f"warning: {risk}")
         if not yes and not typer.confirm(
             "arm scheduled LinkedIn runs? netkeeper serve will then visit LinkedIn on its"
             " own schedule, without you starting each run"

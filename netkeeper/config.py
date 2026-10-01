@@ -12,10 +12,11 @@ from __future__ import annotations
 import json
 import logging
 import tomllib
+import types
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, Union, get_args, get_origin, get_type_hints
 
 from netkeeper.paths import config_candidates
 
@@ -56,7 +57,9 @@ class MeSettings:
 class BudgetSettings:
     connection_pages_per_day: int = 150
     profile_visits_per_day: int = 60
-    profile_visits_per_week: int = 300
+    # None: 5 x the daily limit in force (``budgets.PROFILE_VISIT_DAYS_PER_WEEK``, #318).
+    # TOML has no null, so leaving the key out is how a config file asks for that.
+    profile_visits_per_week: int | None = None
     inbox_polls_per_day: int = 8
     li_messages_auto_per_day: int = 15
     warmup_start: int = 20
@@ -211,7 +214,16 @@ def _extra_strings(
 
 
 def _convert(value: object, hint: Any, *, key: str, source: Path) -> object:
-    """Check ``value`` against the dataclass field type ``hint`` and return it."""
+    """Check ``value`` against the dataclass field type ``hint`` and return it.
+
+    ``X | None`` checks ``value`` as ``X``: TOML has no null, so a present key
+    always has a value, and an absent one keeps the field's default.
+    """
+    if get_origin(hint) in (Union, types.UnionType):
+        options = [arg for arg in get_args(hint) if arg is not type(None)]
+        if len(options) != 1:
+            raise TypeError(f"unsupported settings field type for {key}: {hint!r}")
+        return _convert(value, options[0], key=key, source=source)
     if is_dataclass(hint) and isinstance(hint, type):
         if not isinstance(value, Mapping):
             raise ConfigError(f"{source}: {key} must be a table, got {_kind(value)}")
@@ -293,6 +305,8 @@ def _render_table(obj: DataclassInstance, *, prefix: str, lines: list[str]) -> N
         if role == "skip":
             continue
         value = getattr(obj, f.name)
+        if value is None:
+            continue  # TOML has no null; an absent key reads back as the None default
         if role == "extra":
             scalars.extend(f"{name} = {_toml_value(item)}" for name, item in value.items())
         elif is_dataclass(value) and not isinstance(value, type):

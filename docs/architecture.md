@@ -500,7 +500,7 @@ All jobs take the activity lock, hold one tab, and write progress to `sync_run.p
 - `scroll_like_a_person(page)`: a sequence of `mouse.wheel` deltas with variable magnitude, brief pauses, an occasional scroll back up, and a final dwell. Total scroll depth is random and sometimes short. *As built (P2-17, [ADR 0006](adr/0006-observe-dont-request.md)'s amendment).* Before the first wheel event of a run's tab, the pointer rests over the page's content: a few short `mouse.move` hops with small jitter, paced -- `BrowserRun`'s `_rest_pointer_over_content`, replaying `pacing.rest_pointer_like_a_person`'s plan. Playwright's virtual pointer starts at `(0, 0)`, which on flagship-web sits under the fixed nav, not the scrolling list, so a wheel replay that never moved it first scrolled nothing (#192). The target is read, not guessed: the on-screen box of the page's `main` landmark (`Locator.bounding_box`, a passive DOM/CDP query outside the page's own script, not `evaluate`), clamped to clear the header; only when there is no such box does it fall back to a fraction of the tab's own viewport size (or a conservative default when even that is unknown). Once per tab, repeated only if the tab is reopened.
 - Bursts: 8 to 15 profiles, then a break of 5 to 20 minutes.
 - Active hours: a window in your local timezone (default 08:30 to 21:30, all days). Ticks outside it park a one-shot job for the window start. *As built (#213).* A run started by hand outside the window (the API, `netkeeper linkedin sync`/`enrich`, a resume) is refused before its run row is created, with one sentence naming the window, when it next opens, and the `[linkedin] active_hours` key; connections syncs included, since the scheduler never starts any kind outside it. Inside a run only enrichment checks the window again, between profiles: a sync is minutes long, and one stopped part-way through the list would age nobody that week. An enrichment the window stops records the same sentence as its note and in the log; its `stop_reason` stays `inactive`, and the API, the CLI, and the LinkedIn page show every stop reason in plain words beside it (`stop_reason_text`). `netkeeper linkedin schedule status` and the posture report name the window and the config file it came from, or the defaults.
-- Warm-up: a fresh install starts at 20 profile visits per day and grows by 10 per day up to the configured cap.
+- Warm-up: a fresh install starts at 20 profile visits per day and grows by 10 per day up to the configured cap. A cap above 100 a day (9.6) only lengthens the ramp: 250 takes 23 days to reach.
 - Weekend and holiday damping: multiply budgets by 0.5 on Saturday and Sunday by default.
 - Never run enrichment and a message send in the same minute; the scheduler interleaves job kinds with a gap.
 
@@ -511,11 +511,15 @@ Counters live in `settings_kv`, keyed by local day and week, per action class:
 | Class | Default per day | Hard max | Notes |
 |---|---|---|---|
 | `connection_pages` | 150 | 400 | About 6,000 contacts per day at 40 per page (a page is a unit of 40 read from the page's own ten-card answers, 9.4) |
-| `profile_visits` | 60 | 100 | The number that matters. The reference workflow's guidance for scraping tools is 100 |
+| `profile_visits` | 60 | 250 | The number that matters. The reference workflow's guidance for scraping tools is 100; above that, netkeeper warns (below) |
 | `contact_info_fetches` | tied to `profile_visits` | | One per visit. *As built (#190):* the one Contact info click, covered by the visit's `profile_visits` unit; no separate counter |
 | `inbox_polls` | 8 | 24 | |
 | `li_messages_auto` | 15 | 30 | Only when auto-send is enabled |
-| `profile_visits` per week | 300 | 500 | |
+| `profile_visits` per week | 5 × the daily limit (300) | 1,250 | Follows the daily limit unless `profile_visits_per_week` is set |
+
+*As built (#318).* The profile-visit hard max is 250 a day. The default stays at 60, and netkeeper was designed around 100 at most, the reference workflow's guidance. A daily limit above 100 is your call: nothing refuses it and nothing asks you to confirm it, but netkeeper warns about it wherever the budget appears. `netkeeper serve` logs the warning once at startup, `netkeeper posture` and the Settings page list it under the `profile_visits` budget, `GET /linkedin/budget` returns it as `risk_warning`, and arming scheduled runs (`netkeeper linkedin schedule arm` and the LinkedIn page's dialog) shows it before you confirm. The warning reads: "Profile visits are set to N a day, above the 100 a day netkeeper was designed around. More visits a day make it more likely that LinkedIn restricts your account or asks you to verify it. Heat still slows runs down after LinkedIn throttles a visit." Because `netkeeper posture` exits non-zero when anything warns, a script gated on it stops while the limit is above 100.
+
+The weekly limit follows the daily one. Leave `profile_visits_per_week` out of `config.toml` and it is 5 × the daily limit in force (the configured value clamped to 250): 60 gives 300, 100 gives 500, 250 gives 1,250. Set it and your value applies instead, clamped to 1,250. Warm-up, weekend damping, and heat (9.5, 9.7) narrow the daily figure exactly as before; the weekly counter and what is left of the week bound each run on top of them.
 
 Enrichment order: contacts you are about to enroll in a campaign that lack the channel's address, then `met` contacts never enriched, then stale (`last_enriched_at` older than 180 days), then everyone else, newest connection first. You can pin up to 5 contacts to the front of the next run (igtracker's pins, same rules: selected within the budget, not on top of it).
 
@@ -1106,7 +1110,8 @@ disconnect_after_misses = 2
 [linkedin.budget]
 connection_pages_per_day = 150
 profile_visits_per_day = 60
-profile_visits_per_week = 300
+# Unset, the weekly limit is 5 × the daily one (300 here). Set it to override.
+# profile_visits_per_week = 300
 inbox_polls_per_day = 8
 li_messages_auto_per_day = 15
 warmup_start = 20
@@ -1151,7 +1156,8 @@ keep = 14
 
 | Knob | Default | Reasoning |
 |---|---|---|
-| Profile visits per day | 60 (max 100) | Below the 100-per-day guidance the reference workflow gives for scraping tools, leaving room for your own browsing |
+| Profile visits per day | 60 (max 250; warns above 100) | A conservative margin below the 100-per-day guidance the reference workflow gives for scraping tools, leaving room for your own browsing. It is a judgment call, not a measured limit: netkeeper has no data on where LinkedIn starts restricting accounts. The hard max was 100 until #318 raised it to 250 |
+| Profile visits per week | 5 × the daily limit (300 at 60 a day; max 1,250) | Five days' worth of the daily limit, so a full week cannot run at the daily cap every day. An explicit `profile_visits_per_week` overrides it |
 | Delay between profiles | lognormal, median 25 s, sigma 0.6 | Median matches a person reading a profile; sigma gives a long tail without absurd waits |
 | Distraction pause | 8% chance, 2 to 8 minutes | People get interrupted |
 | Burst | 8 to 15 profiles, then 5 to 20 minutes off | Sessions, not streams |

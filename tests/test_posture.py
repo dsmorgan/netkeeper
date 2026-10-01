@@ -59,7 +59,7 @@ from netkeeper.services import heat as heat_rows
 from netkeeper.services import posture as posture_module
 from netkeeper.services import route_breaker
 from netkeeper.services import scheduler as scheduler_module
-from netkeeper.services.budgets import ActionClass, consume
+from netkeeper.services.budgets import ActionClass, configured_default, consume
 from netkeeper.services.linkedin_session import flag_session
 from netkeeper.services.posture import (
     ATTACH_ONLY,
@@ -436,6 +436,11 @@ CASES = [
         warns=("budget connection_pages",),
     ),
     Case(
+        id="profile visits above the 100 a day netkeeper was designed around (#318)",
+        settings=_budget(profile_visits_per_day=101),
+        warns=("budget profile_visits",),
+    ),
+    Case(
         id="a weekly budget configured past spec 9.6's hard max",
         settings=_budget(profile_visits_per_week=9_999),
         warns=("budget profile_visits",),
@@ -683,6 +688,25 @@ def _warning_for(report: PostureReport, name: str) -> str:
     protection = next(p for p in report.protections if p.name == name)
     assert protection.warnings, f"{name} did not warn"
     return " ".join(protection.warnings)
+
+
+def test_profile_visits_above_100_a_day_warn_in_the_report_text_and_still_enforce(
+    writer: Session,
+) -> None:
+    """#318: above 100 a day the report says so, under the budget row, in the
+    words every other surface uses; the limit in force is still what was asked."""
+    user = _make_user(writer)
+    risky = _report(writer, user, settings=_budget(profile_visits_per_day=150))
+    calm = _report(writer, user, settings=_budget(profile_visits_per_day=100))
+
+    warning = _warning_for(risky, "budget profile_visits")
+    assert "set to 150 a day, above the 100 a day netkeeper was designed around" in warning
+    assert "restricts your account or asks you to verify it" in warning
+    text = render(risky)
+    assert "Profile visits are set to 150 a day" in text
+    assert "0/150 today, 0/750 this week (hard max 250/day, 1250/week)" in text
+    calm_row = next(p for p in calm.protections if p.name == "budget profile_visits")
+    assert calm_row.warnings == ()
 
 
 def test_a_protection_cannot_be_built_off_and_silent() -> None:
@@ -1317,7 +1341,9 @@ def test_the_defaults_this_report_calls_clean_are_appendix_c_s() -> None:
     assert DEFAULTS.linkedin.active_hours == ("08:30", "21:30")
     assert DEFAULTS.linkedin.weekend_multiplier == 0.5
     assert DEFAULTS.linkedin.budget.profile_visits_per_day == 60
-    assert DEFAULTS.linkedin.budget.profile_visits_per_week == 300
+    # Unset: 5 x the daily limit, so 300 (#318).
+    assert DEFAULTS.linkedin.budget.profile_visits_per_week is None
+    assert configured_default(ActionClass.PROFILE_VISITS, DEFAULTS.linkedin.budget, "week") == 300
     assert DEFAULTS.linkedin.budget.warmup_start == 20
     assert DEFAULTS.linkedin.budget.warmup_step == 10
     assert DEFAULTS.linkedin.budget.connection_pages_per_day == 150
