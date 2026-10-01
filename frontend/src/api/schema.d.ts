@@ -1015,6 +1015,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/do-not-send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Entries
+         * @description Every address on the do-not-send list, newest first.
+         */
+        get: operations["list_do_not_send"];
+        put?: never;
+        /**
+         * Add Entry
+         * @description Put an address on the list by hand. An address already there keeps its reason.
+         */
+        post: operations["add_do_not_send"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/do-not-send/{entry_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove Entry
+         * @description Take an address off the list, so campaigns may send to it again.
+         */
+        delete: operations["remove_do_not_send"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -3590,6 +3634,32 @@ export interface components {
             /** Expected Count */
             expected_count: number;
         };
+        /** DoNotSendIn */
+        DoNotSendIn: {
+            /** Email */
+            email: string;
+        };
+        /** DoNotSendOut */
+        DoNotSendOut: {
+            /** Contact Id */
+            contact_id: number | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Email */
+            email: string;
+            /** Id */
+            id: number;
+            reason: components["schemas"]["DoNotSendReason"];
+        };
+        /**
+         * DoNotSendReason
+         * @description Why an address is on the list.
+         * @enum {string}
+         */
+        DoNotSendReason: "manual" | "invalid" | "bounced" | "opted_out";
         /**
          * DuplicateContact
          * @description The ``409`` body of adding someone already in the address book (#303).
@@ -8445,6 +8515,93 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["NextFirePage"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_do_not_send: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DoNotSendOut"][];
+                };
+            };
+        };
+    };
+    add_do_not_send: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DoNotSendIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DoNotSendOut"];
+                };
+            };
+            /** @description Not one bare email address */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_do_not_send: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                entry_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such entry */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

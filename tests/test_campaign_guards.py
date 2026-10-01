@@ -68,6 +68,7 @@ def facts(**changes: Any) -> ContactFacts:
         last_outbound_at=None,
         address_bounced_elsewhere=False,
         duplicate_address=False,
+        do_not_send=None,
     )
     return dataclasses.replace(eligible, **changes)
 
@@ -105,6 +106,7 @@ def test_the_guard_sets_are_pinned() -> None:
         "no_email",
         "email_bounced",
         "email_invalid",
+        "do_not_send",
         "address_bounced_elsewhere",
         "no_linkedin",
         "duplicate_address",
@@ -121,6 +123,7 @@ def test_every_guard_runs() -> None:
         "not_do_not_contact",
         "not_disconnected",
         "has_channel_address",
+        "address_not_on_do_not_send",
         "address_not_bounced_elsewhere",
         "not_duplicate_address",
         "not_in_another_campaign",
@@ -404,6 +407,7 @@ def test_every_reason_has_its_label() -> None:
         "no_email": "no email",
         "email_bounced": "bounced email",
         "email_invalid": "invalid email",
+        "do_not_send": "address on the do-not-send list",
         "address_bounced_elsewhere": "address bounced on another contact",
         "no_linkedin": "no LinkedIn profile",
         "duplicate_address": "address already in this campaign",
@@ -460,6 +464,7 @@ def test_facts_read_the_contact_as_it_is(writer: Session, user: User, campaign: 
         last_outbound_at=None,
         address_bounced_elsewhere=False,
         duplicate_address=False,
+        do_not_send=None,
     )
 
 

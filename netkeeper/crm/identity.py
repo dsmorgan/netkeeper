@@ -47,6 +47,7 @@ from urllib.parse import unquote, urlsplit
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from netkeeper.crm import do_not_send
 from netkeeper.crm.provenance import PROVENANCE_ORDER, may_overwrite, record_synced_value
 from netkeeper.db import is_writer
 from netkeeper.models import (
@@ -63,6 +64,7 @@ from netkeeper.models import (
     ContactTag,
     ContactTagSuppression,
     EmailKind,
+    EmailStatus,
     Enrollment,
     EnrollmentStatus,
     LinkKind,
@@ -888,7 +890,8 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
 
     Every child row moves to the survivor; emails, phones, links, and positions
     are deduplicated by natural key (the survivor's row stays, the loser's
-    duplicate goes), snapshots, aliases, and interactions all move. The
+    duplicate goes; a shared address keeps the worse of the two statuses,
+    :data:`EMAIL_STATUS_SEVERITY`), snapshots, aliases, and interactions all move. The
     survivor's empty provenance fields take the loser's values with the loser's
     recorded source, and its ``synced_values`` fill in from the loser's for the
     fields it has none for. Tag assignments and suppressions carry across under
@@ -937,6 +940,8 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
 
     _merge_identity(session, user, survivor, loser)
     _merge_children(survivor, loser)
+    for email in survivor.emails:  # already listed when it got the status; made sure of here
+        do_not_send.add_for_status(session, user, email.email, email.status, contact_id=survivor.id)
     _merge_tags(session, user, survivor, loser)
     _merge_list_members(session, user, survivor, loser)
     _merge_campaign_rows(session, user, survivor, loser)
@@ -998,7 +1003,16 @@ def _take_source(survivor: Contact, loser: Contact, name: str) -> None:
         survivor.field_sources[name] = loser.source.value
 
 
+EMAIL_STATUS_SEVERITY: Final[Mapping[EmailStatus, int]] = {
+    EmailStatus.OK: 0,
+    EmailStatus.INVALID: 1,
+    EmailStatus.BOUNCED: 2,
+}
+"""Which status a merged address keeps when both contacts hold it: the higher (#238)."""
+
+
 def _merge_children(survivor: Contact, loser: Contact) -> None:
+    _keep_worse_email_status(survivor.emails, loser.emails)
     _move_keyed(survivor.emails, loser.emails, key=lambda row: row.email)
     _keep_one_primary(survivor.emails)
     _move_keyed(
@@ -1020,6 +1034,22 @@ def _merge_children(survivor: Contact, loser: Contact) -> None:
             loser.aliases.remove(alias)  # the survivor's own slug is not its alias
         else:
             survivor.aliases.append(alias)
+
+
+def _keep_worse_email_status(
+    target: Sequence[ContactEmail], source: Sequence[ContactEmail]
+) -> None:
+    """Where both contacts hold an address, the survivor's row takes the worse status.
+
+    :func:`_move_keyed` keeps the survivor's row and drops the loser's, so without
+    this a bounce on the loser's copy would be lost and the survivor would be
+    sendable at a bounced address (#238).
+    """
+    theirs = {row.email: row.status for row in source}
+    for row in target:
+        other = theirs.get(row.email)
+        if other is not None and EMAIL_STATUS_SEVERITY[other] > EMAIL_STATUS_SEVERITY[row.status]:
+            row.status = other
 
 
 def _move_keyed[T: ContactChild, K](

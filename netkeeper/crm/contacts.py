@@ -36,6 +36,7 @@ from typing import Any, Final, Literal, cast
 from sqlalchemy import ColumnElement, CursorResult, Select, Update, func, select
 from sqlalchemy.orm import Session, selectinload
 
+from netkeeper.crm import do_not_send
 from netkeeper.crm.filters import (
     FilterTree,
     SortKey,
@@ -691,6 +692,7 @@ def add_email(
     contact already has; ``ValueError`` for an empty one or anything but one bare
     address (a campaign sends to it, #269). Importers go through
     :class:`IncomingEmail` alone: a bad address there must not stop an import.
+    An address added as ``bounced`` or ``invalid`` goes on the do-not-send list too.
     """
     _require_writer(session)
     contact = live_contact(session, user, contact_id)
@@ -710,6 +712,7 @@ def add_email(
     if incoming.is_primary or not any(other.is_primary for other in contact.emails):
         _make_primary(contact.emails, row)
     session.flush()
+    do_not_send.add_for_status(session, user, row.email, row.status, contact_id=contact.id)
     return row
 
 
@@ -719,6 +722,8 @@ def update_email(
     """Change an address's fields; the row becomes the person's own observation.
 
     ``ValueError`` for a new address that is not one bare address, as :func:`add_email`.
+    Marking an address ``bounced`` or ``invalid`` puts it on the do-not-send list;
+    marking it ``ok`` again does not take it off (:mod:`netkeeper.crm.do_not_send`).
     """
     _require_writer(session)
     contact = live_contact(session, user, contact_id)
@@ -735,6 +740,8 @@ def update_email(
     _apply_primary(contact.emails, row, changes)
     _touch(row)
     session.flush()
+    if "status" in changes:
+        do_not_send.add_for_status(session, user, row.email, row.status, contact_id=contact.id)
     return row
 
 

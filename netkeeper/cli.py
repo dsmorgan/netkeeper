@@ -28,7 +28,7 @@ from netkeeper import __version__, migrations
 from netkeeper.campaigns import gmail_oauth
 from netkeeper.campaigns.render import me_fields
 from netkeeper.config import ConfigError, Settings, load_settings, render_toml
-from netkeeper.crm import import_runs, new_contact
+from netkeeper.crm import do_not_send, import_runs, new_contact
 from netkeeper.crm.archive import ArchiveImport, import_archive
 from netkeeper.crm.archive_check import open_checked_archive
 from netkeeper.crm.contacts import ContactStats, contact_stats
@@ -160,6 +160,10 @@ campaigns_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(campaigns_app, name="campaigns")
+do_not_send_app = typer.Typer(
+    help="The do-not-send list: addresses no campaign sends to.", no_args_is_help=True
+)
+app.add_typer(do_not_send_app, name="do-not-send")
 
 
 @dataclass(frozen=True, slots=True)
@@ -2568,6 +2572,90 @@ def campaigns_resume(
         user = _local_user_or_exit(session)
         campaign_service.resume(session, user, campaign_id)
     typer.echo(f"campaign {campaign_id} resumed")
+
+
+# --- the do-not-send list (#238) -----------------------------------------------
+#
+# Each command mirrors a `/do-not-send` route.
+
+
+@do_not_send_app.command("list")
+def do_not_send_list() -> None:
+    """List the addresses no campaign sends to, newest first (GET /do-not-send)."""
+    with _campaign_db() as factory, session_scope(factory) as session:
+        user = _local_user_or_exit(session)
+        rows = [
+            (
+                str(entry.id),
+                entry.email,
+                entry.reason.value,
+                "-" if entry.contact_id is None else str(entry.contact_id),
+                _when(entry.created_at),
+            )
+            for entry in do_not_send.entries(session, user)
+        ]
+    if not rows:
+        typer.echo("the do-not-send list is empty")
+        return
+    typer.echo(_format_table(("ID", "ADDRESS", "REASON", "CONTACT", "ADDED"), rows), nl=False)
+
+
+@do_not_send_app.command("add")
+def do_not_send_add(
+    email: Annotated[str, typer.Argument(help="The address. A +tag is part of it.")],
+) -> None:
+    """Put an address on the list by hand (POST /do-not-send).
+
+    The address is matched as written, after trimming and lowercasing:
+    `name+tag@example.com` and `name@example.com` are two addresses.
+    """
+    with _campaign_db() as factory, session_scope(factory, write=True) as session:
+        user = _local_user_or_exit(session)
+        try:
+            entry = do_not_send.add_by_hand(session, user, email)
+        except ValueError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        address, reason = entry.email, entry.reason.value
+    typer.echo(f"{address} is on the do-not-send list ({reason})")
+
+
+@do_not_send_app.command("remove")
+def do_not_send_remove(
+    entry: Annotated[str, typer.Argument(help="The entry's ID or its address.")],
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    """Take an address off the list, so campaigns may send to it again (DELETE /do-not-send/{id}).
+
+    A contact that still holds the address as bounced or invalid is still not sent to
+    there: mark it ok on the contact too.
+    """
+    with _campaign_db() as factory:
+        # Read, then ask, then write: a writer held across the prompt would lock out serve.
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            found = (
+                do_not_send.get(session, user, int(entry))
+                if entry.isdigit()
+                else do_not_send.find(session, user, entry)
+            )
+            if found is None:
+                typer.echo(f"error: {entry!r} is not on the do-not-send list", err=True)
+                raise typer.Exit(code=1)
+            entry_id, address, reason = found.id, found.email, found.reason.value
+        if not yes and not typer.confirm(
+            f"take {address} ({reason}) off the do-not-send list? Campaigns may send to it again"
+        ):
+            typer.echo(f"cancelled: {address} stays on the list")
+            raise typer.Exit(code=1)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            try:
+                do_not_send.remove(session, user, entry_id)
+            except do_not_send.NotFound as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+    typer.echo(f"{address} is off the do-not-send list")
 
 
 # --- contacts ---------------------------------------------------------------
