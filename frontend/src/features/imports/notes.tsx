@@ -89,14 +89,27 @@ export function Note({
 }
 
 /**
+ * The exact sentence `netkeeper.crm.import_runs.DUPLICATE_WARNING_EXPLANATION` carries, word
+ * for word: the CLI's commit summary and this note are meant to read the same way. Nothing
+ * shares this string across the Python/TypeScript boundary, so keep the two in sync by hand.
+ */
+const DUPLICATE_WARNING_EXPLANATION =
+  'They were kept as separate contacts: netkeeper never matches two rows of the same file ' +
+  'against each other by name and company alone. Merging any of them is safe, but it means ' +
+  'this import can no longer be rolled back.'
+
+/**
  * The name-and-company duplicate warning a commit's `duplicate_groups` carries (#228).
  *
  * Spec 8.2 step 4 never matches two rows against each other, only a row
  * against a contact already on record, so a person listed twice in one file
  * with no profile URL or email becomes two new contacts rather than one. This
  * names them; it does not suggest anything should have resolved differently.
- * `detail` lists each group's contacts and rows, for the run page; without it
- * this is the one-line summary the wizard's result step shows.
+ * A group whose rows carried different identifiers of their own (different
+ * profile URLs or emails) never reaches here at all: the backend leaves it
+ * out, because those are two different people, not an ambiguity to warn
+ * about. `detail` lists each group's contacts and rows, for the run page;
+ * without it this is the one-line summary the wizard's result step shows.
  */
 export function DuplicateGroupsNote({
   groups,
@@ -112,11 +125,7 @@ export function DuplicateGroupsNote({
       <p className="font-medium">
         {total} new contacts share a name and company with another row in this file.
       </p>
-      <p>
-        They were kept as separate contacts, as netkeeper&rsquo;s matching rules require: a name
-        and a company are never enough to fold two rows of the same file together. Merging any of
-        them by hand is safe, but it means this import can no longer be rolled back.
-      </p>
+      <p>{DUPLICATE_WARNING_EXPLANATION}</p>
       {detail && (
         <ul className="list-disc space-y-1 pl-5">
           {groups.map((group, index) => (

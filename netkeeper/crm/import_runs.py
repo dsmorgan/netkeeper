@@ -489,6 +489,16 @@ class _Outcome:
     contact (spec 8.2 step 4 never folds them together), and that is worth a
     warning even though nothing about how either row resolved changes (#228).
     """
+    has_identifier: bool = False
+    """The row's own incoming data names a LinkedIn identity or an email, of its own.
+
+    Read only by :func:`_duplicate_groups`. Two rows that each carry one of
+    these are two verified, distinct people -- if they had named the *same*
+    one, the second would have matched the first's contact outright at an
+    earlier resolution step rather than reaching :class:`ImportResolution.CREATED`
+    by name and company at all. A group where 2+ members carry one is
+    therefore not this warning's business (#228): see :func:`_duplicate_groups`.
+    """
 
 
 @dataclass(frozen=True)
@@ -605,23 +615,34 @@ def _duplicate_groups(outcomes: Sequence[_Outcome]) -> list[DuplicateGroup]:
     :func:`~netkeeper.crm.identity._resolve_name` matches on, over rows whose
     outcome is :attr:`ImportResolution.CREATED` -- a row matched to a contact
     that already existed before this commit, or one decided ``merge_into``, is
-    not a new contact and never joins a group. Ordered by each group's first
-    row, contacts within a group ordered by row number, so the result is stable
-    for anything that reports it.
+    not a new contact and never joins a group.
+
+    A group is dropped whole when 2 or more of its rows each carry their own
+    identifier (:attr:`_Outcome.has_identifier`): that can only mean the file
+    itself named them as different people (an identical identifier would have
+    matched outright, before name and company were ever consulted), so they
+    are not the ambiguity this warning is for, and calling a merge between them
+    "safe" would be wrong.
+
+    Ordered by each group's first row, contacts within a group ordered by row
+    number, so the result is stable for anything that reports it.
     """
-    by_key: dict[tuple[str, str, str], list[DuplicateContact]] = {}
+    by_key: dict[tuple[str, str, str], list[_Outcome]] = {}
     for outcome in outcomes:
         if outcome.resolution is not ImportResolution.CREATED or outcome.name_key is None:
             continue
-        contact = DuplicateContact(
-            contact_id=cast(int, outcome.contact_id), row_number=outcome.row_number
+        by_key.setdefault(outcome.name_key, []).append(outcome)
+    groups = []
+    for members in by_key.values():
+        if len(members) < 2:
+            continue
+        if sum(1 for member in members if member.has_identifier) >= 2:
+            continue
+        contacts = tuple(
+            DuplicateContact(contact_id=cast(int, member.contact_id), row_number=member.row_number)
+            for member in sorted(members, key=lambda member: member.row_number)
         )
-        by_key.setdefault(outcome.name_key, []).append(contact)
-    groups = [
-        DuplicateGroup(tuple(sorted(contacts, key=lambda c: c.row_number)))
-        for contacts in by_key.values()
-        if len(contacts) >= 2
-    ]
+        groups.append(DuplicateGroup(contacts))
     groups.sort(key=lambda group: group.contacts[0].row_number)
     return groups
 
@@ -639,15 +660,21 @@ def _duplicate_groups_json(groups: Sequence[DuplicateGroup]) -> list[dict[str, A
 
 
 def duplicate_groups(run: ImportRun) -> list[DuplicateGroup]:
-    """The name-and-company duplicate groups :func:`commit` recorded on ``run``, if any.
+    """The name-and-company duplicate groups :func:`commit` recorded on ``run``, if live.
 
     Empty for an archive run (that pipeline never creates two new contacts from
     one file's rows matching each other: a row that would is left as a
     candidate for a CSV import to decide instead, see
-    :mod:`netkeeper.crm.archive`), for a draft that has not been committed, and
-    for a commit that created no such group.
+    :mod:`netkeeper.crm.archive`), for a draft that has not been committed, for
+    a commit that created no such group, and for a run that has since been
+    rolled back: the contacts a group named may be gone, or renumbered by a
+    later import, so a rolled-back run is not a warning worth acting on any
+    more. The run's ``report_json`` keeps the group either way, as history --
+    only what this function reports back changes.
     """
-    if run.source_kind is not ImportSourceKind.CSV or run.report_json is None:
+    if run.source_kind is not ImportSourceKind.CSV or run.status is not ImportStatus.COMMITTED:
+        return []
+    if run.report_json is None:
         return []
     return [
         DuplicateGroup(
@@ -660,23 +687,31 @@ def duplicate_groups(run: ImportRun) -> list[DuplicateGroup]:
     ]
 
 
+DUPLICATE_WARNING_EXPLANATION: Final[str] = (
+    "They were kept as separate contacts: netkeeper never matches two rows of the same file "
+    "against each other by name and company alone. Merging any of them is safe, but it means "
+    "this import can no longer be rolled back."
+)
+"""The sentence every surface uses, word for word: the CLI (below), and the wizard's result
+step and the run page, which quote it in ``frontend/src/features/imports/notes.tsx``'s
+``DuplicateGroupsNote`` (#228). Keep the two in sync by hand; nothing shares this string across
+the Python/TypeScript boundary."""
+
+
 def duplicate_warning(groups: Sequence[DuplicateGroup]) -> str | None:
     """The commit's warning line, or ``None`` when ``groups`` is empty.
 
     One line regardless of how many groups there are, naming the total number of
-    contacts involved (spec 10.5's commit result, the CLI summary, and the
-    wizard's result step all show this same line; the run page lists the groups
-    themselves). Each group always has 2 or more contacts (:func:`_duplicate_groups`
-    drops any that do not), so the total is never 1. Says plainly that merging is
-    the one thing that costs this import its rollback (:class:`RunMerged`).
+    contacts involved (the CLI summary shows this same line). Each group always
+    has 2 or more contacts (:func:`_duplicate_groups` drops any that do not), so
+    the total is never 1.
     """
     total = sum(len(group.contacts) for group in groups)
     if not total:
         return None
     return (
         f"{total} new contacts share a name and company with another row in this file. "
-        "They were kept as separate contacts, as spec 8.2 requires; merging any of them is "
-        "safe but means this import can no longer be rolled back."
+        f"{DUPLICATE_WARNING_EXPLANATION}"
     )
 
 
@@ -751,6 +786,11 @@ def _process_row(
     resolution = identity.resolve(session, user, mapped.incoming)
     outcome = _Outcome(row_number, cells, ImportResolution.SKIPPED, problem=mapped.problem_text)
     outcome.name_key = name_company_key(mapped.incoming)
+    outcome.has_identifier = (
+        mapped.incoming.li_urn is not None
+        or mapped.incoming.li_public_id is not None
+        or bool(mapped.incoming.emails)
+    )
 
     match resolution:
         case Matched(contact_id=contact_id, by=by):
@@ -1865,6 +1905,7 @@ def delete_preset(session: Session, user: User, name: str) -> None:
 
 
 __all__ = [
+    "DUPLICATE_WARNING_EXPLANATION",
     "PREVIEW_ROWS",
     "REPORT_DUPLICATE_GROUPS_KEY",
     "SAVED_PRESETS_KEY",

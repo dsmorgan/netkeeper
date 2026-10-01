@@ -349,6 +349,34 @@ def test_resolve_by_name_and_company_is_a_candidate(
     assert resolve(writer, alice, incoming(first_name="Ann", current_company="Acme")) == New()
 
 
+def test_a_blank_company_on_the_incoming_row_never_matches_by_name_alone(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """A guard on the incoming row's own company, not an accident of SQL NULL semantics.
+
+    The existing contact's company is an explicit empty string, not a missing
+    value: if it were ``None`` too, a query that forgot to require a company at
+    all would still fail to match, because SQL's own ``NULL`` is never equal to
+    another ``NULL`` -- and that would prove nothing about whether the row-level
+    guard in ``name_company_key`` was still there. Stored as ``""`` instead, a
+    row with no company could only still resolve to ``New()`` here because
+    :func:`resolve` itself refuses to treat "no company provided" as a company
+    that matches, not because the database happened to say no.
+    """
+    alice, _ = users
+    factories.make_contact(
+        writer,
+        alice,
+        first_name="Ann",
+        last_name="Lee",
+        current_company="",
+        li_urn=None,
+        li_public_id=None,
+    )
+    row = incoming(first_name="Ann", last_name="Lee")
+    assert resolve(writer, alice, row) == New()
+
+
 def test_a_shared_email_is_a_candidate_with_ids_ascending(
     writer: Session, users: tuple[User, User]
 ) -> None:
