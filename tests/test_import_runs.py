@@ -1188,6 +1188,75 @@ def test_no_warning_for_rows_sharing_a_name_but_not_a_company(writer: Session, u
     assert import_runs.duplicate_groups(committed) == []
 
 
+def test_no_warning_when_neither_row_has_a_company(writer: Session, user: User) -> None:
+    """Two rows that share a name and *neither* carries a company do not group either.
+
+    This is not provable by two rows disagreeing (the case above): it would
+    also pass if :func:`~netkeeper.crm.identity.name_company_key` stopped
+    requiring a company at all and fell back to, say, an empty string for a
+    missing one -- both rows would then carry the *same* fallback key and group
+    regardless. Two new contacts, both company-less, is the shape that
+    actually exercises that guard.
+    """
+    content = "First Name,Last Name,Company\nJordan,Vance,\nJordan,Vance,\n"
+    committed = _run_of(writer, user, content)
+
+    assert committed.created_count == 2
+    assert import_runs.duplicate_groups(committed) == []
+
+
+def test_no_warning_when_the_rows_name_different_people(writer: Session, user: User) -> None:
+    """Two rows that each carry their *own* profile URL are two different people, not a
+    duplicate: an identical identifier would have matched the first row's contact outright,
+    before name and company were ever consulted, so two *different* identifiers on rows that
+    land in the same name-and-company group prove the file itself told them apart. Calling a
+    merge between them "safe" would be wrong, so the group is left out entirely (#228) --
+    rather than kept with softer wording, since there is no ambiguity here to warn about.
+    """
+    mapping = {**_NAME_MAPPING, "Profile Url": "li_url"}
+    content = (
+        "First Name,Last Name,Company,Profile Url\n"
+        "Jordan,Vance,Acme Inc,https://www.linkedin.com/in/jordan-vance-aa/\n"
+        "Jordan,Vance,Acme Inc,https://www.linkedin.com/in/jordan-vance-bb/\n"
+    )
+    run = import_runs.create_run(
+        writer, user, filename="dupes.csv", content=content, mapping=mapping
+    )
+    committed = import_runs.commit(
+        writer, user, run.id, undecided=import_runs.UndecidedPolicy.CREATE_NEW
+    )
+
+    assert committed.created_count == 2
+    assert import_runs.duplicate_groups(committed) == []
+
+
+def test_a_group_is_kept_when_only_one_of_its_rows_carries_an_identifier(
+    writer: Session, user: User
+) -> None:
+    """One row with its own profile URL, next to one with none, is still this file's
+    ambiguity: the identified row's contact is a specific, known person, but the
+    identifier-less row could still be that same person for all the file says -- unlike
+    two rows that each name someone different, nothing here rules that out.
+    """
+    mapping = {**_NAME_MAPPING, "Profile Url": "li_url"}
+    content = (
+        "First Name,Last Name,Company,Profile Url\n"
+        "Jordan,Vance,Acme Inc,https://www.linkedin.com/in/jordan-vance-aa/\n"
+        "Jordan,Vance,Acme Inc,\n"
+    )
+    run = import_runs.create_run(
+        writer, user, filename="dupes.csv", content=content, mapping=mapping
+    )
+    committed = import_runs.commit(
+        writer, user, run.id, undecided=import_runs.UndecidedPolicy.CREATE_NEW
+    )
+
+    assert committed.created_count == 2
+    groups = import_runs.duplicate_groups(committed)
+    assert len(groups) == 1
+    assert [contact.row_number for contact in groups[0].contacts] == [1, 2]
+
+
 def test_no_warning_when_only_one_new_contact_matches_an_existing_one(
     writer: Session, user: User
 ) -> None:
@@ -1218,6 +1287,26 @@ def test_duplicate_groups_is_empty_for_a_draft_run(writer: Session, user: User) 
     )
 
     assert import_runs.duplicate_groups(run) == []
+
+
+def test_duplicate_groups_is_empty_once_the_run_is_rolled_back(writer: Session, user: User) -> None:
+    """Both contacts a group named are deleted by the rollback, so the warning stops too.
+
+    ``report_json`` itself keeps the group as history -- :func:`_duplicate_groups_json`
+    is not re-run and nothing deletes the key -- only what :func:`duplicate_groups` hands
+    back changes, because a run that cannot be rolled back twice has nothing left to warn
+    anyone away from merging.
+    """
+    content = "First Name,Last Name,Company\nJordan,Vance,Acme Inc\nJordan,Vance,Acme Inc\n"
+    committed = _run_of(writer, user, content)
+    assert len(import_runs.duplicate_groups(committed)) == 1
+    stored = committed.report_json
+
+    rolled_back = import_runs.rollback(writer, user, committed.id)
+
+    assert rolled_back.contacts_deleted == 2
+    assert import_runs.duplicate_groups(committed) == []
+    assert committed.report_json == stored  # history, not deleted
 
 
 def test_duplicate_warning_words_the_total_and_the_rollback_cost() -> None:

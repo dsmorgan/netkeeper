@@ -495,21 +495,23 @@ def test_cli_import_csv_on_candidate_new_makes_a_repeated_person_two_contacts(
     with cli_db() as session:
         user = ensure_local_user(session)
         twins = list(
-            session.scalars(scoped(user, Contact).where(Contact.last_name == "Ravensworth"))
+            session.scalars(
+                scoped(user, Contact).where(Contact.last_name == "Ravensworth").order_by(Contact.id)
+            )
         )
-        assert len(twins) == 3  # the seeded one, plus one per row
-        new_ids = {contact.id for contact in twins} - {
-            min(contact.id for contact in twins)  # the contact _seed_candidate made
-        }
+        assert len(twins) == 3  # the seeded one, first; then one per row, in the order they ran
+        _seeded, row_3, row_4 = twins
 
     # #228: the two new Thaddeuses share a name and company with each other -- not
-    # with the seeded one, which this run never created -- so the commit warns.
+    # with the seeded one, which this run never created -- so the commit warns, naming
+    # exactly the pair it created and nobody else, in row order.
     assert (
-        "warning: 2 new contacts share a name and company with another row in this file."
+        "warning: 2 new contacts share a name and company with another row in this file. "
+        "They were kept as separate contacts: netkeeper never matches two rows of the same "
+        "file against each other by name and company alone. Merging any of them is safe, "
+        "but it means this import can no longer be rolled back. "
+        f"Contacts: {row_3.id}, {row_4.id}."
     ) in result.output
-    assert "this import can no longer be rolled back" in result.output
-    for contact_id in new_ids:
-        assert str(contact_id) in result.output
 
     help_text = CliRunner().invoke(cli, ["import", "csv", "--help"], env={"COLUMNS": "200"})
     assert "a person listed twice in the file becomes two new contacts" in help_text.output

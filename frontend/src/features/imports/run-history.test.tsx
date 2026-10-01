@@ -526,7 +526,7 @@ describe('one import run', () => {
       await screen.findByText('5 new contacts share a name and company with another row in this file.'),
     ).toBeVisible()
     expect(
-      screen.getByText(/Merging any of them by hand is safe, but it means this import/),
+      screen.getByText(/Merging any of them is safe, but it means this import/),
     ).toBeVisible()
     expect(screen.getByText(/contact #41 \(row 2\)/)).toBeVisible()
     expect(screen.getByText(/contact #42 \(row 4\)/)).toBeVisible()

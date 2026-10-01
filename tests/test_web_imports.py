@@ -359,6 +359,32 @@ async def test_a_commit_warns_when_it_creates_two_contacts_sharing_a_name_and_co
     assert reread.json()["duplicate_groups"] == groups
 
 
+async def test_duplicate_groups_disappear_once_the_run_is_rolled_back(
+    client: httpx.AsyncClient,
+) -> None:
+    """A rolled-back run is not a warning worth acting on any more (#228): both contacts
+    it named are deleted, so the API stops reporting the group, even though the commit
+    that made it is still there to look up and the group itself stays in `report_json`
+    as history.
+    """
+    content = "First Name,Last Name,Company\nJordan,Vance,Acme Inc\nJordan,Vance,Acme Inc\n"
+    mapping = {"First Name": "first_name", "Last Name": "last_name", "Company": "current_company"}
+    run = await draft(client, content=content, mapping=mapping)
+    committed = await client.post(
+        f"/api/v1/imports/{run['id']}/commit",
+        headers=CSRF,
+        json={"decisions": [{"row_number": 2, "kind": "create_new"}]},
+    )
+    assert len(committed.json()["duplicate_groups"]) == 1
+
+    rolled_back = await client.post(f"/api/v1/imports/{run['id']}/rollback", headers=CSRF)
+    assert rolled_back.status_code == 200, rolled_back.text
+
+    reread = await client.get(f"/api/v1/imports/{run['id']}")
+    assert reread.json()["status"] == "rolled_back"
+    assert reread.json()["duplicate_groups"] == []
+
+
 async def test_a_merge_decision_without_a_contact_is_a_bad_request(
     client: httpx.AsyncClient, seeded: object
 ) -> None:
