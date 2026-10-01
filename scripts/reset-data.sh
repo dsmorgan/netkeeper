@@ -219,28 +219,31 @@ archive_path() {
   printf '%s\n' "$candidate"
 }
 
-# On failure, move a run's own private temp copy (archive_db()'s $tmp) aside
-# as .failed for inspection, then remove that temp directory either way.
-# Prints the .failed path, or nothing when the copy was never created -- there
-# is nothing to quarantine, just the generic "nothing published" the caller
-# falls back to. There is no "the" archive to rename here, only this run's
-# own, still-private work: nothing another concurrent run has already
-# published is ever touched by this (#183 re-review should-fix 1).
+# Moves $1/db aside as .failed for inspection, setting $quarantined to its
+# path; leaves $quarantined empty when $1/db never existed (nothing to
+# quarantine, just the generic "nothing published" the caller falls back to).
+#
+# Called directly, never as `x=$(quarantine_partial ...)`: a command
+# substitution runs in its own subshell, so a failed mv's die() in there
+# would exit only that subshell, its message the only thing said, while the
+# original sat in $tmp -- about to be removed once the real abort finally
+# happened anyway -- rather than naming where it actually, accurately, still
+# is (#183 re-review round 3 nit 3). There is no "the" archive to rename
+# here either way, only this run's own, still-private work: nothing another
+# concurrent run has already published is ever touched by this (#183
+# re-review should-fix 1).
 quarantine_partial() {
   tmp=$1
-  if [ -e "$tmp/db" ]; then
-    failed="$archives/netkeeper-$stamp.sqlite3.failed"
-    n=1
-    while [ -e "$failed" ]; do
-      failed="$archives/netkeeper-$stamp-$n.sqlite3.failed"
-      n=$((n + 1))
-    done
-    # A clear die(), not a bare mv whose own failure would abort under set -e
-    # with nothing said about why (#183 re-review should-fix 2).
-    mv -- "$tmp/db" "$failed" || die "could not move the partial archive to $failed for inspection"
-    printf '%s\n' "$failed"
-  fi
-  rm -rf -- "$tmp"
+  quarantined=
+  [ -e "$tmp/db" ] || return 0
+  quarantined="$archives/netkeeper-$stamp.sqlite3.failed"
+  n=1
+  while [ -e "$quarantined" ]; do
+    quarantined="$archives/netkeeper-$stamp-$n.sqlite3.failed"
+    n=$((n + 1))
+  done
+  mv -- "$tmp/db" "$quarantined" ||
+    die "could not move the partial archive to $quarantined; it is still in $tmp, which this run is about to remove"
 }
 
 # Copy the live database into a run-private temporary file under $archives and
@@ -273,7 +276,11 @@ archive_db() {
   # the signal traps turn an interrupt into a normal exit so that trap runs,
   # instead of the shell's own default response to the signal bypassing it.
   trap 'rm -rf -- "$tmp"' EXIT
-  trap 'exit 130' INT TERM HUP
+  # Conventional 128+signal, not one catch-all code: a killed session's own
+  # exit status still says which signal it was (#183 re-review round 3 nit 4).
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
   work="$tmp/db"
   quoted=$(printf '%s' "$work" | sed "s/'/''/g")
   if ! sqlite3 "$db" "VACUUM INTO '$quoted'"; then
@@ -281,20 +288,33 @@ archive_db() {
     for suffix in '' '-wal' '-shm'; do
       [ -f "$db$suffix" ] || continue
       if ! cp -- "$db$suffix" "$work$suffix"; then
-        failed=$(quarantine_partial "$tmp")
-        if [ -n "$failed" ]; then
-          die "could not copy $db$suffix; moved the partial copy to $failed for inspection. The database was left in place."
+        quarantine_partial "$tmp"
+        if [ -n "$quarantined" ]; then
+          die "could not copy $db$suffix; moved the partial copy to $quarantined for inspection. The database was left in place."
         fi
         die "could not copy $db$suffix; nothing published. The database was left in place."
       fi
     done
-    sqlite3 "$work" 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;' >/dev/null 2>&1 || true
+    # A failed fold is fatal, not a warning this swallows (#183 re-review
+    # round 3 should-fix 2): the point of folding is making $work
+    # self-contained, and either the checkpoint itself failing, or -wal still
+    # carrying real content afterward (TRUNCATE did not fully run), means it
+    # is not -- quietly publishing it anyway would be an archive missing
+    # whatever was still in the WAL, with no sign that anything was wrong.
+    if ! sqlite3 "$work" 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;' >/dev/null 2>&1 ||
+      [ -s "$work-wal" ]; then
+      quarantine_partial "$tmp"
+      if [ -n "$quarantined" ]; then
+        die "could not fold the WAL; moved the partial copy to $quarantined for inspection. The database was left in place."
+      fi
+      die "could not fold the WAL; the database was left in place."
+    fi
     rm -f -- "$work-wal" "$work-shm"
   fi
   if ! verified "$work"; then
-    failed=$(quarantine_partial "$tmp")
-    if [ -n "$failed" ]; then
-      die "the archive did not pass SQLite's quick_check; moved it to $failed for inspection. The database was left in place."
+    quarantine_partial "$tmp"
+    if [ -n "$quarantined" ]; then
+      die "the archive did not pass SQLite's quick_check; moved it to $quarantined for inspection. The database was left in place."
     fi
     die "the archive did not pass SQLite's quick_check; nothing published. The database was left in place."
   fi
@@ -312,10 +332,10 @@ archive_db() {
       n=$((n + 1))
       continue
     fi
-    failed=$(quarantine_partial "$tmp")
+    quarantine_partial "$tmp"
     publish_fail_note="(a filesystem without hard-link support -- some network mounts -- fails this way too)"
-    if [ -n "$failed" ]; then
-      die "could not publish the archive to $candidate; moved it to $failed for inspection. The database was left in place. $publish_fail_note"
+    if [ -n "$quarantined" ]; then
+      die "could not publish the archive to $candidate; moved it to $quarantined for inspection. The database was left in place. $publish_fail_note"
     fi
     die "could not publish the archive to $candidate. The database was left in place. $publish_fail_note"
   done
@@ -326,10 +346,10 @@ archive_db() {
   # is already gone on the strength of a publish that never actually happened
   # where expected (#183 re-review should-fix 4).
   if ! { [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ "$candidate" -ef "$work" ]; }; then
-    failed=$(quarantine_partial "$tmp")
+    quarantine_partial "$tmp"
     note="a directory or a symlink to one was already there"
-    if [ -n "$failed" ]; then
-      die "$candidate did not end up as the archive itself ($note); moved the real copy to $failed for inspection. The database was left in place."
+    if [ -n "$quarantined" ]; then
+      die "$candidate did not end up as the archive itself ($note); moved the real copy to $quarantined for inspection. The database was left in place."
     fi
     die "$candidate did not end up as the archive itself ($note). The database was left in place."
   fi
