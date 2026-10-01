@@ -49,6 +49,24 @@ die() {
   exit 1
 }
 
+# One spelling for a path this script compares against another: absolute,
+# symlinks resolved, no trailing slash. Used for $profile itself, and for a
+# lock-file holder's own --user-data-dir, so two different spellings of the
+# same real directory still compare equal.
+canonicalize() {
+  path=$1
+  case $path in
+    /*) ;;
+    *) path="$PWD/$path" ;;
+  esac
+  if [ -d "$path" ]; then
+    path=$(cd "$path" && pwd -P)
+  elif [ -d "$(dirname "$path")" ]; then
+    path="$(cd "$(dirname "$path")" && pwd -P)/$(basename "$path")"
+  fi
+  printf '%s\n' "$path"
+}
+
 data_dir=
 profile=
 port=
@@ -87,6 +105,26 @@ elif command -v netkeeper >/dev/null 2>&1; then
   netkeeper_bin=$(command -v netkeeper)
 fi
 
+# The python netkeeper's own entry point names on its shebang line: reading it
+# with `head` follows a symlink transparently, straight to the real
+# console-script wherever it lives, so a `uv tool`/pipx install's symlinked
+# `netkeeper` on PATH still finds its interpreter even with nothing of that
+# name sitting beside the symlink itself (#183 review bug 3/should-fix 2). An
+# earlier version of this parsed the JSON with sed instead of asking for a
+# real interpreter at all; that mangled a profile path with a quote, a
+# backslash, or non-ASCII text in it (json.dumps escapes the last as \uXXXX),
+# so a real parser is worth finding a real interpreter for.
+netkeeper_python=
+if [ -n "$netkeeper_bin" ]; then
+  shebang=$(head -n1 "$netkeeper_bin" 2>/dev/null) || shebang=
+  case $shebang in
+    '#!'*)
+      candidate=${shebang#'#!'}
+      [ -x "$candidate" ] && netkeeper_python=$candidate
+      ;;
+  esac
+fi
+
 if [ -z "$port" ] || [ -z "$profile" ]; then
   answer=
   if [ -n "$netkeeper_bin" ]; then
@@ -96,21 +134,18 @@ if [ -z "$port" ] || [ -z "$profile" ]; then
       answer=$("$netkeeper_bin" browser launch --json 2>/dev/null) || answer=
     fi
   fi
-  # Pulled straight from the one-line JSON `browser launch --json` prints, with
-  # sed rather than a sibling `python`: under `uv tool` or pipx, `netkeeper` on
-  # PATH is a symlink, so there is no interpreter next to it to find (#183 review
-  # bug 3) -- and parsing without one sidesteps that rather than chasing it
-  # through `readlink`.
-  if [ -n "$answer" ]; then
-    asked_port=$(printf '%s' "$answer" | sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')
-    asked_profile=$(printf '%s' "$answer" | sed -n 's/.*"profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-    remote=$(printf '%s' "$answer" | sed -n 's/.*"remote"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-  else
-    asked_port=
-    asked_profile=
-    remote=
+  # One field per line: port, profile, remote note (empty when none).
+  fields=
+  if [ -n "$answer" ] && [ -n "$netkeeper_python" ]; then
+    fields=$(printf '%s' "$answer" | "$netkeeper_python" -c '
+import json, sys
+d = json.load(sys.stdin)
+print(d["port"]); print(d["profile"]); print(d["remote"] or "")' 2>/dev/null) || fields=
   fi
-  if [ -n "$asked_port" ] && [ -n "$asked_profile" ]; then
+  if [ -n "$fields" ]; then
+    asked_port=$(printf '%s\n' "$fields" | sed -n 1p)
+    asked_profile=$(printf '%s\n' "$fields" | sed -n 2p)
+    remote=$(printf '%s\n' "$fields" | sed -n 3p)
     if [ -z "$port" ] && [ -n "$remote" ]; then
       die "$remote"
     fi
@@ -132,18 +167,9 @@ case $port in
   *[!0-9]*) die "the port from \`netkeeper browser launch --json\` must be a number, not '$port'" ;;
 esac
 
-# One spelling of the profile, however it was given: absolute, symlinks
-# resolved, no trailing slash (pwd -P, and dirname/basename, drop it). Chrome gets this spelling, and every check
-# compares against it.
-case $profile in
-  /*) ;;
-  *) profile="$PWD/$profile" ;;
-esac
-if [ -d "$profile" ]; then
-  profile=$(cd "$profile" && pwd -P)
-elif [ -d "$(dirname "$profile")" ]; then
-  profile="$(cd "$(dirname "$profile")" && pwd -P)/$(basename "$profile")"
-fi
+# One spelling of the profile, however it was given. Chrome gets this
+# spelling, and every check compares against it.
+profile=$(canonicalize "$profile")
 
 # --- what is running ------------------------------------------------------------
 
@@ -181,14 +207,34 @@ lock_holder() {
     *chrome*|*chromium*) ;;
     *) return 0 ;;
   esac
+  cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 0
   # A renderer, GPU, or utility process never holds SingletonLock itself; a
   # reused pid landing on one belongs to some other Chrome entirely.
-  case $(ps -o command= -p "$pid" 2>/dev/null) in
+  case $cmd in
     *" --type="*) return 0 ;;
   esac
-  # The reused-pid case proper: confirm it has *this* profile's files open,
-  # not just that it is some Chrome or other.
-  lsof -a -p "$pid" -Fn 2>/dev/null | grep -qF "$profile/" || return 0
+  # The reused-pid case proper: confirm it has *this* profile open. Its own
+  # --user-data-dir, canonicalized the same way $profile is, is one
+  # independent sign (catches a spelling profile_pids() cannot match); lsof
+  # showing a file open under it is the other (#183 review nit 3).
+  tail=$(printf '%s' "$cmd" | sed -n 's/.*--user-data-dir=//p')
+  if [ -n "$tail" ]; then
+    flag=${tail%% --*}
+    if [ "$(canonicalize "$flag")" = "$profile" ]; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+  fi
+  lsof_out=$(lsof -a -p "$pid" -Fn 2>/dev/null)
+  if [ -z "$lsof_out" ]; then
+    # Nothing back at all -- a startup race, or lsof lacking permission to
+    # inspect it (sandboxing can hide even a same-user process's open files) --
+    # is not proof there is no holder; fail closed rather than clear a lock a
+    # real Chrome still has (#183 review nit 3).
+    printf '%s\n' "$pid"
+    return 0
+  fi
+  printf '%s\n' "$lsof_out" | grep -qF "$profile/" || return 0
   printf '%s\n' "$pid"
 }
 

@@ -136,8 +136,9 @@ class Sleeps:
         return gaps
 
 
-#: The seed ``_sync`` paces with. Its first draw is well over ``CANCEL_SLICE_S``, which
-#: the cancel tests' single-slice assertion relies on; the test that pins that says so.
+#: The seed ``_sync`` paces with by default. The one test whose assertion needs a
+#: specific draw length pins it directly instead (``_FixedDelayRandom``, below),
+#: rather than trusting this seed's draw to clear a margin (#183 review nit 7).
 PACING_SEED = 7
 
 

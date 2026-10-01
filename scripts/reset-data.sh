@@ -214,6 +214,23 @@ archive_path() {
   printf '%s\n' "$candidate"
 }
 
+# Move $1's main file aside as .failed for inspection (removing an old one
+# first), and discard any -wal/-shm it accumulated along the way. Prints the
+# .failed path, or nothing when $1 itself was never created -- there is
+# nothing to quarantine, just the generic "nothing deleted" the caller falls
+# back to. Used both when the raw-copy fallback fails partway and when the
+# result does not verify, so a partial or corrupt archive never sits in
+# archives/ looking like a good one (#183 review bug 5 and should-fix 1).
+quarantine_archive() {
+  target=$1
+  rm -f -- "$target-wal" "$target-shm"
+  [ -e "$target" ] || return 0
+  failed="$target.failed"
+  rm -f -- "$failed"
+  mv -- "$target" "$failed"
+  printf '%s\n' "$failed"
+}
+
 # Copy the live database to $1 and prove the copy is readable before anything is
 # deleted. VACUUM INTO writes one compacted file with the WAL already folded in.
 # If SQLite refuses, copy the raw files, then fold the WAL into the copy, so an
@@ -231,19 +248,20 @@ archive_db() {
     rm -f -- "$target"
     for suffix in '' '-wal' '-shm'; do
       [ -f "$db$suffix" ] || continue
-      cp -- "$db$suffix" "$target$suffix" || die "could not copy $db$suffix; nothing deleted"
+      if ! cp -- "$db$suffix" "$target$suffix"; then
+        failed=$(quarantine_archive "$target")
+        if [ -n "$failed" ]; then
+          die "could not copy $db$suffix; moved the partial archive to $failed for inspection. The database was left in place."
+        fi
+        die "could not copy $db$suffix; nothing deleted"
+      fi
     done
     sqlite3 "$target" 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;' >/dev/null 2>&1 || true
     rm -f -- "$target-wal" "$target-shm"
   fi
   if ! verified "$target"; then
-    # A failed archive stays out of archives/ rather than sitting there looking
-    # like a good one (#183 review bug 5): renamed aside when something was
-    # actually written, so it is still there to inspect.
-    if [ -e "$target" ]; then
-      failed="$target.failed"
-      rm -f -- "$failed"
-      mv -- "$target" "$failed"
+    failed=$(quarantine_archive "$target")
+    if [ -n "$failed" ]; then
       die "the archive did not pass SQLite's quick_check; moved it to $failed for inspection. The database was left in place."
     fi
     die "the archive $target did not pass SQLite's quick_check; the database was left in place"
