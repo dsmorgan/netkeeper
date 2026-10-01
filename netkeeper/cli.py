@@ -2628,7 +2628,8 @@ def do_not_send_remove(
     """Take an address off the list, so campaigns may send to it again (DELETE /do-not-send/{id}).
 
     A contact that still holds the address as bounced or invalid is still not sent to
-    there: mark it ok on the contact too.
+    there: mark it ok on the contact too. Merging that contact puts the address back on
+    the list. The prompt warns when the entry also records a bounce, which goes with it.
     """
     with _campaign_db() as factory:
         # Read, then ask, then write: a writer held across the prompt would lock out serve.
@@ -2643,9 +2644,13 @@ def do_not_send_remove(
                 typer.echo(f"error: {entry!r} is not on the do-not-send list", err=True)
                 raise typer.Exit(code=1)
             entry_id, address, reason = found.id, found.email, found.reason.value
-        if not yes and not typer.confirm(
+            also_bounced = do_not_send.also_bounced(found)
+        question = (
             f"take {address} ({reason}) off the do-not-send list? Campaigns may send to it again"
-        ):
+        )
+        if also_bounced:
+            question += ". This address also bounced; removing the entry allows email to it again"
+        if not yes and not typer.confirm(question):
             typer.echo(f"cancelled: {address} stays on the list")
             raise typer.Exit(code=1)
         with session_scope(factory, write=True) as session:

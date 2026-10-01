@@ -2328,16 +2328,16 @@ def test_0029_lists_every_bounced_invalid_and_opted_out_address(
     with migration_engine.begin() as connection:
         rows = connection.execute(
             text(
-                "SELECT user_id, email, reason, contact_id FROM do_not_send_addresses"
+                "SELECT user_id, email, reason, bounced, contact_id FROM do_not_send_addresses"
                 " ORDER BY user_id, email"
             )
         ).all()
-    assert [tuple(row) for row in rows] == [
-        (1, "a+x@example.test", "opted_out", 3),
-        (1, "a@example.test", "bounced", 1),
-        (1, "b@example.test", "invalid", 2),
-        (1, "c@example.test", "opted_out", 3),
-        (2, "d@example.test", "bounced", 4),
+    assert [(r.user_id, r.email, r.reason, bool(r.bounced), r.contact_id) for r in rows] == [
+        (1, "a+x@example.test", "opted_out", False, 3),
+        (1, "a@example.test", "bounced", True, 1),
+        (1, "b@example.test", "invalid", False, 2),
+        (1, "c@example.test", "opted_out", False, 3),
+        (2, "d@example.test", "bounced", True, 4),
     ]
 
 
@@ -2349,8 +2349,9 @@ def test_0029_entries_outlive_their_contact_and_are_unique_per_user(
         _seed_address_statuses(connection)
         connection.execute(
             text(
-                "INSERT INTO do_not_send_addresses (user_id, email, reason, contact_id,"
-                " created_at, updated_at) VALUES (1, 'z@example.test', 'bounced', 1, :t, :t)"
+                "INSERT INTO do_not_send_addresses (user_id, email, reason, bounced, contact_id,"
+                " created_at, updated_at)"
+                " VALUES (1, 'z@example.test', 'bounced', true, 1, :t, :t)"
             ),
             {"t": STAMP},
         )
@@ -2363,16 +2364,18 @@ def test_0029_entries_outlive_their_contact_and_are_unique_per_user(
     with pytest.raises(IntegrityError), migration_engine.begin() as connection:
         connection.execute(
             text(
-                "INSERT INTO do_not_send_addresses (user_id, email, reason, contact_id,"
-                " created_at, updated_at) VALUES (1, 'z@example.test', 'manual', NULL, :t, :t)"
+                "INSERT INTO do_not_send_addresses (user_id, email, reason, bounced, contact_id,"
+                " created_at, updated_at)"
+                " VALUES (1, 'z@example.test', 'manual', false, NULL, :t, :t)"
             ),
             {"t": STAMP},
         )
     with pytest.raises(IntegrityError), migration_engine.begin() as connection:
         connection.execute(
             text(
-                "INSERT INTO do_not_send_addresses (user_id, email, reason, contact_id,"
-                " created_at, updated_at) VALUES (1, 'y@example.test', 'bogus', NULL, :t, :t)"
+                "INSERT INTO do_not_send_addresses (user_id, email, reason, bounced, contact_id,"
+                " created_at, updated_at)"
+                " VALUES (1, 'y@example.test', 'bogus', false, NULL, :t, :t)"
             ),
             {"t": STAMP},
         )
@@ -2391,3 +2394,63 @@ def test_0029_downgrades_to_no_list(migration_engine: Engine) -> None:
     migrations.upgrade(migration_engine, "0029")  # and back up again, filled the same way
     with migration_engine.begin() as connection:
         assert _count(connection, "do_not_send_addresses") == 5
+
+
+def test_0029_lists_an_unsubscribe_on_a_completed_enrollment_with_its_bounce(
+    migration_engine: Engine,
+) -> None:
+    """The enrollment had completed when the reply asked to unsubscribe, so it never became
+    ``opted_out``: the message alone lists the contact's addresses. One of them had also
+    bounced, and the entry keeps that."""
+    migrations.upgrade(migration_engine, "0028")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_contact(connection, id=1, user_id=1)
+        _insert_email(connection, contact_id=1, email="u@example.test", status="ok")
+        _insert_email(connection, contact_id=1, email="old@example.test", status="bounced")
+        _insert_contact(connection, id=2, user_id=1)  # a reply that did not ask: not listed
+        _insert_email(connection, contact_id=2, email="r@example.test", status="ok")
+        _insert_campaign(connection, id=1)
+        for enrollment_id, contact_id in ((1, 1), (2, 2)):
+            _insert_enrollment(connection, id=enrollment_id, campaign_id=1, contact_id=contact_id)
+            _insert_message(
+                connection,
+                id=enrollment_id,
+                enrollment_id=enrollment_id,
+                contact_id=contact_id,
+                direction="in",
+                status="received",
+            )
+        connection.execute(text("UPDATE enrollments SET status = 'completed'"))
+        connection.execute(text("UPDATE messages SET asks_unsubscribe = true WHERE id = 1"))
+    migrations.upgrade(migration_engine, "0029")
+    with migration_engine.begin() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT email, reason, bounced, contact_id FROM do_not_send_addresses"
+                " ORDER BY email"
+            )
+        ).all()
+    assert [(r.email, r.reason, bool(r.bounced), r.contact_id) for r in rows] == [
+        ("old@example.test", "opted_out", True, 1),
+        ("u@example.test", "opted_out", False, 1),
+    ]
+
+
+def test_0029_breaks_a_tie_between_equal_reasons_by_the_lowest_contact_id(
+    migration_engine: Engine,
+) -> None:
+    migrations.upgrade(migration_engine, "0028")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        for contact_id in (9, 4, 7):
+            _insert_contact(connection, id=contact_id, user_id=1)
+            _insert_email(
+                connection, contact_id=contact_id, email="Same@example.test", status="bounced"
+            )
+    migrations.upgrade(migration_engine, "0029")
+    with migration_engine.begin() as connection:
+        rows = connection.execute(
+            text("SELECT email, reason, contact_id FROM do_not_send_addresses")
+        ).all()
+    assert [tuple(r) for r in rows] == [("same@example.test", "bounced", 4)]

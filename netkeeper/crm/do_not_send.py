@@ -63,6 +63,8 @@ def add(
 ) -> DoNotSendAddress:
     """Put ``email`` on the list, or keep the stronger reason when it is there already.
 
+    A bounce always sets the entry's ``bounced`` flag, even under a stronger reason.
+
     An entry already there keeps its contact. ``ValueError`` for an empty address.
     The address is taken as found (a bounce notice's, a contact's): only what a person
     types is held to one bare address, by :func:`add_by_hand`. Needs a writer session.
@@ -74,12 +76,14 @@ def add(
     ).one_or_none()
     if entry is None:
         entry = DoNotSendAddress(
-            user_id=user.id, email=address, reason=reason, contact_id=contact_id
+            user_id=user.id, email=address, reason=reason, bounced=False, contact_id=contact_id
         )
         session.add(entry)
         log.info("do-not-send: entry added (%s)", reason.value)
     elif DO_NOT_SEND_RANK[reason] > DO_NOT_SEND_RANK[entry.reason]:
         entry.reason = reason
+    if reason is DoNotSendReason.BOUNCED:
+        entry.bounced = True
     if entry.contact_id is None:
         entry.contact_id = contact_id
     session.flush()
@@ -106,9 +110,14 @@ def remove(session: Session, user: User, entry_id: int) -> DoNotSendAddress:
     """Take an entry off the list: a person's explicit action. :class:`NotFound` for one
     that is not the user's. Returns the removed entry. Needs a writer session.
 
+    The whole entry goes, its ``bounced`` flag with it: callers that ask a person
+    first say so when the entry's reason is not ``bounced`` but the flag is
+    (:func:`also_bounced`).
+
     A contact that still holds the address as ``bounced`` or ``invalid`` keeps that
     status: the guards still refuse it on that contact, and on any other contact with
     the same address (``address_bounced_elsewhere``), until it is marked ``ok`` there.
+    A merge of that contact lists the address again.
     """
     _require_writer(session)
     entry = get(session, user, entry_id)
@@ -123,6 +132,11 @@ def remove(session: Session, user: User, entry_id: int) -> DoNotSendAddress:
 def get(session: Session, user: User, entry_id: int) -> DoNotSendAddress | None:
     """The user's entry with this id, if there is one."""
     return get_scoped(session, user, DoNotSendAddress, entry_id)
+
+
+def also_bounced(entry: DoNotSendAddress) -> bool:
+    """Whether removing ``entry`` also clears a bounce its reason does not show."""
+    return entry.bounced and entry.reason is not DoNotSendReason.BOUNCED
 
 
 def find(session: Session, user: User, email: str) -> DoNotSendAddress | None:

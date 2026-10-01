@@ -21,9 +21,10 @@ from pathlib import Path
 
 import factories
 import pytest
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
-from netkeeper.crm import import_runs
+from netkeeper.crm import contacts as contact_service
+from netkeeper.crm import do_not_send, import_runs
 from netkeeper.crm.exports import (
     FORMULA_TRIGGERS,
     FULL_FIELDS,
@@ -40,13 +41,15 @@ from netkeeper.crm.importer import ImportField, get_preset
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
 from netkeeper.models import (
     Base,
+    Contact,
     ContactLink,
     ContactSnapshot,
+    DoNotSendReason,
     EmailStatus,
     LinkKind,
     User,
 )
-from netkeeper.scoping import install_scope_guard
+from netkeeper.scoping import get_scoped, install_scope_guard
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
 
@@ -671,6 +674,64 @@ def test_campaign_audience_keeps_a_contact_whose_only_address_bounced_without_it
     (row,) = json.loads(_run(session, user, preset="campaign-audience", output_format="json"))
     assert row["email"] is None
     assert row["linkedin_profile_url"] == contact.li_url
+
+
+def test_campaign_audience_skips_an_address_bounced_on_a_deleted_contact(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#238 review probe (a): A bounced, so its address is listed; A is deleted. B holds the
+    same address as ok, and must not be exported with it."""
+    with session_scope(session_factory, write=True) as writer:
+        user = factories.make_user(writer)
+        a = factories.make_contact(writer, user, emails=["shared@example.test"])
+        contact_service.update_email(writer, user, a.id, a.emails[0].id, {"status": "bounced"})
+        writer.delete(a)
+        b = factories.make_contact(
+            writer, user, emails=["shared@example.test", "other@example.test"]
+        )
+        c = factories.make_contact(writer, user, emails=["SHARED@example.test"])
+        b_id, c_id, user_id = b.id, c.id, user.id
+    with session_scope(session_factory) as reader:
+        found = reader.get(User, user_id)
+        assert found is not None
+        user = found
+        rows = json.loads(_run(reader, user, preset="campaign-audience", output_format="json"))
+        by_url = {r["linkedin_profile_url"]: r["email"] for r in rows}
+        urls = {
+            contact_id: get_scoped(reader, user, Contact, contact_id).li_url  # type: ignore[union-attr]
+            for contact_id in (b_id, c_id)
+        }
+        assert by_url == {urls[b_id]: "other@example.test", urls[c_id]: None}
+        text = _run(reader, user, preset="campaign-audience", output_format="csv")
+        assert "shared@example.test" not in text.lower()
+
+
+def test_campaign_audience_drops_a_contact_holding_an_opted_out_address(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#238 review probe (b): the address opted out, the contact holding it never got
+    ``do_not_contact``. The row is dropped, as a do-not-contact one is. A ``+tag`` address
+    is someone else."""
+    with session_scope(session_factory, write=True) as writer:
+        user = factories.make_user(writer)
+        held = factories.make_contact(
+            writer, user, emails=["work@example.test", "home@example.test"]
+        )
+        tagged = factories.make_contact(writer, user, emails=["home+nk1@example.test"])
+        do_not_send.add(writer, user, "home@example.test", DoNotSendReason.OPTED_OUT)
+        assert not held.do_not_contact
+        tagged_id, user_id = tagged.id, user.id
+    with session_scope(session_factory) as reader:
+        found = reader.get(User, user_id)
+        assert found is not None
+        user = found
+        rows = json.loads(_run(reader, user, preset="campaign-audience", output_format="json"))
+        assert [r["email"] for r in rows] == ["home+nk1@example.test"]
+        kept = get_scoped(reader, user, Contact, tagged_id)
+        assert kept is not None and rows[0]["linkedin_profile_url"] == kept.li_url
+        # The re-importable presets are a copy of the data, not a send list.
+        nine = _run(reader, user, preset="nine-column", output_format="csv")
+        assert "work@example.test" in nine
 
 
 def test_campaign_audience_still_exports_an_invalid_address(session: Session) -> None:

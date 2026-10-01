@@ -96,3 +96,17 @@ def test_removing_what_is_not_there_fails(cli_db: sessionmaker[Session]) -> None
         result = runner.invoke(cli, ["do-not-send", "remove", entry, "--yes"])
         assert result.exit_code == 1
         assert "not on the do-not-send list" in result.output
+
+
+def test_remove_warns_when_the_entry_also_bounced(cli_db: sessionmaker[Session]) -> None:
+    with session_scope(cli_db, write=True) as session:
+        user = ensure_local_user(session)
+        do_not_send.add(session, user, "ada@example.test", DoNotSendReason.BOUNCED)
+        do_not_send.add(session, user, "ada@example.test", DoNotSendReason.OPTED_OUT)
+        do_not_send.add(session, user, "bob@example.test", DoNotSendReason.OPTED_OUT)
+    warned = runner.invoke(cli, ["do-not-send", "remove", "ada@example.test"], input="n\n")
+    assert "This address also bounced; removing the entry allows email to it again" in (
+        warned.output
+    )
+    plain = runner.invoke(cli, ["do-not-send", "remove", "bob@example.test"], input="n\n")
+    assert "also bounced" not in plain.output

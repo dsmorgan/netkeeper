@@ -392,3 +392,58 @@ def test_a_merge_keeps_plus_tag_addresses_apart(writer: Session, user: User) -> 
         ("name+nk2@gmail.com", EmailStatus.BOUNCED),
     ]
     assert _listed(writer, user) == {"name+nk2@gmail.com": DoNotSendReason.BOUNCED}
+
+
+@pytest.mark.parametrize("status", [EmailStatus.BOUNCED, EmailStatus.INVALID])
+def test_changing_the_text_of_a_bounced_or_invalid_address_lists_the_new_one(
+    writer: Session, user: User, status: EmailStatus
+) -> None:
+    """The row keeps its status under the new text, so the new address is listed as well."""
+    contact = factories.make_contact(writer, user, emails=["old@example.test"])
+    email_id = contact.emails[0].id
+    contact_service.update_email(writer, user, contact.id, email_id, {"status": status})
+    contact_service.update_email(writer, user, contact.id, email_id, {"email": "New@example.test"})
+    reason = DoNotSendReason(status.value)
+    assert _listed(writer, user) == {"old@example.test": reason, "new@example.test": reason}
+
+
+def test_changing_the_text_of_an_ok_address_lists_nothing(writer: Session, user: User) -> None:
+    contact = factories.make_contact(writer, user, emails=["old@example.test"])
+    contact_service.update_email(
+        writer, user, contact.id, contact.emails[0].id, {"email": "new@example.test"}
+    )
+    assert do_not_send.entries(writer, user) == []
+
+
+def test_a_bounce_under_an_opt_out_is_kept_as_a_flag(writer: Session, user: User) -> None:
+    """One reason per entry, the strongest; a bounce is never hidden by it."""
+    entry = do_not_send.add(writer, user, "ada@example.test", DoNotSendReason.BOUNCED)
+    assert (entry.reason, entry.bounced, do_not_send.also_bounced(entry)) == (
+        DoNotSendReason.BOUNCED,
+        True,
+        False,
+    )
+    do_not_send.add(writer, user, "ada@example.test", DoNotSendReason.OPTED_OUT)
+    assert (entry.reason, entry.bounced, do_not_send.also_bounced(entry)) == (
+        DoNotSendReason.OPTED_OUT,
+        True,
+        True,
+    )
+    opted = do_not_send.add(writer, user, "bob@example.test", DoNotSendReason.OPTED_OUT)
+    do_not_send.add(writer, user, "bob@example.test", DoNotSendReason.INVALID)
+    assert (opted.bounced, do_not_send.also_bounced(opted)) == (False, False)
+
+
+def test_a_merge_lists_again_a_bounce_a_person_removed(
+    writer: Session, user: User, campaign: Campaign
+) -> None:
+    """Removing the entry leaves the contact's own bounced status; a merge lists it again."""
+    survivor = factories.make_contact(writer, user, emails=["shared@example.test"])
+    loser = factories.make_contact(writer, user, emails=["other@example.test"])
+    contact_service.update_email(
+        writer, user, survivor.id, survivor.emails[0].id, {"status": "bounced"}
+    )
+    [entry] = do_not_send.entries(writer, user)
+    do_not_send.remove(writer, user, entry.id)
+    contact_service.merge_contacts(writer, user, survivor.id, loser.id)
+    assert _listed(writer, user) == {"shared@example.test": DoNotSendReason.BOUNCED}

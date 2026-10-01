@@ -3641,6 +3641,8 @@ export interface components {
         };
         /** DoNotSendOut */
         DoNotSendOut: {
+            /** Bounced */
+            bounced: boolean;
             /** Contact Id */
             contact_id: number | null;
             /**

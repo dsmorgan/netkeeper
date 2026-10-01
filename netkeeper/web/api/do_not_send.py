@@ -31,6 +31,9 @@ class DoNotSendOut(BaseModel):
     email: str
     """Trimmed and lowercased; a ``+tag`` is part of the address."""
     reason: DoNotSendReason
+    """The strongest reason the address is listed for."""
+    bounced: bool
+    """A message to it bounced, whatever ``reason`` says. Removing the entry clears this too."""
     contact_id: int | None
     """The contact the address was found on; ``null`` when added by hand or since deleted."""
     created_at: datetime
@@ -45,6 +48,7 @@ def _out(entry: DoNotSendAddress) -> DoNotSendOut:
         id=entry.id,
         email=entry.email,
         reason=entry.reason,
+        bounced=entry.bounced,
         contact_id=entry.contact_id,
         created_at=entry.created_at,
     )

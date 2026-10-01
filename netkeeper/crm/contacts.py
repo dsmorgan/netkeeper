@@ -722,7 +722,8 @@ def update_email(
     """Change an address's fields; the row becomes the person's own observation.
 
     ``ValueError`` for a new address that is not one bare address, as :func:`add_email`.
-    Marking an address ``bounced`` or ``invalid`` puts it on the do-not-send list;
+    Marking an address ``bounced`` or ``invalid``, or changing the text of one that is,
+    puts the address on the do-not-send list;
     marking it ``ok`` again does not take it off (:mod:`netkeeper.crm.do_not_send`).
     """
     _require_writer(session)
@@ -740,7 +741,7 @@ def update_email(
     _apply_primary(contact.emails, row, changes)
     _touch(row)
     session.flush()
-    if "status" in changes:
+    if "status" in changes or "email" in changes:  # a bounced row's new address too
         do_not_send.add_for_status(session, user, row.email, row.status, contact_id=contact.id)
     return row
 

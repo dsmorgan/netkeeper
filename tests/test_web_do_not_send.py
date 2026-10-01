@@ -40,9 +40,9 @@ async def test_list_add_and_remove(running_app: FastAPI, client: httpx.AsyncClie
     assert added.json()["email"] == "name+nk1@example.test"  # the +tag is kept
 
     listed = (await client.get("/api/v1/do-not-send")).json()
-    assert [(e["email"], e["reason"], e["contact_id"]) for e in listed] == [
-        ("name+nk1@example.test", "manual", None),
-        ("ada@example.test", "bounced", seed["contact"]),
+    assert [(e["email"], e["reason"], e["bounced"], e["contact_id"]) for e in listed] == [
+        ("name+nk1@example.test", "manual", False, None),
+        ("ada@example.test", "bounced", True, seed["contact"]),
     ]
 
     removed = await client.delete(f"/api/v1/do-not-send/{seed['bounced']}", headers=CSRF)

@@ -39,7 +39,8 @@ export function DoNotSendSection() {
         <h2 className="font-heading text-sm leading-snug font-medium">Do-not-send list</h2>
         <CardDescription>
           Addresses no campaign sends to, whichever contact holds them. An address with a +tag is
-          its own address.
+          its own address. Merging a contact that still has an address marked bounced or invalid
+          puts the address back on the list, even if you removed it here.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2 text-sm">
@@ -86,8 +87,12 @@ export function DoNotSendSection() {
           if (removing !== null) remove.mutate(removing.id)
         }}
       >
-        Campaigns may send to {removing?.email} again. A contact that still has it marked bounced or
-        invalid stays excluded until you mark it OK there.
+        Campaigns may send to {removing?.email} again.{' '}
+        {removing !== null && removing.bounced && removing.reason !== 'bounced' && (
+          <strong>This address also bounced; removing the entry allows email to it again. </strong>
+        )}
+        A contact that still has it marked bounced or invalid stays excluded until you mark it OK
+        there, and merging that contact puts the address back on the list.
       </ConfirmDialog>
     </Card>
   )
