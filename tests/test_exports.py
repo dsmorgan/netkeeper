@@ -735,7 +735,8 @@ def test_campaign_audience_drops_a_contact_holding_an_opted_out_address(
 
 
 def test_campaign_audience_still_exports_an_invalid_address(session: Session) -> None:
-    """Only ``bounced`` is held out; ``invalid`` stays, by the maintainer's decision (#215)."""
+    """An ``invalid`` status set with no list entry (one a person removed, or set before the
+    list existed) still exports; a listed one does not (#215, #238)."""
     user = factories.make_user(session)
     contact = factories.make_contact(session, user, emails=["invalid@example.test"])
     contact.emails[0].status = EmailStatus.INVALID

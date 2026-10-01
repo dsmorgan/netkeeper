@@ -395,16 +395,50 @@ def test_a_merge_keeps_plus_tag_addresses_apart(writer: Session, user: User) -> 
 
 
 @pytest.mark.parametrize("status", [EmailStatus.BOUNCED, EmailStatus.INVALID])
-def test_changing_the_text_of_a_bounced_or_invalid_address_lists_the_new_one(
+def test_correcting_the_text_of_a_bounced_or_invalid_address_starts_it_clean(
     writer: Session, user: User, status: EmailStatus
 ) -> None:
-    """The row keeps its status under the new text, so the new address is listed as well."""
-    contact = factories.make_contact(writer, user, emails=["old@example.test"])
+    """jon@ bounced and is corrected to john@: the bounce was jon@'s, which stays listed;
+    john@ is not listed and the row is ok."""
+    contact = factories.make_contact(writer, user, emails=["jon@example.test"])
     email_id = contact.emails[0].id
     contact_service.update_email(writer, user, contact.id, email_id, {"status": status})
-    contact_service.update_email(writer, user, contact.id, email_id, {"email": "New@example.test"})
-    reason = DoNotSendReason(status.value)
-    assert _listed(writer, user) == {"old@example.test": reason, "new@example.test": reason}
+    row = contact_service.update_email(
+        writer, user, contact.id, email_id, {"email": "John@example.test"}
+    )
+    assert (row.email, row.status) == ("john@example.test", EmailStatus.OK)
+    [entry] = do_not_send.entries(writer, user)
+    assert (entry.email, entry.reason, entry.bounced) == (
+        "jon@example.test",
+        DoNotSendReason(status.value),
+        status is EmailStatus.BOUNCED,
+    )
+
+
+def test_correcting_an_address_lists_the_old_text_even_if_it_was_never_listed(
+    writer: Session, user: User
+) -> None:
+    """A status set straight on the row (as before this list existed) still moves to the list."""
+    contact = factories.make_contact(writer, user, emails=["jon@example.test"])
+    contact.emails[0].status = EmailStatus.BOUNCED
+    writer.flush()
+    contact_service.update_email(
+        writer, user, contact.id, contact.emails[0].id, {"email": "john@example.test"}
+    )
+    assert _listed(writer, user) == {"jon@example.test": DoNotSendReason.BOUNCED}
+
+
+def test_new_text_with_a_bounced_status_lists_the_new_text(writer: Session, user: User) -> None:
+    contact = factories.make_contact(writer, user, emails=["jon@example.test"])
+    row = contact_service.update_email(
+        writer,
+        user,
+        contact.id,
+        contact.emails[0].id,
+        {"email": "john@example.test", "status": "bounced"},
+    )
+    assert row.status is EmailStatus.BOUNCED
+    assert _listed(writer, user) == {"john@example.test": DoNotSendReason.BOUNCED}
 
 
 def test_changing_the_text_of_an_ok_address_lists_nothing(writer: Session, user: User) -> None:

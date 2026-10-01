@@ -110,3 +110,5 @@ def test_remove_warns_when_the_entry_also_bounced(cli_db: sessionmaker[Session])
     )
     plain = runner.invoke(cli, ["do-not-send", "remove", "bob@example.test"], input="n\n")
     assert "also bounced" not in plain.output
+    for result in (warned, plain):
+        assert "it stays blocked until that contact's status is marked ok" in result.output
