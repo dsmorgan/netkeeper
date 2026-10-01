@@ -653,6 +653,125 @@ async def test_a_re_offer_that_fires_late_after_a_sleep_never_doubles_the_full_s
     assert fired.next_due > first.next_due + timedelta(days=7)  # later than due + interval
 
 
+@pytest.mark.parametrize(
+    ("kind", "interval", "slept"),
+    [
+        (scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7), timedelta(days=6.99)),
+        (scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7), timedelta(days=6.9)),
+        (scheduler.JobKind.CONNECTIONS_INCREMENTAL, timedelta(days=1), timedelta(hours=23.9)),
+    ],
+    ids=["full-6.99d", "full-6.9d", "incremental-23.9h"],
+)
+async def test_a_fire_after_a_sleep_is_followed_a_whole_interval_later(
+    session_factory: sessionmaker[Session],
+    kind: scheduler.JobKind,
+    interval: timedelta,
+    slept: timedelta,
+) -> None:
+    """#309 re-review, F1: ``serve`` stayed alive while the machine slept for just under
+    an interval, so the fire runs on waking, not as a catch-up. Anchored to its due time,
+    the next fire would follow minutes or hours later; it is a whole interval after the
+    wake fire instead."""
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    schedule = scheduler.JobSchedule(kind, interval)
+    due = _establish(session_factory, owner, 1, schedule)
+    woke = due + slept
+    fired = await _fire_weekly(session_factory, owner, schedule, woke, None)
+    assert fired.due == due and not fired.is_catchup
+    assert fired.next_due == woke + interval
+    assert fired.next_due > due + interval  # later than before the fix, never sooner
+
+
+@pytest.mark.parametrize("late", [timedelta(0), timedelta(minutes=1), timedelta(minutes=5)])
+async def test_an_on_time_fire_keeps_its_cadence(
+    session_factory: sessionmaker[Session], late: timedelta
+) -> None:
+    """Within :data:`LATE_FIRE_SLACK` of its due time a fire is on time: the next one is
+    anchored to the due time, so the cadence never drifts with polling."""
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    weekly = scheduler.JobSchedule(scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7))
+    due = _establish(session_factory, owner, 1, weekly)
+    fired = await _fire_weekly(session_factory, owner, weekly, due + late, None)
+    assert fired.next_due == due + timedelta(days=7)
+
+
+def test_the_late_fire_slack_is_pinned() -> None:
+    assert timedelta(minutes=5) == scheduler.LATE_FIRE_SLACK
+
+
+def _record_with_resume(
+    session_factory: sessionmaker[Session],
+    owner: User,
+    schedule: scheduler.JobSchedule,
+    *,
+    due: datetime,
+    resume_due: datetime,
+) -> datetime:
+    """Store a re-offer at ``due`` standing in front of ``resume_due``, and fire it on time."""
+    with session_scope(session_factory, write=True) as session:
+        state = scheduler._load_state(session, owner, 1, schedule.kind)
+        assert state is not None
+        scheduler._store_state(
+            session,
+            owner,
+            1,
+            schedule.kind,
+            dataclasses.replace(state, due=due, resume_due=resume_due),
+        )
+        return scheduler.record_fired(
+            session,
+            owner,
+            1,
+            schedule.kind,
+            due=due,
+            schedule=schedule,
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+            now=due,
+        )
+
+
+def test_a_re_offer_exactly_a_day_before_the_normal_time_goes_back_to_it(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#309 re-review, F3: the boundary. ``resume_due`` exactly NOT_DONE_RETRY after the
+    re-offer ran is still followed."""
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    weekly = scheduler.JobSchedule(scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7))
+    due = _establish(session_factory, owner, 1, weekly)
+    resume = due + scheduler.NOT_DONE_RETRY
+    assert _record_with_resume(session_factory, owner, weekly, due=due, resume_due=resume) == resume
+    # A second less than a day away, and the next fire is a whole interval out instead.
+    again = _record_with_resume(
+        session_factory, owner, weekly, due=due, resume_due=resume - timedelta(seconds=1)
+    )
+    assert again == due + timedelta(days=7)
+
+
+def test_a_re_offer_on_an_interval_shorter_than_a_day_is_refused(
+    session_factory: sessionmaker[Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    """#309 re-review, F2: the re-offer logic assumes an interval of at least
+    NOT_DONE_RETRY. A state that carries a re-offer on a shorter one is refused that
+    logic -- never sooner than the due time it stood in front of, nor than a whole
+    interval after the fire."""
+    with session_scope(session_factory, write=True) as session:
+        owner = factories.make_user(session, timezone="UTC")
+    short = scheduler.JobSchedule(scheduler.JobKind.ENRICH, timedelta(hours=3))
+    due = _establish(session_factory, owner, 1, short)
+    far = due + timedelta(days=2)
+    assert _record_with_resume(session_factory, owner, short, due=due, resume_due=far) == far
+    near = due + timedelta(hours=1)
+    assert _record_with_resume(
+        session_factory, owner, short, due=due, resume_due=near
+    ) == due + timedelta(hours=3)
+    assert "carries a re-offer" in caplog.text
+
+
 async def test_a_retried_re_offer_is_still_a_re_offer(
     session_factory: sessionmaker[Session],
 ) -> None:
