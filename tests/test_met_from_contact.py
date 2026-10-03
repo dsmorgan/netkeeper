@@ -207,3 +207,60 @@ async def test_the_jump_refuses_archived_merged_and_missing_contacts(
         contact.archived_at = NOW
     assert (await client.get(f"{TRIAGE}/contacts/{people[0]}")).status_code == 404
     assert (await client.get(f"{TRIAGE}/contacts/999999")).status_code == 404
+
+
+async def test_an_unchanged_met_logs_no_decision(
+    running_app: FastAPI, client: httpx.AsyncClient, people: list[int]
+) -> None:
+    await _patch_met(client, people[0], "met")
+    await _patch_met(client, people[0], "met")
+    _contact, decisions = _row(running_app, people[0])
+    assert len(decisions) == 1
+
+
+async def test_met_on_an_archived_contact_is_refused_and_undo_still_works(
+    running_app: FastAPI, client: httpx.AsyncClient, people: list[int]
+) -> None:
+    a, b = people[0], people[1]
+    decided = await client.post(
+        f"{TRIAGE}/decisions", json={"contact_id": a, "met": "met"}, headers=CSRF
+    )
+    assert decided.status_code == 201, decided.text
+    archived = await client.post(f"{CONTACTS}/{b}/archive", headers=CSRF)
+    assert archived.status_code == 200, archived.text
+
+    refused = await client.patch(f"{CONTACTS}/{b}", json={"met": "met"}, headers=CSRF)
+    assert refused.status_code == 409, refused.text
+    contact_b, decisions = _row(running_app, b)
+    assert contact_b.met is ContactMet.UNKNOWN
+    assert [row.contact_id for row in decisions] == [a]
+
+    undone = await client.post(f"{TRIAGE}/undo", headers=CSRF)
+    assert undone.status_code == 200, undone.text
+    contact_a, _ = _row(running_app, a)
+    assert contact_a.met is ContactMet.UNKNOWN
+
+
+async def test_bulk_clear_met_clears_the_triage_stamp(
+    running_app: FastAPI, client: httpx.AsyncClient, people: list[int]
+) -> None:
+    await _patch_met(client, people[0], "met")
+    counted = await client.post(
+        f"{CONTACTS}/bulk/count",
+        json={"selection": {"ids": [people[0]]}, "action": "set_met", "value": "unknown"},
+        headers=CSRF,
+    )
+    assert counted.status_code == 200, counted.text
+    applied = await client.post(
+        f"{CONTACTS}/bulk",
+        json={
+            "selection": {"ids": [people[0]]},
+            "action": "set_met",
+            "value": "unknown",
+            "token": counted.json()["token"],
+        },
+        headers=CSRF,
+    )
+    assert applied.status_code == 200, applied.text
+    contact, _ = _row(running_app, people[0])
+    assert (contact.met, contact.triaged_at) == (ContactMet.UNKNOWN, None)

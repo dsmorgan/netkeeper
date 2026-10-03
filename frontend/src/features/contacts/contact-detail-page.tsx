@@ -170,6 +170,7 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
             </CardDescription>
           </CardHeader>
           <CardContent>
+            <MetEditor contact={contact} archived={archived} />
             {EDITABLE.map((entry) => (
               <FieldEditor
                 key={entry.field}
@@ -179,7 +180,6 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
                 kind={entry.kind}
               />
             ))}
-            <MetEditor contact={contact} />
             <DoNotContactEditor contact={contact} />
           </CardContent>
         </Card>

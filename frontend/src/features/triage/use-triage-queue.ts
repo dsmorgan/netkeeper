@@ -483,10 +483,22 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
     void enqueue(load)
   }, [enqueue, load])
 
-  /** Fold a refill answer into the buffer and move the frontier with it. */
+  /**
+   * Fold a refill answer into the buffer and move the frontier with it.
+   *
+   * Returns `true` when the card was one this run already holds or has passed
+   * (a contact jumped to from past the frontier, then skipped, comes round
+   * again in the Skipped and Both queues). It is dropped rather than shown
+   * twice, and the caller asks for the one after it (#322).
+   */
   const absorb = useCallback(
-    (card: TriageCard | null, progress: TriageProgress, settle: PendingCounts | null) => {
+    (card: TriageCard | null, progress: TriageProgress, settle: PendingCounts | null): boolean => {
       if (card !== null) frontierRef.current = card.contact.id
+      const known = stateRef.current
+      const duplicate =
+        card !== null &&
+        (known.cards.some((held) => held.contact.id === card.contact.id) ||
+          known.passed.some((entry) => entry.card.contact.id === card.contact.id))
       commit((state) => ({
         ...state,
         progress,
@@ -497,11 +509,29 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
                 triaged: state.pending.triaged - settle.triaged,
                 removed: state.pending.removed - settle.removed,
               },
-        cards: card === null ? state.cards : [...state.cards, card],
+        cards: card === null || duplicate ? state.cards : [...state.cards, card],
         exhausted: card === null,
       }))
+      return duplicate
     },
     [commit],
+  )
+
+  /** After a dropped duplicate, keep asking for the next contact until one is new. */
+  const pastDuplicates = useCallback(
+    async (duplicate: boolean): Promise<void> => {
+      let again = duplicate
+      while (again) {
+        const queue = await fetchQueue({
+          states,
+          decidedBy,
+          afterId: frontierRef.current,
+          prefetch: false,
+        })
+        again = absorb(queue.card, queue.progress, null)
+      }
+    },
+    [absorb, decidedBy, states],
   )
 
   const decide = useCallback(
@@ -577,7 +607,14 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
             states,
             decidedBy,
           })
-          absorb(result.next, result.progress, settle)
+          const duplicate = absorb(result.next, result.progress, settle)
+          try {
+            await pastDuplicates(duplicate)
+          } catch (refill) {
+            commit((state) =>
+              withFailure(state, messageOf(refill, 'the next contact could not be read')),
+            )
+          }
         } catch (error) {
           // Nothing was written, so the trail goes back to what the contact
           // actually holds — which is not always "untriaged": this may have
@@ -623,7 +660,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
       })
       return true
     },
-    [absorb, commit, decidedBy, enqueue, states],
+    [absorb, commit, decidedBy, enqueue, pastDuplicates, states],
   )
 
   const skipAhead = useCallback((): boolean => {
@@ -647,7 +684,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
           afterId: frontierRef.current,
           prefetch: false,
         })
-        absorb(queue.card, queue.progress, null)
+        await pastDuplicates(absorb(queue.card, queue.progress, null))
       } catch (error) {
         commit((state) =>
           withFailure(state, messageOf(error, 'the next contact could not be read')),
@@ -655,7 +692,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
       }
     })
     return true
-  }, [absorb, commit, decidedBy, enqueue, states])
+  }, [absorb, commit, decidedBy, enqueue, pastDuplicates, states])
 
   const back = useCallback(() => {
     commit((state) => {
