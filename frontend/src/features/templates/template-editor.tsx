@@ -32,7 +32,7 @@ import { createTemplate, deleteTemplate, lintDraft, templateKeys, updateTemplate
 import type { ContactRow, TemplateChannel, TemplateDraft, TemplateOut } from './api'
 import { LINT_DEBOUNCE_MS, draftOf, sameDraft } from './draft'
 import { InlineLint, LineMarks } from './inline-lint'
-import { hasErrors, issuesFor, severityByLine } from './lint'
+import { hasErrors, issuesFor, lineRange, severityByLine } from './lint'
 import { MergeFieldHelper, type InsertTarget } from './merge-field-helper'
 
 const CHANNELS: ReadonlyArray<{ value: TemplateChannel; label: string }> = [
@@ -56,15 +56,6 @@ interface TemplateEditorProps {
 interface PendingCaret {
   target: InsertTarget
   at: number
-}
-
-/** The offsets of one-based `line` in `text`: where it starts and where it ends. */
-function lineRange(text: string, line: number): [number, number] {
-  const lines = text.split('\n')
-  const index = Math.min(Math.max(line, 1), lines.length) - 1
-  let start = 0
-  for (const text of lines.slice(0, index)) start += text.length + 1
-  return [start, start + (lines[index] ?? '').length]
 }
 
 export function TemplateEditor({
@@ -160,6 +151,14 @@ export function TemplateEditor({
     const start = known ? (field.selectionStart ?? value.length) : value.length
     const end = known ? (field.selectionEnd ?? start) : value.length
     const token = `{{ ${expression} }}`
+    // Through the browser's own editing, so the insert is one step of the field's undo
+    // history; the input event it fires reaches onChange like typing does. Setting the
+    // value directly would leave undo replaying history that no longer matches the text.
+    if (field !== null && !field.readOnly) {
+      field.focus()
+      field.setSelectionRange(start, end)
+      if (insertText(token)) return
+    }
     caret.current = { target, at: start + token.length }
     set({ [target]: value.slice(0, start) + token + value.slice(end) })
   }
@@ -201,7 +200,7 @@ export function TemplateEditor({
           }}
         >
           <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-            <div className="grid gap-1">
+            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1">
               <Label htmlFor={ids.name}>Name</Label>
               <Input
                 id={ids.name}
@@ -211,7 +210,7 @@ export function TemplateEditor({
                 onChange={(event) => set({ name: event.target.value })}
               />
             </div>
-            <div className="grid gap-1">
+            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1">
               <Label htmlFor={ids.channel}>Channel</Label>
               <Select
                 id={ids.channel}
@@ -227,7 +226,7 @@ export function TemplateEditor({
               </Select>
             </div>
           </div>
-          <div className="grid gap-1">
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1">
             <Label htmlFor={ids.subject}>Subject</Label>
             <Input
               id={ids.subject}
@@ -248,7 +247,7 @@ export function TemplateEditor({
               <InlineLint id={ids.subjectLint} label="Subject lint" shown={subjectIssues} />
             </Findings>
           </div>
-          <div className="grid gap-1">
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1">
             <Label htmlFor={ids.body}>Body</Label>
             <div className="relative rounded-lg bg-background dark:bg-input/30">
               <LineMarks
@@ -304,7 +303,7 @@ export function TemplateEditor({
                   No lint issues.
                 </p>
               ) : (
-                <p className="text-sm text-muted-foreground">
+                <p role="status" className="text-sm text-muted-foreground">
                   {issues.length} lint {issues.length === 1 ? 'finding' : 'findings'}, shown under
                   the subject and body.
                 </p>
@@ -376,9 +375,24 @@ function Findings({ stale, children }: { stale: boolean; children: ReactNode }) 
   return (
     <div
       data-stale={stale || undefined}
-      className={cn('space-y-2 transition-opacity', stale && 'opacity-50')}
+      className={cn('min-w-0 space-y-2 transition-opacity', stale && 'opacity-50')}
     >
       {children}
     </div>
   )
+}
+
+/**
+ * Insert `text` at the focused field's selection the way typing would, so it can be
+ * undone. False when the browser does not do it (`execCommand` is deprecated, and
+ * missing in some environments), and the caller sets the value itself.
+ */
+function insertText(text: string): boolean {
+  try {
+    return (
+      typeof document.execCommand === 'function' && document.execCommand('insertText', false, text)
+    )
+  } catch {
+    return false
+  }
 }

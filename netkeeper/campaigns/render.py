@@ -113,7 +113,7 @@ from jinja2.runtime import Context, Undefined
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from jinja2.tests import TESTS
 
-from netkeeper.config import MeSettings
+from netkeeper.config import MeSettings, is_me_key
 from netkeeper.models.campaigns import TemplateChannel
 
 CONTACT_FIELDS: Final = (
@@ -215,40 +215,70 @@ PLACEHOLDER_EXAMPLES: Final[Mapping[str, str]] = {
 is made up: none is anyone's real data."""
 
 
+_GROUPS: Final[Mapping[str, FieldGroup]] = {
+    **dict.fromkeys(CONTACT_FIELDS, FieldGroup.CONTACT),
+    PERSONAL_LINE: FieldGroup.PERSONAL,
+    "me": FieldGroup.ME,
+    "campaign": FieldGroup.CAMPAIGN,
+    "step": FieldGroup.CAMPAIGN,
+    PREVIOUS_SEND_DATE: FieldGroup.CAMPAIGN,
+}
+"""The group of each scalar field and each namespace. Only says where a field goes in the
+editor's list; which fields exist is :data:`SCALAR_FIELDS` and :data:`NAMESPACE_FIELDS`."""
+
+_GROUP_ORDER: Final = tuple(FieldGroup)
+
+# The order spec 11.1 lists fields in, within a group. A field not here sorts after these.
+_SPEC_ORDER: Final = (
+    *CONTACT_FIELDS,
+    PERSONAL_LINE,
+    *(f"me.{key}" for key in ME_FIELDS),
+    "campaign.name",
+    "step.number",
+    PREVIOUS_SEND_DATE,
+)
+
+# What goes between the braces when it is more than the name (spec 11.1).
+_INSERTS: Final[Mapping[str, str]] = {PREVIOUS_SEND_DATE: f"{PREVIOUS_SEND_DATE} | ago"}
+
+
+def _group(name: str) -> FieldGroup:
+    """The group of ``name`` (a scalar field or a namespace); raises for one with none."""
+    try:
+        return _GROUPS[name]
+    except KeyError:
+        raise ValueError(f"merge field {name!r} has no group in the editor's field list") from None
+
+
 def merge_fields(me_keys: Collection[str]) -> tuple[MergeField, ...]:
     """Every merge field a template may name, in the order spec 11.1 lists them.
 
-    Built from the same names the lint walker allows (:data:`CONTACT_FIELDS`,
-    :data:`NAMESPACE_FIELDS`, ``me_keys``), so removing a field there removes it
-    here. ``me_keys`` are the ``me.<key>`` names that exist, as for :func:`lint`.
+    Derived from the names the lint walker allows: :data:`SCALAR_FIELDS`, and each
+    namespace of :data:`NAMESPACE_FIELDS` with its keys, ``me`` with ``me_keys`` too.
+    So a field removed there leaves this list, and one added there must be given a
+    group and a description here or this raises. ``me_keys`` are the ``me.<key>``
+    names that exist, as for :func:`lint`; one a template cannot name
+    (:func:`is_me_key`) is left out.
     """
-    fields: list[MergeField] = [
-        MergeField(name, FieldGroup.CONTACT, _FIELD_DESCRIPTIONS[name], name)
-        for name in CONTACT_FIELDS
-    ]
-    fields.append(
-        MergeField(
-            PERSONAL_LINE, FieldGroup.PERSONAL, _FIELD_DESCRIPTIONS[PERSONAL_LINE], PERSONAL_LINE
-        )
+    found: list[tuple[str, FieldGroup]] = [(name, _group(name)) for name in SCALAR_FIELDS]
+    for namespace, keys in NAMESPACE_FIELDS.items():
+        group = _group(namespace)
+        extra = me_keys if namespace == "me" else ()
+        for key in dict.fromkeys((*keys, *extra)):
+            if is_me_key(key):
+                found.append((f"{namespace}.{key}", group))
+    rank = {name: index for index, name in enumerate(_SPEC_ORDER)}
+    found.sort(
+        key=lambda item: (_GROUP_ORDER.index(item[1]), rank.get(item[0], len(rank)), item[0])
     )
-    for key in dict.fromkeys((*NAMESPACE_FIELDS["me"], *me_keys)):
-        name = f"me.{key}"
-        description = _FIELD_DESCRIPTIONS.get(
-            name, f"Your value for `{key}`, from [me] in the config."
-        )
-        fields.append(MergeField(name, FieldGroup.ME, description, name))
-    for namespace in ("campaign", "step"):
-        for key in NAMESPACE_FIELDS[namespace]:
-            name = f"{namespace}.{key}"
-            fields.append(MergeField(name, FieldGroup.CAMPAIGN, _FIELD_DESCRIPTIONS[name], name))
-    fields.append(
-        MergeField(
-            PREVIOUS_SEND_DATE,
-            FieldGroup.CAMPAIGN,
-            _FIELD_DESCRIPTIONS[PREVIOUS_SEND_DATE],
-            f"{PREVIOUS_SEND_DATE} | ago",
-        )
-    )
+    fields: list[MergeField] = []
+    for name, group in found:
+        if group is FieldGroup.ME and name not in _FIELD_DESCRIPTIONS:
+            key = name.removeprefix("me.")
+            description = f"Your value for `{key}`, from [me] in the config."
+        else:
+            description = _FIELD_DESCRIPTIONS[name]
+        fields.append(MergeField(name, group, description, _INSERTS.get(name, name)))
     return tuple(fields)
 
 

@@ -48,6 +48,27 @@ export const WHY_IT_MATTERS: Readonly<Record<LintRule, string>> = {
 
 const LINE_PREFIX = /^line (\d+): /
 
+/** Every line break Jinja counts lines by: CRLF, a bare CR, and LF. */
+export const LINE_BREAK = /\r\n|\r|\n/
+
+/** `text`'s lines, as lint numbers them (one-based: line 1 is the first). */
+export function splitLines(text: string): string[] {
+  return text.split(LINE_BREAK)
+}
+
+/** The offsets of one-based `line` in `text`: where it starts and where it ends. */
+export function lineRange(text: string, line: number): [number, number] {
+  const breaks = new RegExp(LINE_BREAK.source, 'g')
+  let start = 0
+  for (let at = 1; at < line; at++) {
+    const found = breaks.exec(text)
+    if (found === null) break
+    start = found.index + found[0].length
+  }
+  const rest = new RegExp(LINE_BREAK.source).exec(text.slice(start))
+  return [start, rest === null ? text.length : start + rest.index]
+}
+
 /**
  * What each refused construct is, keyed by the name lint puts in `field` for
  * an `unsupported` issue (`_NODE_NAMES` in `netkeeper/campaigns/render.py`).

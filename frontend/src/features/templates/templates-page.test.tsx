@@ -15,7 +15,7 @@ import {
   type RouterHistory,
 } from '@tanstack/react-router'
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { mockApi, renderWithClient, requestsTo, type RouteHandler } from '@/features/crm/harness'
 import { jsonResponse } from '@/test/fetch'
@@ -821,6 +821,57 @@ describe('merge-field helper', () => {
     expect(subject.value).toBe('Hi {{ previous_send_date | ago }}{{ first_name }}')
   })
 
+  it('inserts through the browser’s own editing, so the insert can be undone', async () => {
+    const { body } = await openTemplate()
+    // What a browser's insertText does: edit at the selection and fire an input event.
+    const execCommand = vi.fn((command: string, _ui?: boolean, text?: string) => {
+      const field = document.activeElement as HTMLTextAreaElement
+      if (command !== 'insertText' || text === undefined) return false
+      const { selectionStart: start, selectionEnd: end, value } = field
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+      setter?.call(field, value.slice(0, start) + text + value.slice(end))
+      field.setSelectionRange(start + text.length, start + text.length)
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })
+    const original = document.execCommand
+    document.execCommand = execCommand as unknown as typeof document.execCommand
+    try {
+      act(() => {
+        body.focus()
+        body.setSelectionRange(3, 3)
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'Insert {{ company }}' }))
+      expect(execCommand).toHaveBeenCalledWith('insertText', false, '{{ company }}')
+      // Once: the value the input event carried, not inserted a second time by hand.
+      expect(body.value).toBe('Hi {{ company }}{{ first_name }} at {{ company }}.')
+      expect(document.activeElement).toBe(body)
+      expect(body.selectionStart).toBe(3 + '{{ company }}'.length)
+    } finally {
+      document.execCommand = original
+    }
+  })
+
+  it('sets the value itself when the browser does not do insertText', async () => {
+    const { body } = await openTemplate()
+    const execCommand = vi.fn(() => false)
+    const original = document.execCommand
+    document.execCommand = execCommand as unknown as typeof document.execCommand
+    try {
+      act(() => {
+        body.focus()
+        body.setSelectionRange(3, 3)
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'Insert {{ company }}' }))
+      expect(execCommand).toHaveBeenCalledWith('insertText', false, '{{ company }}')
+      expect(body.value).toBe('Hi {{ company }}{{ first_name }} at {{ company }}.')
+      expect(document.activeElement).toBe(body)
+      expect(body.selectionStart).toBe(3 + '{{ company }}'.length)
+    } finally {
+      document.execCommand = original
+    }
+  })
+
   it('appends to the body when no field has been focused yet', async () => {
     const { body } = await openTemplate()
     fireEvent.click(screen.getByRole('button', { name: 'Insert {{ first_name }}' }))
@@ -936,6 +987,16 @@ describe('inline lint', () => {
     expect(marks.querySelector('[data-line="1"]')).not.toHaveAttribute('data-severity')
     expect(marks.querySelector('[data-line="2"]')).toHaveAttribute('data-severity', 'error')
     expect(marks.querySelector('[data-line="3"]')).toHaveAttribute('data-severity', 'warning')
+
+    // A long quoted line must not widen the editor column (#358 review): every grid item
+    // holding a field and its findings may shrink below its content's width.
+    for (const list of [bodyLint, subjectLint]) {
+      const field = list.closest('.grid')
+      expect(field).toHaveClass('min-w-0', 'grid-cols-[minmax(0,1fr)]')
+      expect(list.parentElement).toHaveClass('min-w-0')
+    }
+    expect(within(first).getByText('{{ compnay }}')).toHaveClass('truncate')
+    expect(screen.getByText(/3 lint findings, shown under/)).toHaveAttribute('role', 'status')
 
     // Errors still block activation, and the editor says so.
     expect(screen.getByText(/a campaign can't use this template/)).toBeInTheDocument()
