@@ -8,6 +8,7 @@
 import { mailbox } from '@/features/mailboxes/test-support'
 import type { ListOut } from '@/features/crm/types'
 import type { TemplateOut } from '@/features/templates/api'
+import type { SendingHours } from '@/features/settings/api'
 import { backend, type Call } from '@/features/imports/test-support'
 import { jsonResponse } from '@/test/fetch'
 
@@ -232,6 +233,16 @@ export const ENROLLMENTS: EnrollmentPage = {
 
 type Handler = (call: Call) => Response | Promise<Response>
 
+/** The default sending hours, as the backend answers them (#338). */
+export const SENDING_HOURS: SendingHours = {
+  enabled: true,
+  days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'],
+  start: '09:00',
+  end: '17:00',
+  timezone: 'America/New_York',
+  summary: 'Mon to Fri, 09:00 to 17:00',
+}
+
 /** The next Tuesday at 09:00 in New York, as the backend answers it (#338). */
 export const DEFAULT_START = '2030-06-18T13:00:00Z'
 
@@ -242,6 +253,8 @@ export function startOptions(overrides: Partial<StartOptions> = {}): StartOption
     suggestion: 'Most effective: Tue–Thu mornings.',
     reminder:
       'netkeeper sends only while `serve` is running and this Mac is awake. Keep it running from the start time until the batch finishes.',
+    sending_hours:
+      'Sending hours: Mon to Fri, 09:00 to 17:00. The first batch starts at the start you choose; the rest of it, and every later step, sends only inside these hours.',
     at: null,
     warning: null,
     ...overrides,
@@ -264,6 +277,7 @@ export function campaignBackend(
       [`GET /api/v1/campaigns/${id}`]: () => jsonResponse(state.campaign),
       [`GET /api/v1/campaigns/${id}/review`]: () => jsonResponse(state.review),
       [`GET /api/v1/campaigns/${id}/enrollments`]: () => jsonResponse(ENROLLMENTS),
+      'GET /api/v1/settings/sending-hours': () => jsonResponse(SENDING_HOURS),
       [`GET /api/v1/campaigns/${id}/start-options`]: (call) =>
         jsonResponse(startOptions({ at: call.query.get('at') })),
       'GET /api/v1/lists': () => jsonResponse(LISTS),

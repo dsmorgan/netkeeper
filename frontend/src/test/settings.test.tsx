@@ -34,6 +34,16 @@ describe('settings', () => {
         })
       }
       if (pathname === '/api/v1/mailboxes') return jsonResponse([])
+      if (pathname === '/api/v1/settings/sending-hours') {
+        return jsonResponse({
+          enabled: true,
+          days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'],
+          start: '09:00',
+          end: '17:00',
+          timezone: 'America/New_York',
+          summary: 'Mon to Fri, 09:00 to 17:00',
+        })
+      }
       if (pathname === '/api/v1/gmail-setup') {
         return jsonResponse({ project_id: null, sender_email: null, done: [], steps: [] })
       }
@@ -51,5 +61,6 @@ describe('settings', () => {
     await renderApp('/settings')
     const pre = await screen.findByText(/"timezone": "America\/New_York"/)
     expect(pre.tagName).toBe('PRE')
+    expect(await screen.findByRole('form', { name: 'Sending hours' })).toBeVisible()
   })
 })

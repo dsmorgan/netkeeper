@@ -669,6 +669,8 @@ class StartOptions:
     """The start asked about, if any."""
     warning: str | None = None
     """Why ``at`` is outside the suggested slots; None inside them, or with no ``at``."""
+    sending_hours: str = "any time"
+    """The sending hours everything after the start keeps (#338), as a phrase."""
 
 
 def _slots(settings: Settings, user: User) -> schedule.Suggested:
@@ -691,7 +693,12 @@ def start_warning(slots: schedule.Suggested, at: datetime) -> str | None:
 
 
 def start_options(
-    user: User, *, settings: Settings, now: datetime, at: datetime | None = None
+    user: User,
+    *,
+    settings: Settings,
+    now: datetime,
+    at: datetime | None = None,
+    hours: schedule.SendingHours | None = None,
 ) -> StartOptions:
     """The default start, the suggestion and the reminder, and a warning for ``at``."""
     slots = _slots(settings, user)
@@ -704,6 +711,32 @@ def start_options(
         reminder=schedule.SERVE_REMINDER,
         at=at,
         warning=None if at is None else start_warning(slots, max(at, now)),
+        sending_hours=sending_hours_text(hours),
+    )
+
+
+def sending_hours_text(hours: schedule.SendingHours | None) -> str:
+    """The sentence the activate dialog and the CLI show about the sending hours."""
+    if hours is None:
+        return "The sending hours cannot be read, so nothing will send; fix them in Settings."
+    if not hours.enabled:
+        return "Sending hours: any time. Every send goes as soon as it is due."
+    return (
+        f"Sending hours: {hours.describe()}. The first batch starts at the start you choose;"
+        " the rest of it, and every later step, sends only inside these hours."
+    )
+
+
+def step_time_warning(hours: schedule.SendingHours | None, send_time: str | None) -> str | None:
+    """A warning, never a refusal, for a step time outside the sending hours (#338)."""
+    if hours is None or not hours.enabled or send_time is None:
+        return None
+    clock = schedule.parse_clock(send_time)
+    if hours.start <= clock < hours.end:
+        return None
+    return (
+        f"{send_time} is outside the sending hours ({hours.describe()}): the step waits"
+        " for their next opening."
     )
 
 

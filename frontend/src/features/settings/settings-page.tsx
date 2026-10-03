@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { DoNotSendSection } from './do-not-send-section'
 import { type GmailOutcome, GmailSection } from './gmail-section'
 import { PostureSection } from './posture-section'
+import { SendingHoursSection } from './sending-hours-section'
 
 export function SettingsPage({ gmail = {} }: { gmail?: GmailOutcome }) {
   const me = useQuery(meQuery)
@@ -17,7 +18,7 @@ export function SettingsPage({ gmail = {} }: { gmail?: GmailOutcome }) {
         <CardHeader>
           <CardTitle level={2}>Settings</CardTitle>
           <CardDescription>
-            Gmail auth, pacing, budgets, LLM, [me] merge fields, backups.
+            Gmail auth, sending hours, pacing, budgets, LLM, [me] merge fields, backups.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex items-center gap-2">
@@ -30,6 +31,8 @@ export function SettingsPage({ gmail = {} }: { gmail?: GmailOutcome }) {
       </Card>
 
       <GmailSection outcome={gmail} />
+
+      <SendingHoursSection />
 
       <DoNotSendSection />
 

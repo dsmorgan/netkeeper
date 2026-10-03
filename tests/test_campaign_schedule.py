@@ -248,3 +248,86 @@ def test_spacing_is_human_and_never_under_the_floor() -> None:
 def test_spacing_refuses_no_spacing(median: float, floor: float) -> None:
     with pytest.raises(ValueError, match="positive"):
         spacing_delay(random.Random(1), median_s=median, floor_s=floor)
+
+
+# --- sending hours (#338) ---------------------------------------------------------------
+
+HOURS = schedule.DEFAULT_SENDING_HOURS
+ANY_TIME = schedule.sending_hours(enabled=False, days=["Mon"], start="09:00", end="17:00")
+
+
+def test_the_default_sending_hours_are_pinned() -> None:
+    assert schedule.sending_hours_json(HOURS) == {
+        "enabled": True,
+        "days": ["Mon", "Tue", "Wed", "Thu", "Fri"],
+        "start": "09:00",
+        "end": "17:00",
+    }
+    assert HOURS.describe() == "Mon to Fri, 09:00 to 17:00"
+    assert ANY_TIME.describe() == "any time"
+    assert schedule.sending_hours_from_json(None) == HOURS
+
+
+@pytest.mark.parametrize(
+    ("days", "start", "end", "match"),
+    [
+        ([], "09:00", "17:00", "at least one day"),
+        (["Funday"], "09:00", "17:00", "not a day"),
+        (["Mon"], "17:00", "09:00", "end after"),
+        (["Mon"], "09:00", "09:00", "end after"),
+        (["Mon"], "9:00", "17:00", "HH:MM"),
+    ],
+)
+def test_sending_hours_that_cannot_be_used_are_refused(
+    days: list[str], start: str, end: str, match: str
+) -> None:
+    with pytest.raises(ScheduleError, match=match):
+        schedule.sending_hours(enabled=True, days=days, start=start, end=end)
+
+
+@pytest.mark.parametrize(
+    ("now", "opens"),
+    [
+        ("2026-09-29 10:00", "2026-09-29 10:00"),  # inside
+        ("2026-09-29 16:55", "2026-09-29 16:55"),
+        ("2026-09-29 17:00", "2026-09-30 09:00"),  # the end is outside
+        ("2026-10-02 22:00", "2026-10-05 09:00"),  # Friday night: Monday
+        ("2026-10-03 11:00", "2026-10-05 09:00"),  # Saturday
+    ],
+)
+def test_the_next_opening_of_the_sending_hours(now: str, opens: str) -> None:
+    assert schedule.next_opening(at(now), HOURS, slots()) == at(opens)
+    assert schedule.next_opening(at(now), ANY_TIME, slots()) == at(now)
+
+
+def test_hold_exempts_only_the_first_step_on_the_starts_day() -> None:
+    start = at("2026-10-02 22:00")  # Friday night
+    hold = schedule.hold
+    assert (
+        hold(
+            start,
+            at("2026-10-02 23:30"),
+            slots=slots(),
+            hours=HOURS,
+            starts_at=start,
+            first_step=True,
+        )
+        is None
+    )
+    # A follow-up, the same night: the sending hours.
+    assert hold(
+        start, at("2026-10-02 23:30"), slots=slots(), hours=HOURS, starts_at=start, first_step=False
+    ) == at("2026-10-05 09:00")
+    # Step 1 the next day (the cap held it back): the spill, then the sending hours.
+    assert hold(
+        start, at("2026-10-03 00:05"), slots=slots(), hours=HOURS, starts_at=start, first_step=True
+    ) == at("2026-10-05 09:00")
+    # Any time: the spill only.
+    assert hold(
+        start,
+        at("2026-10-03 00:05"),
+        slots=slots(),
+        hours=ANY_TIME,
+        starts_at=start,
+        first_step=True,
+    ) == at("2026-10-03 22:00")

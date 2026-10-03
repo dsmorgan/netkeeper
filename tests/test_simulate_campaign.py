@@ -1,8 +1,8 @@
 """P3-06's "done when": 100 contacts over three weeks, nothing before the scheduled start,
 overnight or over a cap, and step 2's timing from the actual ``sent_at`` (spec 11.3, 11.4,
-#338). "Nothing overnight" holds because the replay keeps ``serve`` running the whole
-time: netkeeper does not restrict send times, so a leftover from a stretch when ``serve``
-was off can go at any hour (#354)."""
+#338). "Nothing overnight" holds because every send after the start keeps the sending
+hours (the default, Monday to Friday, 09:00 to 17:00), and the start here is Tuesday
+09:00."""
 
 from __future__ import annotations
 

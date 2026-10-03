@@ -547,6 +547,60 @@ def test_step_time_sets_a_steps_day_offset_and_time_of_day(world: World) -> None
     assert bad.exit_code == 1 and "HH:MM" in bad.output
 
 
+# --- sending hours (#338) -------------------------------------------------------------
+
+
+def test_sending_hours_show_set_and_any_time(world: World) -> None:
+    assert "sending hours are: Mon to Fri, 09:00 to 17:00" in _ok("campaigns", "sending-hours")
+    changed = _ok(
+        "campaigns", "sending-hours", "--days", "mon,wed,friday", "--from", "08:00", "--to", "12:30"
+    )
+    assert "sending hours now: Mon, Wed, Fri, 08:00 to 12:30" in changed
+    later = _ok("campaigns", "sending-hours", "--to", "15:00")  # the rest are kept
+    assert "Mon, Wed, Fri, 08:00 to 15:00" in later
+    assert "sending hours now: any time" in _ok("campaigns", "sending-hours", "--any-time")
+    assert "sending hours are: any time" in _ok("campaigns", "sending-hours")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--from", "17:00", "--to", "09:00"),
+        ("--days", ""),
+        ("--days", "someday"),
+        ("--from", "9am"),
+        ("--any-time", "--days", "mon"),
+    ],
+)
+def test_sending_hours_that_cannot_be_used_are_refused(world: World, args: tuple[str, ...]) -> None:
+    result = _run("campaigns", "sending-hours", *args)
+    assert result.exit_code == 1, result.output
+    assert "Mon to Fri, 09:00 to 17:00" in _ok("campaigns", "sending-hours")
+
+
+def test_step_time_warns_outside_the_sending_hours(world: World) -> None:
+    campaign_id = _create(world)
+    late = _ok(
+        "campaigns", "step-time", str(campaign_id), "2", "--delay-days", "3", "--at", "22:00"
+    )
+    assert "warning: 22:00 is outside the sending hours (Mon to Fri, 09:00 to 17:00)" in late
+    inside = _ok(
+        "campaigns", "step-time", str(campaign_id), "2", "--delay-days", "3", "--at", "10:00"
+    )
+    assert "warning" not in inside
+    _ok("campaigns", "sending-hours", "--any-time")
+    anytime = _ok(
+        "campaigns", "step-time", str(campaign_id), "2", "--delay-days", "3", "--at", "22:00"
+    )
+    assert "warning" not in anytime
+
+
+def test_activate_shows_the_sending_hours(world: World) -> None:
+    campaign_id = _ready(world)
+    output = _ok("campaigns", "activate", str(campaign_id), "--yes")
+    assert "Sending hours: Mon to Fri, 09:00 to 17:00." in output
+
+
 # --- simulate --campaign ------------------------------------------------------------
 
 

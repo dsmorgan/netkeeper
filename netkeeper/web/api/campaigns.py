@@ -47,6 +47,7 @@ from netkeeper.models import (
 )
 from netkeeper.models.base import utcnow
 from netkeeper.services import campaigns as service
+from netkeeper.services.campaign_engine import hours_for
 from netkeeper.web.api.campaign_review import MissingOut
 from netkeeper.web.deps import CurrentUser, SessionDep
 
@@ -187,6 +188,8 @@ class StartOptionsOut(BaseModel):
     at: datetime | None
     warning: str | None
     """Why ``at`` is outside the suggested slots. A warning only: nothing is refused."""
+    sending_hours: str
+    """The sending hours everything after the start keeps, as a sentence (#338)."""
 
 
 class StartIn(BaseModel):
@@ -468,7 +471,13 @@ def start_options(
     warning when ``at`` is outside the suggested slots. Changes nothing."""
     with translate_errors():
         service.get_campaign(session, user, campaign_id)
-        options = service.start_options(user, settings=_settings(request), now=utcnow(), at=at)
+        options = service.start_options(
+            user,
+            settings=_settings(request),
+            now=utcnow(),
+            at=at,
+            hours=hours_for(session, user),
+        )
     return StartOptionsOut(
         timezone=options.timezone,
         default_start=options.default_start,
@@ -476,6 +485,7 @@ def start_options(
         reminder=options.reminder,
         at=options.at,
         warning=options.warning,
+        sending_hours=options.sending_hours,
     )
 
 

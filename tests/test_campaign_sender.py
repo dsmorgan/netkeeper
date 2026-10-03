@@ -12,7 +12,7 @@ import itertools
 import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from email.message import EmailMessage
 from typing import Any
 
@@ -53,6 +53,7 @@ from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import campaign_engine as engine_module
 from netkeeper.services import campaign_sender as sender_module
 from netkeeper.services import mailboxes as mailbox_service
+from netkeeper.services import sending_hours
 from netkeeper.services.campaign_engine import (
     DRAFT_DISCARDED_REASON,
     DRAFT_MISSING,
@@ -220,6 +221,18 @@ class Mail:
                 setattr(row, name, value)
 
         self.write(change)
+
+    def any_time(self) -> None:
+        """Turn the sending hours off (#338): sends go at any hour."""
+
+        def store(session: Session) -> None:
+            user = session.get(User, self.user.id)
+            assert user is not None
+            sending_hours.write(
+                session, user, enabled=False, days=["Mon"], start="09:00", end="17:00"
+            )
+
+        self.write(store)
 
     def set_enrollment(self, enrollment_id: int, **changes: Any) -> None:
         def change(session: Session) -> None:
@@ -1827,8 +1840,8 @@ def test_the_not_sent_constants_are_pinned() -> None:
     """Safety constants against numbers written out here (CLAUDE.md)."""
     assert timedelta(minutes=15) == engine_module.RETRY_AFTER
     assert timedelta(hours=2) == engine_module.RETRY_AFTER_MAX
-    assert engine_module.NOT_SENT_GIVE_UP_TRIES == 8
-    assert timedelta(hours=24) == engine_module.NOT_SENT_GIVE_UP_AFTER
+    assert engine_module.NOT_SENT_GIVE_UP_TRIES == 16
+    assert not hasattr(engine_module, "NOT_SENT_GIVE_UP_AFTER")  # tries, not hours (#338)
     waits = [engine_module.retry_after(n) for n in (1, 2, 3, 4, 5, 6, 100)]
     minutes = [int(w.total_seconds() // 60) for w in waits]
     assert minutes == [15, 30, 60, 120, 120, 120, 120]
@@ -1836,18 +1849,18 @@ def test_the_not_sent_constants_are_pinned() -> None:
         engine_module.retry_after(0)
 
 
-def test_a_thread_that_can_never_be_read_fails_the_step_after_a_day_of_tries(
-    mail: Mail,
-) -> None:
-    """#280: 193 ``threads.get`` in two days, and never a step parked for a person. Now
-    each try waits longer, and a day of them fails the step with the reason."""
+def _run_of_unreadable_tries(mail: Mail) -> tuple[int, list[datetime], list[timedelta]]:
+    """Step 2's thread can never be read: tick each try until the step fails."""
     enrollment_id = mail.enroll()
     mail.tick()  # step 1 goes out; step 2 is a follow-up in its thread
     mail.gmail.__class__ = Unreadable
-    start = NOW + WEEK
+    start = mail.enrollment(enrollment_id).next_action_at
+    assert start is not None
     at = start
+    tried_at: list[datetime] = []
     waits: list[timedelta] = []
-    while at < start + timedelta(days=3):
+    while at < start + timedelta(days=21):
+        tried_at.append(at)
         [(_, outcome)] = mail.tick(at).fired
         assert outcome.outcome is SendOutcome.NOT_SENT  # the sender's word for it
         if mail.messages(enrollment_id)[-1].status is MessageStatus.FAILED:
@@ -1860,12 +1873,7 @@ def test_a_thread_that_can_never_be_read_fails_the_step_after_a_day_of_tries(
         spacing = mail.read(lambda s: engine_module.next_send_at(s, mail.user, mail.mailbox.id))
         assert spacing is not None
         at = max(enrollment.next_action_at, spacing)  # the next tick that can fire it
-    assert at - start >= engine_module.NOT_SENT_GIVE_UP_AFTER
     tries = _thread_reads(mail)
-    assert engine_module.NOT_SENT_GIVE_UP_TRIES <= tries <= 16  # was one every 15 minutes
-    assert waits[:4] == [timedelta(minutes=m) for m in (15, 30, 60, 120)]
-    assert max(waits) == engine_module.RETRY_AFTER_MAX
-
     step_2 = mail.messages(enrollment_id)[-1]
     assert step_2.status is MessageStatus.FAILED
     assert step_2.error is not None
@@ -1875,10 +1883,35 @@ def test_a_thread_that_can_never_be_read_fails_the_step_after_a_day_of_tries(
     assert enrollment.status is EnrollmentStatus.ACTIVE
     assert enrollment.next_action_at is None  # parked for a person
     assert (enrollment.not_sent_count, enrollment.not_sent_since) == (0, None)
-
     mail.tick(at + timedelta(days=2))
     assert _thread_reads(mail) == tries  # never tried again
     assert len(mail.gmail.sent()) == 1
+    return tries, tried_at, waits
+
+
+def test_a_thread_that_can_never_be_read_fails_the_step_after_a_day_of_tries(
+    mail: Mail,
+) -> None:
+    """#280: 193 ``threads.get`` in two days, and never a step parked for a person. Now
+    each try waits longer, and a day of them fails the step with the reason. With
+    "any time" (no sending hours) that is 16 tries over about 26 hours (#338)."""
+    mail.any_time()
+    tries, tried_at, waits = _run_of_unreadable_tries(mail)
+    assert tries == len(tried_at) == engine_module.NOT_SENT_GIVE_UP_TRIES
+    assert tried_at[-1] - tried_at[0] >= timedelta(hours=24)
+    assert waits[:4] == [timedelta(minutes=m) for m in (15, 30, 60, 120)]
+    assert max(waits) == engine_module.RETRY_AFTER_MAX
+
+
+def test_inside_sending_hours_the_step_still_fails_after_the_same_tries(mail: Mail) -> None:
+    """#338: retries wait for the sending hours (Mon to Fri, 09:00 to 17:00), so the
+    tries span days; the step still fails after exactly the same number of them, and
+    none is tried outside the hours."""
+    tries, tried_at, _ = _run_of_unreadable_tries(mail)
+    assert tries == len(tried_at) == engine_module.NOT_SENT_GIVE_UP_TRIES
+    for at in tried_at:
+        assert at.weekday() < 5 and time(9, 0) <= at.time() < time(17, 0), at
+    assert tried_at[-1].date() > tried_at[0].date()  # they spanned days
 
 
 def test_a_send_that_goes_out_ends_the_run_of_tries(mail: Mail) -> None:
@@ -1907,6 +1940,7 @@ def test_a_send_that_goes_out_ends_the_run_of_tries(mail: Mail) -> None:
 def test_tries_far_apart_still_get_every_try_before_the_step_fails(mail: Mail) -> None:
     """A day has passed since the first try, but the campaign was paused between them:
     the step is not failed until :data:`NOT_SENT_GIVE_UP_TRIES` tries in a row."""
+    mail.any_time()  # the resumes below land on weekends too
     enrollment_id = mail.enroll()
     at = NOW
     for n in range(1, engine_module.NOT_SENT_GIVE_UP_TRIES):

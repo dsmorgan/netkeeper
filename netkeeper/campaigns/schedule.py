@@ -215,9 +215,9 @@ def step_due(
     ``base`` is the scheduled start for step 1 (``first``) and the latest sent
     message for a follow-up.
 
-    - An explicit ``send_time`` (``HH:MM``) is honored at any hour, on any day: the
-      step is due that time on the local day ``delay_days`` after ``base``'s, and
-      never before ``base``.
+    - An explicit ``send_time`` (``HH:MM``): the step is due that time on the local
+      day ``delay_days`` after ``base``'s, and never before ``base``. The sending
+      hours apply on top (:func:`next_opening`, by the caller).
     - Without one, step 1 with no delay is due at ``base`` itself (the start the
       person chose). Any other step aims for the next suggested slot at or after
       ``base`` plus its delay.
@@ -237,13 +237,173 @@ def spill(due: datetime, now: datetime, slots: Suggested) -> datetime | None:
     A batch that runs long (its day's cap was reached, or ``serve`` was not
     running) goes on the next day at the same local time it was due, when that
     time is still ahead. ``None`` when ``due`` is on today's local day, or when
-    today's time has already come: it is due now, at any hour. netkeeper does not
-    restrict send times; an optional constraint is #354.
+    today's time has already come: it is due now. The sending hours apply on top
+    (:func:`hold`).
     """
     if slots.local_date(due) >= slots.local_date(now):
         return None
     resume = slots.at_local(slots.local_date(now), slots.local_time(due))
     return resume if resume > _aware(now).astimezone(UTC) else None
+
+
+# --- sending hours (#338, David's requirement on PR #353) -----------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class SendingHours:
+    """When campaign email may go out, in the user's local time: a global setting.
+
+    ``enabled`` False is "any time". Otherwise a send goes only on ``days`` (weekday
+    numbers, Monday 0) in ``[start, end)``. Only a campaign's start is exempt: its
+    first batch goes at the scheduled start, whatever the hour, and keeps going that
+    local day until the caps stop it (:func:`hold`).
+    """
+
+    enabled: bool
+    days: frozenset[int]
+    start: time
+    end: time
+
+    def describe(self) -> str:
+        """For example "Mon to Fri, 09:00 to 17:00", or "any time"."""
+        if not self.enabled:
+            return "any time"
+        return f"{describe_days(self.days)}, {self.start:%H:%M} to {self.end:%H:%M}"
+
+
+FULL_DAY_NAMES: Final = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
+
+DEFAULT_SENDING_HOURS: Final = SendingHours(
+    enabled=True, days=frozenset({0, 1, 2, 3, 4}), start=time(9, 0), end=time(17, 0)
+)
+"""Monday to Friday, 09:00 to 17:00 local time, on (#338)."""
+
+
+def describe_days(days: frozenset[int]) -> str:
+    """Weekday numbers as "Mon to Fri", "Tue, Thu", or "every day"."""
+    ordered = sorted(days)
+    if ordered == list(range(7)):
+        return "every day"
+    if len(ordered) > 2 and ordered == list(range(ordered[0], ordered[-1] + 1)):
+        return f"{DAY_NAMES[ordered[0]]} to {DAY_NAMES[ordered[-1]]}"
+    return ", ".join(DAY_NAMES[d] for d in ordered)
+
+
+def sending_hours(*, enabled: bool, days: Iterable[str], start: str, end: str) -> SendingHours:
+    """Validated sending hours. Raises :class:`ScheduleError`: an unknown day, no day at
+    all, a time that is not ``HH:MM``, or an end that is not after the start."""
+    numbers: set[int] = set()
+    for name in days:
+        key = str(name).strip().lower()
+        short = [d.lower() for d in DAY_NAMES]
+        if key in short:
+            numbers.add(short.index(key))
+        elif key in FULL_DAY_NAMES:
+            numbers.add(FULL_DAY_NAMES.index(key))
+        else:
+            raise ScheduleError(f"{name!r} is not a day; use one of {', '.join(DAY_NAMES)}")
+    if not numbers:
+        raise ScheduleError("sending hours need at least one day")
+    opens, closes = parse_clock(start), parse_clock(end)
+    if closes <= opens:
+        raise ScheduleError(f"sending hours must end after they start, not {start} to {end}")
+    return SendingHours(enabled=enabled, days=frozenset(numbers), start=opens, end=closes)
+
+
+def sending_hours_from_json(raw: object) -> SendingHours:
+    """The stored value (``settings_kv``), or the default when nothing is stored.
+    Raises :class:`ScheduleError` for a stored value that cannot be read."""
+    if raw is None:
+        return DEFAULT_SENDING_HOURS
+    if not isinstance(raw, dict):
+        raise ScheduleError("stored sending hours are not an object")
+    enabled, days, start, end = (raw.get(k) for k in ("enabled", "days", "start", "end"))
+    if not isinstance(enabled, bool) or not isinstance(days, list):
+        raise ScheduleError("stored sending hours are malformed")
+    return sending_hours(
+        enabled=enabled, days=[str(d) for d in days], start=str(start), end=str(end)
+    )
+
+
+def sending_hours_json(hours: SendingHours) -> dict[str, object]:
+    """How ``settings_kv`` stores sending hours."""
+    return {
+        "enabled": hours.enabled,
+        "days": [DAY_NAMES[d] for d in sorted(hours.days)],
+        "start": f"{hours.start:%H:%M}",
+        "end": f"{hours.end:%H:%M}",
+    }
+
+
+def within_sending_hours(at: datetime, hours: SendingHours, slots: Suggested) -> bool:
+    """Whether a send may go out at ``at`` under ``hours``. The one rule; "any time"
+    allows everything."""
+    if not hours.enabled:
+        return True
+    local = _aware(at).astimezone(slots.zone)
+    return (
+        local.weekday() in hours.days
+        and hours.start <= local.time().replace(tzinfo=None) < hours.end
+    )
+
+
+def next_opening(at: datetime, hours: SendingHours, slots: Suggested) -> datetime:
+    """The earliest instant at or after ``at`` inside ``hours``, in UTC (``at`` itself
+    when it already is, or with "any time")."""
+    now = _aware(at).astimezone(UTC)
+    if within_sending_hours(now, hours, slots):
+        return now
+    today = slots.local_date(now)
+    for offset in range(8):
+        day = today + timedelta(days=offset)
+        if day.weekday() not in hours.days:
+            continue
+        opens = slots.at_local(day, hours.start)
+        if opens >= now:
+            return opens
+    raise ScheduleError("sending hours never open")  # unreachable: validated non-empty days
+
+
+def hold(
+    due: datetime,
+    now: datetime,
+    *,
+    slots: Suggested,
+    hours: SendingHours,
+    starts_at: datetime | None,
+    first_step: bool,
+) -> datetime | None:
+    """When a step due at ``due`` may really go, or None for now (#338). The one function
+    the tick, a retry, a re-check and posture ask.
+
+    1. **The start is unbounded.** Step 1 on the local day of the campaign's start
+       goes now, whatever the hour or day: the first batch runs at the scheduled
+       start until the caps stop it.
+    2. **The spill.** A due time from an earlier local day moves to today at its own
+       time of day when that is still ahead (:func:`spill`), then into the sending
+       hours.
+    3. **Sending hours.** Anything else outside them waits for their next opening.
+    """
+    if (
+        first_step
+        and starts_at is not None
+        and slots.local_date(now) == slots.local_date(starts_at)
+    ):
+        return None
+    spilled = spill(due, now, slots)
+    if spilled is not None:
+        return next_opening(spilled, hours, slots)
+    if not within_sending_hours(now, hours, slots):
+        return next_opening(now, hours, slots)
+    return None
 
 
 def spacing_delay(rng: random.Random, *, median_s: float, floor_s: float) -> timedelta:

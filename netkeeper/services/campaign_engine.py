@@ -53,12 +53,12 @@ The tick
      campaign is blocked until then.
    - There is no send window (#338). A time zone or holiday list that cannot be
      read blocks the campaign: nothing is sent under a schedule nobody can read.
-   - A due time left over from an earlier local day (the day's cap was reached,
-     or ``serve`` was not running) spills to today at the same local time, when
-     that is still to come, so a batch the caps hold back goes on at its start
-     time the next day (:func:`netkeeper.campaigns.schedule.spill`). Otherwise it fires at the next
-     tick, at any hour: netkeeper does not restrict send times (#354 tracks an
-     optional constraint).
+   - :func:`netkeeper.campaigns.schedule.hold` decides whether it may go now. The
+     campaign's start is unbounded: step 1 on the start's local day goes, whatever
+     the hour. Anything else keeps the user's sending hours
+     (:mod:`netkeeper.services.sending_hours`): a leftover from an earlier day
+     spills to today at its own time of day, and anything outside the hours waits
+     for their next opening. Sending hours that cannot be read block the campaign.
    - The mailbox (spec 11.9, the last bullet): ``ChannelState`` is filled from
      :func:`netkeeper.services.mailboxes.mailbox_health` and today's count. A
      mailbox that is unknown, ``reauth_required`` or disabled, or at its cap,
@@ -117,8 +117,8 @@ deleted, the enrollment is due :func:`retry_after` later, and its mailbox waits
 :data:`RETRY_AFTER`. An outage is waited out; it never fails a step. The tries are
 counted on the enrollment (``not_sent_count``, with the latest reason), and each
 waits twice as long as the one before, up to :data:`RETRY_AFTER_MAX`. Only
-:data:`NOT_SENT_GIVE_UP_TRIES` tries in a row over :data:`NOT_SENT_GIVE_UP_AFTER`
-fail the step, with the reason, for a person (#280). Any other outcome ends the run.
+:data:`NOT_SENT_GIVE_UP_TRIES` tries in a row fail the step, with the reason, for a
+person (#280). Any other outcome ends the run.
 
 **Off the event loop** (#259). :class:`CampaignEngine` runs each tick in a
 worker thread (``asyncio.to_thread``), as :class:`~netkeeper.services.mailboxes.MailboxMonitor`
@@ -170,6 +170,7 @@ from netkeeper.models import (
 )
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import get_scoped, scoped
+from netkeeper.services import sending_hours
 from netkeeper.services.campaign_guards import (
     UNSENDABLE_EMAIL_STATUSES,
     ChannelReason,
@@ -236,6 +237,7 @@ class Skip(enum.StrEnum):
     NOT_DUE = "not_due"
     NOT_STARTED = "not_started"
     SPILLED = "spilled_to_next_day"
+    OUTSIDE_SENDING_HOURS = "outside_sending_hours"
     BAD_SCHEDULE = "bad_schedule"
     CAMPAIGN_AT_CAP = "campaign_at_cap"
     SPACING = "spacing"
@@ -539,7 +541,7 @@ def activate(
         if template is None or activation_errors(template, me_keys):
             raise CampaignEngineError(f"step {step.position}'s template has lint errors")
     start = max(starts_at, now)
-    first_due = first_step_due(settings, user, steps[0], start)
+    first_due = first_step_due(settings, user, steps[0], start, hours_for(session, user))
     campaign.status = CampaignStatus.ACTIVE
     campaign.starts_at = start
     pending = session.scalars(
@@ -620,7 +622,7 @@ def set_start(
     if not steps:
         raise CampaignEngineError(f"campaign {campaign_id} has no steps")
     start = max(starts_at, now)
-    first_due = first_step_due(settings, user, steps[0], start)
+    first_due = first_step_due(settings, user, steps[0], start, hours_for(session, user))
     campaign.starts_at = start
     waiting = session.scalars(
         scoped(user, Enrollment).where(
@@ -660,16 +662,19 @@ def reschedule_step(session: Session, user: User, step: CampaignStep, *, setting
         else Enrollment.current_step == previous
     )
     moved = 0
+    hours = hours_for(session, user)
     for enrollment in session.scalars(statement).all():
         if previous is None:
             if campaign.starts_at is None:
                 continue
-            enrollment.next_action_at = first_step_due(settings, user, step, campaign.starts_at)
+            enrollment.next_action_at = first_step_due(
+                settings, user, step, campaign.starts_at, hours
+            )
         else:
             latest = _latest_sent(session, user, enrollment.id)
             if latest is None:
                 continue
-            enrollment.next_action_at = follow_up_due(settings, user, step, latest)
+            enrollment.next_action_at = follow_up_due(settings, user, step, latest, hours)
         moved += 1
     session.flush()
     return moved
@@ -886,35 +891,64 @@ def slots_for(settings: Settings, user: User) -> schedule.Suggested:
     return schedule.suggested(settings.campaigns, user.timezone)
 
 
+def hours_for(session: Session, user: User) -> schedule.SendingHours | None:
+    """The user's sending hours (``settings_kv``), or None when the stored value cannot be
+    read: the tick then blocks every campaign, so nothing is sent under it."""
+    try:
+        return sending_hours.read(session, user)
+    except schedule.ScheduleError:
+        return None
+
+
 def first_step_due(
-    settings: Settings, user: User, step: CampaignStep, starts_at: datetime
+    settings: Settings,
+    user: User,
+    step: CampaignStep,
+    starts_at: datetime,
+    hours: schedule.SendingHours | None = None,
 ) -> datetime:
     """When step 1 is due for a campaign starting at ``starts_at``: never before it.
+
+    On the start's own local day the sending hours do not apply (the start is
+    unbounded); a step 1 due on a later day goes to their next opening.
 
     A schedule that cannot be read leaves the start plus the delay; the tick then
     blocks the campaign, so nothing is sent under it."""
     try:
-        return schedule.step_due(
+        slots = slots_for(settings, user)
+        due = schedule.step_due(
             starts_at,
             delay_days=step.delay_days,
             send_time=step.send_time,
-            slots=slots_for(settings, user),
+            slots=slots,
             first=True,
         )
+        if hours is not None and slots.local_date(due) != slots.local_date(starts_at):
+            due = schedule.next_opening(due, hours, slots)
+        return due
     except schedule.ScheduleError:
         return starts_at + timedelta(days=step.delay_days)
 
 
-def follow_up_due(settings: Settings, user: User, step: CampaignStep, latest: datetime) -> datetime:
+def follow_up_due(
+    settings: Settings,
+    user: User,
+    step: CampaignStep,
+    latest: datetime,
+    hours: schedule.SendingHours | None = None,
+) -> datetime:
     """When a follow-up is due after the latest sent message: its own time of day, or
-    the next suggested slot after its delay. Unreadable: the delay alone, as above."""
+    the next suggested slot after its delay, then into the sending hours (an explicit
+    time outside them waits for their next opening). Unreadable: the delay alone."""
     try:
-        return schedule.step_due(
+        slots = slots_for(settings, user)
+        due = schedule.step_due(
             latest,
             delay_days=step.delay_days,
             send_time=step.send_time,
-            slots=slots_for(settings, user),
+            slots=slots,
         )
+        return due if hours is None else schedule.next_opening(due, hours, slots)
     except schedule.ScheduleError:
         return latest + timedelta(days=step.delay_days)
 
@@ -1041,6 +1075,7 @@ class _Blocks:
     campaigns: dict[int, tuple[tuple[str, ...], datetime | None]] = field(default_factory=dict)
     mailboxes: dict[int, tuple[tuple[str, ...], datetime | None]] = field(default_factory=dict)
     slots: schedule.Suggested | None = None
+    hours: schedule.SendingHours | None = None
 
 
 def _next_step_join(user: User) -> ColumnElement[bool]:
@@ -1341,17 +1376,32 @@ class _Chooser:
 
         try:
             slots = self.blocks.slots or slots_for(self.settings, user)
+            hours = self.blocks.hours or sending_hours.read(session, user)
         except schedule.ScheduleError as exc:
             log.warning("campaign %d sends nothing: %s", campaign.id, exc)
             self.block_campaign(campaign.id, (Skip.BAD_SCHEDULE,))
             self.skip(enrollment, Skip.BAD_SCHEDULE)
             return None
-        self.blocks.slots = slots
+        self.blocks.slots, self.blocks.hours = slots, hours
 
+        # The start is unbounded; everything after it keeps the sending hours, and a
+        # leftover from an earlier day spills to its own time of day (schedule.hold).
         due = enrollment.next_action_at
-        resume = None if due is None else schedule.spill(due, now, slots)
+        resume = (
+            None
+            if due is None
+            else schedule.hold(
+                due,
+                now,
+                slots=slots,
+                hours=hours,
+                starts_at=campaign.starts_at,
+                first_step=enrollment.current_step is None,
+            )
+        )
         if resume is not None:
-            self.defer(enrollment, resume, Skip.SPILLED)
+            spilled = schedule.spill(due, now, slots) is not None if due is not None else False
+            self.defer(enrollment, resume, Skip.SPILLED if spilled else Skip.OUTSIDE_SENDING_HOURS)
             return None
 
         # A cap reached today lifts at the local midnight; what is left of the batch
@@ -1402,7 +1452,7 @@ class _Chooser:
         if latest is not None:
             # The step's own timing (#338 review, S2): an explicit time of day may come
             # before the raw delay, and the suggested slot after it.
-            due = follow_up_due(self.settings, user, step, latest)
+            due = follow_up_due(self.settings, user, step, latest, self.blocks.hours)
             if due > now:
                 self.defer(enrollment, due, Skip.NOT_DUE)
                 return None
@@ -1444,7 +1494,10 @@ class _Chooser:
                 _end(self.session, self.user, enrollment, status, reason.value)
                 self.skip(enrollment, Skip.ENDED, *reasons)
                 return
-        self.defer(enrollment, self.now + RECHECK_AFTER, Skip.GUARD_EXCLUDED, *reasons)
+        recheck = self.now + RECHECK_AFTER
+        if self.blocks.slots is not None and self.blocks.hours is not None:
+            recheck = schedule.next_opening(recheck, self.blocks.hours, self.blocks.slots)
+        self.defer(enrollment, recheck, Skip.GUARD_EXCLUDED, *reasons)
 
     def _claim(
         self,
@@ -1578,7 +1631,9 @@ def _advance(
         # step's delay counts from when it does (schedule_next).
         enrollment.next_action_at = None
         return
-    enrollment.next_action_at = follow_up_due(settings, user, upcoming, latest)
+    enrollment.next_action_at = follow_up_due(
+        settings, user, upcoming, latest, hours_for(session, user)
+    )
     session.flush()
 
 
@@ -1678,16 +1733,18 @@ RETRY_AFTER_MAX: Final = timedelta(hours=2)
 waits only :data:`RETRY_AFTER`: one enrollment's thread that cannot be read must not
 hold every other enrollment on the mailbox for hours."""
 
-NOT_SENT_GIVE_UP_TRIES: Final = 8
-"""A step is failed for a person only after this many tries in a row sent nothing ...
+NOT_SENT_GIVE_UP_TRIES: Final = 16
+"""A step is failed for a person only after this many tries in a row sent nothing.
 
 A try that sent nothing leaves no row behind, so without a limit a step whose thread
-could never be read was tried every :data:`RETRY_AFTER` for good (#280)."""
+could never be read was tried every :data:`RETRY_AFTER` for good (#280).
 
-NOT_SENT_GIVE_UP_AFTER: Final = timedelta(hours=24)
-"""... and only once this long has passed since the first of them. Both: an outage
-shorter than this never fails a step, however many tries it costs, and a step whose
-campaign was paused for days between two tries still gets all of its tries."""
+Counted in tries, not hours (#338): retries wait for the sending hours, so elapsed
+time says nothing about how often a step was tried. Sixteen tries at the waits of
+:func:`retry_after` (15, 30 and 60 minutes, then two hours) take about 26 hours of
+sending time: with "any time" that is the day of tries #280 asked for (8 tries and
+24 hours before), and inside sending hours it spans several days. A step whose
+campaign was paused between tries still gets all of them."""
 
 
 def retry_after(tries: int) -> timedelta:
@@ -1722,13 +1779,14 @@ def _give_back(
     Message-ID.
 
     The try is counted on the enrollment. Once :data:`NOT_SENT_GIVE_UP_TRIES` in a
-    row have sent nothing over at least :data:`NOT_SENT_GIVE_UP_AFTER`, nothing is
+    row have sent nothing, nothing is
     given back: the message keeps its row, with the reason as its ``error``, and
     False is returned for the caller to record it ``failed`` (#280). True when the
     claim was given back.
 
-    The retry is part of the batch the step was in: it is due ``retry_after`` later,
-    at any hour (#338).
+    The retry is due ``retry_after`` later, or at the next opening of the sending
+    hours when that falls outside them (#338). Only the campaign's start is exempt
+    from the sending hours; a retry is not.
     """
     reason = (result.error or "no reason given")[:ERROR_MAX_LENGTH]
     # A merge may have moved the message to another enrollment meanwhile: follow it.
@@ -1737,7 +1795,7 @@ def _give_back(
     enrollment.not_sent_since = enrollment.not_sent_since or now
     enrollment.not_sent_error = reason
     tries, since = enrollment.not_sent_count, enrollment.not_sent_since
-    if tries >= NOT_SENT_GIVE_UP_TRIES and now - since >= NOT_SENT_GIVE_UP_AFTER:
+    if tries >= NOT_SENT_GIVE_UP_TRIES:
         hours = int((now - since).total_seconds() // 3600)
         message.error = (f"nothing sent after {tries} tries over {hours} h; the last: {reason}")[
             :ERROR_MAX_LENGTH
@@ -1762,7 +1820,13 @@ def _give_back(
     )
     # A paused enrollment keeps its due time for the resume; an ended one has none.
     if enrollment.status in (EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED):
-        enrollment.next_action_at = now + wait
+        due = now + wait
+        window = hours_for(session, user)
+        if window is not None:
+            # A schedule that cannot be read keeps the plain retry: the tick blocks it.
+            with contextlib.suppress(schedule.ScheduleError):
+                due = schedule.next_opening(due, window, slots_for(settings, user))
+        enrollment.next_action_at = due
     return True
 
 

@@ -586,6 +586,7 @@ async def test_start_options_give_the_default_the_suggestion_and_a_warning_only(
     assert (default.weekday(), default.hour, default.minute) == (1, 9, 0)
     assert options["suggestion"] == "Most effective: Tue–Thu mornings."  # noqa: RUF001
     assert "`serve` is running and this Mac is awake" in options["reminder"]
+    assert options["sending_hours"].startswith("Sending hours: Mon to Fri, 09:00 to 17:00.")
     assert options["warning"] is None
 
     saturday_night = datetime(2099, 1, 3, 22, 0, tzinfo=zone)
@@ -682,7 +683,8 @@ async def test_a_changed_step_time_moves_an_active_campaigns_waiting_enrollments
         zone = ZoneInfo(_local(session).timezone)
         local = moved.next_action_at
         assert local is not None
-        assert local.astimezone(zone).replace(tzinfo=None) == datetime(2026, 10, 3, 22, 0)
+        # Saturday 22:00 is outside the default sending hours: Monday 09:00 (#338).
+        assert local.astimezone(zone).replace(tzinfo=None) == datetime(2026, 10, 5, 9, 0)
         assert untouched.next_action_at == start
 
 
