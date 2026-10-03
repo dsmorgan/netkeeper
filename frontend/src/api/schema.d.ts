@@ -2316,6 +2316,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/templates/merge-fields": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Merge Fields
+         * @description Every merge field a template may name, with a description and an example value.
+         *
+         *     The list is the one lint checks names against, so the editor's field list
+         *     follows any change to it. The ``me.<key>`` fields include any extra keys
+         *     under ``[me]`` in the config.
+         */
+        get: operations["list_merge_fields"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/templates/{template_id}": {
         parameters: {
             query?: never;
@@ -3998,6 +4022,18 @@ export interface components {
             /** Value */
             value: string | number | boolean;
         };
+        /**
+         * ExampleSource
+         * @description Where a field's example value came from.
+         * @enum {string}
+         */
+        ExampleSource: "contact" | "config" | "placeholder";
+        /**
+         * FieldGroup
+         * @description Where a merge field's value comes from.
+         * @enum {string}
+         */
+        FieldGroup: "contact" | "personal" | "me" | "campaign";
         "FilterNode-Input": components["schemas"]["And-Input"] | components["schemas"]["Or-Input"] | components["schemas"]["Not-Input"] | components["schemas"]["Eq"] | components["schemas"]["Neq"] | components["schemas"]["Contains"] | components["schemas"]["StartsWith"] | components["schemas"]["IsEmpty"] | components["schemas"]["Gt"] | components["schemas"]["Gte"] | components["schemas"]["Lt"] | components["schemas"]["Lte"] | components["schemas"]["Between"] | components["schemas"]["HasEmail"] | components["schemas"]["HasPhone"] | components["schemas"]["HasLiUrl"] | components["schemas"]["HasPosition"] | components["schemas"]["EmailContains"] | components["schemas"]["LastContacted"] | components["schemas"]["ConnectedWithinDays"] | components["schemas"]["ChangedJobsWithinDays"] | components["schemas"]["TagAny"] | components["schemas"]["TagAll"] | components["schemas"]["TagNone"] | components["schemas"]["ListMember"] | components["schemas"]["EnrolledIn"] | components["schemas"]["RepliedIn"];
         "FilterNode-Output": components["schemas"]["And-Output"] | components["schemas"]["Or-Output"] | components["schemas"]["Not-Output"] | components["schemas"]["Eq"] | components["schemas"]["Neq"] | components["schemas"]["Contains"] | components["schemas"]["StartsWith"] | components["schemas"]["IsEmpty"] | components["schemas"]["Gt"] | components["schemas"]["Gte"] | components["schemas"]["Lt"] | components["schemas"]["Lte"] | components["schemas"]["Between"] | components["schemas"]["HasEmail"] | components["schemas"]["HasPhone"] | components["schemas"]["HasLiUrl"] | components["schemas"]["HasPosition"] | components["schemas"]["EmailContains"] | components["schemas"]["LastContacted"] | components["schemas"]["ConnectedWithinDays"] | components["schemas"]["ChangedJobsWithinDays"] | components["schemas"]["TagAny"] | components["schemas"]["TagAll"] | components["schemas"]["TagNone"] | components["schemas"]["ListMember"] | components["schemas"]["EnrolledIn"] | components["schemas"]["RepliedIn"];
         /**
@@ -4676,10 +4712,15 @@ export interface components {
         /**
          * LintIssueOut
          * @description One lint finding. ``field`` names the merge field or link it is about, if any.
+         *
+         *     ``line`` is the one-based line of ``part`` it is about; none for a finding about
+         *     the whole part, or one stored before lint reported lines.
          */
         LintIssueOut: {
             /** Field */
             field?: string | null;
+            /** Line */
+            line?: number | null;
             /** Message */
             message: string;
             part: components["schemas"]["Part"];
@@ -4887,6 +4928,38 @@ export interface components {
             mailboxes: components["schemas"]["MailboxOut"][];
             /** Reauth Required */
             reauth_required: boolean;
+        };
+        /**
+         * MergeFieldOut
+         * @description One merge field for the editor's field list (#344).
+         *
+         *     ``insert`` goes between the braces. ``example`` is ``None`` when the contact,
+         *     or ``[me]``, has no value for the field, so it would render empty.
+         *     ``example_source`` says where the example came from: the contact, ``[me]``,
+         *     or an invented ``placeholder``.
+         */
+        MergeFieldOut: {
+            /** Description */
+            description: string;
+            /** Example */
+            example: string | null;
+            example_source: components["schemas"]["ExampleSource"];
+            group: components["schemas"]["FieldGroup"];
+            /** Insert */
+            insert: string;
+            /** Name */
+            name: string;
+        };
+        /**
+         * MergeFieldsOut
+         * @description Every merge field a template may name, with examples (#344). ``contact_id`` is the
+         *     contact the examples come from, or ``None`` for invented placeholders.
+         */
+        MergeFieldsOut: {
+            /** Contact Id */
+            contact_id: number | null;
+            /** Fields */
+            fields: components["schemas"]["MergeFieldOut"][];
         };
         /**
          * MergeIn
@@ -11314,6 +11387,45 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    list_merge_fields: {
+        parameters: {
+            query?: {
+                /** @description A contact to take the example values from. Without one, every example is an invented placeholder. */
+                contact_id?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MergeFieldsOut"];
+                };
+            };
+            /** @description No such template or contact for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

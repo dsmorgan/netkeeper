@@ -727,6 +727,8 @@ Jinja2 in a sandboxed environment with autoescape off for plain-text email and o
 
 Template lint at save time: undefined variables, a body with no per-contact merge field (identical bulk mail is a spam signal), missing subject on email, links that do not parse. Lint results are shown in the editor and block activation for errors.
 
+*As built (#344):* each lint finding about one place carries its one-based `line` in the subject or body; one about the whole part (a missing subject, a body with no per-contact field) has none. The editor shows each finding under its field, at its line, with one sentence on why it matters. `GET /templates/merge-fields` lists every merge field with a description and an example (invented placeholders, or a contact's values with `contact_id`), built from the same names lint allows, so the editor's merge-field helper follows any change to them.
+
 *As built (P3-03):* `netkeeper/campaigns/render.py`. The template language is an **allowlist**, checked by one walker that runs as lint and again before every render. A template may contain only:
 
 - text and `{{ }}` output;

@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns import templates as service
+from netkeeper.config import MeSettings, Settings
 from netkeeper.db import session_scope
 from netkeeper.models import CampaignStatus, TemplateChannel, User, UserKind
 
@@ -231,6 +232,7 @@ async def test_preview(client: httpx.AsyncClient, running_app: FastAPI) -> None:
                 "part": "body",
                 "message": "`company` has no value here, so it renders empty",
                 "field": "company",
+                "line": 1,
             }
         ],
     }
@@ -324,3 +326,81 @@ async def test_lint_of_unsaved_text_refuses_what_a_save_would(client: httpx.Asyn
     ):
         response = await client.post("/api/v1/templates/lint", json=draft, headers=CSRF)
         assert response.status_code == 422, draft
+
+
+# --- the editor's field list and lint lines (#344) ---------------------------------------
+
+
+async def test_merge_fields_without_a_contact_are_invented_placeholders(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.get("/api/v1/templates/merge-fields")
+    assert response.status_code == 200, response.text
+    listed = response.json()
+    assert listed["contact_id"] is None
+    by_name = {f["name"]: f for f in listed["fields"]}
+    assert list(by_name)[:2] == ["first_name", "last_name"]
+    assert by_name["first_name"] == {
+        "name": "first_name",
+        "group": "contact",
+        "description": by_name["first_name"]["description"],
+        "insert": "first_name",
+        "example": "Alex",
+        "example_source": "placeholder",
+    }
+    assert by_name["previous_send_date"]["insert"] == "previous_send_date | ago"
+    assert {f["example_source"] for f in listed["fields"]} == {"placeholder"}
+    assert all(f["example"] and f["description"] for f in listed["fields"])
+
+
+async def test_merge_fields_with_a_contact_show_its_values_and_me_from_the_config(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    running_app.state.settings = Settings(me=MeSettings(name="Ada Fixture", extra={"pod": "P"}))
+    with session_scope(_factory(running_app), write=True) as session:
+        user = session.scalars(select(User)).one()
+        contact_id = factories.make_contact(
+            session, user, preferred_name="Bo", current_company="Fixture Co", location=None
+        ).id
+    response = await client.get("/api/v1/templates/merge-fields", params={"contact_id": contact_id})
+    assert response.status_code == 200, response.text
+    listed = response.json()
+    assert listed["contact_id"] == contact_id
+    shown = {f["name"]: (f["example"], f["example_source"]) for f in listed["fields"]}
+    assert shown["first_name"] == ("Bo", "contact")
+    assert shown["company"] == ("Fixture Co", "contact")
+    assert shown["location"] == (None, "contact")  # renders empty for this contact
+    assert shown["me.name"] == ("Ada Fixture", "config")
+    assert shown["me.website"] == (None, "config")
+    assert shown["me.pod"] == ("P", "config")
+    assert shown["campaign.name"] == ("Example campaign", "placeholder")
+    assert shown["personal_line"][1] == "placeholder"
+
+
+async def test_merge_fields_for_another_users_or_no_contact_is_404(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    with session_scope(_factory(running_app), write=True) as session:
+        other = factories.make_user(session, kind=UserKind.HOSTED)
+        their_contact = factories.make_contact(session, other, preferred_name="Theirs").id
+    for contact_id in (their_contact, their_contact + 999):
+        response = await client.get(
+            "/api/v1/templates/merge-fields", params={"contact_id": contact_id}
+        )
+        assert response.status_code == 404
+        assert "Theirs" not in response.text
+
+
+async def test_lint_reports_the_line_of_each_finding(client: httpx.AsyncClient) -> None:
+    draft = {
+        "channel": "email",
+        "subject": "Hi {{ frist_name }}",
+        "body": "Hi {{ first_name }}\n\n{{ compnay }}\nsee http:/broken",
+    }
+    response = await client.post("/api/v1/templates/lint", json=draft, headers=CSRF)
+    assert response.status_code == 200, response.text
+    assert [(i["part"], i["field"], i["line"]) for i in response.json()] == [
+        ("subject", "frist_name", 1),
+        ("body", "compnay", 3),
+        ("body", "http:/broken", 4),
+    ]

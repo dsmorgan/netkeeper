@@ -20,7 +20,7 @@ import { describe, expect, it } from 'vitest'
 import { mockApi, renderWithClient, requestsTo, type RouteHandler } from '@/features/crm/harness'
 import { jsonResponse } from '@/test/fetch'
 
-import type { LintIssue, TemplateOut } from './api'
+import type { LintIssue, MergeField, TemplateOut } from './api'
 import { TemplatesPage } from './templates-page'
 
 const WAIT = { timeout: 3000 }
@@ -86,11 +86,44 @@ const lintRoute: RouteHandler = ({ body }) => {
   return jsonResponse(text.includes('{% for') ? [LOOP] : [])
 }
 
+/** Invented values, as the backend's placeholders are, and one contact's own for `contact_id`. */
+const mergeFieldsRoute: RouteHandler = ({ url }) => {
+  const contactId = url.searchParams.get('contact_id')
+  const fields: MergeField[] = [
+    {
+      name: 'first_name',
+      group: 'contact',
+      description: "The contact's first name.",
+      insert: 'first_name',
+      example: contactId === null ? 'Alex' : 'Robin',
+      example_source: contactId === null ? 'placeholder' : 'contact',
+    },
+    {
+      name: 'company',
+      group: 'contact',
+      description: "The contact's current company.",
+      insert: 'company',
+      example: contactId === null ? 'Example Co' : null,
+      example_source: contactId === null ? 'placeholder' : 'contact',
+    },
+    {
+      name: 'previous_send_date',
+      group: 'campaign',
+      description: 'When the previous step went out.',
+      insert: 'previous_send_date | ago',
+      example: '3 weeks ago',
+      example_source: 'placeholder',
+    },
+  ]
+  return jsonResponse({ contact_id: contactId === null ? null : Number(contactId), fields })
+}
+
 function routes(rows: TemplateOut[], extra: Record<string, RouteHandler> = {}) {
   const byId: Record<string, RouteHandler> = {}
   for (const row of rows) byId[`GET /api/v1/templates/${row.id}`] = () => jsonResponse(row)
   return {
     'GET /api/v1/templates': () => jsonResponse(rows.filter((row) => row.current)),
+    'GET /api/v1/templates/merge-fields': mergeFieldsRoute,
     'POST /api/v1/templates/lint': lintRoute,
     ...byId,
     ...extra,
@@ -108,9 +141,9 @@ describe('lint', () => {
       target: { value: 'Hi {{ first_name }}\n{% for x in y %}{% endfor %}' },
     })
 
-    const issues = await screen.findByRole('list', { name: 'Lint issues' }, WAIT)
+    const issues = await screen.findByRole('list', { name: 'Body lint' }, WAIT)
     expect(within(issues).getByText("Loops aren't supported in templates")).toBeInTheDocument()
-    expect(within(issues).getByText('Body · line 2')).toBeInTheDocument()
+    expect(within(issues).getByText('Line 2')).toBeInTheDocument()
     expect(
       within(issues).getByText('`for` is not available in a message template'),
     ).toBeInTheDocument()
@@ -130,11 +163,11 @@ describe('lint', () => {
     mockApi(routes([template({ body: '{% for x in y %}{% endfor %}' })]))
     await renderPage()
     fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
-    await screen.findByRole('list', { name: 'Lint issues' }, WAIT)
+    await screen.findByRole('list', { name: 'Body lint' }, WAIT)
 
     fireEvent.change(screen.getByLabelText('Body'), { target: { value: 'Hi {{ first_name }}' } })
     expect(await screen.findByText('No lint issues.', undefined, WAIT)).toBeInTheDocument()
-    expect(screen.queryByRole('list', { name: 'Lint issues' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Body lint' })).not.toBeInTheDocument()
   })
 })
 
@@ -169,7 +202,7 @@ describe('lint while you type', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
     expect(await screen.findByText('Checking…')).toBeInTheDocument()
     await lint.release('{% for x in y %}{% endfor %}', [LOOP])
-    const issues = await screen.findByRole('list', { name: 'Lint issues' })
+    const issues = await screen.findByRole('list', { name: 'Body lint' })
     await waitFor(() => expect(screen.queryByText('Checking…')).not.toBeInTheDocument())
     const section = screen.getByRole('region', { name: 'Lint' })
     expect(section).not.toHaveAttribute('aria-busy')
@@ -179,12 +212,12 @@ describe('lint while you type', () => {
     // The loop is gone from the text, but its answer is still on screen: dimmed, and busy.
     expect(screen.getByText('Checking…')).toBeInTheDocument()
     expect(section).toHaveAttribute('aria-busy', 'true')
-    expect(screen.getByRole('list', { name: 'Lint issues' }).closest('[data-stale]')).not.toBeNull()
+    expect(screen.getByRole('list', { name: 'Body lint' }).closest('[data-stale]')).not.toBeNull()
 
     // Past the debounce, with the request out: still the old answer, so still stale.
     await lint.asked('Hi {{ first_name }}')
     expect(screen.getByText('Checking…')).toBeInTheDocument()
-    expect(screen.getByRole('list', { name: 'Lint issues' }).closest('[data-stale]')).not.toBeNull()
+    expect(screen.getByRole('list', { name: 'Body lint' }).closest('[data-stale]')).not.toBeNull()
 
     await lint.release('Hi {{ first_name }}', [])
     expect(await screen.findByText('No lint issues.', undefined, WAIT)).toBeInTheDocument()
@@ -214,7 +247,7 @@ describe('lint while you type', () => {
     // Give the late answer every chance to land before checking it changed nothing.
     await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
     expect(screen.getByText('No lint issues.')).toBeInTheDocument()
-    expect(screen.queryByRole('list', { name: 'Lint issues' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Body lint' })).not.toBeInTheDocument()
     expect(screen.getByLabelText('Body')).not.toHaveAttribute('aria-invalid')
     expect(screen.queryByText('Checking…')).not.toBeInTheDocument()
   })
@@ -738,5 +771,201 @@ describe('unsaved draft', () => {
 
     fireEvent.change(body, { target: { value: template().body } })
     await waitFor(() => expect(unload()).toBe(false))
+  })
+})
+
+describe('merge-field helper', () => {
+  async function openTemplate(row: TemplateOut = template()) {
+    mockApi(routes([row]))
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: row.name }))
+    await screen.findByRole('button', { name: 'Insert {{ company }}' }, WAIT)
+    return {
+      subject: screen.getByLabelText('Subject') as HTMLInputElement,
+      body: screen.getByLabelText('Body') as HTMLTextAreaElement,
+    }
+  }
+
+  it('inserts at the cursor in the body and leaves the cursor after the insert', async () => {
+    const { subject, body } = await openTemplate()
+    act(() => {
+      body.focus()
+      body.setSelectionRange(3, 3) // "Hi |{{ first_name }} at ..."
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Insert {{ company }}' }))
+
+    const inserted = 'Hi {{ company }}{{ first_name }} at {{ company }}.'
+    expect(body.value).toBe(inserted)
+    expect(document.activeElement).toBe(body)
+    expect(body.selectionStart).toBe(3 + '{{ company }}'.length)
+    expect(body.selectionEnd).toBe(body.selectionStart)
+    expect(subject.value).toBe('Hi {{ first_name }}')
+  })
+
+  it('inserts at the cursor in the subject when it was focused last, replacing a selection', async () => {
+    const { subject, body } = await openTemplate()
+    act(() => body.focus())
+    act(() => {
+      subject.focus()
+      subject.setSelectionRange(3, 19) // selects "{{ first_name }}"
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Insert {{ previous_send_date | ago }}' }))
+
+    expect(subject.value).toBe('Hi {{ previous_send_date | ago }}')
+    expect(document.activeElement).toBe(subject)
+    expect(subject.selectionStart).toBe(subject.value.length)
+    expect(body.value).toBe('Hi {{ first_name }} at {{ company }}.')
+
+    // The cursor stays in the subject, so a second insert follows the first.
+    fireEvent.click(screen.getByRole('button', { name: 'Insert {{ first_name }}' }))
+    expect(subject.value).toBe('Hi {{ previous_send_date | ago }}{{ first_name }}')
+  })
+
+  it('appends to the body when no field has been focused yet', async () => {
+    const { body } = await openTemplate()
+    fireEvent.click(screen.getByRole('button', { name: 'Insert {{ first_name }}' }))
+    expect(body.value).toBe('Hi {{ first_name }} at {{ company }}.{{ first_name }}')
+  })
+
+  it('describes each field, with invented examples until a contact is picked', async () => {
+    const seen = mockApi(
+      routes([template()], {
+        'GET /api/v1/contacts': () =>
+          jsonResponse({
+            items: [{ id: 7, first_name: 'Robin', last_name: 'Example', current_company: null }],
+            total: 1,
+            describe: '',
+          }),
+        'GET /api/v1/templates/1/preview': () =>
+          jsonResponse({ subject: 'Hi Robin', body: 'Hi Robin at .', issues: [] }),
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    const helper = await screen.findByRole('region', { name: 'Merge fields' }, WAIT)
+    const insert = await within(helper).findByRole('button', { name: 'Insert {{ first_name }}' })
+    expect(insert).toHaveAccessibleDescription(/The contact's first name\.\s*Example: Alex/)
+    expect(within(helper).getByText(/Examples are made up/)).toBeInTheDocument()
+    expect(requestsTo(seen, 'GET', '/api/v1/templates/merge-fields')[0]?.search).toBe('')
+
+    fireEvent.change(await screen.findByLabelText('Contact'), { target: { value: 'rob' } })
+    fireEvent.click(await screen.findByRole('button', { name: /Robin Example/ }, WAIT))
+
+    await within(helper).findByText(/Examples are Robin Example's values\./, undefined, WAIT)
+    await waitFor(() =>
+      expect(
+        within(helper).getByRole('button', { name: 'Insert {{ first_name }}' }),
+      ).toHaveAccessibleDescription(/This contact: Robin/),
+    )
+    expect(
+      within(helper).getByRole('button', { name: 'Insert {{ company }}' }),
+    ).toHaveAccessibleDescription(/No value for this contact/)
+    expect(requestsTo(seen, 'GET', '/api/v1/templates/merge-fields').at(-1)?.search).toBe(
+      '?contact_id=7',
+    )
+  })
+})
+
+describe('inline lint', () => {
+  const ISSUES: LintIssue[] = [
+    {
+      rule: 'undefined_variable',
+      severity: 'error',
+      part: 'subject',
+      message: '`frist_name` is not a merge field',
+      field: 'frist_name',
+      line: 1,
+    },
+    {
+      rule: 'bad_link',
+      severity: 'warning',
+      part: 'body',
+      message: '`http:/broken` is not a link that parses',
+      field: 'http:/broken',
+      line: 3,
+    },
+    {
+      rule: 'undefined_variable',
+      severity: 'error',
+      part: 'body',
+      message: '`compnay` is not a merge field',
+      field: 'compnay',
+      line: 2,
+    },
+  ]
+  const BODY = 'Hi {{ first_name }}\n{{ compnay }}\nsee http:/broken'
+
+  it('shows each finding under its field, at its line, with why it matters', async () => {
+    mockApi(
+      routes([template({ subject: 'Hi {{ frist_name }}', body: BODY })], {
+        'POST /api/v1/templates/lint': () => jsonResponse(ISSUES),
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+
+    const bodyLint = await screen.findByRole('list', { name: 'Body lint' }, WAIT)
+    const [first, second] = within(bodyLint).getAllByRole('listitem')
+    if (first === undefined || second === undefined) throw new Error('expected two findings')
+    const items = [first, second]
+    // In reading order, by line.
+    expect(items.map((item) => within(item).getByText(/^Line \d$/).textContent)).toEqual([
+      'Line 2',
+      'Line 3',
+    ])
+    expect(within(first).getByText('{{ compnay }}')).toBeInTheDocument()
+    expect(within(first).getByText('`compnay` is not a merge field')).toBeInTheDocument()
+    expect(within(first).getByText(/Why it matters: This isn't a merge field/)).toBeInTheDocument()
+    expect(within(second).getByText('Warning')).toBeInTheDocument()
+    expect(within(second).getByText(/won't open for the person/)).toBeInTheDocument()
+
+    // Tied to the fields, so a screen reader reads them with each one.
+    const body = screen.getByLabelText('Body')
+    expect(body).toHaveAttribute('aria-invalid', 'true')
+    expect(body.getAttribute('aria-describedby')).toBe(bodyLint.id)
+    const subjectLint = screen.getByRole('list', { name: 'Subject lint' })
+    expect(within(subjectLint).getByText('`frist_name` is not a merge field')).toBeInTheDocument()
+    expect(within(subjectLint).queryByText(/^Line/)).not.toBeInTheDocument()
+    const subject = screen.getByLabelText('Subject')
+    expect(subject.getAttribute('aria-describedby')?.split(' ')).toContain(subjectLint.id)
+    expect(subject).toHaveAccessibleDescription(/Required for email.*frist_name/)
+
+    // The lines themselves are marked behind the text: the error line and the warning line.
+    const marks = screen.getByTestId('line-marks')
+    expect(marks).toHaveAttribute('aria-hidden', 'true')
+    expect(marks.querySelector('[data-line="1"]')).not.toHaveAttribute('data-severity')
+    expect(marks.querySelector('[data-line="2"]')).toHaveAttribute('data-severity', 'error')
+    expect(marks.querySelector('[data-line="3"]')).toHaveAttribute('data-severity', 'warning')
+
+    // Errors still block activation, and the editor says so.
+    expect(screen.getByText(/a campaign can't use this template/)).toBeInTheDocument()
+  })
+
+  it('moves the cursor to a finding’s line', async () => {
+    mockApi(
+      routes([template({ body: BODY })], {
+        'POST /api/v1/templates/lint': () => jsonResponse(ISSUES.slice(1)),
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Go to line 2' }, WAIT))
+    const body = screen.getByLabelText('Body') as HTMLTextAreaElement
+    expect(document.activeElement).toBe(body)
+    expect(body.value.slice(body.selectionStart, body.selectionEnd)).toBe('{{ compnay }}')
+  })
+
+  it('does not say a warning blocks activation', async () => {
+    mockApi(
+      routes([template({ body: BODY })], {
+        'POST /api/v1/templates/lint': () => jsonResponse(ISSUES.slice(1, 2)),
+      }),
+    )
+    await renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'reconnect' }))
+    const bodyLint = await screen.findByRole('list', { name: 'Body lint' }, WAIT)
+    expect(within(bodyLint).getByText('Warning')).toBeInTheDocument()
+    expect(screen.queryByText(/a campaign can't use this template/)).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Body')).not.toHaveAttribute('aria-invalid')
   })
 })

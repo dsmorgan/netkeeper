@@ -16,6 +16,8 @@ export type TemplateChannel = TemplateOut['channel']
 export type LintIssue = components['schemas']['LintIssueOut']
 export type TemplatePreview = components['schemas']['TemplatePreviewOut']
 export type ContactRow = components['schemas']['ContactRow']
+export type MergeField = components['schemas']['MergeFieldOut']
+export type MergeFields = components['schemas']['MergeFieldsOut']
 
 export interface TemplateDraft {
   name: string
@@ -46,6 +48,8 @@ export const templateKeys = {
   versions: (id: number) => [...templateKeys.all, 'versions', id] as const,
   preview: (id: number, contactId: number) =>
     [...templateKeys.all, 'preview', id, contactId] as const,
+  mergeFields: (contactId: number | null) =>
+    [...templateKeys.all, 'merge-fields', contactId] as const,
 }
 
 /** The newest version of every template, by name. */
@@ -162,5 +166,27 @@ export function contactSearchQuery(q: string) {
       if (data === undefined) fail(response.status, error, 'could not search the contacts')
       return data.items
     },
+  })
+}
+
+/**
+ * Every merge field a template may name, with a description and an example (#344).
+ *
+ * The backend builds the list from the names lint allows, so a field removed
+ * there leaves the editor's list too. With `contactId`, the examples are that
+ * contact's values; without, they are invented placeholders.
+ */
+export function mergeFieldsQuery(contactId: number | null) {
+  return queryOptions({
+    queryKey: templateKeys.mergeFields(contactId),
+    queryFn: async ({ signal }): Promise<MergeFields> => {
+      const { data, error, response } = await api.GET('/api/v1/templates/merge-fields', {
+        params: { query: contactId === null ? {} : { contact_id: contactId } },
+        signal,
+      })
+      if (data === undefined) fail(response.status, error, 'could not load the merge fields')
+      return data
+    },
+    staleTime: 60_000,
   })
 }
