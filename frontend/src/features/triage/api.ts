@@ -307,6 +307,36 @@ export interface QueuedContact {
 export const AHEAD_PAGE = 100
 
 /**
+ * The queue's membership as a contacts filter: `met` in `states`, and
+ * `met_source` when the review pass narrows by who decided.
+ */
+function queueWhere(
+  states: ContactMet[],
+  decidedBy: MetSource | null | undefined,
+): FilterNode | null {
+  const terms: FilterNode[] = states.map((state) => ({
+    op: 'eq',
+    field: 'met',
+    value: state,
+  }))
+  const byState: FilterNode | null =
+    terms.length === 0
+      ? null
+      : terms.length === 1
+        ? (terms[0] ?? null)
+        : { op: 'or', children: terms }
+  // `met_source` is the same column `decided_by` narrows on, so the list ahead
+  // of a review pass is the review pass, not an approximation of it.
+  const byDecider: FilterNode | null =
+    decidedBy == null ? null : { op: 'eq', field: 'met_source', value: decidedBy }
+  return byState === null
+    ? byDecider
+    : byDecider === null
+      ? byState
+      : { op: 'and', children: [byState, byDecider] }
+}
+
+/**
  * The contacts still waiting, in the order the queue will serve them.
  *
  * There is no triage endpoint that lists the queue — `GET /triage/next` serves
@@ -328,27 +358,7 @@ export async function fetchQueueAhead(options: {
   limit?: number
   signal?: AbortSignal
 }): Promise<{ contacts: QueuedContact[]; total: number }> {
-  const terms: FilterNode[] = options.states.map((state) => ({
-    op: 'eq',
-    field: 'met',
-    value: state,
-  }))
-  const byState: FilterNode | null =
-    terms.length === 0
-      ? null
-      : terms.length === 1
-        ? (terms[0] ?? null)
-        : { op: 'or', children: terms }
-  // `met_source` is the same column `decided_by` narrows on, so the list ahead
-  // of a review pass is the review pass, not an approximation of it.
-  const decidedBy: FilterNode | null =
-    options.decidedBy == null ? null : { op: 'eq', field: 'met_source', value: options.decidedBy }
-  const where: FilterNode | null =
-    byState === null
-      ? decidedBy
-      : decidedBy === null
-        ? byState
-        : { op: 'and', children: [byState, decidedBy] }
+  const where = queueWhere(options.states, options.decidedBy)
   const { data, error, response } = await api.POST('/api/v1/contacts/query', {
     body: {
       filter: { include_archived: false, where },
@@ -443,4 +453,76 @@ export async function untagContact(contactId: number, tagId: number): Promise<vo
     params: { path: { contact_id: contactId, tag_id: tagId } },
   })
   if (!response.ok) fail(response.status, error, 'the tag was not removed')
+}
+
+/**
+ * Contacts in the queue being served whose name matches `text`, for the jump.
+ *
+ * The queue's own membership (`queueWhere`) AND-ed with one clause per word of
+ * the search, each matching the first, last, or preferred name, so "ada ven"
+ * finds Ada Ventura and a contact outside the queue is never offered. The
+ * filter language folds case and escapes `%` and `_`. Queue order, `id`.
+ */
+export async function searchQueue(options: {
+  states: ContactMet[]
+  decidedBy?: MetSource | null
+  text: string
+  limit?: number
+  signal?: AbortSignal
+}): Promise<QueuedContact[]> {
+  const words = options.text.split(/\s+/).filter((word) => word !== '')
+  if (words.length === 0) return []
+  const clauses: FilterNode[] = words.map((word) => ({
+    op: 'or',
+    children: (['first_name', 'last_name', 'preferred_name'] as const).map((field) => ({
+      op: 'contains',
+      field,
+      value: word,
+    })),
+  }))
+  const names: FilterNode =
+    clauses.length === 1 ? (clauses[0] as FilterNode) : { op: 'and', children: clauses }
+  const membership = queueWhere(options.states, options.decidedBy)
+  const where: FilterNode =
+    membership === null ? names : { op: 'and', children: [membership, names] }
+  const { data, error, response } = await api.POST('/api/v1/contacts/query', {
+    body: {
+      filter: { include_archived: false, where },
+      sort: [],
+      limit: options.limit ?? SEARCH_LIMIT,
+      offset: 0,
+      columns: ['first_name', 'last_name', 'preferred_name', 'met'],
+    },
+    signal: options.signal,
+  })
+  if (data === undefined) fail(response.status, error, 'the search could not be run')
+  return data.items.map((row) => ({
+    id: row.id,
+    name: `${row.preferred_name ?? row.first_name ?? ''} ${row.last_name ?? ''}`.trim(),
+    met: row.met ?? 'unknown',
+  }))
+}
+
+/** How many matches the jump search lists. */
+export const SEARCH_LIMIT = 8
+
+/**
+ * One contact's card, to triage them next (the jump).
+ *
+ * `404` when the contact is not in the queue being served, which the search
+ * never offers but a contact decided in another tab can become.
+ */
+export async function fetchTriageContact(options: {
+  contactId: number
+  states: ContactMet[]
+  decidedBy?: MetSource | null
+}): Promise<TriageCard> {
+  const { data, error, response } = await api.GET('/api/v1/triage/contacts/{contact_id}', {
+    params: {
+      path: { contact_id: options.contactId },
+      query: { states: options.states, decided_by: options.decidedBy ?? null },
+    },
+  })
+  if (data === undefined) fail(response.status, error, 'that contact is not in this queue')
+  return data
 }

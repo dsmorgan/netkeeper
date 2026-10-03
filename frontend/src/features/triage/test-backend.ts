@@ -105,6 +105,34 @@ const CONTACT_COLUMNS = [
 interface AheadFilter {
   states: ContactMet[]
   decidedBy: 'manual' | 'automatic' | null
+  /** The words of a jump search, each of which must be in a name; empty for the look-ahead. */
+  words: string[]
+}
+
+/**
+ * The words of a jump search's name filter, or `null` when this is not one.
+ *
+ * One clause per word -- an `or` of `contains` on the three name columns -- or
+ * an `and` of such clauses.
+ */
+function nameWordsOf(where: unknown): string[] | null {
+  const node = where as { op?: string; children?: unknown[] }
+  if (node.op === 'and') {
+    const words = (node.children ?? []).map((child) => nameWordsOf(child))
+    return words.every((found) => found !== null && found.length === 1)
+      ? (words.flat() as string[])
+      : null
+  }
+  if (node.op !== 'or') return null
+  const children = (node.children ?? []) as Array<{ op?: string; field?: string; value?: string }>
+  const fields = children.map((child) => child.field)
+  const wanted = ['first_name', 'last_name', 'preferred_name']
+  const isClause =
+    children.length === 3 &&
+    children.every((child) => child.op === 'contains') &&
+    wanted.every((field) => fields.includes(field)) &&
+    new Set(children.map((child) => child.value)).size === 1
+  return isClause ? [String(children[0]?.value)] : null
 }
 
 /**
@@ -119,15 +147,20 @@ function aheadFilterOf(where: unknown): AheadFilter {
   if (where === null || where === undefined) {
     throw new Error('the look-ahead must filter on met')
   }
+  const names = nameWordsOf(where)
+  if (names !== null) throw new Error('a name search must also say which queue it is over')
   const node = where as { op?: string; field?: string; value?: unknown; children?: unknown[] }
   if (node.op === 'and') {
     const children = node.children ?? []
     if (children.length !== 2) {
       throw new Error('this fake understands one `and`: the states, then who decided them')
     }
-    return { states: metStatesOf(children[0]), decidedBy: metSourceOf(children[1]) }
+    // The jump search: the queue's membership, then the words.
+    const words = nameWordsOf(children[1])
+    if (words !== null) return { ...aheadFilterOf(children[0]), words }
+    return { states: metStatesOf(children[0]), decidedBy: metSourceOf(children[1]), words: [] }
   }
-  return { states: metStatesOf(where), decidedBy: null }
+  return { states: metStatesOf(where), decidedBy: null, words: [] }
 }
 
 function metSourceOf(where: unknown): 'manual' | 'automatic' {
@@ -692,6 +725,17 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
       })
     }
 
+    // The jump: one contact's card, when the queue being served holds them.
+    const jumpMatch = /^\/api\/v1\/triage\/contacts\/(\d+)$/.exec(url.pathname)
+    if (jumpMatch !== null) {
+      const states = statesOf(url.searchParams)
+      const found = queue(states, decidedByOf(url.searchParams)).find(
+        (contact) => contact.id === Number(jumpMatch[1]),
+      )
+      if (found === undefined) return jsonResponse({ detail: 'no such contact' }, 404)
+      return jsonResponse(card(found))
+    }
+
     const nameMatch = /^\/api\/v1\/triage\/contacts\/(\d+)\/preferred-name$/.exec(url.pathname)
     if (nameMatch !== null) {
       const contact = byId(Number(nameMatch[1]))
@@ -739,6 +783,11 @@ export function createFakeBackend(options: FakeBackendOptions = {}): FakeBackend
           (contact) =>
             wanted.includes(contact.met) &&
             (ahead.decidedBy === null || contact.met_source === ahead.decidedBy) &&
+            ahead.words.every((word) =>
+              [contact.first_name, contact.last_name, contact.preferred_name].some((name) =>
+                name.toLowerCase().includes(word.toLowerCase()),
+              ),
+            ) &&
             contact.archived_at === null &&
             contact.merged_into_id === null,
         )

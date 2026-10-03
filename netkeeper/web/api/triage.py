@@ -175,6 +175,32 @@ def get_next_triage_contact(
     )
 
 
+@router.get(
+    "/triage/contacts/{contact_id}",
+    operation_id="get_triage_contact",
+    responses={404: {"description": "No such contact, or not in the queue being served"}},
+)
+def get_triage_contact(
+    contact_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+    states: States = None,
+    decided_by: DecidedBy = None,
+) -> TriageCardOut:
+    """One contact's card, to triage them next without deciding the ones before them.
+
+    The jump. It holds to the queue's own rules: the contact must be live and in
+    one of `states` (and `decided_by`, for the review pass), so a contact waiting
+    in another queue answers `404`. Nothing is written.
+    """
+    wanted = _states(states, decided_by)
+    with translate_errors():
+        card = service.card_for(session, user, contact_id, states=wanted, decided_by=decided_by)
+    out = _card_out(card)
+    assert out is not None
+    return out
+
+
 @router.post(
     "/triage/decisions",
     operation_id="decide_triage",

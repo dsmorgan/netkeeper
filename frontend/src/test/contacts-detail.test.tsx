@@ -303,7 +303,9 @@ describe('contact detail', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save Headline' }))
     await expectSurvivorLink()
 
-    fireEvent.change(screen.getByLabelText('Met'), { target: { value: 'met' } })
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Met' })).getByRole('button', { name: 'Met' }),
+    )
     await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(2))
     await expectSurvivorLink()
 
@@ -311,6 +313,56 @@ describe('contact detail', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save notes' }))
     await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(3))
     await expectSurvivorLink()
+  })
+
+  it('sets met, not met, and clear from the contact page (issue #322)', async () => {
+    let current = contactDetail()
+    const { seen } = serveContact(current, (request, body) => {
+      const { pathname } = new URL(request.url)
+      if (pathname === '/api/v1/contacts/1' && request.method === 'PATCH') {
+        const { met } = body as { met: 'met' | 'not_met' | 'unknown' }
+        current = {
+          ...current,
+          met,
+          met_source: 'manual',
+          triaged_at: met === 'unknown' ? null : '2026-09-20T12:00:00Z',
+        }
+        return jsonResponse(current)
+      }
+      if (pathname === '/api/v1/contacts/1' && request.method === 'GET') {
+        return jsonResponse(current)
+      }
+      return undefined
+    })
+    await renderApp('/contacts/1')
+    await screen.findByRole('heading', { name: 'Ada Ventura' })
+    const group = screen.getByRole('group', { name: 'Met' })
+    const button = (name: string) => within(group).getByRole('button', { name })
+
+    expect(button('Clear')).toBeDisabled()
+    expect(screen.getByText('Not triaged yet.')).toBeInTheDocument()
+
+    fireEvent.click(button('Met'))
+    await waitFor(() => expect(button('Met')).toHaveAttribute('aria-pressed', 'true'))
+    expect(screen.getByText('Set by you.')).toBeInTheDocument()
+
+    fireEvent.click(button('Not met'))
+    await waitFor(() => expect(button('Not met')).toHaveAttribute('aria-pressed', 'true'))
+    expect(button('Met')).toHaveAttribute('aria-pressed', 'false')
+
+    fireEvent.click(button('Clear'))
+    await waitFor(() => expect(button('Clear')).toBeDisabled())
+    expect(screen.getByText('Not triaged yet.')).toBeInTheDocument()
+
+    const patches = seen.filter((entry) => entry.method === 'PATCH').map((entry) => entry.body)
+    expect(patches).toEqual([{ met: 'met' }, { met: 'not_met' }, { met: 'unknown' }])
+  })
+
+  it('says when netkeeper suggested the answer and it is waiting for review', async () => {
+    serveContact(contactDetail({ met: 'met', met_source: 'automatic' }))
+    await renderApp('/contacts/1')
+    await screen.findByRole('heading', { name: 'Ada Ventura' })
+    expect(screen.getByText('Suggested by netkeeper, waiting for your review.')).toBeInTheDocument()
   })
 
   it('adds and removes a tag', async () => {
