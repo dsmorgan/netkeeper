@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { LintIssue } from './api'
-import { WHY_IT_MATTERS, issuesFor, severityByLine, showIssue } from './lint'
+import { WHY_IT_MATTERS, issuesFor, lineRange, severityByLine, showIssue, splitLines } from './lint'
 
 function issue(overrides: Partial<LintIssue>): LintIssue {
   return {
@@ -105,5 +105,20 @@ describe('lines and reasons (#344)', () => {
       [2, 'error'],
       [3, 'warning'],
     ])
+  })
+})
+
+describe('lines as Jinja counts them', () => {
+  it('splits on CRLF, a bare CR, and LF', () => {
+    expect(splitLines('a\r\nb\rc\nd')).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  it('finds a line’s offsets whatever its breaks', () => {
+    const text = 'one\r\ntwo\rthree\nfour'
+    expect(lineRange(text, 1)).toEqual([0, 3])
+    expect(text.slice(...lineRange(text, 2))).toBe('two')
+    expect(text.slice(...lineRange(text, 3))).toBe('three')
+    expect(text.slice(...lineRange(text, 4))).toBe('four')
+    expect(lineRange('', 1)).toEqual([0, 0])
   })
 })

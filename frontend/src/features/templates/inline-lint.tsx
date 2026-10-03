@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
 import type { LintIssue } from './api'
-import type { ShownIssue } from './lint'
+import { splitLines, type ShownIssue } from './lint'
 
 interface InlineLintProps {
   id: string
@@ -27,9 +27,9 @@ interface InlineLintProps {
 
 export function InlineLint({ id, label, shown, text, onGoToLine }: InlineLintProps) {
   if (shown.length === 0) return null
-  const lines = text?.split('\n')
+  const lines = text === undefined ? undefined : splitLines(text)
   return (
-    <ul id={id} aria-label={label} className="space-y-1 text-sm">
+    <ul id={id} aria-label={label} className="min-w-0 space-y-1 text-sm">
       {shown.map((item, index) => {
         const { issue, line } = item
         const quoted = line === null || lines === undefined ? undefined : lines[line - 1]
@@ -37,7 +37,7 @@ export function InlineLint({ id, label, shown, text, onGoToLine }: InlineLintPro
           <li
             key={`${issue.rule}-${issue.field ?? ''}-${index}`}
             className={cn(
-              'flex gap-2 rounded-md border-l-4 bg-muted/40 px-2 py-1.5',
+              'flex flex-wrap gap-2 rounded-md border-l-4 bg-muted/40 px-2 py-1.5',
               issue.severity === 'error' ? 'border-destructive' : 'border-amber-500',
             )}
           >
@@ -47,7 +47,7 @@ export function InlineLint({ id, label, shown, text, onGoToLine }: InlineLintPro
             >
               {issue.severity === 'error' ? 'Error' : 'Warning'}
             </Badge>
-            <div className="min-w-0 flex-1 space-y-0.5">
+            <div className="min-w-0 flex-1 basis-48 space-y-0.5">
               {lines !== undefined && line !== null && (
                 <p className="flex min-w-0 items-baseline gap-2 text-xs text-muted-foreground">
                   <span className="shrink-0">Line {line}</span>
@@ -107,7 +107,7 @@ export function LineMarks({
       )}
     >
       <div style={{ transform: `translateY(${-scrollTop}px)` }}>
-        {text.split('\n').map((line, index) => {
+        {splitLines(text).map((line, index) => {
           const severity = marks.get(index + 1)
           return (
             <div

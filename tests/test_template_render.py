@@ -879,5 +879,41 @@ def test_an_extra_me_key_is_listed_once_with_a_generic_description() -> None:
     assert placeholder_example("me.podcast") == "(your podcast)"
 
 
+def test_merge_fields_name_exactly_what_lint_allows() -> None:
+    """The reverse of the clean-lint test: every name lint allows is listed, and no other."""
+    me_keys = ("podcast",)
+    allowed = set(render_module.SCALAR_FIELDS) | {
+        f"{namespace}.{key}"
+        for namespace, keys in render_module.NAMESPACE_FIELDS.items()
+        for key in (*keys, *(me_keys if namespace == "me" else ()))
+    }
+    assert {f.name for f in merge_fields(me_keys)} == allowed
+    for name in allowed:  # and lint does allow each one
+        assert lint(LINKEDIN, None, f"{{{{ first_name }}}} {{{{ {name} }}}}", me_keys) == []
+
+
+def test_a_field_lint_allows_but_the_list_cannot_place_is_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        render_module, "NAMESPACE_FIELDS", {**render_module.NAMESPACE_FIELDS, "sender": ("email",)}
+    )
+    with pytest.raises(ValueError, match="'sender' has no group"):
+        merge_fields(())
+    monkeypatch.undo()
+    monkeypatch.setattr(render_module, "SCALAR_FIELDS", render_module.SCALAR_FIELDS | {"nickname"})
+    with pytest.raises(ValueError, match="'nickname' has no group"):
+        merge_fields(())
+
+
+def test_me_keys_no_template_can_name_are_not_listed() -> None:
+    keys = ("podcast", "my-site", "_tok", "2nd", "café")
+    names = [f.name for f in merge_fields(keys)]
+    assert "me.podcast" in names and "me.café" in names
+    assert not {"me.my-site", "me._tok", "me.2nd"} & set(names)
+    for key in ("my-site", "_tok", "2nd"):  # lint refuses each, which is why
+        assert lint(LINKEDIN, None, f"{{{{ first_name }}}} {{{{ me.{key} }}}}", keys) != []
+
+
 def test_every_listed_field_has_an_invented_placeholder() -> None:
     assert {f.name for f in merge_fields(())} == set(PLACEHOLDER_EXAMPLES)

@@ -254,6 +254,22 @@ def test_me_extra_collects_additional_merge_fields(
     assert caplog.records == []
 
 
+def test_me_extra_keys_no_template_can_name_are_kept_with_a_warning(
+    isolated: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    body = '[me]\npodcast = "P"\n"my-site" = "a"\n_tok = "b"\n2nd = "c"\n'
+    path = _write(isolated / "c.toml", body)
+    with caplog.at_level(logging.WARNING, logger="netkeeper.config"):
+        settings = load_settings(path)
+    assert settings.me.extra == {"podcast": "P", "my-site": "a", "_tok": "b", "2nd": "c"}
+    warned = [record.getMessage() for record in caplog.records]
+    assert len(warned) == 3
+    for key in ("me.my-site", "me._tok", "me.2nd"):
+        assert any(key in message and "cannot be used as a merge field" in message
+                   for message in warned), key  # fmt: skip
+    assert not any("podcast" in message for message in warned)
+
+
 def test_me_extra_must_be_strings(isolated: Path) -> None:
     path = _write(isolated / "c.toml", "[me]\nyears = 12\n")
     with pytest.raises(ConfigError, match=r"me\.years must be a string"):

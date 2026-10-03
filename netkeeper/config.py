@@ -198,6 +198,12 @@ def _from_table[T: DataclassInstance](
     return build(**kwargs)
 
 
+def is_me_key(key: str) -> bool:
+    """True for a ``[me]`` key a template can name as ``me.<key>``: an identifier that does
+    not start with ``_``. Template lint refuses any other (#344)."""
+    return key.isidentifier() and not key.startswith("_")
+
+
 def _extra_strings(
     raw: Mapping[str, object], names: list[str], *, prefix: str, source: Path
 ) -> dict[str, str]:
@@ -208,6 +214,14 @@ def _extra_strings(
             raise ConfigError(
                 f"{source}: {_join(prefix, name)} must be a string"
                 f" (extra merge fields are strings), got {_kind(value)}"
+            )
+        if not is_me_key(name):
+            # Kept, as every extra key is, but no template can name it.
+            log.warning(
+                "%s: %s cannot be used as a merge field: a key under [me] must be letters, "
+                "digits and _, must not start with a digit or _",
+                source,
+                _join(prefix, name),
             )
         extra[name] = value
     return extra

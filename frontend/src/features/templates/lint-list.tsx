@@ -33,7 +33,7 @@ export function LintList({ issues, label }: { issues: readonly LintIssue[]; labe
               {shown.detail !== null && (
                 <p className="text-xs text-muted-foreground">{shown.detail}</p>
               )}
-              <p className="text-xs text-muted-foreground">{shown.why}</p>
+              <p className="text-xs text-muted-foreground">Why it matters: {shown.why}</p>
             </div>
           </li>
         )
