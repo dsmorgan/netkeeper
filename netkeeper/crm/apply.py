@@ -474,17 +474,20 @@ def card_name(first: str, last: str, headline: str | None) -> tuple[str, str]:
 def _holds_headline(name: str, headline: str) -> bool:
     """True when the card's headline is inside its name text: the occupation leaked in.
 
-    Word-bounded, so a headline of "Ann" does not refuse "Anna Karenina". The one
-    unbounded case is the join LinkedIn's markup produces when two text nodes run
-    together: a lowercase letter directly followed by the headline as the card
-    wrote it ("OkaforData engineer").
+    Bounded on the right, so a headline of "Ann" does not refuse "Anna Karenina".
+    The left side is open to cover the join LinkedIn's markup produces when two
+    text nodes run together: any word character directly followed by the headline,
+    in any case ("OkaforData engineer", "Jane Doe, MBAData engineer",
+    "DoeiOS developer", "王 小明Engineer"). The cost is that a headline which is
+    itself the tail of a word in the name ("Smith" in "Goldsmith") refuses it; the
+    contact is then named by its slug, which a person can correct on review.
     """
     if not headline:
         return False
     escaped = re.escape(headline)
     if re.search(rf"(?<!\w){escaped}(?!\w)", name, re.IGNORECASE):
         return True
-    return headline[0].isupper() and re.search(rf"(?<=[a-z]){escaped}(?!\w)", name) is not None
+    return re.search(rf"(?<=\w){escaped}(?!\w)", name, re.IGNORECASE) is not None
 
 
 def card_headline(headline: str | None) -> str | None:
