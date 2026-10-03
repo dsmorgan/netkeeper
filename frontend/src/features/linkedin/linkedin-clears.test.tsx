@@ -96,6 +96,46 @@ describe('clearing the session flag (#181)', () => {
     await waitFor(() => expect(statusReads).toBeGreaterThan(readsBefore))
   })
 
+  it('sends the flag shown when the dialog opened, even after a newer one arrives (#364 B1)', async () => {
+    const newer = { ...STATUS_CHECKPOINT, session_flagged_at: '2026-09-20T11:30:00Z' }
+    let current = STATUS_CHECKPOINT
+    const { calls, source } = renderLinkedInPage({
+      'GET /api/v1/linkedin/status': () => jsonResponse(current),
+      [`POST ${FLAG_PATH}`]: () =>
+        jsonResponse(
+          { detail: 'the session flag changed since you confirmed; not clearing it' },
+          409,
+        ),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear flag…' }))
+    const dialog = await screen.findByRole('alertdialog')
+    const shown = dialog.textContent
+
+    // A run ends while the dialog is open and the status refetch finds a newer flag.
+    let statusReads = 0
+    current = newer
+    const countBefore = calls.filter((call) => call.path === '/api/v1/linkedin/status').length
+    act(() => source.emit('run.finished', { run_id: 3, status: 'aborted' }))
+    await waitFor(() => {
+      statusReads = calls.filter((call) => call.path === '/api/v1/linkedin/status').length
+      expect(statusReads).toBeGreaterThan(countBefore)
+    })
+    expect(dialog.textContent).toBe(shown)
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear flag' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      /changed since you confirmed/,
+    )
+    expect(posts(calls, FLAG_PATH).map((call) => call.body)).toEqual([
+      {
+        confirm: true,
+        outcome: 'checkpoint',
+        flagged_at: STATUS_CHECKPOINT.session_flagged_at,
+      },
+    ])
+  })
+
   it('offers no button for a logged-out flag, which preflight clears', async () => {
     renderLinkedInPage({ 'GET /api/v1/linkedin/status': () => jsonResponse(STATUS_LOGGED_OUT) })
     const banner = await screen.findByRole('alert')
@@ -141,6 +181,58 @@ describe('clearing heat (#181)', () => {
     ])
     expect(await screen.findByText(/^Cleared /)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Clear heat…' })).not.toBeInTheDocument()
+  })
+
+  it('sends the heat shown when the dialog opened, even after a refetch raises it (#364 B1)', async () => {
+    const first: Heat = {
+      ...RAISED,
+      score: 1,
+      tripped: false,
+      last_raised_at: '2026-09-23T09:30:00Z',
+    }
+    const second: Heat = { ...first, score: 2, last_raised_at: '2026-09-23T09:45:00Z' }
+    let current = first
+    const { calls, source } = renderLinkedInPage({
+      'GET /api/v1/linkedin/heat': () => jsonResponse(current),
+      [`POST ${HEAT_PATH}`]: () =>
+        jsonResponse(
+          {
+            detail: 'heat was raised again since you confirmed; not clearing it. Look at it again',
+          },
+          409,
+        ),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear heat…' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('1.00 of 2.50')
+
+    current = second
+    act(() => source.emit('run.finished', { run_id: 3, status: 'completed' }))
+    // The panel behind the dialog shows the new heat; the dialog keeps what was confirmed.
+    expect(await screen.findByText('2.00 / 2.50')).toBeInTheDocument()
+    expect(dialog).toHaveTextContent('1.00 of 2.50')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear heat' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/raised again/)
+    expect(posts(calls, HEAT_PATH).map((call) => call.body)).toEqual([
+      { confirm: true, last_raised_at: first.last_raised_at },
+    ])
+  })
+
+  it('says so when a run is going, without blocking the clear', async () => {
+    const { calls } = renderLinkedInPage({
+      'GET /api/v1/linkedin/status': () => jsonResponse({ ...STATUS_CLEAR, running_run_id: 7 }),
+      'GET /api/v1/linkedin/heat': () => jsonResponse(RAISED),
+      [`POST ${HEAT_PATH}`]: () => jsonResponse(CLEARED),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear heat…' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(await within(dialog).findByText(/Run 7 is running/)).toBeInTheDocument()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear heat' }))
+
+    await waitFor(() => expect(posts(calls, HEAT_PATH)).toHaveLength(1))
   })
 
   it('shows a refusal in the dialog', async () => {

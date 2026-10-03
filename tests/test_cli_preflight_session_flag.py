@@ -382,6 +382,22 @@ def test_clear_flag_confirmed_clears_a_checkpoint_flag(cli_db: sessionmaker[Sess
     assert _current_flag(cli_db) is None
 
 
+def test_clear_flag_logs_the_flag_it_cleared(
+    cli_db: sessionmaker[Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    """#364 S1: the command clears through the same function as the web page, log line and all."""
+    _flag_a_checkpoint(cli_db)
+
+    with caplog.at_level(logging.WARNING, logger="netkeeper.services.linkedin_session"):
+        result = CliRunner().invoke(cli, ["linkedin", "clear-flag", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert any(
+        "session flag cleared by hand: checkpoint" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_clear_flag_declined_leaves_the_flag_in_place(cli_db: sessionmaker[Session]) -> None:
     _flag_a_checkpoint(cli_db)
 

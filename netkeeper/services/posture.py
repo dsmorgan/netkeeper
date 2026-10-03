@@ -880,7 +880,8 @@ def _session_from_evidence(
             warnings=(
                 f"LinkedIn answered with a {flag.outcome.value.replace('_', ' ')} on {when},"
                 " so no run can use this session until the session flag is cleared (see"
-                " the session flag row)",
+                " the session flag row of the posture report: Settings, Posture, or"
+                " `netkeeper posture`)",
             ),
         )
     assert evidence is not None
@@ -933,8 +934,9 @@ def _session_flag(session: Session, user: User) -> Protection:
     ``LoggedOut`` flag itself the moment it finds a live session again, so that one
     just needs a login and another preflight. A ``Checkpoint`` flag is never
     auto-cleared -- a live ``li_at`` cookie is not proof the checkpoint is solved --
-    so its advice names the one thing that does clear it, `netkeeper linkedin
-    clear-flag`, run by hand once the account is confirmed healthy.
+    so its advice names the two ways to clear it by hand, once the account is
+    confirmed healthy: the LinkedIn page's **Clear flag** button, or `netkeeper
+    linkedin clear-flag` (#181).
     """
     flag = session_flag(session, user)
     if flag is None:
@@ -954,7 +956,8 @@ def _session_flag(session: Session, user: User) -> Protection:
             "a checkpoint is never retried, and a live session cookie is not proof it"
             " is resolved, so `netkeeper preflight` leaves this one alone. Once you"
             " have opened LinkedIn in the netkeeper profile and confirmed the account"
-            " is healthy, clear it by hand with `netkeeper linkedin clear-flag`"
+            " is healthy, clear it by hand: the Clear flag button on the LinkedIn page, or"
+            " `netkeeper linkedin clear-flag`"
         )
     return Protection(
         name="session flag",

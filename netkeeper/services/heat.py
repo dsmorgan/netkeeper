@@ -16,6 +16,7 @@ so the decay is testable without sleeping (spec 9.7: "decay on read").
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -26,6 +27,8 @@ from netkeeper.db import is_writer
 from netkeeper.linkedin import heat as heat_math
 from netkeeper.models import User
 from netkeeper.services.settings_kv import get_setting, set_setting
+
+log = logging.getLogger(__name__)
 
 _KEY_PREFIX: Final = "linkedin.heat"
 
@@ -115,7 +118,8 @@ def clear_confirmed(
     ``last_raised_at``, the time the person was shown: a throttle that raised
     heat again in between is new evidence, and an answer given about older heat
     must not wipe it. The same compare-before-clear ``netkeeper linkedin
-    clear-flag`` makes for the session flag. Needs a writer session.
+    clear-flag`` makes for the session flag. Logs a warning naming what was
+    cleared, so a manual clear is never silent. Needs a writer session.
     """
     _require_writer(session, "heat.clear_confirmed")
     stored = state(session, user, account_id)
@@ -128,6 +132,13 @@ def clear_confirmed(
             "heat was raised again since you confirmed; not clearing it. Look at it again"
         )
     clear(session, user, account_id, now=now)
+    log.warning(
+        "heat cleared by hand: score %.3f (stored, undecayed) last raised %s, account %d, user %d",
+        stored.score,
+        stored.updated_at.isoformat(),
+        account_id,
+        user.id,
+    )
 
 
 def _as_utc(value: datetime) -> datetime:

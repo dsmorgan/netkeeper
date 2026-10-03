@@ -9,9 +9,11 @@ nothing here, and nothing it calls, attaches to a browser.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -25,6 +27,8 @@ from netkeeper.services import heat, runs
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.linkedin_session import (
     SESSION_FLAG_KEY,
+    FlagClearRefused,
+    clear_confirmed_flag,
     flag_session,
     record_session_evidence,
     same_instant,
@@ -176,6 +180,49 @@ async def test_clear_flag_goes_through_the_csrf_guard(
     assert _stored_flag(running_app) is not None
 
 
+async def test_clear_flag_leaves_a_warning_in_the_log(
+    client: httpx.AsyncClient, running_app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#364 S1: a manual clear of a safety signal is never silent."""
+    _flag(running_app)
+    seen = (await client.get("/api/v1/linkedin/status")).json()
+
+    with caplog.at_level(logging.WARNING, logger="netkeeper.services.linkedin_session"):
+        response = await client.post(
+            FLAG_URL,
+            json={
+                "confirm": True,
+                "outcome": seen["session_flag"],
+                "flagged_at": seen["session_flagged_at"],
+            },
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 200
+    [record] = [r for r in caplog.records if "session flag cleared by hand" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert "checkpoint" in record.getMessage()
+    assert "/checkpoint/challenge" in record.getMessage()
+    assert "?ctx" not in record.getMessage()
+
+
+def test_clear_confirmed_flag_compares_the_url_when_given(running_app: FastAPI) -> None:
+    """#364 N1: the CLI shows the url in its prompt, so its identity check includes it."""
+    _flag(running_app)
+    stored = _stored_flag(running_app)
+    assert stored is not None
+    factory = running_app.state.session_factory
+    with session_scope(factory, write=True) as session, pytest.raises(FlagClearRefused):
+        clear_confirmed_flag(
+            session,
+            _local(session),
+            outcome=stored.outcome.value,
+            flagged_at=stored.flagged_at,
+            url="/somewhere/else",
+        )
+    assert _stored_flag(running_app) is not None
+
+
 def test_same_instant_reads_a_naive_datetime_as_utc() -> None:
     aware = datetime(2026, 3, 1, 12, 0, 0, 123456, tzinfo=UTC)
     assert same_instant(aware, aware.replace(tzinfo=None))
@@ -215,6 +262,26 @@ async def test_heat_clear_clears_the_heat_that_was_shown(
     assert body["cleared_at"] is not None
     stored = _stored_heat(running_app)
     assert stored is not None and stored.score == 0.0
+
+
+async def test_heat_clear_leaves_a_warning_in_the_log(
+    client: httpx.AsyncClient, running_app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#364 S1: the log names the score and when heat was last raised."""
+    _raise_heat(running_app, datetime.now(UTC))
+    seen = (await client.get("/api/v1/linkedin/heat")).json()
+
+    with caplog.at_level(logging.WARNING, logger="netkeeper.services.heat"):
+        response = await client.post(
+            HEAT_URL,
+            json={"confirm": True, "last_raised_at": seen["last_raised_at"]},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 200
+    [record] = [r for r in caplog.records if "heat cleared by hand" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert "last raised" in record.getMessage()
 
 
 async def test_heat_clear_needs_confirm_true(

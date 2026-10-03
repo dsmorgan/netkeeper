@@ -23,6 +23,7 @@ table lands, not a decision this item is positioned to make well.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
@@ -36,6 +37,8 @@ from netkeeper.models import SyncRun, SyncRunKind, SyncRunStatus, User
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import scoped
 from netkeeper.services.settings_kv import delete_setting, get_setting, set_setting
+
+log = logging.getLogger(__name__)
 
 SESSION_FLAG_KEY: Final = "linkedin.session_flag"
 """The ``settings_kv`` key holding the current :class:`SessionFlag`, or nothing
@@ -124,7 +127,12 @@ class FlagClearRefused(Exception):
 
 
 def clear_confirmed_flag(
-    session: Session, user: User, *, outcome: str, flagged_at: datetime
+    session: Session,
+    user: User,
+    *,
+    outcome: str,
+    flagged_at: datetime,
+    url: str | None = None,
 ) -> SessionFlag:
     """Clear the session flag only if it is still the one a person confirmed (#181).
 
@@ -135,17 +143,33 @@ def clear_confirmed_flag(
     preflight cleared and a later run raised as ``checkpoint`` -- must never be
     cleared by an answer given about a different one. ``outcome`` and
     ``flagged_at`` identify the flag; ``flagged_at`` is compared as an instant,
-    a naive value read as UTC. Returns the flag it cleared. Needs a writer
-    session, the same as :func:`clear_session_flag`.
+    a naive value read as UTC. ``url``, when given (the CLI shows it in its
+    prompt; the web page does not), must match too. Returns the flag it cleared.
+    Needs a writer session, the same as :func:`clear_session_flag`.
+
+    Both ``netkeeper linkedin clear-flag`` and ``POST
+    /linkedin/session-flag/clear`` clear through here, so a manual clear always
+    leaves the same warning in the log: which flag, raised when, for whom.
     """
     current = session_flag(session, user)
     if current is None:
         raise FlagClearRefused("no session flag is set")
-    if current.outcome.value != outcome or not same_instant(current.flagged_at, flagged_at):
+    if (
+        current.outcome.value != outcome
+        or not same_instant(current.flagged_at, flagged_at)
+        or (url is not None and current.url != url)
+    ):
         raise FlagClearRefused(
             "the session flag changed since you confirmed; not clearing it. Look at it again"
         )
     clear_session_flag(session, user)
+    log.warning(
+        "session flag cleared by hand: %s raised %s at %s, user %d",
+        current.outcome.value,
+        current.flagged_at.isoformat(),
+        current.url or "/",
+        user.id,
+    )
     return current
 
 

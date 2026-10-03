@@ -409,8 +409,8 @@ export function TriagePage() {
                         name={`${card.contact.preferred_name} ${card.contact.last_name}`.trim()}
                         archived={card.contact.archived_at !== null}
                         pending={false}
-                        onConfirm={() => void queue.review(card.contact.id, 'confirm')}
-                        onReject={() => void queue.review(card.contact.id, 'reject')}
+                        onConfirm={() => queue.review(card.contact.id, 'confirm')}
+                        onReject={() => queue.review(card.contact.id, 'reject')}
                       />
                     )}
                   <EvidencePanel card={card} />

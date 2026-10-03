@@ -13,6 +13,8 @@
  * Reject archives the contact; contacts are never deleted.
  */
 
+import { useRef, useState } from 'react'
+
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 
@@ -37,9 +39,34 @@ export function NeedsReviewNotice({
   /** Rejected already: the contact is archived and still unconfirmed. */
   archived: boolean
   pending: boolean
-  onConfirm: () => void
-  onReject: () => void
+  /**
+   * Return the write's promise (`mutateAsync`, the triage queue's `review`): the
+   * buttons stay disabled until it settles, so a double click sends one answer
+   * even where `pending` lags a render or is not tracked at all (#364 N5). A
+   * rejection is the caller's to show; it is swallowed here.
+   */
+  onConfirm: () => Promise<unknown> | void
+  onReject: () => Promise<unknown> | void
 }) {
+  const sending = useRef(false)
+  const [busy, setBusy] = useState(false)
+  const send = (answer: () => Promise<unknown> | void) => (): void => {
+    if (sending.current) return
+    const result = answer()
+    if (!(result instanceof Promise)) return
+    sending.current = true
+    setBusy(true)
+    void result
+      .catch(() => {
+        // The caller shows the failure.
+      })
+      .finally(() => {
+        sending.current = false
+        setBusy(false)
+      })
+  }
+  const disabled = pending || busy
+
   return (
     <div
       role="region"
@@ -62,9 +89,9 @@ export function NeedsReviewNotice({
       <div className="flex flex-wrap gap-2">
         <Button
           size="sm"
-          disabled={pending}
+          disabled={disabled}
           aria-label={`Confirm ${name}`}
-          onClick={onConfirm}
+          onClick={send(onConfirm)}
           data-testid="needs-review-confirm"
         >
           Confirm
@@ -73,9 +100,9 @@ export function NeedsReviewNotice({
           <Button
             size="sm"
             variant="outline"
-            disabled={pending}
+            disabled={disabled}
             aria-label={`Reject ${name} and archive the contact`}
-            onClick={onReject}
+            onClick={send(onReject)}
             data-testid="needs-review-reject"
           >
             Reject and archive

@@ -26,13 +26,19 @@ function message(error: unknown): string {
  * as `netkeeper linkedin clear-flag` (#181), and like the command it always
  * asks first, naming the flag and when it was raised. A `logged_out` flag gets
  * no button: preflight clears it once it sees a live session, which is better
- * evidence than a click (the command still clears either, from a terminal). The request carries the flag shown here, and the
- * server clears only that exact flag: one raised again while the dialog was
- * open is refused, never cleared by an answer about the older one.
+ * evidence than a click (the command still clears either, from a terminal).
+ *
+ * The dialog works from a snapshot of the flag taken when "Clear flag…" is
+ * clicked, not from the live status query, and sends that snapshot. The server
+ * clears only that exact flag, so one raised again while the dialog was open is
+ * refused (409, shown in the dialog), never cleared by an answer about the
+ * older one. The dialog stays up to show that refusal even if the refetch it
+ * triggers finds no flag at all.
  */
 export function SessionBanner({ status }: { status: LinkedInStatus }) {
   const queryClient = useQueryClient()
   const [asking, setAsking] = useState(false)
+  const [seen, setSeen] = useState<{ outcome: string; flaggedAt: string } | null>(null)
 
   const clear = useMutation({
     mutationFn: ({ outcome, flaggedAt }: { outcome: string; flaggedAt: string }) =>
@@ -46,7 +52,32 @@ export function SessionBanner({ status }: { status: LinkedInStatus }) {
     onError: () => void queryClient.invalidateQueries({ queryKey: linkedinKeys.status() }),
   })
 
-  if (status.session_flag === null) return null
+  const dialog = seen !== null && (
+    <ConfirmDialog
+      open={asking}
+      onOpenChange={(open) => {
+        if (!open) setAsking(false)
+      }}
+      title="Clear the checkpoint session flag?"
+      confirmLabel="Clear flag"
+      pending={clear.isPending}
+      error={clear.isError ? message(clear.error) : null}
+      onConfirm={() => clear.mutateAsync(seen)}
+    >
+      <p>
+        This clears the checkpoint flag raised {formatWhen(seen.flaggedAt)}. Runs can use this
+        LinkedIn session again as soon as it is cleared, and scheduled runs fire when they are due
+        if they are armed.
+      </p>
+      <p>
+        netkeeper cannot tell whether the checkpoint is resolved. Clear it only after you have
+        opened LinkedIn in the netkeeper Chrome profile yourself and the account looks healthy.
+      </p>
+      <p>If the flag changes while this is open, nothing is cleared.</p>
+    </ConfirmDialog>
+  )
+
+  if (status.session_flag === null) return dialog || null
 
   const flag = status.session_flag
   const flaggedAt = status.session_flagged_at
@@ -88,6 +119,7 @@ export function SessionBanner({ status }: { status: LinkedInStatus }) {
             className="mt-1"
             onClick={() => {
               clear.reset()
+              setSeen({ outcome: flag, flaggedAt })
               setAsking(true)
             }}
           >
@@ -96,30 +128,7 @@ export function SessionBanner({ status }: { status: LinkedInStatus }) {
         )}
       </div>
 
-      {checkpoint && flaggedAt !== null && (
-        <ConfirmDialog
-          open={asking}
-          onOpenChange={(open) => {
-            if (!open) setAsking(false)
-          }}
-          title="Clear the checkpoint session flag?"
-          confirmLabel="Clear flag"
-          pending={clear.isPending}
-          error={clear.isError ? message(clear.error) : null}
-          onConfirm={() => clear.mutateAsync({ outcome: flag, flaggedAt })}
-        >
-          <p>
-            This clears the checkpoint flag raised {formatWhen(flaggedAt)}. Runs can use this
-            LinkedIn session again as soon as it is cleared, and scheduled runs fire when they are
-            due if they are armed.
-          </p>
-          <p>
-            netkeeper cannot tell whether the checkpoint is resolved. Clear it only after you have
-            opened LinkedIn in the netkeeper Chrome profile yourself and the account looks healthy.
-          </p>
-          <p>If the flag changes while this is open, nothing is cleared.</p>
-        </ConfirmDialog>
-      )}
+      {dialog}
     </div>
   )
 }

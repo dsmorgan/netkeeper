@@ -101,6 +101,8 @@ from netkeeper.services.linkedin_accounts import (
     unpause_schedule,
 )
 from netkeeper.services.linkedin_session import (
+    FlagClearRefused,
+    clear_confirmed_flag,
     clear_session_flag,
     record_session_evidence,
     session_flag,
@@ -663,10 +665,18 @@ def linkedin_clear_flag(
                 raise typer.Exit(code=1)
         with session_scope(factory, write=True) as session:
             user = _local_user_or_exit(session)
-            if session_flag(session, user) != flag:
+            try:
+                # The same clear, refusals, and log line as the web page's (#181).
+                clear_confirmed_flag(
+                    session,
+                    user,
+                    outcome=flag.outcome.value,
+                    flagged_at=flag.flagged_at,
+                    url=flag.url,
+                )
+            except FlagClearRefused:
                 typer.echo("the session flag changed while waiting for an answer; not clearing it")
-                raise typer.Exit(code=1)
-            clear_session_flag(session, user)
+                raise typer.Exit(code=1) from None
     finally:
         engine.dispose()
     typer.echo("session flag cleared")

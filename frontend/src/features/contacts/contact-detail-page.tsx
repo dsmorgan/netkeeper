@@ -154,8 +154,8 @@ export function ContactDetailPage({ contactId }: { contactId: number }) {
           name={name}
           archived={archived}
           pending={archive.isPending}
-          onConfirm={() => archive.mutate(() => reviewContact(contact.id, 'confirm'))}
-          onReject={() => archive.mutate(() => reviewContact(contact.id, 'reject'))}
+          onConfirm={() => archive.mutateAsync(() => reviewContact(contact.id, 'confirm'))}
+          onReject={() => archive.mutateAsync(() => reviewContact(contact.id, 'reject'))}
         />
       )}
       <WriteError error={archive.error} />
