@@ -137,4 +137,46 @@ describe('jump to a contact', () => {
     )
     expect(seen.filter((name) => name.endsWith(`-${target.id}`))).toHaveLength(0)
   })
+
+  // The loop that asks for the next contact when the one served is a duplicate
+  // (#322): without it the buffer would run one card short until the next key.
+  it.each(['m', 'ArrowRight'])(
+    'keeps the buffer full after a dropped duplicate on %s',
+    async (key) => {
+      const backend = createFakeBackend({ contacts: 10 })
+      renderTriage({ backend })
+      await currentName()
+      fireEvent.click(screen.getByRole('button', { name: 'Both' }))
+      await waitFor(() => expect(backend.countOf('/api/v1/triage/next')).toBeGreaterThan(1))
+      const sixth = backend.byId(6)
+      await jumpTo(sixth.last_name)
+      await waitFor(async () =>
+        expect(await currentName()).toBe(`${sixth.preferred_name} ${sixth.last_name}`),
+      )
+      fireEvent.keyDown(window, { key: 's' })
+      await waitFor(() => expect(backend.byId(6).met).toBe('skip'))
+
+      // The buffer is the live card and two behind it. Three keys walk the
+      // frontier to 5, so the next refill would serve 6 a second time.
+      for (let step = 1; step <= 3; step += 1) {
+        const name = await currentName()
+        fireEvent.keyDown(window, { key })
+        await waitFor(async () => expect(await currentName()).not.toBe(name))
+      }
+      // No further key: the loop alone has to have asked past contact 6, and
+      // left the live card with two behind it.
+      await waitFor(() => {
+        const past = backend.seen.filter(
+          (request) =>
+            request.path === '/api/v1/triage/next' && request.search.get('after_id') === '6',
+        )
+        expect(past.length).toBeGreaterThan(0)
+      })
+      await waitFor(() =>
+        expect(within(screen.getByTestId('triage-queue-list')).queryAllByText('Next')).toHaveLength(
+          2,
+        ),
+      )
+    },
+  )
 })

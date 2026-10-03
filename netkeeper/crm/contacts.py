@@ -396,13 +396,15 @@ def update_contact(
             # The person's own answer, written by the function the Triage keys
             # use, so the decision log and undo see it too (spec 10.2, #322).
             wanted = ContactMet(value)
-            if wanted is contact.met:
-                continue  # nothing changed, so nothing to log (#322)
             try:
                 # Fresh and FOR UPDATE, refusing an archived contact as Triage does.
                 held = _triage_live_contact(session, user, contact.id)
             except NotInQueue as exc:
                 raise Conflict("an archived contact cannot be triaged; unarchive it first") from exc
+            # An unchanged answer logs nothing, but a suggested one (automatic)
+            # still needs confirming: that is a change of who decided it.
+            if wanted is held.met and held.met_source is MetSource.MANUAL:
+                continue
             record_met(session, user, held, wanted)
         elif field == "do_not_contact":
             contact.do_not_contact = bool(value)

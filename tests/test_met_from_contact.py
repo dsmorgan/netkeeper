@@ -264,3 +264,22 @@ async def test_bulk_clear_met_clears_the_triage_stamp(
     assert applied.status_code == 200, applied.text
     contact, _ = _row(running_app, people[0])
     assert (contact.met, contact.triaged_at) == (ContactMet.UNKNOWN, None)
+
+
+async def test_confirming_a_suggested_met_from_the_page_makes_it_manual(
+    running_app: FastAPI, client: httpx.AsyncClient, people: list[int]
+) -> None:
+    with session_scope(_factory(running_app), write=True) as session:
+        user = session.get(User, 1)
+        assert user is not None
+        contact = get_scoped(session, user, Contact, people[0])
+        assert contact is not None
+        contact.met = ContactMet.MET
+        contact.met_source = MetSource.AUTOMATIC
+    body = await _patch_met(client, people[0], "met")
+    assert (body["met"], body["met_source"]) == ("met", "manual")
+    assert body["triaged_at"] is not None
+    contact_row, decisions = _row(running_app, people[0])
+    assert contact_row.met_source is MetSource.MANUAL
+    assert len(decisions) == 1
+    assert decisions[0].before_state["met_source"] == "automatic"
