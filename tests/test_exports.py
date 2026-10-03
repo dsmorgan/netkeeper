@@ -18,11 +18,14 @@ import json
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import factories
 import pytest
+from sqlalchemy import event
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.campaigns.templates import contact_fields
 from netkeeper.crm import contacts as contact_service
 from netkeeper.crm import do_not_send, import_runs
 from netkeeper.crm.exports import (
@@ -531,19 +534,12 @@ def test_campaign_audience_computes_connection_age_and_position_change(
     session: Session,
 ) -> None:
     user = factories.make_user(session)
-    contact = factories.make_contact(
+    factories.make_contact(
         session,
         user,
         emails=["reach@example.test"],
         connected_on=date(2020, 6, 1),
-    )
-    session.add(
-        ContactSnapshot(
-            user_id=user.id,
-            contact_id=contact.id,
-            headline="New role",
-            observed_at=datetime(2025, 3, 1, tzinfo=UTC),
-        )
+        positions=[{"title": "Lead", "started_on": date(2025, 3, 1)}],
     )
     session.commit()
 
@@ -553,6 +549,133 @@ def test_campaign_audience_computes_connection_age_and_position_change(
     assert row["connected_year"] == "2020"
     assert row["years_since_connected"] == "6"  # connected 2020-06-01, "now" is 2026-09-21
     assert row["last_position_change"] == "2025-03-01"
+
+
+def test_campaign_audience_position_change_ignores_a_newer_headline_only_snapshot(
+    session: Session,
+) -> None:
+    """A headline edit is not a job change: the column reads the positions' dates,
+    as the merge field does (spec 11.1, #333), not the newest snapshot."""
+    user = factories.make_user(session)
+    contact = factories.make_contact(
+        session,
+        user,
+        emails=["reach@example.test"],
+        positions=[{"title": "Lead", "started_on": date(2025, 3, 1)}],
+    )
+    session.add(
+        ContactSnapshot(
+            user_id=user.id,
+            contact_id=contact.id,
+            headline="Speaker, writer, occasional sailor",
+            observed_at=datetime(2026, 8, 1, tzinfo=UTC),
+        )
+    )
+    session.commit()
+
+    text = _run(session, user, preset="campaign-audience", output_format="json", now=NOW)
+    (row,) = json.loads(text)
+    assert row["last_position_change"] == "2025-03-01"
+
+    csv_text = _run(session, user, preset="campaign-audience", output_format="csv", now=NOW)
+    (csv_row,) = csv.DictReader(io.StringIO(csv_text))
+    assert csv_row["Last Position Change"] == "2025-03-01"
+
+
+_POSITION_CASES: dict[str, list[dict[str, object]]] = {
+    "no positions": [],
+    "undated position": [{"title": "Engineer"}],
+    "future-dated start": [
+        {"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": date(2026, 8, 31)},
+        {"title": "Lead", "started_on": date(2026, 12, 1)},
+    ],
+    "future-dated end": [
+        {"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": date(2027, 1, 31)},
+    ],
+    "ended position": [
+        {"title": "Advisor", "started_on": date(2019, 4, 1)},
+        {"title": "VP", "started_on": date(2021, 2, 1), "ended_on": date(2026, 8, 15)},
+    ],
+}
+
+
+@pytest.mark.parametrize("case", list(_POSITION_CASES))
+def test_campaign_audience_position_change_equals_the_merge_field(
+    session: Session, case: str
+) -> None:
+    """The column and the ``last_position_change`` merge field agree (#333), with a
+    newer snapshot present so a snapshot-based reading would disagree."""
+    user = factories.make_user(session)
+    contact = factories.make_contact(
+        session, user, emails=["reach@example.test"], positions=_POSITION_CASES[case]
+    )
+    session.add(
+        ContactSnapshot(
+            user_id=user.id,
+            contact_id=contact.id,
+            headline="New headline",
+            observed_at=datetime(2026, 9, 1, tzinfo=UTC),
+        )
+    )
+    session.commit()
+
+    merge_value = contact_fields(contact, NOW.date())["last_position_change"]
+    assert merge_value is None or isinstance(merge_value, date)
+    text = _run(session, user, preset="campaign-audience", output_format="json", now=NOW)
+    (row,) = json.loads(text)
+    assert row["last_position_change"] == (None if merge_value is None else merge_value.isoformat())
+
+
+def test_campaign_audience_export_does_not_query_per_contact(session: Session) -> None:
+    """The position change reads eager-loaded positions: forty contacts cost the
+    same number of queries as three, all inside one batch."""
+    user = factories.make_user(session)
+    user_id = user.id
+
+    def add_contacts(count: int) -> None:
+        for n in range(count):
+            factories.make_contact(
+                session,
+                user,
+                emails=[f"reach{n}-{count}@example.test"],
+                positions=[
+                    {"title": "Lead", "started_on": date(2024, 1, 1)},
+                    {
+                        "title": "Engineer",
+                        "started_on": date(2019, 1, 1),
+                        "ended_on": date(2023, 12, 1),
+                    },
+                ],
+            )
+        session.commit()
+
+    def count_queries() -> tuple[int, int]:
+        session.expire_all()  # nothing already loaded may hide a per-row lazy load
+        exporter = session.get(User, user_id)
+        assert exporter is not None
+        statements: list[str] = []
+
+        def record(*args: Any) -> None:
+            statements.append(args[2])
+
+        engine = session.get_bind()
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            text = _run(
+                session, exporter, preset="campaign-audience", output_format="json", now=NOW
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        rows = json.loads(text)
+        assert all(row["last_position_change"] == "2024-01-01" for row in rows)
+        return len(rows), len(statements)
+
+    add_contacts(3)
+    few_rows, few_queries = count_queries()
+    add_contacts(37)
+    many_rows, many_queries = count_queries()
+    assert (few_rows, many_rows) == (3, 40)
+    assert many_queries == few_queries
 
 
 def test_campaign_audience_never_exports_a_do_not_contact_person(session: Session) -> None:

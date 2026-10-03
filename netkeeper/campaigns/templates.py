@@ -418,6 +418,28 @@ def _whole_years(since: date, today: date) -> int:
     return max(years, 0)
 
 
+def last_position_change(contact: Contact, today: date) -> date | None:
+    """The ``last_position_change`` merge field (spec 11.1): the latest
+    ``started_on`` or ``ended_on`` on or before ``today`` among the contact's
+    positions, or None when no position has such a date.
+
+    Leaving a job is a change just as starting one is (#232), and neither an
+    announced departure nor an announced new job has happened yet (#255).
+    Snapshots play no part: a headline-only snapshot is not a position change.
+    The ``campaign-audience`` export's "Last Position Change" column calls this
+    too, so the file and the merge field cannot drift apart (#333). It reads
+    only ``contact.positions``; a caller over many contacts eager-loads that
+    collection.
+    """
+    changes = [
+        day
+        for p in contact.positions
+        for day in (p.started_on, p.ended_on)
+        if day is not None and day <= today
+    ]
+    return max(changes) if changes else None
+
+
 def contact_fields(contact: Contact, today: date) -> dict[str, object]:
     """A contact's merge values (spec 11.1), keyed by
     :data:`~netkeeper.campaigns.render.CONTACT_FIELDS`.
@@ -429,12 +451,6 @@ def contact_fields(contact: Contact, today: date) -> dict[str, object]:
     new job has happened yet (#255). ``years_since_connected`` counts whole
     years to ``today``.
     """
-    changes = [
-        day
-        for p in contact.positions
-        for day in (p.started_on, p.ended_on)
-        if day is not None and day <= today
-    ]
     values: dict[str, object] = {
         "first_name": contact.preferred_name or contact.first_name,
         "last_name": contact.last_name,
@@ -445,7 +461,7 @@ def contact_fields(contact: Contact, today: date) -> dict[str, object]:
         "years_since_connected": (
             None if contact.connected_on is None else _whole_years(contact.connected_on, today)
         ),
-        "last_position_change": max(changes) if changes else None,
+        "last_position_change": last_position_change(contact, today),
     }
     return values
 
