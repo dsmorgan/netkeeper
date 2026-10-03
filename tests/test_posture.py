@@ -1800,11 +1800,33 @@ def test_a_served_schedule_is_on_and_names_each_kind(writer: Session) -> None:
         "connections_incremental scheduled; connections_full scheduled; enrich scheduled;"
         " inbox not applicable (the LinkedIn inbox poll has no runner yet"
     )
-    assert "Gmail replies are polled by the campaign engine" in row.value
+    assert "Gmail replies are polled by the campaign engine; see the reply poll row" in row.value
     assert report.scheduler.unscheduled == ()
     assert report.scheduler.not_applicable == (("inbox", NOT_SERVED_BECAUSE[JobKind.INBOX]),)
     table = render(report)
     assert "inbox" in table and "not applicable" in table
+
+
+def test_a_legacy_inbox_due_time_is_never_shown(writer: Session) -> None:
+    """A row written for the inbox poll before ``serve`` left it out is not a job that
+    runs: it is neither the next fire nor a due time in the table."""
+    user = _served_user(writer)
+    sync_account_schedule(
+        writer,
+        user,
+        ACCOUNT,
+        now=NOW - timedelta(hours=2, minutes=50),  # due in ten minutes, before any other
+        schedules={JobKind.INBOX: DEFAULT_SCHEDULES[JobKind.INBOX]},
+        rng=random.Random(4),
+        tz=ZONE,
+    )
+    report = _report(writer, user)
+    inbox_due = next(due for kind, _, due in report.scheduler.jobs if kind == "inbox")
+    assert inbox_due is not None
+    row = _row(report, "scheduled jobs")
+    assert row.status is Status.ON
+    assert f"{inbox_due:%Y-%m-%d %H:%M UTC}" not in row.value
+    assert f"{inbox_due:%Y-%m-%d %H:%M UTC}" not in render(report)
 
 
 def test_a_missing_served_kind_is_off_and_says_what_that_means(writer: Session) -> None:
@@ -1862,25 +1884,38 @@ def test_a_recent_reply_poll_is_on_for_a_draft_or_send_armed_mailbox(
     )
 
 
-def test_an_armed_mailbox_never_polled_warns(writer: Session, user: User) -> None:
+HELD = "Follow-ups that start a new conversation are held until replies are checked again"
+
+
+def test_an_armed_mailbox_never_polled_is_a_note_and_the_report_stays_clear(
+    writer: Session, user: User
+) -> None:
+    """A stopped ``serve`` is a choice, and the sender holds new-conversation follow-ups
+    meanwhile, so it is a note: the row stays on and the verdict stays clear."""
     _mailbox(writer, user, armed_at=ARMED_AT)
-    row = _row(_report(writer, user), "reply poll")
-    assert row.status is Status.OFF
+    report = _report(writer, user)
+    row = _row(report, "reply poll")
+    assert row.status is Status.ON and row.warnings == ()
     assert "never polled" in row.value
-    assert "has never been polled for replies" in _warning_for(_report(writer, user), "reply poll")
+    [note] = _notes_for(report, "reply poll")
+    assert "has not been polled for replies yet" in note and HELD in note
+    assert "would not stop" not in note
+    assert "reply poll" not in _warned(report) and report.ok
 
 
-def test_a_late_reply_poll_warns_past_three_intervals(writer: Session, user: User) -> None:
+def test_a_late_reply_poll_is_a_note_past_three_intervals(writer: Session, user: User) -> None:
     _mailbox(writer, user, armed_at=ARMED_AT, replies_polled_at=NOW - timedelta(minutes=30))
-    assert _row(_report(writer, user), "reply poll").status is Status.ON  # exactly 3 x 10
+    assert _notes_for(_report(writer, user), "reply poll") == ()  # exactly 3 x 10
 
     late = _report(writer, user, now=NOW + timedelta(minutes=1))
-    assert _row(late, "reply poll").status is Status.OFF
-    warning = _warning_for(late, "reply poll")
-    assert "last polled for replies 31 min ago, more than 3 times the 10 min" in warning
-    assert "`netkeeper serve` is running" in warning
+    row = _row(late, "reply poll")
+    assert row.status is Status.ON and row.warnings == ()
+    [note] = _notes_for(late, "reply poll")
+    assert "last polled for replies 31 min ago, more than 3 times the 10 min" in note
+    assert HELD in note and "check that it is running" in note
+    assert late.ok
 
     longer = _report(
         writer, user, now=NOW + timedelta(minutes=1), settings=_campaigns(reply_poll_minutes=20)
     )
-    assert _row(longer, "reply poll").status is Status.ON
+    assert _notes_for(longer, "reply poll") == ()
