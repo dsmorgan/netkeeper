@@ -206,6 +206,20 @@ describe('Gmail setup guide', () => {
     ).toBeInTheDocument()
   })
 
+  it('shows the split view guidance, and every console link opens in a new tab', async () => {
+    render(noClient, { project_id: PROJECT })
+    await screen.findByRole('link', { name: 'Check it' })
+    expect(screen.getByText(/See this guide and the linked page side by side/)).toBeInTheDocument()
+    const links = screen
+      .getAllByRole('link')
+      .filter((a) => a.getAttribute('href')?.startsWith('https://'))
+    expect(links.length).toBeGreaterThan(0)
+    for (const a of links) {
+      expect(a).toHaveAttribute('target', '_blank')
+      expect(a).toHaveAttribute('rel', 'noopener noreferrer')
+    }
+  })
+
   it('undoes a step marked done by mistake', async () => {
     const { setup } = render(noClient, { project_id: PROJECT, done: ['project'] })
     fireEvent.click(await screen.findByRole('button', { name: /Create a Google Cloud project/ }))

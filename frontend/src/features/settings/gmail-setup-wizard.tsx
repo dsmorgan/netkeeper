@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { SplitViewHint } from '@/components/split-view-hint'
 import { type MailboxStatus, reasonText } from '@/features/mailboxes/api'
 
 import { ClientForm } from './client-form'
@@ -158,6 +159,7 @@ export function GmailSetupWizard({
         can (the client, the token, the Gmail API); you mark the rest done. Your app stays in
         Testing, with you as its one test user.
       </p>
+      <SplitViewHint />
       {setupQuery.isError && (
         <p role="alert" className="text-destructive">
           Your setup progress didn’t load: {message(setupQuery.error)}
