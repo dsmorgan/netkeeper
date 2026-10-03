@@ -204,13 +204,16 @@ def test_another_users_slug_is_unknown_to_this_user(writer: Session, user: User)
         ("View", "Priya Okafor's profile", None),  # the link's aria-label
         ("Priya", "Okafor Data engineer at Fictional", "Data engineer at Fictional"),
         ("Priya", "OkaforData engineer", "Data engineer"),  # text nodes run together
-        # The run-on join after any word character, in any case (#186).
+        # The run-on join after any letter or digit, in the card's case (#186).
         ("Jane", "Doe, MBAData engineer", "Data engineer"),  # after a capital
         ("Jane", "DOEData engineer", "Data engineer"),
         ("王", "小明Engineer", "Engineer"),  # after CJK
-        ("Jane", "DoeData Engineer", "Data engineer"),  # the headline in another case
+        ("Jane", "DoéData engineer", "Data engineer"),  # after a letter outside ASCII
         ("Jane", "DoeiOS developer", "iOS developer"),  # a headline that starts lowercase
-        ("Jane", "Doe2Data engineer", "Data engineer"),  # after a digit
+        ("अनिल", "कुमारData engineer", "Data engineer"),  # after Devanagari
+        ("Jane", "Doe2Data engineer", "Data engineer"),  # after a digit (a digit is refused too)
+        ("Jane", "DoeData", "Data"),  # four characters: the shortest run-on checked
+        ("Jane", "Doe Sales", "sales"),  # whole words match in any case
         ("Priya", "Okafor 2nd degree connection", None),
         ("Priya", "Okafor · Data engineer", None),
         ("Priya", "Okafor | Fictional Robotics", None),
@@ -264,6 +267,18 @@ def test_a_headline_is_matched_as_words_not_letters() -> None:
     ("first", "last", "headline"),
     [
         ("Anna", "Karenina", "Ann"),  # the headline runs on into a letter
+        # A headline that ends a name word is not a run-on unless it is long
+        # enough and in the card's exact case (#186).
+        ("Maria", "Rosales", "Sales"),
+        ("Priya", "Desai", "AI"),
+        ("PRIYA", "DESAI", "AI"),  # exact case, but two characters
+        ("Ann", "Goldsmith", "Smith"),
+        ("Jane", "Pettit", "IT"),
+        ("Fred", "Okafor", "Ed"),
+        ("Lena", "Behr", "HR"),
+        ("Jane", "DoeData Engineer", "Data engineer"),  # the run-on in another case
+        ("Jane", "Arrowsmith", "SMITH"),
+        ("Jane", "DoeDat", "Dat"),  # three characters: too short for the run-on check
         ("Jane", "Doe", "Data engineer"),
         ("Jane", "Doe", "Doe Industries"),  # the name is inside the headline, not the reverse
         ("王", "小明", "Engineer"),
@@ -542,7 +557,7 @@ def test_an_unconfirmed_contact_is_never_enriched_nor_pinned(writer: Session, us
 # --- merge ---------------------------------------------------------------------------
 
 
-def test_merging_a_card_contact_into_a_real_one_confirms_and_keeps_its_text_lowest(
+def test_merging_a_card_contact_into_a_real_one_confirms_it_and_drops_its_headline(
     writer: Session, user: User
 ) -> None:
     real = factories.make_contact(writer, user, headline=None, location=None, field_sources={})
@@ -552,8 +567,23 @@ def test_merging_a_card_contact_into_a_real_one_confirms_and_keeps_its_text_lowe
     merge(writer, user, real.id, card.id)
 
     assert real.needs_review_at is None
-    assert real.headline == "Card text"
+    # #186: the card's headline is dropped, as the sync drops it; the slug may
+    # have passed to someone else since the card was read.
+    assert real.headline is None
     assert "headline" not in real.field_sources  # still open to every source
+
+
+def test_merging_a_card_contact_into_a_real_one_carries_a_headline_the_person_typed(
+    writer: Session, user: User
+) -> None:
+    real = factories.make_contact(writer, user, headline=None, field_sources={})
+    mapping.apply_page(writer, user, _page([_card("card-slug", "Priya", "Okafor", "Card text")]))
+    card = _by_slug(writer, user, "card-slug")
+    contacts_service.update_contact(writer, user, card.id, {"headline": "Typed by hand"})
+
+    merge(writer, user, real.id, card.id)
+
+    assert (real.headline, real.field_sources["headline"]) == ("Typed by hand", "manual")
 
 
 def test_merging_a_real_contact_into_a_card_contact_confirms_it_and_the_real_values_win(

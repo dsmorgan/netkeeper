@@ -1525,9 +1525,16 @@ def _merge_scalars(survivor: Contact, loser: Contact) -> None:
     # and the loser's values win with the loser's sources, as they would have had
     # the person picked the loser as the survivor.
     card_survivor = survivor.needs_review_at is not None and loser.needs_review_at is None
+    card_loser = loser.needs_review_at is not None and survivor.needs_review_at is None
     for name in PROVENANCE_ORDER:
         if name in ("li_urn", "li_public_id"):
             continue  # _merge_identity did these
+        if name == "headline" and card_loser and name not in loser.field_sources:
+            # #186: a card's headline does not cross onto a confirmed contact. The
+            # merge says who this contact is, not that the card was theirs: the slug
+            # may have passed to this person since the card was read. The sync
+            # drops it in the same case (crm/apply.py, a card confirmed by its URN).
+            continue
         mine: str | date | None = getattr(survivor, name)
         theirs: str | date | None = getattr(loser, name)
         open_to_loser = mine in (None, "") or (card_survivor and name not in survivor.field_sources)
@@ -1535,10 +1542,8 @@ def _merge_scalars(survivor: Contact, loser: Contact) -> None:
             setattr(survivor, name, theirs)
             _take_source(survivor, loser, name)
     if card_survivor and "headline" not in survivor.field_sources:
-        # #186: the loser gave no headline, so the card's is still there. The merge
-        # says who this contact is, not that the card was theirs: the slug may have
-        # passed to this person since the card was read. The sync drops it in the
-        # same case (crm/apply.py, a card contact confirmed by its URN).
+        # #186: the loser gave no headline, so the card's is still there; drop it,
+        # for the reason above.
         survivor.headline = None
     if survivor_default_name:
         # "" means "use first_name" on a stored row (the preferred_name validator).

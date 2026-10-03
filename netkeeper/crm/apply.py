@@ -474,20 +474,29 @@ def card_name(first: str, last: str, headline: str | None) -> tuple[str, str]:
 def _holds_headline(name: str, headline: str) -> bool:
     """True when the card's headline is inside its name text: the occupation leaked in.
 
-    Bounded on the right, so a headline of "Ann" does not refuse "Anna Karenina".
-    The left side is open to cover the join LinkedIn's markup produces when two
-    text nodes run together: any word character directly followed by the headline,
-    in any case ("OkaforData engineer", "Jane Doe, MBAData engineer",
-    "DoeiOS developer", "王 小明Engineer"). The cost is that a headline which is
-    itself the tail of a word in the name ("Smith" in "Goldsmith") refuses it; the
-    contact is then named by its slug, which a person can correct on review.
+    Two checks. As whole words, in any case: a headline of "Ann" refuses
+    "Jo Ann Smith" but not "Anna Karenina". Run on, for the join LinkedIn's
+    markup produces when two text nodes meet: the headline directly after any
+    letter or digit, ending the name text, in the card's exact case
+    ("OkaforData engineer", "Jane Doe, MBAData engineer", "DoeiOS developer",
+    "王 小明Engineer"). The run-on check needs a headline of at least
+    :data:`_RUN_ON_MIN_CHARS` characters and the exact case, because a short or
+    case-folded headline ends many real names: "Sales" in Rosales, "AI" in
+    Desai, "Smith" in Goldsmith (#186).
     """
     if not headline:
         return False
     escaped = re.escape(headline)
     if re.search(rf"(?<!\w){escaped}(?!\w)", name, re.IGNORECASE):
         return True
-    return re.search(rf"(?<=\w){escaped}(?!\w)", name, re.IGNORECASE) is not None
+    return (
+        len(headline) >= _RUN_ON_MIN_CHARS
+        and re.search(rf"(?<=\w){escaped}(?!\w)", name) is not None
+    )
+
+
+_RUN_ON_MIN_CHARS: Final = 4
+"""The shortest headline the run-on check in :func:`_holds_headline` looks for."""
 
 
 def card_headline(headline: str | None) -> str | None:
