@@ -228,7 +228,11 @@ describe('clearing heat (#181)', () => {
     })
     fireEvent.click(await screen.findByRole('button', { name: 'Clear heat…' }))
     const dialog = await screen.findByRole('alertdialog')
-    expect(await within(dialog).findByText(/Run 7 is running/)).toBeInTheDocument()
+    expect(
+      await within(dialog).findByText(
+        'Run 7 is running and keeps its current pace; the next run uses the cleared heat.',
+      ),
+    ).toBeInTheDocument()
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Clear heat' }))
 
