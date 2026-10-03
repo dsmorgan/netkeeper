@@ -22,6 +22,8 @@ The links need your project ID, not its name. Until you save an ID in step 1, th
 
 netkeeper never drives the Google console. Every link opens in your own browser, and netkeeper never runs `gcloud`: it shows the commands, and you run them. The rest of this page is the same steps in writing, for the command line or for reference.
 
+To read this guide next to the console, use Chrome's split view. Right-click a link and choose **Open link in split view**. Or right-click the console's tab and choose **New split view with current tab**. The shortcut is Cmd+Option+N on macOS and Shift+Alt+N on Windows and Linux. To leave, choose the split view icon next to the address bar, then **Separate split view**. See [Google's split view help](https://support.google.com/chrome/answer/16971124). In another browser, drag the console's tab out into its own window and place the two windows side by side. A web page can't ask Chrome for a split view, and netkeeper never launches or drives your browser, so the choice is yours.
+
 ## What netkeeper asks Google for
 
 One scope: `https://www.googleapis.com/auth/gmail.modify`. It lets netkeeper read mail (to see replies and bounces), write drafts, send, and add labels. It doesn't allow permanent deletion, and netkeeper never deletes mail.
