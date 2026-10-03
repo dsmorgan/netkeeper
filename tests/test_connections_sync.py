@@ -76,7 +76,7 @@ from netkeeper.services.connections_sync import (
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.services.linkedin_session import clear_session_flag, session_flag
 from netkeeper.services.pacing import profiles
-from netkeeper.services.posture import posture
+from netkeeper.services.posture import posture, render_summary
 from netkeeper.services.settings_kv import set_setting
 
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
@@ -847,6 +847,12 @@ async def test_a_refused_aging_is_on_the_run_and_in_posture(
     (aging,) = [p for p in found.protections if p.name == "network aging"]
     assert aging.warnings and report.aging.refused in aging.warnings[0]
     assert f"run {report.run_id}" in aging.warnings[0]
+    assert aging.notes == ()
+    # #340's short report prints every warning in full and only counts notes, so
+    # a refusal that were a note would vanish from what `netkeeper posture` shows.
+    assert not found.ok
+    flat = " ".join(render_summary(found).split())
+    assert f"warning: network aging: {' '.join(aging.warnings[0].split())}" in flat
 
 
 async def test_a_full_sync_that_aged_as_usual_does_not_warn(
