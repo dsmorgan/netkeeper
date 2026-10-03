@@ -235,7 +235,7 @@ async def test_a_disarmed_serve_never_touches_the_browser_across_a_week(
                     user_id=user_id, account_id=account, kind=kind, due=clock.at, catch_up=False
                 )
             )
-            assert outcome is scheduler.JobOutcome.SKIPPED
+            assert outcome is scheduler.JobOutcome.DISARMED_AFTER_GATE
         await app.state.tasks.join()
         assert _rows(bare_engine) == []
         with session_scope(factory, write=True) as session:
