@@ -3983,7 +3983,11 @@ def history_scan_gmail(
     ] = False,
     limit: Annotated[
         int | None,
-        typer.Option("--limit", min=1, help="Scan at most this many recipients this run."),
+        typer.Option(
+            "--limit",
+            min=1,
+            help="Scan at most this many recipients this run, and skip the subject search.",
+        ),
     ] = None,
 ) -> None:
     """Search Gmail, read-only, for what the imported recipients sent back.
@@ -4010,7 +4014,14 @@ def history_scan_gmail(
                 raise typer.Exit(code=1)
             user_id, mailbox_id = user.id, box.id
             targets = history_scan.scan_targets(session, user, rescan=rescan, limit=limit)
-            subjects = history_scan.subject_targets(session, user, rescan=rescan)
+            # A trial run on a few recipients skips the subject search, and so marks no
+            # campaign as searched by subject.
+            subjects = (
+                []
+                if limit is not None
+                else history_scan.subject_targets(session, user, rescan=rescan)
+            )
+            no_subject = history_scan.campaigns_without_subject(session, user)
         if not targets and not subjects:
             typer.echo(
                 "nothing to scan: no imported recipients or campaign subjects"
@@ -4029,6 +4040,13 @@ def history_scan_gmail(
             if not apply:
                 session.rollback()
     _print_history_scan(report, applied=apply)
+    if limit is not None:
+        typer.echo("subject search skipped: --limit is set; run without it to search by subject")
+    if no_subject:
+        typer.echo(
+            f"{len(no_subject)} campaign(s) have no subject, so no subject search:"
+            f" {', '.join(no_subject)}"
+        )
     if report.stopped is not None:
         raise typer.Exit(code=1)
 
@@ -4047,15 +4065,38 @@ def _print_history_scan(report: history_scan.ScanReport, *, applied: bool) -> No
                 str(report.by_campaign.get(campaign_id, none).auto),
                 str(report.by_campaign.get(campaign_id, none).bounce),
                 str(report.by_subject.get(campaign_id, 0)),
+                str(report.by_subject_unsubscribe.get(campaign_id, 0)),
             )
             for campaign_id in campaign_ids
         ]
-        headers = ("CAMPAIGN", "REPLIES", "UNSUBSCRIBES", "AUTO", "BOUNCES", "FOUND BY SUBJECT")
+        headers = (
+            "CAMPAIGN",
+            "REPLIES",
+            "UNSUBSCRIBES",
+            "AUTO",
+            "BOUNCES",
+            "BY SUBJECT (REVIEW)",
+            "OF THEM UNSUBSCRIBE",
+        )
         typer.echo(_format_table(headers, rows), nl=False)
     if report.subject_samples:
-        typer.echo(f"found by subject, not in the workbook (first {len(report.subject_samples)}):")
+        typer.echo(
+            f"found by subject, not in the workbook (first {len(report.subject_samples)});"
+            " review only: flagged, never put on do-not-contact or do-not-send:"
+        )
         for address in report.subject_samples:
             typer.echo(f"  {address}")
+    for campaign_id in report.subject_capped:
+        typer.echo(
+            f"campaign {report.campaign_names.get(campaign_id, str(campaign_id))!r}: the subject"
+            f" search hit its limit of {history_scan.SUBJECT_SEARCH_MAX} messages; some may be"
+            " unread"
+        )
+    for campaign_id in report.subject_unsearchable:
+        typer.echo(
+            f"campaign {report.campaign_names.get(campaign_id, str(campaign_id))!r}: its subject"
+            " has nothing to search for"
+        )
     for kind, label in (
         (HistoryReplyKind.REPLY, "replies"),
         (HistoryReplyKind.UNSUBSCRIBE, "unsubscribes"),

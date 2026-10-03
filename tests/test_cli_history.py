@@ -212,3 +212,19 @@ def test_import_names_skipped_tabs_at_the_end_and_exits_1(
         " 2 (no 'Campaign name' header)"
     )
     assert _counts(cli_db)["HistoryCampaign"] == 1  # the readable tab is still imported
+
+
+def test_scan_with_a_limit_skips_the_subject_search_and_says_so(
+    cli_db: sessionmaker[Session], workbook: Path, opened: list[FakeGmail]
+) -> None:
+    runner.invoke(cli, ["history", "import", str(workbook), "--apply"])
+
+    result = runner.invoke(cli, ["history", "scan-gmail", "--limit", "1", "--apply"])
+
+    assert result.exit_code == 0, result.output
+    assert "subject search skipped: --limit is set" in result.output
+    (fake,) = opened
+    assert all("subject scan" not in purpose for _, purpose in fake.calls)
+    with session_scope(cli_db) as session:
+        user = ensure_local_user(session)
+        assert history_scan.subject_targets(session, user) != []

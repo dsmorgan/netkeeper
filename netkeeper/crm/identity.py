@@ -1022,8 +1022,15 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     _merge_tags(session, user, survivor, loser)
     _merge_list_members(session, user, survivor, loser)
     _merge_campaign_rows(session, user, survivor, loser)
-    keep_review = _merge_history_rows(session, user, survivor, loser)
+    keep_review, repliers = _merge_history_rows(session, user, survivor, loser)
+    # A replier's mark is not a card's (#184): hide it while the fields merge, so their
+    # provenance is merged as for any confirmed contact, then put the marks back.
+    marks = {contact.id: contact.needs_review_at for contact in repliers}
+    for contact in repliers:
+        contact.needs_review_at = None
     _merge_scalars(survivor, loser)
+    if loser.id in marks:
+        loser.needs_review_at = marks[loser.id]
     if keep_review is not None:
         survivor.needs_review_at = keep_review
     _merge_synced_values(survivor, loser)
@@ -1034,29 +1041,31 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
 
 def _merge_history_rows(
     session: Session, user: User, survivor: Contact, loser: Contact
-) -> datetime | None:
+) -> tuple[datetime | None, list[Contact]]:
     """Move the loser's old-campaign history rows to the survivor (#65), and say which
     ``needs_review_at`` the survivor keeps when either side waits for a person to read a
     reply to an old campaign: the earlier of the two set ones. ``None``: the usual rule.
+    Also returns the sides whose mark is such a wait, not a card's.
 
     A merge is how a person says two contacts are one, not that they read the reply, so
     it must not clear that mark in either direction (#65 review, S1)."""
     from netkeeper.crm.history import awaiting_reply_triage  # history imports this module
 
-    waiting = any(
-        contact.needs_review_at is not None and awaiting_reply_triage(session, user, contact.id)
+    repliers = [
+        contact
         for contact in (survivor, loser)
-    )
+        if contact.needs_review_at is not None and awaiting_reply_triage(session, user, contact.id)
+    ]
     session.execute(
         scoped_update(user, HistoryRecipient)
         .where(HistoryRecipient.contact_id == loser.id)
         .values(contact_id=survivor.id)
         .execution_options(synchronize_session="evaluate")
     )
-    if not waiting:
-        return None
+    if not repliers:
+        return None, []
     marks = [m for m in (survivor.needs_review_at, loser.needs_review_at) if m is not None]
-    return min(marks)
+    return min(marks), repliers
 
 
 def _merge_identity(session: Session, user: User, survivor: Contact, loser: Contact) -> None:
