@@ -602,4 +602,15 @@ describe('row actions', () => {
     // The page is asked for again, so the row shows the new value.
     await waitFor(() => expect(queries(seen).length).toBeGreaterThan(1))
   })
+
+  it('disables Set met for an archived row and says why', async () => {
+    serveTable(contactPage([{ ...contactRow(1), archived_at: '2026-03-01T00:00:00Z' }], 1))
+    await renderApp('/contacts')
+    await screen.findByText('Bo Quill')
+
+    fireEvent.click(screen.getByRole('button', { name: /Actions for Bo Quill/ }))
+    const trigger = await screen.findByRole('menuitem', { name: /Set met/ })
+    expect(trigger).toHaveAttribute('aria-disabled', 'true')
+    expect(trigger).toHaveAttribute('title', 'Unarchive this contact to change Met.')
+  })
 })

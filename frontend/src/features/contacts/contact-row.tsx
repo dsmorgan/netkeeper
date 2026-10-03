@@ -106,7 +106,12 @@ export const ContactTableRow = memo(function ContactTableRow({
               </MenuContent>
             </MenuSubmenu>
             <MenuSubmenu>
-              <MenuSubmenuTrigger>Set met</MenuSubmenuTrigger>
+              <MenuSubmenuTrigger
+                disabled={archived}
+                title={archived ? 'Unarchive this contact to change Met.' : undefined}
+              >
+                Set met
+              </MenuSubmenuTrigger>
               <MenuContent align="start" side="inline-end">
                 {MET_VALUES.map((value) => (
                   <MenuItem key={value} onClick={() => actions.setMet(row, value)}>
