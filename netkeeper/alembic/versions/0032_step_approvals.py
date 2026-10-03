@@ -75,6 +75,15 @@ def upgrade() -> None:
     )
     for column in ("user_id", "campaign_id", "step_id", "enrollment_id"):
         op.create_index(op.f(f"ix_{TABLE}_{column}"), TABLE, [column], unique=False)
+    # One whole-step approval per step: NULL is not equal to NULL in the constraint above.
+    op.create_index(
+        "uq_campaign_step_approvals_whole_step",
+        TABLE,
+        ["user_id", "step_id"],
+        unique=True,
+        sqlite_where=sa.text("enrollment_id IS NULL"),
+        postgresql_where=sa.text("enrollment_id IS NULL"),
+    )
 
 
 def downgrade() -> None:

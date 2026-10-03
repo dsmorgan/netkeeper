@@ -183,7 +183,8 @@ def _complete_review(world: World, campaign_id: int) -> None:
     """Record every requirement: the steps approved through the CLI, the rest as the
     review screens would through the API."""
     for position in ("1", "2"):
-        _ok("campaigns", "approve-step", str(campaign_id), position, "--yes")
+        approved = _run("campaigns", "approve-step", str(campaign_id), position, input="y\n")
+        assert approved.exit_code == 0, approved.output
     now = datetime.now(UTC)
     with session_scope(world.factory, write=True) as session:
         user = _local(session)
@@ -344,6 +345,8 @@ def test_review_step_shows_one_message_at_a_time_and_the_blocked_ones(world: Wor
     assert "subject: Catching up" in output
     assert "it has been a while." in output
     assert "blocked, never sent (1):" in output
+    asked = _run("campaigns", "approve-step", str(campaign_id), "1", input="n\n").output
+    assert "blocked, never sent (1):" in asked.split("approve step 1")[0]
     assert f"enrollment {blocked_id}:" in output and "do-not-contact" in output
 
     past = _ok("campaigns", "review-step", str(campaign_id), "1", "--index", "9")
@@ -356,6 +359,10 @@ def test_approve_step_asks_then_approves_the_step(world: World) -> None:
 
     cancelled = _run("campaigns", "approve-step", str(campaign_id), "1", input="n\n")
     assert cancelled.exit_code == 1
+    # What is approved is shown in full before the question.
+    shown = cancelled.output.split("approve step 1 for all")[0]
+    assert "message 1 of 3" in shown
+    assert "subject: Catching up" in shown and "it has been a while." in shown
     assert "approve step 1 for all 3 messages that can be sent" in cancelled.output
     assert "cancelled: step 1 is not approved" in cancelled.output
     assert "approval: not approved" in _ok("campaigns", "review-step", str(campaign_id), "1")
@@ -363,6 +370,7 @@ def test_approve_step_asks_then_approves_the_step(world: World) -> None:
     approved = _run("campaigns", "approve-step", str(campaign_id), "1", input="y\n")
     assert approved.exit_code == 0, approved.output
     assert f"step 1 of campaign {campaign_id} approved" in approved.output
+    assert "--yes" not in _run("campaigns", "approve-step", "--help").output
     assert "approval: approved" in _ok("campaigns", "review-step", str(campaign_id), "1")
     status = _ok("campaigns", "status", str(campaign_id))
     assert "- step_approvals: steps not approved (steps 2)" in status
@@ -387,18 +395,24 @@ def test_a_personal_line_step_is_approved_message_by_message(world: World) -> No
 
     review = _ok("campaigns", "review-step", str(campaign_id), "1")
     assert "each message is approved on its own; 3 not approved yet" in review
-    whole = _run("campaigns", "approve-step", str(campaign_id), "1", "--yes")
+    whole = _run("campaigns", "approve-step", str(campaign_id), "1", input="y\n")
     assert whole.exit_code == 1
     assert "approve each message with --enrollment ID" in whole.output
 
-    _ok("campaigns", "approve-step", str(campaign_id), "1", "--enrollment", str(ids[0]), "--yes")
+    one = _run(
+        "campaigns", "approve-step", str(campaign_id), "1", "--enrollment", str(ids[0]), input="y\n"
+    )
+    assert one.exit_code == 0, one.output
+    shown = one.output.split("approve 1 messages")[0]
+    assert f"message 1 of 1 to approve:\nenrollment {ids[0]}:" in shown
+    assert "it has been a while." in shown
     assert "2 not approved yet" in _ok("campaigns", "review-step", str(campaign_id), "1")
     status = _ok("campaigns", "status", str(campaign_id))
     assert "- message_approvals: messages of steps that use" in status
     assert f"(enrollments {ids[1]}, {ids[2]})" in status
 
     wrong = _run(
-        "campaigns", "approve-step", str(campaign_id), "2", "--enrollment", str(ids[0]), "--yes"
+        "campaigns", "approve-step", str(campaign_id), "2", "--enrollment", str(ids[0]), input="y\n"
     )
     assert wrong.exit_code == 1 and "approved as a whole" in wrong.output
 

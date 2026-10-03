@@ -584,7 +584,7 @@ Done when: the module is inert without a key; the cap stops a bulk run.
 **P5-02 Personal line** · lane campaigns · M
 Goal: `{{ personal_line }}` generated at preview time from contact data and your notes, stored with the message, editable in the review gate.
 Depends on: P5-01, P3-09.
-Done when: a campaign using the field cannot activate until every message of a step using it was approved on its own (the review gate already requires this since #339).
+Done when: a campaign using the field cannot activate until every message of a step using it was approved on its own. Since #339 the review gate approves such messages one by one, and the line a message renders with (`campaign_review.personal_line_for`) feeds its message fingerprint, so a stored line written or edited after the approval undoes it. This item stores the line there and adds a fire-time check: before the engine fills `personal_line` at send, the message's approved fingerprint must still match, or the message does not send.
 
 **P5-03 Title classification** · lane crm · S
 Goal: LLM tags with confidence, applied above a threshold as `kind = llm`, suggested below it.
