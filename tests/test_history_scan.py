@@ -1190,3 +1190,46 @@ def test_a_tag_only_subject_is_not_searched_and_is_reported(writer: Session, use
 
     assert len(report.subject_unsearchable) == 1
     assert not [p for _, p in fake.calls if p.startswith("history subject scan")]
+
+
+def test_once_listed_a_plain_scan_applies_the_listed_rules(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """q7c: listing clears the subject-only scan, so no --rescan is needed."""
+    hal = factories.make_contact(writer, user, emails=["hal@example.test"])
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    fake.deliver(_mail("hal@example.test", "Re: Catching up", "Please remove me."), at=_at(6))
+    _subject_scan(writer, user, fake)
+    assert not hal.do_not_contact
+    listed = Tab(
+        opened=(*OPENED, ("Hal", "Abelson", "hal@example.test")),
+        opens="7 (87.5%)",
+        recipients=8,
+        clicked=(),
+        bounces=(),
+        bounced=0,
+    )
+    import_workbook(writer, user, read_workbook(workbook_bytes(listed, FOLLOW_UP)))
+    assert _found(writer, user, "hal@example.test").scanned_at is None
+
+    _scan(writer, user, fake)
+
+    assert (hal.do_not_contact, hal.do_not_contact_reason) == (True, UNSUBSCRIBE_REASON)
+
+
+@pytest.mark.parametrize(
+    ("header", "value"), [("Auto_Submitted", "auto-replied"), ("X_Autoreply", "yes")]
+)
+def test_a_real_auto_reply_through_a_list_that_asks_to_be_removed_is_an_unsubscribe(
+    header: str, value: str
+) -> None:
+    """q11b: Precedence: list does not hide a real auto-reply's request."""
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    ref = fake.deliver(
+        _mail(
+            "ada@example.test", "Away", "Please remove me.", Precedence="list", **{header: value}
+        ),
+        at=_at(4),
+    )
+    message = fake.get_message(ref.id, purpose="test")
+    assert history_scan.classify_from(message, "ada@example.test") is HistoryReplyKind.UNSUBSCRIBE
