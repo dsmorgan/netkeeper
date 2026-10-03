@@ -587,8 +587,8 @@ def apply(
     provided field only when :func:`~netkeeper.crm.provenance.may_overwrite`
     allows it; a slug change keeps the old slug in ``contact_aliases``; a change
     to any job field writes a ``contact_snapshot`` of the values before it,
-    marked ``position_changed`` when a sync replaced a title or company that an
-    earlier sync recorded (#323; see below). Either
+    marked ``position_changed`` when a sync brings a title or company other
+    than an earlier sync recorded (#323; see below). Either
     way, a row from any source but ``manual`` also notes every provided field in
     ``synced_values`` with its source and ``observed_at``, whether or not the
     live column took it (unless a newer observation is already noted), so a
@@ -601,13 +601,15 @@ def apply(
     only when the row says so.
 
     **What counts as a job change (#323).** ``position_changed`` is set only
-    when ``incoming`` comes from the sync and replaces a non-empty
-    ``current_title`` or ``current_company`` whose recorded source was already
-    ``sync``. Only a profile visit (enrichment) gives a sync title or company;
-    the connections list gives a name and headline. So a contact's first
-    enrichment, which replaces a title or company from the archive, a CSV, or a
-    person, never counts, and a later one counts only against what an earlier
-    one recorded.
+    when ``incoming`` comes from the sync and gives a ``current_title`` or
+    ``current_company`` different from the non-empty value an earlier sync
+    recorded (:func:`_enriched_value`). Only a profile visit (enrichment) gives
+    a sync title or company; the connections list gives a name and headline. So
+    a contact's first enrichment, which replaces a title or company from the
+    archive, a CSV, or a person, never counts, and a later one counts only
+    against what an earlier one recorded. A person's override does not hide a
+    move: the comparison is with the last synced value, the snapshot is
+    written, and the column keeps the person's value.
 
     ``snapshot=False`` skips the ``contact_snapshot`` a job-field change would
     write: the sync passes it when the values being replaced were only ever read
@@ -693,11 +695,8 @@ def _update(
     # that catches the ValueError per row would commit that half of the row.
     _assert_identities_free(session, user, contact.id, writable)
     before = {name: getattr(contact, name) for name in JOB_FIELDS}
-    # Read before the loop below records the incoming source over it.
-    enriched_before = {
-        name: (contact.field_sources or {}).get(name) == ContactSource.SYNC.value
-        for name in POSITION_FIELDS
-    }
+    # Read before the loop below records the incoming source and value over it.
+    enriched_before = {name: _enriched_value(contact, name) for name in POSITION_FIELDS}
     for name, value in provided.items():
         if name in writable:
             old: str | date | None = getattr(contact, name)
@@ -707,22 +706,25 @@ def _update(
         if overwrite[name]:
             _record(contact, name, incoming.source)
     _record_synced(contact, incoming)
-    if snapshot and any(
-        before[name] not in (None, "") and before[name] != getattr(contact, name)
-        for name in JOB_FIELDS
+    position_changed = incoming.source is ContactSource.SYNC and any(
+        enriched_before[name] not in (None, "")
+        and name in provided
+        and provided[name] != enriched_before[name]
+        for name in POSITION_FIELDS
+    )
+    if snapshot and (
+        position_changed
+        or any(
+            before[name] not in (None, "") and before[name] != getattr(contact, name)
+            for name in JOB_FIELDS
+        )
     ):
         contact.snapshots.append(
             ContactSnapshot(
                 user_id=user.id,
                 source=incoming.source,
                 observed_at=incoming.observed_at,
-                position_changed=incoming.source is ContactSource.SYNC
-                and any(
-                    enriched_before[name]
-                    and before[name] not in (None, "")
-                    and before[name] != getattr(contact, name)
-                    for name in POSITION_FIELDS
-                ),
+                position_changed=position_changed,
                 **before,
             )
         )
@@ -730,6 +732,26 @@ def _update(
     session.flush()
     log.debug("updated contact %d for user %d from %s", contact.id, user.id, incoming.source)
     return contact
+
+
+def _enriched_value(contact: Contact, name: str) -> str | date | None:
+    """What an earlier enrichment last recorded for position field ``name``, if anything.
+
+    The live value when the sync wrote it. When a person overrode it, the value
+    the sync last reported (``synced_values``), so a manual edit does not hide a
+    later move (#323). ``None`` when no enrichment recorded the field: the
+    connections list never gives a title or company, and an import's or a
+    person's value is not an earlier enrichment.
+    """
+    recorded = (contact.field_sources or {}).get(name)
+    if recorded == ContactSource.SYNC.value:
+        value: str | date | None = getattr(contact, name)
+        return value
+    if recorded == ContactSource.MANUAL.value:
+        entry = (contact.synced_values or {}).get(name)
+        if entry is not None and entry["source"] == ContactSource.SYNC.value:
+            return entry["value"]
+    return None
 
 
 def _record(contact: Contact, name: str, source: ContactSource) -> None:

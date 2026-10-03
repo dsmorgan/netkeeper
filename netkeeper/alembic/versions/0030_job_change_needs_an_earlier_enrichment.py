@@ -14,11 +14,16 @@ support:
   notices nothing.
 - A ``sync`` snapshot with no earlier enrichment of the position it replaced.
   The evidence for one is a ``contact_positions`` row of the same contact with
-  source ``sync``, created before the snapshot was observed, whose title equals
-  the snapshot's non-empty ``current_title`` or whose company equals its
-  non-empty ``current_company``. Only a profile visit writes a ``sync``
-  position, and a visit writes its positions after it observes the profile, so
-  the positions of the visit that wrote the snapshot are never earlier than it.
+  source ``sync``, created before the snapshot was observed, that was open when
+  it was recorded (no ``ended_on``, or an ``ended_on`` no earlier than the
+  first of the month it was created in), and whose title matches the
+  snapshot's non-empty ``current_title`` or whose company matches its
+  non-empty ``current_company``. Values match as identity resolution matches
+  positions: trimmed and case-folded (a frozen copy of ``identity._fold``).
+  Only a profile visit writes a ``sync`` position, and a visit writes its
+  positions after it observes the profile, so the positions of the visit that
+  wrote the snapshot are never earlier than it. A position that had already
+  ended was a past job on that visit, not the current position it recorded.
 
 A snapshot the rule supports keeps its flag, and a false flag is never set.
 Running the upgrade twice changes nothing the second time.
@@ -38,6 +43,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
+from datetime import date, datetime
 
 import sqlalchemy as sa
 from alembic import op
@@ -65,9 +71,23 @@ _positions = sa.table(
     sa.column("contact_id", sa.Integer()),
     sa.column("source", sa.String()),
     sa.column("created_at", sa.DateTime()),
+    sa.column("ended_on", sa.Date()),
     sa.column("title", sa.String()),
     sa.column("company", sa.String()),
 )
+
+
+def _fold(value: str | None) -> str | None:
+    """Frozen copy of identity resolution's ``_fold``: trimmed, case-folded, empty is None."""
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned.casefold() if cleaned else None
+
+
+def _open_when_recorded(created_at: datetime, ended_on: date | None) -> bool:
+    """A position ending no earlier than the month it was first recorded in was current."""
+    return ended_on is None or ended_on >= date(created_at.year, created_at.month, 1)
 
 
 def upgrade() -> None:
@@ -91,6 +111,7 @@ def upgrade() -> None:
                 _positions.c.user_id,
                 _positions.c.contact_id,
                 _positions.c.created_at,
+                _positions.c.ended_on,
                 _positions.c.title,
                 _positions.c.company,
             ).where(
@@ -104,11 +125,13 @@ def upgrade() -> None:
     def supported(row: sa.Row[tuple[object, ...]]) -> bool:
         if row.source != "sync":
             return False
+        title, company = _fold(row.current_title), _fold(row.current_company)
         return any(
             position.created_at < row.observed_at
+            and _open_when_recorded(position.created_at, position.ended_on)
             and (
-                (bool(row.current_title) and position.title == row.current_title)
-                or (bool(row.current_company) and position.company == row.current_company)
+                (title is not None and _fold(position.title) == title)
+                or (company is not None and _fold(position.company) == company)
             )
             for position in enriched[(row.user_id, row.contact_id)]
         )

@@ -416,6 +416,61 @@ def test_a_second_enrichment_with_a_new_position_is_a_job_change(
     assert _job_changes(writer, user, later) == [contact.id]
 
 
+def test_a_new_title_counts_even_over_a_hand_edited_one(writer: Session, user: User) -> None:
+    """#323: a person's override does not hide a move the next enrichment finds."""
+    contact = _stored(writer, user, PRIYA)
+    apply_harvest(writer, user, _harvest(contact, PRIYA))
+    set_manual_field(contact, "current_title", "Data Lead (my words)")
+    writer.flush()
+    promoted = replace(
+        PRIYA,
+        jobs=(
+            Job("Principal Data Engineer", "Fictional Robotics Co", start=(2026, 8)),
+            *PRIYA.jobs,
+        ),
+    )
+    later = NOW + timedelta(days=20)
+
+    apply_harvest(writer, user, _harvest(contact, promoted, at=later))
+
+    (snapshot,) = contact.snapshots
+    assert snapshot.position_changed
+    assert snapshot.observed_at == later
+    assert contact.current_title == "Data Lead (my words)"  # still the person's
+    assert contact.synced_values["current_title"]["value"] == "Principal Data Engineer"
+    assert _job_changes(writer, user, later) == [contact.id]
+
+
+def test_the_same_synced_title_under_a_hand_edited_one_is_not_a_job_change(
+    writer: Session, user: User
+) -> None:
+    contact = _stored(writer, user, PRIYA)
+    apply_harvest(writer, user, _harvest(contact, PRIYA))
+    set_manual_field(contact, "current_title", "Data Lead (my words)")
+    writer.flush()
+    later = NOW + timedelta(days=20)
+
+    apply_harvest(writer, user, _harvest(contact, PRIYA, at=later))
+
+    assert contact.snapshots == []
+    assert contact.current_title == "Data Lead (my words)"
+    assert _job_changes(writer, user, later) == []
+
+
+def test_a_first_enrichment_under_a_hand_edited_title_is_not_a_job_change(
+    writer: Session, user: User
+) -> None:
+    contact = _stored(writer, user, PRIYA)
+    _imported(writer, user, contact, ContactSource.ARCHIVE, NOW - timedelta(days=90))
+    set_manual_field(contact, "current_title", "Data Lead (my words)")
+    writer.flush()
+
+    apply_harvest(writer, user, _harvest(contact, PRIYA))
+
+    assert not any(snapshot.position_changed for snapshot in contact.snapshots)
+    assert _job_changes(writer, user, NOW) == []
+
+
 def test_only_an_enrichment_notices_a_job_change(writer: Session, user: User) -> None:
     """#323: a person's edit over an enriched job writes a snapshot, not a job change."""
     contact = _stored(writer, user, PRIYA)
