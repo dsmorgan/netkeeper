@@ -12,7 +12,7 @@ import { describe, expect, it } from 'vitest'
 import { jsonResponse } from '@/test/fetch'
 
 import { ListsPanel } from './lists-panel'
-import { mockApi, renderWithClient, requestsTo } from './harness'
+import { mockApi, renderWithClient, requestsTo, type RouteHandler } from './harness'
 
 const STATIC_LIST = {
   id: 1,
@@ -64,7 +64,26 @@ const MEMBERS = {
   total: 2,
 }
 
-function routes(overrides: Record<string, () => Response> = {}) {
+const PICK_RESULTS = [
+  {
+    id: 21,
+    first_name: 'Cyrus',
+    last_name: 'Dunn',
+    preferred_name: 'Cy',
+    current_title: 'Founder',
+    current_company: 'Northwind Example',
+  },
+  {
+    id: 22,
+    first_name: 'Diane',
+    last_name: 'Park',
+    preferred_name: 'Di',
+    current_title: null,
+    current_company: 'Northwind Example',
+  },
+]
+
+function routes(overrides: Record<string, RouteHandler> = {}) {
   return {
     'GET /api/v1/tags': () => jsonResponse([]),
     'GET /api/v1/lists': () => jsonResponse([STATIC_LIST, SMART_LIST]),
@@ -148,23 +167,100 @@ describe('a static list', () => {
     )
   })
 
-  it('adds contacts by id', async () => {
+  it('finds contacts by name or company, shows title and company, and posts the picked ids', async () => {
     const seen = mockApi(
-      routes({ 'POST /api/v1/lists/1/members': () => jsonResponse({ added: 2 }, 201) }),
+      routes({
+        'POST /api/v1/contacts/query': ({ body }) => {
+          const where = (body as { filter: { where: unknown } }).filter.where
+          const asksMembers = JSON.stringify(where).includes('list_member')
+          return jsonResponse({
+            items: asksMembers ? [] : PICK_RESULTS,
+            total: asksMembers ? 0 : PICK_RESULTS.length,
+            describe: '',
+          })
+        },
+        'POST /api/v1/lists/1/members': () => jsonResponse({ added: 2 }, 201),
+      }),
     )
     renderWithClient(<ListsPanel />)
     await openList('First 100')
 
-    fireEvent.change(await screen.findByLabelText('Add contacts by id'), {
-      target: { value: '12, 40' },
+    expect(screen.queryByLabelText('Add contacts by id')).toBeNull()
+    fireEvent.change(await screen.findByLabelText('Add contacts'), { target: { value: 'north' } })
+    const matches = await screen.findByRole('list', { name: 'Matches' })
+    expect(within(matches).getByText('Cy Dunn')).toBeInTheDocument()
+    expect(within(matches).getByText('Founder · Northwind Example')).toBeInTheDocument()
+
+    const query = requestsTo(seen, 'POST', '/api/v1/contacts/query').find(
+      (r) => !JSON.stringify(r.body).includes('list_member'),
+    )
+    expect(query?.body).toMatchObject({
+      filter: {
+        include_archived: false,
+        where: {
+          op: 'or',
+          children: ['first_name', 'last_name', 'preferred_name', 'current_company'].map(
+            (field) => ({
+              op: 'contains',
+              field,
+              value: 'north',
+            }),
+          ),
+        },
+      },
     })
+
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled()
+    fireEvent.click(within(matches).getByRole('checkbox', { name: 'Cy Dunn' }))
+    fireEvent.click(within(matches).getByRole('checkbox', { name: 'Di Park' }))
     fireEvent.click(screen.getByRole('button', { name: 'Add' }))
 
     await waitFor(() =>
       expect(requestsTo(seen, 'POST', '/api/v1/lists/1/members')[0]?.body).toEqual({
-        contact_ids: [12, 40],
+        contact_ids: [21, 22],
       }),
     )
+    expect(await screen.findByText('Added 2 contacts.')).toBeInTheDocument()
+  })
+
+  it('shows a contact already in the list as disabled and labeled "In list"', async () => {
+    const seen = mockApi(
+      routes({
+        'POST /api/v1/contacts/query': ({ body }) => {
+          const asksMembers = JSON.stringify(body).includes('list_member')
+          return jsonResponse({
+            items: asksMembers ? [PICK_RESULTS[0]] : PICK_RESULTS,
+            total: 2,
+            describe: '',
+          })
+        },
+        'POST /api/v1/lists/1/members': () => jsonResponse({ added: 1 }, 201),
+      }),
+    )
+    renderWithClient(<ListsPanel />)
+    await openList('First 100')
+
+    fireEvent.change(await screen.findByLabelText('Add contacts'), { target: { value: 'dunn' } })
+    const matches = await screen.findByRole('list', { name: 'Matches' })
+    await within(matches).findByText('In list')
+    expect(within(matches).getByRole('checkbox', { name: 'Cy Dunn' })).toBeDisabled()
+    expect(within(matches).getByRole('checkbox', { name: 'Di Park' })).toBeEnabled()
+
+    fireEvent.click(within(matches).getByRole('checkbox', { name: 'Di Park' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+    await waitFor(() =>
+      expect(requestsTo(seen, 'POST', '/api/v1/lists/1/members')[0]?.body).toEqual({
+        contact_ids: [22],
+      }),
+    )
+  })
+
+  it('says so when nobody matches', async () => {
+    mockApi(routes())
+    renderWithClient(<ListsPanel />)
+    await openList('First 100')
+    fireEvent.change(await screen.findByLabelText('Add contacts'), { target: { value: 'zzz' } })
+    expect(await screen.findByText('Nobody matches “zzz”.')).toBeInTheDocument()
   })
 
   it('exports its members, not everybody', async () => {
@@ -326,6 +422,12 @@ describe('bulk actions', () => {
     const seen = mockApi(
       routes({
         'GET /api/v1/lists/1/members': () => jsonResponse(members),
+        'POST /api/v1/contacts/query': ({ body }) =>
+          jsonResponse({
+            items: JSON.stringify(body).includes('list_member') ? [] : [PICK_RESULTS[0]],
+            total: 1,
+            describe: '',
+          }),
         ...countRoutes({
           count: 2,
           describe: '2 contacts',
@@ -351,7 +453,9 @@ describe('bulk actions', () => {
       items: [...MEMBERS.items, { ...MEMBERS.items[0]!, id: 13, preferred_name: 'Cy' }],
       total: 3,
     }
-    fireEvent.change(screen.getByLabelText('Add contacts by id'), { target: { value: '13' } })
+    fireEvent.change(screen.getByLabelText('Add contacts'), { target: { value: 'cy' } })
+    const matches = await screen.findByRole('list', { name: 'Matches' })
+    fireEvent.click(within(matches).getByRole('checkbox', { name: 'Cy Dunn' }))
     fireEvent.click(screen.getByRole('button', { name: 'Add' }))
     await waitFor(() => expect(screen.getByText('Added 1 contacts.')).toBeInTheDocument())
 

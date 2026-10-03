@@ -12,6 +12,7 @@
 
 import { api } from '@/api/client'
 import type { components } from '@/api/schema'
+import { nameSearchFilter } from '@/features/contacts/name-search'
 
 export type ContactMet = components['schemas']['ContactMet']
 export type MetSource = components['schemas']['MetSource']
@@ -470,18 +471,8 @@ export async function searchQueue(options: {
   limit?: number
   signal?: AbortSignal
 }): Promise<QueuedContact[]> {
-  const words = options.text.split(/\s+/).filter((word) => word !== '')
-  if (words.length === 0) return []
-  const clauses: FilterNode[] = words.map((word) => ({
-    op: 'or',
-    children: (['first_name', 'last_name', 'preferred_name'] as const).map((field) => ({
-      op: 'contains',
-      field,
-      value: word,
-    })),
-  }))
-  const names: FilterNode =
-    clauses.length === 1 ? (clauses[0] as FilterNode) : { op: 'and', children: clauses }
+  const names = nameSearchFilter(options.text)
+  if (names === null) return []
   const membership = queueWhere(options.states, options.decidedBy)
   const where: FilterNode =
     membership === null ? names : { op: 'and', children: [membership, names] }
