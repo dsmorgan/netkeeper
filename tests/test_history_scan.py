@@ -642,6 +642,8 @@ def test_a_merge_keeps_a_replier_s_flag_in_both_directions(
     merge(writer, user, survivor.id, loser.id)
 
     assert survivor.needs_review_at == NOW
+    # P05: the merged-away side keeps its own mark too.
+    assert loser.needs_review_at == (NOW if not replier_survives else None)
     campaign = factories.make_campaign(writer, user, contacted_within_days_guard=0)
     (verdict,) = check_enrollment(writer, user, campaign, [survivor.id], now=NOW)
     assert Reason.NEEDS_REVIEW in verdict.reasons
@@ -875,7 +877,7 @@ def test_a_colleague_relaying_a_decline_is_flagged_not_opted_out(
 def test_a_newsletter_s_unsubscribe_link_is_not_a_request() -> None:
     """S1: bulk mail stays automatic; only a real auto-reply's phrase counts."""
     fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
-    for precedence in ("bulk", "list", "junk"):
+    for precedence in ("bulk", "junk"):
         ref = fake.deliver(
             _mail("ada@example.test", "News", "Click here to unsubscribe.", Precedence=precedence),
             at=_at(4),
@@ -1027,3 +1029,164 @@ def test_a_merge_does_not_treat_a_replier_as_a_card(
 
     assert ada.current_title == title  # a card survivor's unrecorded field would be replaced
     assert ada.needs_review_at == NOW
+
+
+# --- the final review --------------------------------------------------------------------
+
+
+def _found(writer: Session, user: User, email: str) -> HistoryRecipient:
+    return writer.scalars(
+        scoped(user, HistoryRecipient).where(HistoryRecipient.email == email)
+    ).one()
+
+
+def test_a_later_export_listing_a_subject_found_person_gives_them_the_email_out(
+    writer: Session, user: User, people: dict[str, Contact], answers: FakeGmail
+) -> None:
+    """q7: the workbook proves what the subject could not."""
+    hal = factories.make_contact(writer, user, emails=["hal@example.test"])
+    _subject_scan(writer, user, answers)
+    assert hal.last_contacted_at is None
+    listed = Tab(
+        opened=(*OPENED, ("Hal", "Abelson", "hal@example.test")),
+        opens="7 (87.5%)",
+        recipients=8,
+        clicked=(),
+        bounces=(),
+        bounced=0,
+    )
+
+    import_workbook(writer, user, read_workbook(workbook_bytes(listed, FOLLOW_UP)))
+
+    row = _found(writer, user, "hal@example.test")
+    assert row.found_by_subject is False
+    assert row.email_out_interaction_id is not None
+    assert hal.last_contacted_at == datetime(2026, 3, 2, tzinfo=UTC)
+
+
+def test_once_listed_their_own_unsubscribe_opts_them_out_on_a_rescan(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """q7b."""
+    kim = factories.make_contact(writer, user, emails=["kim@example.test"])
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    fake.deliver(_mail("kim@example.test", "Re: Catching up", "Please remove me."), at=_at(6))
+    _subject_scan(writer, user, fake)
+    assert not kim.do_not_contact
+    listed = Tab(
+        opened=(*OPENED, ("Kim", "Lee", "kim@example.test")),
+        opens="7 (87.5%)",
+        recipients=8,
+        clicked=(),
+        bounces=(),
+        bounced=0,
+    )
+    import_workbook(writer, user, read_workbook(workbook_bytes(listed, FOLLOW_UP)))
+
+    _scan(writer, user, fake, rescan=True)
+
+    assert (kim.do_not_contact, kim.do_not_contact_reason) == (True, UNSUBSCRIBE_REASON)
+    entry = do_not_send.find(writer, user, "kim@example.test")
+    assert entry is not None and entry.reason is DoNotSendReason.OPTED_OUT
+
+
+def test_a_subject_found_auto_reply_is_recorded_on_the_row_only(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """q8: no flag, no timeline entry for an out-of-office."""
+    hal = factories.make_contact(writer, user, emails=["hal@example.test"])
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    fake.deliver(
+        _mail("hal@example.test", "Re: Catching up", "Away.", Auto_Submitted="auto-replied"),
+        at=_at(5),
+    )
+
+    _subject_scan(writer, user, fake)
+
+    row = _found(writer, user, "hal@example.test")
+    assert (row.found_by_subject, row.reply_kind, row.replied_at) == (
+        True,
+        HistoryReplyKind.AUTO,
+        None,
+    )
+    assert hal.needs_review_at is None
+    assert _inbound(writer, user, hal) == []
+
+
+def test_a_subject_found_row_s_bounce_is_recorded_on_the_row_only(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """q8: a rescan's notice search on a subject-found row lists nothing."""
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    fake.deliver(_mail("hal@example.test", "Re: Catching up", "Hi."), at=_at(5))
+    _subject_scan(writer, user, fake)
+    fake.deliver(
+        _mail(
+            MAILER_DAEMON,
+            "Delivery Status Notification (Failure)",
+            "Not found.",
+            X_Failed_Recipients="hal@example.test",
+        ),
+        at=_at(8),
+    )
+
+    _scan(writer, user, fake, rescan=True)
+
+    row = _found(writer, user, "hal@example.test")
+    assert row.bounced_at == _at(8)
+    assert do_not_send.find(writer, user, "hal@example.test") is None
+
+
+def test_a_rescan_s_late_match_on_a_subject_found_row_writes_no_email_out(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """P02 (q4b)."""
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    fake.deliver(_mail("kim@example.test", "Re: Catching up", "Please remove me."), at=_at(6))
+    _subject_scan(writer, user, fake)
+    kim = factories.make_contact(writer, user, emails=["kim@example.test"])
+
+    _scan(writer, user, fake, rescan=True)
+
+    row = _found(writer, user, "kim@example.test")
+    assert row.contact_id == kim.id
+    assert row.email_out_interaction_id is None
+    assert kim.last_contacted_at is None
+    assert not kim.do_not_contact
+    assert kim.needs_review_at == NOW
+
+
+def test_a_list_message_from_a_person_is_a_reply_for_review_not_an_opt_out(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """Nit 3: Precedence: list without an auto-reply header may be a person via a group."""
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    fake.deliver(
+        _mail(
+            "ada@example.test",
+            "Re: Catching up",
+            "Yes! (To unsubscribe from this group, send an email.)",
+            Precedence="list",
+        ),
+        at=_at(4),
+    )
+    message = fake.get_message(fake.search("from:ada@example.test", purpose="t")[0].id, purpose="t")
+    assert history_scan.classify_from(message, "ada@example.test") is HistoryReplyKind.REPLY
+
+    _scan(writer, user, fake)
+
+    ada = people["ada"]
+    assert ada.needs_review_at == NOW
+    assert not ada.do_not_contact
+    assert do_not_send.find(writer, user, "ada@example.test") is None
+
+
+def test_a_tag_only_subject_is_not_searched_and_is_reported(writer: Session, user: User) -> None:
+    """Nit 2: "[Catching up]" is empty once its tag is stripped."""
+    import_workbook(writer, user, read_workbook(workbook_bytes(Tab(subject="[Catching up]"))))
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+
+    report = _subject_scan(writer, user, fake)
+
+    assert len(report.subject_unsearchable) == 1
+    assert not [p for _, p in fake.calls if p.startswith("history subject scan")]

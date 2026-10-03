@@ -132,8 +132,12 @@ DAEMON_QUERY: Final = "from:mailer-daemon"
 READ_ONLY_METHODS: Final = frozenset({"messages.list", "messages.get"})
 """The only Gmail methods the scan calls. Tests hold it to this through the fake's call log."""
 
-BULK_PRECEDENCE: Final = frozenset({"bulk", "list", "junk"})
+BULK_PRECEDENCE: Final = frozenset({"bulk", "junk"})
 """``Precedence`` values of bulk mail: recorded as automatic, never read as a request."""
+
+LIST_PRECEDENCE: Final = "list"
+"""``Precedence: list`` with no auto-reply header may be a person writing through a group:
+a reply for review, never an unsubscribe request (a list footer says "unsubscribe")."""
 
 SUBJECT_SEARCH_MAX: Final = 200
 """At most this many messages one campaign's subject search reads."""
@@ -387,10 +391,12 @@ def _scan_subject(
     campaign's; it was received on or after the campaign's start day; and it is not the
     mailbox's own, a mail system's, or from one of the user's own addresses."""
     query = subject_query(target)
-    if query is None:
+    wanted = normalize_subject(target.subject)
+    if query is None or not wanted:
+        # Nothing left once tags and prefixes are stripped ("[Catching up]"): an exact
+        # match would match every untitled reply.
         out.subject_unsearchable.append(target.campaign_id)
         return []
-    wanted = normalize_subject(target.subject)
     found: dict[str, tuple[str | None, list[Finding]]] = {}
     refs = gmail.search(query, max_results=SUBJECT_SEARCH_MAX, purpose=purpose)
     if len(refs) >= SUBJECT_SEARCH_MAX:
@@ -482,9 +488,14 @@ def classify_from(message: Message, address: str) -> HistoryReplyKind | None:
     system's."""
     if message.label_ids & _OWN or sender_of(message) != address or is_daemon(message):
         return None
+    precedence = (message.header("Precedence") or "").strip().lower()
     # Bulk mail (a newsletter's "Unsubscribe" link) is automatic, whatever it says.
-    if (message.header("Precedence") or "").strip().lower() in BULK_PRECEDENCE:
+    if precedence in BULK_PRECEDENCE:
         return HistoryReplyKind.AUTO
+    auto_submitted = (message.header("Auto-Submitted") or "").strip().lower() not in ("", "no")
+    real_auto = auto_submitted or message.header("X-Autoreply") is not None
+    if precedence == LIST_PRECEDENCE and not real_auto:
+        return HistoryReplyKind.REPLY
     # A real auto-reply (Auto-Submitted, X-Autoreply) that asks to be removed still
     # counts as asking: err toward not mailing.
     if asks_to_unsubscribe(message):
@@ -710,13 +721,22 @@ def _apply_subject_one(
     A matching subject does not prove the campaign reached them (a generic subject, a
     forward, a colleague answering for someone else), so nothing is assumed: no
     ``email_out``, no do-not-contact, no do-not-send, even for "please remove me". The
-    message goes on their timeline as a possible reply, and they wait for a person."""
-    human = sorted(findings, key=lambda f: (f.at, f.gmail_id))
-    if not human:
+    message goes on their timeline as a possible reply, and they wait for a person.
+
+    Only a person's message does that. An automatic answer, and a bounce (a rescan's
+    notice search on the row), are recorded on the row only: a subject match does not
+    prove the address, so a bounce puts nothing on the do-not-send list."""
+    if not findings:
         return
-    strongest = max((f.kind for f in human), key=lambda k: REPLY_KIND_RANK[k])
+    strongest = max((f.kind for f in findings), key=lambda k: REPLY_KIND_RANK[k])
     if row.reply_kind is None or REPLY_KIND_RANK[strongest] > REPLY_KIND_RANK[row.reply_kind]:
         row.reply_kind = strongest
+    bounces = sorted(f.at for f in findings if f.kind is HistoryReplyKind.BOUNCE)
+    if bounces:
+        row.bounced_at = min(bounces[0], row.bounced_at or bounces[0])
+    human = sorted((f for f in findings if f.kind in HUMAN), key=lambda f: (f.at, f.gmail_id))
+    if not human:
+        return
     unsubscribe = next((f for f in human if f.kind is HistoryReplyKind.UNSUBSCRIBE), None)
     if unsubscribe is not None:
         report.by_subject_unsubscribe[row.history_campaign_id] = (
