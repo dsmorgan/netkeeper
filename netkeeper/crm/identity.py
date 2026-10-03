@@ -1026,11 +1026,13 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     # A replier's mark is not a card's (#184): hide it while the fields merge, so their
     # provenance is merged as for any confirmed contact, then put the marks back.
     marks = {contact.id: contact.needs_review_at for contact in repliers}
-    for contact in repliers:
-        contact.needs_review_at = None
-    _merge_scalars(survivor, loser)
-    if loser.id in marks:
-        loser.needs_review_at = marks[loser.id]
+    try:
+        for contact in repliers:
+            contact.needs_review_at = None
+        _merge_scalars(survivor, loser)
+    finally:
+        for contact in repliers:
+            contact.needs_review_at = marks[contact.id]
     if keep_review is not None:
         survivor.needs_review_at = keep_review
     _merge_synced_values(survivor, loser)

@@ -4095,7 +4095,7 @@ def _print_history_scan(report: history_scan.ScanReport, *, applied: bool) -> No
     for campaign_id in report.subject_unsearchable:
         typer.echo(
             f"campaign {report.campaign_names.get(campaign_id, str(campaign_id))!r}: its subject"
-            " has nothing to search for"
+            " is empty once tags and reply prefixes are stripped, so it was not searched"
         )
     for kind, label in (
         (HistoryReplyKind.REPLY, "replies"),
