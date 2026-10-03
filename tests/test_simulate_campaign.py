@@ -1,6 +1,8 @@
 """P3-06's "done when": 100 contacts over three weeks, nothing before the scheduled start,
 overnight or over a cap, and step 2's timing from the actual ``sent_at`` (spec 11.3, 11.4,
-#338)."""
+#338). "Nothing overnight" holds because the replay keeps ``serve`` running the whole
+time: netkeeper does not restrict send times, so a leftover from a stretch when ``serve``
+was off can go at any hour (#354)."""
 
 from __future__ import annotations
 
@@ -112,7 +114,9 @@ def _check(replay: Replay, *, cap: int, mailbox_cap: int) -> None:
 
     # Nothing before the start, and nothing overnight: step 1 goes from the start and a
     # follow-up in a suggested slot (09:00 to 16:30 New York), and what a cap holds back
-    # spills to the next day at the same time (#338). A suggested day is never a holiday.
+    # spills to the next day at the same time (#338). Nothing overnight only because the
+    # replay keeps `serve` running the whole time, so nothing is ever left over from a
+    # stretch it was off. A suggested day is never a holiday.
     days: Counter[str] = Counter()
     for message in messages:
         assert message.scheduled_at is not None and message.sent_at is not None
