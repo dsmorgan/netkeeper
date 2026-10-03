@@ -89,7 +89,7 @@
     },
     "ChangedJobsWithinDays": {
       "additionalProperties": false,
-      "description": "A ``contact_snapshots`` row observed in the last ``days`` days (spec 9.8).",
+      "description": "A job change noticed in the last ``days`` days, up to now (spec 9.8).\n\nThe same contacts as the dashboard's \"changed jobs\" card: an enrichment\nfound a different title or company than an earlier enrichment recorded. A\nnew headline or location alone, a contact's first enrichment, and an import\ndo not match.",
       "properties": {
         "op": {
           "const": "changed_jobs_within_days",

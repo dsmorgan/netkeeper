@@ -2469,3 +2469,144 @@ def test_0029_breaks_a_tie_between_equal_reasons_by_the_lowest_contact_id(
             text("SELECT email, reason, contact_id FROM do_not_send_addresses")
         ).all()
     assert [tuple(r) for r in rows] == [("same@example.test", "bounced", 4)]
+
+
+# --- a job change needs an earlier enrichment (0030, #323) ----------------------------------
+
+_EARLIER = "2026-09-01 08:00:00.000000"
+_VISIT = "2026-10-01 09:00:00.000000"
+_AFTER_VISIT = "2026-10-01 09:00:01.000000"
+
+
+def _insert_position(
+    connection: Connection,
+    *,
+    contact_id: int,
+    created_at: str,
+    title: str | None = "Engineer",
+    company: str | None = "Old Co",
+    source: str = "sync",
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO contact_positions (user_id, contact_id, title, company, is_current,"
+            " source, observed_at, created_at, updated_at)"
+            " VALUES (1, :contact_id, :title, :company, true, :source, :t, :created, :t)"
+        ),
+        {
+            "contact_id": contact_id,
+            "title": title,
+            "company": company,
+            "source": source,
+            "created": created_at,
+            "t": _VISIT,
+        },
+    )
+
+
+def _insert_flagged_snapshot(
+    connection: Connection,
+    *,
+    id: int,
+    contact_id: int,
+    source: str = "sync",
+    title: str | None = "Engineer",
+    company: str | None = "Old Co",
+    position_changed: bool = True,
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO contact_snapshots (id, user_id, contact_id, current_title,"
+            " current_company, position_changed, source, observed_at, created_at, updated_at)"
+            " VALUES (:id, 1, :contact_id, :title, :company, :changed, :source, :t, :c, :c)"
+        ),
+        {
+            "id": id,
+            "contact_id": contact_id,
+            "title": title,
+            "company": company,
+            "changed": position_changed,
+            "source": source,
+            "t": _VISIT,
+            "c": _AFTER_VISIT,
+        },
+    )
+
+
+def _seed_job_changes(connection: Connection) -> None:
+    """One contact per case; the snapshot id says which one, and a comment why."""
+    _seed_users(connection, 1)
+    for contact_id in range(1, 9):
+        _insert_contact(connection, id=contact_id, user_id=1)
+    # 1: an earlier enrichment recorded the replaced position: a real job change.
+    _insert_position(connection, contact_id=1, created_at=_EARLIER)
+    _insert_flagged_snapshot(connection, id=1, contact_id=1)
+    # 2: a first enrichment over an archive job: its positions are the visit's own.
+    _insert_position(connection, contact_id=2, created_at=_AFTER_VISIT, title="Lead")
+    _insert_position(connection, contact_id=2, created_at=_AFTER_VISIT)  # the old job, listed
+    _insert_flagged_snapshot(connection, id=2, contact_id=2)
+    # 3: a first enrichment with no position at all from before.
+    _insert_flagged_snapshot(connection, id=3, contact_id=3)
+    # 4: an earlier enrichment, but of another position than the one replaced.
+    _insert_position(connection, contact_id=4, created_at=_EARLIER, title="X", company="Y")
+    _insert_flagged_snapshot(connection, id=4, contact_id=4)
+    # 5: an earlier enrichment recorded the company only; the title was imported.
+    _insert_position(connection, contact_id=5, created_at=_EARLIER, title=None)
+    _insert_flagged_snapshot(connection, id=5, contact_id=5)
+    # 6: a person's edit or an import never notices a job change.
+    _insert_position(connection, contact_id=6, created_at=_EARLIER)
+    _insert_flagged_snapshot(connection, id=6, contact_id=6, source="manual")
+    # 7: a headline-only change stays false.
+    _insert_position(connection, contact_id=7, created_at=_EARLIER)
+    _insert_flagged_snapshot(connection, id=7, contact_id=7, position_changed=False)
+    # 8: another contact's earlier enrichment is no evidence for this one.
+    _insert_flagged_snapshot(connection, id=8, contact_id=8)
+
+
+def _flags(connection: Connection) -> dict[int, bool]:
+    rows = connection.execute(text("SELECT id, position_changed FROM contact_snapshots")).all()
+    return {row.id: bool(row.position_changed) for row in rows}
+
+
+_CORRECTED = {1: True, 2: False, 3: False, 4: False, 5: True, 6: False, 7: False, 8: False}
+
+
+def test_0030_keeps_a_job_change_only_against_an_earlier_enrichment(
+    migration_engine: Engine,
+) -> None:
+    migrations.upgrade(migration_engine, "0029")
+    with migration_engine.begin() as connection:
+        _seed_job_changes(connection)
+    migrations.upgrade(migration_engine, "0030")
+    with migration_engine.begin() as connection:
+        assert _flags(connection) == _CORRECTED
+
+
+def test_0030_is_idempotent(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0029")
+    with migration_engine.begin() as connection:
+        _seed_job_changes(connection)
+    migrations.upgrade(migration_engine, "0030")
+    migrations.downgrade(migration_engine, "0029")
+    migrations.upgrade(migration_engine, "0030")
+    with migration_engine.begin() as connection:
+        assert _flags(connection) == _CORRECTED
+
+
+def test_0030_downgrades_without_restoring_the_cleared_flags(migration_engine: Engine) -> None:
+    """Lossy on purpose: fewer job changes under older code is harmless (#323)."""
+    migrations.upgrade(migration_engine, "0029")
+    with migration_engine.begin() as connection:
+        _seed_job_changes(connection)
+    migrations.upgrade(migration_engine, "0030")
+    migrations.downgrade(migration_engine, "0029")
+    with migration_engine.begin() as connection:
+        assert _revision(connection) == "0029"
+        assert _flags(connection) == _CORRECTED
+    migrations.upgrade(migration_engine, "0030")
+    with migration_engine.begin() as connection:
+        assert _revision(connection) == "0030"
+
+
+def _revision(connection: Connection) -> str:
+    return str(connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one())

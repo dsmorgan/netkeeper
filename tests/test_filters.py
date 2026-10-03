@@ -625,17 +625,32 @@ def test_now_must_be_aware(session: Session, user: User) -> None:
         compile_filter(user, parse_filter({}), session=session, now=datetime(2026, 9, 20, 12, 0))
 
 
-def test_changed_jobs_within_days_looks_for_a_snapshot_in_the_window(
+def _job_change(
+    contact: Contact,
+    at: datetime,
+    *,
+    position_changed: bool = True,
+    source: ContactSource = ContactSource.SYNC,
+) -> None:
+    contact.snapshots.append(
+        ContactSnapshot(
+            user_id=contact.user_id,
+            source=source,
+            observed_at=at,
+            current_title="Before",
+            current_company="Old Co",
+            position_changed=position_changed,
+        )
+    )
+
+
+def test_changed_jobs_within_days_looks_for_a_job_change_in_the_window(
     session: Session, user: User
 ) -> None:
     changed = factories.make_contact(session, user)
-    changed.snapshots.append(
-        ContactSnapshot(user_id=user.id, headline="then", observed_at=NOW - timedelta(days=10))
-    )
+    _job_change(changed, NOW - timedelta(days=10))
     long_ago = factories.make_contact(session, user)
-    long_ago.snapshots.append(
-        ContactSnapshot(user_id=user.id, headline="then", observed_at=NOW - timedelta(days=40))
-    )
+    _job_change(long_ago, NOW - timedelta(days=40))
     factories.make_contact(session, user)
     session.flush()
     assert matching(session, user, {"op": "changed_jobs_within_days", "days": 30}) == [changed.id]
@@ -644,6 +659,21 @@ def test_changed_jobs_within_days_looks_for_a_snapshot_in_the_window(
         changed.id,
         long_ago.id,
     ]
+
+
+def test_changed_jobs_within_days_needs_a_position_change_an_enrichment_noticed(
+    session: Session, user: User
+) -> None:
+    """#313, #323: a new headline, an import, or a first enrichment is not a job change."""
+    at = NOW - timedelta(days=1)
+    headline_only = factories.make_contact(session, user)
+    _job_change(headline_only, at, position_changed=False)
+    for source in (ContactSource.ARCHIVE, ContactSource.CSV, ContactSource.MANUAL):
+        _job_change(factories.make_contact(session, user), at, source=source)
+    ahead = factories.make_contact(session, user)
+    _job_change(ahead, NOW + timedelta(minutes=1))  # a clock skew is not noticed yet
+    session.flush()
+    assert matching(session, user, {"op": "changed_jobs_within_days", "days": 30}) == []
 
 
 # --- logic, archive, merge --------------------------------------------------

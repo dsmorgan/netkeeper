@@ -146,6 +146,7 @@ from pydantic_core import ErrorDetails
 from sqlalchemy import ColumnElement, Select, Update, and_, false, func, not_, or_, select
 from sqlalchemy.orm import InstrumentedAttribute, Session
 
+from netkeeper.crm.job_changes import job_change
 from netkeeper.models import (
     Contact,
     ContactEmail,
@@ -608,7 +609,15 @@ class ConnectedWithinDays(_Node):
 
 
 class ChangedJobsWithinDays(_Node):
-    """A ``contact_snapshots`` row observed in the last ``days`` days (spec 9.8)."""
+    """A job change noticed in the last ``days`` days, up to now (spec 9.8).
+
+    The same contacts as the dashboard's "changed jobs" card: an enrichment
+    found a different title or company than an earlier enrichment recorded. A
+    new headline or location alone, a contact's first enrichment, and an import
+    do not match.
+    """
+
+    # Both select through netkeeper.crm.job_changes.job_change (#313, #323).
 
     op: Literal["changed_jobs_within_days"]
     days: Days
@@ -1114,7 +1123,7 @@ class _Compiler:
             case ChangedJobsWithinDays():
                 return (
                     self._child_rows(ContactSnapshot)
-                    .where(ContactSnapshot.observed_at >= self._ago(node.days))
+                    .where(job_change(self.user, since=self._ago(node.days), until=self.clock.now))
                     .exists()
                 )
             case TagAny():

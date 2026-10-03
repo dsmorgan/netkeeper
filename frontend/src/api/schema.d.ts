@@ -3103,7 +3103,12 @@ export interface components {
         };
         /**
          * ChangedJobsWithinDays
-         * @description A ``contact_snapshots`` row observed in the last ``days`` days (spec 9.8).
+         * @description A job change noticed in the last ``days`` days, up to now (spec 9.8).
+         *
+         *     The same contacts as the dashboard's "changed jobs" card: an enrichment
+         *     found a different title or company than an earlier enrichment recorded. A
+         *     new headline or location alone, a contact's first enrichment, and an import
+         *     do not match.
          */
         ChangedJobsWithinDays: {
             /** Days */
