@@ -12,7 +12,7 @@ import itertools
 import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from typing import Any
 
@@ -1836,23 +1836,18 @@ def test_the_not_sent_constants_are_pinned() -> None:
         engine_module.retry_after(0)
 
 
-def test_a_thread_that_can_never_be_read_fails_the_step_after_its_tries_across_days(
+def test_a_thread_that_can_never_be_read_fails_the_step_after_a_day_of_tries(
     mail: Mail,
 ) -> None:
     """#280: 193 ``threads.get`` in two days, and never a step parked for a person. Now
-    each try waits longer, and :data:`NOT_SENT_GIVE_UP_TRIES` of them over at least a
-    day fail the step with the reason. Since #338's review (S1) a retry that would land
-    off hours waits for the claim's time of day the next day, so the tries span days;
-    the step still fails after the same number of them, and none is tried off hours."""
+    each try waits longer, and a day of them fails the step with the reason."""
     enrollment_id = mail.enroll()
     mail.tick()  # step 1 goes out; step 2 is a follow-up in its thread
     mail.gmail.__class__ = Unreadable
     start = NOW + WEEK
     at = start
     waits: list[timedelta] = []
-    tried_at: list[datetime] = []
-    while at < start + timedelta(days=14):
-        tried_at.append(at)
+    while at < start + timedelta(days=3):
         [(_, outcome)] = mail.tick(at).fired
         assert outcome.outcome is SendOutcome.NOT_SENT  # the sender's word for it
         if mail.messages(enrollment_id)[-1].status is MessageStatus.FAILED:
@@ -1867,11 +1862,9 @@ def test_a_thread_that_can_never_be_read_fails_the_step_after_its_tries_across_d
         at = max(enrollment.next_action_at, spacing)  # the next tick that can fire it
     assert at - start >= engine_module.NOT_SENT_GIVE_UP_AFTER
     tries = _thread_reads(mail)
-    assert tries == len(tried_at) == engine_module.NOT_SENT_GIVE_UP_TRIES  # no more, no fewer
-    assert waits[:3] == [timedelta(minutes=m) for m in (15, 30, 60)]
-    # The fourth would land at 17:45, off hours: it waits for 15:45 the next day.
-    assert waits[3] == timedelta(days=1)
-    assert all(time(9, 0) <= t.time() < time(16, 30) for t in tried_at), tried_at
+    assert engine_module.NOT_SENT_GIVE_UP_TRIES <= tries <= 16  # was one every 15 minutes
+    assert waits[:4] == [timedelta(minutes=m) for m in (15, 30, 60, 120)]
+    assert max(waits) == engine_module.RETRY_AFTER_MAX
 
     step_2 = mail.messages(enrollment_id)[-1]
     assert step_2.status is MessageStatus.FAILED

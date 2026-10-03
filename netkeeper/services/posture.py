@@ -65,7 +65,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
-from netkeeper.campaigns.schedule import SERVE_REMINDER, ScheduleError, release, suggested
+from netkeeper.campaigns.schedule import SERVE_REMINDER, ScheduleError, spill, suggested
 from netkeeper.config import HeatSettings, LinkedInSettings, PacingSettings, Settings
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin import heat as heat_math
@@ -1400,14 +1400,14 @@ later than one due after it."""
 
 def _effective_send(due: datetime, *, now: datetime, settings: Settings, user: User) -> datetime:
     """When a row due at ``due`` would really go: at ``due`` when it is still ahead,
-    else where the tick's spill and off-hours rules put it, else now."""
+    else where the tick's spill puts it (today at its own time of day), else now."""
     if due > now:
         return due
     try:
         slots = suggested(settings.campaigns, user.timezone)
     except ScheduleError:
         return now
-    return release(due, now, slots) or now
+    return spill(due, now, slots) or now
 
 
 def _next_campaign_send(
@@ -1427,7 +1427,7 @@ def _next_campaign_send(
             name="next campaign send", status=Status.ON, value="no campaign send is scheduled"
         )
     # Where each row will really go (#338 review, N4): a row already due waits for the
-    # spill and off-hours rules, or goes at the next tick. Rows are read soonest first,
+    # spill, or goes at the next tick. Rows are read soonest first,
     # and the earliest effective time among them is the one shown.
     effective = [
         (_effective_send(fire.due, now=now, settings=settings, user=user), fire) for fire in fires
