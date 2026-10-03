@@ -237,7 +237,11 @@ def _import_campaign(
         recipient.bounce_listed = recipient.bounce_listed or person.bounced
         # Listed now: the workbook proves the campaign reached them, whatever the subject
         # search found first, so the listed recipient's rules apply from here on.
-        recipient.found_by_subject = False
+        if recipient.found_by_subject:
+            recipient.found_by_subject = False
+            # Scanned under the subject-only rules: the next plain scan applies the
+            # listed recipient's rules to what it finds.
+            recipient.scanned_at = None
         if contact_id is not None:
             recipient.contact_id = contact_id
         session.flush()
