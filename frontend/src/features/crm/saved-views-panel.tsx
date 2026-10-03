@@ -179,15 +179,14 @@ function ViewEditor({
               <Select
                 aria-label={`Sort field ${index + 1}`}
                 value={key.field}
-                onChange={(event) =>
+                onChange={(event) => {
+                  const field = event.target.value as SortKey['field']
                   setSort((current) =>
                     current.map((candidate, position) =>
-                      position === index
-                        ? { ...candidate, field: event.target.value as SortKey['field'] }
-                        : candidate,
+                      position === index ? { ...candidate, field } : candidate,
                     ),
                   )
-                }
+                }}
               >
                 {FIELDS.map((field) => (
                   <option key={field.name} value={field.name}>
@@ -198,18 +197,14 @@ function ViewEditor({
               <Select
                 aria-label={`Sort direction ${index + 1}`}
                 value={key.direction ?? 'asc'}
-                onChange={(event) =>
+                onChange={(event) => {
+                  const direction = event.target.value === 'desc' ? 'desc' : 'asc'
                   setSort((current) =>
                     current.map((candidate, position) =>
-                      position === index
-                        ? {
-                            ...candidate,
-                            direction: event.target.value === 'desc' ? 'desc' : 'asc',
-                          }
-                        : candidate,
+                      position === index ? { ...candidate, direction } : candidate,
                     ),
                   )
-                }
+                }}
               >
                 <option value="asc">ascending</option>
                 <option value="desc">descending</option>
