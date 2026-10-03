@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { jsonResponse, mockFetch } from '@/test/fetch'
 
 import { RunDetail } from './run-detail'
-import { backend, run, type Call, type Handler } from './test-support'
+import { backend, BUDGET, run, type Call, type Handler } from './test-support'
 
 function renderDetail(
   runId: number,
@@ -13,7 +13,9 @@ function renderDetail(
   calls: Call[] = [],
   onResumed = vi.fn(),
 ) {
-  mockFetch(backend(handlers, calls))
+  mockFetch(
+    backend({ 'GET /api/v1/linkedin/budget': () => jsonResponse(BUDGET), ...handlers }, calls),
+  )
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={queryClient}>
@@ -183,6 +185,24 @@ describe('RunDetail', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Resume' }))
     const dialog = await screen.findByRole('alertdialog')
     expect(dialog).toHaveTextContent('resumed only once')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Resume' }))
+
+    await waitFor(() => expect(onResumed).toHaveBeenCalledWith(99))
+    expect(calls.some((call) => call.path === '/api/v1/linkedin/runs/1/resume')).toBe(true)
+  })
+
+  it('shows the profile-view notice in the Resume dialog, and confirming still resumes (#325)', async () => {
+    const { calls, onResumed } = renderDetail(1, {
+      'GET /api/v1/linkedin/runs/1': () =>
+        jsonResponse(run({ id: 1, kind: 'enrich', status: 'aborted', planned: 10, completed: 4 })),
+      'POST /api/v1/linkedin/runs/1/resume': () => jsonResponse({ run_id: 99, task_id: 't' }, 202),
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Resume' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(await within(dialog).findByRole('note', { name: 'Profile views' })).toHaveTextContent(
+      'Who viewed your profile',
+    )
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Resume' }))
 

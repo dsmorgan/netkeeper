@@ -27,7 +27,7 @@ from netkeeper.db import database_url, make_engine, make_session_factory, sessio
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.scoping import install_scope_guard
-from netkeeper.services import budgets, route_breaker, runs
+from netkeeper.services import budgets, enrich_plan, route_breaker, runs
 from netkeeper.services.linkedin_accounts import (
     account_id_for,
     ensure_account,
@@ -447,6 +447,30 @@ def test_runs_run_and_cancel(cli_db: sessionmaker[Session]) -> None:
     with session_scope(cli_db) as session:
         assert runs.cancel_requested(session, _user(session), running)
     assert runner.invoke(cli, ["linkedin", "run", "999"]).exit_code == 1
+
+
+def test_resuming_an_enrichment_shows_the_profile_view_notice_before_it_starts(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#325: the resume path starts visits too, so it says the same thing first."""
+
+    async def no_run(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("netkeeper.cli._execute_printing", no_run)
+    with session_scope(cli_db, write=True) as session:
+        user = _user(session)
+        old = runs.create_run(
+            session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW
+        )
+        enrich_plan.store_plan(session, user, old.id, [1, 2, 3])
+        runs.finish_run(session, user, old.id, status=SyncRunStatus.ABORTED, now=NOW)
+        old_id = old.id
+
+    result = CliRunner().invoke(cli, ["linkedin", "enrich", "--resume", str(old_id)])
+
+    assert budgets.PROFILE_VIEW_NOTICE in result.output
+    assert result.output.index("Who viewed your profile") < result.output.index("started;")
 
 
 def test_resuming_what_cannot_be_resumed_says_why(cli_db: sessionmaker[Session]) -> None:

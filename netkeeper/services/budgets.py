@@ -168,9 +168,10 @@ def profile_visit_week_note(settings: BudgetSettings) -> str | None:
 # renames its settings pages.
 PROFILE_VIEW_NOTICE = (
     "Enrichment opens each contact's LinkedIn profile from your account, so they may see a"
-    " visit in Who viewed your profile. Whether they see your name or an anonymous viewer"
-    " depends on the Profile viewing options in LinkedIn's Visibility settings. netkeeper"
-    " never changes that setting."
+    " visit in Who viewed your profile. Whether they see your name and headline, a partial"
+    " description (such as someone at your company), or an anonymous viewer depends on the"
+    " Profile viewing options in LinkedIn's Visibility settings. netkeeper never changes that"
+    " setting."
 )
 
 
