@@ -242,6 +242,11 @@ class Protection:
     the user is entitled to make, such as profile visits above 100 a day
     (#318). They are listed with the protection and in the report, and they
     never affect :attr:`PostureReport.ok`, the verdict, or the exit code.
+
+    ``brief`` is the one-line form of ``value`` that the summary shows (#340),
+    for the few rows whose ``value`` runs long. Most rows leave it unset and
+    their ``value`` is already short enough; :attr:`summary` picks whichever
+    applies. It is presentation only: it never affects ``ok`` or the verdict.
     """
 
     name: str
@@ -249,6 +254,12 @@ class Protection:
     value: str
     warnings: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
+    brief: str | None = None
+
+    @property
+    def summary(self) -> str:
+        """This row in a few words: ``brief`` when the row sets one, else ``value``."""
+        return self.brief if self.brief is not None else self.value
 
     def __post_init__(self) -> None:
         if self.status is not Status.ON and not self.warnings:
@@ -1284,6 +1295,7 @@ def _budget(action: ActionClass, snapshot: BudgetSnapshot, settings: Settings) -
         value=f"{', '.join(parts)} ({ceiling})",
         warnings=tuple(warnings),
         notes=tuple(notes),
+        brief=", ".join(parts),
     )
 
 
@@ -1331,6 +1343,7 @@ def _scheduled_jobs(scheduler: SchedulerPosture) -> Protection:
     ]
     states += [f"{kind} not applicable ({why})" for kind, why in scheduler.not_applicable]
     detail = "; ".join(states)
+    applicable = len(scheduler.applicable)
     if not scheduler.unscheduled:
         dues = [
             due
@@ -1342,12 +1355,14 @@ def _scheduled_jobs(scheduler: SchedulerPosture) -> Protection:
             name="scheduled jobs",
             status=Status.ON,
             value=f"{detail}{soonest}",
+            brief=f"{applicable} of {applicable} scheduled{soonest}",
         )
     if not any(kind in scheduler.applicable for kind in scheduler.scheduled):
         return Protection(
             name="scheduled jobs",
             status=Status.UNKNOWN,
             value=f"nothing scheduled: {detail}",
+            brief=f"nothing scheduled (0 of {applicable})",
             warnings=(
                 "no job kind has a due time for this account, so nothing fires on its"
                 " own and the active-hours, catch-up, and heat-skip protections have"
@@ -1363,6 +1378,7 @@ def _scheduled_jobs(scheduler: SchedulerPosture) -> Protection:
         name="scheduled jobs",
         status=Status.OFF,
         value=detail,
+        brief=f"missing: {', '.join(scheduler.unscheduled)}",
         warnings=(
             f"these job kinds have no due time, so they never run ({meaning})."
             " `netkeeper serve` gives a missing kind its first due time when it starts,"
@@ -1396,6 +1412,7 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
             name="reply poll",
             status=Status.ON,
             value="no armed mailbox: no campaign email goes out, so there is no reply to poll for",
+            brief="no armed mailbox",
         )
     held = (
         "Follow-ups that start a new conversation are held until replies are checked"
@@ -1404,11 +1421,14 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
     )
     details: list[str] = []
     notes: list[str] = []
+    never_polled = 0
+    oldest: timedelta | None = None
     for mailbox in armed:
         arm = mailbox.arm
         assert arm is not None  # filtered above
         polled = mailbox.replies_polled_at
         if polled is None:
+            never_polled += 1
             details.append(f"{mailbox.email} ({arm.value}-armed): never polled")
             notes.append(
                 f"{mailbox.email} is armed but has not been polled for replies yet. {held},"
@@ -1416,6 +1436,7 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
             )
             continue
         age = now - polled
+        oldest = age if oldest is None else max(oldest, age)
         details.append(
             f"{mailbox.email} ({arm.value}-armed): last polled {polled:%Y-%m-%d %H:%M UTC}"
             f" ({_ago(age)})"
@@ -1427,7 +1448,19 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
                 " check that it is running"
             )
     value = f"every {minutes} min; " + "; ".join(details)
-    return Protection(name="reply poll", status=Status.ON, value=value, notes=tuple(notes))
+    mailboxes = f"{len(armed)} armed mailbox{'es' if len(armed) != 1 else ''}"
+    if never_polled:
+        polled_brief = f"{never_polled} never polled"
+    else:
+        assert oldest is not None  # every armed mailbox has a poll time here
+        polled_brief = f"oldest poll {_ago(oldest)}" if len(armed) > 1 else f"polled {_ago(oldest)}"
+    return Protection(
+        name="reply poll",
+        status=Status.ON,
+        value=value,
+        notes=tuple(notes),
+        brief=f"every {minutes} min; {mailboxes}, {polled_brief}",
+    )
 
 
 def _scheduled_runs_armed(session: Session, user: User, account_id: int) -> Protection:
@@ -1927,6 +1960,45 @@ def render(report: PostureReport) -> str:
     lines.append("")
     lines.append(verdict(report))
     return "".join(f"{line}\n" for line in lines)
+
+
+def render_summary(report: PostureReport) -> str:
+    """The report in short (#340): one line per protection, every warning, the verdict.
+
+    Each row shows its state and :attr:`Protection.summary`, plus a count of its
+    notes when it has any. Warnings always print in full, because they are what
+    makes the verdict "NOT clear" and a summary that hid them would read as
+    clean. Everything else -- each row's full detail, the notes themselves,
+    today's budget arithmetic, the schedule, and the gaps -- is in
+    :func:`render`, which ``netkeeper posture --details`` prints.
+    """
+    lines = [
+        f"netkeeper posture at {report.checked_at:%Y-%m-%d %H:%M UTC}"
+        f" ({report.local_time:%H:%M} {report.timezone})",
+        "",
+    ]
+    rows = [(p.name, p.status.value, _summary_cell(p)) for p in report.protections]
+    lines.extend(_table(("PROTECTION", "STATE", "SUMMARY"), rows).splitlines())
+    if report.warnings:
+        lines.append("")
+        for warning in report.warnings:
+            lines.extend(_wrapped(warning, first="warning: ", rest="         "))
+    lines.append("")
+    hidden = []
+    if report.notes:
+        hidden.append(_plural(len(report.notes), "note"))
+    hidden.append("each row's detail, the schedule, and what this report cannot see")
+    lines.append(f"{', '.join(hidden)}: run `netkeeper posture --details`")
+    lines.append("")
+    lines.append(verdict(report))
+    return "".join(f"{line}\n" for line in lines)
+
+
+def _summary_cell(protection: Protection) -> str:
+    """A row's summary, with a count of the notes the summary leaves out."""
+    if not protection.notes:
+        return protection.summary
+    return f"{protection.summary} ({_plural(len(protection.notes), 'note')})"
 
 
 def _scheduler_lines(scheduler: SchedulerPosture) -> list[str]:

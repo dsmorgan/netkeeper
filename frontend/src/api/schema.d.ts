@@ -5210,6 +5210,9 @@ export interface components {
          *     force, and anything wrong with it. ``status`` is `netkeeper.services.posture.Status`'s
          *     value (``on``, ``off``, ``unknown``); ``off``/``unknown`` always carry a warning.
          *     ``notes`` describe a choice the user made, not a fault, and never affect ``ok``.
+         *     ``summary`` is the row in a few words, for the collapsed view (#340): the same
+         *     as ``value`` for most rows, a one-line form of it for the long ones. ``value``
+         *     keeps the full detail.
          */
         ProtectionOut: {
             /** Name */
@@ -5218,6 +5221,8 @@ export interface components {
             notes: string[];
             /** Status */
             status: string;
+            /** Summary */
+            summary: string;
             /** Value */
             value: string;
             /** Warnings */

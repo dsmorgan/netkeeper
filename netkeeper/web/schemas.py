@@ -1972,11 +1972,15 @@ class ProtectionOut(BaseModel):
     """One row of the posture report (spec section 9): what it is, whether it is in
     force, and anything wrong with it. ``status`` is `netkeeper.services.posture.Status`'s
     value (``on``, ``off``, ``unknown``); ``off``/``unknown`` always carry a warning.
-    ``notes`` describe a choice the user made, not a fault, and never affect ``ok``."""
+    ``notes`` describe a choice the user made, not a fault, and never affect ``ok``.
+    ``summary`` is the row in a few words, for the collapsed view (#340): the same
+    as ``value`` for most rows, a one-line form of it for the long ones. ``value``
+    keeps the full detail."""
 
     name: str
     status: str
     value: str
+    summary: str
     warnings: list[str]
     notes: list[str]
 

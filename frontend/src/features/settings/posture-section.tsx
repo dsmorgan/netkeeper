@@ -1,5 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
+import { useId, useState } from 'react'
 
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card'
 import { renderInlineMarkdown } from '@/lib/inline-markdown'
 import { cn } from '@/lib/utils'
@@ -26,9 +28,16 @@ function message(error: unknown): string {
  * safe" — because this reads configuration and counters, not whether the
  * code that would enforce them actually runs (`netkeeper posture`'s own
  * wording, spec 9, `netkeeper/services/posture.py`).
+ *
+ * It leads with a summary (#340): one line per protection, its state, and
+ * every warning, since a warning is what makes the verdict "NOT clear". Each
+ * row's full detail, its notes, and the gaps sit behind "Show details", the
+ * same split as `netkeeper posture` and `netkeeper posture --details`.
  */
 export function PostureSection() {
   const posture = useQuery(postureQuery)
+  const [expanded, setExpanded] = useState(false)
+  const detailsId = useId()
 
   return (
     <Card size="sm">
@@ -49,52 +58,64 @@ export function PostureSection() {
                 `sm` up there is room for a table, so this renders one markup
                 and hides half of it with `sm:` rather than measuring width in
                 script — the same approach `run-detail.tsx`'s FieldList uses. */}
-            <ul className="space-y-2 sm:hidden" data-testid="posture-blocks">
-              {posture.data.protections.map((row) => (
-                <ProtectionBlock key={row.name} row={row} />
-              ))}
-            </ul>
-            <table
-              className="hidden w-full table-fixed text-left sm:table"
-              data-testid="posture-table"
-            >
-              <colgroup>
-                <col className="w-40" />
-                <col className="w-20" />
-                <col />
-              </colgroup>
-              <thead className="text-muted-foreground">
-                <tr>
-                  <th scope="col" className="py-1 pr-3 font-medium">
-                    Protection
-                  </th>
-                  <th scope="col" className="py-1 pr-3 font-medium">
-                    State
-                  </th>
-                  <th scope="col" className="py-1 font-medium">
-                    Detail
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
+            <div id={detailsId} className="space-y-4">
+              <ul className="space-y-2 sm:hidden" data-testid="posture-blocks">
                 {posture.data.protections.map((row) => (
-                  <ProtectionRow key={row.name} row={row} />
+                  <ProtectionBlock key={row.name} row={row} expanded={expanded} />
                 ))}
-              </tbody>
-            </table>
-
-            {posture.data.gaps.length > 0 && (
-              <div>
-                <h3 className="text-xs font-medium text-muted-foreground">
-                  Not covered by this report
-                </h3>
-                <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
-                  {posture.data.gaps.map((gap) => (
-                    <li key={gap}>{renderInlineMarkdown(gap)}</li>
+              </ul>
+              <table
+                className="hidden w-full table-fixed text-left sm:table"
+                data-testid="posture-table"
+              >
+                <colgroup>
+                  <col className="w-40" />
+                  <col className="w-20" />
+                  <col />
+                </colgroup>
+                <thead className="text-muted-foreground">
+                  <tr>
+                    <th scope="col" className="py-1 pr-3 font-medium">
+                      Protection
+                    </th>
+                    <th scope="col" className="py-1 pr-3 font-medium">
+                      State
+                    </th>
+                    <th scope="col" className="py-1 font-medium">
+                      {expanded ? 'Detail' : 'Summary'}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {posture.data.protections.map((row) => (
+                    <ProtectionRow key={row.name} row={row} expanded={expanded} />
                   ))}
-                </ul>
-              </div>
-            )}
+                </tbody>
+              </table>
+
+              {expanded && posture.data.gaps.length > 0 && (
+                <div>
+                  <h3 className="text-xs font-medium text-muted-foreground">
+                    Not covered by this report
+                  </h3>
+                  <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
+                    {posture.data.gaps.map((gap) => (
+                      <li key={gap}>{renderInlineMarkdown(gap)}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+
+            <Button
+              variant="outline"
+              size="sm"
+              aria-expanded={expanded}
+              aria-controls={detailsId}
+              onClick={() => setExpanded((open) => !open)}
+            >
+              {expanded ? 'Hide details' : 'Show details'}
+            </Button>
 
             <p role="status" className="font-medium">
               {posture.data.verdict}
@@ -119,10 +140,26 @@ function StatusBadge({ status }: { status: string }) {
   )
 }
 
-function ProtectionDetail({ row }: { row: Protection }) {
+function noteCount(count: number): string {
+  return count === 1 ? '1 note' : `${count} notes`
+}
+
+/**
+ * One row's text. Collapsed, it is the row's `summary` and a count of its
+ * notes; expanded, its full `value` and the notes themselves. Warnings show
+ * either way (#340): they are what makes the verdict "NOT clear".
+ */
+function ProtectionDetail({ row, expanded }: { row: Protection; expanded: boolean }) {
   return (
     <>
-      <p>{renderInlineMarkdown(row.value)}</p>
+      <p>
+        {renderInlineMarkdown(expanded ? row.value : row.summary)}
+        {!expanded && row.notes.length > 0 && (
+          <span className="text-amber-800 dark:text-amber-300">
+            {` (${noteCount(row.notes.length)})`}
+          </span>
+        )}
+      </p>
       {row.warnings.length > 0 && (
         <ul className="mt-1 space-y-1 text-destructive">
           {row.warnings.map((warning) => (
@@ -131,7 +168,7 @@ function ProtectionDetail({ row }: { row: Protection }) {
         </ul>
       )}
       {/* Notes describe a choice, not a fault (#318): shown, never counted against the verdict. */}
-      {row.notes.length > 0 && (
+      {expanded && row.notes.length > 0 && (
         <ul className="mt-1 space-y-1 text-amber-800 dark:text-amber-300" aria-label="Notes">
           {row.notes.map((note) => (
             <li key={note}>{renderInlineMarkdown(note)}</li>
@@ -142,7 +179,7 @@ function ProtectionDetail({ row }: { row: Protection }) {
   )
 }
 
-function ProtectionRow({ row }: { row: Protection }) {
+function ProtectionRow({ row, expanded }: { row: Protection; expanded: boolean }) {
   return (
     <tr className="border-t border-border/60 align-top">
       <th scope="row" className="py-2 pr-3 font-normal break-words">
@@ -152,13 +189,13 @@ function ProtectionRow({ row }: { row: Protection }) {
         <StatusBadge status={row.status} />
       </td>
       <td className="py-2 break-words">
-        <ProtectionDetail row={row} />
+        <ProtectionDetail row={row} expanded={expanded} />
       </td>
     </tr>
   )
 }
 
-function ProtectionBlock({ row }: { row: Protection }) {
+function ProtectionBlock({ row, expanded }: { row: Protection; expanded: boolean }) {
   // `p-2`, not the card's usual `p-3`: this app's sidebar nav does not
   // collapse below `sm` (out of scope here), so the content column left for
   // a card at 390px is already only ~166px — every point of padding this
@@ -177,7 +214,7 @@ function ProtectionBlock({ row }: { row: Protection }) {
         <StatusBadge status={row.status} />
       </div>
       <div className="mt-2 break-words text-muted-foreground">
-        <ProtectionDetail row={row} />
+        <ProtectionDetail row={row} expanded={expanded} />
       </div>
     </li>
   )

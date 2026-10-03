@@ -7711,7 +7711,7 @@
         "type": "object"
       },
       "ProtectionOut": {
-        "description": "One row of the posture report (spec section 9): what it is, whether it is in\nforce, and anything wrong with it. ``status`` is `netkeeper.services.posture.Status`'s\nvalue (``on``, ``off``, ``unknown``); ``off``/``unknown`` always carry a warning.\n``notes`` describe a choice the user made, not a fault, and never affect ``ok``.",
+        "description": "One row of the posture report (spec section 9): what it is, whether it is in\nforce, and anything wrong with it. ``status`` is `netkeeper.services.posture.Status`'s\nvalue (``on``, ``off``, ``unknown``); ``off``/``unknown`` always carry a warning.\n``notes`` describe a choice the user made, not a fault, and never affect ``ok``.\n``summary`` is the row in a few words, for the collapsed view (#340): the same\nas ``value`` for most rows, a one-line form of it for the long ones. ``value``\nkeeps the full detail.",
         "properties": {
           "name": {
             "title": "Name",
@@ -7726,6 +7726,10 @@
           },
           "status": {
             "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
             "type": "string"
           },
           "value": {
@@ -7744,6 +7748,7 @@
           "name",
           "status",
           "value",
+          "summary",
           "warnings",
           "notes"
         ],

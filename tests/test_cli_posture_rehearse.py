@@ -94,9 +94,9 @@ def fake_chrome(monkeypatch: pytest.MonkeyPatch) -> ReplayContext:
 
 
 def test_posture_prints_the_table_of_protections(cli_db: sessionmaker[Session]) -> None:
-    result = CliRunner().invoke(cli, ["posture", "--no-probe"])
+    result = CliRunner().invoke(cli, ["posture", "--no-probe", "--details"])
 
-    assert "PROTECTION" in result.output
+    assert "PROTECTION" in result.output and "DETAIL" in result.output
     assert "attach-only browser" in result.output
     assert "budget profile_visits" in result.output
     assert "heat" in result.output
@@ -104,6 +104,42 @@ def test_posture_prints_the_table_of_protections(cli_db: sessionmaker[Session]) 
     assert "heat skip gate" in result.output
     assert "JOB" in result.output and "NEXT DUE" in result.output
     assert "not covered by this report:" in result.output
+    assert "hard max" in result.output
+
+
+def test_posture_leads_with_a_summary_and_keeps_the_details_for_the_flag(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """#340: one line per protection by default; --details adds the rest."""
+    summary = CliRunner().invoke(cli, ["posture", "--no-probe"])
+    details = CliRunner().invoke(cli, ["posture", "--no-probe", "--details"])
+
+    assert "PROTECTION" in summary.output and "SUMMARY" in summary.output
+    assert "DETAIL" not in summary.output
+    for name in ("attach-only browser", "budget profile_visits", "scheduled jobs", "reply poll"):
+        assert name in summary.output and name in details.output
+    for detail in ("today's profile-visit budget:", "NEXT DUE", "not covered by this report:"):
+        assert detail not in summary.output
+        assert detail in details.output
+    assert "hard max" not in summary.output
+    assert "run `netkeeper posture --details`" in summary.output
+    assert len(summary.output.splitlines()) < len(details.output.splitlines())
+
+
+def test_posture_shows_a_warning_in_the_summary_and_exits_the_same_either_way(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """#340: a warning that makes posture not ok is never behind --details, and the exit
+    code does not depend on the flag."""
+    summary = CliRunner().invoke(cli, ["posture", "--no-probe"])
+    details = CliRunner().invoke(cli, ["posture", "--no-probe", "--details"])
+
+    assert summary.exit_code == details.exit_code == 1
+    assert "warning: linkedin session: nothing has checked the LinkedIn session yet" in (
+        summary.output
+    )
+    assert summary.output.rstrip().splitlines()[-1] == details.output.rstrip().splitlines()[-1]
+    assert "NOT clear" in summary.output
 
 
 def test_posture_exits_non_zero_when_anything_warned(cli_db: sessionmaker[Session]) -> None:
@@ -187,13 +223,22 @@ def test_posture_stays_clear_and_exits_zero_above_100_a_day_with_the_note_listed
     config = tmp_path / "318-risky.toml"
     config.write_text("[linkedin.budget]\nprofile_visits_per_day = 101\n", encoding="utf-8")
 
-    result = CliRunner().invoke(cli, ["--config", str(config), "posture"])
+    result = CliRunner().invoke(cli, ["--config", str(config), "posture", "--details"])
 
     assert result.exit_code == 0, result.output
     assert "nothing is misconfigured" in result.output
     assert "NOT clear" not in result.output
     assert "note: budget profile_visits: Profile visits are set to 101 a day" in result.output
     assert "warning:" not in result.output
+
+    # The summary (#340) leaves the note itself out, says the row has one, and
+    # exits the same way.
+    summary = CliRunner().invoke(cli, ["--config", str(config), "posture"])
+    assert summary.exit_code == 0, summary.output
+    assert "Profile visits are set to 101 a day" not in summary.output
+    assert "(1 note)" in summary.output
+    assert "1 note, " in summary.output
+    assert "nothing is misconfigured" in summary.output
 
 
 @pytest.mark.parametrize(
