@@ -299,6 +299,7 @@ const QUERY_RULES: ReadonlyArray<{
   { path: /^\/api\/v1\/imports$/, limit: [1, 200] },
   { path: /^\/api\/v1\/imports\/\d+\/preview$/, limit: [1, 200] },
   { path: /^\/api\/v1\/imports\/\d+\/rows$/, limit: [1, 500], resolution: true },
+  { path: /^\/api\/v1\/campaigns\/\d+\/review\/steps\/\d+$/, limit: [1, 50] },
 ]
 
 function queryComplaint(call: Call): string | null {

@@ -47,8 +47,8 @@ export const CONDITION_LABELS: Record<StepCondition, string> = {
 export const REQUIREMENT_LABELS: Record<string, string> = {
   reviewing: 'Review started',
   audience: 'Audience enrolled',
-  sample_previews: 'Sampled previews approved',
-  searched_previews: 'Searched previews approved',
+  step_approvals: 'Each step approved',
+  message_approvals: 'Personal-line messages approved one by one',
   test_sends: 'Test send of each email step',
   mailbox: 'Mailbox ok',
   lint: 'Lint clean',
@@ -59,8 +59,8 @@ export const REQUIREMENT_LABELS: Record<string, string> = {
 export const REQUIREMENTS = [
   'reviewing',
   'audience',
-  'sample_previews',
-  'searched_previews',
+  'step_approvals',
+  'message_approvals',
   'test_sends',
   'mailbox',
   'lint',
