@@ -303,26 +303,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/campaigns/{campaign_id}/review/approve": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Approve Previews
-         * @description Approve viewed previews, each for the ``fingerprint`` it was shown with.
-         */
-        post: operations["approve_previews_api_v1_campaigns__campaign_id__review_approve_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/campaigns/{campaign_id}/review/guards/acknowledge": {
         parameters: {
             query?: never;
@@ -363,46 +343,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/campaigns/{campaign_id}/review/previews": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * View Previews
-         * @description The rendered previews of enrollments the person looked up. Each must be approved.
-         */
-        post: operations["view_previews_api_v1_campaigns__campaign_id__review_previews_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/campaigns/{campaign_id}/review/sample": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Sample Previews
-         * @description The sample's rendered previews, drawn by the server once per audience.
-         */
-        post: operations["sample_previews_api_v1_campaigns__campaign_id__review_sample_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/campaigns/{campaign_id}/review/start": {
         parameters: {
             query?: never;
@@ -417,6 +357,70 @@ export interface paths {
          * @description ``draft`` to ``reviewing``: needs a step and someone enrolled.
          */
         post: operations["start_review_api_v1_campaigns__campaign_id__review_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/review/steps/{step_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Review Step
+         * @description One step's review: a page of its rendered messages to page through, every
+         *     blocked message, and the ``fingerprint`` an approval of the step is given for.
+         */
+        get: operations["review_step_api_v1_campaigns__campaign_id__review_steps__step_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/review/steps/{step_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve Step
+         * @description Approve every message of the step at once, for the ``fingerprint`` its review came
+         *     with. It covers messages rendered later too, until the step or its template changes,
+         *     and never a blocked one. Refused for a step that uses ``{{ personal_line }}``.
+         */
+        post: operations["approve_step_api_v1_campaigns__campaign_id__review_steps__step_id__approve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/review/steps/{step_id}/messages/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve Messages
+         * @description Approve messages of a step that uses ``{{ personal_line }}`` one by one, each for
+         *     the ``fingerprint`` it was shown with. Refused for any other step.
+         */
+        post: operations["approve_messages_api_v1_campaigns__campaign_id__review_steps__step_id__messages_approve_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2652,21 +2656,6 @@ export interface components {
              */
             op: "and";
         };
-        /** ApprovalIn */
-        ApprovalIn: {
-            /** Enrollment Id */
-            enrollment_id: number;
-            /** Fingerprint */
-            fingerprint: string;
-        };
-        /**
-         * ApproveIn
-         * @description Each enrollment with the ``fingerprint`` its preview came with.
-         */
-        ApproveIn: {
-            /** Previews */
-            previews: components["schemas"]["ApprovalIn"][];
-        };
         /**
          * ArchiveConnectionCountsOut
          * @description What ``Connections.csv`` did (:class:`netkeeper.crm.archive.ConnectionCounts`).
@@ -3960,23 +3949,6 @@ export interface components {
             /** Total */
             total: number;
         };
-        /** EnrollmentPreviewOut */
-        EnrollmentPreviewOut: {
-            /** Approved */
-            approved: boolean;
-            /** Contact Id */
-            contact_id: number;
-            /** Contact Name */
-            contact_name: string;
-            /** Enrollment Id */
-            enrollment_id: number;
-            /** Fingerprint */
-            fingerprint: string;
-            /** Sampled */
-            sampled: boolean;
-            /** Steps */
-            steps: components["schemas"]["StepPreviewOut"][];
-        };
         /**
          * EnrollmentStatus
          * @description One contact's state in one campaign: spec 11.3's state machine.
@@ -4909,6 +4881,48 @@ export interface components {
             /** Merged Into Id */
             merged_into_id: number;
         };
+        /** MessageApprovalIn */
+        MessageApprovalIn: {
+            /** Enrollment Id */
+            enrollment_id: number;
+            /** Fingerprint */
+            fingerprint: string;
+        };
+        /**
+         * MessagePreviewOut
+         * @description One message of a step, rendered for a pending enrollment. ``blocked`` says why
+         *     it cannot be sent, or is null. ``approved``: an approval covers it.
+         */
+        MessagePreviewOut: {
+            /** Approved */
+            approved: boolean;
+            /** Blocked */
+            blocked: string | null;
+            /** Body */
+            body: string | null;
+            /** Contact Id */
+            contact_id: number;
+            /** Contact Name */
+            contact_name: string;
+            /** Enrollment Id */
+            enrollment_id: number;
+            /** Fingerprint */
+            fingerprint: string;
+            /** Issues */
+            issues: components["schemas"]["LintIssueOut"][];
+            /** Subject */
+            subject: string | null;
+            /** To Address */
+            to_address: string | null;
+        };
+        /**
+         * MessagesApproveIn
+         * @description Each message with the ``fingerprint`` it came with.
+         */
+        MessagesApproveIn: {
+            /** Messages */
+            messages: components["schemas"]["MessageApprovalIn"][];
+        };
         /**
          * MetSource
          * @description Who decided ``met``: the person, or netkeeper on their behalf (spec 10.2).
@@ -5191,18 +5205,6 @@ export interface components {
             decision: components["schemas"]["TriageDecisionOut"];
             /** Preferred Name */
             preferred_name: string;
-        };
-        /** PreviewsIn */
-        PreviewsIn: {
-            /** Enrollment Ids */
-            enrollment_ids: number[];
-        };
-        /** PreviewsOut */
-        PreviewsOut: {
-            /** Content Fingerprint */
-            content_fingerprint: string;
-            /** Enrollments */
-            enrollments: components["schemas"]["EnrollmentPreviewOut"][];
         };
         /**
          * ProtectionOut
@@ -5615,6 +5617,14 @@ export interface components {
             value: string;
         };
         /**
+         * StepApproveIn
+         * @description The step ``fingerprint`` its review came with.
+         */
+        StepApproveIn: {
+            /** Fingerprint */
+            fingerprint: string;
+        };
+        /**
          * StepCondition
          * @description When a step fires (spec 11.2): every time, or only if nobody has replied yet.
          * @enum {string}
@@ -5669,22 +5679,38 @@ export interface components {
             /** Template Version */
             template_version: number;
         };
-        /** StepPreviewOut */
-        StepPreviewOut: {
-            /** Body */
-            body: string | null;
+        /**
+         * StepReviewOut
+         * @description One step's review. ``messages`` is the page from ``offset`` of the ``total`` in
+         *     the pager; ``blocked`` lists every message that cannot be sent. ``per_message``:
+         *     the template uses ``{{ personal_line }}``, so each message is approved on its own,
+         *     and ``unapproved`` counts those not approved yet.
+         */
+        StepReviewOut: {
+            /** Approved */
+            approved: boolean;
+            /** Blocked */
+            blocked: components["schemas"]["MessagePreviewOut"][];
             /** Channel */
             channel: string;
-            /** Error */
-            error: string | null;
-            /** Issues */
-            issues: components["schemas"]["LintIssueOut"][];
+            /** Fingerprint */
+            fingerprint: string;
+            /** Messages */
+            messages: components["schemas"]["MessagePreviewOut"][];
+            /** Offset */
+            offset: number;
+            /** Per Message */
+            per_message: boolean;
             /** Position */
             position: number;
-            /** Subject */
-            subject: string | null;
-            /** To Address */
-            to_address: string | null;
+            /** Step Id */
+            step_id: number;
+            /** Template Name */
+            template_name: string;
+            /** Total */
+            total: number;
+            /** Unapproved */
+            unapproved: number;
         };
         /**
          * SyncRunKind
@@ -7082,57 +7108,6 @@ export interface operations {
             };
         };
     };
-    approve_previews_api_v1_campaigns__campaign_id__review_approve_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                campaign_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ApproveIn"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ReviewOut"];
-                };
-            };
-            /** @description No such campaign, step or enrollment for this user */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Refused in the campaign's state; the detail says why. ``code`` is ``stale`` when only a fingerprint went stale: show it again and retry */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RefusedOut"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     acknowledge_guards_api_v1_campaigns__campaign_id__review_guards_acknowledge_post: {
         parameters: {
             query?: never;
@@ -7229,100 +7204,6 @@ export interface operations {
             };
         };
     };
-    view_previews_api_v1_campaigns__campaign_id__review_previews_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                campaign_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["PreviewsIn"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PreviewsOut"];
-                };
-            };
-            /** @description No such campaign, step or enrollment for this user */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Refused in the campaign's state; the detail says why */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    sample_previews_api_v1_campaigns__campaign_id__review_sample_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                campaign_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PreviewsOut"];
-                };
-            };
-            /** @description No such campaign, step or enrollment for this user */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Refused in the campaign's state; the detail says why */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     start_review_api_v1_campaigns__campaign_id__review_start_post: {
         parameters: {
             query?: never;
@@ -7356,6 +7237,159 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    review_step_api_v1_campaigns__campaign_id__review_steps__step_id__get: {
+        parameters: {
+            query?: {
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                campaign_id: number;
+                step_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StepReviewOut"];
+                };
+            };
+            /** @description No such campaign, step or enrollment for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state; the detail says why */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    approve_step_api_v1_campaigns__campaign_id__review_steps__step_id__approve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+                step_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StepApproveIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewOut"];
+                };
+            };
+            /** @description No such campaign, step or enrollment for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state; the detail says why. ``code`` is ``stale`` when only a fingerprint went stale: show it again and retry */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RefusedOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    approve_messages_api_v1_campaigns__campaign_id__review_steps__step_id__messages_approve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+                step_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MessagesApproveIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewOut"];
+                };
+            };
+            /** @description No such campaign, step or enrollment for this user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state; the detail says why. ``code`` is ``stale`` when only a fingerprint went stale: show it again and retry */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RefusedOut"];
+                };
             };
             /** @description Validation Error */
             422: {

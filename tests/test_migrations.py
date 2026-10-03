@@ -2673,3 +2673,62 @@ def _migration_0030() -> Any:
 def test_0030_fold_matches_identity(value: str | None) -> None:
     """0030's frozen copy folds exactly as identity resolution matches positions."""
     assert _migration_0030()._fold(value) == identity_fold(value)
+
+
+# --- step approvals (0032, #339) ---------------------------------------------------------
+
+
+def _insert_step_approval(
+    connection: Connection, *, id: int, enrollment_id: int | None = None
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO campaign_step_approvals (id, user_id, campaign_id, step_id,"
+            " enrollment_id, fingerprint, approved_at, created_at, updated_at)"
+            " VALUES (:id, 1, 1, 1, :enrollment_id, 'fp', :t, :t, :t)"
+        ),
+        {"id": id, "enrollment_id": enrollment_id, "t": STAMP},
+    )
+
+
+def test_0032_starts_every_campaign_with_no_step_approved(migration_engine: Engine) -> None:
+    previous = _migration_0032().down_revision
+    migrations.upgrade(migration_engine, previous)
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+    migrations.upgrade(migration_engine, "0032")
+    with migration_engine.begin() as connection:
+        assert _count(connection, "campaign_step_approvals") == 0
+        _insert_step_approval(connection, id=1)
+        _insert_step_approval(connection, id=2, enrollment_id=1)
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_step_approval(connection, id=3, enrollment_id=1)  # one per message
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_step_approval(connection, id=4)  # one whole-step row per step
+    with migration_engine.begin() as connection:
+        connection.execute(text("DELETE FROM messages"))
+        connection.execute(text("DELETE FROM enrollments WHERE id = 1"))  # the approval goes too
+        assert _count(connection, "campaign_step_approvals") == 1
+
+
+def test_0032_downgrades_to_no_step_approvals(migration_engine: Engine) -> None:
+    previous = _migration_0032().down_revision
+    migrations.upgrade(migration_engine, "0032")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+        connection.execute(text("DELETE FROM messages"))
+        _insert_step_approval(connection, id=1)
+    migrations.downgrade(migration_engine, previous)
+    assert "campaign_step_approvals" not in inspect(migration_engine).get_table_names()
+    with migration_engine.begin() as connection:
+        assert _count(connection, "campaign_steps") == 1
+    migrations.upgrade(migration_engine, "0032")
+
+
+def _migration_0032() -> Any:
+    path = VERSIONS_DIR / "0032_step_approvals.py"
+    spec = importlib.util.spec_from_file_location("migration_0032", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module

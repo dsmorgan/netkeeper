@@ -7,7 +7,7 @@
  * which is the gate itself: it answers 409 with `missing` unless every
  * requirement is recorded and current.
  */
-import { queryOptions } from '@tanstack/react-query'
+import { keepPreviousData, queryOptions } from '@tanstack/react-query'
 
 import { api } from '@/api/client'
 import { detailMessage } from '@/api/errors'
@@ -28,8 +28,8 @@ export type EnrollIn = Schemas['EnrollIn']
 export type EnrollOut = Schemas['EnrollOut']
 export type Missing = Schemas['MissingOut']
 export type Review = Schemas['ReviewOut']
-export type Previews = Schemas['PreviewsOut']
-export type EnrollmentPreview = Schemas['EnrollmentPreviewOut']
+export type StepReview = Schemas['StepReviewOut']
+export type MessagePreview = Schemas['MessagePreviewOut']
 export type LintResult = Schemas['LintOut']
 export type TestSend = Schemas['TestSendOut']
 export type Enrollment = Schemas['EnrollmentOut']
@@ -77,6 +77,9 @@ export const campaignKeys = {
   list: () => [...campaignKeys.all, 'list'] as const,
   one: (id: number) => [...campaignKeys.all, 'one', id] as const,
   review: (id: number) => [...campaignKeys.all, 'review', id] as const,
+  steps: (id: number) => [...campaignKeys.all, 'step', id] as const,
+  step: (id: number, stepId: number, offset: number) =>
+    [...campaignKeys.steps(id), stepId, offset] as const,
   enrollments: (id: number, q: string, status: string, offset: number) =>
     [...campaignKeys.all, 'enrollments', id, q, status, offset] as const,
 }
@@ -186,44 +189,71 @@ export async function startReview(id: number): Promise<Review> {
   return data
 }
 
-/** The sample of up to 10: the same draw while the audience is unchanged. */
-export async function samplePreviews(id: number): Promise<Previews> {
-  const { data, error, response } = await api.POST(
-    '/api/v1/campaigns/{campaign_id}/review/sample',
-    { params: { path: { campaign_id: id } } },
+/** How many of a step's messages one request answers: the pager fetches a page at a time. */
+export const STEP_PAGE = 20
+
+/**
+ * One step's review: a page of its rendered messages (from `offset`), every blocked
+ * message, and the `fingerprint` an approval of the step is given for.
+ */
+export async function reviewStep(id: number, stepId: number, offset: number): Promise<StepReview> {
+  const { data, error, response } = await api.GET(
+    '/api/v1/campaigns/{campaign_id}/review/steps/{step_id}',
+    {
+      params: {
+        path: { campaign_id: id, step_id: stepId },
+        query: { offset, limit: STEP_PAGE },
+      },
+    },
   )
-  if (data === undefined) fail(response.status, error, 'could not draw the sample')
+  if (data === undefined) fail(response.status, error, 'could not render the step')
   return data
 }
 
-/** Render enrollments you looked up. Each one viewed must then be approved too. */
-export async function viewPreviews(id: number, enrollmentIds: number[]): Promise<Previews> {
-  const { data, error, response } = await api.POST(
-    '/api/v1/campaigns/{campaign_id}/review/previews',
-    { params: { path: { campaign_id: id } }, body: { enrollment_ids: enrollmentIds } },
-  )
-  if (data === undefined) fail(response.status, error, 'could not render the previews')
-  return data
-}
+export const stepReviewQuery = (id: number, stepId: number, offset: number) =>
+  queryOptions({
+    queryKey: campaignKeys.step(id, stepId, offset),
+    queryFn: () => reviewStep(id, stepId, offset),
+    placeholderData: keepPreviousData,
+  })
 
-/** Approve previews for the fingerprint each was shown with. */
-export async function approvePreviews(
+/**
+ * Approve every message of a step at once, for the `fingerprint` its review came with.
+ * It covers messages rendered later too, until the step or its template changes; never
+ * a blocked one. A 409 with `code: stale` means the step changed since it was shown.
+ */
+export async function approveStep(
   id: number,
-  previews: ReadonlyArray<Pick<EnrollmentPreview, 'enrollment_id' | 'fingerprint'>>,
+  stepId: number,
+  fingerprint: string,
 ): Promise<Review> {
   const { data, error, response } = await api.POST(
-    '/api/v1/campaigns/{campaign_id}/review/approve',
+    '/api/v1/campaigns/{campaign_id}/review/steps/{step_id}/approve',
+    { params: { path: { campaign_id: id, step_id: stepId } }, body: { fingerprint } },
+  )
+  if (data === undefined) fail(response.status, error, 'could not approve the step')
+  return data
+}
+
+/** Approve messages of a step that uses `{{ personal_line }}` one by one. */
+export async function approveMessages(
+  id: number,
+  stepId: number,
+  messages: ReadonlyArray<Pick<MessagePreview, 'enrollment_id' | 'fingerprint'>>,
+): Promise<Review> {
+  const { data, error, response } = await api.POST(
+    '/api/v1/campaigns/{campaign_id}/review/steps/{step_id}/messages/approve',
     {
-      params: { path: { campaign_id: id } },
+      params: { path: { campaign_id: id, step_id: stepId } },
       body: {
-        previews: previews.map((p) => ({
-          enrollment_id: p.enrollment_id,
-          fingerprint: p.fingerprint,
+        messages: messages.map((m) => ({
+          enrollment_id: m.enrollment_id,
+          fingerprint: m.fingerprint,
         })),
       },
     },
   )
-  if (data === undefined) fail(response.status, error, 'could not approve the previews')
+  if (data === undefined) fail(response.status, error, 'could not approve the message')
   return data
 }
 

@@ -5,11 +5,11 @@ has a step and an audience (a ``pending`` enrollment). It is activated only
 through :func:`activate`, which refuses with :class:`ReviewIncomplete`, listing
 every requirement not met, unless each of these is recorded and still current:
 
-- ``sample_previews``: the rendered previews of a sample of up to
-  :data:`SAMPLE_SIZE` pending enrollments, drawn by the server
-  (:func:`draw_sample`), each approved (:func:`approve`).
-- ``searched_previews``: every other enrollment whose previews the person
-  looked up (:func:`view`), approved too.
+- ``step_approvals``: every step approved once, as a whole (:func:`approve_step`),
+  after paging through its rendered messages (:func:`review_step`).
+- ``message_approvals``: for a step whose template uses ``{{ personal_line }}``,
+  which differs for every contact, each pending enrollment's message approved on
+  its own (:func:`approve_messages`) instead (#339).
 - ``test_sends``: a test send of each email step (:func:`prepare_test_send`,
   then :func:`record_test_send`).
 - ``lint``: every step's template found free of lint errors (:func:`record_lint`).
@@ -23,12 +23,22 @@ made for, and counts only while that fingerprint is still the current one:
 - A step's fingerprint (:func:`step_fingerprint`) covers the step's own fields,
   its template's text, the campaign's name and mailbox, and the ``[me]``
   values. A test send counts for its step's fingerprint.
+- A step approval counts for its step's fingerprint, so a change to the step or
+  its template (an edit, or a new version) undoes it. While it holds, it covers
+  every message of the step, including messages rendered later for contacts
+  enrolled or edited since, but never a blocked one: a message that fails to
+  render, has a lint error, or whose contact a guard excludes stays blocked, and
+  the engine checks each of those again when the step fires.
+- A single message's approval counts for :func:`message_fingerprint`: the step's
+  fingerprint with every per-contact input to the render (the contact's merge
+  values and its ``personal_line``) and its address. The current date isn't hashed
+  itself, but a merge value that changes with it does undo the approval.
 - The content fingerprint (:func:`content_fingerprint`) covers every step's.
-  Preview approvals and the lint record count for it, so any change to a step or
-  a template, or a step added or removed, undoes them.
+  The lint record counts for it.
 - The audience fingerprint (:func:`audience_fingerprint`) covers the pending
-  enrollments, the audience's source and its contacts. The sample and the guard
-  acknowledgement count for it. The acknowledged summary must also still be the
+  enrollments, the audience's source and its contacts. The guard
+  acknowledgement counts for it; a step approval does not, since it covers the
+  messages of contacts enrolled later. The acknowledged summary must also still be the
   one the guards give now.
 
 **Test sends are never campaign messages.** A test send goes only to the
@@ -53,10 +63,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import random
 import secrets
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Final
 
@@ -67,8 +76,10 @@ from netkeeper.campaigns.render import (
     LintIssue,
     MergeValues,
     Rendered,
+    Severity,
     TemplateRenderError,
     render,
+    uses_personal_line,
 )
 from netkeeper.campaigns.templates import activation_errors, contact_fields
 from netkeeper.config import Settings
@@ -86,7 +97,7 @@ from netkeeper.models import (
     Mailbox,
     MailboxArm,
     MailboxStatus,
-    ReviewPreview,
+    StepApproval,
     Template,
     TemplateChannel,
     TestSend,
@@ -96,17 +107,24 @@ from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import campaign_engine, mailboxes
 from netkeeper.services.campaign_guards import (
     UNSENDABLE_EMAIL_STATUSES,
+    GuardPolicy,
+    check_contact,
     check_enrollment,
     excluded_summary,
+    load_facts,
+    reason_label,
 )
 
 log = logging.getLogger(__name__)
 
-SAMPLE_SIZE: Final = 10
-"""Spec 11.8: rendered previews of 10 sampled enrollments."""
+STEP_PAGE: Final = 20
+"""How many of a step's messages :func:`review_step` answers by default."""
 
-VIEW_MAX: Final = 50
-"""The most enrollments one :func:`view` call renders."""
+STEP_PAGE_MAX: Final = 50
+"""The most of a step's messages one :func:`review_step` call answers."""
+
+APPROVE_MAX: Final = 50
+"""The most messages one :func:`approve_messages` call approves."""
 
 TEST_SUBJECT_PREFIX: Final = "[Test] "
 
@@ -300,17 +318,6 @@ def _reviewing(session: Session, user: User, campaign_id: int) -> Campaign:
     return campaign
 
 
-def _rows(session: Session, user: User, campaign_id: int) -> list[ReviewPreview]:
-    return list(
-        session.scalars(
-            scoped(user, ReviewPreview)
-            .where(ReviewPreview.campaign_id == campaign_id)
-            .order_by(ReviewPreview.enrollment_id)
-            .execution_options(populate_existing=True)
-        )
-    )
-
-
 def _require_writer(session: Session, what: str) -> None:
     if not is_writer(session):
         raise RuntimeError(f"{what} needs a writer session (session_scope(..., write=True))")
@@ -335,35 +342,7 @@ def start_review(session: Session, user: User, campaign_id: int) -> Campaign:
     return campaign
 
 
-# --- previews -----------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class StepPreview:
-    position: int
-    channel: TemplateChannel
-    to_address: str | None
-    subject: str | None
-    body: str | None
-    issues: tuple[LintIssue, ...]
-    error: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class EnrollmentPreview:
-    enrollment_id: int
-    contact_id: int
-    contact_name: str
-    sampled: bool
-    approved: bool
-    fingerprint: str
-    steps: tuple[StepPreview, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class Previews:
-    content_fingerprint: str
-    enrollments: tuple[EnrollmentPreview, ...] = field(default=())
+# --- step review: the pager, the blocked list, the approvals ------------------------
 
 
 def _contact(session: Session, user: User, contact_id: int) -> Contact | None:
@@ -375,247 +354,447 @@ def _contact(session: Session, user: User, contact_id: int) -> Contact | None:
     ).first()
 
 
-def preview_fingerprint(
-    session: Session, user: User, content: str, contact_id: int, today: date
-) -> str:
-    """What one enrollment's previews show: the content fingerprint, the contact's merge
-    values and its sendable address. An approval counts only while this is unchanged, so
-    editing the contact (a name, an email) undoes it."""
-    contact = _contact(session, user, contact_id)
-    if contact is None:
-        return _digest([content, None])
-    email = sendable_email(contact, refuse=UNSENDABLE_EMAIL_STATUSES)
-    return _digest(
-        [content, contact_fields(contact, today), None if email is None else email.email]
-    )
+def personal_line_for(enrollment_id: int, step: CampaignStep) -> str | None:
+    """The ``{{ personal_line }}`` one message of ``step`` renders with (spec 12).
+
+    Nothing writes a personal line until P5-02, so this is None. The review's render
+    and :func:`message_fingerprint` both read it here, so the stored line feeds the
+    fingerprint an approval of the message is given for.
+    """
+    return None
 
 
-def _render_step(
-    template: Template | None,
+def merge_values(
     contact: Contact,
     campaign: Campaign,
     step: CampaignStep,
     me: Mapping[str, str],
     today: date,
-) -> Rendered:
-    """The step as the engine renders it at a fire, less the previous send's date."""
-    if template is None:
-        raise TemplateRenderError("the step's template is gone")
-    values = MergeValues(
+    *,
+    enrollment_id: int,
+) -> MergeValues:
+    """Everything one message of the step renders with for this contact: the render
+    context the engine builds at a fire, less the previous send's date."""
+    return MergeValues(
         contact=contact_fields(contact, today),
         me=me,
         campaign_name=campaign.name,
         step_number=step.position,
+        personal_line=personal_line_for(enrollment_id, step),
     )
+
+
+def _render_step(template: Template | None, values: MergeValues, today: date) -> Rendered:
+    """The step as the engine renders it at a fire, less the previous send's date."""
+    if template is None:
+        raise TemplateRenderError("the step's template is gone")
     return render(template.channel, template.subject, template.body, values, today=today)
 
 
-def _preview(
+@dataclass(frozen=True, slots=True)
+class MessagePreview:
+    """One pending enrollment's message for one step, rendered as the engine would.
+
+    ``blocked`` says why it cannot be sent (it fails to render, has a lint
+    error, or a guard excludes the contact), or is None. ``approved`` is whether
+    an approval covers it: the step's, or for a ``personal_line`` step its own,
+    never for a blocked message of a step approved as a whole. ``fingerprint`` is
+    what approving this one message is checked against (:func:`approve_messages`).
+    """
+
+    enrollment_id: int
+    contact_id: int
+    contact_name: str
+    to_address: str | None
+    subject: str | None
+    body: str | None
+    issues: tuple[LintIssue, ...]
+    blocked: str | None
+    approved: bool
+    fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class StepReview:
+    """One step's review: its approval, one page of its messages, and its blocked ones.
+
+    ``total`` is how many messages the pager holds, and ``messages`` the page from
+    ``offset``. A step approved as a whole pages through the messages that can be
+    sent; ``blocked`` lists the rest. A ``per_message`` step (its template uses
+    ``{{ personal_line }}``) pages through every pending enrollment, blocked ones
+    too, since each must be approved on its own.
+    """
+
+    step_id: int
+    position: int
+    channel: TemplateChannel
+    template_name: str
+    fingerprint: str
+    per_message: bool
+    approved: bool
+    total: int
+    offset: int
+    messages: tuple[MessagePreview, ...]
+    blocked: tuple[MessagePreview, ...]
+    unapproved: int
+
+
+def _step(session: Session, user: User, campaign_id: int, step_id: int) -> CampaignStep:
+    step = session.scalars(
+        scoped(user, CampaignStep)
+        .where(CampaignStep.id == step_id, CampaignStep.campaign_id == campaign_id)
+        .execution_options(populate_existing=True)
+    ).first()
+    if step is None:
+        raise ReviewNotFound(f"no step {step_id} in campaign {campaign_id}")
+    return step
+
+
+def step_at(session: Session, user: User, campaign_id: int, position: int) -> CampaignStep:
+    """The campaign's step at ``position`` (1 is the first)."""
+    get_campaign(session, user, campaign_id)
+    step = next((s for s in _steps(session, user, campaign_id) if s.position == position), None)
+    if step is None:
+        raise ReviewNotFound(f"no step {position} in campaign {campaign_id}")
+    return step
+
+
+def is_per_message(template: Template | None) -> bool:
+    """Whether the step's messages must each be approved: its template names
+    ``{{ personal_line }}``, which differs for every contact (#339)."""
+    return template is not None and uses_personal_line(
+        template.channel, template.subject, template.body
+    )
+
+
+def _contacts(session: Session, user: User, contact_ids: Collection[int]) -> dict[int, Contact]:
+    if not contact_ids:
+        return {}
+    found = session.scalars(
+        scoped(user, Contact)
+        .where(Contact.id.in_(sorted(set(contact_ids))))
+        .options(selectinload(Contact.emails), selectinload(Contact.positions))
+        .execution_options(populate_existing=True)
+    )
+    return {contact.id: contact for contact in found}
+
+
+def _contact_name(contact: Contact | None) -> str:
+    if contact is None:
+        return ""
+    return f"{contact.preferred_name or contact.first_name} {contact.last_name}".strip()
+
+
+def _address(contact: Contact | None) -> str | None:
+    if contact is None:
+        return None
+    email = sendable_email(contact, refuse=UNSENDABLE_EMAIL_STATUSES)
+    return None if email is None else email.email
+
+
+def message_fingerprint(
+    step_print: str,
+    contact: Contact | None,
+    campaign: Campaign,
+    step: CampaignStep,
+    me: Mapping[str, str],
+    today: date,
+    *,
+    enrollment_id: int,
+) -> str:
+    """What one message of a step shows: the step's fingerprint, every per-contact input
+    to its render (:func:`merge_values`: the contact's merge fields and its
+    ``personal_line``) and its sendable address. The current date isn't hashed itself,
+    but a merge value that changes with it, such as ``years_since_connected`` or
+    ``last_position_change``, does undo the approval. An approval of the
+    message counts only while this is unchanged, so editing the step, its template,
+    the contact or its personal line undoes it."""
+    if contact is None:
+        return _digest([step_print, None])
+    values = merge_values(contact, campaign, step, me, today, enrollment_id=enrollment_id)
+    context = {
+        "contact": dict(values.contact),
+        "me": dict(values.me),
+        "campaign_name": values.campaign_name,
+        "step_number": values.step_number,
+        "personal_line": values.personal_line,
+    }
+    return _digest([step_print, context, _address(contact)])
+
+
+def _approvals(
+    session: Session, user: User, campaign_id: int, step_id: int | None = None
+) -> list[StepApproval]:
+    query = scoped(user, StepApproval).where(StepApproval.campaign_id == campaign_id)
+    if step_id is not None:
+        query = query.where(StepApproval.step_id == step_id)
+    return list(
+        session.scalars(query.order_by(StepApproval.id).execution_options(populate_existing=True))
+    )
+
+
+def _step_approved(rows: Sequence[StepApproval], step_id: int, fingerprint: str) -> bool:
+    return any(
+        r.step_id == step_id and r.enrollment_id is None and r.fingerprint == fingerprint
+        for r in rows
+    )
+
+
+def _messages_approved(rows: Sequence[StepApproval], step_id: int) -> dict[int, str]:
+    """Each enrollment's approved message fingerprint for the step."""
+    return {
+        r.enrollment_id: r.fingerprint
+        for r in rows
+        if r.step_id == step_id and r.enrollment_id is not None
+    }
+
+
+def _render_messages(
     session: Session,
     user: User,
     campaign: Campaign,
-    steps: Sequence[CampaignStep],
-    row: ReviewPreview,
-    enrollment: Enrollment,
-    content: str,
+    step: CampaignStep,
+    template: Template | None,
+    pending: Sequence[Enrollment],
     me: Mapping[str, str],
-    today: date,
-) -> EnrollmentPreview:
-    contact = _contact(session, user, enrollment.contact_id)
-    shown: list[StepPreview] = []
-    for step in steps:
-        address = None
-        if contact is not None and step.channel is TemplateChannel.EMAIL:
-            email = sendable_email(contact, refuse=UNSENDABLE_EMAIL_STATUSES)
-            address = None if email is None else email.email
-        try:
-            if contact is None:
-                raise TemplateRenderError("the contact is gone")
-            rendered = _render_step(
-                _template(session, user, step), contact, campaign, step, me, today
+    now: datetime,
+    *,
+    step_approved: bool,
+    approved_messages: Mapping[int, str],
+) -> list[MessagePreview]:
+    """The step's message for each pending enrollment, in enrollment order, each with
+    the reason it is blocked, if it is. The guards are the ones that decide at a step
+    fire, for this step's channel; the render is the engine's."""
+    today = now.date()
+    contacts = _contacts(session, user, [e.contact_id for e in pending])
+    facts = load_facts(session, user, list(contacts), campaign_id=campaign.id)
+    policy = GuardPolicy(contacted_within_days=campaign.contacted_within_days_guard)
+    step_print = step_fingerprint(step, template, campaign, me)
+    per_message = is_per_message(template)
+    out: list[MessagePreview] = []
+    for enrollment in pending:
+        contact = contacts.get(enrollment.contact_id)
+        address = _address(contact) if step.channel is TemplateChannel.EMAIL else None
+        subject: str | None = None
+        body: str | None = None
+        issues: tuple[LintIssue, ...] = ()
+        blocked: str | None = None
+        verdict = check_contact(
+            facts.get(enrollment.contact_id), enrollment.contact_id, step.channel, policy, now=now
+        )
+        if contact is None:
+            blocked = "the contact is gone"
+        else:
+            try:
+                rendered = _render_step(
+                    template,
+                    merge_values(contact, campaign, step, me, today, enrollment_id=enrollment.id),
+                    today,
+                )
+            except TemplateRenderError as exc:
+                blocked = f"does not render: {exc}"
+            else:
+                subject, body, issues = rendered.subject, rendered.body, rendered.issues
+                errors = [i for i in issues if i.severity is Severity.ERROR]
+                if errors:
+                    blocked = f"lint error: {errors[0].message}"
+                elif step.channel is TemplateChannel.EMAIL and not subject:
+                    blocked = "renders with no subject"
+        if blocked is None and verdict.reason is not None:
+            label = reason_label(
+                verdict.reason, contacted_within_days=campaign.contacted_within_days_guard
             )
-        except TemplateRenderError as exc:
-            shown.append(
-                StepPreview(step.position, step.channel, address, None, None, (), str(exc))
-            )
-            continue
-        shown.append(
-            StepPreview(
-                step.position,
-                step.channel,
+            blocked = f"excluded by a guard: {label}"
+        fingerprint = message_fingerprint(
+            step_print, contact, campaign, step, me, today, enrollment_id=enrollment.id
+        )
+        if per_message:
+            approved = approved_messages.get(enrollment.id) == fingerprint
+        else:
+            approved = step_approved and blocked is None
+        out.append(
+            MessagePreview(
+                enrollment.id,
+                enrollment.contact_id,
+                _contact_name(contact),
                 address,
-                rendered.subject,
-                rendered.body,
-                rendered.issues,
-                None,
+                subject,
+                body,
+                issues,
+                blocked,
+                approved,
+                fingerprint,
             )
         )
-    name = (
-        ""
-        if contact is None
-        else f"{contact.preferred_name or contact.first_name} {contact.last_name}".strip()
-    )
-    fingerprint = preview_fingerprint(session, user, content, enrollment.contact_id, today)
-    return EnrollmentPreview(
-        enrollment.id,
-        enrollment.contact_id,
-        name,
-        row.sampled,
-        row.approved_at is not None and row.approved_fingerprint == fingerprint,
-        fingerprint,
-        tuple(shown),
-    )
+    return out
 
 
-def _previews(
-    session: Session,
-    user: User,
-    campaign: Campaign,
-    rows: Sequence[ReviewPreview],
-    me: Mapping[str, str],
-    today: date,
-) -> Previews:
-    content = content_fingerprint(session, user, campaign, me)
-    steps = _steps(session, user, campaign.id)
-    out = []
-    for row in rows:
-        enrollment = get_scoped(session, user, Enrollment, row.enrollment_id)
-        if enrollment is not None:
-            out.append(
-                _preview(session, user, campaign, steps, row, enrollment, content, me, today)
-            )
-    return Previews(content, tuple(out))
-
-
-def _sample_is_current(rows: Sequence[ReviewPreview], audience: str) -> bool:
-    sample = [r for r in rows if r.sampled]
-    return bool(sample) and all(r.sample_fingerprint == audience for r in sample)
-
-
-def draw_sample(
+def review_step(
     session: Session,
     user: User,
     campaign_id: int,
+    step_id: int,
     *,
     me: Mapping[str, str],
     now: datetime,
-    rng: random.Random | None = None,
-) -> Previews:
-    """The sample's previews. The sample is drawn once per audience: while the audience
-    fingerprint is unchanged, the same sample comes back; after a change, a new one."""
-    _require_writer(session, "draw_sample")
-    campaign = _reviewing(session, user, campaign_id)
-    pending, audience = _audience(session, user, campaign)
-    rows = _rows(session, user, campaign_id)
-    if not _sample_is_current(rows, audience):
-        # The old draw stays as viewed previews: each still has to be approved, as any
-        # preview the person looked at does, unless it is drawn again.
-        for old in rows:
-            if old.sampled:
-                old.sampled = False
-                old.sample_fingerprint = None
-        chooser = rng if rng is not None else random.SystemRandom()
-        chosen = sorted(chooser.sample([e.id for e in pending], min(SAMPLE_SIZE, len(pending))))
-        existing = {r.enrollment_id: r for r in _rows(session, user, campaign_id)}
-        for enrollment_id in chosen:
-            row = existing.get(enrollment_id)
-            if row is None:
-                row = ReviewPreview(
-                    user_id=user.id,
-                    campaign_id=campaign_id,
-                    enrollment_id=enrollment_id,
-                    viewed_at=now,
-                )
-                session.add(row)
-            row.sampled = True
-            row.sample_fingerprint = audience
-        session.flush()
-        log.info("campaign %d: sample of %d drawn", campaign_id, len(chosen))
-    sample = [r for r in _rows(session, user, campaign_id) if r.sampled]
-    for row in sample:
-        row.viewed_at = now
-    session.flush()
-    return _previews(session, user, campaign, sample, me, now.date())
+    offset: int = 0,
+    limit: int = STEP_PAGE,
+) -> StepReview:
+    """One step's review, for any campaign of the user's: whether it is approved, one
+    page of its messages, and every blocked one. Reads only."""
+    if offset < 0 or not 1 <= limit <= STEP_PAGE_MAX:
+        raise ReviewConflict(f"page from an offset of 0 or more, 1 to {STEP_PAGE_MAX} at a time")
+    campaign = get_campaign(session, user, campaign_id)
+    step = _step(session, user, campaign_id, step_id)
+    template = _template(session, user, step)
+    fingerprint = step_fingerprint(step, template, campaign, me)
+    per_message = is_per_message(template)
+    rows = _approvals(session, user, campaign_id, step.id)
+    approved = not per_message and _step_approved(rows, step.id, fingerprint)
+    messages = _render_messages(
+        session,
+        user,
+        campaign,
+        step,
+        template,
+        _pending(session, user, campaign_id),
+        me,
+        now,
+        step_approved=approved,
+        approved_messages=_messages_approved(rows, step.id),
+    )
+    blocked = tuple(m for m in messages if m.blocked is not None)
+    pager = messages if per_message else [m for m in messages if m.blocked is None]
+    return StepReview(
+        step_id=step.id,
+        position=step.position,
+        channel=step.channel,
+        template_name="" if template is None else f"{template.name} v{template.version}",
+        fingerprint=fingerprint,
+        per_message=per_message,
+        approved=approved,
+        total=len(pager),
+        offset=offset,
+        messages=tuple(pager[offset : offset + limit]),
+        blocked=blocked,
+        unapproved=sum(1 for m in messages if not m.approved) if per_message else 0,
+    )
 
 
-def view(
+def approve_step(
     session: Session,
     user: User,
     campaign_id: int,
-    enrollment_ids: Collection[int],
+    step_id: int,
     *,
+    fingerprint_seen: str,
     me: Mapping[str, str],
     now: datetime,
-) -> Previews:
-    """The previews of enrollments the person looked up. Each one viewed must be
-    approved before activation, as the sample must."""
-    _require_writer(session, "view")
+) -> StepApproval:
+    """Approve every message of a step at once, for the step ``fingerprint`` its review
+    came with: refused (:class:`ReviewStale`) when the step or its template changed
+    since. The approval covers the step's messages rendered later too, while that
+    fingerprint holds, but never a blocked one. Refused for a step whose template uses
+    ``{{ personal_line }}``: its messages are approved one by one."""
+    _require_writer(session, "approve_step")
     campaign = _reviewing(session, user, campaign_id)
-    ids = sorted(set(enrollment_ids))
-    if not ids or len(ids) > VIEW_MAX:
-        raise ReviewConflict(f"view between 1 and {VIEW_MAX} enrollments at a time")
-    pending = {e.id for e in _pending(session, user, campaign_id)}
-    unknown = [i for i in ids if i not in pending]
-    if unknown:
-        raise ReviewNotFound(f"no pending enrollment {unknown[0]} in campaign {campaign_id}")
-    existing = {r.enrollment_id: r for r in _rows(session, user, campaign_id)}
-    rows = []
-    for enrollment_id in ids:
-        row = existing.get(enrollment_id)
-        if row is None:
-            row = ReviewPreview(
-                user_id=user.id,
-                campaign_id=campaign_id,
-                enrollment_id=enrollment_id,
-                sampled=False,
-                viewed_at=now,
-            )
-            session.add(row)
-        row.viewed_at = now
-        rows.append(row)
+    step = _step(session, user, campaign_id, step_id)
+    template = _template(session, user, step)
+    if is_per_message(template):
+        raise ReviewConflict(
+            f"step {step.position} uses {{{{ personal_line }}}}, so each of its messages"
+            " is approved on its own"
+        )
+    fingerprint = step_fingerprint(step, template, campaign, me)
+    if fingerprint_seen != fingerprint:
+        raise ReviewStale(
+            f"step {step.position} changed since it was shown (its template, its settings or"
+            " the campaign's); review it again"
+        )
+    row = next(
+        (r for r in _approvals(session, user, campaign_id, step.id) if r.enrollment_id is None),
+        None,
+    )
+    if row is None:
+        row = StepApproval(
+            user_id=user.id, campaign_id=campaign_id, step_id=step.id, enrollment_id=None
+        )
+        session.add(row)
+    row.fingerprint = fingerprint
+    row.approved_at = now
     session.flush()
-    return _previews(session, user, campaign, rows, me, now.date())
+    log.info("campaign %d: step %d approved", campaign_id, step.position)
+    return row
 
 
-def approve(
+def approve_messages(
     session: Session,
     user: User,
     campaign_id: int,
+    step_id: int,
     seen: Mapping[int, str],
     *,
     me: Mapping[str, str],
     now: datetime,
-) -> list[ReviewPreview]:
-    """Approve previews the person viewed. ``seen`` maps each enrollment to the
-    ``fingerprint`` its preview came with: refused when a step, a template or the
-    contact changed since."""
-    _require_writer(session, "approve")
+) -> list[StepApproval]:
+    """Approve single messages of a ``personal_line`` step. ``seen`` maps each pending
+    enrollment to the ``fingerprint`` its message came with: refused
+    (:class:`ReviewStale`) when the step, its template or the contact changed since.
+    Refused for any other step, which is approved as a whole (:func:`approve_step`)."""
+    _require_writer(session, "approve_messages")
     campaign = _reviewing(session, user, campaign_id)
-    ids = sorted(seen)
-    if not ids:
-        raise ReviewConflict("approve at least one enrollment")
-    content = content_fingerprint(session, user, campaign, me)
-    rows = {r.enrollment_id: r for r in _rows(session, user, campaign_id)}
-    pending = {e.id: e for e in _pending(session, user, campaign_id)}
-    current: dict[int, str] = {}
-    for enrollment_id in ids:
-        if enrollment_id not in pending:
-            raise ReviewConflict(f"enrollment {enrollment_id} is not pending in this campaign")
-        if enrollment_id not in rows:
-            raise ReviewConflict(f"enrollment {enrollment_id}'s previews were not viewed")
-        current[enrollment_id] = preview_fingerprint(
-            session, user, content, pending[enrollment_id].contact_id, now.date()
+    step = _step(session, user, campaign_id, step_id)
+    template = _template(session, user, step)
+    if not is_per_message(template):
+        raise ReviewConflict(
+            f"step {step.position} is approved as a whole; only a step that uses"
+            " {{ personal_line }} has its messages approved one by one"
         )
+    ids = sorted(seen)
+    if not ids or len(ids) > APPROVE_MAX:
+        raise ReviewConflict(f"approve between 1 and {APPROVE_MAX} messages at a time")
+    pending = {e.id: e for e in _pending(session, user, campaign_id)}
+    unknown = [i for i in ids if i not in pending]
+    if unknown:
+        raise ReviewConflict(f"enrollment {unknown[0]} is not pending in this campaign")
+    step_print = step_fingerprint(step, template, campaign, me)
+    contacts = _contacts(session, user, [pending[i].contact_id for i in ids])
+    current = {
+        i: message_fingerprint(
+            step_print,
+            contacts.get(pending[i].contact_id),
+            campaign,
+            step,
+            me,
+            now.date(),
+            enrollment_id=i,
+        )
+        for i in ids
+    }
+    for enrollment_id in ids:
         if seen[enrollment_id] != current[enrollment_id]:
             raise ReviewStale(
-                f"enrollment {enrollment_id}'s previews changed since they were viewed;"
-                " view them again"
+                f"enrollment {enrollment_id}'s message for step {step.position} changed since"
+                " it was shown; review it again"
             )
+    rows = {r.enrollment_id: r for r in _approvals(session, user, campaign_id, step.id)}
+    out = []
     for enrollment_id in ids:
-        rows[enrollment_id].approved_at = now
-        rows[enrollment_id].approved_fingerprint = current[enrollment_id]
+        row = rows.get(enrollment_id)
+        if row is None:
+            row = StepApproval(
+                user_id=user.id,
+                campaign_id=campaign_id,
+                step_id=step.id,
+                enrollment_id=enrollment_id,
+            )
+            session.add(row)
+        row.fingerprint = current[enrollment_id]
+        row.approved_at = now
+        out.append(row)
     session.flush()
-    return [rows[i] for i in sorted(ids)]
+    log.info("campaign %d: %d messages of step %d approved", campaign_id, len(ids), step.position)
+    return out
 
 
 # --- lint and guards ----------------------------------------------------------------
@@ -709,8 +888,8 @@ def prepare_test_send(
     me: Mapping[str, str],
     today: date,
 ) -> TestSendPlan:
-    """A test send of an email step, rendered for one of the campaign's enrollments
-    (the given one, else the first pending) and addressed to the campaign mailbox's
+    """A test send of an email step, rendered for one of the campaign's pending
+    enrollments (the given one, else the first) and addressed to the campaign mailbox's
     own address, never the contact's.
 
     Refused (:class:`ReviewConflict`) unless the mailbox is ``ok`` and armed, for
@@ -738,9 +917,8 @@ def prepare_test_send(
     if mailbox.status is not MailboxStatus.OK:
         raise ReviewConflict(f"{mailbox.email} is {mailbox.status}")
     pending = _pending(session, user, campaign_id)
-    if enrollment_id is None:  # the first sampled one, else the first pending one
-        sampled = {r.enrollment_id for r in _rows(session, user, campaign_id) if r.sampled}
-        enrollment = next((e for e in pending if e.id in sampled), pending[0] if pending else None)
+    if enrollment_id is None:  # the first pending one
+        enrollment = pending[0] if pending else None
     else:
         enrollment = next((e for e in pending if e.id == enrollment_id), None)
     if enrollment is None:
@@ -750,7 +928,11 @@ def prepare_test_send(
     try:
         if contact is None:
             raise TemplateRenderError("the contact is gone")
-        rendered = _render_step(template, contact, campaign, step, me, today)
+        rendered = _render_step(
+            template,
+            merge_values(contact, campaign, step, me, today, enrollment_id=enrollment.id),
+            today,
+        )
     except TemplateRenderError as exc:
         raise ReviewConflict(f"step {step.position} does not render: {exc}") from exc
     if not rendered.subject:
@@ -882,29 +1064,51 @@ def missing(
     steps = _steps(session, user, campaign.id)
     content = content_fingerprint(session, user, campaign, me)
     pending, audience = _audience(session, user, campaign)
-    live = {e.id: e for e in pending}
-    rows = _rows(session, user, campaign.id)
-
-    def unapproved(candidates: Sequence[ReviewPreview]) -> tuple[int, ...]:
-        return tuple(
-            r.enrollment_id
-            for r in candidates
-            if r.approved_at is None
-            or r.enrollment_id not in live
-            or r.approved_fingerprint
-            != preview_fingerprint(
-                session, user, content, live[r.enrollment_id].contact_id, now.date()
+    if not pending:
+        out.append(Missing("audience", "nobody is enrolled"))
+    approvals = _approvals(session, user, campaign.id)
+    whole: list[int] = []
+    per_message: list[int] = []
+    unapproved: set[int] = set()
+    contacts: dict[int, Contact] | None = None
+    for step in steps:
+        template = _template(session, user, step)
+        fingerprint = step_fingerprint(step, template, campaign, me)
+        if not is_per_message(template):
+            if not _step_approved(approvals, step.id, fingerprint):
+                whole.append(step.position)
+            continue
+        if contacts is None:
+            contacts = _contacts(session, user, [e.contact_id for e in pending])
+        approved = _messages_approved(approvals, step.id)
+        late = {
+            e.id
+            for e in pending
+            if approved.get(e.id)
+            != message_fingerprint(
+                fingerprint,
+                contacts.get(e.contact_id),
+                campaign,
+                step,
+                me,
+                now.date(),
+                enrollment_id=e.id,
+            )
+        }
+        if late:
+            per_message.append(step.position)
+            unapproved |= late
+    if whole:
+        out.append(Missing("step_approvals", "steps not approved", step_positions=tuple(whole)))
+    if per_message:
+        out.append(
+            Missing(
+                "message_approvals",
+                "messages of steps that use {{ personal_line }} not approved one by one",
+                enrollment_ids=tuple(sorted(unapproved)),
+                step_positions=tuple(per_message),
             )
         )
-
-    if not live:
-        out.append(Missing("audience", "nobody is enrolled"))
-    if not _sample_is_current(rows, audience):
-        out.append(Missing("sample_previews", "no sample was drawn for the current audience"))
-    elif ids := unapproved([r for r in rows if r.sampled]):
-        out.append(Missing("sample_previews", "sampled previews not approved", enrollment_ids=ids))
-    if ids := unapproved([r for r in rows if not r.sampled and r.enrollment_id in live]):
-        out.append(Missing("searched_previews", "viewed previews not approved", enrollment_ids=ids))
     sent = set(
         session.scalars(
             scoped(user, TestSend)
