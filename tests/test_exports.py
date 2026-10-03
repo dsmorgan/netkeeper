@@ -1095,3 +1095,25 @@ def test_export_batches_across_the_page_boundary(
     rows = json.loads(text)
     assert len(rows) == 5
     assert [row["last_name"] for row in rows] == [f"Last{n}" for n in range(1, 6)]
+
+
+@pytest.mark.parametrize("preset", ["full", "linkedin-archive"])
+def test_vcard_4_escapes_the_name_and_title_lines(session: Session, preset: str) -> None:
+    """The 4.0 cards (the ``full`` card and the column-driven one) escape N, FN,
+    and TITLE like every other TEXT value, so a ``;`` adds no name component and a
+    bare ``\\r`` cannot end the line (#254)."""
+    user = factories.make_user(session)
+    factories.make_contact(
+        session,
+        user,
+        first_name="Ada; Jr",
+        last_name="Lo,ve\\lace",
+        current_title="VP, Sales; West\rRegion",
+    )
+    session.commit()
+    text = _run(session, user, preset=preset, output_format="vcard")
+    lines = text.split("\r\n")
+    assert "VERSION:4.0" in lines
+    assert "N:Lo\\,ve\\\\lace;Ada\\; Jr;;;" in lines
+    assert "TITLE:VP\\, Sales\\; West\\nRegion" in lines
+    assert "\r" not in text.replace("\r\n", "")
