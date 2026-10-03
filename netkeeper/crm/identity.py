@@ -87,7 +87,9 @@ log = logging.getLogger(__name__)
 # A change to any of these on an existing contact writes a contact_snapshot (spec 8.1, 9.8).
 JOB_FIELDS: Final[tuple[str, ...]] = ("headline", "current_title", "current_company", "location")
 # Of those, the ones whose change is a position change: the dashboard's "changed
-# jobs" (spec 9.8, #286). A first fill from empty is not one.
+# jobs" (spec 9.8, #286). A first fill from empty is not one, and neither is a
+# value only an import or a person wrote: a job change is an enrichment
+# replacing what an earlier enrichment recorded (#323).
 POSITION_FIELDS: Final[tuple[str, ...]] = ("current_title", "current_company")
 
 # More decided wins in a merge: a person who said "met" is not un-met by a duplicate.
@@ -585,7 +587,8 @@ def apply(
     provided field only when :func:`~netkeeper.crm.provenance.may_overwrite`
     allows it; a slug change keeps the old slug in ``contact_aliases``; a change
     to any job field writes a ``contact_snapshot`` of the values before it,
-    marked ``position_changed`` when the title or company changed. Either
+    marked ``position_changed`` when a sync replaced a title or company that an
+    earlier sync recorded (#323; see below). Either
     way, a row from any source but ``manual`` also notes every provided field in
     ``synced_values`` with its source and ``observed_at``, whether or not the
     live column took it (unless a newer observation is already noted), so a
@@ -596,6 +599,15 @@ def apply(
     ``observed_at`` refreshed unless the row was observed more recently, an
     existing row's ``is_primary`` kept, and a position's ``is_current`` changed
     only when the row says so.
+
+    **What counts as a job change (#323).** ``position_changed`` is set only
+    when ``incoming`` comes from the sync and replaces a non-empty
+    ``current_title`` or ``current_company`` whose recorded source was already
+    ``sync``. Only a profile visit (enrichment) gives a sync title or company;
+    the connections list gives a name and headline. So a contact's first
+    enrichment, which replaces a title or company from the archive, a CSV, or a
+    person, never counts, and a later one counts only against what an earlier
+    one recorded.
 
     ``snapshot=False`` skips the ``contact_snapshot`` a job-field change would
     write: the sync passes it when the values being replaced were only ever read
@@ -681,6 +693,11 @@ def _update(
     # that catches the ValueError per row would commit that half of the row.
     _assert_identities_free(session, user, contact.id, writable)
     before = {name: getattr(contact, name) for name in JOB_FIELDS}
+    # Read before the loop below records the incoming source over it.
+    enriched_before = {
+        name: (contact.field_sources or {}).get(name) == ContactSource.SYNC.value
+        for name in POSITION_FIELDS
+    }
     for name, value in provided.items():
         if name in writable:
             old: str | date | None = getattr(contact, name)
@@ -699,8 +716,11 @@ def _update(
                 user_id=user.id,
                 source=incoming.source,
                 observed_at=incoming.observed_at,
-                position_changed=any(
-                    before[name] not in (None, "") and before[name] != getattr(contact, name)
+                position_changed=incoming.source is ContactSource.SYNC
+                and any(
+                    enriched_before[name]
+                    and before[name] not in (None, "")
+                    and before[name] != getattr(contact, name)
                     for name in POSITION_FIELDS
                 ),
                 **before,

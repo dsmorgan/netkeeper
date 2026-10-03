@@ -216,7 +216,7 @@ export const PREDICATES: readonly PredicateSpec[] = [
     op: 'changed_jobs_within_days',
     label: 'changed jobs within',
     group: 'time',
-    hint: 'A job-change snapshot observed in the window.',
+    hint: 'A later enrichment found a new title or company. A first enrichment never counts.',
     create: () => ({ op: 'changed_jobs_within_days', days: 90 }),
     example: { op: 'changed_jobs_within_days', days: 90 },
   },

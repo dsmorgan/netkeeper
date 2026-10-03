@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.crm.filters import compile_filter, parse_filter
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import session_scope
 from netkeeper.models import (
@@ -267,6 +268,24 @@ def test_archived_merged_and_do_not_contact_are_not_prompts(session: Session) ->
     _noticed(session, user, at, do_not_contact=True)
 
     assert _changed(session, user) == [live]
+
+
+def test_the_card_and_the_crm_filter_agree_on_who_changed_jobs(session: Session) -> None:
+    """#313, #323: "changed jobs" means the same on the dashboard and in a smart list."""
+    user = factories.make_user(session)
+    expected = [
+        _noticed(session, user, NOW - timedelta(days=1)),
+        _noticed(session, user, NOW - timedelta(days=30)),
+    ]
+    _noticed(session, user, NOW - timedelta(days=1), position_changed=False)
+    _noticed(session, user, NOW - timedelta(days=1), source=ContactSource.ARCHIVE)
+    _noticed(session, user, NOW - timedelta(days=31))
+    _noticed(session, user, NOW + timedelta(minutes=1))
+    tree = parse_filter({"where": {"op": "changed_jobs_within_days", "days": 30}})
+
+    matched = session.scalars(compile_filter(user, tree, session=session, now=NOW))
+
+    assert sorted(_changed(session, user)) == sorted(c.id for c in matched) == sorted(expected)
 
 
 def test_changed_jobs_limit_keeps_the_total(session: Session) -> None:

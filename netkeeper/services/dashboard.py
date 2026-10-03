@@ -16,7 +16,11 @@ This module holds the three reads that had no home:
   restates a file, it does not notice anything. The ``last_position_change``
   merge field (spec 11.1) still reads the positions' dates; a template says
   "congrats on the move" by the profile's calendar. A contact who is archived,
-  merged away, or do-not-contact is not a prompt to reach out.
+  merged away, or do-not-contact is not a prompt to reach out. A contact's
+  first enrichment is never a change: only a later enrichment that finds a
+  different position than an earlier one recorded is (#323). The CRM filter
+  ``changed_jobs_within_days`` shares the selection
+  (:mod:`netkeeper.crm.job_changes`).
 - **Inbound this week**: interactions of kind ``email_in`` or ``li_in`` in the
   last seven days. This is not a reply count. Reply detection is P3-08 and is
   not built yet, so the dashboard says so, and shows this count as what it is.
@@ -38,10 +42,10 @@ from typing import Final
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from netkeeper.crm.job_changes import job_change
 from netkeeper.models import (
     Contact,
     ContactSnapshot,
-    ContactSource,
     Interaction,
     InteractionKind,
     User,
@@ -72,23 +76,19 @@ def changed_jobs(
 ) -> tuple[list[ChangedJob], int]:
     """Live contacts netkeeper saw change position in the last :data:`CHANGED_JOBS_WINDOW`.
 
-    A change is a ``contact_snapshot`` with ``position_changed`` set and source
-    ``sync``, observed between ``now - CHANGED_JOBS_WINDOW`` and ``now``, both
-    inclusive. Each contact is listed once, at its latest such snapshot; newest
-    first, then by contact id. The total is the count before ``limit``.
+    A change is what :func:`~netkeeper.crm.job_changes.job_change` selects (a
+    ``contact_snapshot`` with ``position_changed`` set and source ``sync``),
+    observed between ``now - CHANGED_JOBS_WINDOW`` and ``now``, both inclusive:
+    the same rows the filter ``changed_jobs_within_days`` matches. Each contact
+    is listed once, at its latest such snapshot; newest first, then by contact
+    id. The total is the count before ``limit``.
     """
     latest = (
         select(
             ContactSnapshot.contact_id.label("contact_id"),
             func.max(ContactSnapshot.observed_at).label("noticed_at"),
         )
-        .where(
-            ContactSnapshot.user_id == user.id,
-            ContactSnapshot.position_changed.is_(True),
-            ContactSnapshot.source == ContactSource.SYNC,
-            ContactSnapshot.observed_at >= now - CHANGED_JOBS_WINDOW,
-            ContactSnapshot.observed_at <= now,
-        )
+        .where(job_change(user, since=now - CHANGED_JOBS_WINDOW, until=now))
         .group_by(ContactSnapshot.contact_id)
         .subquery()
     )

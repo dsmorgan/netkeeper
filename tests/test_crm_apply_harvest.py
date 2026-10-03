@@ -21,8 +21,10 @@ from profile_fakes import PROFILES, Job, Profile, contact_info_of, details_of
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.crm import apply as mapping
+from netkeeper.crm import identity
 from netkeeper.crm.apply import HarvestCounts, HarvestResult, apply_harvest
-from netkeeper.crm.identity import merge
+from netkeeper.crm.filters import compile_filter, parse_filter
+from netkeeper.crm.identity import IncomingContact, Matched, merge
 from netkeeper.crm.provenance import set_manual_field
 from netkeeper.db import session_scope
 from netkeeper.linkedin.classify import Outcome
@@ -302,6 +304,133 @@ def test_the_dashboard_dates_a_new_job_by_when_the_visit_saw_it(
     [row], total = dashboard.changed_jobs(writer, user, now=seen + timedelta(days=1), limit=10)
     assert (row.contact.id, row.noticed_at, total) == (contact.id, seen, 1)
     assert row.contact.current_company == "Madeup Mobility"
+
+
+# --- #323: a job change is a later enrichment against an earlier one ------------------------
+
+
+def _job_changes(session: Session, user: User, now: datetime) -> list[int]:
+    """Contacts the dashboard card lists, after checking the CRM filter agrees (#313)."""
+    rows, _ = dashboard.changed_jobs(session, user, now=now, limit=100)
+    card = sorted(row.contact.id for row in rows)
+    tree = parse_filter({"where": {"op": "changed_jobs_within_days", "days": 30}})
+    matched = sorted(
+        c.id for c in session.scalars(compile_filter(user, tree, session=session, now=now))
+    )
+    assert matched == card
+    return card
+
+
+def _imported(
+    session: Session, user: User, contact: Contact, source: ContactSource, at: datetime
+) -> None:
+    """``contact``'s title and company as an archive or CSV import writes them."""
+    incoming = IncomingContact(
+        source=source,
+        observed_at=at,
+        li_public_id=contact.li_public_id,
+        current_title="Analyst",
+        current_company="Imported Co",
+    )
+    identity.apply(session, user, incoming, Matched(contact.id, "public_id"))
+
+
+def test_a_first_enrichment_is_never_a_job_change(writer: Session, user: User) -> None:
+    """#323: the first visit has no earlier enrichment to compare against."""
+    contact = _stored(writer, user, PRIYA)
+
+    apply_harvest(writer, user, _harvest(contact, PRIYA))
+
+    assert contact.snapshots == []
+    assert _job_changes(writer, user, NOW) == []
+
+
+@pytest.mark.parametrize("source", [ContactSource.ARCHIVE, ContactSource.CSV])
+def test_a_first_enrichment_over_an_imported_job_is_not_a_job_change(
+    writer: Session, user: User, source: ContactSource
+) -> None:
+    """#323: the archive's or a CSV's position is not the earlier position."""
+    contact = _stored(writer, user, PRIYA)
+    _imported(writer, user, contact, source, NOW - timedelta(days=90))
+
+    apply_harvest(writer, user, _harvest(contact, PRIYA))
+
+    (snapshot,) = contact.snapshots
+    assert (snapshot.current_title, snapshot.current_company) == ("Analyst", "Imported Co")
+    assert snapshot.source is ContactSource.SYNC
+    assert not snapshot.position_changed
+    assert contact.current_company == "Fictional Robotics Co"
+    assert _job_changes(writer, user, NOW) == []
+
+
+def test_a_first_enrichment_after_the_connections_sync_is_not_a_job_change(
+    writer: Session, user: User
+) -> None:
+    """#323: the connections list gives a name and a headline, never a position."""
+    contact = _stored(writer, user, PRIYA)
+    mapping.apply_page(writer, user, _connections_page([PRIYA], NOW - timedelta(days=1)))
+    assert (contact.current_title, contact.current_company) == (None, None)
+
+    apply_harvest(writer, user, _harvest(contact, PRIYA))
+
+    assert not any(snapshot.position_changed for snapshot in contact.snapshots)
+    assert _job_changes(writer, user, NOW) == []
+
+
+def test_a_second_enrichment_with_the_same_position_is_not_a_job_change(
+    writer: Session, user: User
+) -> None:
+    contact = _stored(writer, user, PRIYA)
+    _imported(writer, user, contact, ContactSource.ARCHIVE, NOW - timedelta(days=90))
+    apply_harvest(writer, user, _harvest(contact, PRIYA))
+    reworded = replace(PRIYA, headline="Now writing about data")
+    later = NOW + timedelta(days=20)
+
+    apply_harvest(writer, user, _harvest(contact, reworded, at=later))
+
+    assert [s.position_changed for s in contact.snapshots] == [False, False]
+    assert _job_changes(writer, user, later) == []
+
+
+def test_a_second_enrichment_with_a_new_position_is_a_job_change(
+    writer: Session, user: User
+) -> None:
+    """#323: the first enrichment over an archive job is the baseline; the second is a move."""
+    contact = _stored(writer, user, PRIYA)
+    _imported(writer, user, contact, ContactSource.ARCHIVE, NOW - timedelta(days=90))
+    apply_harvest(writer, user, _harvest(contact, PRIYA))
+    moved = replace(
+        PRIYA, jobs=(Job("Principal Engineer", "Madeup Mobility", start=(2026, 8)), *PRIYA.jobs)
+    )
+    later = NOW + timedelta(days=20)
+
+    apply_harvest(writer, user, _harvest(contact, moved, at=later))
+
+    first, newest = sorted(contact.snapshots, key=lambda s: s.observed_at)
+    assert not first.position_changed
+    assert newest.position_changed
+    assert (newest.current_title, newest.current_company) == (
+        "Staff Data Engineer",
+        "Fictional Robotics Co",
+    )
+    assert _job_changes(writer, user, later) == [contact.id]
+
+
+def test_only_an_enrichment_notices_a_job_change(writer: Session, user: User) -> None:
+    """#323: a person's edit over an enriched job writes a snapshot, not a job change."""
+    contact = _stored(writer, user, PRIYA)
+    apply_harvest(writer, user, _harvest(contact, PRIYA))
+    edit = IncomingContact(
+        source=ContactSource.MANUAL,
+        observed_at=NOW + timedelta(days=1),
+        current_company="Typed By Hand",
+    )
+
+    identity.apply(writer, user, edit, Matched(contact.id, "urn"))
+
+    (snapshot,) = contact.snapshots
+    assert snapshot.current_company == "Fictional Robotics Co"
+    assert not snapshot.position_changed
 
 
 def test_the_same_harvest_twice_writes_no_snapshot(writer: Session, user: User) -> None:
