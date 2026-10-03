@@ -3980,7 +3980,9 @@ def history_scan_gmail(
     """Search Gmail, read-only, for what the imported recipients sent back.
 
     For each recipient: messages from their address, and bounce notices that name
-    it, from the campaign's start until 120 days after its last batch. With --apply,
+    it, from the campaign's start until 120 days after its last batch. For each
+    campaign: replies with its exact subject from people the workbook does not list,
+    who become recipients found by subject. With --apply,
     a bounce and an unsubscribe go on the do-not-send list, an unsubscribe also sets
     the contact's do-not-contact, and any other reply flags the contact for review.
     Nothing in Gmail is changed. A run stopped by a rate limit resumes where it
@@ -3999,9 +4001,10 @@ def history_scan_gmail(
                 raise typer.Exit(code=1)
             user_id, mailbox_id = user.id, box.id
             targets = history_scan.scan_targets(session, user, rescan=rescan, limit=limit)
-        if not targets:
+            subjects = history_scan.subject_targets(session, user, rescan=rescan)
+        if not targets and not subjects:
             typer.echo(
-                "nothing to scan: no imported recipients"
+                "nothing to scan: no imported recipients or campaign subjects"
                 + ("" if rescan else " left unscanned (pass --rescan to scan them again)")
             )
             return
@@ -4010,7 +4013,7 @@ def history_scan_gmail(
         except (mailbox_service.MailboxNotFound, mailbox_service.MailboxNotReady) as exc:
             typer.echo(f"error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
-        read = history_scan.read_gmail(gmail, targets)
+        read = history_scan.read_gmail(gmail, targets, subjects)
         with session_scope(factory, write=True) as session:
             user = _local_user_or_exit(session)
             report = history_scan.apply_scan(session, user, read, now=datetime.now(UTC))
@@ -4024,21 +4027,26 @@ def history_scan_gmail(
 def _print_history_scan(report: history_scan.ScanReport, *, applied: bool) -> None:
     typer.echo("applied" if applied else _DRY_RUN_NOTE)
     typer.echo(f"scanned {report.scanned} recipient(s); nothing found for {report.nothing}")
-    if report.by_campaign:
+    campaign_ids = sorted(set(report.by_campaign) | set(report.by_subject))
+    if campaign_ids:
+        none = history_scan.KindCount()
         rows = [
             (
                 report.campaign_names.get(campaign_id, str(campaign_id)),
-                str(counts.reply),
-                str(counts.unsubscribe),
-                str(counts.auto),
-                str(counts.bounce),
+                str(report.by_campaign.get(campaign_id, none).reply),
+                str(report.by_campaign.get(campaign_id, none).unsubscribe),
+                str(report.by_campaign.get(campaign_id, none).auto),
+                str(report.by_campaign.get(campaign_id, none).bounce),
+                str(report.by_subject.get(campaign_id, 0)),
             )
-            for campaign_id, counts in sorted(report.by_campaign.items())
+            for campaign_id in campaign_ids
         ]
-        typer.echo(
-            _format_table(("CAMPAIGN", "REPLIES", "UNSUBSCRIBES", "AUTO", "BOUNCES"), rows),
-            nl=False,
-        )
+        headers = ("CAMPAIGN", "REPLIES", "UNSUBSCRIBES", "AUTO", "BOUNCES", "FOUND BY SUBJECT")
+        typer.echo(_format_table(headers, rows), nl=False)
+    if report.subject_samples:
+        typer.echo(f"found by subject, not in the workbook (first {len(report.subject_samples)}):")
+        for address in report.subject_samples:
+            typer.echo(f"  {address}")
     for kind, label in (
         (HistoryReplyKind.REPLY, "replies"),
         (HistoryReplyKind.UNSUBSCRIBE, "unsubscribes"),
@@ -4065,7 +4073,8 @@ def _print_history_scan(report: history_scan.ScanReport, *, applied: bool) -> No
     if report.stopped is not None:
         typer.echo(
             f"error: Gmail stopped the scan ({report.stopped}); {report.remaining} recipient(s)"
-            " were not scanned. Run it again later to continue.",
+            f" and {report.subject_remaining} campaign subject search(es) were not done."
+            " Run it again later to continue.",
             err=True,
         )
 

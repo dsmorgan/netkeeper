@@ -12,7 +12,7 @@ Then you triage the people who replied.
 You need:
 
 - The old tool's report, exported from Google Sheets as an `.xlsx` workbook, one tab per campaign. Keep it outside the repository; `.gitignore` refuses `*.xlsx` files anyway.
-- For the scan, the Gmail account the old tool sent from, connected to netkeeper ([Gmail setup](gmail-setup.md)). The scan doesn't need the mailbox armed: it sends nothing.
+- For the scan, the Gmail account where replies to the old campaigns arrived, connected to netkeeper ([Gmail setup](gmail-setup.md)). The scan doesn't need the mailbox armed: it sends nothing.
 
 ## Step 1: import the workbook
 
@@ -51,7 +51,9 @@ netkeeper history scan-gmail
 
 For each imported recipient, the scan makes two searches, from the day before the campaign started until 120 days after its last batch: messages from the recipient's address, and delivery-failure notices that name it. It reads only each message's headers and Gmail's short preview, never the body, and it changes nothing in Gmail: no labels, no read state, no deletes.
 
-To try the scan on a few recipients first, add `--limit 5`. If your account has more than one mailbox, name the one the old tool sent from with `--mailbox you@example.com`.
+The workbook names only the people who opened, clicked, or bounced, so the scan also looks for everyone else who replied. Replies usually keep the campaign's subject, so for each campaign it searches for messages with that subject, not sent by you, in the same window. A message counts only when its subject, without `Re:` or `Fwd:`, is exactly the campaign's subject, it arrived on or after the campaign's start day, and its sender isn't one of your own mailboxes or already a recipient of that campaign. Each such sender becomes a recipient of the campaign, marked as found by subject, is matched to a contact, gets the same imported **email out** entry, and is handled like any other recipient in the table below. The report's **FOUND BY SUBJECT** column counts them per campaign, and the first 20 addresses are listed. Each campaign's subject search runs once, unless you add `--rescan`.
+
+To try the scan on a few recipients first, add `--limit 5`. If your account has more than one mailbox, name the one that received the replies with `--mailbox you@example.com`.
 
 The report counts what the scan found in each campaign and lists the first 20 addresses of each kind. When the counts look right, apply them:
 
@@ -71,6 +73,10 @@ The scan can't tell a polite "no, thanks" from a friendly reply, so every person
 A scan that Gmail stops, for example at a rate limit, saves what it finished and exits with an error. Run the same command again later, and it continues with the recipients it didn't reach. A recipient already scanned is skipped unless you add `--rescan`.
 
 If the report lists people who wrote back but whom no single contact holds, import again with `--create-missing` (or merge the duplicates), and then scan again with `--rescan`.
+
+## What stays unknown
+
+Someone the old tool emailed who neither opened, clicked, nor bounced, and who never replied, appears nowhere: not in the workbook, and not in Gmail. netkeeper can't know the old tool emailed them, so no guard skips them. The import's **UNLISTED** column tells you how many such people each campaign had. When you pick the contacts for your first batch, check them by hand against what you remember of the old campaigns, and leave out anyone the old tool reached recently.
 
 ## Step 3: triage the people who replied
 

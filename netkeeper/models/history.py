@@ -61,7 +61,9 @@ class HistoryCampaign(UserOwned, TimestampMixin, Base):
     workbook updates the row instead of adding another. ``source_sha256`` is the
     digest of the file the row was last imported from. The three counts are the
     workbook's own aggregate cells; ``recipients_count`` can be larger than the
-    number of people the workbook lists.
+    number of people the workbook lists. ``subject_scanned_at`` is when the Gmail scan
+    last searched for replies by the campaign's subject (a scan without ``--rescan``
+    searches each campaign once).
     """
 
     __tablename__ = "history_campaigns"
@@ -76,6 +78,7 @@ class HistoryCampaign(UserOwned, TimestampMixin, Base):
     opens_count: Mapped[int | None] = mapped_column(Integer)
     bounces_count: Mapped[int | None] = mapped_column(Integer)
     source_sha256: Mapped[str] = mapped_column(String(SHA256_HEX_LENGTH), nullable=False)
+    subject_scanned_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     recipients: Mapped[list[HistoryRecipient]] = relationship(
         back_populates="campaign", cascade="all, delete-orphan", passive_deletes=True
@@ -91,7 +94,9 @@ class HistoryRecipient(UserOwned, TimestampMixin, Base):
     contact merged away since, so readers resolve the survivor.
 
     ``opened``, ``clicked`` and ``bounce_listed`` say which of the workbook's lists
-    named the person. ``email_out_interaction_id`` is the timeline entry the import
+    named the person. ``found_by_subject`` marks a row the workbook did not list: the
+    Gmail scan found a reply with the campaign's subject from this address, so the
+    campaign reached them. ``email_out_interaction_id`` is the timeline entry the import
     wrote, so a re-import writes no second one.
 
     The rest is the Gmail scan's: ``scanned_at`` (a scan without ``--rescan`` skips
@@ -115,6 +120,7 @@ class HistoryRecipient(UserOwned, TimestampMixin, Base):
     opened: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     clicked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     bounce_listed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    found_by_subject: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     email_out_interaction_id: Mapped[int | None] = mapped_column(
         ForeignKey("interactions.id", ondelete="SET NULL"), index=True
     )

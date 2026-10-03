@@ -16,6 +16,19 @@ last batch:
   (:func:`~netkeeper.services.campaign_replies.is_hard_bounce`) and, when it names
   its failed recipients, names this one, is a bounce.
 
+**The subject pass.** The workbook lists only the people who opened, clicked, or
+bounced, so a reply from anyone else would be missed. Replies usually keep the
+campaign's subject, so for each campaign the scan also searches
+``subject:"<subject>" -from:me`` in the same window (:func:`subject_query`). A message
+counts only when its subject, without ``Re:``/``Fwd:``, is exactly the campaign's
+(:func:`normalize_subject`), it arrived on or after the start day, and its sender is
+not one of the user's mailboxes and not already a recipient of that campaign. Each
+such sender becomes a recipient row with ``found_by_subject``, is matched through
+``identity.resolve``, gets the imported ``email_out`` a listed recipient gets, and is
+classified and applied as one. Bounce notices do not apply here. A campaign's subject
+pass runs once (``subject_scanned_at``) unless asked to rescan. People who neither
+replied nor appear in the workbook stay unknown.
+
 **Read-only.** The scan calls only :meth:`Gmail.search` and :meth:`Gmail.get_message`.
 It never sends, drafts, labels, or deletes anything (ADR 0003), and it holds no
 database session while Gmail answers.
@@ -52,14 +65,19 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
-from email.utils import getaddresses
+from email.utils import getaddresses, parseaddr
 from typing import Final
 
 from sqlalchemy.orm import Session
 
 from netkeeper.campaigns.gmail import Gmail, GmailError, GmailNotFound, Message, MessageRef
 from netkeeper.crm import do_not_send
-from netkeeper.crm.history import HISTORY_SUMMARY
+from netkeeper.crm.history import (
+    HISTORY_SUMMARY,
+    campaign_start,
+    match_address,
+    record_email_out,
+)
 from netkeeper.crm.identity import resolve_survivor
 from netkeeper.crm.interactions import add_interaction
 from netkeeper.db import is_writer
@@ -73,6 +91,7 @@ from netkeeper.models import (
     HistoryRecipient,
     HistoryReplyKind,
     InteractionKind,
+    Mailbox,
     User,
 )
 from netkeeper.scoping import get_scoped, scoped
@@ -105,6 +124,10 @@ DAEMON_QUERY: Final = "from:mailer-daemon"
 READ_ONLY_METHODS: Final = frozenset({"messages.list", "messages.get"})
 """The only Gmail methods the scan calls. Tests hold it to this through the fake's call log."""
 
+SUBJECT_SEARCH_MAX: Final = 200
+"""At most this many messages one campaign's subject search reads."""
+
+_REPLY_PREFIX: Final = re.compile(r"^\s*(?:re|fwd?|aw)\s*:\s*", re.IGNORECASE)
 _SEARCHABLE: Final = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+")
 _SAMPLE: Final = 20
 
@@ -161,6 +184,80 @@ def scan_targets(
     return targets
 
 
+@dataclass(frozen=True, slots=True)
+class SubjectTarget:
+    """One campaign whose replies to search for by subject (the subject pass)."""
+
+    campaign_id: int
+    subject: str
+    starts: datetime
+    after: datetime
+    before: datetime
+    known: frozenset[str]
+    """The campaign's recipient addresses: someone already listed is not found again."""
+    own: frozenset[str]
+    """The user's own mailbox addresses: never a recipient."""
+
+
+def normalize_subject(subject: str | None) -> str:
+    """A subject without its ``Re:``/``Fwd:`` prefixes, whitespace collapsed, case folded:
+    what the subject pass compares, exactly."""
+    text = subject or ""
+    while True:
+        stripped = _REPLY_PREFIX.sub("", text, count=1)
+        if stripped == text:
+            return " ".join(text.split()).casefold()
+        text = stripped
+
+
+def subject_query(target: SubjectTarget) -> str | None:
+    """``subject:"<subject>" -from:me`` in the campaign's window, or ``None`` for a subject
+    with nothing to search for. Quotes and backslashes cannot be escaped in a Gmail
+    phrase, so they become spaces; the exact comparison afterwards still holds."""
+    phrase = " ".join(re.sub(r'["\\]', " ", target.subject).split())
+    if not phrase:
+        return None
+    span = f"after:{int(target.after.timestamp())} before:{int(target.before.timestamp())}"
+    return f'subject:"{phrase}" -from:me {span}'
+
+
+def subject_targets(session: Session, user: User, *, rescan: bool = False) -> list[SubjectTarget]:
+    """The campaigns with a subject whose subject pass has not run (all of them with
+    ``rescan``). Reads only."""
+    statement = scoped(user, HistoryCampaign).where(HistoryCampaign.subject.is_not(None))
+    if not rescan:
+        statement = statement.where(HistoryCampaign.subject_scanned_at.is_(None))
+    campaigns = list(
+        session.scalars(statement.order_by(HistoryCampaign.started_on, HistoryCampaign.id))
+    )
+    if not campaigns:
+        return []
+    own = frozenset(m.email.lower() for m in session.scalars(scoped(user, Mailbox)))
+    known: dict[int, set[str]] = {c.id: set() for c in campaigns}
+    for campaign_id, email in session.execute(
+        scoped(user, HistoryRecipient)
+        .with_only_columns(HistoryRecipient.history_campaign_id, HistoryRecipient.email)
+        .where(HistoryRecipient.history_campaign_id.in_(known))
+    ):
+        known[campaign_id].add(email)
+    targets: list[SubjectTarget] = []
+    for campaign in campaigns:
+        assert campaign.subject is not None
+        after, before = window(campaign.started_on, campaign.last_batch_on)
+        targets.append(
+            SubjectTarget(
+                campaign_id=campaign.id,
+                subject=campaign.subject,
+                starts=campaign_start(campaign.started_on),
+                after=after,
+                before=before,
+                known=frozenset(known[campaign.id]),
+                own=own,
+            )
+        )
+    return targets
+
+
 # --- reading Gmail ------------------------------------------------------------------------
 
 
@@ -183,18 +280,36 @@ class Scanned:
     findings: tuple[Finding, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SubjectFound:
+    """Someone the workbook does not list who answered a campaign, found by its subject."""
+
+    campaign_id: int
+    email: str
+    first_name: str | None
+    last_name: str | None
+    findings: tuple[Finding, ...]
+
+
 @dataclass
 class ScanRead:
-    """What one run read: the recipients it finished, and why it stopped early, if it did."""
+    """What one run read: the recipients it finished, the campaigns whose subject pass it
+    finished and whom that found, and why it stopped early, if it did."""
 
     scanned: list[Scanned] = field(default_factory=list)
+    subject_found: list[SubjectFound] = field(default_factory=list)
+    subject_done: list[int] = field(default_factory=list)
     stopped: str | None = None
     remaining: int = 0
+    subject_remaining: int = 0
 
 
-def read_gmail(gmail: Gmail, targets: Sequence[Target]) -> ScanRead:
-    """Search and read Gmail for each target, in order (the module docstring). Blocking:
-    call it with no database session open."""
+def read_gmail(
+    gmail: Gmail, targets: Sequence[Target], subjects: Sequence[SubjectTarget] = ()
+) -> ScanRead:
+    """Search and read Gmail for each target, in order, then run the subject pass for each
+    campaign in ``subjects`` (the module docstring). Blocking: call it with no database
+    session open."""
     out = ScanRead()
     cache: dict[str, Message | None] = {}
     for index, target in enumerate(targets):
@@ -204,6 +319,7 @@ def read_gmail(gmail: Gmail, targets: Sequence[Target]) -> ScanRead:
         except GmailError as exc:
             out.stopped = exc.code
             out.remaining = len(targets) - index
+            out.subject_remaining = len(subjects)
             log.warning(
                 "history scan stopped after %d of %d recipients (%s)",
                 index,
@@ -212,6 +328,62 @@ def read_gmail(gmail: Gmail, targets: Sequence[Target]) -> ScanRead:
             )
             return out
         out.scanned.append(Scanned(target, findings))
+    for index, subject in enumerate(subjects):
+        purpose = f"history subject scan of old campaign {subject.campaign_id}"
+        try:
+            out.subject_found.extend(_scan_subject(gmail, subject, purpose, cache))
+        except GmailError as exc:
+            out.stopped = exc.code
+            out.subject_remaining = len(subjects) - index
+            log.warning("history subject scan stopped (%s)", exc.code)
+            return out
+        out.subject_done.append(subject.campaign_id)
+    return out
+
+
+def _scan_subject(
+    gmail: Gmail, target: SubjectTarget, purpose: str, cache: dict[str, Message | None]
+) -> list[SubjectFound]:
+    """Who answered the campaign by its subject and is not one of its recipients.
+
+    A message counts only when its subject, without ``Re:``/``Fwd:``, is exactly the
+    campaign's; it was received on or after the campaign's start day; and it is not the
+    mailbox's own, a mail system's, or from one of the user's own addresses."""
+    query = subject_query(target)
+    if query is None:
+        return []
+    wanted = normalize_subject(target.subject)
+    found: dict[str, tuple[str | None, list[Finding]]] = {}
+    for message in _read(
+        gmail, gmail.search(query, max_results=SUBJECT_SEARCH_MAX, purpose=purpose), purpose, cache
+    ):
+        sender = sender_of(message)
+        if (
+            not sender
+            or sender in target.own
+            or sender in target.known
+            or message.internal_date < target.starts
+            or normalize_subject(message.header("Subject")) != wanted
+        ):
+            continue
+        kind = classify_from(message, sender)
+        if kind is None:
+            continue
+        name = parseaddr(message.header("From") or "")[0].strip() or None
+        entry = found.setdefault(sender, (name, []))
+        entry[1].append(_finding(kind, message))
+    out: list[SubjectFound] = []
+    for sender, (name, findings) in found.items():
+        first, _, last = (name or "").partition(" ")
+        out.append(
+            SubjectFound(
+                campaign_id=target.campaign_id,
+                email=sender,
+                first_name=first or None,
+                last_name=last.strip() or None,
+                findings=tuple(findings),
+            )
+        )
     return out
 
 
@@ -325,8 +497,12 @@ class ScanReport:
     no_contact: list[str] = field(default_factory=list)
     """Addresses that wrote back but match no single contact: nothing to flag."""
     new_interactions: int = 0
+    by_subject: dict[int, int] = field(default_factory=dict)
+    """Per campaign, the people the workbook does not list whom the subject pass found."""
+    subject_samples: list[str] = field(default_factory=list)
     stopped: str | None = None
     remaining: int = 0
+    subject_remaining: int = 0
 
 
 def apply_scan(session: Session, user: User, read: ScanRead, *, now: datetime) -> ScanReport:
@@ -334,15 +510,22 @@ def apply_scan(session: Session, user: User, read: ScanRead, *, now: datetime) -
     Needs a writer session; commits nothing."""
     if not is_writer(session):
         raise RuntimeError("applying the history scan needs a writer session")
-    report = ScanReport(stopped=read.stopped, remaining=read.remaining)
-    names = {
-        c.id: c.name
+    report = ScanReport(
+        stopped=read.stopped, remaining=read.remaining, subject_remaining=read.subject_remaining
+    )
+    campaigns = {
+        c.id: c
         for c in session.scalars(
             scoped(user, HistoryCampaign).where(
-                HistoryCampaign.id.in_({s.target.campaign_id for s in read.scanned})
+                HistoryCampaign.id.in_(
+                    {s.target.campaign_id for s in read.scanned}
+                    | {f.campaign_id for f in read.subject_found}
+                    | set(read.subject_done)
+                )
             )
         )
     }
+    names = {campaign_id: c.name for campaign_id, c in campaigns.items()}
     report.campaign_names = names
     for scanned in read.scanned:
         row = get_scoped(session, user, HistoryRecipient, scanned.target.recipient_id)
@@ -356,6 +539,22 @@ def apply_scan(session: Session, user: User, read: ScanRead, *, now: datetime) -
         _apply_one(
             session, user, row, scanned.findings, names.get(row.history_campaign_id), report, now
         )
+    for found in read.subject_found:
+        campaign = campaigns.get(found.campaign_id)
+        if campaign is None:  # deleted since the read
+            continue
+        row = _subject_row(session, user, campaign, found)
+        report.scanned += 1
+        report.by_subject[campaign.id] = report.by_subject.get(campaign.id, 0) + 1
+        if len(report.subject_samples) < _SAMPLE and row.email not in report.subject_samples:
+            report.subject_samples.append(row.email)
+        if record_email_out(session, user, row, campaign.name, campaign_start(campaign.started_on)):
+            report.new_interactions += 1
+        row.scanned_at = now
+        _apply_one(session, user, row, found.findings, campaign.name, report, now)
+    for campaign_id in read.subject_done:
+        if campaign_id in campaigns:
+            campaigns[campaign_id].subject_scanned_at = now
     session.flush()
     log.info(
         "history scan for user %d: %d scanned, %d flagged for review, %d opted out",
@@ -424,6 +623,37 @@ def _apply_one(
             session, user, contact, recorded, campaign_name, len(human), report
         )
     row.reply_gmail_id = row.reply_gmail_id or recorded.gmail_id
+
+
+def _subject_row(
+    session: Session, user: User, campaign: HistoryCampaign, found: SubjectFound
+) -> HistoryRecipient:
+    """The recipient row for someone the subject pass found, created and matched through
+    :func:`~netkeeper.crm.history.match_address` the first time."""
+    row = session.scalars(
+        scoped(user, HistoryRecipient).where(
+            HistoryRecipient.history_campaign_id == campaign.id,
+            HistoryRecipient.email == found.email,
+        )
+    ).one_or_none()
+    if row is not None:
+        return row
+    _, contact_id = match_address(
+        session, user, found.email, first_name=found.first_name, last_name=found.last_name
+    )
+    row = HistoryRecipient(
+        user_id=user.id,
+        history_campaign_id=campaign.id,
+        email=found.email,
+        contact_id=contact_id,
+        opened=False,
+        clicked=False,
+        bounce_listed=False,
+        found_by_subject=True,
+    )
+    session.add(row)
+    session.flush()
+    return row
 
 
 def _recorded_on(session: Session, user: User, finding: Finding) -> int | None:
