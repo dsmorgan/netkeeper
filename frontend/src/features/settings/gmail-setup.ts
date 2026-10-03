@@ -61,15 +61,21 @@ export function suggestProjectId(random: () => number = Math.random): string {
 
 const CONSOLE = 'https://console.cloud.google.com'
 
-/** Every console page the wizard links to, for the given project. */
+/**
+ * Every console page the wizard links to. The pages that take a project are
+ * `null` until there is a project ID: without `?project=<id>` the console opens
+ * whichever project it last used, and a name in its place lands on a permission
+ * page with no error. Only the project ID works; never pass a project name.
+ */
 export function consoleLinks(projectId: string | null) {
-  const project = projectId === null ? '' : `?project=${encodeURIComponent(projectId)}`
+  const forProject = (path: string): string | null =>
+    projectId === null ? null : `${CONSOLE}${path}?project=${encodeURIComponent(projectId)}`
   return {
     createProject: `${CONSOLE}/projectcreate`,
-    gmailApi: `${CONSOLE}/apis/library/gmail.googleapis.com${project}`,
-    branding: `${CONSOLE}/auth/branding${project}`,
-    audience: `${CONSOLE}/auth/audience${project}`,
-    createClient: `${CONSOLE}/auth/clients/create${project}`,
+    gmailApi: forProject('/apis/library/gmail.googleapis.com'),
+    branding: forProject('/auth/branding'),
+    audience: forProject('/auth/audience'),
+    createClient: forProject('/auth/clients/create'),
     installGcloud: 'https://cloud.google.com/sdk/docs/install',
   }
 }

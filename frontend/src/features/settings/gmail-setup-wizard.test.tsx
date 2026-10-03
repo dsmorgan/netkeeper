@@ -79,6 +79,55 @@ describe('Gmail setup guide', () => {
     expect(screen.getByRole('button', { name: 'Done: the project exists' })).toBeEnabled()
   })
 
+  it('explains where to find the project ID', async () => {
+    render(noClient)
+    await screen.findByLabelText('Project ID')
+    const help = screen.getByText(/project picker/)
+    expect(help).toHaveTextContent(/Name, Type and ID/)
+    expect(help).toHaveTextContent(/netkeeper-510123/)
+  })
+
+  it('disables every project link, with a hint, until a project ID is saved', async () => {
+    const marked = ['project', 'gmail_api', 'branding', 'test_user', 'client_created']
+    const { setup } = render(noClient, { done: marked })
+    for (const [stepName, linkName] of [
+      [/Enable the Gmail API/, 'Gmail API'],
+      [/Set up the consent screen/, 'Branding'],
+      [/Add yourself as a test user/, 'Audience'],
+      [/Create a Desktop OAuth client/, 'Create OAuth client'],
+      [/Publish the app/, 'Audience'],
+      [/Publish the app/, 'Branding'],
+    ] as const) {
+      fireEvent.click(await screen.findByRole('button', { name: stepName }))
+      const disabled = screen.getByRole('link', { name: linkName })
+      expect(disabled).toHaveAttribute('aria-disabled', 'true')
+      expect(disabled).not.toHaveAttribute('href')
+      expect(screen.getByRole('note')).toHaveTextContent(/needs your project ID/)
+    }
+    expect(setup().project_id).toBeNull()
+  })
+
+  it('uses the project ID in every deep link, never the name', async () => {
+    const marked = ['project', 'gmail_api', 'branding', 'test_user', 'client_created']
+    render(noClient, { project_id: 'netkeeper-510123', done: marked })
+    const hrefs: string[] = []
+    for (const [stepName, linkName] of [
+      [/Enable the Gmail API/, 'Gmail API'],
+      [/Set up the consent screen/, 'Branding'],
+      [/Add yourself as a test user/, 'Audience'],
+      [/Create a Desktop OAuth client/, 'Create OAuth client'],
+      [/Publish the app/, 'Audience'],
+      [/Publish the app/, 'Branding'],
+    ] as const) {
+      fireEvent.click(await screen.findByRole('button', { name: stepName }))
+      hrefs.push(link(linkName).href)
+    }
+    expect(hrefs).toHaveLength(6)
+    for (const href of hrefs) {
+      expect(new URL(href).searchParams.get('project')).toBe('netkeeper-510123')
+    }
+  })
+
   it('refuses a project ID Google would refuse', async () => {
     render(noClient)
     fireEvent.change(await screen.findByLabelText('Project ID'), { target: { value: '1bad' } })

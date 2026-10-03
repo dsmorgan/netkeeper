@@ -74,6 +74,17 @@ async def test_a_put_needs_the_csrf_header(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.parametrize(
+    "project_id", ["a" * 6, "a" + "b" * 28 + "9", "netkeeper-510123", "a-b-c-d"]
+)
+async def test_the_edges_of_a_valid_project_id_round_trip(
+    client: httpx.AsyncClient, project_id: str
+) -> None:
+    assert 6 <= len(project_id) <= 30
+    assert (await _put(client, project_id=project_id)).json()["project_id"] == project_id
+    assert (await client.get("/api/v1/gmail-setup")).json()["project_id"] == project_id
+
+
+@pytest.mark.parametrize(
     ("body", "fragment"),
     [
         ({"project_id": "short"}, "6 to 30"),
@@ -82,6 +93,8 @@ async def test_a_put_needs_the_csrf_header(client: httpx.AsyncClient) -> None:
         ({"project_id": "net keeper"}, "lowercase"),
         ({"project_id": "netkeeper;rm-rf"}, "lowercase"),
         ({"project_id": "a" * 31}, "6 to 30"),
+        ({"project_id": "My Project"}, "lowercase"),
+        ({"project_id": "Netkeeper_510123"}, "lowercase"),
         ({"sender_email": "not-an-address"}, "email address"),
         ({"done": ["project", "launch_rockets"]}, "launch_rockets"),
     ],
