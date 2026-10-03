@@ -235,6 +235,9 @@ def _import_campaign(
         recipient.opened = recipient.opened or person.opened
         recipient.clicked = recipient.clicked or person.clicked
         recipient.bounce_listed = recipient.bounce_listed or person.bounced
+        # Listed now: the workbook proves the campaign reached them, whatever the subject
+        # search found first, so the listed recipient's rules apply from here on.
+        recipient.found_by_subject = False
         if contact_id is not None:
             recipient.contact_id = contact_id
         session.flush()
