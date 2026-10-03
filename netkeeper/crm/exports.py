@@ -133,6 +133,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import ColumnElement, Select, and_, exists
 from sqlalchemy.orm import Session, selectinload
 
+from netkeeper.campaigns.templates import last_position_change
 from netkeeper.crm import do_not_send
 from netkeeper.crm.filters import FilterTree, SortKey, apply_sort, compile_filter, paginate
 from netkeeper.crm.identity import phone_key
@@ -215,7 +216,6 @@ def _contacts_statement(
         selectinload(Contact.phones),
         selectinload(Contact.links),
         selectinload(Contact.positions),
-        selectinload(Contact.snapshots),
         selectinload(Contact.tags),
     )
 
@@ -317,8 +317,15 @@ def _years_since_connected(contact: Contact, *, today: date) -> str | None:
     return str(max(years, 0))
 
 
-def _last_position_change(contact: Contact) -> str | None:
-    return contact.snapshots[0].observed_at.date().isoformat() if contact.snapshots else None
+def _last_position_change(contact: Contact, *, today: date) -> str | None:
+    """The ``last_position_change`` merge field (spec 11.1) as an ISO date.
+
+    Calls the merge field's own definition rather than restating it, so the
+    file and a rendered message agree (#333). It reads the positions, which
+    :func:`_contacts_statement` eager-loads per batch, so a large export does
+    not query once per contact.
+    """
+    return _iso_date(last_position_change(contact, today))
 
 
 # --- column-shaped presets: nine-column, linkedin-archive, campaign-audience ---
@@ -380,7 +387,7 @@ CAMPAIGN_AUDIENCE: Final[tuple[_Column, ...]] = (
     _Column(
         "Last Position Change",
         "last_position_change",
-        lambda c, _today: _last_position_change(c),
+        lambda c, today: _last_position_change(c, today=today),
         None,
     ),
     _Column("LinkedIn Profile URL", "linkedin_profile_url", lambda c, _today: c.li_url, "url"),
