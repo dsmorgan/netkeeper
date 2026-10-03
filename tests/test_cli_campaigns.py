@@ -491,6 +491,13 @@ def test_activate_at_an_explicit_time_outside_the_slots_warns_and_keeps_it(
     )
 
 
+def test_activate_with_a_start_already_past_says_it_starts_now(world: World) -> None:
+    """#338 review, N3: a past --start starts the campaign now, and the prompt says so."""
+    campaign_id = _ready(world)
+    output = _ok("campaigns", "activate", str(campaign_id), "--start", "2020-01-07T10:00", "--yes")
+    assert "starts: now" in output
+
+
 def test_activate_now_starts_at_once(world: World) -> None:
     campaign_id = _ready(world)
     before = datetime.now(UTC)

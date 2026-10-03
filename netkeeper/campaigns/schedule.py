@@ -245,6 +245,71 @@ def spill(due: datetime, now: datetime, slots: Suggested) -> datetime | None:
     return resume if resume > _aware(now).astimezone(UTC) else None
 
 
+def in_suggested_hours(clock: time, slots: Suggested) -> bool:
+    """Whether a local time of day is inside the suggested hours, ``[09:00, 16:30)``."""
+    return slots.start <= clock < slots.end
+
+
+def unchosen_allowed(at: datetime, slots: Suggested) -> bool:
+    """Whether a send whose time nobody chose may go out at ``at`` (#338 review, B1).
+
+    The one place this rule lives. Today it is the hours rule: inside 09:00 to 16:30
+    local time. A day rule (no weekends, say) would join it here, and every caller
+    (the overdue check, a retry, a guard's re-check) would follow.
+    """
+    return in_suggested_hours(slots.local_time(at), slots)
+
+
+def next_time_of_day(clock: time, at: datetime, slots: Suggested) -> datetime:
+    """The first instant at or after ``at`` whose local time of day is ``clock``, in UTC."""
+    now = _aware(at).astimezone(UTC)
+    day = slots.local_date(now)
+    candidate = slots.at_local(day, clock)
+    return candidate if candidate >= now else slots.at_local(day + timedelta(days=1), clock)
+
+
+def release(due: datetime, now: datetime, slots: Suggested) -> datetime | None:
+    """When a step due at ``due`` may really go, or None for now (#338).
+
+    Two rules, in order:
+
+    1. **The spill** (:func:`spill`): a due time from an earlier local day moves to
+       today at its own time of day, when that is still to come.
+    2. **Off hours** (#338 review, B1): a due time whose time of day is inside the
+       suggested hours was never explicitly set outside them, so it never goes out
+       while :func:`unchosen_allowed` says no. It waits for the next occurrence of
+       its own time of day. A Tuesday 09:00 step that ``serve`` wakes for at 22:00
+       goes on Wednesday at 09:00.
+
+    A due time outside the suggested hours was chosen (an explicit start or step
+    time), and keeps firing at the chosen time.
+    """
+    spilled = spill(due, now, slots)
+    if spilled is not None:
+        return spilled
+    clock = slots.local_time(due)
+    if in_suggested_hours(clock, slots) and not unchosen_allowed(now, slots):
+        return next_time_of_day(clock, now, slots)
+    return None
+
+
+def aim_unchosen(anchor: datetime, due: datetime, slots: Suggested) -> datetime:
+    """A due time nobody chose (a retry, a guard's re-check), aimed at ``anchor``'s hours.
+
+    ``anchor`` is when the step was last claimed or considered. When that was inside
+    the suggested hours and ``due`` is not allowed (:func:`unchosen_allowed`) or falls
+    on a later local day, ``due`` moves to the next occurrence of ``anchor``'s time of
+    day at or after it. Otherwise it is kept: an anchor outside the hours was an
+    explicit time, and keeps its batch going.
+    """
+    clock = slots.local_time(anchor)
+    if not in_suggested_hours(clock, slots):
+        return due
+    if unchosen_allowed(due, slots) and slots.local_date(due) == slots.local_date(anchor):
+        return due
+    return next_time_of_day(clock, due, slots)
+
+
 def spacing_delay(rng: random.Random, *, median_s: float, floor_s: float) -> timedelta:
     """The gap after one send before the next may go (spec 11.4): ``human_delay``, floored.
 

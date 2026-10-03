@@ -248,3 +248,55 @@ def test_spacing_is_human_and_never_under_the_floor() -> None:
 def test_spacing_refuses_no_spacing(median: float, floor: float) -> None:
     with pytest.raises(ValueError, match="positive"):
         spacing_delay(random.Random(1), median_s=median, floor_s=floor)
+
+
+# --- off hours (#338 review, B1 and S1) ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("now", "allowed"),
+    [
+        ("2026-09-29 08:59", False),
+        ("2026-09-29 09:00", True),
+        ("2026-09-29 16:29", True),
+        ("2026-09-29 16:30", False),
+        ("2026-09-29 22:00", False),
+        ("2026-10-03 10:00", True),  # the hours rule only: a day rule is not decided yet
+    ],
+)
+def test_an_unchosen_send_is_allowed_only_inside_the_suggested_hours(
+    now: str, allowed: bool
+) -> None:
+    assert schedule.unchosen_allowed(at(now), slots()) is allowed
+
+
+@pytest.mark.parametrize(
+    ("due", "now", "goes"),
+    [
+        ("2026-09-29 09:00", "2026-09-29 22:00", "2026-09-30 09:00"),  # asleep until 22:00
+        ("2026-10-01 10:00", "2026-10-03 23:30", "2026-10-04 10:00"),  # Thursday's, Saturday night
+        ("2026-09-29 09:00", "2026-09-30 03:00", "2026-09-30 09:00"),  # the spill comes first
+        ("2026-09-29 09:00", "2026-09-29 11:00", None),  # inside the hours: now
+        ("2026-09-29 22:00", "2026-09-29 23:30", None),  # chosen for 22:00: now
+        ("2026-09-29 15:00", "2026-09-29 16:45", "2026-09-30 15:00"),  # a batch past 16:30
+    ],
+)
+def test_release_holds_an_unchosen_send_until_its_own_time_of_day(
+    due: str, now: str, goes: str | None
+) -> None:
+    got = schedule.release(at(due), at(now), slots())
+    assert got == (None if goes is None else at(goes))
+
+
+@pytest.mark.parametrize(
+    ("anchor", "due", "aimed"),
+    [
+        ("2026-09-29 16:20", "2026-09-29 16:35", "2026-09-30 16:20"),  # off hours: next day
+        ("2026-09-29 10:00", "2026-09-29 10:15", "2026-09-29 10:15"),  # inside: kept
+        ("2026-09-29 10:00", "2026-09-30 10:00", "2026-09-30 10:00"),  # a day on, same time
+        ("2026-09-29 22:00", "2026-09-29 22:15", "2026-09-29 22:15"),  # chosen off hours: kept
+        ("2026-09-29 16:00", "2026-09-30 14:00", "2026-09-30 16:00"),  # a later day: claim's time
+    ],
+)
+def test_an_unchosen_retry_aims_at_its_claims_hours(anchor: str, due: str, aimed: str) -> None:
+    assert schedule.aim_unchosen(at(anchor), at(due), slots()) == at(aimed)
