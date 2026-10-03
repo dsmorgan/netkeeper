@@ -2486,14 +2486,19 @@ def _insert_position(
     title: str | None = "Engineer",
     company: str | None = "Old Co",
     source: str = "sync",
+    ended_on: str | None = None,
+    user_id: int = 1,
 ) -> None:
     connection.execute(
         text(
-            "INSERT INTO contact_positions (user_id, contact_id, title, company, is_current,"
-            " source, observed_at, created_at, updated_at)"
-            " VALUES (1, :contact_id, :title, :company, true, :source, :t, :created, :t)"
+            "INSERT INTO contact_positions (user_id, contact_id, title, company, ended_on,"
+            " is_current, source, observed_at, created_at, updated_at)"
+            " VALUES (:user_id, :contact_id, :title, :company, :ended_on, true, :source, :t,"
+            " :created, :t)"
         ),
         {
+            "user_id": user_id,
+            "ended_on": ended_on,
             "contact_id": contact_id,
             "title": title,
             "company": company,
@@ -2513,15 +2518,18 @@ def _insert_flagged_snapshot(
     title: str | None = "Engineer",
     company: str | None = "Old Co",
     position_changed: bool = True,
+    user_id: int = 1,
 ) -> None:
     connection.execute(
         text(
             "INSERT INTO contact_snapshots (id, user_id, contact_id, current_title,"
             " current_company, position_changed, source, observed_at, created_at, updated_at)"
-            " VALUES (:id, 1, :contact_id, :title, :company, :changed, :source, :t, :c, :c)"
+            " VALUES (:id, :user_id, :contact_id, :title, :company, :changed, :source, :t, :c,"
+            " :c)"
         ),
         {
             "id": id,
+            "user_id": user_id,
             "contact_id": contact_id,
             "title": title,
             "company": company,
@@ -2535,9 +2543,11 @@ def _insert_flagged_snapshot(
 
 def _seed_job_changes(connection: Connection) -> None:
     """One contact per case; the snapshot id says which one, and a comment why."""
-    _seed_users(connection, 1)
-    for contact_id in range(1, 9):
+    _seed_users(connection, 1, 2)
+    for contact_id in range(1, 15):
         _insert_contact(connection, id=contact_id, user_id=1)
+    for contact_id in (20, 21):
+        _insert_contact(connection, id=contact_id, user_id=2)
     # 1: an earlier enrichment recorded the replaced position: a real job change.
     _insert_position(connection, contact_id=1, created_at=_EARLIER)
     _insert_flagged_snapshot(connection, id=1, contact_id=1)
@@ -2561,6 +2571,30 @@ def _seed_job_changes(connection: Connection) -> None:
     _insert_flagged_snapshot(connection, id=7, contact_id=7, position_changed=False)
     # 8: another contact's earlier enrichment is no evidence for this one.
     _insert_flagged_snapshot(connection, id=8, contact_id=8)
+    # 9: the review's repro. The archive wrote Engineer at Old Co; visit 1 found
+    # that job only as an ended one (its current job had no title or company);
+    # visit 2 replaced the archive's values. Visit 1 never recorded them as current.
+    _insert_position(connection, contact_id=9, created_at=_EARLIER, ended_on="2023-03-01")
+    _insert_flagged_snapshot(connection, id=9, contact_id=9)
+    # 10: no title on either side is no match; the companies differ.
+    _insert_position(connection, contact_id=10, created_at=_EARLIER, title=None, company="Else")
+    _insert_flagged_snapshot(connection, id=10, contact_id=10, title=None)
+    # 11: a position created at the very instant of the visit is the visit's own.
+    _insert_position(connection, contact_id=11, created_at=_VISIT)
+    _insert_flagged_snapshot(connection, id=11, contact_id=11)
+    # 12: an earlier position an import wrote is no enrichment.
+    _insert_position(connection, contact_id=12, created_at=_EARLIER, source="archive")
+    _insert_flagged_snapshot(connection, id=12, contact_id=12)
+    # 13: values match trimmed and case-folded, as positions match.
+    _insert_position(connection, contact_id=13, created_at=_EARLIER, title=" engineer ")
+    _insert_flagged_snapshot(connection, id=13, contact_id=13, company="OLD CO")
+    # 14: a job ending in the month it was recorded was still current then.
+    _insert_position(connection, contact_id=14, created_at=_EARLIER, ended_on="2026-09-01")
+    _insert_flagged_snapshot(connection, id=14, contact_id=14)
+    # A second user: one real change, one first enrichment.
+    _insert_position(connection, contact_id=20, created_at=_EARLIER, user_id=2)
+    _insert_flagged_snapshot(connection, id=20, contact_id=20, user_id=2)
+    _insert_flagged_snapshot(connection, id=21, contact_id=21, user_id=2)
 
 
 def _flags(connection: Connection) -> dict[int, bool]:
@@ -2568,7 +2602,11 @@ def _flags(connection: Connection) -> dict[int, bool]:
     return {row.id: bool(row.position_changed) for row in rows}
 
 
-_CORRECTED = {1: True, 2: False, 3: False, 4: False, 5: True, 6: False, 7: False, 8: False}
+_CORRECTED = {
+    **{1: True, 2: False, 3: False, 4: False, 5: True, 6: False, 7: False, 8: False},
+    **{9: False, 10: False, 11: False, 12: False, 13: True, 14: True},
+    **{20: True, 21: False},
+}
 
 
 def test_0030_keeps_a_job_change_only_against_an_earlier_enrichment(
