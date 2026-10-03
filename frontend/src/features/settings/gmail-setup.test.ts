@@ -6,6 +6,8 @@ import {
   consoleLinks,
   currentStep,
   gcloudCommands,
+  lacksSuffix,
+  parseProjectInput,
   PROJECT_ID_PATTERN,
   setupComplete,
   suggestProjectId,
@@ -22,6 +24,7 @@ describe('consoleLinks', () => {
   it('names the project on every page that needs it', () => {
     expect(consoleLinks('netkeeper-ab12cd')).toEqual({
       createProject: 'https://console.cloud.google.com/projectcreate',
+      dashboard: 'https://console.cloud.google.com/home/dashboard?project=netkeeper-ab12cd',
       gmailApi:
         'https://console.cloud.google.com/apis/library/gmail.googleapis.com?project=netkeeper-ab12cd',
       branding: 'https://console.cloud.google.com/auth/branding?project=netkeeper-ab12cd',
@@ -49,7 +52,7 @@ describe('consoleLinks', () => {
     expect(links.createProject).toBe('https://console.cloud.google.com/projectcreate')
   })
 
-  it('puts the project ID, never a name, in every project link', () => {
+  it('puts the ID in the project parameter of every project link', () => {
     const links = consoleLinks('netkeeper-510123')
     const projectLinks = [links.gmailApi, links.branding, links.audience, links.createClient]
     for (const href of projectLinks) {
@@ -155,5 +158,29 @@ describe('wizardSteps', () => {
     expect(currentStep(steps)).toBe('gmail_api')
     const other = wizardSteps({ done: marked }, status(), 'access_denied')
     expect(currentStep(other)).toBe('connect')
+  })
+})
+
+describe('parseProjectInput', () => {
+  it('takes the project parameter from a pasted console URL', () => {
+    const url = 'https://console.cloud.google.com/auth/branding?project=Netkeeper-510123&x=1'
+    expect(parseProjectInput(url)).toBe('netkeeper-510123')
+  })
+
+  it('takes plain text as the ID, trimmed and lowercased', () => {
+    expect(parseProjectInput('  Netkeeper-510123 ')).toBe('netkeeper-510123')
+  })
+
+  it('leaves a URL with no project parameter to fail validation', () => {
+    expect(PROJECT_ID_PATTERN.test(parseProjectInput('https://console.cloud.google.com/'))).toBe(
+      false,
+    )
+  })
+})
+
+describe('lacksSuffix', () => {
+  it('flags an ID that may be the name', () => {
+    expect(lacksSuffix('netkeeper')).toBe(true)
+    expect(lacksSuffix('netkeeper-510123')).toBe(false)
   })
 })

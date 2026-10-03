@@ -51,6 +51,27 @@ export async function saveGmailSetup(body: {
 /** Google's rule: 6 to 30 lowercase letters, digits or hyphens, a letter first, no hyphen last. */
 export const PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/
 
+/**
+ * What you typed in the project ID field, as an ID candidate. A pasted console
+ * URL (from the address bar) gives its `project` parameter; anything else is the
+ * text itself. Trimmed and lowercased; validate the result with `PROJECT_ID_PATTERN`.
+ */
+export function parseProjectInput(raw: string): string {
+  const text = raw.trim()
+  try {
+    const fromUrl = new URL(text).searchParams.get('project')
+    if (fromUrl !== null) return fromUrl.trim().toLowerCase()
+  } catch {
+    // Not a URL: it's the ID itself.
+  }
+  return text.toLowerCase()
+}
+
+/** True when the ID has no hyphenated suffix, so it may be the project name instead. */
+export function lacksSuffix(projectId: string): boolean {
+  return !/-[a-z0-9]+$/.test(projectId)
+}
+
 /** A fresh project ID to suggest. Project IDs are unique across all of Google Cloud. */
 export function suggestProjectId(random: () => number = Math.random): string {
   const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789'
@@ -72,6 +93,7 @@ export function consoleLinks(projectId: string | null) {
     projectId === null ? null : `${CONSOLE}${path}?project=${encodeURIComponent(projectId)}`
   return {
     createProject: `${CONSOLE}/projectcreate`,
+    dashboard: forProject('/home/dashboard'),
     gmailApi: forProject('/apis/library/gmail.googleapis.com'),
     branding: forProject('/auth/branding'),
     audience: forProject('/auth/audience'),

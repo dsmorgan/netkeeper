@@ -107,7 +107,7 @@ describe('Gmail setup guide', () => {
     expect(setup().project_id).toBeNull()
   })
 
-  it('uses the project ID in every deep link, never the name', async () => {
+  it('carries the saved project ID in every deep link', async () => {
     const marked = ['project', 'gmail_api', 'branding', 'test_user', 'client_created']
     render(noClient, { project_id: 'netkeeper-510123', done: marked })
     const hrefs: string[] = []
@@ -126,6 +126,38 @@ describe('Gmail setup guide', () => {
     for (const href of hrefs) {
       expect(new URL(href).searchParams.get('project')).toBe('netkeeper-510123')
     }
+  })
+
+  it('accepts a pasted console URL and saves its project ID', async () => {
+    const { calls } = render(noClient)
+    fireEvent.change(await screen.findByLabelText('Project ID'), {
+      target: { value: 'https://console.cloud.google.com/home/dashboard?project=netkeeper-510123' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(calls).toContainEqual({
+        method: 'PUT',
+        path: '/api/v1/gmail-setup',
+        body: { project_id: 'netkeeper-510123', sender_email: null, done: [] },
+      }),
+    )
+    expect(screen.getByText(/paste any Google Cloud console URL/)).toBeInTheDocument()
+  })
+
+  it('links to the project dashboard to check the saved ID', async () => {
+    render(noClient, { project_id: 'netkeeper-510123' })
+    expect(await screen.findByRole('link', { name: 'Check it' })).toHaveAttribute(
+      'href',
+      'https://console.cloud.google.com/home/dashboard?project=netkeeper-510123',
+    )
+    expect(screen.getByText(/If you see a permissions page instead, the ID is wrong/)).toBeVisible()
+    expect(screen.queryByText(/Google usually adds a suffix/)).not.toBeInTheDocument()
+  })
+
+  it('notes, without blocking, an ID with no suffix', async () => {
+    render(noClient, { project_id: 'netkeeper' })
+    expect(await screen.findByText(/Google usually adds a suffix/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Done: the project exists' })).toBeEnabled()
   })
 
   it('refuses a project ID Google would refuse', async () => {

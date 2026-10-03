@@ -16,7 +16,9 @@ import {
   type GmailSetup,
   gmailSetupKeys,
   gmailSetupQuery,
+  lacksSuffix,
   type ManualStep,
+  parseProjectInput,
   PROJECT_ID_PATTERN,
   saveGmailSetup,
   setupComplete,
@@ -274,15 +276,29 @@ function StepBody({
         <>
           <ProjectForm setup={setup} saving={saving} persist={persist} />
           <p className="text-muted-foreground">
-            Already have a project? Use its <strong>ID</strong>, not its name. In the console,
+            Paste the ID, or paste any Google Cloud console URL for your project from the address
+            bar. Already have a project? Use its <strong>ID</strong>, not its name. In the console,
             choose the project picker at the top; the list shows <strong>Name</strong>,{' '}
             <strong>Type</strong> and <strong>ID</strong>. Google often adds a number to the ID, so{' '}
             <code className="font-mono">netkeeper</code> might be{' '}
-            <code className="font-mono">netkeeper-510123</code>. Every link below uses the ID, and
-            a wrong one lands on a confusing permission page with no error.
+            <code className="font-mono">netkeeper-510123</code>. Every link below uses the ID, and a
+            wrong one lands on a confusing permission page with no error.
           </p>
           {setup.project_id !== null && commands !== null && (
             <>
+              <p>
+                <ConsoleLink href={links.dashboard}>Check it</ConsoleLink>{' '}
+                <span className="text-muted-foreground">
+                  Opens your project’s dashboard. If you see a permissions page instead, the ID is
+                  wrong.
+                </span>
+              </p>
+              {lacksSuffix(setup.project_id) && (
+                <p role="note" className="text-muted-foreground">
+                  Google usually adds a suffix, such as netkeeper-510123. Make sure this is the ID,
+                  not the name.
+                </p>
+              )}
               <p>
                 Open <ConsoleLink href={links.createProject}>New project</ConsoleLink>. Name it{' '}
                 <code className="font-mono">netkeeper</code>, then choose <strong>Edit</strong>{' '}
@@ -518,7 +534,7 @@ function ProjectForm({
 }) {
   const [projectId, setProjectId] = useState(setup.project_id ?? '')
   const [sender, setSender] = useState(setup.sender_email ?? '')
-  const trimmed = projectId.trim().toLowerCase()
+  const trimmed = parseProjectInput(projectId)
   const valid = PROJECT_ID_PATTERN.test(trimmed)
   const unchanged =
     trimmed === (setup.project_id ?? '') && sender.trim() === (setup.sender_email ?? '')
