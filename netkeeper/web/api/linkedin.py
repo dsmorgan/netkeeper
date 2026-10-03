@@ -14,15 +14,19 @@ built on:
   today's budget, never above it.
 * ``POST /linkedin/runs/{id}/cancel``: the cooperative cancel (spec 9.9). The
   run stops at its next check, ``aborted``, keeping what it completed.
+* ``POST /linkedin/runs/{id}/pause``: the same cooperative stop for an
+  enrichment, recorded ``paused`` and resumable (#324).
 * ``POST /linkedin/runs/{id}/resume``: an aborted enrichment's remaining plan,
   as a new run, never re-planned.
+* ``GET /linkedin/runs/{id}/contacts``: the last few contacts the run touched.
 * ``GET /linkedin/budget``, ``GET /linkedin/heat``: the counters and the heat
   level, as ``netkeeper posture`` reads them.
 * ``GET``/``POST /linkedin/pins``, ``DELETE /linkedin/pins/{contact_id}``: up
   to five contacts at the front of the next enrichment (spec 9.6).
 * ``GET /linkedin/schedule``, ``POST /linkedin/schedule/arm`` (with
   ``confirm: true``), ``POST /linkedin/schedule/disarm``: whether scheduled
-  runs may fire. Every install starts disarmed.
+  runs may fire. Every install starts disarmed. ``POST /linkedin/schedule/pause``
+  and ``/unpause`` hold new scheduled runs without disarming (#324).
 * ``GET /linkedin/status``: the page's banner in one read.
 * ``GET /linkedin/browser``: ``netkeeper browser launch``'s instructions, as data.
   Read-only and built from config alone; it never attaches (spec 9.9, CLAUDE.md).
@@ -43,7 +47,7 @@ from netkeeper.models import Contact, SyncRun, SyncRunKind, SyncRunStatus, SyncR
 from netkeeper.models.base import utcnow
 from netkeeper.paths import data_dir
 from netkeeper.scoping import get_scoped, scoped
-from netkeeper.services import budgets, enrich_plan, runs
+from netkeeper.services import budgets, enrich_plan, run_contacts, runs
 from netkeeper.services import posture as posture_service
 from netkeeper.services.browser_launch import (
     CHROME_PROFILE_DIRNAME,
@@ -58,7 +62,11 @@ from netkeeper.services.linkedin_accounts import (
     disarm_scheduled_runs,
     ensure_account,
     find_account,
+    pause_schedule,
+    schedule_paused,
+    schedule_paused_at,
     scheduled_runs_armed,
+    unpause_schedule,
 )
 from netkeeper.services.linkedin_session import session_flag
 from netkeeper.services.scheduled_runs import seed_served_schedule, submit_run
@@ -75,6 +83,8 @@ from netkeeper.web.schemas import (
     PinIn,
     PinOut,
     RunAccepted,
+    RunContactOut,
+    RunContactsOut,
     RunOut,
     RunPage,
     RunResumeIn,
@@ -95,7 +105,7 @@ _NO_WORKER = (
 )
 
 
-def _run_out(run: SyncRun) -> RunOut:
+def _run_out(session: SessionDep, user: User, run: SyncRun) -> RunOut:
     derived = runs.view(run)
     return RunOut(
         id=run.id,
@@ -118,6 +128,8 @@ def _run_out(run: SyncRun) -> RunOut:
         completed=derived.completed,
         aging_refused=derived.aging_refused,
         resumed_by=derived.resumed_by,
+        pause_requested=run.status is SyncRunStatus.RUNNING
+        and runs.pause_requested(session, user, run.id),
     )
 
 
@@ -148,7 +160,7 @@ def list_runs(
     rows, total = runs.list_runs(
         session, user, kind=kind, status=status, limit=limit, offset=offset
     )
-    return RunPage(items=[_run_out(run) for run in rows], total=total)
+    return RunPage(items=[_run_out(session, user, run) for run in rows], total=total)
 
 
 @router.get(
@@ -156,7 +168,7 @@ def list_runs(
 )
 def get_run(run_id: int, user: CurrentUser, session: SessionDep) -> RunOut:
     try:
-        return _run_out(runs.get_run(session, user, run_id))
+        return _run_out(session, user, runs.get_run(session, user, run_id))
     except runs.RunNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -218,11 +230,61 @@ async def start_run(
 def cancel_run(run_id: int, user: CurrentUser, session: SessionDep) -> RunOut:
     """Ask a running run to stop at its next check (spec 9.9)."""
     try:
-        return _run_out(runs.request_cancel(session, user, run_id, now=utcnow()))
+        return _run_out(session, user, runs.request_cancel(session, user, run_id, now=utcnow()))
     except runs.RunNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except runs.RunFinished as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/runs/{run_id}/pause",
+    operation_id="pause_linkedin_run",
+    responses={
+        404: {"description": "No run"},
+        409: {
+            "description": "The run already ended, is being cancelled, or is a sync"
+            " (only an enrichment keeps a plan to resume)"
+        },
+    },
+)
+def pause_run(run_id: int, user: CurrentUser, session: SessionDep) -> RunOut:
+    """Ask a running enrichment to stop at its next check and keep its place (#324).
+
+    It ends ``aborted``, ``paused``, with its plan; ``POST /runs/{id}/resume``
+    continues the rest. Nothing here touches the browser: the run reads the flag.
+    """
+    try:
+        return _run_out(session, user, runs.request_pause(session, user, run_id, now=utcnow()))
+    except runs.RunNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except runs.RunError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get(
+    "/runs/{run_id}/contacts",
+    operation_id="list_linkedin_run_contacts",
+    responses={404: {"description": "No run"}},
+)
+def list_run_contacts(run_id: int, user: CurrentUser, session: SessionDep) -> RunContactsOut:
+    """The last few contacts the run touched, newest first, and what happened (#324)."""
+    try:
+        run = runs.get_run(session, user, run_id)
+    except runs.RunNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return RunContactsOut(
+        items=[
+            RunContactOut(
+                contact_id=item.contact_id,
+                first_name=item.first_name,
+                last_name=item.last_name,
+                outcome=item.outcome,
+                outcome_text=item.outcome_text,
+            )
+            for item in run_contacts.recent(session, user, run)
+        ]
+    )
 
 
 @router.post(
@@ -402,9 +464,12 @@ def unpin_contact(contact_id: int, user: CurrentUser, session: SessionDep) -> li
 def _schedule_out(request: Request, session: SessionDep, user: User) -> ScheduleOut:
     account = find_account(session, user)
     account_id = account_id_for(session, user)
+    paused_at = None if account is None else schedule_paused_at(session, user, account.id)
     return ScheduleOut(
         armed=account is not None and scheduled_runs_armed(session, user, account.id),
         armed_at=None if account is None else account.scheduled_runs_armed_at,
+        paused=paused_at is not None,
+        paused_at=paused_at,
         scheduler_running=request.app.state.scheduler is not None,
         jobs=[
             ScheduledJobOut(
@@ -449,6 +514,29 @@ def disarm_schedule(request: Request, user: CurrentUser, session: SessionDep) ->
     return _schedule_out(request, session, user)
 
 
+@router.post("/schedule/pause", operation_id="pause_linkedin_schedule")
+def pause_linkedin_schedule(
+    request: Request, user: CurrentUser, session: SessionDep
+) -> ScheduleOut:
+    """Hold scheduled runs without disarming (#324): no new one starts until unpaused.
+
+    A run already going is not stopped (cancel does that). Due fires met while
+    paused are skipped and their cadence moves on, so unpausing starts nothing at
+    once. The pause survives a restart of ``netkeeper serve``.
+    """
+    pause_schedule(session, user, now=utcnow())
+    return _schedule_out(request, session, user)
+
+
+@router.post("/schedule/unpause", operation_id="unpause_linkedin_schedule")
+def unpause_linkedin_schedule(
+    request: Request, user: CurrentUser, session: SessionDep
+) -> ScheduleOut:
+    """Let scheduled runs start again; each kind waits for its next due time."""
+    unpause_schedule(session, user)
+    return _schedule_out(request, session, user)
+
+
 # --- the banner ------------------------------------------------------------------------
 
 
@@ -465,6 +553,7 @@ def get_status(request: Request, user: CurrentUser, session: SessionDep) -> Link
         session_flagged_at=None if flag is None else flag.flagged_at,
         heat_tripped=heat.tripped,
         armed=account is not None and scheduled_runs_armed(session, user, account.id),
+        schedule_paused=account is not None and schedule_paused(session, user, account.id),
         running_run_id=None if running is None else running.id,
         can_start_runs=request.app.state.executor is not None,
     )

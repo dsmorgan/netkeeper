@@ -14,6 +14,8 @@ export type RunTrigger = components['schemas']['SyncRunTrigger']
 export type Run = components['schemas']['RunOut']
 export type RunPage = JsonOf<paths['/api/v1/linkedin/runs']['get']['responses'][200]>
 export type RunAccepted = JsonOf<paths['/api/v1/linkedin/runs']['post']['responses'][202]>
+export type RunContact = components['schemas']['RunContactOut']
+export type RunContacts = components['schemas']['RunContactsOut']
 
 export type Budget = components['schemas']['BudgetOut']
 export type PeriodBudget = components['schemas']['PeriodBudgetOut']

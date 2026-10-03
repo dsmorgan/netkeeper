@@ -1637,6 +1637,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/linkedin/runs/{run_id}/contacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Run Contacts
+         * @description The last few contacts the run touched, newest first, and what happened (#324).
+         */
+        get: operations["list_linkedin_run_contacts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/runs/{run_id}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pause Run
+         * @description Ask a running enrichment to stop at its next check and keep its place (#324).
+         *
+         *     It ends ``aborted``, ``paused``, with its plan; ``POST /runs/{id}/resume``
+         *     continues the rest. Nothing here touches the browser: the run reads the flag.
+         */
+        post: operations["pause_linkedin_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/linkedin/runs/{run_id}/resume": {
         parameters: {
             query?: never;
@@ -1708,6 +1751,50 @@ export interface paths {
          * @description Stop scheduled LinkedIn runs from firing. A run already going is not cancelled.
          */
         post: operations["disarm_linkedin_schedule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/schedule/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pause Linkedin Schedule
+         * @description Hold scheduled runs without disarming (#324): no new one starts until unpaused.
+         *
+         *     A run already going is not stopped (cancel does that). Due fires met while
+         *     paused are skipped and their cadence moves on, so unpausing starts nothing at
+         *     once. The pause survives a restart of ``netkeeper serve``.
+         */
+        post: operations["pause_linkedin_schedule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/linkedin/schedule/unpause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Unpause Linkedin Schedule
+         * @description Let scheduled runs start again; each kind waits for its next due time.
+         */
+        post: operations["unpause_linkedin_schedule"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4579,6 +4666,8 @@ export interface components {
             heat_tripped: boolean;
             /** Running Run Id */
             running_run_id: number | null;
+            /** Schedule Paused */
+            schedule_paused: boolean;
             /** Session Flag */
             session_flag: string | null;
             /** Session Flagged At */
@@ -5241,6 +5330,32 @@ export interface components {
             task_id: string;
         };
         /**
+         * RunContactOut
+         * @description One contact a run touched (#324): who, and what happened, in a stored word
+         *     (``outcome``) and in plain words (``outcome_text``).
+         */
+        RunContactOut: {
+            /** Contact Id */
+            contact_id: number;
+            /** First Name */
+            first_name: string | null;
+            /** Last Name */
+            last_name: string | null;
+            /** Outcome */
+            outcome: string;
+            /** Outcome Text */
+            outcome_text: string;
+        };
+        /**
+         * RunContactsOut
+         * @description The last few contacts a run touched, newest first (#324). Empty for a run
+         *     that touched nobody yet, or one older than the account's newest run.
+         */
+        RunContactsOut: {
+            /** Items */
+            items: components["schemas"]["RunContactOut"][];
+        };
+        /**
          * RunOut
          * @description One run: what it is, how far it got, and how it ended. Counts only, never names.
          *
@@ -5250,6 +5365,8 @@ export interface components {
          *     remaining plan, or null when it has not been (and so still may be, spec 9.9).
          *     ``stop_reason_text`` is ``stop_reason`` in plain words ("outside active
          *     hours" for ``inactive``, #213), or null while the run is running.
+         *     ``pause_requested`` is true while a running enrichment is stopping to pause
+         *     (#324); it ends ``aborted`` with ``stop_reason`` ``paused``, and resumable.
          */
         RunOut: {
             /** Aging Refused */
@@ -5275,6 +5392,8 @@ export interface components {
             max_visits: number | null;
             /** Notes */
             notes: string | null;
+            /** Pause Requested */
+            pause_requested: boolean;
             /** Planned */
             planned: number | null;
             /** Progress */
@@ -5379,6 +5498,8 @@ export interface components {
          *     ``armed`` is false on every install until a person arms it; while false the
          *     scheduler still keeps due times, and no scheduled LinkedIn job fires.
          *     ``scheduler_running`` is whether this process runs a scheduler at all.
+         *     ``paused`` is whether a person paused the schedule (#324): armed or not, no
+         *     new scheduled run starts until it is unpaused, and nothing missed is replayed.
          */
         ScheduleOut: {
             /** Armed */
@@ -5387,6 +5508,10 @@ export interface components {
             armed_at: string | null;
             /** Jobs */
             jobs: components["schemas"]["ScheduledJobOut"][];
+            /** Paused */
+            paused: boolean;
+            /** Paused At */
+            paused_at: string | null;
             /** Scheduler Running */
             scheduler_running: boolean;
         };
@@ -9847,6 +9972,89 @@ export interface operations {
             };
         };
     };
+    list_linkedin_run_contacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunContactsOut"];
+                };
+            };
+            /** @description No run */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pause_linkedin_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunOut"];
+                };
+            };
+            /** @description No run */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The run already ended, is being cancelled, or is a sync (only an enrichment keeps a plan to resume) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     resume_linkedin_run: {
         parameters: {
             query?: never;
@@ -9955,6 +10163,46 @@ export interface operations {
         };
     };
     disarm_linkedin_schedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleOut"];
+                };
+            };
+        };
+    };
+    pause_linkedin_schedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleOut"];
+                };
+            };
+        };
+    };
+    unpause_linkedin_schedule: {
         parameters: {
             query?: never;
             header?: never;

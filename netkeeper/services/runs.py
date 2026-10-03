@@ -29,6 +29,17 @@ their sliced waits, and the run ends ``aborted`` with whatever it completed.
 Because the flag is in the database, not in memory, ``netkeeper linkedin
 cancel`` in one terminal stops a run another process is doing.
 
+**Pause** (#324) is a cancel that keeps its place, for an enrichment run only:
+:func:`request_pause` sets the same cancel flag and a marker
+(:func:`pause_requested`), and :func:`finish_run` records the run's
+``cancelled`` ending as :data:`PAUSED` instead. The run ends ``aborted`` with
+its plan stored, as a cancelled one does, and a resume
+(``enrich_plan.start_resume``) continues the rest of that plan. A connections
+sync has no plan to keep, so it cannot be paused; Cancel stops it. The marker is
+one ``settings_kv`` key per run, removed when the run ends, so nothing about
+the ``sync_runs`` table changed. A cancel asked for after a pause wins: it
+removes the marker.
+
 **A process that went away** leaves its runs ``running``. At every start,
 :func:`fail_interrupted_runs` marks them ``failed`` ("interrupted"). None is
 resumed on its own: an interrupted enrichment can be resumed by a person, and
@@ -77,6 +88,7 @@ from netkeeper.services.linkedin_accounts import (
     scheduled_runs_armed,
 )
 from netkeeper.services.linkedin_session import session_flag
+from netkeeper.services.settings_kv import delete_setting, get_setting, set_setting
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +104,13 @@ RUNNABLE_KINDS: Final = frozenset(
 
 #: The line an interrupted run's ``error`` carries.
 INTERRUPTED: Final = "interrupted: the netkeeper process running it stopped"
+
+#: The ``stop_reason`` of a run a person paused (#324): stopped like a cancel, at the
+#: next check, and resumable, since its plan is kept.
+PAUSED: Final = "paused"
+
+#: The ``stop_reason`` a cancel records. A paused run's is :data:`PAUSED` instead.
+CANCELLED: Final = "cancelled"
 
 #: The longest ``error`` or ``notes`` line kept. A traceback belongs in the log.
 MAX_MESSAGE_LENGTH: Final = 500
@@ -133,7 +152,8 @@ def _stale(run: SyncRun, *, now: datetime, held: BrowserHeld) -> bool:
     return now - run.started_at >= STALE_AFTER and not held(run.linkedin_account_id)
 
 
-def _fail_stale(run: SyncRun, *, now: datetime) -> None:
+def _fail_stale(session: Session, user: User, run: SyncRun, *, now: datetime) -> None:
+    _clear_pause(session, user, run.id)
     run.status = SyncRunStatus.FAILED
     run.completed_at = now
     run.stop_reason = "interrupted"
@@ -159,6 +179,10 @@ class ScheduledRunsDisarmed(RunError):
 
 class RunFinished(RunError):
     """The run already ended; there is nothing to cancel."""
+
+
+class RunNotPausable(RunError):
+    """Only an enrichment run keeps a plan to resume, so only one can be paused."""
 
 
 class HeatSkipped(RuntimeError):
@@ -288,7 +312,7 @@ def create_run(
         )
     busy = running_run(session, user, account.id)
     if busy is not None and _stale(busy, now=now, held=browser_held or browser_held_for(session)):
-        _fail_stale(busy, now=now)
+        _fail_stale(session, user, busy, now=now)
         busy = None
     if busy is not None:
         raise RunAlreadyRunning(
@@ -349,6 +373,10 @@ def finish_run(
     if run.status is not SyncRunStatus.RUNNING:
         log.warning("run %d already ended %s; not recording %s", run_id, run.status, status)
         return run
+    if pause_requested(session, user, run_id):
+        if stop_reason == CANCELLED:
+            stop_reason = PAUSED
+        _clear_pause(session, user, run_id)
     run.status = status
     run.completed_at = now
     run.stop_reason = None if stop_reason is None else stop_reason[:32]
@@ -389,9 +417,70 @@ def request_cancel(
     if run.cancel_requested_at is None:
         run.cancel_requested_at = now
         log.info("cancel requested for run %d", run_id)
+    if pause_requested(session, user, run_id):
+        # A cancel after a pause wins: the run ends cancelled, not paused.
+        _clear_pause(session, user, run_id)
+        log.info("cancel replaces the pause asked for run %d", run_id)
     if _stale(run, now=now, held=browser_held or browser_held_for(session)):
-        _fail_stale(run, now=now)
+        _fail_stale(session, user, run, now=now)
     return run
+
+
+def request_pause(
+    session: Session,
+    user: User,
+    run_id: int,
+    *,
+    now: datetime,
+    browser_held: BrowserHeld | None = None,
+) -> SyncRun:
+    """Ask an enrichment run to stop at its next check and keep its place (#324).
+
+    The same cooperative stop as :func:`request_cancel` -- the runner reads the
+    same flag between profiles and inside its sliced waits -- plus a marker that
+    makes :func:`finish_run` record the ending as :data:`PAUSED`, not
+    ``cancelled``. The run ends ``aborted`` with its plan, and a resume continues
+    the rest. Idempotent while it runs.
+
+    :class:`RunFinished` for a run that already ended, :class:`RunNotPausable`
+    for a connections sync (it keeps no plan), and :class:`RunError` for a run
+    already being cancelled. A run left behind by a process that went away is
+    marked ``failed`` at once, as :func:`request_cancel` does; its plan is just
+    as resumable.
+    """
+    _require_writer(session)
+    _require_aware(now)
+    run = get_run(session, user, run_id)
+    if run.status is not SyncRunStatus.RUNNING:
+        raise RunFinished(f"run {run_id} already ended {run.status.value}")
+    if run.kind is not SyncRunKind.ENRICH:
+        raise RunNotPausable(
+            f"run {run_id} is a {run.kind.value} run; only an enrichment run keeps a plan"
+            " to resume, so cancel a sync instead"
+        )
+    already = pause_requested(session, user, run_id)
+    if run.cancel_requested_at is not None and not already:
+        raise RunError(f"run {run_id} is already being cancelled")
+    if not already:
+        set_setting(session, user, _pause_key(run_id), now.isoformat())
+        run.cancel_requested_at = now
+        log.info("pause requested for run %d", run_id)
+    if _stale(run, now=now, held=browser_held or browser_held_for(session)):
+        _fail_stale(session, user, run, now=now)
+    return run
+
+
+def pause_requested(session: Session, user: User, run_id: int) -> bool:
+    """Whether a person asked run ``run_id`` to pause and it has not ended yet. Read-only."""
+    return get_setting(session, user, _pause_key(run_id)) is not None
+
+
+def _pause_key(run_id: int) -> str:
+    return f"linkedin.run.{run_id}.pause_requested"
+
+
+def _clear_pause(session: Session, user: User, run_id: int) -> None:
+    delete_setting(session, user, _pause_key(run_id))
 
 
 def cancel_requested(session: Session, user: User, run_id: int) -> bool:
@@ -439,7 +528,7 @@ def fail_interrupted_runs(
         for run in stale:
             if not _stale(run, now=now, held=held):
                 continue
-            _fail_stale(run, now=now)
+            _fail_stale(session, user, run, now=now)
             total += 1
     if total:
         log.warning("marked %d run(s) left running by a stopped process as failed", total)
@@ -510,6 +599,7 @@ STOP_REASON_TEXT: Final[Mapping[str, str]] = {
     "budget": "today's or this week's budget is spent",
     "inactive": "outside active hours",
     "cancelled": "cancelled",
+    "paused": "paused; resume it to continue its plan",
     "answer_lost": "lost some of the page's answers",
     # what LinkedIn answered
     "throttled": "LinkedIn throttled it",

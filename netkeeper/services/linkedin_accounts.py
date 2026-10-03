@@ -9,7 +9,7 @@ made since, on the first run that needs it.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from netkeeper.db import is_writer
 from netkeeper.models import DEFAULT_ACCOUNT_LABEL, LinkedInAccount, User, UserKind
 from netkeeper.scoping import scoped
+from netkeeper.services.settings_kv import delete_setting, get_setting, set_setting
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +116,68 @@ def disarm_scheduled_runs(session: Session, user: User) -> LinkedInAccount:
         account.scheduled_runs_armed_at = None
         log.warning(
             "scheduled LinkedIn runs disarmed for account %d (user %d)", account.id, user.id
+        )
+    return account
+
+
+# --- the schedule paused: armed, but no new scheduled run starts (#324) ---------
+
+
+def _pause_key(account_id: int) -> str:
+    return f"linkedin.schedule.{account_id}.paused_at"
+
+
+def schedule_paused_at(session: Session, user: User, account_id: int) -> datetime | None:
+    """When a person paused ``account_id``'s schedule, or ``None`` while it is not. Read-only.
+
+    A pause holds the scheduler without disarming it: no new scheduled run starts
+    until :func:`unpause_schedule`, and a run already going is not stopped. It is
+    a ``settings_kv`` key, so it survives a restart of ``serve``. Unlike arming,
+    it only ever stops traffic, so a key is safe here. A stored value this cannot
+    read counts as paused (logged), the side that starts nothing.
+    """
+    raw = get_setting(session, user, _pause_key(account_id))
+    if raw is None:
+        return None
+    try:
+        when = datetime.fromisoformat(str(raw))
+    except ValueError:
+        log.warning(
+            "the schedule pause for account %d is unreadable; treating it as paused", account_id
+        )
+        return datetime.min.replace(tzinfo=UTC)
+    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+
+
+def schedule_paused(session: Session, user: User, account_id: int) -> bool:
+    """Whether ``account_id``'s schedule is paused (:func:`schedule_paused_at`). Read-only."""
+    return schedule_paused_at(session, user, account_id) is not None
+
+
+def pause_schedule(session: Session, user: User, *, now: datetime) -> LinkedInAccount:
+    """Pause ``user``'s account's schedule. Pausing a paused one keeps the first time."""
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    _require_writer(session, "pause_schedule")
+    account = ensure_account(session, user)
+    if schedule_paused_at(session, user, account.id) is None:
+        set_setting(session, user, _pause_key(account.id), now.isoformat())
+        log.warning("scheduled LinkedIn runs paused for account %d (user %d)", account.id, user.id)
+    return account
+
+
+def unpause_schedule(session: Session, user: User) -> LinkedInAccount:
+    """Let ``user``'s account's scheduled runs start again. Nothing missed is replayed.
+
+    Every due fire the scheduler met while paused was skipped and its cadence
+    moved on (``services.scheduler.poll_and_fire``), so each kind next fires at
+    its own stored due time, never all at once.
+    """
+    _require_writer(session, "unpause_schedule")
+    account = ensure_account(session, user)
+    if delete_setting(session, user, _pause_key(account.id)):
+        log.warning(
+            "scheduled LinkedIn runs unpaused for account %d (user %d)", account.id, user.id
         )
     return account
 

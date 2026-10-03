@@ -32,6 +32,7 @@ from netkeeper.services import budgets, enrich_plan, route_breaker, runs
 from netkeeper.services.linkedin_accounts import (
     account_id_for,
     ensure_account,
+    schedule_paused,
     scheduled_runs_armed,
 )
 from netkeeper.services.linkedin_session import flag_session
@@ -606,3 +607,75 @@ def test_the_lock_key_is_the_local_users_account(cli_db: sessionmaker[Session]) 
     assert cli_module._browser_lock_key() == account_key(account)
     provider = cli_module._provider(Settings())
     assert provider.locks.legacy_partner == account_key(account)
+
+
+# --- #324: pause a run, pause the schedule ------------------------------------------------
+
+
+def test_pause_asks_a_running_enrichment_to_stop_and_keep_its_place(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runs, "browser_held_for", lambda session: lambda account_id: True)
+    with session_scope(cli_db, write=True) as session:
+        user = _user(session)
+        enrich = runs.create_run(
+            session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=NOW
+        ).id
+    runner = CliRunner()
+
+    paused = runner.invoke(cli, ["linkedin", "pause", str(enrich)])
+
+    assert paused.exit_code == 0, paused.output
+    assert f"--resume {enrich}" in paused.output
+    with session_scope(cli_db, write=True) as session:
+        user = _user(session)
+        assert runs.pause_requested(session, user, enrich)
+        runs.finish_run(
+            session,
+            user,
+            enrich,
+            status=SyncRunStatus.ABORTED,
+            now=NOW,
+            stop_reason="cancelled",
+        )
+    shown = runner.invoke(cli, ["linkedin", "run", str(enrich)])
+    assert "paused; resume it to continue its plan (paused)" in shown.output
+    again = runner.invoke(cli, ["linkedin", "pause", str(enrich)])
+    assert again.exit_code == 1 and "already ended" in again.output
+
+
+def test_a_sync_cannot_be_paused(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runs, "browser_held_for", lambda session: lambda account_id: True)
+    with session_scope(cli_db, write=True) as session:
+        sync = runs.create_run(
+            session,
+            _user(session),
+            SyncRunKind.CONNECTIONS_FULL,
+            trigger=SyncRunTrigger.MANUAL,
+            now=NOW,
+        ).id
+    result = CliRunner().invoke(cli, ["linkedin", "pause", str(sync)])
+    assert result.exit_code == 1 and "cancel a sync instead" in result.output
+
+
+def test_schedule_pause_and_unpause_show_in_status(cli_db: sessionmaker[Session]) -> None:
+    runner = CliRunner()
+    assert runner.invoke(cli, ["linkedin", "schedule", "arm", "--yes"]).exit_code == 0
+
+    paused = runner.invoke(cli, ["linkedin", "schedule", "pause"])
+    status = runner.invoke(cli, ["linkedin", "schedule", "status"])
+
+    assert paused.exit_code == 0 and "paused" in paused.output
+    assert "armed since" in status.output
+    assert "paused since" in status.output and "schedule unpause" in status.output
+    assert _armed(cli_db)  # pausing does not disarm
+
+    unpaused = runner.invoke(cli, ["linkedin", "schedule", "unpause"])
+    after = runner.invoke(cli, ["linkedin", "schedule", "status"])
+    assert unpaused.exit_code == 0 and "next due time" in unpaused.output
+    assert "paused since" not in after.output
+    with session_scope(cli_db) as session:
+        user = _user(session)
+        assert not schedule_paused(session, user, account_id_for(session, user))

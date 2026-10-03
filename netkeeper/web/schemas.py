@@ -1803,6 +1803,8 @@ class RunOut(BaseModel):
     remaining plan, or null when it has not been (and so still may be, spec 9.9).
     ``stop_reason_text`` is ``stop_reason`` in plain words ("outside active
     hours" for ``inactive``, #213), or null while the run is running.
+    ``pause_requested`` is true while a running enrichment is stopping to pause
+    (#324); it ends ``aborted`` with ``stop_reason`` ``paused``, and resumable.
     """
 
     id: int
@@ -1825,11 +1827,30 @@ class RunOut(BaseModel):
     completed: int | None
     aging_refused: str | None
     resumed_by: int | None
+    pause_requested: bool
 
 
 class RunPage(BaseModel):
     items: list[RunOut]
     total: int
+
+
+class RunContactOut(BaseModel):
+    """One contact a run touched (#324): who, and what happened, in a stored word
+    (``outcome``) and in plain words (``outcome_text``)."""
+
+    contact_id: int
+    first_name: str | None
+    last_name: str | None
+    outcome: str
+    outcome_text: str
+
+
+class RunContactsOut(BaseModel):
+    """The last few contacts a run touched, newest first (#324). Empty for a run
+    that touched nobody yet, or one older than the account's newest run."""
+
+    items: list[RunContactOut]
 
 
 class PeriodBudgetOut(BaseModel):
@@ -1913,10 +1934,14 @@ class ScheduleOut(BaseModel):
     ``armed`` is false on every install until a person arms it; while false the
     scheduler still keeps due times, and no scheduled LinkedIn job fires.
     ``scheduler_running`` is whether this process runs a scheduler at all.
+    ``paused`` is whether a person paused the schedule (#324): armed or not, no
+    new scheduled run starts until it is unpaused, and nothing missed is replayed.
     """
 
     armed: bool
     armed_at: datetime | None
+    paused: bool
+    paused_at: datetime | None
     scheduler_running: bool
     jobs: list[ScheduledJobOut]
 
@@ -1936,6 +1961,7 @@ class LinkedInStatusOut(BaseModel):
     session_flagged_at: datetime | None
     heat_tripped: bool
     armed: bool
+    schedule_paused: bool
     running_run_id: int | None
     can_start_runs: bool
 

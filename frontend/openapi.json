@@ -6370,6 +6370,10 @@
             ],
             "title": "Running Run Id"
           },
+          "schedule_paused": {
+            "title": "Schedule Paused",
+            "type": "boolean"
+          },
           "session_flag": {
             "anyOf": [
               {
@@ -6399,6 +6403,7 @@
           "session_flagged_at",
           "heat_tripped",
           "armed",
+          "schedule_paused",
           "running_run_id",
           "can_start_runs"
         ],
@@ -8000,8 +8005,73 @@
         "title": "RunAccepted",
         "type": "object"
       },
+      "RunContactOut": {
+        "description": "One contact a run touched (#324): who, and what happened, in a stored word\n(``outcome``) and in plain words (``outcome_text``).",
+        "properties": {
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "outcome_text": {
+            "title": "Outcome Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contact_id",
+          "first_name",
+          "last_name",
+          "outcome",
+          "outcome_text"
+        ],
+        "title": "RunContactOut",
+        "type": "object"
+      },
+      "RunContactsOut": {
+        "description": "The last few contacts a run touched, newest first (#324). Empty for a run\nthat touched nobody yet, or one older than the account's newest run.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RunContactOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "RunContactsOut",
+        "type": "object"
+      },
       "RunOut": {
-        "description": "One run: what it is, how far it got, and how it ended. Counts only, never names.\n\n``planned``/``completed`` are an enrichment plan's size and progress.\n``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.\n``resumed_by`` is the id of the run that already took over this one's\nremaining plan, or null when it has not been (and so still may be, spec 9.9).\n``stop_reason_text`` is ``stop_reason`` in plain words (\"outside active\nhours\" for ``inactive``, #213), or null while the run is running.",
+        "description": "One run: what it is, how far it got, and how it ended. Counts only, never names.\n\n``planned``/``completed`` are an enrichment plan's size and progress.\n``aging_refused`` is why a complete full sync aged nobody (#169 E), or null.\n``resumed_by`` is the id of the run that already took over this one's\nremaining plan, or null when it has not been (and so still may be, spec 9.9).\n``stop_reason_text`` is ``stop_reason`` in plain words (\"outside active\nhours\" for ``inactive``, #213), or null while the run is running.\n``pause_requested`` is true while a running enrichment is stopping to pause\n(#324); it ends ``aborted`` with ``stop_reason`` ``paused``, and resumable.",
         "properties": {
           "aging_refused": {
             "anyOf": [
@@ -8105,6 +8175,10 @@
             ],
             "title": "Notes"
           },
+          "pause_requested": {
+            "title": "Pause Requested",
+            "type": "boolean"
+          },
           "planned": {
             "anyOf": [
               {
@@ -8204,7 +8278,8 @@
           "planned",
           "completed",
           "aging_refused",
-          "resumed_by"
+          "resumed_by",
+          "pause_requested"
         ],
         "title": "RunOut",
         "type": "object"
@@ -8452,7 +8527,7 @@
         "type": "object"
       },
       "ScheduleOut": {
-        "description": "Whether scheduled runs may fire, and when each kind is next due.\n\n``armed`` is false on every install until a person arms it; while false the\nscheduler still keeps due times, and no scheduled LinkedIn job fires.\n``scheduler_running`` is whether this process runs a scheduler at all.",
+        "description": "Whether scheduled runs may fire, and when each kind is next due.\n\n``armed`` is false on every install until a person arms it; while false the\nscheduler still keeps due times, and no scheduled LinkedIn job fires.\n``scheduler_running`` is whether this process runs a scheduler at all.\n``paused`` is whether a person paused the schedule (#324): armed or not, no\nnew scheduled run starts until it is unpaused, and nothing missed is replayed.",
         "properties": {
           "armed": {
             "title": "Armed",
@@ -8477,6 +8552,22 @@
             "title": "Jobs",
             "type": "array"
           },
+          "paused": {
+            "title": "Paused",
+            "type": "boolean"
+          },
+          "paused_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paused At"
+          },
           "scheduler_running": {
             "title": "Scheduler Running",
             "type": "boolean"
@@ -8485,6 +8576,8 @@
         "required": [
           "armed",
           "armed_at",
+          "paused",
+          "paused_at",
           "scheduler_running",
           "jobs"
         ],
@@ -15483,6 +15576,101 @@
         ]
       }
     },
+    "/api/v1/linkedin/runs/{run_id}/contacts": {
+      "get": {
+        "description": "The last few contacts the run touched, newest first, and what happened (#324).",
+        "operationId": "list_linkedin_run_contacts",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunContactsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No run"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Run Contacts",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/runs/{run_id}/pause": {
+      "post": {
+        "description": "Ask a running enrichment to stop at its next check and keep its place (#324).\n\nIt ends ``aborted``, ``paused``, with its plan; ``POST /runs/{id}/resume``\ncontinues the rest. Nothing here touches the browser: the run reads the flag.",
+        "operationId": "pause_linkedin_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No run"
+          },
+          "409": {
+            "description": "The run already ended, is being cancelled, or is a sync (only an enrichment keeps a plan to resume)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pause Run",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
     "/api/v1/linkedin/runs/{run_id}/resume": {
       "post": {
         "description": "Record a resume of an enrichment run's remaining plan and submit it.",
@@ -15618,6 +15806,50 @@
           }
         },
         "summary": "Disarm Schedule",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/schedule/pause": {
+      "post": {
+        "description": "Hold scheduled runs without disarming (#324): no new one starts until unpaused.\n\nA run already going is not stopped (cancel does that). Due fires met while\npaused are skipped and their cadence moves on, so unpausing starts nothing at\nonce. The pause survives a restart of ``netkeeper serve``.",
+        "operationId": "pause_linkedin_schedule",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Pause Linkedin Schedule",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/schedule/unpause": {
+      "post": {
+        "description": "Let scheduled runs start again; each kind waits for its next due time.",
+        "operationId": "unpause_linkedin_schedule",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Unpause Linkedin Schedule",
         "tags": [
           "linkedin"
         ]

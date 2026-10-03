@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { budgetQuery, heatQuery, scheduleQuery, statusQuery } from '@/features/linkedin/api'
+import { SchedulePause } from '@/features/linkedin/schedule-pause'
 import { RUN_STATUS_CLASSES, formatWhen, stopReasonLabel } from '@/features/linkedin/fields'
 import {
   RUN_KIND_LABELS,
@@ -143,6 +144,8 @@ export function NextSendsCard() {
  * The next scheduled LinkedIn run, from the scheduler's persisted due times
  * (`GET /linkedin/schedule`). Unarmed, nothing fires however soon a due time
  * is, so the card says that instead of showing a time that will not happen.
+ * Paused (#324), it says that instead, with the control to unpause; armed and
+ * running, it offers the pause.
  */
 export function NextLinkedInRunCard() {
   const schedule = useQuery(scheduleQuery)
@@ -153,7 +156,7 @@ export function NextLinkedInRunCard() {
         <Checking />
       ) : schedule.isError ? (
         <Failed what="The LinkedIn schedule" />
-      ) : !schedule.data.armed ? (
+      ) : !schedule.data.armed && !schedule.data.paused ? (
         <>
           <Muted>
             Scheduled runs are off. Nothing visits LinkedIn on its own until you arm them.
@@ -164,11 +167,16 @@ export function NextLinkedInRunCard() {
             </Button>
           </div>
         </>
+      ) : schedule.data.paused ? (
+        <SchedulePause schedule={schedule.data} />
       ) : (
-        <LinkedInJobs
-          jobs={schedule.data.jobs}
-          schedulerRunning={schedule.data.scheduler_running}
-        />
+        <>
+          <LinkedInJobs
+            jobs={schedule.data.jobs}
+            schedulerRunning={schedule.data.scheduler_running}
+          />
+          <SchedulePause schedule={schedule.data} />
+        </>
       )}
     </GlanceCard>
   )

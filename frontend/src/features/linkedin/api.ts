@@ -14,6 +14,7 @@ import type {
   LinkedInStatus,
   Pin,
   RunAccepted,
+  RunContacts,
   RunKind,
   RunPage,
   RunStatus,
@@ -58,6 +59,7 @@ export const linkedinKeys = {
   runs: () => [...linkedinKeys.all, 'runs'] as const,
   runList: (params: RunsParams) => [...linkedinKeys.runs(), 'list', params] as const,
   run: (runId: number) => [...linkedinKeys.runs(), 'detail', runId] as const,
+  runContacts: (runId: number) => [...linkedinKeys.runs(), 'contacts', runId] as const,
 }
 
 // --- reads -------------------------------------------------------------------------
@@ -154,7 +156,24 @@ export function runQuery(runId: number) {
   })
 }
 
-// --- runs: start, cancel, resume ----------------------------------------------------
+/** The last few contacts a run touched, newest first, and what happened to each (#324). */
+export function runContactsQuery(runId: number) {
+  return queryOptions({
+    queryKey: linkedinKeys.runContacts(runId),
+    queryFn: async ({ signal }): Promise<RunContacts> => {
+      const { data, error, response } = await api.GET('/api/v1/linkedin/runs/{run_id}/contacts', {
+        params: { path: { run_id: runId } },
+        signal,
+      })
+      if (data === undefined) {
+        throw apiError(error, response, `GET /api/v1/linkedin/runs/${runId}/contacts`)
+      }
+      return data
+    },
+  })
+}
+
+// --- runs: start, cancel, pause, resume ----------------------------------------------------
 
 /** Start a run by hand. `max_visits` (enrichment only) only ever lowers today's budget. */
 export async function startRun(kind: RunKind, maxVisits: number | null): Promise<RunAccepted> {
@@ -172,6 +191,20 @@ export async function cancelRun(runId: number): Promise<RunType> {
   })
   if (data === undefined) {
     throw apiError(error, response, `POST /api/v1/linkedin/runs/${runId}/cancel`)
+  }
+  return data
+}
+
+/**
+ * Ask a running enrichment to stop at its next check and keep its place (#324). It
+ * ends `paused`, and `resumeRun` continues the rest of its plan. A sync cannot be paused.
+ */
+export async function pauseRun(runId: number): Promise<RunType> {
+  const { data, error, response } = await api.POST('/api/v1/linkedin/runs/{run_id}/pause', {
+    params: { path: { run_id: runId } },
+  })
+  if (data === undefined) {
+    throw apiError(error, response, `POST /api/v1/linkedin/runs/${runId}/pause`)
   }
   return data
 }
@@ -223,6 +256,24 @@ export async function disarmSchedule(): Promise<Schedule> {
   const { data, error, response } = await api.POST('/api/v1/linkedin/schedule/disarm')
   if (data === undefined) {
     throw apiError(error, response, 'POST /api/v1/linkedin/schedule/disarm')
+  }
+  return data
+}
+
+/**
+ * Hold scheduled runs without disarming (#324): no new one starts until unpaused, a
+ * run already going is not stopped, and nothing skipped while paused is replayed.
+ */
+export async function pauseSchedule(): Promise<Schedule> {
+  const { data, error, response } = await api.POST('/api/v1/linkedin/schedule/pause')
+  if (data === undefined) throw apiError(error, response, 'POST /api/v1/linkedin/schedule/pause')
+  return data
+}
+
+export async function unpauseSchedule(): Promise<Schedule> {
+  const { data, error, response } = await api.POST('/api/v1/linkedin/schedule/unpause')
+  if (data === undefined) {
+    throw apiError(error, response, 'POST /api/v1/linkedin/schedule/unpause')
   }
   return data
 }

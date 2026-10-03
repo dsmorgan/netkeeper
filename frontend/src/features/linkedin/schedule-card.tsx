@@ -10,6 +10,7 @@ import { armSchedule, budgetQuery, disarmSchedule, linkedinKeys, scheduleQuery }
 import { formatWhen } from './fields'
 import { ProfileViewNotice } from './profile-view-notice'
 import { RiskWarning } from './risk-warning'
+import { SchedulePause } from './schedule-pause'
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -24,7 +25,8 @@ function message(error: unknown): string {
  * click, because backing out of "runs happen on their own" should never be
  * harder than turning it on. When the daily profile-visit limit is above
  * 100, the dialog shows the budget's risk warning too (#318); it informs and
- * does not block arming.
+ * does not block arming. Armed, the schedule can also be paused (#324): no new
+ * scheduled run starts until it is unpaused, without disarming.
  */
 export function ScheduleCard() {
   const schedule = useQuery(scheduleQuery)
@@ -85,6 +87,7 @@ export function ScheduleCard() {
                 ))}
               </ul>
             )}
+            {(armed || schedule.data.paused) && <SchedulePause schedule={schedule.data} />}
             {armed ? (
               <Button variant="outline" onClick={() => disarm.mutate()} disabled={disarm.isPending}>
                 {disarm.isPending ? 'Disarming…' : 'Disarm'}

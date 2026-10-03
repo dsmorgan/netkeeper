@@ -16,6 +16,7 @@ import {
   NextSendsCard,
   RepliesCard,
 } from './glance-cards'
+import { LiveRunCard } from './live-run-card'
 import { MailboxCard } from './mailbox-card'
 import { SetupStepCard } from './setup-step-card'
 import { buildSetupSteps } from './setup-steps'
@@ -118,6 +119,9 @@ export function DashboardPage() {
       )}
 
       <section aria-label="At a glance" className="grid gap-3 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <LiveRunCard />
+        </div>
         <NextSendsCard />
         <NextLinkedInRunCard />
         <BrowserHealthCard />
