@@ -105,6 +105,7 @@ from netkeeper.services.linkedin_session import (
 from netkeeper.services.pacing import profiles as pacing_profiles
 from netkeeper.services.posture import SessionProbe, describe_active_hours, posture
 from netkeeper.services.posture import render as render_posture
+from netkeeper.services.scheduled_runs import seed_served_schedule
 from netkeeper.services.simulate_campaign import DEFAULT_SCHEDULE_DAYS
 from netkeeper.services.simulate_run import DEFAULT_DAYS as DEFAULT_SIMULATION_DAYS
 from netkeeper.services.simulate_run import DEFAULT_SEED as DEFAULT_SIMULATION_SEED
@@ -1452,6 +1453,10 @@ def linkedin_schedule_arm(
             account = find_account(session, user)
             already = account is not None and account.scheduled_runs_armed_at is not None
         if already:
+            # A kind added since arming gets its first due time here too (#327).
+            with session_scope(factory, write=True) as session:
+                user = _local_user_or_exit(session)
+                seed_served_schedule(session, user, settings.linkedin, now=datetime.now(UTC))
             typer.echo("scheduled LinkedIn runs are already armed")
             return
         risk = budgets.profile_visit_risk_warning(settings.linkedin.budget)
@@ -1466,7 +1471,10 @@ def linkedin_schedule_arm(
             raise typer.Exit(code=1)
         with session_scope(factory, write=True) as session:
             # Arming is idempotent, so a change between the read and here is harmless.
-            arm_scheduled_runs(session, _local_user_or_exit(session), now=datetime.now(UTC))
+            user = _local_user_or_exit(session)
+            now = datetime.now(UTC)
+            arm_scheduled_runs(session, user, now=now)
+            seed_served_schedule(session, user, settings.linkedin, now=now)
     finally:
         engine.dispose()
     typer.echo("scheduled LinkedIn runs armed; `netkeeper linkedin schedule disarm` undoes it")

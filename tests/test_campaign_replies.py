@@ -286,6 +286,37 @@ def test_a_reply_to_a_scheduled_draft_once_delivered_ends_the_enrollment(
     assert mail.gmail.drafts() == {}
 
 
+def test_a_draft_armed_mailbox_is_polled_for_replies(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#327: the reply poll needs an armed mailbox, not a send-armed one. A mailbox armed
+    for drafts only is polled like one armed to send, records ``replies_polled_at``, and a
+    reply to a draft the person sent ends the enrollment."""
+    mail = make_mail(session_factory, modes=(StepMode.DRAFT,) * 2, same_thread=(False, True))
+    set_mailbox(mail, send_armed_at=None)
+    assert mail.read(lambda s: mailbox_of(mail, s).arm) is MailboxArm.DRAFT
+    mail.sender = poller(mail)
+    enrollment_id = mail.enroll(ADA)
+    mail.tick(NOW)
+    [draft_id] = mail.gmail.drafts()
+    scheduled = mail.gmail.schedule_draft(draft_id, at=NOW + timedelta(minutes=5))
+    delivered_at = NOW + timedelta(days=1)
+    mail.gmail.send_scheduled(scheduled, at=delivered_at)
+    mail.tick(delivered_at + timedelta(minutes=1))  # the drafts poll sees it sent
+    mail.tick(delivered_at + timedelta(minutes=2))  # the reply poll sets its baseline
+    assert history_id(mail) is not None
+    mail.gmail.reply(scheduled, sender=f"Ada <{ADA}>", at=delivered_at + timedelta(hours=1))
+    polled_at = delivered_at + timedelta(hours=2)
+    mail.tick(polled_at)
+
+    enrollment = mail.enrollment(enrollment_id)
+    assert (enrollment.status, enrollment.replied_at) == (
+        EnrollmentStatus.REPLIED,
+        delivered_at + timedelta(hours=1),
+    )
+    assert mail.read(lambda s: mailbox_of(mail, s).replies_polled_at) == polled_at
+
+
 def _reply_in_the_gap(mail: Mail, to: MessageRef, at: datetime, *, in_thread: bool) -> None:
     if in_thread:
         mail.gmail.reply(to, sender=f"Ada <{ADA}>", at=at)

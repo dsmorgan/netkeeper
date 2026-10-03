@@ -61,7 +61,7 @@ from netkeeper.services.linkedin_accounts import (
     scheduled_runs_armed,
 )
 from netkeeper.services.linkedin_session import session_flag
-from netkeeper.services.scheduled_runs import submit_run
+from netkeeper.services.scheduled_runs import seed_served_schedule, submit_run
 from netkeeper.services.scheduler import SERVED_SCHEDULES, stored_due
 from netkeeper.services.visit_budget import todays_visits
 from netkeeper.web.deps import CurrentUser, SessionDep, Tasks
@@ -436,7 +436,9 @@ def arm_schedule(
             status_code=422,
             detail="arming lets netkeeper visit LinkedIn on its own schedule; send confirm: true",
         )
-    arm_scheduled_runs(session, user, now=utcnow())
+    now = utcnow()
+    arm_scheduled_runs(session, user, now=now)
+    seed_served_schedule(session, user, _settings(request), now=now)
     return _schedule_out(request, session, user)
 
 

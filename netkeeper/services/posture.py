@@ -76,7 +76,8 @@ from netkeeper.linkedin.pacing import (
     next_window_start,
     warmup_budget,
 )
-from netkeeper.models import SyncRunKind, SyncRunStatus, User
+from netkeeper.models import Mailbox, SyncRunKind, SyncRunStatus, User
+from netkeeper.scoping import scoped
 from netkeeper.services import heat as heat_rows
 from netkeeper.services import route_breaker
 from netkeeper.services.budgets import (
@@ -104,8 +105,10 @@ from netkeeper.services.scheduler import (
     DEFAULT_SCHEDULES,
     HEAT_SKIP_DISABLED,
     MIN_JOB_KIND_GAP,
+    SERVED_SCHEDULES,
     HeatGate,
     HeatSkip,
+    JobKind,
     stored_due,
 )
 
@@ -186,6 +189,29 @@ MIN_BURST_BREAK_S: Final = 60.0
 #: last weeks, but a day is long enough that "it worked yesterday" is worth
 #: checking again before trusting an unattended run with it.
 SESSION_EVIDENCE_FRESH_FOR: Final = timedelta(hours=24)
+
+#: Why a job kind that ``netkeeper serve`` does not schedule is not applicable (#327).
+#: A kind outside :data:`~netkeeper.services.scheduler.SERVED_SCHEDULES` that is not
+#: named here reads as having no runner.
+NOT_SERVED_BECAUSE: Final[dict[JobKind, str]] = {
+    JobKind.INBOX: (
+        "the LinkedIn inbox poll has no runner yet, so `netkeeper serve` does not schedule"
+        " it; Gmail replies are polled by the campaign engine (the reply poll row)"
+    ),
+}
+
+#: What a served job kind with no due time means: it never runs on its own (#327).
+MISSING_MEANS: Final[dict[JobKind, str]] = {
+    JobKind.CONNECTIONS_FULL: "the weekly full sync never runs, so nobody is aged out",
+    JobKind.CONNECTIONS_INCREMENTAL: "the daily sync never runs, so new connections wait",
+    JobKind.ENRICH: "enrichment never runs on its own",
+}
+
+#: The Gmail reply poll is late once a mailbox's last complete poll is older than this
+#: many ``[campaigns] reply_poll_minutes`` (#327). One missed poll is noise (a slow tick,
+#: a transient Gmail error the next tick retries); three in a row is a poll that is not
+#: running, and a reply it would have caught does not stop the next follow-up.
+REPLY_POLL_LATE_AFTER_POLLS: Final = 3
 
 
 class Status(enum.StrEnum):
@@ -294,6 +320,9 @@ class SchedulerPosture:
     job_kind_gap_minutes: float
     #: ``(kind, interval hours, next due or None)``, in :data:`DEFAULT_SCHEDULES` order.
     jobs: tuple[tuple[str, float, datetime | None], ...]
+    #: ``(kind, why)`` for each kind ``netkeeper serve`` does not schedule (#327). Such a
+    #: kind has no due time on purpose, so it is neither scheduled nor missing.
+    not_applicable: tuple[tuple[str, str], ...] = ()
 
     @property
     def scheduled(self) -> tuple[str, ...]:
@@ -301,7 +330,14 @@ class SchedulerPosture:
 
     @property
     def unscheduled(self) -> tuple[str, ...]:
-        return tuple(kind for kind, _, due in self.jobs if due is None)
+        """The kinds ``serve`` schedules that have no due time: they never run."""
+        skip = {kind for kind, _ in self.not_applicable}
+        return tuple(kind for kind, _, due in self.jobs if due is None and kind not in skip)
+
+    @property
+    def applicable(self) -> tuple[str, ...]:
+        skip = {kind for kind, _ in self.not_applicable}
+        return tuple(kind for kind, _, _ in self.jobs if kind not in skip)
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,6 +500,7 @@ def posture(
         _heat_skip_gate(gate),
         _scheduled_jobs(scheduler),
         _scheduled_runs_armed(session, user, account_id),
+        _reply_poll(session, user, now=now, settings=settings),
         _route_changed_breaker(session, user, account_id),
         _answer_lost_limit(session, user, account_id),
         _network_aging(session, user),
@@ -1273,27 +1310,35 @@ def _heat_skip_gate(gate: HeatGate) -> Protection:
 
 
 def _scheduled_jobs(scheduler: SchedulerPosture) -> Protection:
-    """Whether a schedule is established, because the scheduler-side protections need one.
+    """Each job kind, by name: scheduled, missing, or not applicable, and why (#327).
 
     Active hours deferral, the catch-up rule, and the heat skip gate are all
     things the *scheduler* does. A report that called them in force while no
     job kind has a due time would be claiming protection from a mechanism that
-    is not running, so a schedule that is missing or half-established warns.
+    is not running, so a schedule that is missing or half-established warns. A
+    kind ``netkeeper serve`` does not schedule (the LinkedIn inbox poll, which has
+    no runner) is named as not applicable, never as missing.
     """
-    total = len(scheduler.jobs)
+    states = [
+        f"{kind} {'scheduled' if due is not None else 'missing'}"
+        for kind, _, due in scheduler.jobs
+        if kind in scheduler.applicable
+    ]
+    states += [f"{kind} not applicable ({why})" for kind, why in scheduler.not_applicable]
+    detail = "; ".join(states)
     if not scheduler.unscheduled:
-        soonest = min(due for _, _, due in scheduler.jobs if due is not None)
+        dues = [due for kind, _, due in scheduler.jobs if due is not None]
+        soonest = f"; next {min(dues):%Y-%m-%d %H:%M UTC}" if dues else ""
         return Protection(
             name="scheduled jobs",
             status=Status.ON,
-            value=f"{total} kinds scheduled; next {soonest:%Y-%m-%d %H:%M UTC}",
+            value=f"{detail}{soonest}",
         )
-    missing = ", ".join(scheduler.unscheduled)
-    if not scheduler.scheduled:
+    if not any(kind in scheduler.applicable for kind in scheduler.scheduled):
         return Protection(
             name="scheduled jobs",
             status=Status.UNKNOWN,
-            value="nothing scheduled",
+            value=f"nothing scheduled: {detail}",
             warnings=(
                 "no job kind has a due time for this account, so nothing fires on its"
                 " own and the active-hours, catch-up, and heat-skip protections have"
@@ -1301,15 +1346,77 @@ def _scheduled_jobs(scheduler: SchedulerPosture) -> Protection:
                 " establishes a schedule",
             ),
         )
+    meaning = "; ".join(
+        f"{kind}: {MISSING_MEANS.get(JobKind(kind), 'it never runs on its own')}"
+        for kind in scheduler.unscheduled
+    )
     return Protection(
         name="scheduled jobs",
-        status=Status.UNKNOWN,
-        value=f"{len(scheduler.scheduled)} of {total} kinds scheduled",
+        status=Status.OFF,
+        value=detail,
         warnings=(
-            f"these job kinds have no due time: {missing}. A half-established"
-            " schedule runs some kinds and silently never runs the others",
+            f"these job kinds have no due time, so they never run ({meaning})."
+            " `netkeeper serve` gives a missing kind its first due time when it starts,"
+            " and `netkeeper linkedin schedule arm` does it at once",
         ),
     )
+
+
+def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settings) -> Protection:
+    """When each armed mailbox was last polled for replies (#327).
+
+    The reply poll (spec 11.7) runs in ``netkeeper serve``'s campaign tick for every
+    armed mailbox, armed for drafts or to send, every ``[campaigns]
+    reply_poll_minutes``. ``mailboxes.replies_polled_at`` is when it last read
+    everything up to then. A poll that never ran, or is over
+    :data:`REPLY_POLL_LATE_AFTER_POLLS` intervals old, warns: a reply nobody reads
+    does not stop the next follow-up.
+    """
+    minutes = max(settings.campaigns.reply_poll_minutes, 1)
+    late_after = timedelta(minutes=minutes * REPLY_POLL_LATE_AFTER_POLLS)
+    armed = [
+        mailbox
+        for mailbox in session.scalars(scoped(user, Mailbox).order_by(Mailbox.id))
+        if mailbox.arm is not None
+    ]
+    if not armed:
+        return Protection(
+            name="reply poll",
+            status=Status.ON,
+            value="no armed mailbox: no campaign email goes out, so there is no reply to poll for",
+        )
+    details: list[str] = []
+    warnings: list[str] = []
+    for mailbox in armed:
+        arm = mailbox.arm
+        assert arm is not None  # filtered above
+        polled = mailbox.replies_polled_at
+        if polled is None:
+            details.append(f"{mailbox.email} ({arm.value}-armed): never polled")
+            warnings.append(
+                f"{mailbox.email} is armed but has never been polled for replies, so a reply"
+                " would not stop a follow-up. The poll runs in `netkeeper serve`, every"
+                f" {minutes} min: check that serve is running"
+            )
+            continue
+        age = now - polled
+        details.append(
+            f"{mailbox.email} ({arm.value}-armed): last polled {polled:%Y-%m-%d %H:%M UTC}"
+            f" ({_ago(age)})"
+        )
+        if age > late_after:
+            warnings.append(
+                f"{mailbox.email} was last polled for replies {_ago(age)}, more than"
+                f" {REPLY_POLL_LATE_AFTER_POLLS} times the {minutes} min interval, so a reply"
+                " since then has not been seen and would not stop a follow-up. Check that"
+                " `netkeeper serve` is running"
+            )
+    value = f"every {minutes} min; " + "; ".join(details)
+    if warnings:
+        return Protection(
+            name="reply poll", status=Status.OFF, value=value, warnings=tuple(warnings)
+        )
+    return Protection(name="reply poll", status=Status.ON, value=value)
 
 
 def _scheduled_runs_armed(session: Session, user: User, account_id: int) -> Protection:
@@ -1630,11 +1737,17 @@ def _scheduler_posture(
         )
         for kind, schedule in DEFAULT_SCHEDULES.items()
     )
+    not_applicable = tuple(
+        (kind.value, NOT_SERVED_BECAUSE.get(kind, "no runner, so `netkeeper serve` skips it"))
+        for kind in DEFAULT_SCHEDULES
+        if kind not in SERVED_SCHEDULES
+    )
     return SchedulerPosture(
         heat_skip=gate is not HEAT_SKIP_DISABLED,
         catchup_minutes=(CATCHUP_MIN_MINUTES, CATCHUP_MAX_MINUTES),
         job_kind_gap_minutes=MIN_JOB_KIND_GAP.total_seconds() / 60,
         jobs=jobs,
+        not_applicable=not_applicable,
     )
 
 
@@ -1789,11 +1902,16 @@ def render(report: PostureReport) -> str:
 def _scheduler_lines(scheduler: SchedulerPosture) -> list[str]:
     """The scheduler's own settings, and when each job kind next fires."""
     low, high = scheduler.catchup_minutes
+    skip = {kind for kind, _ in scheduler.not_applicable}
     rows = [
         (
             kind,
             f"every {_hours(interval)}",
-            "not scheduled" if due is None else f"{due:%Y-%m-%d %H:%M UTC}",
+            "not applicable"
+            if kind in skip and due is None
+            else "not scheduled"
+            if due is None
+            else f"{due:%Y-%m-%d %H:%M UTC}",
         )
         for kind, interval, due in scheduler.jobs
     ]
