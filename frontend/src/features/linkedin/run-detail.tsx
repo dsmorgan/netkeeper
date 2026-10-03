@@ -6,8 +6,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { cn } from '@/lib/utils'
 
-import { cancelRun, linkedinKeys, resumeRun, runQuery } from './api'
+import { budgetQuery, cancelRun, linkedinKeys, resumeRun, runQuery } from './api'
 import { formatFields, formatWhen, RUN_STATUS_CLASSES, stopReasonLabel, type Field } from './fields'
+import { ProfileViewNotice } from './profile-view-notice'
 import { RUN_KIND_LABELS, RUN_STATUS_LABELS } from './types'
 
 function message(error: unknown): string {
@@ -34,6 +35,7 @@ export function RunDetail({
   onResumed?: (runId: number) => void
 }) {
   const run = useQuery(runQuery(runId))
+  const budget = useQuery(budgetQuery)
   const queryClient = useQueryClient()
   const [resuming, setResuming] = useState(false)
 
@@ -140,6 +142,7 @@ export function RunDetail({
         onConfirm={() => resume.mutate()}
       >
         <p>Starts a new run on the rest of this plan, in the same order, right now.</p>
+        <ProfileViewNotice text={budget.data?.profile_view_notice} />
         <p>A plan can be resumed only once.</p>
       </ConfirmDialog>
     </Card>

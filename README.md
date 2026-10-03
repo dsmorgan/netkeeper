@@ -71,7 +71,7 @@ Logs live under `<data_dir>/logs/`: `serve.log` for stdout and `serve.err.log` f
 
 LinkedIn's User Agreement prohibits automated access, including reading data it already shows you. netkeeper reads only your own 1st-degree connections, ships conservative defaults, warms up slowly, backs off when LinkedIn pushes back, and never retries a security checkpoint. Those safeguards reduce the risk of an account restriction; they do not remove it. Read [the security and terms section](docs/architecture.md#18-security-privacy-and-terms-of-service) before you run it, and treat the daily budgets as the ceiling, not a target.
 
-Enrichment opens each contact's LinkedIn profile from your account, so they may see a visit in Who viewed your profile. Whether they see your name or an anonymous viewer depends on the Profile viewing options in LinkedIn's Visibility settings. netkeeper never changes that setting, and it tells you this wherever enrichment starts or is enabled.
+Enrichment opens each contact's LinkedIn profile from your account, so they may see a visit in **Who viewed your profile**. Whether they see your name and headline, a partial description (such as someone at your company), or an anonymous viewer depends on the Profile viewing options in LinkedIn's Visibility settings. netkeeper never changes that setting, and it tells you this wherever enrichment starts or is enabled.
 
 ## Roadmap
 

@@ -46,6 +46,11 @@ describe('StartRunCard', () => {
       'POST /api/v1/linkedin/runs': () => jsonResponse({ run_id: 7 }),
     })
     const select = await screen.findByLabelText('Kind')
+    // Let the budget query resolve first, so a missing note is not just a note not loaded yet.
+    await waitFor(() =>
+      expect(calls.some((call) => call.path === '/api/v1/linkedin/budget')).toBe(true),
+    )
+    await screen.findByRole('button', { name: 'Start run' })
     expect(screen.queryByRole('note', { name: 'Profile views' })).not.toBeInTheDocument()
 
     fireEvent.change(select, { target: { value: 'enrich' } })
@@ -60,6 +65,20 @@ describe('StartRunCard', () => {
     await waitFor(() =>
       expect(calls.some((call) => call.path === '/api/v1/linkedin/runs')).toBe(true),
     )
+  })
+
+  it('drops the profile-view notice from the card and the dialog when the kind goes back to a sync (#325)', async () => {
+    renderCard()
+    const select = await screen.findByLabelText('Kind')
+    fireEvent.change(select, { target: { value: 'enrich' } })
+    expect(await screen.findByRole('note', { name: 'Profile views' })).toBeInTheDocument()
+
+    fireEvent.change(select, { target: { value: 'connections_incremental' } })
+    expect(screen.queryByRole('note', { name: 'Profile views' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start run' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(within(dialog).queryByRole('note', { name: 'Profile views' })).not.toBeInTheDocument()
   })
 
   it('clamps max visits to today’s remaining budget: it can only lower it', async () => {
