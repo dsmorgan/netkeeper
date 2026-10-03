@@ -422,6 +422,12 @@ Merging two contacts is a first-class operation that re-points every child row a
 - **Statuses.** An enrollment's status follows 11.3. A message's status is one of `scheduled`, `drafted`, `prefilled`, `sent`, `stale`, `discarded`, `bounced`, `failed` or `received`.
 - **Column meanings.** `current_step` is the position of the step that fired last (NULL before the first one). `contacted_within_days_guard` has no default: whatever creates a campaign (P3-06 or later) copies it from the config. 0 turns the recency guard off.
 
+### 8.6 History from the old mailing tool (#65)
+
+`history_campaigns` (`name`, `subject`, `started_on`, `last_batch_on`, `recipients_count`, `opens_count`, `bounces_count`, `source_sha256`; unique on `user_id`, `name`, `started_on`) and `history_recipients` (`history_campaign_id`, `email` stored lowercased, `contact_id` `SET NULL`, `opened`, `clicked`, `bounce_listed`, `email_out_interaction_id`, `scanned_at`, `reply_kind` unsubscribe/reply/bounce/auto, `replied_at`, `reply_gmail_id`, `email_in_interaction_id`, `bounced_at`; unique on `user_id`, `history_campaign_id`, `email`). `netkeeper history import` fills them from the old tool's workbook (`crm/history_workbook.py`, `crm/history.py`) and `netkeeper history scan-gmail` adds what Gmail holds (`services/history_scan.py`). Both are dry runs unless `--apply`.
+
+The guards never read these tables. The import and the scan act through what the guards already read (11.9): an imported `email_out` interaction (the recency guard), the do-not-send list (a bounce, an unsubscribe), `do_not_contact` (an unsubscribe), and `needs_review_at` (any other human reply, until a person confirms the contact). A connections sync that matches a flagged replier by URN leaves the mark alone (`history.awaiting_reply_triage`). The workbook names only the people who opened, clicked, or bounced, so the people it counts but doesn't name are not imported; the import reports how many. User steps: [docs/history-import.md](history-import.md).
+
 ## 9. LinkedIn extractor
 
 ### 9.1 Browser attach

@@ -82,6 +82,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
+from netkeeper.crm.history import awaiting_reply_triage
 from netkeeper.crm.identity import (
     Candidate,
     IncomingContact,
@@ -328,7 +329,14 @@ def apply_page(
                 )
                 if target is not None:
                     incoming = _keep_split(incoming, target)
-                unconfirmed = target is not None and target.needs_review_at is not None
+                # A contact the history scan flagged because they wrote back to an old
+                # campaign (#65) waits for a person, not for a URN: only a card's flag
+                # is this sync's to clear.
+                unconfirmed = (
+                    target is not None
+                    and target.needs_review_at is not None
+                    and not awaiting_reply_triage(session, user, target.id)
+                )
                 card_named = target is not None and "first_name" not in target.field_sources
                 first_before = target.first_name if target is not None else ""
                 preferred_before = target.preferred_name if target is not None else ""

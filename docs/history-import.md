@@ -1,0 +1,82 @@
+# Import the old mailing tool's history
+
+Before netkeeper sends its first campaign, tell it whom your old mailing tool already emailed, and what those people said back. Without this history, someone the old tool emailed, even someone who asked to be left alone, passes every campaign guard: the guards read only what netkeeper itself sent and what you set by hand.
+
+You run two commands, each first as a dry run:
+
+1. `netkeeper history import` reads the old tool's workbook and records who each campaign reached and when.
+2. `netkeeper history scan-gmail` searches your Gmail, read-only, for what those people sent back: replies, unsubscribe requests, automatic answers, and bounces.
+
+Then you triage the people who replied.
+
+You need:
+
+- The old tool's report, exported from Google Sheets as an `.xlsx` workbook, one tab per campaign. Keep it outside the repository; `.gitignore` refuses `*.xlsx` files anyway.
+- For the scan, the Gmail account the old tool sent from, connected to netkeeper ([Gmail setup](gmail-setup.md)). The scan doesn't need the mailbox armed: it sends nothing.
+
+## Step 1: import the workbook
+
+Run the dry run first. It does every step, prints what it would write, and writes nothing:
+
+```sh
+netkeeper history import ~/path/to/old-campaigns.xlsx
+```
+
+For each campaign tab, the report shows:
+
+- **LISTED**: the people the workbook names. The workbook lists the people who opened, clicked, or bounced, and nobody else.
+- **MATCHED**, **UNMATCHED**, **AMBIGUOUS**: whether a contact holds each address. An ambiguous address is one that more than one contact holds.
+- **CLICKS**, **OPENS**, **BOUNCES**: the workbook's own counts.
+- **SENT TO** and **UNLISTED**: the campaign's recipient count, and how many of those recipients the workbook doesn't name. netkeeper can't import the unlisted people, because the workbook doesn't say who they are. The report ends with a warning that gives the total.
+
+Below the table, the report lists every unmatched and ambiguous address. Merge duplicate contacts so that each ambiguous address belongs to one contact. To create a contact (name and address only) for each unmatched address, add `--create-missing`.
+
+When the report looks right, apply it:
+
+```sh
+netkeeper history import ~/path/to/old-campaigns.xlsx --apply
+```
+
+For each matched recipient, netkeeper adds one **email out** entry to the contact's timeline, dated at the campaign's start and labeled **Imported history**. The campaign guard that skips people you contacted recently counts these entries. A person on a campaign's bounce list goes on the do-not-send list as bounced.
+
+You can run the import again at any time, for example after you merge contacts or export the workbook again. It adds nothing twice.
+
+## Step 2: scan Gmail
+
+Run the dry run first. It searches Gmail and prints what it found, but writes nothing:
+
+```sh
+netkeeper history scan-gmail
+```
+
+For each imported recipient, the scan makes two searches, from the day before the campaign started until 120 days after its last batch: messages from the recipient's address, and delivery-failure notices that name it. It reads only each message's headers and Gmail's short preview, never the body, and it changes nothing in Gmail: no labels, no read state, no deletes.
+
+To try the scan on a few recipients first, add `--limit 5`. If your account has more than one mailbox, name the one the old tool sent from with `--mailbox you@example.com`.
+
+The report counts what the scan found in each campaign and lists the first 20 addresses of each kind. When the counts look right, apply them:
+
+```sh
+netkeeper history scan-gmail --apply
+```
+
+| What the scan found | What `--apply` does |
+|---|---|
+| A bounce | Puts the address on the do-not-send list as bounced. |
+| An unsubscribe request | Sets the contact's **Do not contact**, with the reason "unsubscribe (old campaign)", and puts every address the contact has on the do-not-send list as opted out. It also adds the message to the timeline. |
+| Any other reply | Adds the message to the contact's timeline as an **email in** entry labeled **Imported history**, and marks the contact **Needs review**, so that no campaign enrolls them until you look. |
+| An automatic answer, such as an out-of-office message | Nothing beyond recording it. |
+
+The scan can't tell a polite "no, thanks" from a friendly reply, so every person who replied waits for you.
+
+A scan that Gmail stops, for example at a rate limit, saves what it finished and exits with an error. Run the same command again later, and it continues with the recipients it didn't reach. A recipient already scanned is skipped unless you add `--rescan`.
+
+If the report lists people who wrote back but whom no single contact holds, import again with `--create-missing` (or merge the duplicates), and then scan again with `--rescan`.
+
+## Step 3: triage the people who replied
+
+Open each contact the scan flagged. In the contacts table, filter on **needs review since**. On the contact page, read the reply in the timeline, and then do one of the following:
+
+- If they're happy to hear from you, choose **Confirm**. Campaigns may include them again.
+- If they declined, set **Do not contact**, and then choose **Confirm**.
+
+The **Needs review** notice on the contact page describes a contact read off a LinkedIn card, because that is the other way a contact gets this mark. For a contact the scan flagged, the reply in the timeline is the reason. A LinkedIn sync never clears the mark from a contact the scan flagged; only you do, by confirming the contact. Merging a flagged contact into one that isn't flagged also clears it, so triage before you merge.

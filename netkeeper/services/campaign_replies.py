@@ -167,6 +167,13 @@ def is_auto_reply(message: Message) -> bool:
     return (message.header("Precedence") or "").strip().lower() in AUTO_REPLY_PRECEDENCE
 
 
+def asks_to_unsubscribe(message: Message) -> bool:
+    """Whether the message's subject or snippet holds one of :data:`UNSUBSCRIBE_PHRASES`,
+    as a whole word, without case. The one test for an unsubscribe request: the reply
+    poll and the history scan (#65) both use it."""
+    return bool(_UNSUBSCRIBE.search(f"{message.header('Subject') or ''} {message.snippet}"))
+
+
 def is_daemon(message: Message) -> bool:
     """Whether a mail system sent it: ``mailer-daemon@`` or ``postmaster@``."""
     return sender_of(message).partition("@")[0] in DAEMON_LOCAL_PARTS
@@ -429,13 +436,9 @@ class _Poll:
             candidates = in_thread or list(self.work.watches)
             for watch in candidates:
                 if sender in watch.addresses and message.internal_date > watch.first_sent_at:
-                    text = f"{message.header('Subject') or ''} {message.snippet}"
                     found.append(
                         Reply(
-                            watch.enrollment_id,
-                            message,
-                            bool(_UNSUBSCRIBE.search(text)),
-                            watch.label,
+                            watch.enrollment_id, message, asks_to_unsubscribe(message), watch.label
                         )
                     )
         return found
