@@ -155,7 +155,7 @@ Drift signals to watch for at every checkpoint:
 ### CP7: first real batch, after the follow-up
 
 - **Demo:** The first batch of up to 100 in `send` mode; two weeks later, the campaign page: sends per day, replies per step, bounces, opted out, the inbox page.
-- **Questions:** Response rate against the benchmarks in the workflow doc? Any follow-up sent to someone who had replied (the one failure that must not happen)? Any send before the campaign's scheduled start? Did any send go at an hour that surprised you (see #354)? Did Gmail push back in any way? What did you do by hand that the tool should have done?
+- **Questions:** Response rate against the benchmarks in the workflow doc? Any follow-up sent to someone who had replied (the one failure that must not happen)? Any send before the campaign's scheduled start? Any send outside your sending hours other than the first batch on its start day? Did Gmail push back in any way? What did you do by hand that the tool should have done?
 - **Re-read:** workflow stages 3 to 5, the benchmarks table.
 - **Outcome:** This is the checkpoint that proves the product. Take a full pass over the backlog afterward.
 

@@ -8870,6 +8870,104 @@
         "title": "ScheduledJobOut",
         "type": "object"
       },
+      "SendingHoursIn": {
+        "properties": {
+          "days": {
+            "items": {
+              "enum": [
+                "Mon",
+                "Tue",
+                "Wed",
+                "Thu",
+                "Fri",
+                "Sat",
+                "Sun"
+              ],
+              "type": "string"
+            },
+            "maxItems": 7,
+            "minItems": 1,
+            "title": "Days",
+            "type": "array"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "end": {
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "title": "End",
+            "type": "string"
+          },
+          "start": {
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "days",
+          "start",
+          "end"
+        ],
+        "title": "SendingHoursIn",
+        "type": "object"
+      },
+      "SendingHoursOut": {
+        "properties": {
+          "days": {
+            "items": {
+              "enum": [
+                "Mon",
+                "Tue",
+                "Wed",
+                "Thu",
+                "Fri",
+                "Sat",
+                "Sun"
+              ],
+              "type": "string"
+            },
+            "maxItems": 7,
+            "minItems": 1,
+            "title": "Days",
+            "type": "array"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "end": {
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "title": "End",
+            "type": "string"
+          },
+          "start": {
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "title": "Start",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "days",
+          "start",
+          "end",
+          "timezone",
+          "summary"
+        ],
+        "title": "SendingHoursOut",
+        "type": "object"
+      },
       "SessionFlagClearIn": {
         "additionalProperties": false,
         "description": "Clear the session flag by hand (#181), what ``netkeeper linkedin clear-flag`` does.\n\n``confirm`` must be true, and ``outcome`` and ``flagged_at`` name the flag the\nperson saw when they confirmed: the route clears only that exact flag, the same\nre-read the command makes after its prompt, so a flag raised again in between\nis never cleared by an answer given about an older one.",
@@ -9090,6 +9188,10 @@
             "title": "Reminder",
             "type": "string"
           },
+          "sending_hours": {
+            "title": "Sending Hours",
+            "type": "string"
+          },
           "suggestion": {
             "title": "Suggestion",
             "type": "string"
@@ -9116,7 +9218,8 @@
           "suggestion",
           "reminder",
           "at",
-          "warning"
+          "warning",
+          "sending_hours"
         ],
         "title": "StartOptionsOut",
         "type": "object"
@@ -17457,6 +17560,64 @@
         "summary": "Get Posture",
         "tags": [
           "posture"
+        ]
+      }
+    },
+    "/api/v1/settings/sending-hours": {
+      "get": {
+        "description": "The sending hours: when campaign email may go out, after each campaign's start.",
+        "operationId": "get_sending_hours",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendingHoursOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "The stored value cannot be read"
+          }
+        },
+        "summary": "Get Sending Hours",
+        "tags": [
+          "settings"
+        ]
+      },
+      "put": {
+        "description": "Replace the sending hours. Applies from the next tick to every campaign.",
+        "operationId": "set_sending_hours",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendingHoursIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendingHoursOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Hours that cannot be used"
+          }
+        },
+        "summary": "Set Sending Hours",
+        "tags": [
+          "settings"
         ]
       }
     },

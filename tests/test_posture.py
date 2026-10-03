@@ -58,7 +58,7 @@ from netkeeper.models import SettingKV, SyncRunKind, User
 from netkeeper.scoping import unscoped
 from netkeeper.services import heat as heat_rows
 from netkeeper.services import posture as posture_module
-from netkeeper.services import route_breaker
+from netkeeper.services import route_breaker, sending_hours
 from netkeeper.services import scheduler as scheduler_module
 from netkeeper.services.budgets import ActionClass, configured_default, consume
 from netkeeper.services.linkedin_session import flag_session
@@ -238,6 +238,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "scheduled jobs",
         "scheduled runs",
         "reply poll",
+        "sending hours",
         "next campaign send",
         "route-changed breaker",
         "answer-lost limit",
@@ -2067,7 +2068,8 @@ def test_the_next_campaign_send_names_the_soonest_and_the_serve_reminder(
         )
     writer.flush()
     row = _row(_report(writer, user), "next campaign send")
-    soonest = NOW + timedelta(hours=6)
+    # 20:00 New York is outside the sending hours: Thursday 09:00 New York (#338).
+    soonest = datetime(2026, 9, 24, 13, 0, tzinfo=UTC)
     assert row.status is Status.ON and row.warnings == ()
     assert row.value.startswith("'Autumn' step 1 at ")
     assert f"({soonest:%Y-%m-%d %H:%M} UTC)" in row.value
@@ -2092,4 +2094,38 @@ def test_an_overdue_next_campaign_send_shows_where_it_will_really_go(
     assert "Wed Sep 23, 10:00" in row.value
     tonight = datetime(2026, 9, 24, 2, 0, tzinfo=UTC)  # 22:00 New York
     row = _row(_report(writer, user, now=tonight), "next campaign send")
-    assert "(2026-09-24 02:00 UTC)" in row.value, row.value  # now, not the past due time
+    # Outside the sending hours: their next opening, Thursday 09:00 New York (#338).
+    assert "(2026-09-24 13:00 UTC)" in row.value, row.value
+    assert "Thu Sep 24, 09:00" in row.value
+
+
+def test_the_sending_hours_row_says_them_or_any_time(writer: Session, user: User) -> None:
+    row = _row(_report(writer, user), "sending hours")
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value.startswith("Mon to Fri, 09:00 to 17:00 (")
+    sending_hours.write(writer, user, enabled=False, days=["Mon"], start="09:00", end="17:00")
+    assert _row(_report(writer, user), "sending hours").value.startswith("any time")
+
+
+def test_sending_hours_that_cannot_be_read_warn(writer: Session, user: User) -> None:
+    set_setting(writer, user, sending_hours.KEY, {"enabled": True, "days": []})
+    report = _report(writer, user)
+    row = _row(report, "sending hours")
+    assert row.status is not Status.ON and row.warnings
+    assert "sending hours" in _warned(report)
+
+
+def test_with_any_time_an_overdue_send_shows_now(writer: Session, user: User) -> None:
+    sending_hours.write(writer, user, enabled=False, days=["Mon"], start="09:00", end="17:00")
+    mailbox = make_mailbox(writer, user, email="me@example.test")
+    campaign = factories.make_campaign(writer, user, name="Autumn", mailbox_id=mailbox.id)
+    factories.make_enrollment(
+        writer,
+        campaign,
+        factories.make_contact(writer, user),
+        next_action_at=datetime(2026, 9, 22, 14, 0, tzinfo=UTC),
+    )
+    writer.flush()
+    tonight = datetime(2026, 9, 24, 2, 0, tzinfo=UTC)
+    row = _row(_report(writer, user, now=tonight), "next campaign send")
+    assert "(2026-09-24 02:00 UTC)" in row.value, row.value

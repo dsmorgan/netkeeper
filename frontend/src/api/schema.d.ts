@@ -2319,6 +2319,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/settings/sending-hours": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Sending Hours
+         * @description The sending hours: when campaign email may go out, after each campaign's start.
+         */
+        get: operations["get_sending_hours"];
+        /**
+         * Set Sending Hours
+         * @description Replace the sending hours. Applies from the next tick to every campaign.
+         */
+        put: operations["set_sending_hours"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tags": {
         parameters: {
             query?: never;
@@ -5808,6 +5832,32 @@ export interface components {
             /** Next Due */
             next_due: string | null;
         };
+        /** SendingHoursIn */
+        SendingHoursIn: {
+            /** Days */
+            days: ("Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat" | "Sun")[];
+            /** Enabled */
+            enabled: boolean;
+            /** End */
+            end: string;
+            /** Start */
+            start: string;
+        };
+        /** SendingHoursOut */
+        SendingHoursOut: {
+            /** Days */
+            days: ("Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat" | "Sun")[];
+            /** Enabled */
+            enabled: boolean;
+            /** End */
+            end: string;
+            /** Start */
+            start: string;
+            /** Summary */
+            summary: string;
+            /** Timezone */
+            timezone: string;
+        };
         /**
          * SessionFlagClearIn
          * @description Clear the session flag by hand (#181), what ``netkeeper linkedin clear-flag`` does.
@@ -5915,6 +5965,8 @@ export interface components {
             default_start: string;
             /** Reminder */
             reminder: string;
+            /** Sending Hours */
+            sending_hours: string;
             /** Suggestion */
             suggestion: string;
             /** Timezone */
@@ -11592,6 +11644,64 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["PostureOut"];
                 };
+            };
+        };
+    };
+    get_sending_hours: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendingHoursOut"];
+                };
+            };
+            /** @description The stored value cannot be read */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_sending_hours: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendingHoursIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendingHoursOut"];
+                };
+            };
+            /** @description Hours that cannot be used */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

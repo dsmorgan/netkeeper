@@ -10,6 +10,9 @@ import type { components } from '@/api/schema'
 export type Posture = components['schemas']['PostureOut']
 export type Protection = components['schemas']['ProtectionOut']
 export type DoNotSendEntry = components['schemas']['DoNotSendOut']
+export type SendingHours = components['schemas']['SendingHoursOut']
+export type SendingHoursIn = components['schemas']['SendingHoursIn']
+export type Day = SendingHoursIn['days'][number]
 
 /**
  * Every protection the LinkedIn extractor has (spec section 9, P2-11), read-only.
@@ -51,4 +54,24 @@ export async function removeDoNotSend(entryId: number): Promise<void> {
     params: { path: { entry_id: entryId } },
   })
   if (!response.ok) throw failure(error, response, 'DELETE /do-not-send/{id}')
+}
+
+/**
+ * The sending hours (#338): when campaign email may go out, after each campaign's start.
+ * A global setting, stored in the database, so it is changed here and not in a file.
+ */
+export const sendingHoursQuery = queryOptions({
+  queryKey: ['sending-hours'] as const,
+  queryFn: async ({ signal }): Promise<SendingHours> => {
+    const { data, error, response } = await api.GET('/api/v1/settings/sending-hours', { signal })
+    if (data === undefined) throw failure(error, response, 'GET /settings/sending-hours')
+    return data
+  },
+})
+
+/** Replace the sending hours; 422 for no day, or an end that is not after the start. */
+export async function saveSendingHours(body: SendingHoursIn): Promise<SendingHours> {
+  const { data, error, response } = await api.PUT('/api/v1/settings/sending-hours', { body })
+  if (data === undefined) throw failure(error, response, 'PUT /settings/sending-hours')
+  return data
 }

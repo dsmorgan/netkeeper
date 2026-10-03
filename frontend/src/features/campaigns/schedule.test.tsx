@@ -90,6 +90,7 @@ describe('activating with a scheduled start', () => {
       'netkeeper sends only while serve is running and this Mac is awake.',
     )
     expect(dialog.getByLabelText('Start date and time')).toHaveValue(toLocalInput(DEFAULT_START))
+    expect(dialog.getByText(/Sending hours: Mon to Fri, 09:00 to 17:00\./)).toBeVisible()
     expect(dialog.queryByText('Not a suggested time')).toBeNull()
 
     fireEvent.click(dialog.getByRole('button', { name: 'Activate campaign' }))
@@ -259,6 +260,7 @@ describe('the campaign page', () => {
     const form = within(screen.getByRole('form', { name: 'Step 2 timing' }))
     fireEvent.change(form.getByLabelText('Days after the step before'), { target: { value: '3' } })
     fireEvent.change(form.getByLabelText(/Time of day/), { target: { value: '22:00' } })
+    expect(await form.findByText(/22:00 is outside the sending hours/)).toBeVisible()
     fireEvent.click(form.getByRole('button', { name: 'Save timing' }))
 
     expect(await screen.findByText(/3 days after the step before, at 22:00/)).toBeVisible()

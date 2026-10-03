@@ -65,7 +65,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
-from netkeeper.campaigns.schedule import SERVE_REMINDER, ScheduleError, spill, suggested
+from netkeeper.campaigns.schedule import (
+    SERVE_REMINDER,
+    ScheduleError,
+    SendingHours,
+    hold,
+    suggested,
+)
 from netkeeper.config import HeatSettings, LinkedInSettings, PacingSettings, Settings
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin import heat as heat_math
@@ -91,7 +97,7 @@ from netkeeper.services.budgets import (
     profile_visit_week_note,
 )
 from netkeeper.services.budgets import status as budget_status
-from netkeeper.services.campaign_engine import upcoming
+from netkeeper.services.campaign_engine import UpcomingFire, hours_for, upcoming
 from netkeeper.services.linkedin_accounts import (
     find_account,
     schedule_pause_state,
@@ -519,6 +525,7 @@ def posture(
         _scheduled_jobs(scheduler),
         _scheduled_runs_armed(session, user, account_id),
         _reply_poll(session, user, now=now, settings=settings),
+        _sending_hours(session, user),
         _next_campaign_send(session, user, zone=zone, now=now, settings=settings),
         _route_changed_breaker(session, user, account_id),
         _answer_lost_limit(session, user, account_id),
@@ -1398,16 +1405,59 @@ NEXT_SEND_LOOKAHEAD: Final = 50
 later than one due after it."""
 
 
-def _effective_send(due: datetime, *, now: datetime, settings: Settings, user: User) -> datetime:
-    """When a row due at ``due`` would really go: at ``due`` when it is still ahead,
-    else where the tick's spill puts it (today at its own time of day), else now."""
-    if due > now:
-        return due
+def _effective_send(
+    fire: UpcomingFire,
+    *,
+    now: datetime,
+    settings: Settings,
+    user: User,
+    hours: SendingHours | None,
+) -> datetime:
+    """When a row would really go: its due time or now, whichever is later, then where
+    the tick's own rule (:func:`netkeeper.campaigns.schedule.hold`: the unbounded start,
+    the spill, the sending hours) puts it."""
+    at = max(fire.due, now)
+    if hours is None:
+        return at
     try:
         slots = suggested(settings.campaigns, user.timezone)
     except ScheduleError:
-        return now
-    return spill(due, now, slots) or now
+        return at
+    held = hold(
+        fire.due,
+        at,
+        slots=slots,
+        hours=hours,
+        starts_at=fire.campaign.starts_at,
+        first_step=fire.enrollment.current_step is None,
+    )
+    return held or at
+
+
+def _sending_hours(session: Session, user: User) -> Protection:
+    """The sending hours (#338): when campaign email may go out after each start."""
+    hours = hours_for(session, user)
+    if hours is None:
+        return Protection(
+            name="sending hours",
+            status=Status.UNKNOWN,
+            value="the stored sending hours cannot be read",
+            warnings=(
+                "The stored sending hours cannot be read, so no campaign sends. Set them"
+                " again on the Settings page or with `netkeeper campaigns sending-hours`",
+            ),
+        )
+    if not hours.enabled:
+        return Protection(
+            name="sending hours",
+            status=Status.ON,
+            value="any time: every campaign send goes as soon as it is due",
+        )
+    return Protection(
+        name="sending hours",
+        status=Status.ON,
+        value=f"{hours.describe()} ({user.timezone}); only a campaign's start ignores them",
+    )
 
 
 def _next_campaign_send(
@@ -1429,8 +1479,10 @@ def _next_campaign_send(
     # Where each row will really go (#338 review, N4): a row already due waits for the
     # spill, or goes at the next tick. Rows are read soonest first,
     # and the earliest effective time among them is the one shown.
+    hours = hours_for(session, user)
     effective = [
-        (_effective_send(fire.due, now=now, settings=settings, user=user), fire) for fire in fires
+        (_effective_send(fire, now=now, settings=settings, user=user, hours=hours), fire)
+        for fire in fires
     ]
     when, fire = min(effective, key=lambda pair: pair[0])
     step = "" if fire.step is None else f" step {fire.step.position}"

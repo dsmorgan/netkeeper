@@ -95,6 +95,9 @@ export function StartPicker({
       {defaults.data !== undefined && (
         <p className="text-muted-foreground">{withCode(defaults.data.reminder)}</p>
       )}
+      {defaults.data !== undefined && (
+        <p className="text-muted-foreground">{defaults.data.sending_hours}</p>
+      )}
     </div>
   )
 }

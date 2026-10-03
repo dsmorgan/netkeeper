@@ -15,6 +15,8 @@ import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Callout, ErrorNote, LoadingNote } from '@/features/crm/controls'
 import { listsQuery } from '@/features/crm/api'
+import { sendingHoursQuery } from '@/features/settings/api'
+import { stepTimeWarning } from '@/features/settings/sending-hours'
 
 import {
   CampaignApiError,
@@ -340,6 +342,8 @@ function StepTimingForm({
     },
   })
   const valid = /^\d+$/.test(days) && Number(days) <= 365
+  const hours = useQuery(sendingHoursQuery)
+  const outside = stepTimeWarning(hours.data, time)
   const reviewing = campaign.status === 'draft' || campaign.status === 'reviewing'
   return (
     <form
@@ -378,6 +382,11 @@ function StepTimingForm({
           Cancel
         </Button>
       </div>
+      {outside !== null && (
+        <Callout tone="warning" title="Outside the sending hours">
+          <p>{outside}</p>
+        </Callout>
+      )}
       <p className="text-muted-foreground">
         {reviewing
           ? 'Changing the timing means the review records that name this step need doing again.'

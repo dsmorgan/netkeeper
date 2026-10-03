@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper import __version__, migrations
 from netkeeper.campaigns import gmail_oauth
+from netkeeper.campaigns import schedule as schedule_module
 from netkeeper.campaigns.render import me_fields
 from netkeeper.config import ConfigError, Settings, load_settings, render_toml
 from netkeeper.crm import do_not_send, import_runs, new_contact
@@ -72,6 +73,7 @@ from netkeeper.paths import CONFIG_ENV, data_dir
 from netkeeper.scoping import install_scope_guard
 from netkeeper.services import (
     budgets,
+    campaign_engine,
     campaign_review,
     enrich_plan,
     keychain,
@@ -81,6 +83,7 @@ from netkeeper.services import (
 )
 from netkeeper.services import campaigns as campaign_service
 from netkeeper.services import mailboxes as mailbox_service
+from netkeeper.services import sending_hours as sending_hours_service
 from netkeeper.services.backup import (
     BACKUPS_DIRNAME,
     BackupError,
@@ -2738,7 +2741,13 @@ def campaigns_activate(
             starts_at = campaign_service.resolve_start(
                 user, settings=settings, now=now, starts_at=chosen
             )
-            options = campaign_service.start_options(user, settings=settings, now=now, at=starts_at)
+            options = campaign_service.start_options(
+                user,
+                settings=settings,
+                now=now,
+                at=starts_at,
+                hours=campaign_engine.hours_for(session, user),
+            )
         if gaps:
             _refuse_activation(campaign_id, gaps)
         # A --start already past starts the campaign now, as activation records it.
@@ -2748,6 +2757,7 @@ def campaigns_activate(
         if options.warning is not None:
             typer.echo(f"warning: {options.warning}")
         typer.echo(options.reminder)
+        typer.echo(options.sending_hours)
         if not yes and not typer.confirm(
             f"activate campaign {campaign_id} {name!r}, starting {when}? `netkeeper serve`"
             " fires its steps from then on an armed mailbox"
@@ -2839,8 +2849,8 @@ def campaigns_step_time(
         str | None,
         typer.Option(
             "--at",
-            help="An explicit local time of day, HH:MM, honored at any hour. Left out: the"
-            " next suggested slot after the delay.",
+            help="An explicit local time of day, HH:MM, applied inside the sending hours."
+            " Left out: the next suggested slot after the delay.",
             show_default=False,
         ),
     ] = None,
@@ -2877,6 +2887,11 @@ def campaigns_step_time(
         timing = (
             "the next suggested slot" if changed.send_time is None else f"at {changed.send_time}"
         )
+        warning = campaign_service.step_time_warning(
+            campaign_engine.hours_for(session, user), changed.send_time
+        )
+    if warning is not None:
+        typer.echo(f"warning: {warning}")
     typer.echo(f"campaign {campaign_id} step {position}: +{delay_days}d, {timing}")
 
 
@@ -2929,6 +2944,69 @@ def campaigns_resume(
         user = _local_user_or_exit(session)
         campaign_service.resume(session, user, campaign_id)
     typer.echo(f"campaign {campaign_id} resumed")
+
+
+@campaigns_app.command("sending-hours")
+def campaigns_sending_hours(
+    days: Annotated[
+        str | None,
+        typer.Option(
+            "--days",
+            help="Comma-separated days, for example mon,tue,wed,thu,fri.",
+            show_default=False,
+        ),
+    ] = None,
+    start: Annotated[
+        str | None,
+        typer.Option(
+            "--from", help="When sending opens each day, HH:MM local.", show_default=False
+        ),
+    ] = None,
+    end: Annotated[
+        str | None,
+        typer.Option("--to", help="When sending closes each day, HH:MM local.", show_default=False),
+    ] = None,
+    any_time: Annotated[
+        bool, typer.Option("--any-time", help="Turn the sending hours off: send at any hour.")
+    ] = False,
+) -> None:
+    """Show or set the sending hours (GET/PUT /settings/sending-hours).
+
+    With no options, prints them. Only a campaign's start ignores them: its first batch
+    goes at the scheduled start, whatever the hour, and keeps going that day until the
+    caps stop it. The rest of that batch, every follow-up, retry and leftover sends only
+    inside the sending hours. The default is Monday to Friday, 09:00 to 17:00.
+    """
+    if any_time and (days is not None or start is not None or end is not None):
+        typer.echo("error: give --any-time alone, or --days/--from/--to", err=True)
+        raise typer.Exit(code=1)
+    changing = any_time or days is not None or start is not None or end is not None
+    with (
+        _campaign_db() as factory,
+        session_scope(factory, write=changing) as session,
+    ):
+        user = _local_user_or_exit(session)
+        timezone = user.timezone
+        try:
+            hours = sending_hours_service.read(session, user)
+        except schedule_module.ScheduleError:
+            hours = schedule_module.DEFAULT_SENDING_HOURS  # a bad stored value is replaced
+        if changing:
+            current_days = [schedule_module.DAY_NAMES[d] for d in sorted(hours.days)]
+            try:
+                hours = sending_hours_service.write(
+                    session,
+                    user,
+                    enabled=not any_time,
+                    days=current_days if days is None else days.split(","),
+                    start=f"{hours.start:%H:%M}" if start is None else start,
+                    end=f"{hours.end:%H:%M}" if end is None else end,
+                )
+            except schedule_module.ScheduleError as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+    verb = "now" if changing else "are"
+    typer.echo(f"sending hours {verb}: {hours.describe()} ({timezone})")
 
 
 # --- the do-not-send list (#238) -----------------------------------------------
