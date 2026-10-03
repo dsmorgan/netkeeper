@@ -24,6 +24,8 @@ from netkeeper.campaigns.render import (
     MAX_OUTPUT_CHARS,
     MAX_TRUNCATE_LENGTH,
     ME_FIELDS,
+    PLACEHOLDER_EXAMPLES,
+    FieldGroup,
     LintIssue,
     LintRule,
     MergeValues,
@@ -34,6 +36,8 @@ from netkeeper.campaigns.render import (
     has_errors,
     lint,
     me_fields,
+    merge_fields,
+    placeholder_example,
     render,
 )
 from netkeeper.config import MeSettings
@@ -224,15 +228,21 @@ def test_reaching_for_another_template_is_refused(tag: str) -> None:
 
 
 def test_lint_issues_round_trip_through_json() -> None:
-    issue = LintIssue(LintRule.BAD_LINK, Severity.WARNING, Part.BODY, "broken", "http:/x")
+    issue = LintIssue(LintRule.BAD_LINK, Severity.WARNING, Part.BODY, "broken", "http:/x", 3)
     assert issue.to_json() == {
         "rule": "bad_link",
         "severity": "warning",
         "part": "body",
         "message": "broken",
         "field": "http:/x",
+        "line": 3,
     }
     assert LintIssue.from_json(issue.to_json()) == issue
+
+
+def test_lint_stored_before_lines_reads_with_no_line() -> None:
+    stored = {"rule": "syntax", "severity": "error", "part": "body", "message": "x", "field": None}
+    assert LintIssue.from_json(stored).line is None
 
 
 # --- the sandbox ----------------------------------------------------------------
@@ -758,3 +768,116 @@ def test_every_line_break_in_a_subject_becomes_one_space(brk: str) -> None:
     values = _values(first_name=f"A{brk}B")
     rendered = render(EMAIL, "{{ first_name }}", "{{ first_name }}", values, today=TODAY)
     assert rendered.subject == "A B"
+
+
+# --- lint: line numbers (#344) ------------------------------------------------------
+
+
+def _lines(issues: list[LintIssue]) -> list[tuple[LintRule, str | None, int | None]]:
+    return [(issue.rule, issue.field, issue.line) for issue in issues]
+
+
+def test_each_finding_about_one_place_names_its_line() -> None:
+    body = (
+        "Hi {{ first_name }},\n"  # 1
+        "{{ frist_name }}\n"  # 2
+        "{{ me.age }} {{ me._x }}\n"  # 3
+        "{{ company.upper }}\n"  # 4
+        "{% for x in y %}{% endfor %}\n"  # 5
+        "see http:/broken\n"  # 6
+    )
+    assert _lines(lint(LINKEDIN, None, body, ME.keys())) == [
+        (LintRule.UNDEFINED_VARIABLE, "frist_name", 2),
+        (LintRule.UNDEFINED_VARIABLE, "me.age", 3),
+        (LintRule.UNSAFE_ATTRIBUTE, "_x", 3),
+        (LintRule.ATTRIBUTE_ACCESS, "company.upper", 4),
+        (LintRule.UNSUPPORTED, "for", 5),
+        (LintRule.BAD_LINK, "http:/broken", 6),
+    ]
+
+
+def test_a_syntax_error_names_its_line() -> None:
+    [issue] = lint(LINKEDIN, None, "{{ first_name }}\n\n{{ oops", ME.keys())
+    assert (issue.rule, issue.line) == (LintRule.SYNTAX, 3)
+
+
+def test_a_finding_about_the_whole_part_has_no_line() -> None:
+    issues = lint(EMAIL, "", "no fields\nat all", ME.keys())
+    assert _lines(issues) == [
+        (LintRule.MISSING_SUBJECT, None, None),
+        (LintRule.NO_CONTACT_FIELD, None, None),
+    ]
+
+
+def test_a_bad_link_after_tags_and_fields_that_span_lines_names_the_right_line() -> None:
+    body = (
+        "{{\n first_name\n}}\n"  # lines 1-3
+        "{% if company\n %}x{% endif %}{# a\ncomment #}\n"  # lines 4-6
+        "go to https://{{ me.website }}/ok or https://bad_host!.example\n"  # line 7
+    )
+    assert _lines(lint(LINKEDIN, None, body, ME.keys())) == [
+        (LintRule.BAD_LINK, "https://bad_host!.example", 7)
+    ]
+
+
+def test_the_same_finding_twice_is_reported_once_at_its_first_line() -> None:
+    body = "{{ first_name }}\n{{ frist_name }}\n{{ frist_name }}"
+    assert _lines(lint(LINKEDIN, None, body, ME.keys())) == [
+        (LintRule.UNDEFINED_VARIABLE, "frist_name", 2)
+    ]
+
+
+def test_a_missing_value_warning_names_the_line_the_field_is_first_used_on() -> None:
+    rendered = render(
+        LINKEDIN, None, "Hi {{ first_name }}\n\n{{ company }} {{ company }}",
+        _values(first_name="Bo"), today=TODAY,
+    )  # fmt: skip
+    assert _lines(list(rendered.issues)) == [(LintRule.MISSING_VALUE, "company", 3)]
+
+
+# --- the editor's field list (#344) -----------------------------------------------
+
+
+def test_merge_fields_list_every_field_spec_11_1_names() -> None:
+    fields = merge_fields(ME.keys())
+    assert [(f.name, f.group, f.insert) for f in fields] == [
+        ("first_name", FieldGroup.CONTACT, "first_name"),
+        ("last_name", FieldGroup.CONTACT, "last_name"),
+        ("company", FieldGroup.CONTACT, "company"),
+        ("title", FieldGroup.CONTACT, "title"),
+        ("location", FieldGroup.CONTACT, "location"),
+        ("connected_year", FieldGroup.CONTACT, "connected_year"),
+        ("years_since_connected", FieldGroup.CONTACT, "years_since_connected"),
+        ("last_position_change", FieldGroup.CONTACT, "last_position_change"),
+        ("personal_line", FieldGroup.PERSONAL, "personal_line"),
+        ("me.name", FieldGroup.ME, "me.name"),
+        ("me.website", FieldGroup.ME, "me.website"),
+        ("me.scheduling_link", FieldGroup.ME, "me.scheduling_link"),
+        ("me.signature", FieldGroup.ME, "me.signature"),
+        ("me.city", FieldGroup.ME, "me.city"),
+        ("campaign.name", FieldGroup.CAMPAIGN, "campaign.name"),
+        ("step.number", FieldGroup.CAMPAIGN, "step.number"),
+        ("previous_send_date", FieldGroup.CAMPAIGN, "previous_send_date | ago"),
+    ]
+    assert all(f.description.strip() for f in fields)
+
+
+def test_every_listed_field_lints_clean_so_the_list_and_lint_agree() -> None:
+    me = me_fields(MeSettings(name="Ada", extra={"podcast": "Fixture Hour"}))
+    fields = merge_fields(me.keys())
+    assert "me.podcast" in [f.name for f in fields]
+    for item in fields:
+        body = f"{{{{ first_name }}}} {{{{ {item.insert} }}}}"
+        assert lint(LINKEDIN, None, body, me.keys()) == [], item.name
+
+
+def test_an_extra_me_key_is_listed_once_with_a_generic_description() -> None:
+    names = [f.name for f in merge_fields(["name", "podcast", "name"])]
+    assert names.count("me.name") == 1 and names.count("me.podcast") == 1
+    [podcast] = [f for f in merge_fields(["podcast"]) if f.name == "me.podcast"]
+    assert "podcast" in podcast.description
+    assert placeholder_example("me.podcast") == "(your podcast)"
+
+
+def test_every_listed_field_has_an_invented_placeholder() -> None:
+    assert {f.name for f in merge_fields(())} == set(PLACEHOLDER_EXAMPLES)

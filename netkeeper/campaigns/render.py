@@ -56,6 +56,9 @@ Merge fields (spec 11.1)
 - Campaign: ``campaign.name``, ``step.number``, ``previous_send_date``.
 - ``personal_line`` (spec 12), written per contact at preview time.
 
+:func:`merge_fields` lists them with a description each, for the editor's field
+list; it is built from the same names lint allows, so the two cannot drift.
+
 A field with no value renders as an empty string and adds a
 :attr:`LintRule.MISSING_VALUE` *warning* to the render. It never raises,
 whatever an allowed template does with it (:class:`_Missing`): arithmetic
@@ -78,16 +81,22 @@ applies is an error, and :func:`has_errors` is what blocks activation:
 - :attr:`LintRule.MISSING_SUBJECT`: an email template with no subject.
 - :attr:`LintRule.BAD_LINK`: an ``http``/``https`` link that does not parse.
 
+Each issue about one place carries its one-based ``line`` in the part; an issue
+about the whole part (a missing subject, a body with no per-contact field) has
+none.
+
 :func:`render` adds the render-time warnings: fields with no value for this
 contact, and links that came out broken once merge values were filled in.
 """
 
 from __future__ import annotations
 
+import bisect
 import enum
 import functools
 import operator
 import re
+import sys
 from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -138,6 +147,117 @@ SCALAR_FIELDS: Final = frozenset((*CONTACT_FIELDS, PERSONAL_LINE, PREVIOUS_SEND_
 
 NUMBER_FIELDS: Final = frozenset({"connected_year", "years_since_connected", "step.number"})
 """The merge fields that hold whole numbers, the only ones ``*`` and ``+`` accept."""
+
+
+class FieldGroup(enum.StrEnum):
+    """Where a merge field's value comes from."""
+
+    CONTACT = "contact"
+    PERSONAL = "personal"
+    ME = "me"
+    CAMPAIGN = "campaign"
+
+
+@dataclass(frozen=True, slots=True)
+class MergeField:
+    """One merge field a template may name, for the editor's field list (#344).
+
+    ``insert`` is what goes between the braces: the name, or for
+    ``previous_send_date`` the name with the ``ago`` filter spec 11.1 pairs it with.
+    """
+
+    name: str
+    group: FieldGroup
+    description: str
+    insert: str
+
+
+_FIELD_DESCRIPTIONS: Final[Mapping[str, str]] = {
+    "first_name": "The contact's first name, or their preferred name when they have one.",
+    "last_name": "The contact's last name.",
+    "company": "The contact's current company.",
+    "title": "The contact's current job title.",
+    "location": "Where the contact is based, as their profile says.",
+    "connected_year": "The year you connected with the contact.",
+    "years_since_connected": "Whole years since you connected with the contact.",
+    "last_position_change": "The latest date the contact started or left a job.",
+    PERSONAL_LINE: "A line written for this contact at preview time (spec 12).",
+    "me.name": "Your name, from [me] in the config.",
+    "me.website": "Your website, from [me] in the config.",
+    "me.scheduling_link": "Your scheduling link, from [me] in the config.",
+    "me.signature": "Your signature, from [me] in the config.",
+    "me.city": "Your city, from [me] in the config.",
+    "campaign.name": "The name of the campaign sending the message.",
+    "step.number": "Which step of the campaign this message is, counting from 1.",
+    PREVIOUS_SEND_DATE: 'When the previous step went to this contact, as words like "last week".',
+}
+
+PLACEHOLDER_EXAMPLES: Final[Mapping[str, str]] = {
+    "first_name": "Alex",
+    "last_name": "Example",
+    "company": "Example Co",
+    "title": "Product Manager",
+    "location": "Springfield",
+    "connected_year": "2019",
+    "years_since_connected": "6",
+    "last_position_change": "2025-03-01",
+    PERSONAL_LINE: "Congratulations on the new role at Example Co.",
+    "me.name": "Your Name",
+    "me.website": "https://example.com",
+    "me.scheduling_link": "https://example.com/meet",
+    "me.signature": "Your Name",
+    "me.city": "Your City",
+    "campaign.name": "Example campaign",
+    "step.number": "2",
+    PREVIOUS_SEND_DATE: "3 weeks ago",
+}
+"""Invented example values for the editor's field list when no contact is picked. Every one
+is made up: none is anyone's real data."""
+
+
+def merge_fields(me_keys: Collection[str]) -> tuple[MergeField, ...]:
+    """Every merge field a template may name, in the order spec 11.1 lists them.
+
+    Built from the same names the lint walker allows (:data:`CONTACT_FIELDS`,
+    :data:`NAMESPACE_FIELDS`, ``me_keys``), so removing a field there removes it
+    here. ``me_keys`` are the ``me.<key>`` names that exist, as for :func:`lint`.
+    """
+    fields: list[MergeField] = [
+        MergeField(name, FieldGroup.CONTACT, _FIELD_DESCRIPTIONS[name], name)
+        for name in CONTACT_FIELDS
+    ]
+    fields.append(
+        MergeField(
+            PERSONAL_LINE, FieldGroup.PERSONAL, _FIELD_DESCRIPTIONS[PERSONAL_LINE], PERSONAL_LINE
+        )
+    )
+    for key in dict.fromkeys((*NAMESPACE_FIELDS["me"], *me_keys)):
+        name = f"me.{key}"
+        description = _FIELD_DESCRIPTIONS.get(
+            name, f"Your value for `{key}`, from [me] in the config."
+        )
+        fields.append(MergeField(name, FieldGroup.ME, description, name))
+    for namespace in ("campaign", "step"):
+        for key in NAMESPACE_FIELDS[namespace]:
+            name = f"{namespace}.{key}"
+            fields.append(MergeField(name, FieldGroup.CAMPAIGN, _FIELD_DESCRIPTIONS[name], name))
+    fields.append(
+        MergeField(
+            PREVIOUS_SEND_DATE,
+            FieldGroup.CAMPAIGN,
+            _FIELD_DESCRIPTIONS[PREVIOUS_SEND_DATE],
+            f"{PREVIOUS_SEND_DATE} | ago",
+        )
+    )
+    return tuple(fields)
+
+
+def placeholder_example(name: str) -> str:
+    """An invented example value for the merge field ``name``."""
+    if name in PLACEHOLDER_EXAMPLES:
+        return PLACEHOLDER_EXAMPLES[name]
+    return f"(your {name.removeprefix('me.')})"
+
 
 MAX_OUTPUT_CHARS: Final = 100_000
 """The most one render may produce, and the budget text-building operations share."""
@@ -259,21 +379,28 @@ class Part(enum.StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class LintIssue:
-    """One finding. ``field`` names the merge field or link it is about, when there is one."""
+    """One finding. ``field`` names the merge field or link it is about, when there is one.
+
+    ``line`` is the one-based line of ``part`` the finding is about, when it is about
+    one place: the first place, when the same finding applies to several. A finding
+    about the whole part, such as a missing subject, has none.
+    """
 
     rule: LintRule
     severity: Severity
     part: Part
     message: str
     field: str | None = None
+    line: int | None = None
 
-    def to_json(self) -> dict[str, str | None]:
+    def to_json(self) -> dict[str, str | int | None]:
         return {
             "rule": self.rule.value,
             "severity": self.severity.value,
             "part": self.part.value,
             "message": self.message,
             "field": self.field,
+            "line": self.line,
         }
 
     @classmethod
@@ -284,6 +411,8 @@ class LintIssue:
             part=Part(data["part"]),
             message=str(data["message"]),
             field=None if data.get("field") is None else str(data["field"]),
+            # Lint stored before #344 has no line.
+            line=None if data.get("line") is None else int(data["line"]),
         )
 
 
@@ -564,17 +693,29 @@ class _Analysis:
     """What lint learned about one part: its issues and the merge fields it names."""
 
     issues: list[LintIssue] = field(default_factory=list)
-    references: list[str] = field(default_factory=list)
+    # Each merge field the part names, in order, with the line it is first named on.
+    references: dict[str, int | None] = field(default_factory=dict)
     compiled: bool = True
 
-    def error(self, rule: LintRule, part: Part, message: str, name: str | None = None) -> None:
-        issue = LintIssue(rule, Severity.ERROR, part, message, name)
-        if issue not in self.issues:
+    def error(
+        self,
+        rule: LintRule,
+        part: Part,
+        message: str,
+        name: str | None = None,
+        line: int | None = None,
+    ) -> None:
+        """Add an error, once: the same finding again, on a later line, keeps the first line."""
+        issue = LintIssue(rule, Severity.ERROR, part, message, name, line)
+        if not any(_same_finding(issue, seen) for seen in self.issues):
             self.issues.append(issue)
 
-    def refer(self, name: str) -> None:
-        if name not in self.references:
-            self.references.append(name)
+    def refer(self, name: str, line: int | None) -> None:
+        self.references.setdefault(name, line)
+
+
+def _same_finding(a: LintIssue, b: LintIssue) -> bool:
+    return (a.rule, a.part, a.message, a.field) == (b.rule, b.part, b.message, b.field)
 
 
 def _node_name(node: nodes.Node) -> str:
@@ -611,6 +752,7 @@ class _Walker:
             self.part,
             f"line {node.lineno}: {what} is not available in a message template",
             name,
+            node.lineno,
         )
 
     def walk(self, node: nodes.Node, parent: nodes.Node | None, depth: int = 0) -> None:
@@ -657,7 +799,7 @@ class _Walker:
         elif name == "self":
             self.refuse(node, "`self`", name)
         elif name in SCALAR_FIELDS:
-            self.analysis.refer(name)
+            self.analysis.refer(name, node.lineno)
         elif name in self.allowed:
             self.analysis.error(
                 LintRule.UNDEFINED_VARIABLE,
@@ -665,10 +807,15 @@ class _Walker:
                 f"`{name}` is a group of fields; name one, like "
                 f"`{name}.{NAMESPACE_FIELDS[name][0]}`",
                 name,
+                node.lineno,
             )
         else:
             self.analysis.error(
-                LintRule.UNDEFINED_VARIABLE, self.part, f"`{name}` is not a merge field", name
+                LintRule.UNDEFINED_VARIABLE,
+                self.part,
+                f"`{name}` is not a merge field",
+                name,
+                node.lineno,
             )
 
     def const(self, node: nodes.Const) -> None:
@@ -691,6 +838,7 @@ class _Walker:
                 self.part,
                 f"`{key}`: names starting with _ are refused",
                 key,
+                node.lineno,
             )
         elif not isinstance(base, nodes.Name) or base.name not in self.allowed:
             dotted = f"{base.name}.{key}" if isinstance(base, nodes.Name) else key
@@ -699,14 +847,19 @@ class _Walker:
                 self.part,
                 f"`{dotted}`: merge fields are plain values, with no attributes or methods",
                 dotted,
+                node.lineno,
             )
         elif key not in self.allowed[base.name]:
             dotted = f"{base.name}.{key}"
             self.analysis.error(
-                LintRule.UNDEFINED_VARIABLE, self.part, f"`{dotted}` is not a merge field", dotted
+                LintRule.UNDEFINED_VARIABLE,
+                self.part,
+                f"`{dotted}` is not a merge field",
+                dotted,
+                node.lineno,
             )
         else:
-            self.analysis.refer(f"{base.name}.{key}")
+            self.analysis.refer(f"{base.name}.{key}", node.lineno)
 
     def filter_or_test(self, node: nodes.Filter | nodes.Test) -> bool:
         """False when ``node`` is refused, so the walk does not go into it."""
@@ -751,7 +904,7 @@ def _analyse(source: str, part: Part, me_keys: Collection[str]) -> _Analysis:
     try:
         tree = env.parse(source)
     except TemplateSyntaxError as exc:
-        analysis.error(LintRule.SYNTAX, part, f"line {exc.lineno}: {exc.message}")
+        analysis.error(LintRule.SYNTAX, part, f"line {exc.lineno}: {exc.message}", line=exc.lineno)
         analysis.compiled = False
         return analysis
     except RecursionError:
@@ -768,34 +921,67 @@ def _analyse(source: str, part: Part, me_keys: Collection[str]) -> _Analysis:
         try:
             env.compile(source)
         except TemplateSyntaxError as exc:
-            analysis.error(LintRule.SYNTAX, part, f"line {exc.lineno}: {exc.message}")
+            analysis.error(
+                LintRule.SYNTAX, part, f"line {exc.lineno}: {exc.message}", line=exc.lineno
+            )
         except (SyntaxError, RecursionError) as exc:
             analysis.error(LintRule.SYNTAX, part, f"the template does not compile: {exc}")
-    for link in _bad_links(_text_with_placeholders(env, source)):
-        analysis.error(LintRule.BAD_LINK, part, f"`{link}` is not a link that parses", link)
+    text = _TextWithPlaceholders.of(env, source)
+    for link, offset in _bad_links(text.text):
+        analysis.error(
+            LintRule.BAD_LINK,
+            part,
+            f"`{link}` is not a link that parses",
+            link,
+            text.line_at(offset),
+        )
     return analysis
 
 
-def _text_with_placeholders(env: _Sandbox, source: str) -> str:
-    """``source`` with each ``{{ }}`` replaced by a placeholder and each tag by a space."""
-    out: list[str] = []
-    inside: str | None = None
-    for _lineno, kind, value in env.lex(source):
-        if inside is not None:
-            if kind == inside:
-                inside = None
-            continue
-        if kind == "data":
-            out.append(value)
-        elif kind == "variable_begin":
-            out.append(_PLACEHOLDER)
-            inside = "variable_end"
-        elif kind == "block_begin":
-            out.append(" ")
-            inside = "block_end"
-        elif kind == "comment_begin":
-            inside = "comment_end"
-    return "".join(out)
+@dataclass(frozen=True, slots=True)
+class _TextWithPlaceholders:
+    """A template's text with each ``{{ }}`` replaced by a placeholder and each tag by a
+    space, and where each piece of it came from, so a link found in it has a line."""
+
+    text: str
+    # (offset in ``text``, line in the source) where each piece starts, in order.
+    starts: tuple[tuple[int, int], ...]
+
+    @classmethod
+    def of(cls, env: _Sandbox, source: str) -> _TextWithPlaceholders:
+        out: list[str] = []
+        starts: list[tuple[int, int]] = []
+        size = 0
+        inside: str | None = None
+        for lineno, kind, value in env.lex(source):
+            if inside is not None:
+                if kind == inside:
+                    inside = None
+                continue
+            piece: str | None = None
+            if kind == "data":
+                piece = value
+            elif kind == "variable_begin":
+                piece = _PLACEHOLDER
+                inside = "variable_end"
+            elif kind == "block_begin":
+                piece = " "
+                inside = "block_end"
+            elif kind == "comment_begin":
+                inside = "comment_end"
+            if piece:
+                starts.append((size, lineno))
+                out.append(piece)
+                size += len(piece)
+        return cls("".join(out), tuple(starts))
+
+    def line_at(self, offset: int) -> int | None:
+        """The source line the character at ``offset`` of :attr:`text` came from."""
+        index = bisect.bisect_right(self.starts, (offset, sys.maxsize)) - 1
+        if index < 0:
+            return None
+        start, lineno = self.starts[index]
+        return lineno + self.text.count("\n", start, offset)
 
 
 def _link_parses(link: str) -> bool:
@@ -815,13 +1001,14 @@ def _link_parses(link: str) -> bool:
     return all(_HOST_LABEL.match(label) for label in host.split("."))
 
 
-def _bad_links(text: str) -> list[str]:
-    bad: list[str] = []
+def _bad_links(text: str) -> list[tuple[str, int]]:
+    """Each link in ``text`` that does not parse, once, with the offset it first appears at."""
+    bad: dict[str, int] = {}
     for match in _HTTP_LINK.finditer(text):
         link = match.group(0).rstrip(_TRAILING)
         if not _link_parses(link) and link not in bad:
-            bad.append(link)
-    return bad
+            bad[link] = match.start()
+    return list(bad.items())
 
 
 def _lint(
@@ -966,7 +1153,7 @@ def render(
 
     warnings: list[LintIssue] = []
     for part, analysis in analyses.items():
-        for name in analysis.references:
+        for name, line in analysis.references.items():
             if _missing(_value_of(values, name)):
                 warnings.append(
                     LintIssue(
@@ -975,12 +1162,14 @@ def render(
                         part,
                         f"`{name}` has no value here, so it renders empty",
                         name,
+                        line,
                     )
                 )
     for part, text in ((Part.SUBJECT, rendered_subject), (Part.BODY, rendered_body)):
         if text is None:
             continue
-        for link in _bad_links(text):
+        # A line of the rendered text is not a line of the template, so these have none.
+        for link, _offset in _bad_links(text):
             issue = LintIssue(
                 LintRule.BAD_LINK,
                 Severity.WARNING,

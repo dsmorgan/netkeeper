@@ -24,6 +24,8 @@ from netkeeper.scoping import get_scoped
 from netkeeper.web.deps import CurrentUser, SessionDep, read_only
 from netkeeper.web.schemas import (
     LintIssueOut,
+    MergeFieldOut,
+    MergeFieldsOut,
     TemplateCreate,
     TemplateLintIn,
     TemplateOut,
@@ -73,6 +75,7 @@ def _issue_out(issue: LintIssue) -> LintIssueOut:
         part=issue.part,
         message=issue.message,
         field=issue.field,
+        line=issue.line,
     )
 
 
@@ -136,6 +139,47 @@ def lint_template(body: TemplateLintIn, request: Request, user: CurrentUser) -> 
     with translate_errors():
         issues = service.lint_draft(body.channel, body.subject, body.body, _me(request).keys())
     return [_issue_out(issue) for issue in issues]
+
+
+@router.get("/templates/merge-fields", operation_id="list_merge_fields", responses=NOT_FOUND)
+def list_merge_fields(
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    contact_id: Annotated[
+        int | None,
+        Query(
+            description="A contact to take the example values from. Without one, every "
+            "example is an invented placeholder."
+        ),
+    ] = None,
+) -> MergeFieldsOut:
+    """Every merge field a template may name, with a description and an example value.
+
+    The list is the one lint checks names against, so the editor's field list
+    follows any change to it. The ``me.<key>`` fields include any extra keys
+    under ``[me]`` in the config.
+    """
+    contact = None
+    if contact_id is not None:
+        contact = get_scoped(session, user, Contact, contact_id)
+        if contact is None:
+            raise HTTPException(status_code=404, detail=f"no contact {contact_id}")
+    examples = service.field_examples(_me(request), contact)
+    return MergeFieldsOut(
+        contact_id=contact_id,
+        fields=[
+            MergeFieldOut(
+                name=item.field.name,
+                group=item.field.group,
+                description=item.field.description,
+                insert=item.field.insert,
+                example=item.example,
+                example_source=item.source,
+            )
+            for item in examples
+        ],
+    )
 
 
 @router.get("/templates/{template_id}", operation_id="get_template", responses=NOT_FOUND)

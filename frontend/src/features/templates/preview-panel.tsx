@@ -27,11 +27,17 @@ interface PreviewPanelProps {
   templateId: number | null
   /** Set when the editor holds changes the saved version does not have. */
   unsaved: boolean
+  /** The contact picked to preview for; the merge-field helper shows their values too. */
+  contact: ContactRow | null
+  onContactChange: (contact: ContactRow | null) => void
 }
 
-export function PreviewPanel({ templateId, unsaved }: PreviewPanelProps) {
-  const [contact, setContact] = useState<ContactRow | null>(null)
-
+export function PreviewPanel({
+  templateId,
+  unsaved,
+  contact,
+  onContactChange: setContact,
+}: PreviewPanelProps) {
   return (
     <Card>
       <CardHeader>

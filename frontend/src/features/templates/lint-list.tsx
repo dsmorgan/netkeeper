@@ -1,6 +1,8 @@
 /**
- * Lint findings, inline under the editor: severity, which part, the line where
- * lint named one, and the plain sentence from `showIssue`.
+ * Lint findings as one list (the preview's warnings, an older version's lint at
+ * save): severity, which part, the line where lint named one, the plain
+ * sentence from `showIssue`, and why the rule matters. The editor shows its own
+ * lint inline, next to each field (`inline-lint.tsx`).
  */
 import { Badge } from '@/components/ui/badge'
 
@@ -31,6 +33,7 @@ export function LintList({ issues, label }: { issues: readonly LintIssue[]; labe
               {shown.detail !== null && (
                 <p className="text-xs text-muted-foreground">{shown.detail}</p>
               )}
+              <p className="text-xs text-muted-foreground">{shown.why}</p>
             </div>
           </li>
         )

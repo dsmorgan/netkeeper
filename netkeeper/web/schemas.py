@@ -14,8 +14,8 @@ from pydantic import (
     model_validator,
 )
 
-from netkeeper.campaigns.render import LintRule, Part, Severity
-from netkeeper.campaigns.templates import TEMPLATE_BODY_MAX_LENGTH
+from netkeeper.campaigns.render import FieldGroup, LintRule, Part, Severity
+from netkeeper.campaigns.templates import TEMPLATE_BODY_MAX_LENGTH, ExampleSource
 from netkeeper.crm.confirmation import InvalidReason
 from netkeeper.crm.filters import FilterTree, SortKey
 from netkeeper.crm.importer import ImportField
@@ -2039,13 +2039,43 @@ TemplateBody = Annotated[str, Field(max_length=TEMPLATE_BODY_MAX_LENGTH)]
 
 
 class LintIssueOut(BaseModel):
-    """One lint finding. ``field`` names the merge field or link it is about, if any."""
+    """One lint finding. ``field`` names the merge field or link it is about, if any.
+
+    ``line`` is the one-based line of ``part`` it is about; none for a finding about
+    the whole part, or one stored before lint reported lines.
+    """
 
     rule: LintRule
     severity: Severity
     part: Part
     message: str
     field: str | None = None
+    line: int | None = None
+
+
+class MergeFieldOut(BaseModel):
+    """One merge field for the editor's field list (#344).
+
+    ``insert`` goes between the braces. ``example`` is ``None`` when the contact,
+    or ``[me]``, has no value for the field, so it would render empty.
+    ``example_source`` says where the example came from: the contact, ``[me]``,
+    or an invented ``placeholder``.
+    """
+
+    name: str
+    group: FieldGroup
+    description: str
+    insert: str
+    example: str | None
+    example_source: ExampleSource
+
+
+class MergeFieldsOut(BaseModel):
+    """Every merge field a template may name, with examples (#344). ``contact_id`` is the
+    contact the examples come from, or ``None`` for invented placeholders."""
+
+    contact_id: int | None
+    fields: list[MergeFieldOut]
 
 
 class TemplateOut(BaseModel):

@@ -1,15 +1,22 @@
 /**
- * The editor for one template: its fields, lint as you type, save and delete.
+ * The editor for one template: its fields, the merge-field helper, lint as you
+ * type, save and delete.
  *
  * Lint runs on the text in front of you, debounced, through `POST
  * /templates/lint`, so an error shows before you save. Lint never blocks a
- * save; every issue it reports is an error that blocks activating a campaign
- * with the template, and the editor says so. While the result on screen is
- * for older text (during the debounce, and while the request is out), the list
- * is dimmed and marked busy, and says it is checking.
+ * save; an error blocks activating a campaign with the template, and the
+ * editor says so; a warning does not. Each finding shows inline, under the
+ * field it is about, with its line and why it matters, and the body marks the
+ * lines that have one (#344). While the result on screen is for older text
+ * (during the debounce, and while the request is out), the findings are dimmed
+ * and marked busy, and the editor says it is checking.
+ *
+ * The merge-field helper inserts `{{ field }}` at the cursor of the subject or
+ * the body, whichever was focused last (the body until you focus one), and
+ * leaves the cursor after the insert.
  */
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query'
-import { useId, useMemo, useState } from 'react'
+import { useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -22,10 +29,11 @@ import { useDebounced } from '@/features/crm/use-debounced'
 import { cn } from '@/lib/utils'
 
 import { createTemplate, deleteTemplate, lintDraft, templateKeys, updateTemplate } from './api'
-import type { TemplateChannel, TemplateDraft, TemplateOut } from './api'
+import type { ContactRow, TemplateChannel, TemplateDraft, TemplateOut } from './api'
 import { LINT_DEBOUNCE_MS, draftOf, sameDraft } from './draft'
-import { hasErrors } from './lint'
-import { LintList } from './lint-list'
+import { InlineLint, LineMarks } from './inline-lint'
+import { hasErrors, issuesFor, severityByLine } from './lint'
+import { MergeFieldHelper, type InsertTarget } from './merge-field-helper'
 
 const CHANNELS: ReadonlyArray<{ value: TemplateChannel; label: string }> = [
   { value: 'email', label: 'Email' },
@@ -40,6 +48,23 @@ interface TemplateEditorProps {
   /** `sent` is the draft the save sent, which the draft may have moved on from since. */
   onSaved: (saved: TemplateOut, sent: TemplateDraft) => void
   onDeleted: () => void
+  /** The contact picked in the preview, whose values the merge-field examples show. */
+  sampleContact?: ContactRow | null
+}
+
+/** Where a field's cursor goes once an insert has rendered. */
+interface PendingCaret {
+  target: InsertTarget
+  at: number
+}
+
+/** The offsets of one-based `line` in `text`: where it starts and where it ends. */
+function lineRange(text: string, line: number): [number, number] {
+  const lines = text.split('\n')
+  const index = Math.min(Math.max(line, 1), lines.length) - 1
+  let start = 0
+  for (const text of lines.slice(0, index)) start += text.length + 1
+  return [start, start + (lines[index] ?? '').length]
 }
 
 export function TemplateEditor({
@@ -48,9 +73,26 @@ export function TemplateEditor({
   onDraftChange,
   onSaved,
   onDeleted,
+  sampleContact = null,
 }: TemplateEditorProps) {
-  const ids = { name: useId(), channel: useId(), subject: useId(), body: useId() }
+  const ids = {
+    name: useId(),
+    channel: useId(),
+    subject: useId(),
+    subjectHint: useId(),
+    subjectLint: useId(),
+    body: useId(),
+    bodyLint: useId(),
+  }
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const subjectRef = useRef<HTMLInputElement>(null)
+  const bodyRef = useRef<HTMLTextAreaElement>(null)
+  // The field an insert goes into, and the fields you have been in: one you never
+  // focused has no cursor of yours, so an insert there goes at the end.
+  const [target, setTarget] = useState<InsertTarget>('body')
+  const focused = useRef(new Set<InsertTarget>())
+  const caret = useRef<PendingCaret | null>(null)
+  const [bodyScroll, setBodyScroll] = useState(0)
 
   // Memoized so the debounce sees one value per edit, not a new object every render.
   const text = useMemo(
@@ -71,6 +113,9 @@ export function TemplateEditor({
   const checking = !lint.isError && (stale || lint.data === undefined)
   const partHasError = (part: 'subject' | 'body') =>
     issues.some((issue) => issue.part === part && issue.severity === 'error')
+  const subjectIssues = issuesFor(issues, 'subject')
+  const bodyIssues = issuesFor(issues, 'body')
+  const shownStale = stale && lint.data !== undefined
 
   const save = useMutation({
     mutationFn: (value: TemplateDraft) =>
@@ -90,6 +135,43 @@ export function TemplateEditor({
   })
 
   const set = (patch: Partial<TemplateDraft>) => onDraftChange({ ...draft, ...patch })
+
+  const fieldOf = (which: InsertTarget) =>
+    which === 'subject' ? subjectRef.current : bodyRef.current
+  const markFocused = (which: InsertTarget) => {
+    focused.current.add(which)
+    setTarget(which)
+  }
+
+  // Put the cursor after an insert once the new text is on screen.
+  useLayoutEffect(() => {
+    const pending = caret.current
+    if (pending === null) return
+    caret.current = null
+    const field = pending.target === 'subject' ? subjectRef.current : bodyRef.current
+    field?.focus()
+    field?.setSelectionRange(pending.at, pending.at)
+  }, [draft.subject, draft.body])
+
+  const insert = (expression: string) => {
+    const value = draft[target]
+    const field = fieldOf(target)
+    const known = focused.current.has(target) && field !== null
+    const start = known ? (field.selectionStart ?? value.length) : value.length
+    const end = known ? (field.selectionEnd ?? start) : value.length
+    const token = `{{ ${expression} }}`
+    caret.current = { target, at: start + token.length }
+    set({ [target]: value.slice(0, start) + token + value.slice(end) })
+  }
+
+  const goToLine = (line: number) => {
+    const field = bodyRef.current
+    if (field === null) return
+    const [start, end] = lineRange(draft.body, line)
+    markFocused('body')
+    field.focus()
+    field.setSelectionRange(start, end)
+  }
   const unchanged = template !== null && sameDraft(draft, draftOf(template))
 
   return (
@@ -149,28 +231,64 @@ export function TemplateEditor({
             <Label htmlFor={ids.subject}>Subject</Label>
             <Input
               id={ids.subject}
+              ref={subjectRef}
               value={draft.subject}
               readOnly={locked}
               aria-invalid={partHasError('subject') || undefined}
+              aria-describedby={
+                subjectIssues.length > 0 ? `${ids.subjectHint} ${ids.subjectLint}` : ids.subjectHint
+              }
+              onFocus={() => markFocused('subject')}
               onChange={(event) => set({ subject: event.target.value })}
             />
-            <p className="text-xs text-muted-foreground">
+            <p id={ids.subjectHint} className="text-xs text-muted-foreground">
               Required for email. A LinkedIn message has no subject line.
             </p>
+            <Findings stale={shownStale}>
+              <InlineLint id={ids.subjectLint} label="Subject lint" shown={subjectIssues} />
+            </Findings>
           </div>
           <div className="grid gap-1">
             <Label htmlFor={ids.body}>Body</Label>
-            <Textarea
-              id={ids.body}
-              value={draft.body}
-              readOnly={locked}
-              rows={12}
-              spellCheck
-              className="font-mono"
-              aria-invalid={partHasError('body') || undefined}
-              onChange={(event) => set({ body: event.target.value })}
-            />
+            <div className="relative rounded-lg bg-background dark:bg-input/30">
+              <LineMarks
+                text={draft.body}
+                marks={shownStale ? new Map() : severityByLine(bodyIssues)}
+                scrollTop={bodyScroll}
+                className="font-mono"
+              />
+              <Textarea
+                id={ids.body}
+                ref={bodyRef}
+                value={draft.body}
+                readOnly={locked}
+                rows={12}
+                spellCheck
+                className="relative bg-transparent font-mono [scrollbar-gutter:stable] dark:bg-transparent"
+                aria-invalid={partHasError('body') || undefined}
+                aria-describedby={bodyIssues.length > 0 ? ids.bodyLint : undefined}
+                onFocus={() => markFocused('body')}
+                onScroll={(event) => setBodyScroll(event.currentTarget.scrollTop)}
+                onChange={(event) => set({ body: event.target.value })}
+              />
+            </div>
+            <Findings stale={shownStale}>
+              <InlineLint
+                id={ids.bodyLint}
+                label="Body lint"
+                shown={bodyIssues}
+                text={draft.body}
+                onGoToLine={goToLine}
+              />
+            </Findings>
           </div>
+
+          <MergeFieldHelper
+            contact={sampleContact}
+            target={target}
+            disabled={locked}
+            onInsert={insert}
+          />
 
           <section aria-label="Lint" aria-busy={checking || undefined} className="space-y-2">
             {checking && (
@@ -178,10 +296,7 @@ export function TemplateEditor({
                 Checking…
               </p>
             )}
-            <div
-              data-stale={(stale && lint.data !== undefined) || undefined}
-              className={cn('space-y-2 transition-opacity', stale && 'opacity-50')}
-            >
+            <Findings stale={shownStale}>
               {lint.isError ? (
                 <ErrorNote label="Could not lint the template" error={lint.error} />
               ) : lint.data === undefined ? null : issues.length === 0 ? (
@@ -189,19 +304,20 @@ export function TemplateEditor({
                   No lint issues.
                 </p>
               ) : (
-                <>
-                  {hasErrors(issues) && (
-                    <Callout tone="warning">
-                      <p>
-                        You can save with lint errors, but a campaign can't use this template until
-                        they're fixed.
-                      </p>
-                    </Callout>
-                  )}
-                  <LintList issues={issues} label="Lint issues" />
-                </>
+                <p className="text-sm text-muted-foreground">
+                  {issues.length} lint {issues.length === 1 ? 'finding' : 'findings'}, shown under
+                  the subject and body.
+                </p>
               )}
-            </div>
+              {!lint.isError && hasErrors(issues) && (
+                <Callout tone="warning">
+                  <p>
+                    You can save with lint errors, but a campaign can't use this template until
+                    they're fixed.
+                  </p>
+                </Callout>
+              )}
+            </Findings>
           </section>
 
           {save.isError && <ErrorNote label="Could not save the template" error={save.error} />}
@@ -252,5 +368,17 @@ export function TemplateEditor({
         </ConfirmDialog>
       )}
     </Card>
+  )
+}
+
+/** Lint findings, dimmed and marked while the text has moved on from what they describe. */
+function Findings({ stale, children }: { stale: boolean; children: ReactNode }) {
+  return (
+    <div
+      data-stale={stale || undefined}
+      className={cn('space-y-2 transition-opacity', stale && 'opacity-50')}
+    >
+      {children}
+    </div>
   )
 }

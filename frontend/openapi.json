@@ -3821,6 +3821,27 @@
         "title": "Eq",
         "type": "object"
       },
+      "ExampleSource": {
+        "description": "Where a field's example value came from.",
+        "enum": [
+          "contact",
+          "config",
+          "placeholder"
+        ],
+        "title": "ExampleSource",
+        "type": "string"
+      },
+      "FieldGroup": {
+        "description": "Where a merge field's value comes from.",
+        "enum": [
+          "contact",
+          "personal",
+          "me",
+          "campaign"
+        ],
+        "title": "FieldGroup",
+        "type": "string"
+      },
       "FilterNode-Input": {
         "discriminator": {
           "mapping": {
@@ -6411,7 +6432,7 @@
         "type": "object"
       },
       "LintIssueOut": {
-        "description": "One lint finding. ``field`` names the merge field or link it is about, if any.",
+        "description": "One lint finding. ``field`` names the merge field or link it is about, if any.\n\n``line`` is the one-based line of ``part`` it is about; none for a finding about\nthe whole part, or one stored before lint reported lines.",
         "properties": {
           "field": {
             "anyOf": [
@@ -6423,6 +6444,17 @@
               }
             ],
             "title": "Field"
+          },
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line"
           },
           "message": {
             "title": "Message",
@@ -7016,6 +7048,79 @@
           "reauth_required"
         ],
         "title": "MailboxStatusOut",
+        "type": "object"
+      },
+      "MergeFieldOut": {
+        "description": "One merge field for the editor's field list (#344).\n\n``insert`` goes between the braces. ``example`` is ``None`` when the contact,\nor ``[me]``, has no value for the field, so it would render empty.\n``example_source`` says where the example came from: the contact, ``[me]``,\nor an invented ``placeholder``.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "example": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Example"
+          },
+          "example_source": {
+            "$ref": "#/components/schemas/ExampleSource"
+          },
+          "group": {
+            "$ref": "#/components/schemas/FieldGroup"
+          },
+          "insert": {
+            "title": "Insert",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "group",
+          "description",
+          "insert",
+          "example",
+          "example_source"
+        ],
+        "title": "MergeFieldOut",
+        "type": "object"
+      },
+      "MergeFieldsOut": {
+        "description": "Every merge field a template may name, with examples (#344). ``contact_id`` is the\ncontact the examples come from, or ``None`` for invented placeholders.",
+        "properties": {
+          "contact_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Id"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/MergeFieldOut"
+            },
+            "title": "Fields",
+            "type": "array"
+          }
+        },
+        "required": [
+          "contact_id",
+          "fields"
+        ],
+        "title": "MergeFieldsOut",
         "type": "object"
       },
       "MergeIn": {
@@ -17099,6 +17204,61 @@
           }
         },
         "summary": "Lint Template",
+        "tags": [
+          "templates"
+        ]
+      }
+    },
+    "/api/v1/templates/merge-fields": {
+      "get": {
+        "description": "Every merge field a template may name, with a description and an example value.\n\nThe list is the one lint checks names against, so the editor's field list\nfollows any change to it. The ``me.<key>`` fields include any extra keys\nunder ``[me]`` in the config.",
+        "operationId": "list_merge_fields",
+        "parameters": [
+          {
+            "description": "A contact to take the example values from. Without one, every example is an invented placeholder.",
+            "in": "query",
+            "name": "contact_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A contact to take the example values from. Without one, every example is an invented placeholder.",
+              "title": "Contact Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeFieldsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such template or contact for this user"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Merge Fields",
         "tags": [
           "templates"
         ]

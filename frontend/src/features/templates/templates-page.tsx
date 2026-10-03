@@ -17,7 +17,7 @@ import { DiscardChangesDialog, UnsavedChangesGuard } from '@/components/unsaved-
 import { Callout, EmptyState, ErrorNote, LoadingNote } from '@/features/crm/controls'
 
 import { templateKeys, templatesQuery, versionsQuery } from './api'
-import type { TemplateOut } from './api'
+import type { ContactRow, TemplateOut } from './api'
 import { LintList } from './lint-list'
 import { PreviewPanel } from './preview-panel'
 import { draftOf, sameDraft } from './draft'
@@ -204,6 +204,8 @@ function Workspace({ current, versions, onSaved, onDeleted, onDirtyChange }: Wor
   useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange])
   useEffect(() => () => onDirtyChange(false), [onDirtyChange])
   const [viewingId, setViewingId] = useState<number | null>(current?.id ?? null)
+  // The contact the preview renders for; the editor's merge-field examples are theirs too.
+  const [sampleContact, setSampleContact] = useState<ContactRow | null>(null)
   const older =
     current !== null && viewingId !== current.id
       ? versions?.find((row) => row.id === viewingId)
@@ -227,6 +229,7 @@ function Workspace({ current, versions, onSaved, onDeleted, onDirtyChange }: Wor
               onSaved(row)
             }}
             onDeleted={onDeleted}
+            sampleContact={sampleContact}
           />
         )}
       </div>
@@ -234,6 +237,8 @@ function Workspace({ current, versions, onSaved, onDeleted, onDirtyChange }: Wor
         <PreviewPanel
           templateId={viewingId}
           unsaved={older === undefined && current !== null && dirty}
+          contact={sampleContact}
+          onContactChange={setSampleContact}
         />
         {versions !== undefined && viewingId !== null && (
           <VersionHistory versions={versions} viewingId={viewingId} onView={setViewingId} />

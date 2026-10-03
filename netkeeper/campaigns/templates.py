@@ -31,7 +31,8 @@ from __future__ import annotations
 
 import enum
 import logging
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date
 from typing import Final
 
@@ -40,11 +41,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
 from netkeeper.campaigns.render import (
+    FieldGroup,
     LintIssue,
+    MergeField,
     MergeValues,
     Rendered,
     has_errors,
     lint,
+    merge_fields,
+    placeholder_example,
     render,
 )
 from netkeeper.crm.positions import last_position_change
@@ -142,7 +147,7 @@ def _check_body(body: str) -> str:
     return body
 
 
-def _lint_json(issues: Sequence[LintIssue]) -> list[dict[str, str | None]]:
+def _lint_json(issues: Sequence[LintIssue]) -> list[dict[str, str | int | None]]:
     return [issue.to_json() for issue in issues]
 
 
@@ -466,3 +471,59 @@ def render_preview(
     day = utcnow().date() if today is None else today
     values = MergeValues(contact=contact_fields(contact, day), me=me, personal_line=personal_line)
     return render(row.channel, row.subject, row.body, values, today=day)
+
+
+# --- the editor's field list --------------------------------------------------------
+
+
+class ExampleSource(enum.StrEnum):
+    """Where a field's example value came from."""
+
+    CONTACT = "contact"
+    CONFIG = "config"
+    PLACEHOLDER = "placeholder"
+
+
+@dataclass(frozen=True, slots=True)
+class FieldExample:
+    """A merge field with an example value. ``example`` is ``None`` when the picked contact,
+    or ``[me]``, has no value for it: the field would render empty."""
+
+    field: MergeField
+    example: str | None
+    source: ExampleSource
+
+
+def field_examples(
+    me: Mapping[str, str], contact: Contact | None = None, *, today: date | None = None
+) -> list[FieldExample]:
+    """Every merge field (:func:`~netkeeper.campaigns.render.merge_fields`) with an example.
+
+    With no ``contact``, every example is an invented placeholder, never anyone's
+    data. With one, the contact fields show that contact's values and the
+    ``me.<key>`` fields show ``[me]``, as a preview for that contact would render
+    them. ``personal_line`` and the campaign fields have no value outside a
+    campaign, so they keep their placeholders either way.
+    """
+    day = utcnow().date() if today is None else today
+    values = None if contact is None else contact_fields(contact, day)
+    out: list[FieldExample] = []
+    for item in merge_fields(me.keys()):
+        if values is not None and item.group is FieldGroup.CONTACT:
+            out.append(FieldExample(item, _shown(values.get(item.name)), ExampleSource.CONTACT))
+        elif values is not None and item.group is FieldGroup.ME:
+            value = me.get(item.name.removeprefix("me."))
+            out.append(FieldExample(item, _shown(value), ExampleSource.CONFIG))
+        else:
+            out.append(
+                FieldExample(item, placeholder_example(item.name), ExampleSource.PLACEHOLDER)
+            )
+    return out
+
+
+def _shown(value: object) -> str | None:
+    """A value as the render prints it, or ``None`` when it would render empty."""
+    if value is None:
+        return None
+    text = str(value)
+    return text if text.strip() else None
