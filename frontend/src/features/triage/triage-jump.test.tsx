@@ -43,6 +43,14 @@ describe('jump to a contact', () => {
     await waitFor(async () => expect(await currentName()).toBe(first))
   })
 
+  it('links the card name to the contact page, in a new tab', async () => {
+    renderTriage({ contacts: 3 })
+    await currentName()
+    const link = within(screen.getByTestId('triage-card')).getByRole('link', { name: /Ada/ })
+    expect(link).toHaveAttribute('href', '/contacts/1')
+    expect(link).toHaveAttribute('target', '_blank')
+  })
+
   it('moves a contact already in hand up rather than showing them twice', async () => {
     const backend = createFakeBackend({ contacts: 4 })
     renderTriage({ backend })
@@ -98,5 +106,35 @@ describe('jump to a contact', () => {
     expect(await currentName()).toBe(
       `${backend.byId(1).preferred_name} ${backend.byId(1).last_name}`,
     )
+  })
+
+  it('shows a contact once in the Both queue after a jump past the frontier and a skip', async () => {
+    const backend = createFakeBackend({ contacts: 9 })
+    renderTriage({ backend })
+    await currentName()
+    fireEvent.click(screen.getByRole('button', { name: 'Both' }))
+    await waitFor(() => expect(backend.countOf('/api/v1/triage/next')).toBeGreaterThan(1))
+    const target = backend.byId(6)
+
+    await jumpTo(target.last_name)
+    await waitFor(async () =>
+      expect(await currentName()).toBe(`${target.preferred_name} ${target.last_name}`),
+    )
+    fireEvent.keyDown(window, { key: 's' })
+    await waitFor(() => expect(backend.byId(6).met).toBe('skip'))
+
+    // Five more answers walk the cursor past where the skipped contact sits.
+    const seen: string[] = []
+    for (let step = 0; step < 5; step += 1) {
+      seen.push(await currentName())
+      const before = backend.decisions.length
+      fireEvent.keyDown(window, { key: 'm' })
+      await waitFor(() => expect(backend.decisions.length).toBe(before + 1))
+    }
+    const next = backend.byId(7)
+    await waitFor(async () =>
+      expect(await currentName()).toBe(`${next.preferred_name} ${next.last_name}`),
+    )
+    expect(seen.filter((name) => name.endsWith(`-${target.id}`))).toHaveLength(0)
   })
 })

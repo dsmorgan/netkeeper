@@ -93,7 +93,19 @@ export function ContactCard({
         </p>
       )}
       <div className="min-w-0">
-        <h2 className="font-heading text-xl leading-tight font-medium break-words">{name}</h2>
+        <h2 className="font-heading text-xl leading-tight font-medium break-words">
+          {/* The contact page, in a new tab so the run keeps its place: it has
+              the Met control and everything else the card does not (#322). */}
+          <a
+            href={`/contacts/${contact.id}`}
+            target="_blank"
+            rel="noreferrer noopener"
+            title="Open this contact's page in a new tab"
+            className="hover:underline focus-visible:underline"
+          >
+            {name}
+          </a>
+        </h2>
         {/* Two lines, always, however long the headline is. This is the one
             thing on the card whose height varies with the contact, and the
             decision row sits under it: without a reserved height a wrapped

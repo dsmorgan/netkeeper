@@ -358,6 +358,27 @@ describe('contact detail', () => {
     expect(patches).toEqual([{ met: 'met' }, { met: 'not_met' }, { met: 'unknown' }])
   })
 
+  it('disables the Met control for an archived contact and says why', async () => {
+    serveContact(contactDetail({ archived_at: '2026-03-01T00:00:00Z' }))
+    await renderApp('/contacts/1')
+    await screen.findByRole('heading', { name: 'Ada Ventura' })
+    const group = screen.getByRole('group', { name: 'Met' })
+    expect(within(group).getByRole('button', { name: 'Met' })).toBeDisabled()
+    expect(within(group).getByRole('button', { name: 'Not met' })).toBeDisabled()
+    expect(screen.getByText('Unarchive this contact to change Met.')).toBeInTheDocument()
+  })
+
+  it('puts the Met control above the text fields', async () => {
+    serveContact(contactDetail())
+    await renderApp('/contacts/1')
+    await screen.findByRole('heading', { name: 'Ada Ventura' })
+    const group = screen.getByRole('group', { name: 'Met' })
+    const firstField = screen.getByRole('button', { name: 'Edit Preferred name' })
+    expect(
+      group.compareDocumentPosition(firstField) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
   it('says when netkeeper suggested the answer and it is waiting for review', async () => {
     serveContact(contactDetail({ met: 'met', met_source: 'automatic' }))
     await renderApp('/contacts/1')

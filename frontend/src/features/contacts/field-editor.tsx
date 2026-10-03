@@ -192,7 +192,13 @@ function RevertControl({
  * `triaged_at`, and undoable decision behind (#322). A contact skipped in
  * Triage shows as skipped, with neither button pressed.
  */
-export function MetEditor({ contact }: { contact: ContactDetail }) {
+export function MetEditor({
+  contact,
+  archived = false,
+}: {
+  contact: ContactDetail
+  archived?: boolean
+}) {
   const write = useContactWrite(contact.id)
   const choose = (met: ContactDetail['met']) =>
     write.mutate(() => patchContact(contact.id, { met }))
@@ -207,7 +213,7 @@ export function MetEditor({ contact }: { contact: ContactDetail }) {
             size="sm"
             variant={contact.met === value ? 'default' : 'outline'}
             aria-pressed={contact.met === value}
-            disabled={write.isPending}
+            disabled={write.isPending || archived}
             onClick={() => choose(value)}
           >
             {MET_LABELS[value]}
@@ -216,7 +222,7 @@ export function MetEditor({ contact }: { contact: ContactDetail }) {
         <Button
           size="sm"
           variant="ghost"
-          disabled={write.isPending || !answered}
+          disabled={write.isPending || archived || !answered}
           title="Back to untriaged"
           onClick={() => choose('unknown')}
         >
@@ -231,6 +237,9 @@ export function MetEditor({ contact }: { contact: ContactDetail }) {
             : 'Set by you.'
           : 'Not triaged yet.'}
       </span>
+      {archived && (
+        <span className="text-xs text-muted-foreground">Unarchive this contact to change Met.</span>
+      )}
       <WriteError error={write.error} />
     </div>
   )

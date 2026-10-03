@@ -62,7 +62,8 @@ from netkeeper.crm.provenance import (
     revert_to_synced,
     set_manual_field,
 )
-from netkeeper.crm.triage import record_met
+from netkeeper.crm.triage import NotInQueue, record_met
+from netkeeper.crm.triage import _live_contact as _triage_live_contact
 from netkeeper.db import is_writer
 from netkeeper.models import (
     Contact,
@@ -394,7 +395,15 @@ def update_contact(
         elif field == "met":
             # The person's own answer, written by the function the Triage keys
             # use, so the decision log and undo see it too (spec 10.2, #322).
-            record_met(session, user, contact, ContactMet(value))
+            wanted = ContactMet(value)
+            if wanted is contact.met:
+                continue  # nothing changed, so nothing to log (#322)
+            try:
+                # Fresh and FOR UPDATE, refusing an archived contact as Triage does.
+                held = _triage_live_contact(session, user, contact.id)
+            except NotInQueue as exc:
+                raise Conflict("an archived contact cannot be triaged; unarchive it first") from exc
+            record_met(session, user, held, wanted)
         elif field == "do_not_contact":
             contact.do_not_contact = bool(value)
         elif field == "do_not_contact_reason":
@@ -636,7 +645,14 @@ def _bulk_values(
                 raise ValueError("set_met needs a ContactMet value")
             # met_source, so a bulk edit by hand is a decision by hand and
             # leaves the review queue (spec 10.2).
-            return {"met": value, "met_source": MetSource.MANUAL, "triaged_at": now}
+            # ``unknown`` is the way back to untriaged, so it clears the stamp
+            # as ``record_met`` does. Unlike a single edit, a bulk write logs no
+            # decision rows: it is one statement over many contacts (#322).
+            return {
+                "met": value,
+                "met_source": MetSource.MANUAL,
+                "triaged_at": None if value is ContactMet.UNKNOWN else now,
+            }
         case "archive":
             # Keep the stamp a row already carries, as archive_contact() does:
             # archived_at records when the contact left the table, and a row
