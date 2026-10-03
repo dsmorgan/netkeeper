@@ -360,8 +360,10 @@ def test_the_campaign_cap_holds_for_the_local_day(session_factory: sessionmaker[
     capped = world.tick(NOW + timedelta(hours=2))
     assert reasons_of(capped, ids[2]) == (Skip.CAMPAIGN_AT_CAP,)
     assert capped.next_wake == datetime(2026, 9, 30, tzinfo=UTC)  # the local midnight
-    # #338: what is left of the batch spills to the next day at its start time, 14:00,
-    # never overnight.
+    # #338: the cap-held rest of the batch spills to the next day at its start time,
+    # 14:00, rather than going at midnight. This holds for the cap-held rest only: a
+    # leftover from earlier the same day, or one whose time has already passed today,
+    # can still go overnight (no send-time constraint; see #354).
     midnight = world.tick(datetime(2026, 9, 30, 0, 1, tzinfo=UTC))
     assert midnight.fired == [] and reasons_of(midnight, ids[2]) == (Skip.SPILLED,)
     resume = datetime(2026, 9, 30, 14, 0, tzinfo=UTC)
