@@ -517,10 +517,12 @@ class ContactSnapshot(ContactChild, Base):
 
     ``observed_at`` is when the change was seen, so "changed jobs in the last 30
     days" is a query over ``(user_id, observed_at)``. The row holds the values
-    *before* the change, so ``position_changed`` records, when the row is written,
-    whether the change replaced a non-empty ``current_title`` or
-    ``current_company`` with a different value: a position change, as opposed to
-    a new headline or location only. A first fill (from empty) is not one. Rows
+    *before* the change. ``position_changed`` is set when the incoming
+    enrichment's title or company differs from the last enrichment's value (the
+    live column when its source is sync, the ``synced_values`` ledger when the
+    field is manually overridden); a first enrichment never counts (#323). A new
+    headline or location alone is not a position change. For an overridden
+    field, the row holds the last enrichment's value, not the person's. Rows
     written before migration 0028 hold false: what replaced them was not kept.
     """
 

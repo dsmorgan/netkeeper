@@ -14,16 +14,20 @@ support:
   notices nothing.
 - A ``sync`` snapshot with no earlier enrichment of the position it replaced.
   The evidence for one is a ``contact_positions`` row of the same contact with
-  source ``sync``, created before the snapshot was observed, that was open when
-  it was recorded (no ``ended_on``, or an ``ended_on`` no earlier than the
-  first of the month it was created in), and whose title matches the
-  snapshot's non-empty ``current_title`` or whose company matches its
-  non-empty ``current_company``. Values match as identity resolution matches
-  positions: trimmed and case-folded (a frozen copy of ``identity._fold``).
-  Only a profile visit writes a ``sync`` position, and a visit writes its
-  positions after it observes the profile, so the positions of the visit that
-  wrote the snapshot are never earlier than it. A position that had already
-  ended was a past job on that visit, not the current position it recorded.
+  source ``sync``, created before the snapshot was observed, whose title
+  matches the snapshot's non-empty ``current_title`` or whose company matches
+  its non-empty ``current_company``. Values match as identity resolution
+  matches positions: trimmed and case-folded (a frozen copy of
+  ``identity._fold``). Only a profile visit writes a ``sync`` position, and a
+  visit writes its positions after it observes the profile, so the positions
+  of the visit that wrote the snapshot are never earlier than it.
+
+  A position's end date is not consulted. A later visit overwrites
+  ``ended_on`` on the same row, so a backdated or year-only end date would make
+  a job that was current at the earlier visit look as if it had already ended,
+  and clear a real job change for good. The rare reverse case, an earlier visit
+  that saw the matching job only as an ended one, keeps its flag: this
+  migration errs toward keeping a flag, never toward clearing a real one.
 
 A snapshot the rule supports keeps its flag, and a false flag is never set.
 Running the upgrade twice changes nothing the second time.
@@ -43,7 +47,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
-from datetime import date, datetime
 
 import sqlalchemy as sa
 from alembic import op
@@ -71,7 +74,6 @@ _positions = sa.table(
     sa.column("contact_id", sa.Integer()),
     sa.column("source", sa.String()),
     sa.column("created_at", sa.DateTime()),
-    sa.column("ended_on", sa.Date()),
     sa.column("title", sa.String()),
     sa.column("company", sa.String()),
 )
@@ -83,11 +85,6 @@ def _fold(value: str | None) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned.casefold() if cleaned else None
-
-
-def _open_when_recorded(created_at: datetime, ended_on: date | None) -> bool:
-    """A position ending no earlier than the month it was first recorded in was current."""
-    return ended_on is None or ended_on >= date(created_at.year, created_at.month, 1)
 
 
 def upgrade() -> None:
@@ -111,7 +108,6 @@ def upgrade() -> None:
                 _positions.c.user_id,
                 _positions.c.contact_id,
                 _positions.c.created_at,
-                _positions.c.ended_on,
                 _positions.c.title,
                 _positions.c.company,
             ).where(
@@ -128,7 +124,6 @@ def upgrade() -> None:
         title, company = _fold(row.current_title), _fold(row.current_company)
         return any(
             position.created_at < row.observed_at
-            and _open_when_recorded(position.created_at, position.ended_on)
             and (
                 (title is not None and _fold(position.title) == title)
                 or (company is not None and _fold(position.company) == company)
