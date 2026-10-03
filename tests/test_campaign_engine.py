@@ -1432,6 +1432,7 @@ def test_the_start_moves_until_the_first_send_and_takes_waiting_enrollments_with
         )
     )
     assert moved.starts_at == sooner
+    assert moved.start_chosen is True  # a person chose it (#338 review N5)
     assert world.enrollment(waiting).next_action_at == sooner
     assert world.enrollment(parked).next_action_at is None
     assert world.tick(sooner).fired != []
@@ -1441,6 +1442,32 @@ def test_the_start_moves_until_the_first_send_and_takes_waiting_enrollments_with
                 s, world.user, world.campaign.id, settings=Settings(), now=NOW, starts_at=later
             )
         )
+
+
+def test_moving_an_upgraded_campaigns_start_makes_it_chosen_and_exempt(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#338 review N5: 0031 backfilled the start (``start_chosen`` false), so a 21:00 send
+    waits for the sending hours. Once a person moves the start to 21:00, the start is
+    theirs, and step 1 goes then."""
+    approved = _at(TUESDAY, 10)
+    world = make_world(session_factory, approved_at=approved, starts_at=approved)
+    enrollment_id = world.enroll_new(next_action_at=approved)
+    evening = _at(TUESDAY, 21)
+    assert world.tick(evening - timedelta(minutes=30)).fired == []  # 20:30: held
+    moved = world.write(
+        lambda s: engine_module.set_start(
+            s,
+            world.user,
+            world.campaign.id,
+            settings=Settings(),
+            now=evening - timedelta(minutes=20),
+            starts_at=evening,
+        )
+    )
+    assert moved.start_chosen is True and moved.starts_at == evening
+    [(firing, _)] = world.tick(evening).fired
+    assert firing.enrollment_id == enrollment_id
 
 
 @pytest.mark.parametrize("status", [CampaignStatus.REVIEWING, CampaignStatus.COMPLETED])
