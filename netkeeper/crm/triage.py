@@ -559,6 +559,31 @@ def next_card(
     return None if contact is None else load_card(session, user, contact)
 
 
+def card_for(
+    session: Session,
+    user: User,
+    contact_id: int,
+    *,
+    states: Sequence[ContactMet] = DEFAULT_QUEUE_STATES,
+    decided_by: MetSource | None = None,
+) -> Card:
+    """The card for one named contact, when the queue being served holds them (#322).
+
+    The jump: Triage serves this contact next without deciding the ones before
+    them. The same rule as :func:`next_contact` decides who may be named --
+    ``met`` in ``states``, live, and ``decided_by`` when the review pass asks --
+    so a jump never reaches a contact the queue would not serve, such as one
+    waiting for review in another pass. :class:`NotFound` when the contact is
+    not ``user``'s or is not in this queue.
+    """
+    contact = session.scalars(
+        _queue(user, states, decided_by=decided_by).where(Contact.id == contact_id)
+    ).one_or_none()
+    if contact is None:
+        raise NotFound(f"contact {contact_id} is not in this queue")
+    return load_card(session, user, contact)
+
+
 def load_card(session: Session, user: User, contact: Contact) -> Card:
     """The evidence panel for one contact of ``user`` (spec 10.2).
 
@@ -642,13 +667,35 @@ def decide(
             + ", ".join(sorted(state.value for state in DECIDABLE))
         )
     contact = _live_contact(session, user, contact_id)
+    return record_met(session, user, contact, decided, at=at)
+
+
+def record_met(
+    session: Session,
+    user: User,
+    contact: Contact,
+    met: ContactMet,
+    *,
+    at: datetime | None = None,
+) -> TriageDecision:
+    """Write a hand-made ``met`` answer on ``contact`` and log it, as :func:`decide` does.
+
+    The one place a person's answer is written, so the Triage keys and the
+    contact page's Met control leave the same fields behind: ``met`` with
+    ``met_source = manual``, ``triaged_at``, and an undoable decision row.
+    ``unknown`` is the way back to untriaged and is accepted here for the
+    contact page: it clears ``triaged_at`` so the contact rejoins the queue,
+    and stays ``manual`` because a person made the change. The caller has
+    already checked liveness; ``RuntimeError`` when ``session`` is not a writer.
+    """
+    _require_writer(session)
     moment = at if at is not None else utcnow()
     _require_aware(moment)
     before = _snapshot(contact, _MET_FIELDS)
     # The person's own answer, whatever a batch decided before: that is what
     # takes a contact out of the review queue.
-    set_met(contact, decided, source=MetSource.MANUAL)
-    contact.triaged_at = moment
+    set_met(contact, ContactMet(met), source=MetSource.MANUAL)
+    contact.triaged_at = None if contact.met is ContactMet.UNKNOWN else moment
     return _log(
         session,
         user,

@@ -17053,6 +17053,91 @@
         ]
       }
     },
+    "/api/v1/triage/contacts/{contact_id}": {
+      "get": {
+        "description": "One contact's card, to triage them next without deciding the ones before them.\n\nThe jump. It holds to the queue's own rules: the contact must be live and in\none of `states` (and `decided_by`, for the review pass), so a contact waiting\nin another queue answers `404`. Nothing is written.",
+        "operationId": "get_triage_contact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
+            "in": "query",
+            "name": "states",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/components/schemas/ContactMet"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided.",
+              "title": "States"
+            }
+          },
+          {
+            "description": "Narrow the queue to the contacts whose current `met` was decided this way. `automatic` is the review pass: what netkeeper decided for you, on the same cards, so you can check it. Deciding one by hand makes it `manual` and takes it out of that queue.",
+            "in": "query",
+            "name": "decided_by",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/MetSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Narrow the queue to the contacts whose current `met` was decided this way. `automatic` is the review pass: what netkeeper decided for you, on the same cards, so you can check it. Deciding one by hand makes it `manual` and takes it out of that queue.",
+              "title": "Decided By"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriageCardOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such contact, or not in the queue being served"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Triage Contact",
+        "tags": [
+          "triage"
+        ]
+      }
+    },
     "/api/v1/triage/contacts/{contact_id}/preferred-name": {
       "put": {
         "description": "The `p` key: what you call this person, as a manual edit no later sync overwrites.\n\nAn empty name falls back to the first name. The edit is undoable like a\ndecision.",

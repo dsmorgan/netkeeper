@@ -45,6 +45,7 @@ import { CardSteps } from './card-steps'
 import { ContactCard } from './contact-card'
 import { EvidencePanel } from './evidence-panel'
 import { KeyboardHelp } from './keyboard-help'
+import { JumpToContact } from './jump-to-contact'
 import { QueueList } from './queue-list'
 import { ScreenExplainer } from './screen-explainer'
 import { SuggestionBanner } from './suggestion-banner'
@@ -432,6 +433,8 @@ export function TriagePage() {
               {queue.notice}
             </p>
           </div>
+
+          {queue.liveCard !== null && <JumpToContact filter={filter} onJump={queue.jumpTo} />}
 
           {(queue.seen > 0 || queue.liveCard !== null) && (
             <QueueList

@@ -61,8 +61,8 @@ from netkeeper.crm.provenance import (
     PROVENANCE_FIELDS,
     revert_to_synced,
     set_manual_field,
-    set_met,
 )
+from netkeeper.crm.triage import record_met
 from netkeeper.db import is_writer
 from netkeeper.models import (
     Contact,
@@ -392,10 +392,9 @@ def update_contact(
         if field == "li_public_id":
             _set_public_id(session, user, contact, value)
         elif field == "met":
-            # The person's own answer, which takes a contact a batch decided
-            # out of the review queue (spec 10.2).
-            set_met(contact, ContactMet(value), source=MetSource.MANUAL)
-            contact.triaged_at = utcnow()
+            # The person's own answer, written by the function the Triage keys
+            # use, so the decision log and undo see it too (spec 10.2, #322).
+            record_met(session, user, contact, ContactMet(value))
         elif field == "do_not_contact":
             contact.do_not_contact = bool(value)
         elif field == "do_not_contact_reason":

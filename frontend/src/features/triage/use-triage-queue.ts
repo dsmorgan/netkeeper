@@ -48,6 +48,7 @@ import {
   fetchQueue,
   decidedByFor,
   fetchQueueAhead,
+  fetchTriageContact,
   reviewContact,
   setPreferredName,
   statesFor,
@@ -244,6 +245,13 @@ export interface TriageQueue extends TriageQueueState {
   goTo: (index: number) => void
   /** Leave the trail and return to the live card. */
   resume: () => void
+  /**
+   * Triage this contact next, without deciding the ones before them (#322).
+   *
+   * They go to the front of the buffer; the cards that were in hand stay
+   * behind them, so the normal order carries on once they are answered.
+   */
+  jumpTo: (contactId: number) => Promise<void>
   /** Say something happened that the screen would otherwise swallow. */
   notify: (text: string) => void
   /** Resolves once the undo has landed, so a caller can re-run what it invalidates. */
@@ -719,6 +727,40 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
     })
   }, [commit, resumeNotice])
 
+  const jumpTo = useCallback(
+    async (contactId: number): Promise<void> => {
+      if (stateRef.current.cards[0]?.contact.id === contactId) {
+        commit((state) => ({
+          ...state,
+          reviewIndex: null,
+          notice: `You are on ${nameOf(state.cards[0] as TriageCard)} already.`,
+        }))
+        return
+      }
+      try {
+        const card = await fetchTriageContact({ contactId, states, decidedBy })
+        commit((state) => ({
+          ...state,
+          reviewIndex: null,
+          // A contact already in hand moves up rather than appearing twice.
+          cards: [card, ...state.cards.filter((held) => held.contact.id !== contactId)],
+          // Off the look-ahead too, so the list does not show them as waiting.
+          ahead: state.ahead.filter((row) => row.id !== contactId),
+          undoConflict: null,
+          notice: `Jumped to ${nameOf(card)}. Once you answer, the queue carries on where it was.`,
+        }))
+      } catch (error) {
+        commit((state) =>
+          withFailure(
+            state,
+            `Could not jump to that contact: ${messageOf(error, 'the request failed')}.`,
+          ),
+        )
+      }
+    },
+    [commit, decidedBy, states],
+  )
+
   const notify = useCallback(
     (text: string) => {
       commit((state) => ({ ...state, notice: text }))
@@ -1032,7 +1074,10 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
   // card in the buffer or one already passed, and both are drawn from state
   // that is more current than this page.
   const frontier = frontierRef.current
-  const waiting = state.ahead.filter((row) => frontier === null || row.id > frontier)
+  const held = new Set(state.cards.map((card) => card.contact.id))
+  const waiting = state.ahead.filter(
+    (row) => (frontier === null || row.id > frontier) && !held.has(row.id),
+  )
   // A page is only asked for again when the tail it left has nearly run out
   // *and* that page was full, so a queue whose whole tail is in hand never
   // asks twice and a long run asks about once every ninety contacts.
@@ -1056,6 +1101,7 @@ export function useTriageQueue(filter: QueueFilter): TriageQueue {
     forward,
     goTo,
     resume,
+    jumpTo,
     notify,
     undo,
     dismissConflict: useCallback(

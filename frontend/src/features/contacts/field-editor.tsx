@@ -5,7 +5,6 @@ import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input, Textarea } from '@/components/ui/input'
-import { Select } from '@/components/ui/select'
 
 import { contactsKeys, patchContact, revertContactField, setNotes } from './api'
 import { WriteError } from './merged-notice'
@@ -17,7 +16,7 @@ import type {
   ProvenanceField,
   SyncedValueOut,
 } from './types'
-import { MET_LABELS, MET_VALUES } from './types'
+import { MET_LABELS } from './types'
 
 /** The scalar fields the detail page lets you type into. */
 export type EditableField = Extract<
@@ -185,28 +184,53 @@ function RevertControl({
   )
 }
 
-/** `met` is the person's own call, so it has no provenance and no revert. */
+/**
+ * `met` is the person's own call, so it has no provenance and no revert.
+ *
+ * Met, not met, and clear (back to untriaged). The write goes through the same
+ * service function the Triage keys use, so it leaves the same `met_source`,
+ * `triaged_at`, and undoable decision behind (#322). A contact skipped in
+ * Triage shows as skipped, with neither button pressed.
+ */
 export function MetEditor({ contact }: { contact: ContactDetail }) {
   const write = useContactWrite(contact.id)
+  const choose = (met: ContactDetail['met']) =>
+    write.mutate(() => patchContact(contact.id, { met }))
+  const answered = contact.met !== 'unknown'
   return (
-    <div className="flex items-center gap-2 border-b border-border/60 py-2">
+    <div className="flex flex-wrap items-center gap-2 border-b border-border/60 py-2">
       <span className="w-40 shrink-0 text-muted-foreground">Met</span>
-      <Select
-        aria-label="Met"
-        value={contact.met}
-        disabled={write.isPending}
-        onChange={(event) =>
-          write.mutate(() =>
-            patchContact(contact.id, { met: event.target.value as ContactDetail['met'] }),
-          )
-        }
-      >
-        {MET_VALUES.map((value) => (
-          <option key={value} value={value}>
+      <div role="group" aria-label="Met" className="flex items-center gap-1">
+        {(['met', 'not_met'] as const).map((value) => (
+          <Button
+            key={value}
+            size="sm"
+            variant={contact.met === value ? 'default' : 'outline'}
+            aria-pressed={contact.met === value}
+            disabled={write.isPending}
+            onClick={() => choose(value)}
+          >
             {MET_LABELS[value]}
-          </option>
+          </Button>
         ))}
-      </Select>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={write.isPending || !answered}
+          title="Back to untriaged"
+          onClick={() => choose('unknown')}
+        >
+          Clear
+        </Button>
+      </div>
+      <span className="text-xs text-muted-foreground">
+        {contact.met === 'skip' && 'Skipped in Triage. '}
+        {answered
+          ? contact.met_source === 'automatic'
+            ? 'Suggested by netkeeper, waiting for your review.'
+            : 'Set by you.'
+          : 'Not triaged yet.'}
+      </span>
       <WriteError error={write.error} />
     </div>
   )

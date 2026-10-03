@@ -2280,6 +2280,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/triage/contacts/{contact_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Triage Contact
+         * @description One contact's card, to triage them next without deciding the ones before them.
+         *
+         *     The jump. It holds to the queue's own rules: the contact must be live and in
+         *     one of `states` (and `decided_by`, for the review pass), so a contact waiting
+         *     in another queue answers `404`. Nothing is written.
+         */
+        get: operations["get_triage_contact"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/triage/contacts/{contact_id}/preferred-name": {
         parameters: {
             query?: never;
@@ -11197,6 +11221,49 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    get_triage_contact: {
+        parameters: {
+            query?: {
+                /** @description The met states the queue holds. Defaults to `unknown`; pass `skip` to revisit, or both to walk the two together. With `decided_by=automatic` and no states, the queue defaults to everything a batch can have decided. */
+                states?: components["schemas"]["ContactMet"][] | null;
+                /** @description Narrow the queue to the contacts whose current `met` was decided this way. `automatic` is the review pass: what netkeeper decided for you, on the same cards, so you can check it. Deciding one by hand makes it `manual` and takes it out of that queue. */
+                decided_by?: components["schemas"]["MetSource"] | null;
+            };
+            header?: never;
+            path: {
+                contact_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TriageCardOut"];
+                };
+            };
+            /** @description No such contact, or not in the queue being served */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };
