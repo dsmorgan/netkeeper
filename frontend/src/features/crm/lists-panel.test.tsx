@@ -188,7 +188,7 @@ describe('a static list', () => {
     expect(screen.queryByLabelText('Add contacts by id')).toBeNull()
     fireEvent.change(await screen.findByLabelText('Add contacts'), { target: { value: 'north' } })
     const matches = await screen.findByRole('list', { name: 'Matches' })
-    expect(within(matches).getByText('Cy Dunn')).toBeInTheDocument()
+    expect(within(matches).getByText('Cy (Cyrus) Dunn')).toBeInTheDocument()
     expect(within(matches).getByText('Founder · Northwind Example')).toBeInTheDocument()
 
     const query = requestsTo(seen, 'POST', '/api/v1/contacts/query').find(
@@ -211,8 +211,8 @@ describe('a static list', () => {
     })
 
     expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled()
-    fireEvent.click(within(matches).getByRole('checkbox', { name: 'Cy Dunn' }))
-    fireEvent.click(within(matches).getByRole('checkbox', { name: 'Di Park' }))
+    fireEvent.click(within(matches).getByRole('checkbox', { name: /^Cy \(Cyrus\) Dunn/ }))
+    fireEvent.click(within(matches).getByRole('checkbox', { name: /^Di \(Diane\) Park/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Add' }))
 
     await waitFor(() =>
@@ -243,16 +243,90 @@ describe('a static list', () => {
     fireEvent.change(await screen.findByLabelText('Add contacts'), { target: { value: 'dunn' } })
     const matches = await screen.findByRole('list', { name: 'Matches' })
     await within(matches).findByText('In list')
-    expect(within(matches).getByRole('checkbox', { name: 'Cy Dunn' })).toBeDisabled()
-    expect(within(matches).getByRole('checkbox', { name: 'Di Park' })).toBeEnabled()
+    expect(within(matches).getByRole('checkbox', { name: /^Cy \(Cyrus\) Dunn/ })).toBeDisabled()
+    expect(within(matches).getByRole('checkbox', { name: /^Di \(Diane\) Park/ })).toBeEnabled()
 
-    fireEvent.click(within(matches).getByRole('checkbox', { name: 'Di Park' }))
+    fireEvent.click(within(matches).getByRole('checkbox', { name: /^Di \(Diane\) Park/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Add' }))
     await waitFor(() =>
       expect(requestsTo(seen, 'POST', '/api/v1/lists/1/members')[0]?.body).toEqual({
         contact_ids: [22],
       }),
     )
+  })
+
+  it('says how many more matches there are than the list shows', async () => {
+    mockApi(
+      routes({
+        'POST /api/v1/contacts/query': ({ body }) =>
+          jsonResponse({
+            items: JSON.stringify(body).includes('list_member') ? [] : PICK_RESULTS,
+            total: JSON.stringify(body).includes('list_member') ? 0 : 57,
+            describe: '',
+          }),
+      }),
+    )
+    renderWithClient(<ListsPanel />)
+    await openList('First 100')
+    fireEvent.change(await screen.findByLabelText('Add contacts'), { target: { value: 'n' } })
+    expect(
+      await screen.findByText('Showing 20 of 57. Type more of the name to narrow it.'),
+    ).toBeInTheDocument()
+  })
+
+  it('names same-name contacts apart and describes the member by "In list"', async () => {
+    const twins = [
+      { ...PICK_RESULTS[0], id: 31, preferred_name: 'Cyrus', current_company: 'Acme' },
+      { ...PICK_RESULTS[0], id: 32, preferred_name: '', current_company: 'Globex' },
+    ]
+    mockApi(
+      routes({
+        'POST /api/v1/contacts/query': ({ body }) =>
+          jsonResponse({
+            items: JSON.stringify(body).includes('list_member') ? [twins[1]] : twins,
+            total: 2,
+            describe: '',
+          }),
+      }),
+    )
+    renderWithClient(<ListsPanel />)
+    await openList('First 100')
+    fireEvent.change(await screen.findByLabelText('Add contacts'), { target: { value: 'dunn' } })
+    const matches = await screen.findByRole('list', { name: 'Matches' })
+    await within(matches).findByText('In list')
+    const acme = within(matches).getByRole('checkbox', { name: /Cyrus Dunn.*Acme/ })
+    const globex = within(matches).getByRole('checkbox', { name: /Cyrus Dunn.*Globex.*In list/ })
+    expect(acme).toBeEnabled()
+    expect(globex).toBeDisabled()
+  })
+
+  it('keeps the ticks when the add fails, and clears them when it works', async () => {
+    let fail = true
+    mockApi(
+      routes({
+        'POST /api/v1/contacts/query': ({ body }) =>
+          jsonResponse({
+            items: JSON.stringify(body).includes('list_member') ? [] : PICK_RESULTS,
+            total: 2,
+            describe: '',
+          }),
+        'POST /api/v1/lists/1/members': () =>
+          fail ? jsonResponse({ detail: 'nope' }, 500) : jsonResponse({ added: 1 }, 201),
+      }),
+    )
+    renderWithClient(<ListsPanel />)
+    await openList('First 100')
+    fireEvent.change(await screen.findByLabelText('Add contacts'), { target: { value: 'dunn' } })
+    const matches = await screen.findByRole('list', { name: 'Matches' })
+    const box = within(matches).getByRole('checkbox', { name: /^Cy \(Cyrus\) Dunn/ })
+    fireEvent.click(box)
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+    await screen.findByText('Could not add the contacts', { exact: false })
+    expect(box).toBeChecked()
+
+    fail = false
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+    await waitFor(() => expect(box).not.toBeChecked())
   })
 
   it('says so when nobody matches', async () => {
@@ -455,7 +529,7 @@ describe('bulk actions', () => {
     }
     fireEvent.change(screen.getByLabelText('Add contacts'), { target: { value: 'cy' } })
     const matches = await screen.findByRole('list', { name: 'Matches' })
-    fireEvent.click(within(matches).getByRole('checkbox', { name: 'Cy Dunn' }))
+    fireEvent.click(within(matches).getByRole('checkbox', { name: /^Cy \(Cyrus\) Dunn/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Add' }))
     await waitFor(() => expect(screen.getByText('Added 1 contacts.')).toBeInTheDocument())
 
