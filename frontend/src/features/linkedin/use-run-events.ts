@@ -61,6 +61,7 @@ export function useRunEvents(): void {
   useServerEvent<RunStarted>('run.started', () => {
     void queryClient.invalidateQueries({ queryKey: linkedinKeys.runs() })
     void queryClient.invalidateQueries({ queryKey: linkedinKeys.status() })
+    void queryClient.invalidateQueries({ queryKey: linkedinKeys.browserHealth() })
   })
 
   useServerEvent<RunProgress>('run.progress', ({ run_id, ...progress }) => {
@@ -75,5 +76,7 @@ export function useRunEvents(): void {
     void queryClient.invalidateQueries({ queryKey: linkedinKeys.budget() })
     void queryClient.invalidateQueries({ queryKey: linkedinKeys.heat() })
     void queryClient.invalidateQueries({ queryKey: linkedinKeys.pins() })
+    // A run that read LinkedIn, or could not reach Chrome, is new browser evidence (#181).
+    void queryClient.invalidateQueries({ queryKey: linkedinKeys.browserHealth() })
   })
 }

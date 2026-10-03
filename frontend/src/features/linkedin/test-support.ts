@@ -8,6 +8,7 @@
 import { jsonResponse } from '@/test/fetch'
 
 import type {
+  BrowserHealth,
   BrowserLaunch,
   BudgetStatus,
   Heat,
@@ -50,6 +51,21 @@ export const BROWSER_LAUNCH: BrowserLaunch = {
   ],
   remote_host_note: null,
   check_command: 'netkeeper preflight',
+}
+
+/** `GET /linkedin/browser/health` before anything has checked the session (#181). */
+export const BROWSER_HEALTH: BrowserHealth = {
+  checked_at: '2026-09-23T12:00:00Z',
+  can_start_runs: true,
+  session_status: 'unknown',
+  session_summary: 'not checked yet',
+  session_warnings: [
+    'nothing has checked the LinkedIn session yet: no `netkeeper preflight` and no run that' +
+      ' read LinkedIn. Run `netkeeper preflight` in a terminal; this report shows what it finds',
+  ],
+  chrome_unreachable_at: null,
+  chrome_unreachable_run_id: null,
+  running_run_id: null,
 }
 
 export const SCHEDULE_DISARMED: Schedule = {
@@ -208,6 +224,7 @@ export function defaultHandlers(overrides: Record<string, Handler> = {}): Record
   return {
     'GET /api/v1/linkedin/status': () => jsonResponse(STATUS_CLEAR),
     'GET /api/v1/linkedin/browser': () => jsonResponse(BROWSER_LAUNCH),
+    'GET /api/v1/linkedin/browser/health': () => jsonResponse(BROWSER_HEALTH),
     'GET /api/v1/linkedin/schedule': () => jsonResponse(SCHEDULE_DISARMED),
     'GET /api/v1/linkedin/budget': () => jsonResponse(BUDGET),
     'GET /api/v1/linkedin/heat': () => jsonResponse(HEAT),

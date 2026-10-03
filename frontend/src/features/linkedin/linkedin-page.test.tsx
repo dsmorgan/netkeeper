@@ -33,8 +33,8 @@ describe('session banner', () => {
     expect(within(banner).getByText(/log in to linkedin/i)).toBeInTheDocument()
     expect(within(banner).getByText(/netkeeper preflight/i)).toBeInTheDocument()
     expect(banner).toHaveTextContent(/clears this automatically/i)
-    // #175 has no clear-flag API yet, so the UI never offers a button to
-    // clear either flag itself — this one names the CLI command that does.
+    // No clear button for a logged-out flag (#181): preflight clears it once it
+    // sees a live session, which is better evidence than a click.
     expect(within(banner).queryByRole('button')).not.toBeInTheDocument()
   })
 
@@ -43,10 +43,11 @@ describe('session banner', () => {
     const banner = await screen.findByRole('alert')
     expect(within(banner).getByText(/resolve the checkpoint/i)).toBeInTheDocument()
     expect(within(banner).getByText(/netkeeper linkedin clear-flag/i)).toBeInTheDocument()
-    expect(within(banner).queryByRole('button')).not.toBeInTheDocument()
+    // The by-hand clear (#181), which always asks first (linkedin-clears.test.tsx).
+    expect(within(banner).getByRole('button', { name: 'Clear flag…' })).toBeInTheDocument()
     // R-13: nothing here may say or imply netkeeper clears this on its own —
     // a live session cookie is not proof a checkpoint is resolved (spec 9.7),
-    // so only a person, running the CLI command above, ends this banner.
+    // so only a person, with the button or the CLI command above, ends this banner.
     expect(banner).not.toHaveTextContent(/automatic/i)
     expect(banner).not.toHaveTextContent(/on its own/i)
   })

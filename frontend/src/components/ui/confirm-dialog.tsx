@@ -15,7 +15,16 @@ interface ConfirmDialogProps {
   /** The button's label at rest. While `pending` is true it always reads "Working…"
    *  instead — a caller does not need (and should not build) a pending variant of it. */
   confirmLabel: string
-  onConfirm: () => void
+  /**
+   * The action. Return its promise (`mutation.mutateAsync(...)`, not `mutate`):
+   * the dialog takes another confirm only once that promise settles, whatever
+   * `pending` did meanwhile (#181). A rejection is the caller's to show through
+   * `error`; the dialog swallows it here so it never surfaces as unhandled.
+   * A `void` return is accepted for a caller not yet moved over, and falls back
+   * to resetting on `pending`, `open`, or `error` changing, which can jam on two
+   * fast failures with the same text.
+   */
+  onConfirm: () => Promise<unknown> | void
   pending?: boolean
   /** A failure from the action itself, shown here because the dialog stays open. */
   error?: string | null
@@ -50,19 +59,14 @@ export function ConfirmDialog({
   // checked and set synchronously in the handler itself, so the second of two
   // same-tick clicks is dropped regardless of render timing (L2).
   //
-  // `pending` alone is not enough to *reset* it either: a mutation that
-  // settles (succeeds or fails) fast enough that React never commits a render
-  // with `pending` true — an instant 409, a fast test, a fast backend — means
-  // `pending` reads `false` before the click and `false` after, so an effect
-  // that only reacts to `pending` changing never runs again, and the ref
-  // stays set forever: every click after the first is silently dropped, even
-  // once the caller is plainly ready for another one. `open` (closes on
-  // success) and `error` (appears on failure) are the two props that *do*
-  // change whenever the action actually concludes, whatever `pending` did
-  // along the way, so this resets on either of them too — reset the moment
-  // `pending` turns true is harmless, since `disabled={pending}` on the
-  // button below is what guards every click from then on; this ref only has
-  // to survive the gap before `pending`'s first true render.
+  // It resets when `onConfirm`'s promise settles (#181). Nothing short of that
+  // is reliable: a mutation that fails fast enough that React never commits a
+  // render with `pending` true, twice with the same error text, changes none
+  // of `pending`, `open`, or `error`, so a reset that watched only those props
+  // never ran and every later click was dropped. The effect below stays only
+  // for a caller that still returns `void`; for one that returns its promise,
+  // a reset it makes early is harmless, since `disabled={pending}` guards
+  // every click once `pending` renders true.
   const submitting = useRef(false)
   useEffect(() => {
     submitting.current = false
@@ -71,7 +75,22 @@ export function ConfirmDialog({
   const handleConfirm = (): void => {
     if (submitting.current) return
     submitting.current = true
-    onConfirm()
+    let result: Promise<unknown> | void
+    try {
+      result = onConfirm()
+    } catch (thrown) {
+      submitting.current = false
+      throw thrown
+    }
+    if (result instanceof Promise) {
+      void result
+        .catch(() => {
+          // The caller shows the failure through `error`.
+        })
+        .finally(() => {
+          submitting.current = false
+        })
+    }
   }
 
   return (

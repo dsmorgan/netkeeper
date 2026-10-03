@@ -755,8 +755,83 @@
         "title": "Body_import_archive",
         "type": "object"
       },
+      "BrowserHealthOut": {
+        "description": "What netkeeper already knows about Chrome and the LinkedIn session (#181).\n\nBuilt only from what was recorded: the last ``netkeeper preflight`` or\n``posture --probe``, the newest run that read LinkedIn, the session flag, and\nthe newest run that could not reach Chrome. Nothing here attaches to the\nbrowser; a request handler never does (spec 9.9, CLAUDE.md).\n\n``session_status`` and ``session_summary`` are the posture report's\n``linkedin session`` row, word for word. ``chrome_unreachable_at`` is set when\nthe newest run that ended ``browser_unavailable`` is newer than the last sign\nof a working session.",
+        "properties": {
+          "can_start_runs": {
+            "title": "Can Start Runs",
+            "type": "boolean"
+          },
+          "checked_at": {
+            "format": "date-time",
+            "title": "Checked At",
+            "type": "string"
+          },
+          "chrome_unreachable_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chrome Unreachable At"
+          },
+          "chrome_unreachable_run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chrome Unreachable Run Id"
+          },
+          "running_run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Running Run Id"
+          },
+          "session_status": {
+            "title": "Session Status",
+            "type": "string"
+          },
+          "session_summary": {
+            "title": "Session Summary",
+            "type": "string"
+          },
+          "session_warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Session Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "checked_at",
+          "can_start_runs",
+          "session_status",
+          "session_summary",
+          "session_warnings",
+          "chrome_unreachable_at",
+          "chrome_unreachable_run_id",
+          "running_run_id"
+        ],
+        "title": "BrowserHealthOut",
+        "type": "object"
+      },
       "BrowserLaunchOut": {
-        "description": "``netkeeper browser launch``'s instructions, for the page (spec 9.1, ADR 0002).\n\nRead-only and built from config alone -- no attach, no CDP connection, nothing\nawaited. Whether Chrome is actually reachable, and whether the session it holds\nis healthy, is what ``netkeeper preflight`` checks; that attaches, so it cannot\nrun inside a request handler and has no API endpoint yet (a follow-up).",
+        "description": "``netkeeper browser launch``'s instructions, for the page (spec 9.1, ADR 0002).\n\nRead-only and built from config alone -- no attach, no CDP connection, nothing\nawaited. Whether Chrome is actually reachable, and whether the session it holds\nis healthy, is what ``netkeeper preflight`` checks; that attaches, so it cannot\nrun inside a request handler. ``GET /linkedin/browser/health`` reports what the\nlast preflight or run recorded instead (#181).",
         "properties": {
           "cdp_url": {
             "title": "Cdp Url",
@@ -4993,6 +5068,27 @@
         "title": "HealthOut",
         "type": "object"
       },
+      "HeatClearIn": {
+        "additionalProperties": false,
+        "description": "Clear heat by hand (#181): \"the block was something else\" (spec 9.7).\n\n``confirm`` must be true, and ``last_raised_at`` is the time the person saw heat\nlast raised: a throttle that raised it again in between refuses the clear.",
+        "properties": {
+          "confirm": {
+            "title": "Confirm",
+            "type": "boolean"
+          },
+          "last_raised_at": {
+            "format": "date-time",
+            "title": "Last Raised At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "confirm",
+          "last_raised_at"
+        ],
+        "title": "HeatClearIn",
+        "type": "object"
+      },
       "HeatOut": {
         "description": "Heat as spec 9.7 says the page shows it: level, last raised, when runs resume.",
         "properties": {
@@ -8723,6 +8819,32 @@
           "next_due"
         ],
         "title": "ScheduledJobOut",
+        "type": "object"
+      },
+      "SessionFlagClearIn": {
+        "additionalProperties": false,
+        "description": "Clear the session flag by hand (#181), what ``netkeeper linkedin clear-flag`` does.\n\n``confirm`` must be true, and ``outcome`` and ``flagged_at`` name the flag the\nperson saw when they confirmed: the route clears only that exact flag, the same\nre-read the command makes after its prompt, so a flag raised again in between\nis never cleared by an answer given about an older one.",
+        "properties": {
+          "confirm": {
+            "title": "Confirm",
+            "type": "boolean"
+          },
+          "flagged_at": {
+            "format": "date-time",
+            "title": "Flagged At",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          }
+        },
+        "required": [
+          "confirm",
+          "outcome",
+          "flagged_at"
+        ],
+        "title": "SessionFlagClearIn",
         "type": "object"
       },
       "Severity": {
@@ -15301,6 +15423,28 @@
         ]
       }
     },
+    "/api/v1/linkedin/browser/health": {
+      "get": {
+        "description": "What netkeeper already knows about Chrome and the session, never a fresh probe (#181).\n\nThe ``linkedin session`` posture row (the last ``netkeeper preflight`` or\n``posture --probe``, or the newest run that read LinkedIn, under the session\nflag), and the newest run that could not reach Chrome when that is newer.\nNothing here attaches to the browser (spec 9.9, CLAUDE.md); a live check is\nstill ``netkeeper preflight`` in a terminal.",
+        "operationId": "get_linkedin_browser_health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserHealthOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Browser Health",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
     "/api/v1/linkedin/budget": {
       "get": {
         "description": "Every action class's counters against its limits, and today's profile-visit chain.",
@@ -15339,6 +15483,44 @@
           }
         },
         "summary": "Get Heat",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/heat/clear": {
+      "post": {
+        "description": "Clear heat by hand: \"the block was something else\" (spec 9.7, #181).\n\nNeeds ``confirm: true`` and the ``last_raised_at`` the person was shown. It\nclears only that heat: a throttle that raised it again since is refused with\n``409``, as is heat that was never raised or is already cleared.",
+        "operationId": "clear_linkedin_heat",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HeatClearIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HeatOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "Nothing to clear, or heat was raised again since the confirm"
+          },
+          "422": {
+            "description": "confirm was not true"
+          }
+        },
+        "summary": "Clear Heat",
         "tags": [
           "linkedin"
         ]
@@ -15960,6 +16142,44 @@
           }
         },
         "summary": "Unpause Linkedin Schedule",
+        "tags": [
+          "linkedin"
+        ]
+      }
+    },
+    "/api/v1/linkedin/session-flag/clear": {
+      "post": {
+        "description": "Clear the session flag by hand: ``netkeeper linkedin clear-flag`` (#181).\n\nNeeds ``confirm: true`` and the flag the person was shown (``outcome``,\n``flagged_at``). The command's refusals apply as they are: no flag set is\n``409``, and so is a flag that is not the one confirmed, so a flag raised\nagain in between is never cleared by an answer about an older one.",
+        "operationId": "clear_linkedin_session_flag",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionFlagClearIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkedInStatusOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "No flag is set, or it changed since the confirm"
+          },
+          "422": {
+            "description": "confirm was not true"
+          }
+        },
+        "summary": "Clear Session Flag Route",
         "tags": [
           "linkedin"
         ]

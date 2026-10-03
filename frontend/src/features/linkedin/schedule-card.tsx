@@ -108,7 +108,7 @@ export function ScheduleCard() {
         confirmLabel="Arm scheduled runs"
         pending={arm.isPending}
         error={arm.isError ? message(arm.error) : null}
-        onConfirm={() => arm.mutate()}
+        onConfirm={() => arm.mutateAsync()}
       >
         <p>
           Scheduled syncs and enrichment will start contacting LinkedIn on their own, within active

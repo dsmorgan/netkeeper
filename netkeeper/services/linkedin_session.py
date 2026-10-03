@@ -24,7 +24,7 @@ table lands, not a decision this item is positioned to make well.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Final
 from urllib.parse import urlsplit
 
@@ -117,6 +117,45 @@ def clear_session_flag(session: Session, user: User) -> bool:
             "clear_session_flag() needs a writer session; use session_scope(write=True)"
         )
     return delete_setting(session, user, SESSION_FLAG_KEY)
+
+
+class FlagClearRefused(Exception):
+    """:func:`clear_confirmed_flag` refused: no flag, or not the one that was confirmed."""
+
+
+def clear_confirmed_flag(
+    session: Session, user: User, *, outcome: str, flagged_at: datetime
+) -> SessionFlag:
+    """Clear the session flag only if it is still the one a person confirmed (#181).
+
+    The web half of ``netkeeper linkedin clear-flag``, with that command's two
+    refusals: no flag set ("no session flag is set"), and a flag that is no longer
+    the one shown when the person confirmed ("changed"). A flag raised again
+    between the read and the confirm -- by a job, or a ``logged_out`` flag a
+    preflight cleared and a later run raised as ``checkpoint`` -- must never be
+    cleared by an answer given about a different one. ``outcome`` and
+    ``flagged_at`` identify the flag; ``flagged_at`` is compared as an instant,
+    a naive value read as UTC. Returns the flag it cleared. Needs a writer
+    session, the same as :func:`clear_session_flag`.
+    """
+    current = session_flag(session, user)
+    if current is None:
+        raise FlagClearRefused("no session flag is set")
+    if current.outcome.value != outcome or not same_instant(current.flagged_at, flagged_at):
+        raise FlagClearRefused(
+            "the session flag changed since you confirmed; not clearing it. Look at it again"
+        )
+    clear_session_flag(session, user)
+    return current
+
+
+def same_instant(left: datetime, right: datetime) -> bool:
+    """Whether two datetimes name the same instant, a naive one read as UTC."""
+    return _as_utc(left) == _as_utc(right)
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def session_flag(session: Session, user: User) -> SessionFlag | None:

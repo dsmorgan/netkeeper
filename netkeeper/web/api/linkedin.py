@@ -21,6 +21,8 @@ built on:
 * ``GET /linkedin/runs/{id}/contacts``: the last few contacts the run touched.
 * ``GET /linkedin/budget``, ``GET /linkedin/heat``: the counters and the heat
   level, as ``netkeeper posture`` reads them.
+* ``POST /linkedin/heat/clear`` (with ``confirm: true`` and the ``last_raised_at``
+  the person saw): spec 9.7's manual clear (#181).
 * ``GET``/``POST /linkedin/pins``, ``DELETE /linkedin/pins/{contact_id}``: up
   to five contacts at the front of the next enrichment (spec 9.6).
 * ``GET /linkedin/schedule``, ``POST /linkedin/schedule/arm`` (with
@@ -28,10 +30,14 @@ built on:
   runs may fire. Every install starts disarmed. ``POST /linkedin/schedule/pause``
   and ``/unpause`` hold new scheduled runs without disarming (#324).
 * ``GET /linkedin/status``: the page's banner in one read.
+* ``POST /linkedin/session-flag/clear`` (with ``confirm: true`` and the flag the
+  person saw): ``netkeeper linkedin clear-flag``, with its refusals (#181).
 * ``GET /linkedin/browser``: ``netkeeper browser launch``'s instructions, as data.
   Read-only and built from config alone; it never attaches (spec 9.9, CLAUDE.md).
+* ``GET /linkedin/browser/health``: what the last preflight or run recorded about
+  Chrome and the session. Read-only; it never attaches either (#181).
 
-Every ``GET`` here only reads: none starts, resumes, or arms anything. Every
+Every ``GET`` here only reads: none starts, resumes, arms, or clears anything. Every
 ``POST`` and ``DELETE`` goes through the CSRF guard (``X-Netkeeper-Client: 1``
 and a same-origin check, spec 14.2).
 """
@@ -48,6 +54,7 @@ from netkeeper.models.base import utcnow
 from netkeeper.paths import data_dir
 from netkeeper.scoping import get_scoped, scoped
 from netkeeper.services import budgets, enrich_plan, run_contacts, runs
+from netkeeper.services import heat as heat_rows
 from netkeeper.services import posture as posture_service
 from netkeeper.services.browser_launch import (
     CHROME_PROFILE_DIRNAME,
@@ -68,15 +75,22 @@ from netkeeper.services.linkedin_accounts import (
     scheduled_runs_armed,
     unpause_schedule,
 )
-from netkeeper.services.linkedin_session import session_flag
+from netkeeper.services.linkedin_session import (
+    FlagClearRefused,
+    clear_confirmed_flag,
+    last_session_evidence,
+    session_flag,
+)
 from netkeeper.services.scheduled_runs import seed_served_schedule, submit_run
 from netkeeper.services.scheduler import SERVED_SCHEDULES, stored_due
 from netkeeper.services.visit_budget import todays_visits
 from netkeeper.web.deps import CurrentUser, SessionDep, Tasks
 from netkeeper.web.schemas import (
+    BrowserHealthOut,
     BrowserLaunchOut,
     BudgetOut,
     BudgetStatusOut,
+    HeatClearIn,
     HeatOut,
     LinkedInStatusOut,
     PeriodBudgetOut,
@@ -92,6 +106,7 @@ from netkeeper.web.schemas import (
     ScheduleArmIn,
     ScheduledJobOut,
     ScheduleOut,
+    SessionFlagClearIn,
     TodaysVisitsOut,
 )
 
@@ -392,6 +407,45 @@ def get_budget(request: Request, user: CurrentUser, session: SessionDep) -> Budg
 
 @router.get("/heat", operation_id="get_linkedin_heat")
 def get_heat(request: Request, user: CurrentUser, session: SessionDep) -> HeatOut:
+    return _heat_out(request, session, user)
+
+
+@router.post(
+    "/heat/clear",
+    operation_id="clear_linkedin_heat",
+    responses={
+        409: {"description": "Nothing to clear, or heat was raised again since the confirm"},
+        422: {"description": "confirm was not true"},
+    },
+)
+def clear_heat(
+    body: HeatClearIn, request: Request, user: CurrentUser, session: SessionDep
+) -> HeatOut:
+    """Clear heat by hand: "the block was something else" (spec 9.7, #181).
+
+    Needs ``confirm: true`` and the ``last_raised_at`` the person was shown. It
+    clears only that heat: a throttle that raised it again since is refused with
+    ``409``, as is heat that was never raised or is already cleared.
+    """
+    if not body.confirm:
+        raise HTTPException(
+            status_code=422,
+            detail="clearing heat lets runs go at full pace again; send confirm: true",
+        )
+    try:
+        heat_rows.clear_confirmed(
+            session,
+            user,
+            account_id_for(session, user),
+            last_raised_at=body.last_raised_at,
+            now=utcnow(),
+        )
+    except heat_rows.HeatClearRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _heat_out(request, session, user)
+
+
+def _heat_out(request: Request, session: SessionDep, user: User) -> HeatOut:
     heat = posture_service.heat_status(
         session, user, account_id_for(session, user), now=utcnow(), settings=_settings(request)
     )
@@ -542,6 +596,40 @@ def unpause_linkedin_schedule(
 
 @router.get("/status", operation_id="get_linkedin_status")
 def get_status(request: Request, user: CurrentUser, session: SessionDep) -> LinkedInStatusOut:
+    return _status_out(request, session, user)
+
+
+@router.post(
+    "/session-flag/clear",
+    operation_id="clear_linkedin_session_flag",
+    responses={
+        409: {"description": "No flag is set, or it changed since the confirm"},
+        422: {"description": "confirm was not true"},
+    },
+)
+def clear_session_flag_route(
+    body: SessionFlagClearIn, request: Request, user: CurrentUser, session: SessionDep
+) -> LinkedInStatusOut:
+    """Clear the session flag by hand: ``netkeeper linkedin clear-flag`` (#181).
+
+    Needs ``confirm: true`` and the flag the person was shown (``outcome``,
+    ``flagged_at``). The command's refusals apply as they are: no flag set is
+    ``409``, and so is a flag that is not the one confirmed, so a flag raised
+    again in between is never cleared by an answer about an older one.
+    """
+    if not body.confirm:
+        raise HTTPException(
+            status_code=422,
+            detail="clearing the session flag lets runs use this session again; send confirm: true",
+        )
+    try:
+        clear_confirmed_flag(session, user, outcome=body.outcome, flagged_at=body.flagged_at)
+    except FlagClearRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _status_out(request, session, user)
+
+
+def _status_out(request: Request, session: SessionDep, user: User) -> LinkedInStatusOut:
     settings = _settings(request)
     account = find_account(session, user)
     account_id = account_id_for(session, user)
@@ -556,6 +644,51 @@ def get_status(request: Request, user: CurrentUser, session: SessionDep) -> Link
         schedule_paused=account is not None and schedule_paused(session, user, account.id),
         running_run_id=None if running is None else running.id,
         can_start_runs=request.app.state.executor is not None,
+    )
+
+
+# --- what is known about the browser ----------------------------------------------------
+
+
+@router.get("/browser/health", operation_id="get_linkedin_browser_health")
+def get_browser_health(
+    request: Request, user: CurrentUser, session: SessionDep
+) -> BrowserHealthOut:
+    """What netkeeper already knows about Chrome and the session, never a fresh probe (#181).
+
+    The ``linkedin session`` posture row (the last ``netkeeper preflight`` or
+    ``posture --probe``, or the newest run that read LinkedIn, under the session
+    flag), and the newest run that could not reach Chrome when that is newer.
+    Nothing here attaches to the browser (spec 9.9, CLAUDE.md); a live check is
+    still ``netkeeper preflight`` in a terminal.
+    """
+    now = utcnow()
+    account = find_account(session, user)
+    account_id = account_id_for(session, user)
+    row = posture_service.session_row(
+        session, user, account_id, now=now, settings=_settings(request)
+    )
+    evidence = last_session_evidence(session, user, account_id)
+    unreachable = (
+        None if account is None else runs.last_browser_unavailable(session, user, account.id)
+    )
+    if (
+        unreachable is not None
+        and evidence is not None
+        and unreachable.completed_at is not None
+        and not unreachable.completed_at > evidence.observed_at
+    ):
+        unreachable = None
+    running = None if account is None else runs.running_run(session, user, account.id)
+    return BrowserHealthOut(
+        checked_at=now,
+        can_start_runs=request.app.state.executor is not None,
+        session_status=row.status.value,
+        session_summary=row.value,
+        session_warnings=list(row.warnings),
+        chrome_unreachable_at=None if unreachable is None else unreachable.completed_at,
+        chrome_unreachable_run_id=None if unreachable is None else unreachable.id,
+        running_run_id=None if running is None else running.id,
     )
 
 

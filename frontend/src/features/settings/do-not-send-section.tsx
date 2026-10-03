@@ -83,9 +83,7 @@ export function DoNotSendSection() {
         confirmLabel="Remove"
         pending={remove.isPending}
         error={remove.isError ? message(remove.error) : null}
-        onConfirm={() => {
-          if (removing !== null) remove.mutate(removing.id)
-        }}
+        onConfirm={() => (removing === null ? Promise.resolve() : remove.mutateAsync(removing.id))}
       >
         Campaigns may send to {removing?.email} again.{' '}
         {removing !== null && removing.bounced && removing.reason !== 'bounced' && (

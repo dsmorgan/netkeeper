@@ -248,6 +248,17 @@ describe('PostureSection', () => {
     })
   })
 
+  it('wraps the badge below a stacked name rather than breaking the name mid-word (#181)', async () => {
+    // jsdom has no layout, so this pins the classes a real browser at 390px
+    // was measured with: the row wraps, and the name may not shrink below its
+    // longest word (`min-w-0` is what let "linkedin" split as "linkedi/n").
+    renderSection(CLEAN)
+    const blocks = await screen.findByTestId('posture-blocks')
+    const name = within(blocks).getByText('linkedin session')
+    expect(name.parentElement).toHaveClass('flex-wrap')
+    expect(name).not.toHaveClass('min-w-0')
+  })
+
   it('shows an error state', async () => {
     renderSection('error')
     expect(await screen.findByRole('alert')).toHaveTextContent('boom')

@@ -1889,6 +1889,26 @@ def _days_since_install(user: User, local_now: datetime) -> int:
     return max((local_now.date() - installed_local.date()).days, 0)
 
 
+def session_row(
+    session: Session, user: User, account_id: int, *, now: datetime, settings: LinkedInSettings
+) -> Protection:
+    """The ``linkedin session`` row as the web page shows it, without the rest (#181).
+
+    Exactly the row :func:`posture` gives a report that ran no probe: what
+    the last ``netkeeper preflight`` or ``posture --probe`` recorded, or the
+    newest run that read LinkedIn, and the session flag over both. Read-only;
+    nothing here attaches to the browser.
+    """
+    zone, _ = _zone_of(settings.timezone)
+    return _linkedin_session(
+        None,
+        evidence=last_session_evidence(session, user, account_id),
+        flag=session_flag(session, user),
+        now=now,
+        zone=zone,
+    )
+
+
 def _zone_of(name: str) -> tuple[ZoneInfo, str | None]:
     """``name`` as a zone, or UTC with the warning that says so."""
     try:

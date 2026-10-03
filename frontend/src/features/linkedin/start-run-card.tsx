@@ -149,7 +149,7 @@ export function StartRunCard({ onStarted }: { onStarted: (runId: number) => void
         confirmVariant="default"
         pending={start.isPending}
         error={start.isError ? message(start.error) : null}
-        onConfirm={() => start.mutate()}
+        onConfirm={() => start.mutateAsync()}
       >
         <p>
           {kind === 'enrich'
