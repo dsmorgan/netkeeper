@@ -1489,6 +1489,33 @@ def _drop(session: Session, *rows: ContactTag | ContactTagSuppression | None) ->
             session.delete(row)
 
 
+def _met_confirmed(contact: Contact) -> bool:
+    """The person answered Met on this contact: ``manual`` and triaged.
+
+    ``manual`` alone says nothing, because it is the column default: an
+    untriaged contact carries it without anyone deciding (#331).
+    """
+    return contact.met_source is MetSource.MANUAL and contact.triaged_at is not None
+
+
+def _loser_met_wins(survivor: Contact, loser: Contact) -> bool:
+    """Whether the loser's Met answer replaces the survivor's in a merge (#331).
+
+    A confirmed answer and a batch's (``automatic``) one: the confirmed answer
+    wins whatever the values, so a merge never loses the person's answer to a
+    machine's, and a machine's answer never takes the person's source. With
+    the same value that still moves the loser's ``manual`` and ``triaged_at``
+    across, which takes the survivor out of the review queue as
+    :func:`~netkeeper.crm.triage.record_met` would. Any other pair: the more
+    decided value wins (:data:`MET_RANK`), and a tie keeps the survivor's.
+    """
+    if _met_confirmed(survivor) and loser.met_source is MetSource.AUTOMATIC:
+        return False
+    if _met_confirmed(loser) and survivor.met_source is MetSource.AUTOMATIC:
+        return True
+    return MET_RANK[loser.met] > MET_RANK[survivor.met]
+
+
 def _merge_scalars(survivor: Contact, loser: Contact) -> None:
     survivor_default_name = survivor.preferred_name in ("", survivor.first_name)
     loser_custom_name = bool(loser.preferred_name) and loser.preferred_name != loser.first_name
@@ -1510,25 +1537,13 @@ def _merge_scalars(survivor: Contact, loser: Contact) -> None:
     if survivor_default_name:
         # "" means "use first_name" on a stored row (the preferred_name validator).
         survivor.preferred_name = loser.preferred_name if loser_custom_name else ""
-    if MET_RANK[loser.met] > MET_RANK[survivor.met]:
+    if _loser_met_wins(survivor, loser):
         # The value carries who decided it with it (spec 10.2): a decision a
         # triage batch made must not read as one the person made by hand just
         # because it moved to the survivor, and it stays up for review there.
         survivor.met = loser.met
         survivor.met_source = loser.met_source
         survivor.triaged_at = loser.triaged_at
-    elif (
-        loser.met is survivor.met
-        and loser.met_source is MetSource.MANUAL
-        and loser.triaged_at is not None
-        and survivor.met_source is MetSource.AUTOMATIC
-    ):
-        # The same answer, but one of them is the person's own. Keeping the
-        # batch's would throw away a confirmation and leave the survivor in the
-        # review queue for a decision that has already been reviewed. Only a
-        # triaged loser confirms anything (#331): ``manual`` is also the column
-        # default, so an untriaged contact carries it without anyone deciding.
-        survivor.met_source = MetSource.MANUAL
     if loser.do_not_contact:
         if not survivor.do_not_contact:
             survivor.do_not_contact = True
