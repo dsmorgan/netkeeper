@@ -29,6 +29,8 @@ For each campaign tab, the report shows:
 - **CLICKS**, **OPENS**, **BOUNCES**: the workbook's own counts.
 - **SENT TO** and **UNLISTED**: the campaign's recipient count, and how many of those recipients the workbook doesn't name. netkeeper can't import the unlisted people, because the workbook doesn't say who they are. The report ends with a warning that gives the total.
 
+Below the table, the report lists any warnings for a tab, such as rows it dropped because they hold no usable address, or formula cells with no saved value (open the sheet, let it calculate, and export it again). A tab that isn't a campaign report is skipped. The report names skipped tabs again at the end, and the command exits with an error so that you notice.
+
 Below the table, the report lists every unmatched and ambiguous address. Merge duplicate contacts so that each ambiguous address belongs to one contact. To create a contact (name and address only) for each unmatched address, add `--create-missing`.
 
 When the report looks right, apply it:
@@ -37,7 +39,7 @@ When the report looks right, apply it:
 netkeeper history import ~/path/to/old-campaigns.xlsx --apply
 ```
 
-For each matched recipient, netkeeper adds one **email out** entry to the contact's timeline, dated at the campaign's start and labeled **Imported history**. The campaign guard that skips people you contacted recently counts these entries. A person on a campaign's bounce list goes on the do-not-send list as bounced.
+For each matched recipient, netkeeper adds one **email out** entry to the contact's timeline, dated at the campaign's start and labeled **Imported history**. The campaign guard that skips people you contacted recently counts these entries. A person on a campaign's bounce list goes on the do-not-send list as bounced. That happens once: if you later take the address off the do-not-send list, a re-run doesn't put it back.
 
 You can run the import again at any time, for example after you merge contacts or export the workbook again. It adds nothing twice.
 
@@ -68,7 +70,9 @@ netkeeper history scan-gmail --apply
 | Any other reply | Adds the message to the contact's timeline as an **email in** entry labeled **Imported history**, and marks the contact **Needs review**, so that no campaign enrolls them until you look. |
 | An automatic answer, such as an out-of-office message | Nothing beyond recording it. |
 
-The scan can't tell a polite "no, thanks" from a friendly reply, so every person who replied waits for you.
+The scan can't tell a polite "no, thanks" from a friendly reply, so every replier with a contact waits for you. The scan first tries again to match a recipient that had no contact at import time, so a contact you created or gave the address to since then is flagged too. A replier whose address no contact holds, or more than one contact holds, can't be flagged: the report lists them instead. An unsubscribe request from such an address still puts the address on the do-not-send list.
+
+An unsubscribe phrase counts even inside an automatic answer. A failure notice counts as a bounce only when it lists the address as a failed recipient or, if it lists none, names the exact address. A notice about `jim.bob@example.com` isn't a bounce of `bob@example.com`. The report counts the notices it skipped this way.
 
 A scan that Gmail stops, for example at a rate limit, saves what it finished and exits with an error. Run the same command again later, and it continues with the recipients it didn't reach. A recipient already scanned is skipped unless you add `--rescan`.
 
@@ -85,4 +89,4 @@ Open each contact the scan flagged. In the contacts table, filter on **needs rev
 - If they're happy to hear from you, choose **Confirm**. Campaigns may include them again.
 - If they declined, set **Do not contact**, and then choose **Confirm**.
 
-The **Needs review** notice on the contact page describes a contact read off a LinkedIn card, because that is the other way a contact gets this mark. For a contact the scan flagged, the reply in the timeline is the reason. A LinkedIn sync never clears the mark from a contact the scan flagged; only you do, by confirming the contact. Merging a flagged contact into one that isn't flagged also clears it, so triage before you merge.
+The **Needs review** notice on the contact page describes a contact read off a LinkedIn card, because that is the other way a contact gets this mark. For a contact the scan flagged, the reply in the timeline is the reason. A LinkedIn sync never clears the mark from a contact the scan flagged, and neither does a merge: when either contact in a merge is waiting for you to read a reply, the merged contact keeps the earlier mark. Only you clear it, by confirming the contact.

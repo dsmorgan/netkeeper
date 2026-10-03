@@ -45,7 +45,10 @@ log = logging.getLogger(__name__)
 #: A list ends at this many empty rows in a row.
 BLANK_ROWS_END_A_LIST: Final = 2
 
-_ADDRESS: Final = re.compile(r"[^@\s<>,;\"']+@[^@\s<>,;\"']+\.[^@\s<>,;\"']+")
+_ADDRESS: Final = re.compile(r"[^@\s<>,;:\"']+@[^@\s<>,;:\"']+\.[^@\s<>,;:\"']+")
+_LINK: Final = re.compile(
+    r"(?:https?://|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\b)", re.IGNORECASE
+)
 _LEADING_INT: Final = re.compile(r"\s*(\d+)")
 _SPACES: Final = re.compile(r"\s+")
 
@@ -158,13 +161,21 @@ def read_workbook(data: bytes) -> Workbook:
         book = load_workbook(BytesIO(data), read_only=True, data_only=True)
     except Exception as exc:  # openpyxl raises a zoo of types for a file it cannot read
         raise WorkbookError("not an xlsx workbook this reader understands") from exc
+    uncached = _uncached_formulas(data)
     campaigns: list[WorkbookCampaign] = []
     skipped: list[SkippedTab] = []
     try:
         for index, sheet in enumerate(book.worksheets):
             rows = [list(row) for row in sheet.iter_rows(values_only=True)]
             try:
-                campaigns.append(read_tab(index, rows, title=sheet.title))
+                campaigns.append(
+                    read_tab(
+                        index,
+                        rows,
+                        title=sheet.title,
+                        uncached_formulas=uncached.get(index, 0),
+                    )
+                )
             except WorkbookError as exc:
                 skipped.append(SkippedTab(index, str(exc)))
                 log.info("history workbook: tab %d skipped (%s)", index + 1, exc)
@@ -173,7 +184,46 @@ def read_workbook(data: bytes) -> Workbook:
     return Workbook(sha256=digest, campaigns=tuple(campaigns), skipped=tuple(skipped))
 
 
-def read_tab(index: int, rows: Sequence[Sequence[object]], *, title: str = "") -> WorkbookCampaign:
+def _uncached_formulas(data: bytes) -> dict[int, int]:
+    """Per tab, how many formula cells carry no saved value. Read with ``data_only``, such
+    a cell is empty, which would silently drop a row; the tab reports it instead."""
+    book = load_workbook(BytesIO(data), read_only=True, data_only=False)
+    cached = load_workbook(BytesIO(data), read_only=True, data_only=True)
+    found: dict[int, int] = {}
+    try:
+        for index, (formulas, values) in enumerate(
+            zip(book.worksheets, cached.worksheets, strict=True)
+        ):
+            count = 0
+            for formula_row, value_row in zip(
+                formulas.iter_rows(values_only=True),
+                values.iter_rows(values_only=True),
+                strict=False,
+            ):
+                for formula, value in zip(formula_row, value_row, strict=False):
+                    if value is None and _is_formula(formula):
+                        count += 1
+            if count:
+                found[index] = count
+    finally:
+        book.close()
+        cached.close()
+    return found
+
+
+def _is_formula(value: object) -> bool:
+    if isinstance(value, str):
+        return value.startswith("=")
+    return value is not None and "formula" in type(value).__name__.lower()
+
+
+def read_tab(
+    index: int,
+    rows: Sequence[Sequence[object]],
+    *,
+    title: str = "",
+    uncached_formulas: int = 0,
+) -> WorkbookCampaign:
     """One tab's campaign from its cell values, row by row. :class:`WorkbookError` when it
     has no campaign header or no start date."""
     grid = _Grid(rows)
@@ -183,6 +233,11 @@ def read_tab(index: int, rows: Sequence[Sequence[object]], *, title: str = "") -
     top, _ = header
     labels = {col: label for col, label in grid.labels(top)}
     warnings: list[str] = []
+    if uncached_formulas:
+        warnings.append(
+            f"{uncached_formulas} formula cell(s) have no saved value and read as empty;"
+            " open the sheet, let it calculate, and export it again"
+        )
 
     def value(match: str) -> object:
         for col, label in labels.items():
@@ -210,10 +265,10 @@ def read_tab(index: int, rows: Sequence[Sequence[object]], *, title: str = "") -
         if kind in lists:
             warnings.append(f"a second {kind} list was skipped")
             continue
-        people, unreadable = _walk(grid, row, col)
+        people, dropped = _walk(grid, row, col, kind)
         lists[kind] = people
-        if unreadable:
-            warnings.append(f"{unreadable} row(s) of the {kind} list had no usable address")
+        if dropped:
+            warnings.append(f"{dropped} row(s) of the {kind} list were dropped: no usable address")
 
     opens = _count(value("opens"))
     opened = lists.get(ListKind.OPENED, ())
@@ -294,11 +349,13 @@ def _list_kind(
     return ListKind.OPENED
 
 
-def _walk(grid: _Grid, header_row: int, col: int) -> tuple[tuple[Person, ...], int]:
-    """The people under a list header, and how many rows had names but no address."""
+def _walk(grid: _Grid, header_row: int, col: int, kind: ListKind) -> tuple[tuple[Person, ...], int]:
+    """The people under a list header, and how many other rows were dropped. In the
+    clicks list, a row holding only a link in the address column is the link the person
+    above clicked, and is not counted; any other row without an address is."""
     people: list[Person] = []
     seen: set[str] = set()
-    unreadable = 0
+    dropped = 0
     blanks = 0
     row = header_row + 1
     cols = (col, col + 1, col + 2)
@@ -314,11 +371,15 @@ def _walk(grid: _Grid, header_row: int, col: int) -> tuple[tuple[Person, ...], i
             if email not in seen:
                 seen.add(email)
                 people.append(Person(first, last, email))
-        elif first is not None or last is not None:
-            unreadable += 1
-        # A row with only text in the address column is a clicked link: not a person.
+        elif not (
+            kind is ListKind.CLICKED
+            and first is None
+            and last is None
+            and _LINK.search(_text(grid.at(row, col + 2)) or "")
+        ):
+            dropped += 1
         row += 1
-    return tuple(people), unreadable
+    return tuple(people), dropped
 
 
 def _label(value: object) -> str | None:

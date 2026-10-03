@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from email.message import EmailMessage
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import factories
 import pytest
 from campaign_fakes import make_mailbox
 from history_fixtures import Tab, workbook_bytes
+from openpyxl import load_workbook
 from sqlalchemy.orm import Session, sessionmaker
 from typer.testing import CliRunner
 
@@ -192,3 +194,21 @@ def test_scan_without_a_mailbox_says_so(cli_db: sessionmaker[Session], workbook:
     result = runner.invoke(cli, ["history", "scan-gmail", "--mailbox", "other@example.test"])
     assert result.exit_code == 1
     assert "no mailbox other@example.test" in result.output
+
+
+def test_import_names_skipped_tabs_at_the_end_and_exits_1(
+    cli_db: sessionmaker[Session], tmp_path: Path
+) -> None:
+    book = load_workbook(BytesIO(workbook_bytes(Tab())))
+    book.create_sheet("Summary")["A1"] = "Totals"
+    path = tmp_path / "history.xlsx"
+    book.save(path)
+
+    result = runner.invoke(cli, ["history", "import", str(path), "--apply"])
+
+    assert result.exit_code == 1
+    assert result.output.rstrip().endswith(
+        "warning: 1 tab(s) were skipped and nothing from them was imported:"
+        " 2 (no 'Campaign name' header)"
+    )
+    assert _counts(cli_db)["HistoryCampaign"] == 1  # the readable tab is still imported
