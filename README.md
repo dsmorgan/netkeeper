@@ -14,7 +14,7 @@ netkeeper is three tools in one, and they only make sense together:
 
 1. **Extract.** A browser sidecar attaches to the Chrome you already use and reads your connections and their contact info with human-like pacing and hard daily budgets. It never runs a second browser identity.
 2. **Organize.** A local CRM with a triage screen for "have I actually met this person", manual and rule-based tags, static and smart lists, CSV import with column mapping, and export presets. LinkedIn stays the source of truth through periodic re-sync.
-3. **Reach out.** Multi-step sequences: an email, a follow-up a week later into the same thread, and a LinkedIn message after that, each skipped automatically when the person replies. Draft mode writes into Gmail for you to send by hand; send mode sends for you inside a daily cap and a send window.
+3. **Reach out.** Multi-step sequences: an email, a follow-up a week later into the same thread, and a LinkedIn message after that, each skipped automatically when the person replies. Draft mode writes into Gmail for you to send by hand; send mode sends for you from the start you schedule, inside a daily cap.
 
 Everything stays on your machine: one SQLite file, tokens in the macOS Keychain, a web UI on `127.0.0.1`. v1 is for one person, but the schema carries a user boundary from the start so a self-hosted or hosted multi-user deployment can follow later without a rewrite.
 

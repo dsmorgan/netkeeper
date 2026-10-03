@@ -1001,7 +1001,7 @@ def simulate_command(
         int | None,
         typer.Option(
             "--campaign",
-            help="Replay this campaign's schedule instead: its steps, delays, send window"
+            help="Replay this campaign's schedule instead: its steps, delays, times of day"
             " and caps, for its audience, sending nothing.",
             show_default=False,
         ),
@@ -1036,9 +1036,9 @@ def simulate_command(
     picture of them.
 
     With `--campaign ID` it replays that campaign's schedule instead: its steps,
-    delays, modes, send window, holidays, and caps, for as many synthetic contacts
-    as it has live enrollments (or, with nobody enrolled yet, as its list or filter
-    holds), from step 1 as if activated at `--start`. It reads the campaign from
+    delays, times of day, modes, and caps, for as many synthetic contacts as it has
+    live enrollments (or, with nobody enrolled yet, as its list or filter holds),
+    from step 1 as if activated to start at `--start`. It reads the campaign from
     your database and changes nothing there; the replay runs on the real engine
     tick in a scratch database, deleted afterwards, and sends nothing. It shows the
     sends per local day and step.
@@ -2418,6 +2418,45 @@ def _when(at: datetime | None) -> str:
     return "-" if at is None else f"{at:%Y-%m-%d %H:%M UTC}"
 
 
+START_FORMATS: Final = [
+    "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M",
+    "%Y-%m-%d %H:%M",
+]
+"""What `--start` takes: ISO 8601, in your time zone unless it says."""
+
+
+def _local_start(at: datetime, timezone: str) -> str:
+    """A start as the campaign page shows it: "Tue Oct 6, 09:00 America/New_York"."""
+    try:
+        local = at.astimezone(ZoneInfo(timezone))
+    except (ValueError, KeyError):
+        return _when(at)
+    return f"{local:%a %b} {local.day}, {local:%H:%M} {timezone}"
+
+
+def _start_or_exit(
+    at: datetime | None, now_flag: bool, *, timezone: str, now: datetime
+) -> datetime | None:
+    """`--start` read in the user's time zone when it names none, `--now` as now, or None
+    for the default. Both at once is refused."""
+    if at is not None and now_flag:
+        typer.echo("error: give --start or --now, not both", err=True)
+        raise typer.Exit(code=1)
+    if now_flag:
+        return now
+    if at is None:
+        return None
+    if at.tzinfo is None:
+        try:
+            at = at.replace(tzinfo=ZoneInfo(timezone))
+        except (ValueError, KeyError) as exc:
+            typer.echo(f"error: {timezone!r} is not a time zone", err=True)
+            raise typer.Exit(code=1) from exc
+    return at.astimezone(UTC)
+
+
 def _list_id_or_exit(session: Session, user: User, which: str | None) -> int | None:
     """The id of the user's list named by its name or id."""
     if which is None:
@@ -2497,6 +2536,13 @@ def campaigns_status(
             f"mailbox: {detail.mailbox_email or '-'}",
             f"daily cap: {'config' if c.daily_cap is None else c.daily_cap}",
             f"enrollments: {_counts_cell(detail.enrollments)}",
+            "starts: "
+            + (
+                "at activation"
+                if c.starts_at is None
+                else _local_start(c.starts_at, user.timezone)
+                + ("" if detail.start_editable else " (fixed: it has sent)")
+            ),
             f"next fire: {_when(detail.next_action_at)}",
         ]
         steps = [
@@ -2504,7 +2550,8 @@ def campaigns_status(
                 str(s.step.position),
                 s.step.channel.value,
                 s.step.mode.value,
-                f"+{s.step.delay_days}d",
+                f"+{s.step.delay_days}d "
+                + ("suggested slot" if s.step.send_time is None else f"at {s.step.send_time}"),
                 s.step.condition.value,
                 "yes" if s.step.same_thread else "no",
                 f"{s.template_name} v{s.template_version}",
@@ -2522,7 +2569,7 @@ def campaigns_status(
                 "STEP",
                 "CHANNEL",
                 "MODE",
-                "DELAY",
+                "TIMING",
                 "CONDITION",
                 "THREAD",
                 "TEMPLATE",
@@ -2639,14 +2686,32 @@ def campaigns_enroll(
 def campaigns_activate(
     ctx: typer.Context,
     campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+    start: Annotated[
+        datetime | None,
+        typer.Option(
+            "--start",
+            help="When the campaign starts sending (ISO 8601, in your time zone unless it"
+            " says). Default: the next Tuesday at 09:00.",
+            formats=START_FORMATS,
+            show_default=False,
+        ),
+    ] = None,
+    now_flag: Annotated[
+        bool, typer.Option("--now", help="Start sending now instead of at a scheduled time.")
+    ] = False,
     yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
 ) -> None:
     """Activate a reviewed campaign through the review gate (POST /campaigns/{id}/activate).
 
     Refused, with the list of what is missing, unless every review requirement is
     recorded and current: sampled and searched previews approved, a test send of
-    each email step, a clean lint, and the guard summary acknowledged. Once active,
-    `netkeeper serve` fires its steps on an armed mailbox.
+    each email step, a clean lint, and the guard summary acknowledged.
+
+    The campaign sends nothing before its scheduled start: `--start`, `--now`, or by
+    default the next Tuesday at 09:00 in your time zone. A start outside the
+    suggested slots (Tuesday to Thursday, 09:00 to 16:30) gets a warning, never a
+    refusal. `netkeeper serve` fires the steps on an armed mailbox, and only while
+    it runs.
     """
     settings = _load_settings_or_exit(ctx.ensure_object(CliState))
     me = me_fields(settings.me)
@@ -2656,27 +2721,152 @@ def campaigns_activate(
             user = _local_user_or_exit(session)
             campaign = campaign_review.get_campaign(session, user, campaign_id)
             name = campaign.name
-            gaps = campaign_review.missing(session, user, campaign, me=me, now=datetime.now(UTC))
+            timezone = user.timezone
+            now = datetime.now(UTC)
+            gaps = campaign_review.missing(session, user, campaign, me=me, now=now)
+            chosen = _start_or_exit(start, now_flag, timezone=timezone, now=now)
+            starts_at = campaign_service.resolve_start(
+                user, settings=settings, now=now, starts_at=chosen
+            )
+            options = campaign_service.start_options(user, settings=settings, now=now, at=starts_at)
         if gaps:
             _refuse_activation(campaign_id, gaps)
+        when = "now" if now_flag else _local_start(starts_at, timezone)
+        typer.echo(f"starts: {when}")
+        typer.echo(options.suggestion)
+        if options.warning is not None:
+            typer.echo(f"warning: {options.warning}")
+        typer.echo(options.reminder)
         if not yes and not typer.confirm(
-            f"activate campaign {campaign_id} {name!r}? `netkeeper serve` fires its steps"
-            " from the next tick on an armed mailbox"
+            f"activate campaign {campaign_id} {name!r}, starting {when}? `netkeeper serve`"
+            " fires its steps from then on an armed mailbox"
         ):
             typer.echo(f"cancelled: campaign {campaign_id} stays in review")
             raise typer.Exit(code=1)
         with session_scope(factory, write=True) as session:
             user = _local_user_or_exit(session)
             try:
-                campaign_review.activate(
-                    session, user, campaign_id, settings=settings, me=me, now=datetime.now(UTC)
+                activated = campaign_review.activate(
+                    session,
+                    user,
+                    campaign_id,
+                    settings=settings,
+                    me=me,
+                    now=datetime.now(UTC),
+                    starts_at=starts_at,
                 )
+                started = activated.starts_at
             except campaign_review.ReviewIncomplete as exc:
                 _refuse_activation(campaign_id, exc.missing, cause=exc)
             except campaign_review.ReviewError as exc:
                 typer.echo(f"error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
-    typer.echo(f"campaign {campaign_id} {name!r} is active")
+    typer.echo(
+        f"campaign {campaign_id} {name!r} is active; it starts"
+        f" {_local_start(started, timezone) if started is not None else when}"
+    )
+
+
+@campaigns_app.command("start")
+def campaigns_start(
+    ctx: typer.Context,
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+    start: Annotated[
+        datetime | None,
+        typer.Option(
+            "--start",
+            help="The new start (ISO 8601, in your time zone unless it says).",
+            formats=START_FORMATS,
+            show_default=False,
+        ),
+    ] = None,
+    now_flag: Annotated[bool, typer.Option("--now", help="Start sending now.")] = False,
+) -> None:
+    """Move an active or paused campaign's scheduled start (PUT /campaigns/{id}/start).
+
+    Refused once the campaign has sent anything. A start outside the suggested slots
+    gets a warning, never a refusal.
+    """
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
+    if start is None and not now_flag:
+        typer.echo("error: give --start or --now", err=True)
+        raise typer.Exit(code=1)
+    with (
+        _campaign_db() as factory,
+        session_scope(factory, write=True) as session,
+        _campaign_errors(),
+    ):
+        user = _local_user_or_exit(session)
+        now = datetime.now(UTC)
+        chosen = _start_or_exit(start, now_flag, timezone=user.timezone, now=now)
+        assert chosen is not None  # one of the two was given
+        options = campaign_service.start_options(user, settings=settings, now=now, at=chosen)
+        campaign = campaign_service.set_start(
+            session, user, campaign_id, settings=settings, now=now, starts_at=chosen
+        )
+        starts_at = campaign.starts_at
+        timezone = user.timezone
+    if options.warning is not None:
+        typer.echo(f"warning: {options.warning}")
+    assert starts_at is not None  # set_start sets it
+    typer.echo(f"campaign {campaign_id} now starts {_local_start(starts_at, timezone)}")
+    typer.echo(options.reminder)
+
+
+@campaigns_app.command("step-time")
+def campaigns_step_time(
+    ctx: typer.Context,
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+    position: Annotated[int, typer.Argument(help="The step's number, 1 for the first.")],
+    delay_days: Annotated[
+        int,
+        typer.Option(
+            "--delay-days", help="Days after the step before; for step 1, after the start."
+        ),
+    ],
+    at: Annotated[
+        str | None,
+        typer.Option(
+            "--at",
+            help="An explicit local time of day, HH:MM, honored at any hour. Left out: the"
+            " next suggested slot after the delay.",
+            show_default=False,
+        ),
+    ] = None,
+) -> None:
+    """Set a step's day offset and time of day (PUT /campaigns/{id}/steps/{step}/schedule).
+
+    Only timing changes. Live enrollments waiting for the step are due again by the
+    new timing. On a campaign still in review, the review records that name the step
+    (its test send, lint, previews) need doing again.
+    """
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
+    with (
+        _campaign_db() as factory,
+        session_scope(factory, write=True) as session,
+        _campaign_errors(),
+    ):
+        user = _local_user_or_exit(session)
+        detail = campaign_service.campaign_status(
+            session, user, campaign_id, me=me_fields(settings.me), now=datetime.now(UTC)
+        )
+        step = next((s.step for s in detail.steps if s.step.position == position), None)
+        if step is None:
+            typer.echo(f"error: campaign {campaign_id} has no step {position}", err=True)
+            raise typer.Exit(code=1)
+        changed = campaign_service.set_step_schedule(
+            session,
+            user,
+            campaign_id,
+            step.id,
+            settings=settings,
+            delay_days=delay_days,
+            send_time=at,
+        )
+        timing = (
+            "the next suggested slot" if changed.send_time is None else f"at {changed.send_time}"
+        )
+    typer.echo(f"campaign {campaign_id} step {position}: +{delay_days}d, {timing}")
 
 
 def _refuse_activation(

@@ -65,6 +65,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
+from netkeeper.campaigns.schedule import SERVE_REMINDER
 from netkeeper.config import HeatSettings, LinkedInSettings, PacingSettings, Settings
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin import heat as heat_math
@@ -90,6 +91,7 @@ from netkeeper.services.budgets import (
     profile_visit_week_note,
 )
 from netkeeper.services.budgets import status as budget_status
+from netkeeper.services.campaign_engine import upcoming
 from netkeeper.services.linkedin_accounts import (
     find_account,
     schedule_pause_state,
@@ -517,6 +519,7 @@ def posture(
         _scheduled_jobs(scheduler),
         _scheduled_runs_armed(session, user, account_id),
         _reply_poll(session, user, now=now, settings=settings),
+        _next_campaign_send(session, user, zone=zone),
         _route_changed_breaker(session, user, account_id),
         _answer_lost_limit(session, user, account_id),
         _network_aging(session, user),
@@ -1383,6 +1386,33 @@ def _scheduled_jobs(scheduler: SchedulerPosture) -> Protection:
             f"these job kinds have no due time, so they never run ({meaning})."
             " `netkeeper serve` gives a missing kind its first due time when it starts,"
             " and `netkeeper linkedin schedule arm` does it at once",
+        ),
+    )
+
+
+def _next_campaign_send(session: Session, user: User, *, zone: ZoneInfo) -> Protection:
+    """When the campaign engine next has a send to consider, and what it needs (#338).
+
+    There is no send window: each campaign sends from its scheduled start, and only
+    while ``netkeeper serve`` runs on an awake Mac. The row is the soonest due time
+    the tick would act on (:func:`netkeeper.services.campaign_engine.upcoming`, the
+    dashboard's own list), so it never disagrees with the campaign pages. In force
+    either way: a send with nothing running to make it is a choice, not a fault.
+    """
+    fires, _ = upcoming(session, user, limit=1)
+    if not fires:
+        return Protection(
+            name="next campaign send", status=Status.ON, value="no campaign send is scheduled"
+        )
+    fire = fires[0]
+    step = "" if fire.step is None else f" step {fire.step.position}"
+    local = fire.due.astimezone(zone)
+    return Protection(
+        name="next campaign send",
+        status=Status.ON,
+        value=(
+            f"{fire.campaign.name!r}{step} at {local:%a %b} {local.day}, {local:%H:%M}"
+            f" ({fire.due:%Y-%m-%d %H:%M UTC}). {SERVE_REMINDER}"
         ),
     )
 

@@ -28,8 +28,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Body, HTTPException, Request
+from pydantic import AwareDatetime, BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
 from netkeeper.campaigns.gmail import Gmail, GmailError
@@ -39,6 +39,7 @@ from netkeeper.db import session_scope
 from netkeeper.models import CampaignStatus, MailboxArm, User
 from netkeeper.models.base import utcnow
 from netkeeper.services import campaign_review as service
+from netkeeper.services import campaigns as campaign_service
 from netkeeper.services.mailboxes import MailboxNotFound, MailboxNotReady, open_gmail
 from netkeeper.web.deps import CurrentUser, SessionDep, read_only
 from netkeeper.web.errors import ApiError
@@ -80,6 +81,14 @@ STALE: Responses = {
         "``stale`` when only a fingerprint went stale: show it again and retry",
     }
 }
+
+
+class ActivateIn(BaseModel):
+    """When the campaign starts (#338)."""
+
+    starts_at: AwareDatetime | None = None
+    """The scheduled start: nothing is sent before it. Left out, the next Tuesday at
+    09:00 in your time zone. A time already past starts the campaign now."""
 
 
 class ActivationRefusedOut(BaseModel):
@@ -431,12 +440,34 @@ REFUSED: Responses = {
 }
 
 
-@router.post("/campaigns/{campaign_id}/activate", responses={**NOT_FOUND, **REFUSED})
+@router.post(
+    "/campaigns/{campaign_id}/activate",
+    responses={
+        **NOT_FOUND,
+        **REFUSED,
+        422: {"description": "The send schedule (time zone or holidays) cannot be read"},
+    },
+)
 def activate_campaign(
-    campaign_id: int, request: Request, session: SessionDep, user: CurrentUser
+    campaign_id: int,
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+    body: Annotated[ActivateIn | None, Body()] = None,
 ) -> ReviewOut:
-    """``reviewing`` to ``active``: ``409`` with ``missing`` unless every review
-    requirement is recorded and current, checked in this one writer transaction."""
+    """``reviewing`` to ``active``, starting at ``starts_at`` (#338): ``409`` with
+    ``missing`` unless every review requirement is recorded and current, checked in
+    this one writer transaction. Nothing of the campaign is sent before its start."""
+    now = utcnow()
+    try:
+        starts_at = campaign_service.resolve_start(
+            user,
+            settings=_settings(request),
+            now=now,
+            starts_at=None if body is None else body.starts_at,
+        )
+    except campaign_service.InvalidCampaign as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     with translate_errors():
         service.activate(
             session,
@@ -444,6 +475,7 @@ def activate_campaign(
             campaign_id,
             settings=_settings(request),
             me=_me(request),
-            now=utcnow(),
+            now=now,
+            starts_at=starts_at,
         )
         return _review(session, user, campaign_id, _me(request))

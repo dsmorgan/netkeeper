@@ -908,7 +908,9 @@ def test_in_simulate_a_reply_ends_the_enrollment_before_the_follow_up_fires(
             enrolled[address] = factories.make_enrollment(
                 session, campaign, contact, status=EnrollmentStatus.PENDING
             ).id
-        activate(session, user, campaign.id, settings=SETTINGS, now=NOW, gate=REVIEW_GATE)
+        activate(
+            session, user, campaign.id, settings=SETTINGS, now=NOW, starts_at=NOW, gate=REVIEW_GATE
+        )
         user_id, mailbox_id = user.id, mailbox.id
     clock = [NOW]
     gmail = FakeGmail("me@example.com", mailbox_id=mailbox_id, clock=lambda: clock[0])

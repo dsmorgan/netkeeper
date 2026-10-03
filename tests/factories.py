@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Iterator, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -126,6 +127,17 @@ def make_user_position(session: Session, user: User, **overrides: Any) -> UserPo
     return position
 
 
+STARTED_STATUSES = frozenset(
+    {
+        CampaignStatus.ACTIVE,
+        CampaignStatus.PAUSED,
+        CampaignStatus.COMPLETED,
+        CampaignStatus.ARCHIVED,
+    }
+)
+LONG_AGO = datetime(2020, 1, 1, tzinfo=UTC)
+
+
 def make_campaign(
     session: Session,
     user: User,
@@ -146,6 +158,9 @@ def make_campaign(
         "contacted_within_days_guard": 30,
     }
     fields.update(overrides)
+    if fields["status"] in STARTED_STATUSES:
+        # Activated long ago, as 0031 backfills one (#338); a test of the start passes its own.
+        fields.setdefault("starts_at", LONG_AGO)
     campaign = Campaign(user_id=user.id, **fields)
     for position, channel in enumerate(channels, start=1):
         template = Template(

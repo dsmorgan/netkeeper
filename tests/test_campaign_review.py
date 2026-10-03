@@ -7,12 +7,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import factories
 import httpx
 import pytest
-from campaign_fakes import ARMED_FOR_SEND, make_mailbox
+from campaign_fakes import ARMED_FOR_SEND, FakeSender, make_mailbox
 from fastapi import FastAPI
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -231,6 +233,77 @@ async def test_a_campaign_with_every_requirement_recorded_activates(
     status, approved_at, enrollments = _campaign(s)
     assert status is CampaignStatus.ACTIVE and approved_at is not None
     assert set(enrollments) == {EnrollmentStatus.ACTIVE}
+
+
+def _at(when: datetime) -> datetime:
+    return when
+
+
+def _starts_at(s: Setup) -> tuple[datetime | None, list[datetime | None]]:
+    with session_scope(s.factory) as session:
+        campaign = session.scalars(unscoped(select(Campaign))).one()
+        due = list(
+            session.scalars(unscoped(select(Enrollment.next_action_at).order_by(Enrollment.id)))
+        )
+        return campaign.starts_at, due
+
+
+async def test_activation_without_a_start_defaults_to_the_next_tuesday_at_nine(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """#338: the API's default is the safe one, never "now"."""
+    s = _build(running_app)
+    await _complete(client, s)
+    before = utcnow()
+    await _ok(await client.post(f"{s.base}/activate", headers=CSRF))
+    starts_at, due = _starts_at(s)
+    assert starts_at is not None and starts_at > before
+    with session_scope(s.factory) as session:
+        zone = ZoneInfo(
+            session.scalars(select(User).where(User.kind == UserKind.LOCAL)).one().timezone
+        )
+    local = starts_at.astimezone(zone)
+    assert (local.weekday(), local.hour, local.minute) == (1, 9, 0)
+    assert set(due) == {starts_at}
+
+
+async def test_activation_takes_an_explicit_start_and_sends_nothing_before_it(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app)
+    await _complete(client, s)
+    start = utcnow() + timedelta(days=2)
+    await _ok(
+        await client.post(f"{s.base}/activate", json={"starts_at": start.isoformat()}, headers=CSRF)
+    )
+    starts_at, due = _starts_at(s)
+    assert starts_at == start
+    assert set(due) == {starts_at}
+    sender = FakeSender()
+    for at in (utcnow(), start - timedelta(seconds=1)):
+        results = campaign_engine.run_tick(
+            s.factory, settings=running_app.state.settings, sender=sender, clock=partial(_at, at)
+        )
+        assert all(r.fired == [] for r in results)
+    assert sender.firings == []
+    with session_scope(s.factory) as session:
+        assert session.scalar(unscoped(select(func.count(Message.id)))) == 0
+    results = campaign_engine.run_tick(
+        s.factory, settings=running_app.state.settings, sender=sender, clock=lambda: start
+    )
+    assert [len(r.fired) for r in results] == [1]
+
+
+async def test_activation_refuses_a_start_with_no_time_zone(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app)
+    await _complete(client, s)
+    response = await client.post(
+        f"{s.base}/activate", json={"starts_at": "2099-01-05T09:00:00"}, headers=CSRF
+    )
+    assert response.status_code == 422
+    assert _campaign(s)[0] is CampaignStatus.REVIEWING
 
 
 @pytest.mark.parametrize("requirement", REQUIREMENTS)

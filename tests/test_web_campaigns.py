@@ -6,8 +6,9 @@ that nothing under ``/campaigns`` itself activates a campaign.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import factories
 import httpx
@@ -33,7 +34,7 @@ from netkeeper.models import (
     User,
     UserKind,
 )
-from netkeeper.scoping import scoped
+from netkeeper.scoping import get_scoped, scoped
 
 CSRF = {"X-Netkeeper-Client": "1"}
 
@@ -545,3 +546,154 @@ async def test_resume_of_a_linkedin_only_campaign_needs_no_mailbox(
     resumed = await client.post(f"/api/v1/campaigns/{campaign_id}/resume", headers=CSRF)
 
     assert resumed.status_code == 200, resumed.text
+
+
+# --- the scheduled start and step timing (#338) -------------------------------------------
+
+
+def _active_campaign(app: FastAPI, *, starts_at: datetime) -> tuple[int, int, list[int]]:
+    """An active campaign starting at ``starts_at``, with two enrollments waiting for step 1."""
+    factory: sessionmaker[Session] = app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        mailbox_id = make_mailbox(session, user).id
+        campaign = factories.make_campaign(
+            session,
+            user,
+            channels=(TemplateChannel.EMAIL, TemplateChannel.EMAIL),
+            mailbox_id=mailbox_id,
+            starts_at=starts_at,
+        )
+        enrollments = [
+            factories.make_enrollment(
+                session, campaign, factories.make_contact(session, user), next_action_at=starts_at
+            ).id
+            for _ in range(2)
+        ]
+        return campaign.id, campaign.steps[1].id, enrollments
+
+
+async def test_start_options_give_the_default_the_suggestion_and_a_warning_only(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    seed = _seed(running_app)
+    created = await _create(client, seed)
+    base = f"/api/v1/campaigns/{created['id']}/start-options"
+
+    options = (await client.get(base)).json()
+    zone = ZoneInfo(options["timezone"])
+    default = datetime.fromisoformat(options["default_start"]).astimezone(zone)
+    assert (default.weekday(), default.hour, default.minute) == (1, 9, 0)
+    assert options["suggestion"] == "Most effective: Tue–Thu mornings."  # noqa: RUF001
+    assert "`serve` is running and this Mac is awake" in options["reminder"]
+    assert options["warning"] is None
+
+    saturday_night = datetime(2099, 1, 3, 22, 0, tzinfo=zone)
+    checked = (await client.get(base, params={"at": saturday_night.isoformat()})).json()
+    assert checked["warning"].startswith("That is outside the suggested slots")
+    tuesday_morning = datetime(2099, 1, 6, 10, 0, tzinfo=zone)
+    checked = (await client.get(base, params={"at": tuesday_morning.isoformat()})).json()
+    assert checked["warning"] is None
+    naive = await client.get(base, params={"at": "2099-01-06T10:00:00"})
+    assert naive.status_code == 422
+    assert (await client.get("/api/v1/campaigns/999/start-options")).status_code == 404
+
+
+async def test_the_start_moves_until_the_campaign_sends(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    later = datetime(2099, 1, 6, 9, 0, tzinfo=UTC)
+    campaign_id, _, enrollments = _active_campaign(running_app, starts_at=later)
+    base = f"/api/v1/campaigns/{campaign_id}"
+    before = (await client.get(base)).json()
+    assert before["starts_at"] == "2099-01-06T09:00:00Z" and before["start_editable"] is True
+
+    sooner = datetime(2099, 1, 5, 22, 0, tzinfo=UTC)
+    moved = await client.put(f"{base}/start", json={"starts_at": sooner.isoformat()}, headers=CSRF)
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["starts_at"] == "2099-01-05T22:00:00Z"
+    assert moved.json()["next_action_at"] == "2099-01-05T22:00:00Z"
+
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        enrollment = get_scoped(session, _local(session), Enrollment, enrollments[0])
+        assert enrollment is not None
+        factories.make_message(session, enrollment, position=1)
+    assert (await client.get(base)).json()["start_editable"] is False
+    refused = await client.put(f"{base}/start", json={"starts_at": later.isoformat()}, headers=CSRF)
+    assert refused.status_code == 409 and "already sent" in refused.json()["detail"]
+
+
+async def test_the_start_of_a_draft_cannot_move(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    created = await _create(client, _seed(running_app))
+    response = await client.put(
+        f"/api/v1/campaigns/{created['id']}/start",
+        json={"starts_at": "2099-01-06T09:00:00Z"},
+        headers=CSRF,
+    )
+    assert response.status_code == 409
+    assert created["starts_at"] is None and created["start_editable"] is False
+
+
+async def test_a_steps_timing_is_set_and_shown(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    created = await _create(client, _seed(running_app))
+    step = created["steps"][1]
+    assert step["send_time"] is None
+    url = f"/api/v1/campaigns/{created['id']}/steps/{step['id']}/schedule"
+
+    updated = await client.put(url, json={"delay_days": 3, "send_time": "22:00"}, headers=CSRF)
+    assert updated.status_code == 200, updated.text
+    [_, second, _] = updated.json()["steps"]
+    assert (second["delay_days"], second["send_time"]) == (3, "22:00")
+
+    cleared = await client.put(url, json={"delay_days": 5, "send_time": None}, headers=CSRF)
+    assert [(s["delay_days"], s["send_time"]) for s in cleared.json()["steps"]][1] == (5, None)
+
+    for bad in ({"delay_days": 3, "send_time": "9pm"}, {"delay_days": -1}):
+        assert (await client.put(url, json=bad, headers=CSRF)).status_code == 422
+    other = f"/api/v1/campaigns/{created['id']}/steps/99999/schedule"
+    assert (await client.put(other, json={"delay_days": 1}, headers=CSRF)).status_code == 404
+
+
+async def test_a_changed_step_time_moves_an_active_campaigns_waiting_enrollments(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    start = datetime(2026, 9, 29, 14, 0, tzinfo=UTC)
+    campaign_id, step_id, enrollments = _active_campaign(running_app, starts_at=start)
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        enrollment = get_scoped(session, _local(session), Enrollment, enrollments[0])
+        assert enrollment is not None
+        factories.make_message(session, enrollment, position=1, sent_at=start)
+        enrollment.current_step = 1
+        enrollment.next_action_at = start + timedelta(days=7)
+
+    url = f"/api/v1/campaigns/{campaign_id}/steps/{step_id}/schedule"
+    response = await client.put(url, json={"delay_days": 4, "send_time": "22:00"}, headers=CSRF)
+    assert response.status_code == 200, response.text
+    with session_scope(factory) as session:
+        moved = get_scoped(session, _local(session), Enrollment, enrollments[0])
+        untouched = get_scoped(session, _local(session), Enrollment, enrollments[1])
+        assert moved is not None and untouched is not None
+        zone = ZoneInfo(_local(session).timezone)
+        local = moved.next_action_at
+        assert local is not None
+        assert local.astimezone(zone).replace(tzinfo=None) == datetime(2026, 10, 3, 22, 0)
+        assert untouched.next_action_at == start
+
+
+async def test_a_completed_campaigns_steps_no_longer_change(
+    running_app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    factory: sessionmaker[Session] = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        campaign = factories.make_campaign(
+            session, _local(session), status=CampaignStatus.COMPLETED
+        )
+        ids = (campaign.id, campaign.steps[0].id)
+    url = f"/api/v1/campaigns/{ids[0]}/steps/{ids[1]}/schedule"
+    assert (await client.put(url, json={"delay_days": 1}, headers=CSRF)).status_code == 409

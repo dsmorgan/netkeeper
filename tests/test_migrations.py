@@ -2673,3 +2673,52 @@ def _migration_0030() -> Any:
 def test_0030_fold_matches_identity(value: str | None) -> None:
     """0030's frozen copy folds exactly as identity resolution matches positions."""
     assert _migration_0030()._fold(value) == identity_fold(value)
+
+
+# --- the scheduled start (0031, #338) -----------------------------------------------------
+
+
+def test_0031_starts_every_activated_campaign_at_its_activation(migration_engine: Engine) -> None:
+    """An activated campaign starts at ``approved_at``, or ``created_at`` without one; a
+    draft or reviewing one has no start until it is activated. Every step keeps the
+    suggested slot (no ``send_time``)."""
+    migrations.upgrade(migration_engine, "0030")
+    with migration_engine.begin() as connection:
+        _seed_users(connection, 1)
+        _insert_template(connection, id=1)
+        statuses = ["draft", "reviewing", "active", "paused", "completed", "archived"]
+        for id, status in enumerate(statuses, start=1):
+            _insert_campaign(connection, id=id, status=status)
+            _insert_step(connection, id=id, campaign_id=id, template_id=1)
+        connection.execute(
+            text("UPDATE campaigns SET approved_at = :t WHERE id IN (3, 5)"),
+            {"t": "2026-09-22 13:00:00"},
+        )
+    migrations.upgrade(migration_engine, "0031")
+    with migration_engine.begin() as connection:
+        rows = connection.execute(text("SELECT id, starts_at FROM campaigns ORDER BY id")).all()
+        times = connection.execute(text("SELECT send_time FROM campaign_steps")).scalars().all()
+    starts = {row[0]: None if row[1] is None else str(row[1])[:19] for row in rows}
+    assert starts == {
+        1: None,
+        2: None,
+        3: "2026-09-22 13:00:00",
+        4: STAMP,
+        5: "2026-09-22 13:00:00",
+        6: STAMP,
+    }
+    assert times == [None] * 6
+
+
+def test_0031_downgrades_to_campaigns_without_a_start(migration_engine: Engine) -> None:
+    migrations.upgrade(migration_engine, "0031")
+    with migration_engine.begin() as connection:
+        _seed_a_sent_campaign(connection)
+        connection.execute(text("UPDATE campaign_steps SET send_time = '22:00'"))
+    migrations.downgrade(migration_engine, "0030")
+    inspector = inspect(migration_engine)
+    assert "starts_at" not in {c["name"] for c in inspector.get_columns("campaigns")}
+    assert "send_time" not in {c["name"] for c in inspector.get_columns("campaign_steps")}
+    with migration_engine.begin() as connection:
+        assert _count(connection, "campaigns") == 1
+        assert _count(connection, "campaign_steps") == 1
