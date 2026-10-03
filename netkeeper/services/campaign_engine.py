@@ -55,12 +55,10 @@ The tick
      read blocks the campaign: nothing is sent under a schedule nobody can read.
    - A due time left over from an earlier local day (the day's cap was reached,
      or ``serve`` was not running) spills to today at the same local time, when
-     that is still to come, so a long batch never runs on overnight
-     (:func:`netkeeper.campaigns.schedule.spill`). A due time inside the
-     suggested hours (09:00 to 16:30) was never chosen for off hours, so it never
-     goes out off hours: it waits for the next occurrence of its own time of day
-     (:func:`netkeeper.campaigns.schedule.release`, ``off_hours``). An explicit
-     off-hours start or step time keeps firing at the chosen time.
+     that is still to come, so a batch the caps hold back goes on at its start
+     time the next day (:func:`netkeeper.campaigns.schedule.spill`). Otherwise it fires at the next
+     tick, at any hour: netkeeper does not restrict send times (#354 tracks an
+     optional constraint).
    - The mailbox (spec 11.9, the last bullet): ``ChannelState`` is filled from
      :func:`netkeeper.services.mailboxes.mailbox_health` and today's count. A
      mailbox that is unknown, ``reauth_required`` or disabled, or at its cap,
@@ -238,7 +236,6 @@ class Skip(enum.StrEnum):
     NOT_DUE = "not_due"
     NOT_STARTED = "not_started"
     SPILLED = "spilled_to_next_day"
-    OFF_HOURS = "off_hours"
     BAD_SCHEDULE = "bad_schedule"
     CAMPAIGN_AT_CAP = "campaign_at_cap"
     SPACING = "spacing"
@@ -1352,17 +1349,13 @@ class _Chooser:
         self.blocks.slots = slots
 
         due = enrollment.next_action_at
-        if due is not None:
-            # A leftover from an earlier day, or a send nobody chose for off hours, waits
-            # for its own time of day (schedule.release: the spill, then off hours).
-            resume = schedule.release(due, now, slots)
-            if resume is not None:
-                spilled = schedule.spill(due, now, slots) is not None
-                self.defer(enrollment, resume, Skip.SPILLED if spilled else Skip.OFF_HOURS)
-                return None
+        resume = None if due is None else schedule.spill(due, now, slots)
+        if resume is not None:
+            self.defer(enrollment, resume, Skip.SPILLED)
+            return None
 
         # A cap reached today lifts at the local midnight; what is left of the batch
-        # then spills to its own time of day (above), never overnight.
+        # then spills to its own time of day (above).
         day_start, day_end = slots.day_bounds(now)
         tomorrow = day_end
         mailbox_reasons = self._mailbox(campaign, day_start, day_end)
@@ -1451,10 +1444,7 @@ class _Chooser:
                 _end(self.session, self.user, enrollment, status, reason.value)
                 self.skip(enrollment, Skip.ENDED, *reasons)
                 return
-        recheck = self.now + RECHECK_AFTER
-        if self.blocks.slots is not None:
-            recheck = schedule.aim_unchosen(self.now, recheck, self.blocks.slots)
-        self.defer(enrollment, recheck, Skip.GUARD_EXCLUDED, *reasons)
+        self.defer(enrollment, self.now + RECHECK_AFTER, Skip.GUARD_EXCLUDED, *reasons)
 
     def _claim(
         self,
@@ -1737,12 +1727,8 @@ def _give_back(
     False is returned for the caller to record it ``failed`` (#280). True when the
     claim was given back.
 
-    The retry is due ``retry_after`` later. When the claim was inside the suggested
-    hours and the retry would fall outside them, or on a later local day, it aims at
-    the next occurrence of the claim's time of day instead
-    (:func:`netkeeper.campaigns.schedule.aim_unchosen`, #338 review S1). Tries can
-    then span days; the give-up rule counts tries and elapsed time, so it still fails
-    the step after :data:`NOT_SENT_GIVE_UP_TRIES` of them.
+    The retry is part of the batch the step was in: it is due ``retry_after`` later,
+    at any hour (#338).
     """
     reason = (result.error or "no reason given")[:ERROR_MAX_LENGTH]
     # A merge may have moved the message to another enrollment meanwhile: follow it.
@@ -1764,8 +1750,6 @@ def _give_back(
         )
         return False
     wait = retry_after(tries)
-    # The claim's time, kept before the row goes: the retry aims at its hours (S1).
-    claimed = message.scheduled_at or now
     session.delete(message)
     session.flush()
     log.warning(
@@ -1778,11 +1762,7 @@ def _give_back(
     )
     # A paused enrollment keeps its due time for the resume; an ended one has none.
     if enrollment.status in (EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED):
-        due = now + wait
-        # A schedule that cannot be read keeps the plain retry: the tick blocks it.
-        with contextlib.suppress(schedule.ScheduleError):
-            due = schedule.aim_unchosen(claimed, due, slots_for(settings, user))
-        enrollment.next_action_at = due
+        enrollment.next_action_at = now + wait
     return True
 
 
