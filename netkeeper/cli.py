@@ -2782,7 +2782,6 @@ def campaigns_approve_step(
             " Repeat for each.",
         ),
     ] = None,
-    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
 ) -> None:
     """Approve a step of a campaign under review, once for all its messages.
 
@@ -2790,7 +2789,10 @@ def campaigns_approve_step(
     step's messages rendered later too, until the step or its template changes.
     Blocked messages stay blocked. A step whose template uses {{ personal_line }}
     is approved message by message instead, with `--enrollment`
-    (POST .../messages/approve). Review the step first with `review-step`.
+    (POST .../messages/approve). It prints the first message in full (or each
+    message picked with `--enrollment`) and the blocked ones, then asks you to
+    confirm; there is no flag to skip the question. Page through the rest with
+    `review-step`.
     """
     settings = _load_settings_or_exit(ctx.ensure_object(CliState))
     me = me_fields(settings.me)
@@ -2810,6 +2812,7 @@ def campaigns_approve_step(
                 limit=campaign_review.STEP_PAGE_MAX,
             )
             seen: dict[int, str] = {}
+            shown: list[campaign_review.MessagePreview] = []
             if review.per_message:
                 if not picked:
                     typer.echo(
@@ -2830,11 +2833,10 @@ def campaigns_approve_step(
                         offset=offset,
                         limit=campaign_review.STEP_PAGE_MAX,
                     )
-                    seen.update(
-                        (m.enrollment_id, m.fingerprint)
-                        for m in page.messages
-                        if m.enrollment_id in picked
-                    )
+                    for m in page.messages:
+                        if m.enrollment_id in picked:
+                            seen[m.enrollment_id] = m.fingerprint
+                            shown.append(m)
                     offset += campaign_review.STEP_PAGE_MAX
                 if absent := [i for i in picked if i not in seen]:
                     typer.echo(
@@ -2849,6 +2851,24 @@ def campaigns_approve_step(
                     err=True,
                 )
                 raise typer.Exit(code=1)
+        lines: list[str] = []
+        if review.per_message:
+            for n, m in enumerate(shown, start=1):
+                lines.append(f"message {n} of {len(shown)} to approve:")
+                lines.extend(_message_lines(m))
+        elif review.messages:
+            lines.append(f"message 1 of {review.total} (see the rest with `review-step --index`):")
+            lines.extend(_message_lines(review.messages[0]))
+        else:
+            lines.append("no message of this step can be sent")
+        if review.blocked:
+            lines.append(f"blocked, never sent ({len(review.blocked)}):")
+            lines.extend(
+                f"  - enrollment {m.enrollment_id}: {m.contact_name or 'unnamed contact'}:"
+                f" {m.blocked}"
+                for m in review.blocked
+            )
+        typer.echo("\n".join(lines))
         if review.per_message:
             question = f"approve {len(picked)} messages of step {position}?"
         else:
@@ -2857,7 +2877,7 @@ def campaigns_approve_step(
                 " and any rendered later until the step or its template changes?"
                 f" {len(review.blocked)} blocked stay blocked"
             )
-        if not yes and not typer.confirm(question):
+        if not typer.confirm(question):
             typer.echo(f"cancelled: step {position} is not approved")
             raise typer.Exit(code=1)
         with (

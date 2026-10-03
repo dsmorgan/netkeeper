@@ -30,7 +30,8 @@ made for, and counts only while that fingerprint is still the current one:
   render, has a lint error, or whose contact a guard excludes stays blocked, and
   the engine checks each of those again when the step fires.
 - A single message's approval counts for :func:`message_fingerprint`: the step's
-  fingerprint with the contact's merge values and address.
+  fingerprint with every per-contact input to the render (the contact's merge
+  values and its ``personal_line``) and its address, not the current date.
 - The content fingerprint (:func:`content_fingerprint`) covers every step's.
   The lint record counts for it.
 - The audience fingerprint (:func:`audience_fingerprint`) covers the pending
@@ -354,23 +355,40 @@ def _contact(session: Session, user: User, contact_id: int) -> Contact | None:
     ).first()
 
 
-def _render_step(
-    template: Template | None,
+def personal_line_for(enrollment_id: int, step: CampaignStep) -> str | None:
+    """The ``{{ personal_line }}`` one message of ``step`` renders with (spec 12).
+
+    Nothing writes a personal line until P5-02, so this is None. The review's render
+    and :func:`message_fingerprint` both read it here, so the stored line feeds the
+    fingerprint an approval of the message is given for.
+    """
+    return None
+
+
+def merge_values(
     contact: Contact,
     campaign: Campaign,
     step: CampaignStep,
     me: Mapping[str, str],
     today: date,
-) -> Rendered:
-    """The step as the engine renders it at a fire, less the previous send's date."""
-    if template is None:
-        raise TemplateRenderError("the step's template is gone")
-    values = MergeValues(
+    *,
+    enrollment_id: int,
+) -> MergeValues:
+    """Everything one message of the step renders with for this contact: the render
+    context the engine builds at a fire, less the previous send's date."""
+    return MergeValues(
         contact=contact_fields(contact, today),
         me=me,
         campaign_name=campaign.name,
         step_number=step.position,
+        personal_line=personal_line_for(enrollment_id, step),
     )
+
+
+def _render_step(template: Template | None, values: MergeValues, today: date) -> Rendered:
+    """The step as the engine renders it at a fire, less the previous send's date."""
+    if template is None:
+        raise TemplateRenderError("the step's template is gone")
     return render(template.channel, template.subject, template.body, values, today=today)
 
 
@@ -475,13 +493,33 @@ def _address(contact: Contact | None) -> str | None:
     return None if email is None else email.email
 
 
-def message_fingerprint(step_print: str, contact: Contact | None, today: date) -> str:
-    """What one message of a step shows: the step's fingerprint, the contact's merge
-    values and its sendable address. An approval of the message counts only while
-    this is unchanged, so editing the step, its template or the contact undoes it."""
+def message_fingerprint(
+    step_print: str,
+    contact: Contact | None,
+    campaign: Campaign,
+    step: CampaignStep,
+    me: Mapping[str, str],
+    today: date,
+    *,
+    enrollment_id: int,
+) -> str:
+    """What one message of a step shows: the step's fingerprint, every per-contact input
+    to its render (:func:`merge_values`: the contact's merge fields and its
+    ``personal_line``) and its sendable address. The current date is not part of it,
+    so an approval does not go stale from one day to the next. An approval of the
+    message counts only while this is unchanged, so editing the step, its template,
+    the contact or its personal line undoes it."""
     if contact is None:
         return _digest([step_print, None])
-    return _digest([step_print, contact_fields(contact, today), _address(contact)])
+    values = merge_values(contact, campaign, step, me, today, enrollment_id=enrollment_id)
+    context = {
+        "contact": dict(values.contact),
+        "me": dict(values.me),
+        "campaign_name": values.campaign_name,
+        "step_number": values.step_number,
+        "personal_line": values.personal_line,
+    }
+    return _digest([step_print, context, _address(contact)])
 
 
 def _approvals(
@@ -548,7 +586,11 @@ def _render_messages(
             blocked = "the contact is gone"
         else:
             try:
-                rendered = _render_step(template, contact, campaign, step, me, today)
+                rendered = _render_step(
+                    template,
+                    merge_values(contact, campaign, step, me, today, enrollment_id=enrollment.id),
+                    today,
+                )
             except TemplateRenderError as exc:
                 blocked = f"does not render: {exc}"
             else:
@@ -563,7 +605,9 @@ def _render_messages(
                 verdict.reason, contacted_within_days=campaign.contacted_within_days_guard
             )
             blocked = f"excluded by a guard: {label}"
-        fingerprint = message_fingerprint(step_print, contact, today)
+        fingerprint = message_fingerprint(
+            step_print, contact, campaign, step, me, today, enrollment_id=enrollment.id
+        )
         if per_message:
             approved = approved_messages.get(enrollment.id) == fingerprint
         else:
@@ -716,7 +760,15 @@ def approve_messages(
     step_print = step_fingerprint(step, template, campaign, me)
     contacts = _contacts(session, user, [pending[i].contact_id for i in ids])
     current = {
-        i: message_fingerprint(step_print, contacts.get(pending[i].contact_id), now.date())
+        i: message_fingerprint(
+            step_print,
+            contacts.get(pending[i].contact_id),
+            campaign,
+            step,
+            me,
+            now.date(),
+            enrollment_id=i,
+        )
         for i in ids
     }
     for enrollment_id in ids:
@@ -876,7 +928,11 @@ def prepare_test_send(
     try:
         if contact is None:
             raise TemplateRenderError("the contact is gone")
-        rendered = _render_step(template, contact, campaign, step, me, today)
+        rendered = _render_step(
+            template,
+            merge_values(contact, campaign, step, me, today, enrollment_id=enrollment.id),
+            today,
+        )
     except TemplateRenderError as exc:
         raise ReviewConflict(f"step {step.position} does not render: {exc}") from exc
     if not rendered.subject:
@@ -1029,7 +1085,15 @@ def missing(
             e.id
             for e in pending
             if approved.get(e.id)
-            != message_fingerprint(fingerprint, contacts.get(e.contact_id), now.date())
+            != message_fingerprint(
+                fingerprint,
+                contacts.get(e.contact_id),
+                campaign,
+                step,
+                me,
+                now.date(),
+                enrollment_id=e.id,
+            )
         }
         if late:
             per_message.append(step.position)

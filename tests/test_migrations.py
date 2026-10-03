@@ -2755,6 +2755,8 @@ def test_0032_starts_every_campaign_with_no_step_approved(migration_engine: Engi
         _insert_step_approval(connection, id=2, enrollment_id=1)
     with pytest.raises(IntegrityError), migration_engine.begin() as connection:
         _insert_step_approval(connection, id=3, enrollment_id=1)  # one per message
+    with pytest.raises(IntegrityError), migration_engine.begin() as connection:
+        _insert_step_approval(connection, id=4)  # one whole-step row per step
     with migration_engine.begin() as connection:
         connection.execute(text("DELETE FROM messages"))
         connection.execute(text("DELETE FROM enrollments WHERE id = 1"))  # the approval goes too

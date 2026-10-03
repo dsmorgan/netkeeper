@@ -447,6 +447,22 @@ async def test_a_change_after_the_review_undoes_the_affected_approvals(
     assert _campaign(s)[0] is CampaignStatus.REVIEWING
 
 
+async def test_an_audience_change_with_the_same_summary_still_undoes_the_acknowledgement(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """The acknowledgement counts for the audience it was given for, not only its text."""
+    s = _build(running_app)
+    await _complete(client, s)
+    before = await _review(client, s)
+    _edit(s, "removed")
+    _edit(s, "enrolled")  # the same count, so the same summary, for another audience
+    assert (await _review(client, s))["guard_summary"] == before["guard_summary"]
+    response = await client.post(f"{s.base}/activate", headers=CSRF)
+    assert response.status_code == 409
+    assert _missing(response.json()) == {"guards"}
+    assert _campaign(s)[0] is CampaignStatus.REVIEWING
+
+
 async def test_guard_results_that_change_undo_the_acknowledgement(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
@@ -823,6 +839,49 @@ async def test_editing_a_contact_undoes_its_personal_line_message_approval(
     assert gap["enrollment_ids"] == [s.enrollment_ids[0]]
     stale = await _approve_messages(client, s, step_id, review["messages"][:1])
     assert stale.status_code == 409 and stale.json()["code"] == "stale"
+
+
+async def test_a_changed_personal_line_undoes_its_message_approval(
+    client: httpx.AsyncClient, running_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The personal line a message renders with feeds its fingerprint, so a line written
+    or edited after the approval undoes it (#339 review)."""
+    s = _build(running_app, people=2)
+    step_id = _personal_line(s)
+    review = await _step_review(client, s, step_id)
+    await _ok(await _approve_messages(client, s, step_id, review["messages"]))
+    assert "message_approvals" not in _missing(await _review(client, s))
+    edited = s.enrollment_ids[0]
+
+    def line(enrollment_id: int, step: CampaignStep) -> str | None:
+        return "Loved your talk on kettles." if enrollment_id == edited else None
+
+    monkeypatch.setattr(campaign_review, "personal_line_for", line)
+    gaps = (await _review(client, s))["missing"]
+    [gap] = [m for m in gaps if m["requirement"] == "message_approvals"]
+    assert gap["enrollment_ids"] == [edited]
+    again = await _step_review(client, s, step_id)
+    assert "Loved your talk on kettles." in again["messages"][0]["body"]
+    assert [m["approved"] for m in again["messages"]] == [False, True]
+    stale = await _approve_messages(client, s, step_id, review["messages"][:1])
+    assert stale.status_code == 409 and stale.json()["code"] == "stale"
+    await _ok(await _approve_messages(client, s, step_id, again["messages"][:1]))
+    assert "message_approvals" not in _missing(await _review(client, s))
+
+
+async def test_approving_a_step_again_keeps_one_whole_step_row(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app)
+    await _approve_step(client, s, s.step_ids[0])
+    _edit(s, "template")
+    await _approve_step(client, s, s.step_ids[0])  # approved again, in place
+    with session_scope(s.factory) as session:
+        rows = session.scalars(
+            unscoped(select(StepApproval)).where(StepApproval.step_id == s.step_ids[0])
+        ).all()
+        assert [r.enrollment_id for r in rows] == [None]
+    assert (await _step_review(client, s, s.step_ids[0]))["approved"] is True
 
 
 async def test_a_template_edit_undoes_personal_line_message_approvals(

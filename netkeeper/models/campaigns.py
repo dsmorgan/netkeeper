@@ -487,13 +487,24 @@ class StepApproval(UserOwned, TimestampMixin, Base):
     Each row counts while ``fingerprint`` is the current one: the step's
     (:func:`netkeeper.services.campaign_review.step_fingerprint`), or for one
     message, the step's with the contact's merge values and address. Any change
-    to the step or its template undoes it. ``NULL`` is not equal to ``NULL`` in a
-    unique constraint, so the service, not the schema, keeps one whole-step row
-    per step.
+    to the step or its template undoes it. A partial unique index keeps one
+    whole-step row per step, since ``NULL`` is not equal to ``NULL`` in the unique
+    constraint.
     """
 
     __tablename__ = "campaign_step_approvals"
-    __table_args__ = (UniqueConstraint("user_id", "step_id", "enrollment_id"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "step_id", "enrollment_id"),
+        # NULL is not equal to NULL above, so one whole-step row per step is kept here.
+        Index(
+            "uq_campaign_step_approvals_whole_step",
+            "user_id",
+            "step_id",
+            unique=True,
+            sqlite_where=text("enrollment_id IS NULL"),
+            postgresql_where=text("enrollment_id IS NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, sort_order=-100)
     campaign_id: Mapped[int] = mapped_column(
