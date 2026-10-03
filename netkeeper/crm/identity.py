@@ -609,7 +609,8 @@ def apply(
     archive, a CSV, or a person, never counts, and a later one counts only
     against what an earlier one recorded. A person's override does not hide a
     move: the comparison is with the last synced value, the snapshot is
-    written, and the column keeps the person's value.
+    written with that value as the job before, and the column keeps the
+    person's value.
 
     ``snapshot=False`` skips the ``contact_snapshot`` a job-field change would
     write: the sync passes it when the values being replaced were only ever read
@@ -697,6 +698,12 @@ def _update(
     before = {name: getattr(contact, name) for name in JOB_FIELDS}
     # Read before the loop below records the incoming source and value over it.
     enriched_before = {name: _enriched_value(contact, name) for name in POSITION_FIELDS}
+    # A snapshot holds the job as LinkedIn last showed it: for a field a person
+    # overrode, that is the last synced value, not the person's words (#323).
+    snapshot_values = dict(before)
+    for name in POSITION_FIELDS:
+        if _overridden(contact, name) and enriched_before[name] is not None:
+            snapshot_values[name] = enriched_before[name]
     for name, value in provided.items():
         if name in writable:
             old: str | date | None = getattr(contact, name)
@@ -725,7 +732,7 @@ def _update(
                 source=incoming.source,
                 observed_at=incoming.observed_at,
                 position_changed=position_changed,
-                **before,
+                **snapshot_values,
             )
         )
     _upsert_children(user, contact, incoming)
@@ -747,11 +754,15 @@ def _enriched_value(contact: Contact, name: str) -> str | date | None:
     if recorded == ContactSource.SYNC.value:
         value: str | date | None = getattr(contact, name)
         return value
-    if recorded == ContactSource.MANUAL.value:
+    if _overridden(contact, name):
         entry = (contact.synced_values or {}).get(name)
         if entry is not None and entry["source"] == ContactSource.SYNC.value:
             return entry["value"]
     return None
+
+
+def _overridden(contact: Contact, name: str) -> bool:
+    return (contact.field_sources or {}).get(name) == ContactSource.MANUAL.value
 
 
 def _record(contact: Contact, name: str, source: ContactSource) -> None:

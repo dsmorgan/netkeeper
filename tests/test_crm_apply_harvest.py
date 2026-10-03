@@ -436,8 +436,36 @@ def test_a_new_title_counts_even_over_a_hand_edited_one(writer: Session, user: U
     (snapshot,) = contact.snapshots
     assert snapshot.position_changed
     assert snapshot.observed_at == later
+    # The job before is what LinkedIn last showed, not the person's words.
+    assert (snapshot.current_title, snapshot.current_company) == (
+        "Staff Data Engineer",
+        "Fictional Robotics Co",
+    )
     assert contact.current_title == "Data Lead (my words)"  # still the person's
     assert contact.synced_values["current_title"]["value"] == "Principal Data Engineer"
+    assert _job_changes(writer, user, later) == [contact.id]
+
+
+def test_a_new_company_counts_even_over_a_hand_edited_one(writer: Session, user: User) -> None:
+    contact = _stored(writer, user, PRIYA)
+    apply_harvest(writer, user, _harvest(contact, PRIYA))
+    set_manual_field(contact, "current_company", "Robotics (my words)")
+    writer.flush()
+    moved = replace(
+        PRIYA,
+        jobs=(Job("Staff Data Engineer", "Madeup Mobility", start=(2026, 8)), *PRIYA.jobs),
+    )
+    later = NOW + timedelta(days=20)
+
+    apply_harvest(writer, user, _harvest(contact, moved, at=later))
+
+    (snapshot,) = contact.snapshots
+    assert snapshot.position_changed
+    assert (snapshot.current_title, snapshot.current_company) == (
+        "Staff Data Engineer",
+        "Fictional Robotics Co",
+    )
+    assert contact.current_company == "Robotics (my words)"
     assert _job_changes(writer, user, later) == [contact.id]
 
 

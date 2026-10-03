@@ -11,6 +11,7 @@ the PostgreSQL params locally, start a throwaway server and point the variable a
         make test
 """
 
+import importlib.util
 import io
 import json
 import os
@@ -28,6 +29,7 @@ from sqlalchemy import Connection, Engine, MetaData, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from netkeeper import migrations
+from netkeeper.crm.identity import _fold as identity_fold
 from netkeeper.db import database_url, make_engine
 from netkeeper.models import Base
 
@@ -2544,7 +2546,7 @@ def _insert_flagged_snapshot(
 def _seed_job_changes(connection: Connection) -> None:
     """One contact per case; the snapshot id says which one, and a comment why."""
     _seed_users(connection, 1, 2)
-    for contact_id in range(1, 15):
+    for contact_id in range(1, 16):
         _insert_contact(connection, id=contact_id, user_id=1)
     for contact_id in (20, 21):
         _insert_contact(connection, id=contact_id, user_id=2)
@@ -2571,11 +2573,6 @@ def _seed_job_changes(connection: Connection) -> None:
     _insert_flagged_snapshot(connection, id=7, contact_id=7, position_changed=False)
     # 8: another contact's earlier enrichment is no evidence for this one.
     _insert_flagged_snapshot(connection, id=8, contact_id=8)
-    # 9: the review's repro. The archive wrote Engineer at Old Co; visit 1 found
-    # that job only as an ended one (its current job had no title or company);
-    # visit 2 replaced the archive's values. Visit 1 never recorded them as current.
-    _insert_position(connection, contact_id=9, created_at=_EARLIER, ended_on="2023-03-01")
-    _insert_flagged_snapshot(connection, id=9, contact_id=9)
     # 10: no title on either side is no match; the companies differ.
     _insert_position(connection, contact_id=10, created_at=_EARLIER, title=None, company="Else")
     _insert_flagged_snapshot(connection, id=10, contact_id=10, title=None)
@@ -2585,12 +2582,23 @@ def _seed_job_changes(connection: Connection) -> None:
     # 12: an earlier position an import wrote is no enrichment.
     _insert_position(connection, contact_id=12, created_at=_EARLIER, source="archive")
     _insert_flagged_snapshot(connection, id=12, contact_id=12)
-    # 13: values match trimmed and case-folded, as positions match.
-    _insert_position(connection, contact_id=13, created_at=_EARLIER, title=" engineer ")
-    _insert_flagged_snapshot(connection, id=13, contact_id=13, company="OLD CO")
-    # 14: a job ending in the month it was recorded was still current then.
-    _insert_position(connection, contact_id=14, created_at=_EARLIER, ended_on="2026-09-01")
+    # 9 and 13: values match trimmed and case-folded, as positions match; each
+    # case leaves only one field able to match, so each fold is pinned.
+    _insert_position(
+        connection, contact_id=9, created_at=_EARLIER, title="Unrelated", company="  old co "
+    )
+    _insert_flagged_snapshot(connection, id=9, contact_id=9, company="OLD CO")
+    _insert_position(
+        connection, contact_id=13, created_at=_EARLIER, title=" engineer ", company="Else"
+    )
+    _insert_flagged_snapshot(connection, id=13, contact_id=13, title="ENGINEER")
+    # 14 and 15: the review's probes. A later visit rewrites ended_on on the same
+    # row, so a job recorded open and later backdated, or given a year-only end
+    # date, was still the earlier visit's current job. The end date is not read.
+    _insert_position(connection, contact_id=14, created_at=_EARLIER, ended_on="2020-01-01")
     _insert_flagged_snapshot(connection, id=14, contact_id=14)
+    _insert_position(connection, contact_id=15, created_at=_EARLIER, ended_on="2026-01-01")
+    _insert_flagged_snapshot(connection, id=15, contact_id=15)
     # A second user: one real change, one first enrichment.
     _insert_position(connection, contact_id=20, created_at=_EARLIER, user_id=2)
     _insert_flagged_snapshot(connection, id=20, contact_id=20, user_id=2)
@@ -2604,7 +2612,7 @@ def _flags(connection: Connection) -> dict[int, bool]:
 
 _CORRECTED = {
     **{1: True, 2: False, 3: False, 4: False, 5: True, 6: False, 7: False, 8: False},
-    **{9: False, 10: False, 11: False, 12: False, 13: True, 14: True},
+    **{9: True, 10: False, 11: False, 12: False, 13: True, 14: True, 15: True},
     **{20: True, 21: False},
 }
 
@@ -2648,3 +2656,20 @@ def test_0030_downgrades_without_restoring_the_cleared_flags(migration_engine: E
 
 def _revision(connection: Connection) -> str:
     return str(connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one())
+
+
+def _migration_0030() -> Any:
+    path = VERSIONS_DIR / "0030_job_change_needs_an_earlier_enrichment.py"
+    spec = importlib.util.spec_from_file_location("migration_0030", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    "value", [None, "", "   ", " Engineer ", "ÉCOLE", "Straße", "\tA\n", "Acme, Inc."]
+)
+def test_0030_fold_matches_identity(value: str | None) -> None:
+    """0030's frozen copy folds exactly as identity resolution matches positions."""
+    assert _migration_0030()._fold(value) == identity_fold(value)
