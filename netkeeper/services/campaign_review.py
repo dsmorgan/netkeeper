@@ -31,7 +31,8 @@ made for, and counts only while that fingerprint is still the current one:
   the engine checks each of those again when the step fires.
 - A single message's approval counts for :func:`message_fingerprint`: the step's
   fingerprint with every per-contact input to the render (the contact's merge
-  values and its ``personal_line``) and its address, not the current date.
+  values and its ``personal_line``) and its address. The current date isn't hashed
+  itself, but a merge value that changes with it does undo the approval.
 - The content fingerprint (:func:`content_fingerprint`) covers every step's.
   The lint record counts for it.
 - The audience fingerprint (:func:`audience_fingerprint`) covers the pending
@@ -505,8 +506,9 @@ def message_fingerprint(
 ) -> str:
     """What one message of a step shows: the step's fingerprint, every per-contact input
     to its render (:func:`merge_values`: the contact's merge fields and its
-    ``personal_line``) and its sendable address. The current date is not part of it,
-    so an approval does not go stale from one day to the next. An approval of the
+    ``personal_line``) and its sendable address. The current date isn't hashed itself,
+    but a merge value that changes with it, such as ``years_since_connected`` or
+    ``last_position_change``, does undo the approval. An approval of the
     message counts only while this is unchanged, so editing the step, its template,
     the contact or its personal line undoes it."""
     if contact is None:
