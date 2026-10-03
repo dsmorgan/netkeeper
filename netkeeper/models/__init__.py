@@ -52,6 +52,13 @@ from netkeeper.models.contacts import (
     single_address,
 )
 from netkeeper.models.do_not_send import DO_NOT_SEND_RANK, DoNotSendAddress, DoNotSendReason
+from netkeeper.models.history import (
+    HISTORY_TABLES,
+    REPLY_KIND_RANK,
+    HistoryCampaign,
+    HistoryRecipient,
+    HistoryReplyKind,
+)
 from netkeeper.models.imports import (
     IMPORT_TABLES,
     FieldChange,
@@ -107,12 +114,14 @@ __all__ = [
     "CONTACT_CHILDREN",
     "DEFAULT_ACCOUNT_LABEL",
     "DO_NOT_SEND_RANK",
+    "HISTORY_TABLES",
     "IMPORT_TABLES",
     "LIST_NAME_MAX_LENGTH",
     "LIST_TABLES",
     "MESSAGE_SNIPPET_MAX_LENGTH",
     "MESSAGE_SUBJECT_MAX_LENGTH",
     "REASON_MAX_LENGTH",
+    "REPLY_KIND_RANK",
     "REVIEW_TABLES",
     "TAG_NAME_MAX_LENGTH",
     "TAG_TABLES",
@@ -146,6 +155,9 @@ __all__ = [
     "Enrollment",
     "EnrollmentStatus",
     "FieldChange",
+    "HistoryCampaign",
+    "HistoryRecipient",
+    "HistoryReplyKind",
     "ImportDecisionKind",
     "ImportResolution",
     "ImportRow",

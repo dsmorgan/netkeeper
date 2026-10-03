@@ -43,6 +43,9 @@ dependencies = [
   # A recipient domain written in Unicode goes into To as IDNA 2008 (#280). Already
   # installed through anyio and requests; imported directly by netkeeper/campaigns/compose.py.
   "idna>=3.7",
+  # Reads the old mailing tool's workbook for the history import (#65). Read-only,
+  # data_only: a formula's cached value, never one evaluated.
+  "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +59,7 @@ dev = [
   "towncrier>=24.8",
   "types-regex>=2026.9.10.20260911",
   "pytest-xdist>=3.6",
+  "types-openpyxl>=3.1",
 ]
 
 [project.scripts]

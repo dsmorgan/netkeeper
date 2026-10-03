@@ -1,5 +1,5 @@
 """Command-line entry point: serve, db, config, backup, openapi, tags, import/export, gmail,
-campaigns, version."""
+campaigns, history, version."""
 
 from __future__ import annotations
 
@@ -34,6 +34,8 @@ from netkeeper.crm.archive_check import open_checked_archive
 from netkeeper.crm.contacts import ContactStats, contact_stats
 from netkeeper.crm.exports import ExportError, ExportFormat, ExportPreset, export_stream
 from netkeeper.crm.filters import FilterError, FilterTree, SortKey, parse_filter, parse_sort
+from netkeeper.crm.history import ImportReport, import_workbook
+from netkeeper.crm.history_workbook import WorkbookError, read_workbook
 from netkeeper.crm.lists import ListCount, find_list, list_lists, list_views, member_counts
 from netkeeper.crm.tags import ensure_default_rules, find_tag, list_tags, run_rules
 from netkeeper.db import database_url, make_engine, make_session_factory, session_scope
@@ -54,6 +56,7 @@ from netkeeper.linkedin.rehearse import render as render_rehearsal
 from netkeeper.logging_setup import setup_logging
 from netkeeper.models import (
     EnrollmentStatus,
+    HistoryReplyKind,
     ImportResolution,
     ImportRun,
     ImportStatus,
@@ -74,6 +77,7 @@ from netkeeper.services import (
     budgets,
     campaign_review,
     enrich_plan,
+    history_scan,
     keychain,
     route_breaker,
     runs,
@@ -172,6 +176,11 @@ do_not_send_app = typer.Typer(
     help="The do-not-send list: addresses no campaign sends to.", no_args_is_help=True
 )
 app.add_typer(do_not_send_app, name="do-not-send")
+history_app = typer.Typer(
+    help="History from the old mailing tool: import its workbook, then scan Gmail for replies.",
+    no_args_is_help=True,
+)
+app.add_typer(history_app, name="history")
 
 
 @dataclass(frozen=True, slots=True)
@@ -3344,6 +3353,234 @@ def _human_age(age: timedelta) -> str:
     if seconds < 86400:
         return f"{seconds // 3600} h"
     return f"{seconds // 86400} d"
+
+
+# --- history from the old mailing tool (#65) ----------------------------------------
+#
+# Both commands are dry runs unless --apply: they do every step, report it, and roll
+# the database back. docs/history-import.md has the order to run them in.
+
+_DRY_RUN_NOTE: Final = "dry run: nothing was written; pass --apply to write it"
+
+
+@history_app.command("import")
+def history_import(
+    path: Annotated[Path, typer.Argument(help="The old tool's workbook, exported as .xlsx.")],
+    apply: Annotated[bool, typer.Option("--apply", help="Write; without it, a dry run.")] = False,
+    create_missing: Annotated[
+        bool,
+        typer.Option(
+            "--create-missing",
+            help="Create a contact (name and address only) for each address no contact holds.",
+        ),
+    ] = False,
+) -> None:
+    """Import the old tool's campaigns and the people its workbook names.
+
+    Each matched recipient gets an imported `email_out` on their timeline, dated at
+    the campaign's start, so the recency guard counts it. A person on a campaign's
+    bounce list goes on the do-not-send list. Re-running it adds nothing twice.
+    """
+    try:
+        data = path.expanduser().read_bytes()
+    except OSError as exc:
+        typer.echo(f"error: cannot read {path}: {exc.strerror}", err=True)
+        raise typer.Exit(code=1) from exc
+    try:
+        workbook = read_workbook(data)
+    except WorkbookError as exc:
+        typer.echo(f"error: {path}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    with _campaign_db() as factory, session_scope(factory, write=True) as session:
+        user = _local_user_or_exit(session)
+        report = import_workbook(session, user, workbook, create_missing=create_missing)
+        if not apply:
+            session.rollback()
+    _print_history_import(report, applied=apply)
+
+
+def _print_history_import(report: ImportReport, *, applied: bool) -> None:
+    typer.echo("applied" if applied else _DRY_RUN_NOTE)
+    typer.echo(f"workbook sha256 {report.sha256}")
+    for skipped in report.skipped:
+        typer.echo(f"tab {skipped.index + 1} skipped: {skipped.reason}")
+    if not report.campaigns:
+        typer.echo("no campaign tabs found")
+        return
+    rows = [
+        (
+            str(c.index + 1),
+            c.name,
+            c.started_on.isoformat(),
+            "-" if c.last_batch_on is None else c.last_batch_on.isoformat(),
+            str(c.listed),
+            str(c.matched),
+            str(c.unmatched),
+            str(c.ambiguous),
+            str(c.created),
+            str(c.clicked),
+            _count_cell(c.opens_count),
+            _count_cell(c.bounces_count),
+            _count_cell(c.recipients_count),
+            _count_cell(c.unlisted),
+        )
+        for c in report.campaigns
+    ]
+    headers = (
+        "TAB",
+        "CAMPAIGN",
+        "STARTED",
+        "LAST BATCH",
+        "LISTED",
+        "MATCHED",
+        "UNMATCHED",
+        "AMBIGUOUS",
+        "CREATED",
+        "CLICKS",
+        "OPENS",
+        "BOUNCES",
+        "SENT TO",
+        "UNLISTED",
+    )
+    typer.echo(_format_table(headers, rows), nl=False)
+    for c in report.campaigns:
+        for warning in c.warnings:
+            typer.echo(f"tab {c.index + 1}: {warning}")
+    new_interactions = sum(c.new_interactions for c in report.campaigns)
+    new_rows = sum(c.new_rows for c in report.campaigns)
+    typer.echo(
+        f"{report.new_campaigns} new campaign(s), {new_rows} new recipient row(s),"
+        f" {new_interactions} new timeline entr{'y' if new_interactions == 1 else 'ies'}"
+    )
+    if report.unmatched:
+        typer.echo(f"unmatched addresses ({len(report.unmatched)}), no contact holds them:")
+        for address in report.unmatched:
+            typer.echo(f"  {address}")
+    if report.ambiguous:
+        typer.echo(
+            f"ambiguous addresses ({len(report.ambiguous)}), more than one contact holds them;"
+            " merge them and import again:"
+        )
+        for address in report.ambiguous:
+            typer.echo(f"  {address}")
+    if report.unlisted:
+        typer.echo(
+            f"warning: the workbook names only the people who opened, clicked, or bounced."
+            f" {report.unlisted} recipient(s) across these campaigns are not named in it, so"
+            " they are not imported and the guards cannot know the old tool emailed them."
+        )
+
+
+def _count_cell(value: int | None) -> str:
+    return "-" if value is None else str(value)
+
+
+@history_app.command("scan-gmail")
+def history_scan_gmail(
+    mailbox: Annotated[
+        str | None,
+        typer.Option("--mailbox", help="Mailbox address or ID; the connected one if omitted."),
+    ] = None,
+    apply: Annotated[bool, typer.Option("--apply", help="Write; without it, a dry run.")] = False,
+    rescan: Annotated[
+        bool, typer.Option("--rescan", help="Scan recipients an earlier --apply already scanned.")
+    ] = False,
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", min=1, help="Scan at most this many recipients this run."),
+    ] = None,
+) -> None:
+    """Search Gmail, read-only, for what the imported recipients sent back.
+
+    For each recipient: messages from their address, and bounce notices that name
+    it, from the campaign's start until 120 days after its last batch. With --apply,
+    a bounce and an unsubscribe go on the do-not-send list, an unsubscribe also sets
+    the contact's do-not-contact, and any other reply flags the contact for review.
+    Nothing in Gmail is changed. A run stopped by a rate limit resumes where it
+    stopped.
+    """
+    with _campaign_db() as factory:
+        with session_scope(factory) as session:
+            user = _local_user_or_exit(session)
+            box = (
+                _mailbox_or_exit(session, user, mailbox)
+                if mailbox is not None
+                else mailbox_service.live_mailbox(session, user)
+            )
+            if box is None:
+                typer.echo("error: no mailbox is connected; run `netkeeper gmail login`", err=True)
+                raise typer.Exit(code=1)
+            user_id, mailbox_id = user.id, box.id
+            targets = history_scan.scan_targets(session, user, rescan=rescan, limit=limit)
+        if not targets:
+            typer.echo(
+                "nothing to scan: no imported recipients"
+                + ("" if rescan else " left unscanned (pass --rescan to scan them again)")
+            )
+            return
+        try:
+            gmail = mailbox_service.open_gmail(factory, user_id, mailbox_id)
+        except (mailbox_service.MailboxNotFound, mailbox_service.MailboxNotReady) as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        read = history_scan.read_gmail(gmail, targets)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            report = history_scan.apply_scan(session, user, read, now=datetime.now(UTC))
+            if not apply:
+                session.rollback()
+    _print_history_scan(report, applied=apply)
+    if report.stopped is not None:
+        raise typer.Exit(code=1)
+
+
+def _print_history_scan(report: history_scan.ScanReport, *, applied: bool) -> None:
+    typer.echo("applied" if applied else _DRY_RUN_NOTE)
+    typer.echo(f"scanned {report.scanned} recipient(s); nothing found for {report.nothing}")
+    if report.by_campaign:
+        rows = [
+            (
+                report.campaign_names.get(campaign_id, str(campaign_id)),
+                str(counts.reply),
+                str(counts.unsubscribe),
+                str(counts.auto),
+                str(counts.bounce),
+            )
+            for campaign_id, counts in sorted(report.by_campaign.items())
+        ]
+        typer.echo(
+            _format_table(("CAMPAIGN", "REPLIES", "UNSUBSCRIBES", "AUTO", "BOUNCES"), rows),
+            nl=False,
+        )
+    for kind, label in (
+        (HistoryReplyKind.REPLY, "replies"),
+        (HistoryReplyKind.UNSUBSCRIBE, "unsubscribes"),
+        (HistoryReplyKind.AUTO, "automatic answers"),
+        (HistoryReplyKind.BOUNCE, "bounces"),
+    ):
+        sample = report.samples.get(kind)
+        if sample:
+            typer.echo(f"{label} (first {len(sample)}):")
+            for address in sample:
+                typer.echo(f"  {address}")
+    typer.echo(
+        f"{report.flagged} contact(s) flagged for review, {report.opted_out} opted out,"
+        f" {report.new_interactions} new timeline entr"
+        f"{'y' if report.new_interactions == 1 else 'ies'}"
+    )
+    if report.no_contact:
+        typer.echo(
+            f"wrote back, but no single contact holds the address ({len(report.no_contact)});"
+            " import with --create-missing or merge, then scan again with --rescan:"
+        )
+        for address in report.no_contact:
+            typer.echo(f"  {address}")
+    if report.stopped is not None:
+        typer.echo(
+            f"error: Gmail stopped the scan ({report.stopped}); {report.remaining} recipient(s)"
+            " were not scanned. Run it again later to continue.",
+            err=True,
+        )
 
 
 if __name__ == "__main__":
