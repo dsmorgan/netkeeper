@@ -8,12 +8,12 @@ and enrichment). A handler:
 1. records nothing while the account's schedule is paused (#324; the
    scheduler's gate already skipped the fire, so this only closes the moment
    between that gate and the handler, and answers
-   :attr:`~netkeeper.services.scheduler.JobOutcome.SKIPPED` so the fire counts as
+   :attr:`~netkeeper.services.scheduler.JobOutcome.PAUSED_AFTER_GATE` so the fire counts as
    skipped, not run), and otherwise records a ``scheduled``
    run through :func:`netkeeper.services.runs.create_run`,
    which refuses on a disarmed account -- the scheduler's arm gate already
    skipped the fire, so reaching this refusal means something bypassed that
-   gate, and it is logged as an error, nothing runs, and the answer is ``SKIPPED``;
+   gate, and it is logged as an error, nothing runs, and the answer is ``DISARMED_AFTER_GATE``;
 2. submits the run to the task runner, so it is a task like any other (its
    progress on the event stream, cancelled with the process), and waits for it,
    because the scheduler's heartbeat runs one fire at a time on purpose;
@@ -137,7 +137,7 @@ def _handler(
                 return None
         except _SchedulePaused:
             log.info("scheduled %s not started: the schedule is paused", run_kind.value)
-            return JobOutcome.SKIPPED
+            return JobOutcome.PAUSED_AFTER_GATE
         except runs.ScheduledRunsDisarmed:
             log.error(
                 "scheduled %s reached a disarmed account %d past the scheduler's arm gate;"
@@ -145,7 +145,7 @@ def _handler(
                 run_kind.value,
                 ctx.account_id,
             )
-            return JobOutcome.SKIPPED
+            return JobOutcome.DISARMED_AFTER_GATE
         except runs.RunAlreadyRunning as exc:
             log.info("scheduled %s not started: %s", run_kind.value, exc)
             return JobOutcome.RETRY_LATER

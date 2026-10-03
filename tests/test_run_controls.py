@@ -46,6 +46,7 @@ from netkeeper.services import enrich_plan, run_contacts, runs, scheduler
 from netkeeper.services.connections_sync import sync_connections
 from netkeeper.services.linkedin_accounts import (
     arm_scheduled_runs,
+    disarm_scheduled_runs,
     ensure_account,
     pause_schedule,
     schedule_pause_state,
@@ -485,11 +486,89 @@ async def test_the_served_handler_records_nothing_while_paused(
         due=NOW,
         catch_up=False,
     )
-    assert await registry[scheduler.JobKind.ENRICH](ctx) is scheduler.JobOutcome.SKIPPED
+    assert await registry[scheduler.JobKind.ENRICH](ctx) is scheduler.JobOutcome.PAUSED_AFTER_GATE
     with session_scope(session_factory) as session:
         user = session.get(User, owner.id)
         assert user is not None
         assert runs.list_runs(session, user)[1] == 0
+
+
+FIRST = scheduler.JobSchedule(
+    scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7), run_on_first_setup=True
+)
+
+
+class _Race:
+    """An armed account's weekly full sync, and ``serve``'s real handler for it, for
+    a pause (or a disarm) that lands between the scheduler's gate and the handler."""
+
+    def __init__(self, factory: sessionmaker[Session]) -> None:
+        from netkeeper.services.events import EventBus
+        from netkeeper.services.scheduled_runs import serve_registry
+        from netkeeper.services.tasks import TaskRunner
+
+        class Never:
+            async def execute(self, run_id: int, user_id: int) -> runs.RunOutcome:
+                raise AssertionError("a fire stopped after the gate reached the worker")
+
+        self.factory = factory
+        self.owner, self.account = _armed_account(factory)
+        with session_scope(factory, write=True) as session:
+            self.due = scheduler.establish_schedule(
+                session,
+                self.owner,
+                self.account,
+                FIRST.kind,
+                now=NOW,
+                schedule=FIRST,
+                rng=random.Random(0),
+                tz="UTC",
+                active_start=ALL_DAY[0],
+                active_end=ALL_DAY[1],
+            ).due
+        self.served = serve_registry(factory, Never(), TaskRunner(EventBus()), clock=lambda: NOW)
+        self.calls: list[scheduler.JobContext] = []
+
+    async def pause_then_handle(self, ctx: scheduler.JobContext) -> scheduler.JobOutcome | None:
+        with session_scope(self.factory, write=True) as session:
+            pause_schedule(session, self.owner, now=NOW)
+        return await self.served[FIRST.kind](ctx)
+
+    async def disarm_then_handle(self, ctx: scheduler.JobContext) -> scheduler.JobOutcome | None:
+        with session_scope(self.factory, write=True) as session:
+            disarm_scheduled_runs(session, self.owner)
+        return await self.served[FIRST.kind](ctx)
+
+    async def record(self, ctx: scheduler.JobContext) -> None:
+        self.calls.append(ctx)
+
+    async def poll(
+        self, at: datetime, handler: scheduler.JobHandler
+    ) -> scheduler.FireResult | None:
+        return await scheduler.poll_and_fire(
+            self.factory,
+            self.owner,
+            self.account,
+            FIRST.kind,
+            now=at,
+            schedule=FIRST,
+            registry={FIRST.kind: handler},
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        )
+
+    def fired_once(self) -> bool:
+        with session_scope(self.factory) as session:
+            state = scheduler._load_state(session, self.owner, self.account, FIRST.kind)
+            assert state is not None
+            return state.fired_once
+
+    def recorded_runs(self) -> int:
+        with session_scope(self.factory) as session:
+            user = session.get(User, self.owner.id)
+            assert user is not None
+            return runs.list_runs(session, user)[1]
 
 
 async def test_a_pause_that_lands_after_the_gate_keeps_first_setup_standing(
@@ -498,70 +577,56 @@ async def test_a_pause_that_lands_after_the_gate_keeps_first_setup_standing(
     """The narrow race: the gate let the never-run full sync through, then a person
     paused before the handler recorded a run. The handler starts nothing and says
     so; the fire counts as skipped, so the full sync is offered again within the
-    hour, not a week later, and runs then."""
-    from netkeeper.services.events import EventBus
-    from netkeeper.services.scheduled_runs import serve_registry
-    from netkeeper.services.tasks import TaskRunner
+    hour after the late poll, not a week later, and runs then."""
+    race = _Race(session_factory)
+    late = race.due + timedelta(minutes=30)
 
-    first = scheduler.JobSchedule(
-        scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7), run_on_first_setup=True
-    )
-    owner, account = _armed_account(session_factory)
-    with session_scope(session_factory, write=True) as session:
-        due = scheduler.establish_schedule(
-            session,
-            owner,
-            account,
-            first.kind,
-            now=NOW,
-            schedule=first,
-            rng=random.Random(0),
-            tz="UTC",
-            active_start=ALL_DAY[0],
-            active_end=ALL_DAY[1],
-        ).due
+    raced = await race.poll(late, race.pause_then_handle)
 
-    class Never:
-        async def execute(self, run_id: int, user_id: int) -> runs.RunOutcome:
-            raise AssertionError("a paused schedule reached the worker")
-
-    served = serve_registry(session_factory, Never(), TaskRunner(EventBus()), clock=lambda: NOW)
-    calls: list[scheduler.JobContext] = []
-
-    async def pause_then_handle(ctx: scheduler.JobContext) -> scheduler.JobOutcome | None:
-        with session_scope(session_factory, write=True) as session:
-            pause_schedule(session, owner, now=NOW)
-        return await served[first.kind](ctx)
-
-    async def record(ctx: scheduler.JobContext) -> None:
-        calls.append(ctx)
-
-    async def poll(at: datetime, handler: scheduler.JobHandler) -> scheduler.FireResult | None:
-        return await scheduler.poll_and_fire(
-            session_factory,
-            owner,
-            account,
-            first.kind,
-            now=at,
-            schedule=first,
-            registry={first.kind: handler},
-            tz="UTC",
-            active_start=ALL_DAY[0],
-            active_end=ALL_DAY[1],
-        )
-
-    raced = await poll(due, pause_then_handle)
     assert raced is not None and not raced.fired
-    assert raced.next_due == due + scheduler.FIRST_SETUP_RETRY
-    with session_scope(session_factory) as session:
-        user = session.get(User, owner.id)
-        assert user is not None
-        assert runs.list_runs(session, user)[1] == 0
+    assert raced.skipped_reason == "paused_after_gate"
+    assert raced.next_due == late + scheduler.FIRST_SETUP_RETRY  # from now, not from due
+    assert race.fired_once() is False
+    assert race.recorded_runs() == 0
 
     with session_scope(session_factory, write=True) as session:
-        unpause_schedule(session, owner)
-    again = await poll(raced.next_due, record)
-    assert again is not None and again.fired and len(calls) == 1
+        unpause_schedule(session, race.owner)
+    again = await race.poll(raced.next_due, race.record)
+    assert again is not None and again.fired and len(race.calls) == 1
+
+
+async def test_a_pause_after_the_gate_on_a_later_fire_keeps_the_weekly_cadence(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The full sync already ran once. A pause that races its next fire is skipped,
+    but there is no first-setup standing to give back: the claim's week-out due time
+    stands, and the kind still counts as having fired."""
+    race = _Race(session_factory)
+    first = await race.poll(race.due, race.record)
+    assert first is not None and first.fired and race.fired_once() is True
+    week_on = race.due + FIRST.interval
+    assert first.next_due == week_on
+
+    raced = await race.poll(week_on, race.pause_then_handle)
+
+    assert raced is not None and not raced.fired
+    assert raced.skipped_reason == "paused_after_gate"
+    assert raced.next_due == week_on + FIRST.interval
+    assert race.fired_once() is True
+    assert len(race.calls) == 1 and race.recorded_runs() == 0
+
+
+async def test_a_disarm_after_the_gate_is_skipped_with_its_own_reason(
+    session_factory: sessionmaker[Session],
+) -> None:
+    race = _Race(session_factory)
+
+    raced = await race.poll(race.due, race.disarm_then_handle)
+
+    assert raced is not None and not raced.fired
+    assert raced.skipped_reason == "disarmed_after_gate"
+    assert raced.next_due == race.due + scheduler.FIRST_SETUP_RETRY
+    assert race.fired_once() is False and race.recorded_runs() == 0
 
 
 def test_posture_says_the_schedule_is_paused(session_factory: sessionmaker[Session]) -> None:

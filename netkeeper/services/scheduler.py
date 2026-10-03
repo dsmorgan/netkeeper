@@ -202,16 +202,24 @@ class JobOutcome(enum.Enum):
     page's answers, so it could not age anyone): offer it again
     :data:`NOT_DONE_RETRY` later instead of a whole interval out."""
 
-    SKIPPED = "skipped"
-    """The handler started nothing: the schedule was paused, or the account
-    disarmed, after the gate let the fire through (#324). The fire counts as
-    skipped, not run, so a first-setup kind keeps its standing and is offered
-    again :data:`FIRST_SETUP_RETRY` later, as a fire the gate skipped would be."""
+    PAUSED_AFTER_GATE = "paused_after_gate"
+    """The handler started nothing: the schedule was paused after the gate let the
+    fire through (#324). The fire counts as skipped, not run, so a first-setup
+    kind keeps its standing and is offered again :data:`FIRST_SETUP_RETRY` later,
+    as a fire the gate skipped would be. Its value is the fire's skip reason."""
 
+    DISARMED_AFTER_GATE = "disarmed_after_gate"
+    """The same, for an account found disarmed after the gate let the fire through."""
+
+
+#: The outcomes that say the handler started nothing: the fire was skipped, not run.
+SKIPPED_AFTER_GATE: Final = frozenset(
+    {JobOutcome.PAUSED_AFTER_GATE, JobOutcome.DISARMED_AFTER_GATE}
+)
 
 #: A handler returns ``None`` when the fire ran (whatever the run made of it),
-#: :attr:`JobOutcome.RETRY_LATER`, :attr:`JobOutcome.NOT_DONE`, or
-#: :attr:`JobOutcome.SKIPPED`.
+#: :attr:`JobOutcome.RETRY_LATER`, :attr:`JobOutcome.NOT_DONE`, or one of
+#: :data:`SKIPPED_AFTER_GATE`.
 JobHandler = Callable[[JobContext], Awaitable[JobOutcome | None]]
 JobRegistry = Mapping[JobKind, JobHandler]
 
@@ -1046,7 +1054,13 @@ async def poll_and_fire(
     :data:`RETRY_MAX_MINUTES` after ``clock()`` (spec 9.9), unless the next
     due time is already sooner. One that answers :attr:`JobOutcome.NOT_DONE` (#200)
     is offered again :data:`NOT_DONE_RETRY` after ``clock()``, the same way.
-    ``clock`` defaults to returning ``now``.
+    One that answers :attr:`JobOutcome.PAUSED_AFTER_GATE` or
+    :attr:`JobOutcome.DISARMED_AFTER_GATE` (#324: it found the schedule paused, or
+    the account disarmed, after this gate passed, and started nothing) has its fire
+    counted as skipped, not run: the result is not ``fired``, its
+    ``skipped_reason`` is the outcome's value, and a first-setup kind that had never
+    run keeps that standing and is offered again :data:`FIRST_SETUP_RETRY` after
+    the later of its due time and ``now``. ``clock`` defaults to returning ``now``.
 
     The writer session that reads and advances the due time is closed *before*
     the (possibly long-running) handler is awaited, so a real job never holds
@@ -1141,10 +1155,11 @@ async def poll_and_fire(
             user_id=user.id, account_id=account_id, kind=kind, due=due, catch_up=is_catchup
         )
         outcome = await handler(ctx)
-        if outcome is JobOutcome.SKIPPED:
+        if outcome in SKIPPED_AFTER_GATE:
             # The handler started nothing (#324): the fire was skipped, not run.
+            assert outcome is not None
             fired = False
-            skipped_reason = "skipped_by_handler"
+            skipped_reason = outcome.value
             next_due = await off_loop(
                 _record_skipped,
                 session_factory,
