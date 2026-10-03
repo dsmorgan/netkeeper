@@ -35,6 +35,7 @@ from netkeeper.models import (
     Campaign,
     CampaignStatus,
     CampaignStep,
+    Contact,
     Enrollment,
     EnrollmentStatus,
     ListKind,
@@ -42,11 +43,12 @@ from netkeeper.models import (
     Message,
     StepCondition,
     StepMode,
+    Template,
     TemplateChannel,
     User,
     UserKind,
 )
-from netkeeper.scoping import install_scope_guard, scoped
+from netkeeper.scoping import get_scoped, install_scope_guard, scoped
 from netkeeper.services import campaign_engine, campaign_review, sending_hours
 from netkeeper.services import campaigns as campaign_service
 from netkeeper.services.settings_kv import set_setting
@@ -178,19 +180,13 @@ def _reviewing(world: World) -> int:
 
 
 def _complete_review(world: World, campaign_id: int) -> None:
-    """Record every requirement, as the review screens would through the API."""
+    """Record every requirement: the steps approved through the CLI, the rest as the
+    review screens would through the API."""
+    for position in ("1", "2"):
+        _ok("campaigns", "approve-step", str(campaign_id), position, "--yes")
     now = datetime.now(UTC)
     with session_scope(world.factory, write=True) as session:
         user = _local(session)
-        sample = campaign_review.draw_sample(session, user, campaign_id, me=ME, now=now)
-        campaign_review.approve(
-            session,
-            user,
-            campaign_id,
-            {e.enrollment_id: e.fingerprint for e in sample.enrollments},
-            me=ME,
-            now=now,
-        )
         steps = session.scalars(
             scoped(user, CampaignStep).where(CampaignStep.campaign_id == campaign_id)
         ).all()
@@ -300,7 +296,7 @@ def test_status_shows_steps_enrollments_and_what_review_needs(world: World) -> N
     assert "enrollments: 3 pending" in output
     assert "step 1 v1" in output and "step 2 v1" in output
     assert "review: activation still needs" in output
-    for requirement in ("sample_previews", "test_sends", "lint", "guards"):
+    for requirement in ("step_approvals", "test_sends", "lint", "guards"):
         assert f"- {requirement}:" in output
 
     missing = _run("campaigns", "status", "999")
@@ -318,11 +314,93 @@ def test_activate_refused_prints_what_is_missing_and_exits_non_zero(world: World
 
     assert result.exit_code == 1
     assert f"error: campaign {campaign_id} cannot be activated" in result.output
-    for requirement in ("sample_previews", "test_sends", "lint", "guards"):
+    for requirement in ("step_approvals", "test_sends", "lint", "guards"):
         assert f"- {requirement}:" in result.output
     assert "(steps 1, 2)" in result.output  # the test sends missing, by step
     assert _campaign(world, campaign_id).status is CampaignStatus.REVIEWING
     assert _enrollment_statuses(world, campaign_id) == [EnrollmentStatus.PENDING] * 3
+
+
+def test_review_step_shows_one_message_at_a_time_and_the_blocked_ones(world: World) -> None:
+    campaign_id = _reviewing(world)
+    with session_scope(world.factory, write=True) as session:
+        user = _local(session)
+        first = session.scalars(
+            scoped(user, Enrollment)
+            .where(Enrollment.campaign_id == campaign_id)
+            .order_by(Enrollment.id)
+        ).first()
+        assert first is not None
+        blocked_id = first.id
+        contact = get_scoped(session, user, Contact, first.contact_id)
+        assert contact is not None
+        contact.do_not_contact = True
+
+    output = _ok("campaigns", "review-step", str(campaign_id), "1", "--index", "2")
+
+    assert f"step 1 of campaign {campaign_id}: email, step 1 v1" in output
+    assert "approval: not approved" in output
+    assert "message 2 of 2:" in output
+    assert "subject: Catching up" in output
+    assert "it has been a while." in output
+    assert "blocked, never sent (1):" in output
+    assert f"enrollment {blocked_id}:" in output and "do-not-contact" in output
+
+    past = _ok("campaigns", "review-step", str(campaign_id), "1", "--index", "9")
+    assert "no message 9: the step has 2" in past
+    assert _run("campaigns", "review-step", str(campaign_id), "7").exit_code == 1
+
+
+def test_approve_step_asks_then_approves_the_step(world: World) -> None:
+    campaign_id = _reviewing(world)
+
+    cancelled = _run("campaigns", "approve-step", str(campaign_id), "1", input="n\n")
+    assert cancelled.exit_code == 1
+    assert "approve step 1 for all 3 messages that can be sent" in cancelled.output
+    assert "cancelled: step 1 is not approved" in cancelled.output
+    assert "approval: not approved" in _ok("campaigns", "review-step", str(campaign_id), "1")
+
+    approved = _run("campaigns", "approve-step", str(campaign_id), "1", input="y\n")
+    assert approved.exit_code == 0, approved.output
+    assert f"step 1 of campaign {campaign_id} approved" in approved.output
+    assert "approval: approved" in _ok("campaigns", "review-step", str(campaign_id), "1")
+    status = _ok("campaigns", "status", str(campaign_id))
+    assert "- step_approvals: steps not approved (steps 2)" in status
+
+
+def test_a_personal_line_step_is_approved_message_by_message(world: World) -> None:
+    campaign_id = _reviewing(world)
+    with session_scope(world.factory, write=True) as session:
+        user = _local(session)
+        step = campaign_review.step_at(session, user, campaign_id, 1)
+        template = get_scoped(session, user, Template, step.template_id)
+        assert template is not None
+        template.body = BODY + " {{ personal_line }}"
+        ids = list(
+            session.scalars(
+                scoped(user, Enrollment)
+                .with_only_columns(Enrollment.id)
+                .where(Enrollment.campaign_id == campaign_id)
+                .order_by(Enrollment.id)
+            )
+        )
+
+    review = _ok("campaigns", "review-step", str(campaign_id), "1")
+    assert "each message is approved on its own; 3 not approved yet" in review
+    whole = _run("campaigns", "approve-step", str(campaign_id), "1", "--yes")
+    assert whole.exit_code == 1
+    assert "approve each message with --enrollment ID" in whole.output
+
+    _ok("campaigns", "approve-step", str(campaign_id), "1", "--enrollment", str(ids[0]), "--yes")
+    assert "2 not approved yet" in _ok("campaigns", "review-step", str(campaign_id), "1")
+    status = _ok("campaigns", "status", str(campaign_id))
+    assert "- message_approvals: messages of steps that use" in status
+    assert f"(enrollments {ids[1]}, {ids[2]})" in status
+
+    wrong = _run(
+        "campaigns", "approve-step", str(campaign_id), "2", "--enrollment", str(ids[0]), "--yes"
+    )
+    assert wrong.exit_code == 1 and "approved as a whole" in wrong.output
 
 
 def test_activate_refuses_a_draft_with_the_reviewing_requirement(world: World) -> None:

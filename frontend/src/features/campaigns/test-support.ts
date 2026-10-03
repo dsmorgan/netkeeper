@@ -16,10 +16,11 @@ import type {
   Campaign,
   CampaignSummary,
   EnrollmentPage,
-  EnrollmentPreview,
+  MessagePreview,
   Missing,
   Review,
   StartOptions,
+  StepReview,
 } from './api'
 
 export type { Call }
@@ -142,10 +143,10 @@ export function summary(overrides: Partial<CampaignSummary> = {}): CampaignSumma
 /** Everything the gate can report for a fresh reviewing campaign. */
 export const ALL_MISSING: Missing[] = [
   {
-    requirement: 'sample_previews',
-    detail: 'no sample was drawn for the current audience',
+    requirement: 'step_approvals',
+    detail: 'steps not approved',
     enrollment_ids: [],
-    step_positions: [],
+    step_positions: [1, 2],
   },
   {
     requirement: 'test_sends',
@@ -180,25 +181,56 @@ export function review(overrides: Partial<Review> = {}): Review {
   }
 }
 
-export function preview(overrides: Partial<EnrollmentPreview> = {}): EnrollmentPreview {
+export function message(overrides: Partial<MessagePreview> = {}): MessagePreview {
   return {
     enrollment_id: 301,
     contact_id: 401,
     contact_name: 'Rosalind Quillfeather',
-    sampled: true,
+    to_address: 'rosalind@nimbus-kettle.example',
+    subject: 'Catching up',
+    body: 'Hi Rosalind',
+    issues: [],
+    blocked: null,
     approved: false,
     fingerprint: 'fp-rosalind-000000',
-    steps: [
-      {
-        position: 1,
-        channel: 'email',
-        to_address: 'rosalind@nimbus-kettle.example',
-        subject: 'Catching up',
-        body: 'Hi Rosalind',
-        issues: [],
-        error: null,
-      },
-    ],
+    ...overrides,
+  }
+}
+
+export const MESSAGES: MessagePreview[] = [
+  message(),
+  message({
+    enrollment_id: 302,
+    contact_id: 402,
+    contact_name: 'Tobias Marrowbone',
+    to_address: 'tobias@orrery-works.example',
+    body: 'Hi Tobias',
+    fingerprint: 'fp-tobias-111111',
+  }),
+  message({
+    enrollment_id: 303,
+    contact_id: 403,
+    contact_name: 'Wilhelmina Fernsby',
+    to_address: 'wilhelmina@lantern-row.example',
+    body: 'Hi Wilhelmina',
+    fingerprint: 'fp-wilhelmina-222222',
+  }),
+]
+
+export function stepReview(overrides: Partial<StepReview> = {}): StepReview {
+  return {
+    step_id: 101,
+    position: 1,
+    channel: 'email',
+    template_name: 'Catching up v1',
+    fingerprint: 'step-fp-101',
+    per_message: false,
+    approved: false,
+    total: MESSAGES.length,
+    offset: 0,
+    messages: MESSAGES,
+    blocked: [],
+    unapproved: 0,
     ...overrides,
   }
 }
@@ -277,6 +309,16 @@ export function campaignBackend(
       'GET /api/v1/campaigns': () => jsonResponse([summary()]),
       [`GET /api/v1/campaigns/${id}`]: () => jsonResponse(state.campaign),
       [`GET /api/v1/campaigns/${id}/review`]: () => jsonResponse(state.review),
+      [`GET /api/v1/campaigns/${id}/review/steps/101`]: () => jsonResponse(stepReview()),
+      [`GET /api/v1/campaigns/${id}/review/steps/102`]: () =>
+        jsonResponse(
+          stepReview({
+            step_id: 102,
+            position: 2,
+            template_name: 'Follow-up nudge v2',
+            fingerprint: 'step-fp-102',
+          }),
+        ),
       [`GET /api/v1/campaigns/${id}/enrollments`]: () => jsonResponse(ENROLLMENTS),
       'GET /api/v1/settings/sending-hours': () => jsonResponse(SENDING_HOURS),
       [`GET /api/v1/campaigns/${id}/start-options`]: (call) =>

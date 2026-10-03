@@ -3,21 +3,21 @@
  *
  * The checklist at the top is the API's own `missing` list, so it never claims
  * a requirement is met that the gate would refuse. Each section below records
- * one requirement: sampled previews approved for the fingerprint they were shown
- * with, any enrollment you searched for, lint, a test per email step to your own
+ * one requirement: each step approved once, after paging through its rendered
+ * messages (a step whose template uses `{{ personal_line }}` has each message
+ * approved on its own instead), lint, a test per email step to your own
  * mailbox (a draft in your Drafts while Gmail is armed for drafts, a message sent
  * to you once it is armed to send), and the guard summary acknowledged as shown.
  * Activation asks first, with the scheduled start (#338), and a `409` shows what is
  * still missing.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, CircleDashed } from 'lucide-react'
+import { Check, ChevronLeft, ChevronRight, CircleDashed } from 'lucide-react'
 import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
-import { Input } from '@/components/ui/input'
 import { Callout, ErrorNote, LoadingNote } from '@/features/crm/controls'
 
 import { UNCHOSEN, startIso, type StartChoice } from './start'
@@ -25,22 +25,23 @@ import { StartPicker } from './start-picker'
 
 import {
   CampaignApiError,
+  STEP_PAGE,
   acknowledgeGuards,
   activateCampaign,
-  approvePreviews,
+  approveMessages,
+  approveStep,
   campaignKeys,
-  enrollmentsQuery,
   errorText,
   lintCampaign,
   reviewQuery,
-  samplePreviews,
   startReview,
+  stepReviewQuery,
   testSend,
-  viewPreviews,
   type Campaign,
-  type EnrollmentPreview,
   type LintResult,
+  type MessagePreview,
   type Missing,
+  type Step,
   type TestSend,
 } from './api'
 import { REQUIREMENTS, REQUIREMENT_LABELS, formatWhen, missingText } from './format'
@@ -54,6 +55,7 @@ export function ReviewPanel({ campaign }: { campaign: Campaign }) {
   const refresh = () =>
     Promise.all([
       queryClient.invalidateQueries({ queryKey: campaignKeys.review(id) }),
+      queryClient.invalidateQueries({ queryKey: campaignKeys.steps(id) }),
       queryClient.invalidateQueries({ queryKey: campaignKeys.one(id) }),
       queryClient.invalidateQueries({ queryKey: campaignKeys.list() }),
     ])
@@ -88,8 +90,7 @@ export function ReviewPanel({ campaign }: { campaign: Campaign }) {
           </div>
         ) : (
           <>
-            <SampleSection campaignId={id} missing={missing} onChange={refresh} />
-            <SearchSection campaignId={id} missing={missing} onChange={refresh} />
+            <StepsSection campaign={campaign} onChange={refresh} />
             <LintSection campaignId={id} missing={missing} onChange={refresh} />
             <TestSendSection campaign={campaign} missing={missing} onChange={refresh} />
             <GuardsSection
@@ -154,13 +155,6 @@ function isMissing(missing: Missing[], requirement: string) {
   return missing.some((m) => m.requirement === requirement)
 }
 
-/** Merge newly rendered previews into those already shown, by enrollment. */
-function merge(shown: EnrollmentPreview[], incoming: EnrollmentPreview[]) {
-  const byId = new Map(shown.map((p) => [p.enrollment_id, p]))
-  for (const p of incoming) byId.set(p.enrollment_id, p)
-  return [...byId.values()]
-}
-
 /**
  * Whether a refusal says the thing shown is no longer current (a stale fingerprint).
  * Only the server's `code: stale` counts: any other 409 (the campaign no longer under
@@ -170,50 +164,9 @@ function isStale(error: unknown): boolean {
   return error instanceof CampaignApiError && error.status === 409 && error.code === 'stale'
 }
 
-const STALE_PREVIEW =
-  'Something changed since this preview was shown (the contact, a template or the audience), ' +
+const STALE_STEP =
+  'Something changed since this step was shown (its template, its settings or the contact), ' +
   'so it was refreshed. Read it again before approving.'
-
-/**
- * Previews on show and their approval. A 409 on approve means a fingerprint went
- * stale: the review is refreshed and `reload` renders the refused previews again,
- * so the next approval carries the fingerprint of what is on screen now.
- */
-function usePreviewApproval(
-  campaignId: number,
-  onChange: () => Promise<unknown>,
-  reload: (stale: EnrollmentPreview[], shown: EnrollmentPreview[]) => Promise<EnrollmentPreview[]>,
-) {
-  const [shown, setShown] = useState<EnrollmentPreview[]>([])
-  const [notice, setNotice] = useState<string | null>(null)
-  const approve = useMutation({
-    mutationFn: (previews: EnrollmentPreview[]) => approvePreviews(campaignId, previews),
-    onMutate: () => setNotice(null),
-    onSuccess: async (_review, previews) => {
-      const ids = new Set(previews.map((p) => p.enrollment_id))
-      setShown((current) =>
-        current.map((p) => (ids.has(p.enrollment_id) ? { ...p, approved: true } : p)),
-      )
-      await onChange()
-    },
-    onError: async (error, previews) => {
-      if (!isStale(error)) return
-      const ids = new Set(previews.map((p) => p.enrollment_id))
-      let refreshed: EnrollmentPreview[]
-      try {
-        refreshed = await reload(previews, shown)
-      } catch {
-        // Nothing current to show for them: drop the stale ones rather than keep them.
-        refreshed = shown.filter((p) => !ids.has(p.enrollment_id))
-      }
-      setShown(refreshed)
-      setNotice(STALE_PREVIEW)
-      await onChange()
-    },
-  })
-  const refusal = approve.isError && !isStale(approve.error) ? approve.error : null
-  return { shown, setShown, approve, notice, refusal }
-}
 
 function StaleNotice({ notice }: { notice: string | null }) {
   if (notice === null) return null
@@ -224,245 +177,256 @@ function StaleNotice({ notice }: { notice: string | null }) {
   )
 }
 
-function PreviewList({
-  previews,
-  onApprove,
-  pending,
-}: {
-  previews: EnrollmentPreview[]
-  onApprove: (previews: EnrollmentPreview[]) => void
-  pending: boolean
-}) {
-  const waiting = previews.filter((p) => !p.approved)
-  return (
-    <div className="flex flex-col gap-2">
-      {waiting.length > 1 && (
-        <Button
-          variant="outline"
-          className="w-fit"
-          disabled={pending}
-          onClick={() => onApprove(waiting)}
-        >
-          Approve all {waiting.length} shown
-        </Button>
-      )}
-      <ul className="flex flex-col gap-2">
-        {previews.map((preview) => (
-          <li
-            key={preview.enrollment_id}
-            aria-label={`Preview for ${preview.contact_name}`}
-            className="rounded-lg border p-3 text-sm"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-medium">{preview.contact_name || 'Unnamed contact'}</span>
-              <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                <span title="The fingerprint this preview is approved for">
-                  fingerprint {preview.fingerprint.slice(0, 12)}
-                </span>
-                {preview.approved ? (
-                  <span className="font-medium text-emerald-700 dark:text-emerald-300">
-                    Approved
-                  </span>
-                ) : (
-                  <Button size="xs" disabled={pending} onClick={() => onApprove([preview])}>
-                    Approve
-                  </Button>
-                )}
-              </span>
-            </div>
-            <ol className="mt-2 flex flex-col gap-2">
-              {preview.steps.map((step) => (
-                <li key={step.position} className="rounded-md bg-muted/40 p-2">
-                  <p className="text-xs text-muted-foreground">
-                    Step {step.position}, {step.channel}
-                    {step.to_address !== null && ` to ${step.to_address}`}
-                  </p>
-                  {step.error !== null ? (
-                    <p className="text-destructive">Does not render: {step.error}</p>
-                  ) : (
-                    <>
-                      {step.subject !== null && <p className="font-medium">{step.subject}</p>}
-                      <pre className="font-sans whitespace-pre-wrap">{step.body}</pre>
-                    </>
-                  )}
-                  {step.issues.length > 0 && (
-                    <ul className="mt-1 text-xs text-amber-700 dark:text-amber-300">
-                      {step.issues.map((issue, index) => (
-                        <li key={index}>
-                          {issue.severity}: {issue.message}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </li>
-              ))}
-            </ol>
-          </li>
-        ))}
-      </ul>
-    </div>
-  )
-}
-
-function SampleSection({
-  campaignId,
-  missing,
+function StepsSection({
+  campaign,
   onChange,
 }: {
-  campaignId: number
-  missing: Missing[]
+  campaign: Campaign
   onChange: () => Promise<unknown>
 }) {
-  const { shown, setShown, approve, notice, refusal } = usePreviewApproval(
-    campaignId,
-    onChange,
-    // The draw is kept while the audience is, so this re-renders it with current
-    // fingerprints; a changed audience gives a new draw and the old one goes.
-    async () => (await samplePreviews(campaignId)).enrollments,
-  )
-  const sample = useMutation({
-    mutationFn: () => samplePreviews(campaignId),
-    onSuccess: async (previews) => {
-      setShown(previews.enrollments)
-      await onChange()
-    },
-  })
   return (
-    <Section title="Sampled previews">
+    <Section title="Steps">
       <p className="text-sm text-muted-foreground">
-        Up to 10 enrollments drawn at random. Read each rendered message and approve it. The draw
-        stays the same while the audience does.
-        {!isMissing(missing, 'sample_previews') && ' Done.'}
+        Page through each step&apos;s messages, rendered for every enrolled contact, then approve
+        the step once. The approval covers the step&apos;s messages, including any rendered later,
+        until you edit the step or its template. A message that can&apos;t be sent is listed apart
+        and stays blocked.
       </p>
-      <Button
-        variant="outline"
-        className="w-fit"
-        onClick={() => sample.mutate()}
-        disabled={sample.isPending}
-      >
-        {shown.length === 0 ? 'Show the sample' : 'Show the sample again'}
-      </Button>
-      {sample.isError && <ErrorNote label="The sample was not drawn." error={sample.error} />}
-      <StaleNotice notice={notice} />
-      {refusal !== null && <ErrorNote label="Not approved." error={refusal} />}
-      <PreviewList
-        previews={shown}
-        onApprove={(previews) => approve.mutate(previews)}
-        pending={approve.isPending}
-      />
+      <ol className="flex flex-col gap-3">
+        {campaign.steps.map((step) => (
+          <li key={step.id}>
+            <StepReviewCard campaignId={campaign.id} step={step} onChange={onChange} />
+          </li>
+        ))}
+      </ol>
     </Section>
   )
 }
 
-function SearchSection({
+function StepReviewCard({
   campaignId,
-  missing,
+  step,
   onChange,
 }: {
   campaignId: number
-  missing: Missing[]
+  step: Step
   onChange: () => Promise<unknown>
 }) {
-  const [q, setQ] = useState('')
-  const [submitted, setSubmitted] = useState<string | null>(null)
-  const results = useQuery({
-    ...enrollmentsQuery(campaignId, submitted ?? '', 'pending', 0, 8),
-    enabled: submitted !== null,
+  const [index, setIndex] = useState(0)
+  const [notice, setNotice] = useState<string | null>(null)
+  const offset = Math.floor(index / STEP_PAGE) * STEP_PAGE
+  const review = useQuery(stepReviewQuery(campaignId, step.id, offset))
+  const onError = async (error: unknown) => {
+    if (!isStale(error)) return
+    setNotice(STALE_STEP)
+    await onChange()
+  }
+  const approve = useMutation({
+    mutationFn: (fingerprint: string) => approveStep(campaignId, step.id, fingerprint),
+    onMutate: () => setNotice(null),
+    onSuccess: onChange,
+    onError,
   })
-  const { shown, setShown, approve, notice, refusal } = usePreviewApproval(
-    campaignId,
-    onChange,
-    async (stale, current) => {
-      const ids = new Set(stale.map((p) => p.enrollment_id))
-      const kept = current.filter((p) => !ids.has(p.enrollment_id))
-      const again = await viewPreviews(
-        campaignId,
-        stale.map((p) => p.enrollment_id),
-      )
-      return merge(kept, again.enrollments)
-    },
-  )
-  const view = useMutation({
-    mutationFn: (ids: number[]) => viewPreviews(campaignId, ids),
-    onSuccess: async (previews) => {
-      setShown((current) => merge(current, previews.enrollments))
-      await onChange()
-    },
+  const approveOne = useMutation({
+    mutationFn: (message: MessagePreview) => approveMessages(campaignId, step.id, [message]),
+    onMutate: () => setNotice(null),
+    onSuccess: onChange,
+    onError,
   })
-  const awaiting = missing
-    .filter((m) => m.requirement === 'searched_previews')
-    .flatMap((m) => m.enrollment_ids ?? [])
-    .filter((eid) => !shown.some((p) => p.enrollment_id === eid))
+  const title = `Step ${step.position}, ${step.channel}: ${step.template_name}`
+
+  if (review.isPending) return <LoadingNote label={`Rendering step ${step.position}…`} />
+  if (review.isError)
+    return <ErrorNote label={`Step ${step.position} did not render.`} error={review.error} />
+  const data = review.data
+  const total = data.total
+  const shown = total === 0 ? 0 : Math.min(index, total - 1)
+  const message = data.messages[shown - data.offset] ?? null
+  const go = (to: number) => setIndex(Math.max(0, Math.min(to, total - 1)))
+  const refusal = [approve, approveOne].find((m) => m.isError && !isStale(m.error))?.error
 
   return (
-    <Section title="Search for anyone">
-      <p className="text-sm text-muted-foreground">
-        Preview any enrolled contact you want to check. Each one you view must be approved too.
-      </p>
-      {awaiting.length > 0 && (
+    <section
+      aria-label={`Step ${step.position}`}
+      className="flex flex-col gap-2 rounded-lg border p-3 text-sm"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="font-medium">{title}</h4>
+        <StepState
+          approved={data.approved}
+          perMessage={data.per_message}
+          unapproved={data.unapproved}
+        />
+      </div>
+      {data.per_message && (
         <Callout tone="warning">
           <p>
-            {awaiting.length} viewed {awaiting.length === 1 ? 'preview is' : 'previews are'} not
-            approved yet.{' '}
-            <Button
-              variant="link"
-              className="h-auto p-0"
-              onClick={() => view.mutate(awaiting.slice(0, 50))}
-            >
-              Show {awaiting.length === 1 ? 'it' : 'them'}
-            </Button>
+            This step&apos;s template uses {'{{ personal_line }}'}, so every message is different.
+            Approve each message on its own.
           </p>
         </Callout>
       )}
-      <form
-        className="flex gap-2"
-        onSubmit={(event) => {
-          event.preventDefault()
-          setSubmitted(q.trim())
-        }}
-      >
-        <Input
-          aria-label="Search enrollments by name or address"
-          placeholder="Name or address"
-          value={q}
-          onChange={(event) => setQ(event.target.value)}
-          className="max-w-xs"
-        />
-        <Button type="submit" variant="outline">
-          Search
-        </Button>
-      </form>
-      {results.isError && <ErrorNote label="The search failed." error={results.error} />}
-      {results.isSuccess &&
-        (results.data.items.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No pending enrollment matches.</p>
+      {total === 0 ? (
+        <p className="text-muted-foreground">No message of this step can be sent.</p>
+      ) : (
+        <div
+          role="group"
+          aria-label={`Messages of step ${step.position}`}
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowLeft') {
+              event.preventDefault()
+              go(shown - 1)
+            } else if (event.key === 'ArrowRight') {
+              event.preventDefault()
+              go(shown + 1)
+            }
+          }}
+          className="flex flex-col gap-2 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <div className="flex items-center gap-2">
+            <Button
+              size="xs"
+              variant="outline"
+              aria-label="Previous message"
+              disabled={shown === 0}
+              onClick={() => go(shown - 1)}
+            >
+              <ChevronLeft aria-hidden="true" />
+            </Button>
+            <span aria-live="polite" className="text-muted-foreground">
+              {shown + 1} of {total}
+            </span>
+            <Button
+              size="xs"
+              variant="outline"
+              aria-label="Next message"
+              disabled={shown >= total - 1}
+              onClick={() => go(shown + 1)}
+            >
+              <ChevronRight aria-hidden="true" />
+            </Button>
+            <span className="text-xs text-muted-foreground">Use ← and → to page.</span>
+          </div>
+          {message === null ? (
+            <LoadingNote label="Rendering…" />
+          ) : (
+            <MessageView
+              message={message}
+              perMessage={data.per_message}
+              pending={approveOne.isPending}
+              onApprove={() => approveOne.mutate(message)}
+            />
+          )}
+        </div>
+      )}
+      {!data.per_message &&
+        (data.approved ? (
+          <p className="text-muted-foreground">
+            Approved for these {total} {total === 1 ? 'message' : 'messages'} and any rendered
+            later, until the step or its template changes.
+          </p>
         ) : (
-          <ul aria-label="Search results" className="flex flex-col gap-1 text-sm">
-            {results.data.items.map((row) => (
-              <li key={row.id} className="flex items-center gap-2">
-                <span>{row.contact_name || 'Unnamed contact'}</span>
-                {row.email !== null && <span className="text-muted-foreground">{row.email}</span>}
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={view.isPending}
-                  onClick={() => view.mutate([row.id])}
-                >
-                  Preview
-                </Button>
+          <Button
+            className="w-fit"
+            size="sm"
+            disabled={approve.isPending}
+            onClick={() => approve.mutate(data.fingerprint)}
+          >
+            Approve step {step.position}
+          </Button>
+        ))}
+      <StaleNotice notice={notice} />
+      {refusal !== undefined && <ErrorNote label="Not approved." error={refusal} />}
+      {data.blocked.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <p className="font-medium">
+            {data.blocked.length} {data.blocked.length === 1 ? 'message' : 'messages'} can&apos;t be
+            sent and {data.blocked.length === 1 ? 'stays' : 'stay'} blocked
+          </p>
+          <ul aria-label={`Blocked messages of step ${step.position}`} className="text-xs">
+            {data.blocked.map((m) => (
+              <li key={m.enrollment_id}>
+                {m.contact_name || 'Unnamed contact'}: {m.blocked}
               </li>
             ))}
           </ul>
-        ))}
-      {view.isError && <ErrorNote label="The preview did not render." error={view.error} />}
-      <StaleNotice notice={notice} />
-      {refusal !== null && <ErrorNote label="Not approved." error={refusal} />}
-      <PreviewList
-        previews={shown}
-        onApprove={(previews) => approve.mutate(previews)}
-        pending={approve.isPending}
-      />
-    </Section>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function StepState({
+  approved,
+  perMessage,
+  unapproved,
+}: {
+  approved: boolean
+  perMessage: boolean
+  unapproved: number
+}) {
+  if (perMessage) {
+    return (
+      <span className="text-xs text-muted-foreground">
+        {unapproved === 0
+          ? 'Every message approved'
+          : `${unapproved} ${unapproved === 1 ? 'message' : 'messages'} to approve`}
+      </span>
+    )
+  }
+  return approved ? (
+    <span className="text-xs font-medium text-emerald-700 dark:text-emerald-300">Approved</span>
+  ) : (
+    <span className="text-xs text-muted-foreground">Not approved</span>
+  )
+}
+
+function MessageView({
+  message,
+  perMessage,
+  pending,
+  onApprove,
+}: {
+  message: MessagePreview
+  perMessage: boolean
+  pending: boolean
+  onApprove: () => void
+}) {
+  return (
+    <article
+      aria-label={`Message to ${message.contact_name || 'unnamed contact'}`}
+      className="rounded-md bg-muted/40 p-2"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-muted-foreground">
+          {message.contact_name || 'Unnamed contact'}
+          {message.to_address !== null && ` <${message.to_address}>`}
+        </p>
+        {perMessage &&
+          (message.approved ? (
+            <span className="text-xs font-medium text-emerald-700 dark:text-emerald-300">
+              Approved
+            </span>
+          ) : (
+            <Button size="xs" disabled={pending} onClick={onApprove}>
+              Approve this message
+            </Button>
+          ))}
+      </div>
+      {message.blocked !== null && <p className="text-destructive">Blocked: {message.blocked}</p>}
+      {message.subject !== null && <p className="font-medium">{message.subject}</p>}
+      {message.body !== null && <pre className="font-sans whitespace-pre-wrap">{message.body}</pre>}
+      {message.issues.length > 0 && (
+        <ul className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+          {message.issues.map((issue, i) => (
+            <li key={i}>
+              {issue.severity}: {issue.message}
+            </li>
+          ))}
+        </ul>
+      )}
+    </article>
   )
 }
 
