@@ -21,8 +21,9 @@ from netkeeper.campaigns.gmail_fake import MAILER_DAEMON, FakeGmail
 from netkeeper.crm import apply as mapping
 from netkeeper.crm import do_not_send
 from netkeeper.crm.contacts import confirm_contact
-from netkeeper.crm.history import HISTORY_SUMMARY, import_workbook
+from netkeeper.crm.history import HISTORY_SUMMARY, awaiting_reply_triage, import_workbook
 from netkeeper.crm.history_workbook import read_workbook
+from netkeeper.crm.identity import merge
 from netkeeper.db import session_scope
 from netkeeper.linkedin.connections import ConnectionsPage, SyncMode
 from netkeeper.linkedin.voyager import ConnectionSummary
@@ -30,6 +31,7 @@ from netkeeper.models import (
     Contact,
     ContactEmail,
     DoNotSendReason,
+    HistoryCampaign,
     HistoryRecipient,
     HistoryReplyKind,
     Interaction,
@@ -551,3 +553,262 @@ def test_subjects_compare_without_reply_prefixes_and_quotes_never_reach_the_quer
     assert history_scan.subject_query(target) == (
         'subject:"Say hi now" -from:me after:1772323200 before:1772409600'
     )
+
+
+# --- the safety review's findings (#65 review) ------------------------------------------
+
+
+def _sync_page(contact: Contact) -> ConnectionsPage:
+    assert contact.li_urn is not None and contact.li_public_id is not None
+    return ConnectionsPage(
+        mode=SyncMode.FULL,
+        number=0,
+        start=0,
+        total=1,
+        connections=(
+            ConnectionSummary(
+                urn=contact.li_urn,
+                public_id=contact.li_public_id,
+                first_name=contact.first_name or "",
+                last_name=contact.last_name or "",
+                headline=contact.headline,
+                connected_at=None,
+            ),
+        ),
+        observed_at=NOW,
+    )
+
+
+def test_import_merge_scan_sync_keeps_the_replier_flag(
+    writer: Session, user: User, people: dict[str, Contact], gmail: FakeGmail
+) -> None:
+    """B1: a merge between the import and the scan moves the history rows, and the
+    connections sync still leaves the scan's flag alone."""
+    loser = people["ada"]
+    survivor = factories.make_contact(writer, user, emails=["ada.home@example.test"])
+    merge(writer, user, survivor.id, loser.id)
+    assert {
+        r.contact_id
+        for r in writer.scalars(
+            scoped(user, HistoryRecipient).where(HistoryRecipient.email == "ada@example.test")
+        )
+    } == {survivor.id}
+
+    _scan(writer, user, gmail)
+    assert survivor.needs_review_at == NOW
+
+    counts = mapping.apply_page(writer, user, _sync_page(survivor))
+
+    assert counts.confirmed_by_urn == 0
+    assert survivor.needs_review_at == NOW
+
+
+def test_a_row_naming_a_merged_away_contact_still_counts_through_the_chain(
+    writer: Session, user: User, people: dict[str, Contact], gmail: FakeGmail
+) -> None:
+    """B1: rows written before merges moved them are followed through the merge chain."""
+    _scan(writer, user, gmail)
+    ada = people["ada"]
+    survivor = factories.make_contact(writer, user, emails=["ada.home@example.test"])
+    merge(writer, user, survivor.id, ada.id)
+    for row in writer.scalars(scoped(user, HistoryRecipient)):
+        if row.contact_id == survivor.id:
+            row.contact_id = ada.id  # as a row from before the merge moved rows would be
+    writer.flush()
+
+    assert awaiting_reply_triage(writer, user, survivor.id)
+
+
+@pytest.mark.parametrize("replier_survives", [True, False])
+def test_a_merge_keeps_a_replier_s_flag_in_both_directions(
+    writer: Session,
+    user: User,
+    people: dict[str, Contact],
+    gmail: FakeGmail,
+    replier_survives: bool,
+) -> None:
+    """S1: whichever side waits for a person to read the reply, the survivor keeps the
+    earlier mark, and the guards still exclude it."""
+    _scan(writer, user, gmail)
+    ada = people["ada"]
+    other = factories.make_contact(writer, user, emails=["ada.home@example.test"])
+    survivor, loser = (ada, other) if replier_survives else (other, ada)
+
+    merge(writer, user, survivor.id, loser.id)
+
+    assert survivor.needs_review_at == NOW
+    campaign = factories.make_campaign(writer, user, contacted_within_days_guard=0)
+    (verdict,) = check_enrollment(writer, user, campaign, [survivor.id], now=NOW)
+    assert Reason.NEEDS_REVIEW in verdict.reasons
+
+
+def test_a_merge_keeps_the_earlier_of_two_marks(
+    writer: Session, user: User, people: dict[str, Contact], gmail: FakeGmail
+) -> None:
+    _scan(writer, user, gmail)
+    ada = people["ada"]
+    card = factories.make_contact(
+        writer, user, emails=["ada.home@example.test"], needs_review_at=NOW - timedelta(days=3)
+    )
+
+    merge(writer, user, ada.id, card.id)
+
+    assert ada.needs_review_at == NOW - timedelta(days=3)
+
+
+def test_a_replier_whose_contact_appeared_after_the_import_is_flagged(
+    writer: Session, user: User, people: dict[str, Contact], gmail: FakeGmail
+) -> None:
+    """S2: Gus had no contact at import; one created since is matched at apply time."""
+    gus = factories.make_contact(writer, user, emails=["gus@example.test"])
+
+    report = _scan(writer, user, gmail)
+
+    row = _row(writer, user, "gus@example.test")
+    assert row.contact_id == gus.id
+    assert gus.needs_review_at == NOW
+    kinds = sorted(
+        e.kind
+        for e in writer.scalars(scoped(user, Interaction).where(Interaction.contact_id == gus.id))
+    )
+    assert kinds == sorted([InteractionKind.EMAIL_OUT, InteractionKind.EMAIL_IN])
+    assert report.matched_late == 1
+    assert report.no_contact == []
+
+
+def test_a_notice_for_jim_bob_is_not_bob_s_bounce(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """S3: a full-text search for bob@ also finds a notice about jim.bob@; with no
+    X-Failed-Recipients, the notice must name bob@ exactly."""
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    fake.deliver(
+        _mail(
+            f"Mail Delivery Subsystem <{MAILER_DAEMON}>",
+            "Delivery Status Notification (Failure)",
+            "Address not found: jim.bob@example.test",
+        ),
+        at=_at(2),
+    )
+
+    report = _scan(writer, user, fake)
+
+    assert do_not_send.find(writer, user, "bob@example.test") is None
+    assert _row(writer, user, "bob@example.test").reply_kind is None
+    assert report.unconfirmed_notices == 1
+
+
+def test_a_notice_without_the_header_that_names_the_address_exactly_is_a_bounce() -> None:
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    ref = fake.deliver(
+        _mail(
+            MAILER_DAEMON, "Delivery Status Notification (Failure)", "Not found: bob@example.test."
+        ),
+        at=_at(2),
+    )
+    message = fake.get_message(ref.id, purpose="test")
+    assert history_scan.names_failed_recipient(message, "bob@example.test")
+    assert not history_scan.names_failed_recipient(message, "ob@example.test")
+    assert not history_scan.names_failed_recipient(message, "bob@example.te")
+
+
+def test_classify_from_ignores_a_message_from_another_sender() -> None:
+    """T1: from:ada@ is a word match; a message from bada@ is not Ada's."""
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    ref = fake.deliver(_mail("bada@example.test", "Re: Catching up", "Not Ada."), at=_at(4))
+    message = fake.get_message(ref.id, purpose="test")
+    assert history_scan.classify_from(message, "ada@example.test") is None
+    assert history_scan.classify_from(message, "bada@example.test") is HistoryReplyKind.REPLY
+
+
+def test_an_unsubscribe_phrase_counts_even_in_an_automatic_answer() -> None:
+    """N2: err toward not mailing."""
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    ref = fake.deliver(
+        _mail(
+            "cy@example.test",
+            "Out of office",
+            "Away. Please remove me from your list.",
+            Auto_Submitted="auto-replied",
+        ),
+        at=_at(3),
+    )
+    message = fake.get_message(ref.id, purpose="test")
+    assert history_scan.classify_from(message, "cy@example.test") is HistoryReplyKind.UNSUBSCRIBE
+
+
+def test_an_address_starting_with_a_dash_is_never_searched(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """N1: ``-x@y`` would read as a negated term."""
+    row = _row(writer, user, "fay@example.test")
+    row.email = "-fay@example.test"
+    writer.flush()
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+
+    _scan(writer, user, fake)
+
+    assert all("-fay" not in purpose for _, purpose in fake.calls)
+    assert len([m for m, _ in fake.calls if m == "messages.list"]) == 2 * (
+        len(scan_targets(writer, user, rescan=True)) - 1
+    )
+
+
+def _overlap_reply() -> FakeGmail:
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    fake.deliver(_mail("ada@example.test", "Re: Catching up", "Yes, let's talk."), at=_at(20))
+    return fake
+
+
+def _scan_campaign(writer: Session, user: User, gmail: FakeGmail, name: str) -> None:
+    targets = [
+        t for t in scan_targets(writer, user) if _campaign_name(writer, user, t.campaign_id) == name
+    ]
+    apply_scan(writer, user, read_gmail(gmail, targets), now=NOW)
+
+
+def _campaign_name(writer: Session, user: User, campaign_id: int) -> str:
+    campaign = writer.scalars(
+        scoped(user, HistoryCampaign).where(HistoryCampaign.id == campaign_id)
+    ).one()
+    return campaign.name
+
+
+def _review_mark(contact: Contact) -> datetime | None:
+    return contact.needs_review_at
+
+
+def test_a_later_campaign_s_row_with_the_same_message_does_not_re_flag(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """T2: campaign A flags Ada; she is confirmed; campaign B's row for the same message,
+    scanned in a later run, records no second flag."""
+    gmail = _overlap_reply()
+    _scan_campaign(writer, user, gmail, "Spring check-in")
+    ada = people["ada"]
+    assert ada.needs_review_at == NOW
+    confirm_contact(writer, user, ada.id)
+
+    _scan_campaign(writer, user, gmail, "Spring follow-up")
+
+    assert _review_mark(ada) is None
+    assert _row(writer, user, "ada@example.test", "Spring follow-up").reply_gmail_id is not None
+    assert len(_inbound(writer, user, ada)) == 1
+
+
+def test_a_rescan_after_the_entry_was_deleted_does_not_re_flag(
+    writer: Session, user: User, people: dict[str, Contact], gmail: FakeGmail
+) -> None:
+    """T2: the row remembers its message even when its timeline entry is gone."""
+    _scan(writer, user, gmail)
+    ada = people["ada"]
+    confirm_contact(writer, user, ada.id)
+    for entry in _inbound(writer, user, ada):
+        writer.delete(entry)
+    writer.flush()
+    writer.expire_all()
+
+    report = _scan(writer, user, gmail, rescan=True)
+
+    assert ada.needs_review_at is None
+    assert report.flagged == 0

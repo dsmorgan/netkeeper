@@ -10,7 +10,8 @@ a contact:
   imported history (:data:`HISTORY_SUMMARY`). It moves the contact's
   ``last_contacted_at``, so the campaign guard ``not_contacted_recently`` counts it.
 - for a person on the workbook's own bounce list, the address goes on the
-  do-not-send list as ``bounced``.
+  do-not-send list as ``bounced``, once: a re-run does not put back an entry a person
+  removed.
 
 Matching is by email address through :func:`netkeeper.crm.identity.resolve`. An
 address no contact holds is reported as unmatched, and ``create_missing`` creates a
@@ -227,6 +228,9 @@ def _import_campaign(
             session.add(recipient)
             existing[person.email] = recipient
             out.new_rows += 1
+        # Listed as bounced for the first time: put on do-not-send once. A re-run never
+        # puts back an entry a person has since removed (#65 review, N7).
+        newly_bounced = person.bounced and not recipient.bounce_listed
         # A later export only ever adds to what an earlier one said.
         recipient.opened = recipient.opened or person.opened
         recipient.clicked = recipient.clicked or person.clicked
@@ -236,7 +240,7 @@ def _import_campaign(
         session.flush()
         if record_email_out(session, user, recipient, name, started_at):
             out.new_interactions += 1
-        if person.bounced:
+        if newly_bounced:
             do_not_send.add(
                 session, user, person.email, DoNotSendReason.BOUNCED, contact_id=contact_id
             )
@@ -332,19 +336,33 @@ def campaign_start(started_on: date) -> datetime:
 
 
 def awaiting_reply_triage(session: Session, user: User, contact_id: int) -> bool:
-    """Whether the Gmail scan flagged this contact for review because they wrote back to
-    an old campaign. The connections sync reads it so that a sync matching the contact by
-    URN does not clear a review flag it did not set (#65)."""
-    held = session.scalar(
+    """Whether a reply to an old campaign is recorded for this contact, or for a contact
+    merged into it, so its review mark is the Gmail scan's and waits for a person.
+
+    The connections sync reads it so that a sync matching the contact by URN does not
+    clear a mark it did not set, and a merge reads it so that it keeps the mark (#65).
+    A merge moves the rows to the survivor; rows that still name a merged-away contact
+    are followed through the merge chain."""
+    holders = session.scalars(
         scoped(user, HistoryRecipient)
-        .with_only_columns(HistoryRecipient.id)
+        .with_only_columns(HistoryRecipient.contact_id)
         .where(
-            HistoryRecipient.contact_id == contact_id,
+            HistoryRecipient.contact_id.is_not(None),
             HistoryRecipient.reply_kind.in_((HistoryReplyKind.REPLY, HistoryReplyKind.UNSUBSCRIBE)),
         )
-        .limit(1)
+        .distinct()
     )
-    return held is not None
+    for holder in holders:
+        if holder is None:
+            continue
+        if holder == contact_id:
+            return True
+        try:
+            if resolve_survivor(session, user, holder).id == contact_id:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 @dataclass(frozen=True, slots=True)

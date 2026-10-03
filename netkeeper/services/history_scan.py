@@ -7,14 +7,16 @@ last batch:
 
 - ``from:<address>``: what the person sent. Each message found is read (metadata
   only) and classified with the reply poll's own tests
-  (:mod:`netkeeper.services.campaign_replies`): an automatic answer
-  (:func:`~netkeeper.services.campaign_replies.is_auto_reply`), an unsubscribe
-  request (:func:`~netkeeper.services.campaign_replies.asks_to_unsubscribe`), or
-  any other reply.
-- ``from:mailer-daemon <address>``: delivery notices that name the address. One
+  (:mod:`netkeeper.services.campaign_replies`): an unsubscribe request
+  (:func:`~netkeeper.services.campaign_replies.asks_to_unsubscribe`, checked first,
+  so it counts even in an automatic answer), an automatic answer
+  (:func:`~netkeeper.services.campaign_replies.is_auto_reply`), or any other reply.
+- ``from:mailer-daemon "<address>"``: delivery notices that name the address. One
   that is a hard bounce
-  (:func:`~netkeeper.services.campaign_replies.is_hard_bounce`) and, when it names
-  its failed recipients, names this one, is a bounce.
+  (:func:`~netkeeper.services.campaign_replies.is_hard_bounce`) is a bounce of this
+  address when its ``X-Failed-Recipients`` lists it or, with no such header, when its
+  subject or snippet names it exactly (:func:`names_failed_recipient`). Any other
+  hard-bounce notice the search found is skipped and counted.
 
 **The subject pass.** The workbook lists only the people who opened, clicked, or
 bounced, so a reply from anyone else would be missed. Replies usually keep the
@@ -42,6 +44,9 @@ database session while Gmail answers.
   recipient's own, on the do-not-send list as ``opted_out``, as
   :func:`~netkeeper.services.campaign_replies.record_reply` does for a live
   unsubscribe; it is also recorded as a reply;
+- a recipient the import could not match is matched again by address first, so a
+  contact created or given the address since is acted on (and gets the imported
+  ``email_out``);
 - any other reply records an ``email_in`` interaction marked as imported history,
   sets ``replied_at``, and sets the contact's ``needs_review_at``, so the campaign
   guards skip the contact until a person reads the reply and confirms the contact;
@@ -128,7 +133,7 @@ SUBJECT_SEARCH_MAX: Final = 200
 """At most this many messages one campaign's subject search reads."""
 
 _REPLY_PREFIX: Final = re.compile(r"^\s*(?:re|fwd?|aw)\s*:\s*", re.IGNORECASE)
-_SEARCHABLE: Final = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+")
+_SEARCHABLE: Final = re.compile(r"[A-Za-z0-9._%+][A-Za-z0-9._%+\-]*@[A-Za-z0-9.\-]+")
 _SAMPLE: Final = 20
 
 HUMAN: Final = frozenset({HistoryReplyKind.REPLY, HistoryReplyKind.UNSUBSCRIBE})
@@ -302,6 +307,7 @@ class ScanRead:
     stopped: str | None = None
     remaining: int = 0
     subject_remaining: int = 0
+    unconfirmed_notices: int = 0
 
 
 def read_gmail(
@@ -315,7 +321,7 @@ def read_gmail(
     for index, target in enumerate(targets):
         purpose = f"history scan of old campaign {target.campaign_id}"
         try:
-            findings = _scan_one(gmail, target, purpose, cache)
+            findings = _scan_one(gmail, target, purpose, cache, out)
         except GmailError as exc:
             out.stopped = exc.code
             out.remaining = len(targets) - index
@@ -388,7 +394,7 @@ def _scan_subject(
 
 
 def _scan_one(
-    gmail: Gmail, target: Target, purpose: str, cache: dict[str, Message | None]
+    gmail: Gmail, target: Target, purpose: str, cache: dict[str, Message | None], out: ScanRead
 ) -> tuple[Finding, ...]:
     if not _SEARCHABLE.fullmatch(target.email):
         log.info("a history recipient's address cannot be searched for; skipped")
@@ -405,11 +411,15 @@ def _scan_one(
         if kind is not None:
             findings.append(_finding(kind, message))
     notices = gmail.search(
-        f"{DAEMON_QUERY} {target.email} {span}", max_results=SEARCH_MAX, purpose=purpose
+        f'{DAEMON_QUERY} "{target.email}" {span}', max_results=SEARCH_MAX, purpose=purpose
     )
     for message in _read(gmail, notices, purpose, cache):
+        if not is_hard_bounce(message):
+            continue
         if names_failed_recipient(message, target.email):
             findings.append(_finding(HistoryReplyKind.BOUNCE, message))
+        else:
+            out.unconfirmed_notices += 1
     return tuple(findings)
 
 
@@ -439,23 +449,27 @@ def classify_from(message: Message, address: str) -> HistoryReplyKind | None:
     system's."""
     if message.label_ids & _OWN or sender_of(message) != address or is_daemon(message):
         return None
-    if is_auto_reply(message):
-        return HistoryReplyKind.AUTO
+    # An unsubscribe phrase wins even in an automatic answer: err toward not mailing.
     if asks_to_unsubscribe(message):
         return HistoryReplyKind.UNSUBSCRIBE
+    if is_auto_reply(message):
+        return HistoryReplyKind.AUTO
     return HistoryReplyKind.REPLY
 
 
 def names_failed_recipient(message: Message, address: str) -> bool:
     """Whether a notice found by a search for ``address`` is a hard bounce of it. A notice
-    that lists its failed recipients (``X-Failed-Recipients``) must list this one; one that
-    lists none counts, since the search found the address in it."""
+    that lists its failed recipients (``X-Failed-Recipients``) must list this one. One that
+    lists none must name the exact address in its subject or snippet: a full-text search
+    for ``bob@`` also finds a notice about ``jim.bob@`` (#65 review, S3)."""
     if not is_hard_bounce(message):
         return False
     failed = message.header("X-Failed-Recipients")
-    if failed is None or not failed.strip():
-        return True
-    return address in {a.lower() for _, a in getaddresses([failed])}
+    if failed is not None and failed.strip():
+        return address in {a.lower() for _, a in getaddresses([failed])}
+    # No address character either side; a sentence's full stop after it is not one.
+    exact = re.compile(rf"(?<![\w.+-]){re.escape(address)}(?![\w+-])(?!\.[\w.+-])", re.IGNORECASE)
+    return bool(exact.search(f"{message.header('Subject') or ''} {message.snippet}"))
 
 
 def _finding(kind: HistoryReplyKind, message: Message) -> Finding:
@@ -500,6 +514,10 @@ class ScanReport:
     by_subject: dict[int, int] = field(default_factory=dict)
     """Per campaign, the people the workbook does not list whom the subject pass found."""
     subject_samples: list[str] = field(default_factory=list)
+    matched_late: int = 0
+    """Recipients unmatched at import whose address a contact holds now."""
+    unconfirmed_notices: int = 0
+    """Failure notices skipped because they did not name the address exactly."""
     stopped: str | None = None
     remaining: int = 0
     subject_remaining: int = 0
@@ -511,7 +529,10 @@ def apply_scan(session: Session, user: User, read: ScanRead, *, now: datetime) -
     if not is_writer(session):
         raise RuntimeError("applying the history scan needs a writer session")
     report = ScanReport(
-        stopped=read.stopped, remaining=read.remaining, subject_remaining=read.subject_remaining
+        stopped=read.stopped,
+        remaining=read.remaining,
+        subject_remaining=read.subject_remaining,
+        unconfirmed_notices=read.unconfirmed_notices,
     )
     campaigns = {
         c.id: c
@@ -536,6 +557,9 @@ def apply_scan(session: Session, user: User, read: ScanRead, *, now: datetime) -
         if not scanned.findings:
             report.nothing += 1
             continue
+        campaign = campaigns.get(row.history_campaign_id)
+        if row.contact_id is None and campaign is not None:
+            _match_late(session, user, row, campaign, report)
         _apply_one(
             session, user, row, scanned.findings, names.get(row.history_campaign_id), report, now
         )
@@ -667,6 +691,26 @@ def _recorded_on(session: Session, user: User, finding: Finding) -> int | None:
         )
         .limit(1)
     )
+
+
+def _match_late(
+    session: Session,
+    user: User,
+    row: HistoryRecipient,
+    campaign: HistoryCampaign,
+    report: ScanReport,
+) -> None:
+    """A recipient with no contact at import time, matched now by address (#65 review, S2):
+    a contact created or given the address since the import is flagged like any other,
+    and gets the imported ``email_out`` the import would have written."""
+    match, contact_id = match_address(session, user, row.email)
+    if match != "matched" or contact_id is None:
+        return
+    row.contact_id = contact_id
+    session.flush()
+    if record_email_out(session, user, row, campaign.name, campaign_start(campaign.started_on)):
+        report.new_interactions += 1
+        report.matched_late += 1
 
 
 def _contact(session: Session, user: User, row: HistoryRecipient) -> Contact | None:

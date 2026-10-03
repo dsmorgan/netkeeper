@@ -67,6 +67,7 @@ from netkeeper.models import (
     EmailStatus,
     Enrollment,
     EnrollmentStatus,
+    HistoryRecipient,
     LinkKind,
     ListMember,
     Message,
@@ -80,7 +81,7 @@ from netkeeper.models import (
     normalize_public_id,
 )
 from netkeeper.models.base import utcnow
-from netkeeper.scoping import get_scoped, scoped
+from netkeeper.scoping import get_scoped, scoped, scoped_update
 
 log = logging.getLogger(__name__)
 
@@ -973,7 +974,9 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     :func:`_merge_tags`. Static-list memberships carry across too, so the
     survivor is in every list the loser was in; see :func:`_merge_list_members`.
     Campaign messages all move, and so do enrollments, one per campaign; see
-    :func:`_merge_campaign_rows`.
+    :func:`_merge_campaign_rows`. Old-campaign history rows move too, and a contact
+    waiting for a person to read a reply to an old campaign stays waiting; see
+    :func:`_merge_history_rows`.
     The loser's URN and slug move to the survivor when it lacks
     them; otherwise the slug becomes an alias of the survivor and the URN is
     dropped. Both are cleared on the loser, whose ``merged_into_id`` points at
@@ -1019,11 +1022,41 @@ def merge(session: Session, user: User, survivor_id: int, loser_id: int) -> Cont
     _merge_tags(session, user, survivor, loser)
     _merge_list_members(session, user, survivor, loser)
     _merge_campaign_rows(session, user, survivor, loser)
+    keep_review = _merge_history_rows(session, user, survivor, loser)
     _merge_scalars(survivor, loser)
+    if keep_review is not None:
+        survivor.needs_review_at = keep_review
     _merge_synced_values(survivor, loser)
     loser.merged_into_id = survivor.id
     session.flush()
     return survivor
+
+
+def _merge_history_rows(
+    session: Session, user: User, survivor: Contact, loser: Contact
+) -> datetime | None:
+    """Move the loser's old-campaign history rows to the survivor (#65), and say which
+    ``needs_review_at`` the survivor keeps when either side waits for a person to read a
+    reply to an old campaign: the earlier of the two set ones. ``None``: the usual rule.
+
+    A merge is how a person says two contacts are one, not that they read the reply, so
+    it must not clear that mark in either direction (#65 review, S1)."""
+    from netkeeper.crm.history import awaiting_reply_triage  # history imports this module
+
+    waiting = any(
+        contact.needs_review_at is not None and awaiting_reply_triage(session, user, contact.id)
+        for contact in (survivor, loser)
+    )
+    session.execute(
+        scoped_update(user, HistoryRecipient)
+        .where(HistoryRecipient.contact_id == loser.id)
+        .values(contact_id=survivor.id)
+        .execution_options(synchronize_session="evaluate")
+    )
+    if not waiting:
+        return None
+    marks = [m for m in (survivor.needs_review_at, loser.needs_review_at) if m is not None]
+    return min(marks)
 
 
 def _merge_identity(session: Session, user: User, survivor: Contact, loser: Contact) -> None:

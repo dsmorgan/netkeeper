@@ -295,3 +295,17 @@ def test_a_recipient_is_unique_per_campaign_and_address_whatever_its_case(
     )
     with pytest.raises(IntegrityError):
         session.flush()
+
+
+def test_a_re_import_does_not_put_back_a_bounce_a_person_removed(
+    writer: Session, user: User
+) -> None:
+    """N7: the workbook's bounce goes on the list once; removing it by hand sticks."""
+    import_workbook(writer, user, read_workbook(_workbook()))
+    entry = do_not_send.find(writer, user, "dee@example.test")
+    assert entry is not None
+    do_not_send.remove(writer, user, entry.id)
+
+    import_workbook(writer, user, read_workbook(_workbook()))
+
+    assert do_not_send.find(writer, user, "dee@example.test") is None

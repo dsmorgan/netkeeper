@@ -3884,6 +3884,8 @@ def history_import(
         if not apply:
             session.rollback()
     _print_history_import(report, applied=apply)
+    if report.skipped:
+        raise typer.Exit(code=1)
 
 
 def _print_history_import(report: ImportReport, *, applied: bool) -> None:
@@ -3893,7 +3895,6 @@ def _print_history_import(report: ImportReport, *, applied: bool) -> None:
         typer.echo(f"tab {skipped.index + 1} skipped: {skipped.reason}")
     if not report.campaigns:
         typer.echo("no campaign tabs found")
-        return
     rows = [
         (
             str(c.index + 1),
@@ -3929,7 +3930,8 @@ def _print_history_import(report: ImportReport, *, applied: bool) -> None:
         "SENT TO",
         "UNLISTED",
     )
-    typer.echo(_format_table(headers, rows), nl=False)
+    if rows:
+        typer.echo(_format_table(headers, rows), nl=False)
     for c in report.campaigns:
         for warning in c.warnings:
             typer.echo(f"tab {c.index + 1}: {warning}")
@@ -3955,6 +3957,13 @@ def _print_history_import(report: ImportReport, *, applied: bool) -> None:
             f"warning: the workbook names only the people who opened, clicked, or bounced."
             f" {report.unlisted} recipient(s) across these campaigns are not named in it, so"
             " they are not imported and the guards cannot know the old tool emailed them."
+        )
+    if report.skipped:
+        tabs = ", ".join(f"{t.index + 1} ({t.reason})" for t in report.skipped)
+        typer.echo(
+            f"warning: {len(report.skipped)} tab(s) were skipped and nothing from them was"
+            f" imported: {tabs}",
+            err=True,
         )
 
 
@@ -4063,6 +4072,16 @@ def _print_history_scan(report: history_scan.ScanReport, *, applied: bool) -> No
         f" {report.new_interactions} new timeline entr"
         f"{'y' if report.new_interactions == 1 else 'ies'}"
     )
+    if report.matched_late:
+        typer.echo(
+            f"{report.matched_late} recipient(s) unmatched at import now match a contact"
+            " and got the imported email-out entry"
+        )
+    if report.unconfirmed_notices:
+        typer.echo(
+            f"{report.unconfirmed_notices} failure notice(s) skipped: they did not name the"
+            " searched address exactly"
+        )
     if report.no_contact:
         typer.echo(
             f"wrote back, but no single contact holds the address ({len(report.no_contact)});"
