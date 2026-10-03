@@ -21,6 +21,7 @@ import pytest
 from campaign_fakes import ARMED_FOR_SEND, NOW, SETTINGS, make_mailbox
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.campaigns import schedule
 from netkeeper.campaigns.compose import message_id_for
 from netkeeper.campaigns.gmail import (
     Draft,
@@ -32,6 +33,7 @@ from netkeeper.campaigns.gmail import (
     MessageRef,
 )
 from netkeeper.campaigns.gmail_fake import FakeGmail
+from netkeeper.config import CampaignSettings
 from netkeeper.crm.contacts import merge_contacts
 from netkeeper.db import session_scope
 from netkeeper.models import (
@@ -67,6 +69,19 @@ from netkeeper.services.mailboxes import MailboxNotReady
 
 EMAIL = TemplateChannel.EMAIL
 WEEK = timedelta(days=7)
+
+
+def follow_up(sent_at: datetime) -> datetime:
+    """When step 2 (a week, no time of its own) is due after a send at ``sent_at``: the next
+    suggested slot after the week (#338; these users are on UTC)."""
+    return schedule.step_due(
+        sent_at,
+        delay_days=7,
+        send_time=None,
+        slots=schedule.suggested(CampaignSettings(), "UTC"),
+    )
+
+
 LATER = engine_module.RECONCILE_AFTER + timedelta(minutes=1)
 NO_REPLY_POLL = timedelta(days=3650)
 
@@ -435,7 +450,7 @@ def test_a_draft_that_disappears_with_a_sent_message_in_its_thread_is_sent(draft
     assert message.gmail_message_id == sent_ref.id
     assert message.error is None
     enrollment = drafts.enrollment(enrollment_id)
-    assert (enrollment.current_step, enrollment.next_action_at) == (1, sent_at + WEEK)
+    assert (enrollment.current_step, enrollment.next_action_at) == (1, follow_up(sent_at))
     assert drafts.labelled() == [sent_ref.id]
 
 
@@ -611,14 +626,14 @@ def test_a_scheduled_draft_stays_drafted_until_delivered_and_the_follow_up_count
     assert (message.status, message.sent_at, message.error) == (MessageStatus.SENT, seen, None)
     assert message.gmail_message_id == scheduled.id
     enrollment = drafts.enrollment(enrollment_id)
-    assert (enrollment.current_step, enrollment.next_action_at) == (1, seen + WEEK)
+    assert (enrollment.current_step, enrollment.next_action_at) == (1, follow_up(seen))
     assert drafts.labelled() == [scheduled.id]
     assert len(queries) == 4  # a draft seen sent needs no Scheduled search
 
     # Step 2 is drafted only once it is due, a week after the send was seen.
-    drafts.tick(seen + WEEK - timedelta(minutes=1))
+    drafts.tick(follow_up(seen) - timedelta(minutes=1))
     assert len(drafts.messages(enrollment_id)) == 1
-    drafts.tick(seen + WEEK)
+    drafts.tick(follow_up(seen))
     assert [m.status for m in drafts.messages(enrollment_id)] == [
         MessageStatus.SENT,
         MessageStatus.DRAFTED,
@@ -873,7 +888,7 @@ def test_a_canceled_schedule_back_under_the_same_draft_id_clears_its_mark(
     drafts.tick(NOW + timedelta(hours=4))
     [message] = drafts.messages(enrollment_id)
     assert (message.status, message.sent_at) == (MessageStatus.SENT, sent_at)
-    assert drafts.enrollment(enrollment_id).next_action_at == sent_at + WEEK
+    assert drafts.enrollment(enrollment_id).next_action_at == follow_up(sent_at)
 
 
 def test_a_drafts_search_error_changes_nothing(drafts: Mail) -> None:
@@ -974,7 +989,7 @@ def test_a_scheduled_leftover_that_misses_again_after_days_does_not_give_up(
     drafts.gmail.send_scheduled(scheduled, at=delivered_at)
     drafts.tick(late_miss + every)
     assert (message().status, message().sent_at) == (MessageStatus.SENT, delivered_at)
-    assert drafts.enrollment(enrollment_id).next_action_at == delivered_at + WEEK
+    assert drafts.enrollment(enrollment_id).next_action_at == follow_up(delivered_at)
 
 
 def test_the_find_never_counts_a_scheduled_message_as_sent() -> None:
@@ -1532,7 +1547,7 @@ def test_a_sent_draft_is_found_whether_gmail_keeps_its_id_or_not(
         sent_at,
         sent.id,
     )
-    assert drafts.enrollment(enrollment_id).next_action_at == sent_at + WEEK
+    assert drafts.enrollment(enrollment_id).next_action_at == follow_up(sent_at)
     assert drafts.labelled() == [sent.id]
 
 

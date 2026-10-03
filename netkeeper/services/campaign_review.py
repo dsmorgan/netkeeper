@@ -174,6 +174,8 @@ def step_fingerprint(
                 step.condition,
                 step.same_thread,
                 step.template_id,
+                # Only when set (#338), so a step with none keeps the fingerprint it had.
+                *([] if step.send_time is None else [step.send_time]),
             ],
             "template": None
             if template is None
@@ -977,10 +979,14 @@ def activate(
     settings: Settings,
     me: Mapping[str, str],
     now: datetime,
+    starts_at: datetime,
 ) -> Campaign:
     """The only way a campaign should go ``active``: :class:`ReviewIncomplete` unless every
     requirement is met, then ``approved_at`` and
-    :func:`netkeeper.services.campaign_engine.activate`, in the caller's writer transaction."""
+    :func:`netkeeper.services.campaign_engine.activate`, in the caller's writer transaction.
+
+    ``starts_at`` is the scheduled start (#338): nothing of the campaign is sent before
+    it. Callers default it to :func:`netkeeper.campaigns.schedule.default_start`."""
     _require_writer(session, "activate")
     campaign = get_campaign(session, user, campaign_id)
     gaps = missing(session, user, campaign, me=me, now=now)
@@ -995,6 +1001,7 @@ def activate(
             campaign_id,
             settings=settings,
             now=now,
+            starts_at=starts_at,
             gate=campaign_engine.REVIEW_GATE,
         )
     except campaign_engine.CampaignEngineError as exc:

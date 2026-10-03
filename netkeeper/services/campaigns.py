@@ -8,6 +8,11 @@ each command mirrors an endpoint. The state machine stays where it is:
   campaign, and nothing here holds the engine's gate token.
 - pause and resume are the engine's (:func:`campaign_engine.pause_campaign`,
   :func:`campaign_engine.resume_campaign`).
+- the scheduled start (#338): :func:`start_options` says what the default start is
+  and whether a chosen one is in a suggested send slot; :func:`set_start` moves an
+  active or paused campaign's start until its first send
+  (:func:`campaign_engine.set_start`); :func:`set_step_schedule` changes a step's
+  delay and time of day at any time before the campaign is over.
 - enrollment is the engine's :func:`campaign_engine.enroll`, so the guards
   (spec 11.9) decide who joins, and only a ``draft`` or ``reviewing`` campaign
   takes anyone.
@@ -32,6 +37,7 @@ from typing import Final
 from sqlalchemy import func, or_, true
 from sqlalchemy.orm import Session
 
+from netkeeper.campaigns import schedule
 from netkeeper.campaigns import templates as template_service
 from netkeeper.config import Settings
 from netkeeper.crm import lists as crm_lists
@@ -114,6 +120,8 @@ class StepSpec:
     mode: StepMode | None = None
     condition: StepCondition | None = None
     same_thread: bool | None = None
+    send_time: str | None = None
+    """An explicit local time of day, ``HH:MM``; None aims for the next suggested slot."""
 
 
 def _clean_name(name: str) -> str:
@@ -123,6 +131,17 @@ def _clean_name(name: str) -> str:
     if len(cleaned) > CAMPAIGN_NAME_MAX_LENGTH:
         raise InvalidCampaign(f"a campaign name is at most {CAMPAIGN_NAME_MAX_LENGTH} characters")
     return cleaned
+
+
+def _send_time(position: int, value: str | None) -> str | None:
+    """``HH:MM``, or None for the suggested slot. Refuses anything else."""
+    if value is None:
+        return None
+    try:
+        clock = schedule.parse_clock(value)
+    except schedule.ScheduleError as exc:
+        raise InvalidCampaign(f"step {position}: {exc}") from exc
+    return f"{clock:%H:%M}"
 
 
 def _step(
@@ -173,6 +192,7 @@ def _step(
         mode=mode,
         condition=condition,
         same_thread=same_thread,
+        send_time=_send_time(position, spec.send_time),
     )
 
 
@@ -438,6 +458,8 @@ class CampaignDetail:
     next_action_at: datetime | None
     """The soonest due time of an active enrollment, while the campaign is active."""
     missing: tuple[campaign_review.Missing, ...] = field(default=())
+    start_editable: bool = False
+    """Whether the scheduled start can still move: active or paused, nothing fired yet."""
     """What the review gate still needs, for a ``draft`` or ``reviewing`` campaign."""
 
 
@@ -501,6 +523,9 @@ def campaign_status(
     gaps: tuple[campaign_review.Missing, ...] = ()
     if campaign.status in REVIEWABLE:
         gaps = tuple(campaign_review.missing(session, user, campaign, me=me, now=now))
+    start_editable = campaign.status in campaign_engine.START_EDITABLE and not (
+        campaign_engine.has_fired(session, user, campaign_id)
+    )
     return CampaignDetail(
         campaign=campaign,
         mailbox_email=None if mailbox is None else mailbox.email,
@@ -508,6 +533,7 @@ def campaign_status(
         enrollments=dict(_enrollment_counts(session, user, [campaign_id])[campaign_id]),
         next_action_at=next_at,
         missing=gaps,
+        start_editable=start_editable,
     )
 
 
@@ -625,3 +651,140 @@ def resume(session: Session, user: User, campaign_id: int) -> Campaign:
         return campaign_engine.resume_campaign(session, user, campaign_id)
     except campaign_engine.CampaignEngineError as exc:
         raise CampaignConflict(str(exc)) from exc
+
+
+# --- the scheduled start and step timing (#338) -------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class StartOptions:
+    """What the activate dialog and ``campaigns activate`` show about the start."""
+
+    timezone: str
+    default_start: datetime
+    """The next Tuesday at 09:00 local time (:func:`schedule.default_start`)."""
+    suggestion: str
+    reminder: str
+    at: datetime | None = None
+    """The start asked about, if any."""
+    warning: str | None = None
+    """Why ``at`` is outside the suggested slots; None inside them, or with no ``at``."""
+
+
+def _slots(settings: Settings, user: User) -> schedule.Suggested:
+    try:
+        return schedule.suggested(settings.campaigns, user.timezone)
+    except schedule.ScheduleError as exc:
+        raise InvalidCampaign(f"the send schedule cannot be read: {exc}") from exc
+
+
+def start_warning(slots: schedule.Suggested, at: datetime) -> str | None:
+    """A warning, never a refusal, for a start outside the suggested slots (#338)."""
+    if slots.is_holiday(at):
+        return "That day is on your holiday list. netkeeper will still send then."
+    if not slots.is_suggested(at):
+        return (
+            f"That is outside the suggested slots (Tue to Thu, {schedule.SUGGESTED_HOURS[0]}"
+            f" to {schedule.SUGGESTED_HOURS[1]}). netkeeper will still send then."
+        )
+    return None
+
+
+def start_options(
+    user: User, *, settings: Settings, now: datetime, at: datetime | None = None
+) -> StartOptions:
+    """The default start, the suggestion and the reminder, and a warning for ``at``."""
+    slots = _slots(settings, user)
+    if at is not None and (at.tzinfo is None or at.utcoffset() is None):
+        raise InvalidCampaign("a start time must say its time zone")
+    return StartOptions(
+        timezone=user.timezone,
+        default_start=schedule.default_start(now, slots),
+        suggestion=schedule.SUGGESTION,
+        reminder=schedule.SERVE_REMINDER,
+        at=at,
+        warning=None if at is None else start_warning(slots, max(at, now)),
+    )
+
+
+def resolve_start(
+    user: User, *, settings: Settings, now: datetime, starts_at: datetime | None
+) -> datetime:
+    """``starts_at``, or the default start when it is None. Refuses a naive time."""
+    if starts_at is None:
+        return schedule.default_start(now, _slots(settings, user))
+    if starts_at.tzinfo is None or starts_at.utcoffset() is None:
+        raise InvalidCampaign("a start time must say its time zone")
+    return starts_at
+
+
+def set_start(
+    session: Session,
+    user: User,
+    campaign_id: int,
+    *,
+    settings: Settings,
+    now: datetime,
+    starts_at: datetime,
+) -> Campaign:
+    """Move the scheduled start (:func:`campaign_engine.set_start`): refused once the
+    campaign has sent anything, or unless it is active or paused."""
+    get_campaign(session, user, campaign_id)
+    if starts_at.tzinfo is None or starts_at.utcoffset() is None:
+        raise InvalidCampaign("a start time must say its time zone")
+    try:
+        return campaign_engine.set_start(
+            session, user, campaign_id, settings=settings, now=now, starts_at=starts_at
+        )
+    except campaign_engine.CampaignEngineError as exc:
+        raise CampaignConflict(str(exc)) from exc
+
+
+SCHEDULE_EDITABLE: Final = frozenset(
+    {CampaignStatus.DRAFT, CampaignStatus.REVIEWING, CampaignStatus.ACTIVE, CampaignStatus.PAUSED}
+)
+"""A campaign whose steps' timing can change: any that is not over."""
+
+
+def set_step_schedule(
+    session: Session,
+    user: User,
+    campaign_id: int,
+    step_id: int,
+    *,
+    settings: Settings,
+    delay_days: int,
+    send_time: str | None,
+) -> CampaignStep:
+    """Set a step's day offset and time of day (#338): ``send_time`` ``HH:MM``, or None
+    for the next suggested slot after the delay.
+
+    Only the timing changes, never what is sent. On an active or paused campaign,
+    each live enrollment already waiting for this step is due again by the new
+    timing (:func:`campaign_engine.reschedule_step`). On a draft or reviewing one,
+    the review's records that name the step's timing are no longer current, as for
+    any other change to a step.
+    """
+    _require_writer(session, "set_step_schedule")
+    campaign = get_campaign(session, user, campaign_id)
+    if campaign.status not in SCHEDULE_EDITABLE:
+        raise CampaignConflict(
+            f"campaign {campaign_id} is {campaign.status}; its steps no longer change"
+        )
+    step = get_scoped(session, user, CampaignStep, step_id)
+    if step is None or step.campaign_id != campaign_id:
+        raise CampaignNotFound(f"no step {step_id} in campaign {campaign_id}")
+    if not 0 <= delay_days <= MAX_DELAY_DAYS:
+        raise InvalidCampaign(f"step {step.position}: the delay is 0 to {MAX_DELAY_DAYS} days")
+    step.delay_days = delay_days
+    step.send_time = _send_time(step.position, send_time)
+    session.flush()
+    if campaign.status in campaign_engine.START_EDITABLE:
+        moved = campaign_engine.reschedule_step(session, user, step, settings=settings)
+        log.info(
+            "campaign %d step %d timing changed; %d enrollments due again",
+            campaign_id,
+            step.position,
+            moved,
+        )
+    return step

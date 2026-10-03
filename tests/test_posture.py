@@ -238,6 +238,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "scheduled jobs",
         "scheduled runs",
         "reply poll",
+        "next campaign send",
         "route-changed breaker",
         "answer-lost limit",
         "network aging",
@@ -2042,3 +2043,53 @@ def test_the_summary_shows_a_warning_on_a_row_that_is_still_on(writer: Session, 
         if line.startswith("budget profile_visits")
     )
     assert budget_line.split()[2] == "on"
+
+
+# --- #338: the next scheduled campaign send ------------------------------------------------
+
+
+def test_with_nothing_scheduled_the_next_campaign_send_says_so(writer: Session, user: User) -> None:
+    row = _row(_report(writer, user), "next campaign send")
+    assert (row.status, row.value, row.warnings) == (Status.ON, "no campaign send is scheduled", ())
+
+
+def test_the_next_campaign_send_names_the_soonest_and_the_serve_reminder(
+    writer: Session, user: User
+) -> None:
+    mailbox = make_mailbox(writer, user, email="me@example.test")
+    campaign = factories.make_campaign(writer, user, name="Autumn", mailbox_id=mailbox.id)
+    for hours in (30, 6):
+        factories.make_enrollment(
+            writer,
+            campaign,
+            factories.make_contact(writer, user),
+            next_action_at=NOW + timedelta(hours=hours),
+        )
+    writer.flush()
+    row = _row(_report(writer, user), "next campaign send")
+    soonest = NOW + timedelta(hours=6)
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value.startswith("'Autumn' step 1 at ")
+    assert f"({soonest:%Y-%m-%d %H:%M} UTC)" in row.value
+    assert "netkeeper sends only while `serve` is running and this Mac is awake." in row.value
+
+
+def test_an_overdue_next_campaign_send_shows_where_it_will_really_go(
+    writer: Session, user: User
+) -> None:
+    """#338 review, N4: a row due yesterday at 10:00 New York, read at 03:00 today,
+    spills to 10:00 today; one whose time has passed today goes at the next tick (now)."""
+    mailbox = make_mailbox(writer, user, email="me@example.test")
+    campaign = factories.make_campaign(writer, user, name="Autumn", mailbox_id=mailbox.id)
+    yesterday_ten = datetime(2026, 9, 22, 14, 0, tzinfo=UTC)  # 10:00 New York
+    factories.make_enrollment(
+        writer, campaign, factories.make_contact(writer, user), next_action_at=yesterday_ten
+    )
+    writer.flush()
+    early = datetime(2026, 9, 23, 7, 0, tzinfo=UTC)  # 03:00 New York
+    row = _row(_report(writer, user, now=early), "next campaign send")
+    assert "(2026-09-23 14:00 UTC)" in row.value, row.value
+    assert "Wed Sep 23, 10:00" in row.value
+    tonight = datetime(2026, 9, 24, 2, 0, tzinfo=UTC)  # 22:00 New York
+    row = _row(_report(writer, user, now=tonight), "next campaign send")
+    assert "(2026-09-24 02:00 UTC)" in row.value, row.value  # now, not the past due time

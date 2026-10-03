@@ -192,8 +192,9 @@ export interface paths {
         put?: never;
         /**
          * Activate Campaign
-         * @description ``reviewing`` to ``active``: ``409`` with ``missing`` unless every review
-         *     requirement is recorded and current, checked in this one writer transaction.
+         * @description ``reviewing`` to ``active``, starting at ``starts_at`` (#338): ``409`` with
+         *     ``missing`` unless every review requirement is recorded and current, checked in
+         *     this one writer transaction. Nothing of the campaign is sent before its start.
          */
         post: operations["activate_campaign_api_v1_campaigns__campaign_id__activate_post"];
         delete?: never;
@@ -441,6 +442,68 @@ export interface paths {
          *     message: it counts toward no cap or recency and advances no enrollment.
          */
         post: operations["test_send_api_v1_campaigns__campaign_id__review_test_send_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Start
+         * @description Move an active or paused campaign's scheduled start. ``409`` once it has sent.
+         */
+        put: operations["set_campaign_start"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/start-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Start Options
+         * @description The default scheduled start, the suggestion and the reminder (#338), and a
+         *     warning when ``at`` is outside the suggested slots. Changes nothing.
+         */
+        get: operations["campaign_start_options"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/campaigns/{campaign_id}/steps/{step_id}/schedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Step Schedule
+         * @description Set a step's day offset and time of day (#338). Only timing changes. ``409`` once
+         *     the campaign is completed or archived.
+         */
+        put: operations["set_step_schedule"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2623,6 +2686,14 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * ActivateIn
+         * @description When the campaign starts (#338).
+         */
+        ActivateIn: {
+            /** Starts At */
+            starts_at?: string | null;
+        };
+        /**
          * ActivationRefusedOut
          * @description The ``409`` body of an activation refused for an incomplete review.
          */
@@ -3125,6 +3196,10 @@ export interface components {
             next_action_at: string | null;
             /** Source List Id */
             source_list_id: number | null;
+            /** Start Editable */
+            start_editable: boolean;
+            /** Starts At */
+            starts_at: string | null;
             status: components["schemas"]["CampaignStatus"];
             /** Steps */
             steps: components["schemas"]["StepOut"][];
@@ -3154,6 +3229,8 @@ export interface components {
             name: string;
             /** Next Action At */
             next_action_at?: string | null;
+            /** Starts At */
+            starts_at?: string | null;
             status: components["schemas"]["CampaignStatus"];
             /** Steps */
             steps: number;
@@ -5599,6 +5676,32 @@ export interface components {
              */
             field: "first_name" | "last_name" | "preferred_name" | "headline" | "current_title" | "current_company" | "location" | "li_public_id" | "met" | "met_source" | "source" | "degree" | "connected_on" | "last_contacted_at" | "last_enriched_at" | "triaged_at" | "li_disconnected_at" | "archived_at" | "needs_review_at" | "created_at" | "updated_at" | "do_not_contact";
         };
+        /** StartIn */
+        StartIn: {
+            /**
+             * Starts At
+             * Format: date-time
+             */
+            starts_at: string;
+        };
+        /** StartOptionsOut */
+        StartOptionsOut: {
+            /** At */
+            at: string | null;
+            /**
+             * Default Start
+             * Format: date-time
+             */
+            default_start: string;
+            /** Reminder */
+            reminder: string;
+            /** Suggestion */
+            suggestion: string;
+            /** Timezone */
+            timezone: string;
+            /** Warning */
+            warning: string | null;
+        };
         /** StartsWith */
         StartsWith: {
             /**
@@ -5633,6 +5736,8 @@ export interface components {
             mode?: components["schemas"]["StepMode"] | null;
             /** Same Thread */
             same_thread?: boolean | null;
+            /** Send Time */
+            send_time?: string | null;
             /** Template Id */
             template_id: number;
         };
@@ -5660,6 +5765,8 @@ export interface components {
             position: number;
             /** Same Thread */
             same_thread: boolean;
+            /** Send Time */
+            send_time: string | null;
             /** Sent */
             sent: number;
             /** Template Id */
@@ -5685,6 +5792,13 @@ export interface components {
             subject: string | null;
             /** To Address */
             to_address: string | null;
+        };
+        /** StepScheduleIn */
+        StepScheduleIn: {
+            /** Delay Days */
+            delay_days: number;
+            /** Send Time */
+            send_time?: string | null;
         };
         /**
          * SyncRunKind
@@ -6823,7 +6937,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ActivateIn"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -6850,14 +6968,12 @@ export interface operations {
                     "application/json": components["schemas"]["ActivationRefusedOut"];
                 };
             };
-            /** @description Validation Error */
+            /** @description The send schedule (time zone or holidays) cannot be read */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
+                content?: never;
             };
         };
     };
@@ -7417,6 +7533,140 @@ export interface operations {
             };
             /** @description Gmail refused or failed the test send; nothing recorded */
             502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_campaign_start: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state, or a name taken */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A value a campaign cannot be made from */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    campaign_start_options: {
+        parameters: {
+            query?: {
+                /** @description A start to check against the suggested slots, with its zone. */
+                at?: string | null;
+            };
+            header?: never;
+            path: {
+                campaign_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StartOptionsOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A value a campaign cannot be made from */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_step_schedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: number;
+                step_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StepScheduleIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignOut"];
+                };
+            };
+            /** @description No such campaign, template, mailbox or list */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refused in the campaign's state, or a name taken */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A value a campaign cannot be made from */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

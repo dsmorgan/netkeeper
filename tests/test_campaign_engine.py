@@ -14,7 +14,7 @@ from typing import Any
 
 import factories
 import pytest
-from campaign_fakes import ALWAYS_OPEN, LATENCY, NOW, SETTINGS, FakeSender, make_mailbox
+from campaign_fakes import LATENCY, NOW, SETTINGS, FakeSender, make_mailbox
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -217,19 +217,40 @@ def test_a_due_step_fires_and_the_next_is_due_after_the_actual_send(world: World
     assert enrollment.next_action_at == NOW + LATENCY + timedelta(days=7)
 
 
-def test_the_next_step_is_pushed_into_the_window(session_factory: sessionmaker[Session]) -> None:
-    """Spec 11.3: "then pushed into the campaign's send window"."""
-    world = make_world(
-        session_factory, send_window_json={"days": ["Tue"], "hours": ["09:00", "16:30"]}
-    )
+def test_a_follow_up_lands_in_the_next_suggested_slot_after_its_delay(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#338: after its delay, a follow-up aims for the next suggested slot (Tuesday to
+    Thursday, 09:00 to 16:30 local; the user here is on UTC)."""
+    world = make_world(session_factory)
     enrollment_id = world.enroll_new()
     world.tick(settings=Settings())
-    # Sent Tuesday 14:07 UTC; seven days on is Tuesday 14:07, inside the window.
+    # Sent Tuesday 14:07; seven days on is Tuesday 14:07, inside a suggested slot.
     assert world.enrollment(enrollment_id).next_action_at == NOW + LATENCY + timedelta(days=7)
-    world.sender.latency = timedelta(hours=3)  # the next one goes out at 17:00, after closing
+    world.sender.latency = timedelta(hours=3)  # the next one goes out at 18:00, after 16:30
     second = world.enroll_new()
     world.tick(NOW + timedelta(hours=1), settings=Settings())
-    assert world.enrollment(second).next_action_at == datetime(2026, 10, 13, 9, 0, tzinfo=UTC)
+    assert world.enrollment(second).next_action_at == datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
+
+
+def test_an_explicit_step_time_is_honored(session_factory: sessionmaker[Session]) -> None:
+    """#338: a step's own time of day, on the day its delay lands, at any hour."""
+    world = make_world(session_factory)
+
+    def at_ten_pm(session: Session) -> None:
+        campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+        assert campaign is not None
+        campaign.steps[1].send_time = "22:00"
+        campaign.steps[1].delay_days = 4
+
+    world.write(at_ten_pm)
+    enrollment_id = world.enroll_new()
+    world.tick()
+    due = datetime(2026, 10, 3, 22, 0, tzinfo=UTC)  # Saturday, outside every suggested slot
+    assert world.enrollment(enrollment_id).next_action_at == due
+    assert world.tick(due - timedelta(minutes=1)).fired == []
+    [(firing, _)] = world.tick(due).fired
+    assert firing.step_position == 2
 
 
 def test_the_last_step_completes_the_enrollment(session_factory: sessionmaker[Session]) -> None:
@@ -338,21 +359,24 @@ def test_the_campaign_cap_holds_for_the_local_day(session_factory: sessionmaker[
     world.tick(NOW + timedelta(hours=1))
     capped = world.tick(NOW + timedelta(hours=2))
     assert reasons_of(capped, ids[2]) == (Skip.CAMPAIGN_AT_CAP,)
-    assert capped.next_wake == datetime(2026, 9, 30, tzinfo=UTC)  # tomorrow, window open
-    assert world.tick(datetime(2026, 9, 30, 0, 1, tzinfo=UTC)).fired != []
+    assert capped.next_wake == datetime(2026, 9, 30, tzinfo=UTC)  # the local midnight
+    # #338: the cap-held rest of the batch spills to the next day at its start time,
+    # 14:00, rather than going at midnight. This holds for the cap-held rest only: a
+    # leftover from earlier the same day, or one whose time has already passed today,
+    # can still go overnight (no send-time constraint; see #354).
+    midnight = world.tick(datetime(2026, 9, 30, 0, 1, tzinfo=UTC))
+    assert midnight.fired == [] and reasons_of(midnight, ids[2]) == (Skip.SPILLED,)
+    resume = datetime(2026, 9, 30, 14, 0, tzinfo=UTC)
+    assert world.enrollment(ids[2]).next_action_at == resume
+    assert world.tick(resume - timedelta(minutes=1)).fired == []
+    assert world.tick(resume).fired != []
 
 
 def test_a_campaign_with_no_cap_of_its_own_uses_the_configs(
     session_factory: sessionmaker[Session],
 ) -> None:
     world = make_world(session_factory)
-    settings = Settings(
-        campaigns=CampaignSettings(
-            send_window_days=ALWAYS_OPEN.send_window_days,
-            send_window_hours=ALWAYS_OPEN.send_window_hours,
-            mailbox_daily_cap=1,
-        )
-    )
+    settings = Settings(campaigns=CampaignSettings(mailbox_daily_cap=1))
     ids = [world.enroll_new() for _ in range(2)]
     world.tick(settings=settings)
     assert reasons_of(world.tick(NOW + timedelta(hours=1), settings=settings), ids[1]) == (
@@ -388,46 +412,231 @@ def test_campaign_cap_is_never_over_the_mailbox_hard_max() -> None:
     assert engine_module.campaign_cap(SETTINGS, Campaign(daily_cap=3)) == 3
 
 
-# --- windows ----------------------------------------------------------------------------------
+# --- the scheduled start, and no window (#338) -----------------------------------------------
+
+SATURDAY_NIGHT = datetime(2026, 10, 3, 22, 0, tzinfo=UTC)
+"""Outside every suggested slot, and a holiday in some tests below."""
 
 
-def test_outside_the_window_the_step_is_deferred_to_its_opening(
-    session_factory: sessionmaker[Session],
+def _start_at(world: World, starts_at: datetime | None) -> None:
+    def move(session: Session) -> None:
+        campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+        assert campaign is not None
+        campaign.starts_at = starts_at
+
+    world.write(move)
+
+
+def test_nothing_sends_before_the_scheduled_start(world: World) -> None:
+    """The enrollment is due now; its campaign starts two hours later. Nothing goes out,
+    to the second, and the tick wakes at the start."""
+    start = NOW + timedelta(hours=2)
+    _start_at(world, start)
+    enrollment_id = world.enroll_new()
+    for at in (NOW, NOW + timedelta(hours=1), start - timedelta(seconds=1)):
+        result = world.tick(at)
+        assert result.fired == [], at
+        # Left out by the tick's query itself, not refused later (#338 review, S3a).
+        assert enrollment_id not in result.skipped(), at
+        assert result.next_wake == start
+    assert world.sender.firings == [] and world.messages() == []
+    assert world.enrollment(enrollment_id).next_action_at == NOW  # nothing changed
+    [(firing, _)] = world.tick(start).fired
+    assert firing.enrollment_id == enrollment_id
+
+
+def test_an_active_campaign_with_no_start_sends_nothing(world: World) -> None:
+    _start_at(world, None)
+    world.enroll_new()
+    for days in (0, 1, 30):
+        assert world.tick(NOW + timedelta(days=days)).fired == []
+    assert world.messages() == []
+
+
+def test_the_start_is_checked_again_where_the_claim_is_decided(
+    world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    world = make_world(session_factory, send_window_json={"days": ["Thu"]})
-    enrollment_id = world.enroll_new()
-    result = world.tick(settings=Settings())
-    assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.OUTSIDE_WINDOW,)
-    opens = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
-    assert world.enrollment(enrollment_id).next_action_at == opens
-    assert result.next_wake == opens
-    assert world.tick(opens, settings=Settings()).fired != []
-
-
-def test_a_holiday_defers_the_step(world: World) -> None:
-    enrollment_id = world.enroll_new()
-    settings = Settings(
-        campaigns=CampaignSettings(
-            send_window_days=ALWAYS_OPEN.send_window_days,
-            send_window_hours=ALWAYS_OPEN.send_window_hours,
-            holidays=("2026-09-29",),
-        )
+    """Defense in depth: if the query ever selected a campaign that has not started,
+    the claim is still refused."""
+    monkeypatch.setattr(
+        engine_module,
+        "_selected",
+        lambda user, now: engine_module._selectable(user).where(Enrollment.next_action_at <= now),
     )
-    assert reasons_of(world.tick(settings=settings), enrollment_id) == (Skip.OUTSIDE_WINDOW,)
-    assert world.enrollment(enrollment_id).next_action_at == datetime(2026, 9, 30, tzinfo=UTC)
-
-
-@pytest.mark.parametrize(
-    "window", [{"days": ["Someday"]}, {"hours": ["17:00", "09:00"]}, {"days": []}, {"tz": "UTC"}]
-)
-def test_a_window_that_cannot_be_read_or_never_opens_sends_nothing(
-    session_factory: sessionmaker[Session], window: dict[str, Any]
-) -> None:
-    world = make_world(session_factory, send_window_json=window)
+    start = NOW + timedelta(hours=2)
+    _start_at(world, start)
     enrollment_id = world.enroll_new()
     result = world.tick()
-    assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.NO_SEND_WINDOW,)
+    assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.NOT_STARTED,)
+    assert result.next_wake == start
+    _start_at(world, None)
+    result = world.tick()
+    assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.NOT_STARTED,)
+    assert world.messages() == []
+
+
+def test_an_explicit_start_at_ten_pm_on_a_saturday_holiday_sends(world: World) -> None:
+    """No window gates a send: an explicitly scheduled 22:00 goes out at 22:00, on a
+    weekend, on a holiday."""
+    _start_at(world, SATURDAY_NIGHT)
+    enrollment_id = world.enroll_new(next_action_at=SATURDAY_NIGHT)
+    settings = Settings(campaigns=CampaignSettings(holidays=("2026-10-03",)))
+    assert world.tick(SATURDAY_NIGHT - timedelta(minutes=1), settings=settings).fired == []
+    [(firing, _)] = world.tick(SATURDAY_NIGHT, settings=settings).fired
+    assert firing.enrollment_id == enrollment_id
+
+
+def test_without_a_window_the_spacing_still_holds(world: World) -> None:
+    _start_at(world, SATURDAY_NIGHT)
+    first = world.enroll_new(next_action_at=SATURDAY_NIGHT)
+    second = world.enroll_new(next_action_at=SATURDAY_NIGHT)
+    [(firing, _)] = world.tick(SATURDAY_NIGHT).fired
+    assert firing.enrollment_id == first
+    later = world.tick(SATURDAY_NIGHT + timedelta(seconds=60))
+    assert later.fired == [] and reasons_of(later, second) == (Skip.SPACING,)
+
+
+def test_without_a_window_the_daily_caps_still_hold(
+    session_factory: sessionmaker[Session],
+) -> None:
+    world = make_world(session_factory, daily_cap=1)
+    _start_at(world, SATURDAY_NIGHT)
+    ids = [world.enroll_new(next_action_at=SATURDAY_NIGHT) for _ in range(2)]
+    assert world.tick(SATURDAY_NIGHT).fired != []
+    capped = world.tick(SATURDAY_NIGHT + timedelta(hours=1))
+    assert capped.fired == [] and reasons_of(capped, ids[1]) == (Skip.CAMPAIGN_AT_CAP,)
+
+
+def test_without_a_window_do_not_contact_still_holds(world: World) -> None:
+    _start_at(world, SATURDAY_NIGHT)
+    enrollment_id = world.enroll_new(next_action_at=SATURDAY_NIGHT)
+    _set_contact(world, enrollment_id, do_not_contact=True)
+    result = world.tick(SATURDAY_NIGHT)
+    assert result.fired == [] and world.messages() == []
+    assert world.enrollment(enrollment_id).status is EnrollmentStatus.OPTED_OUT
+
+
+@pytest.mark.parametrize("status", [CampaignStatus.DRAFT, CampaignStatus.REVIEWING])
+def test_without_a_window_a_campaign_short_of_the_review_gate_sends_nothing(
+    session_factory: sessionmaker[Session], status: CampaignStatus
+) -> None:
+    """A start in the past never stands in for activation: only an active campaign fires."""
+    world = make_world(session_factory, status=status, starts_at=NOW - timedelta(days=1))
+    world.enroll_new()
+    assert world.tick(SATURDAY_NIGHT).fired == [] and world.messages() == []
+
+
+def test_a_moved_start_is_refused_once_a_message_is_scheduled_even_if_not_sent(
+    world: World,
+) -> None:
+    """#338 review, S3b: a claimed message with no ``sent_at`` may be in Gmail's hands."""
+    _start_at(world, NOW + timedelta(days=1))
+    enrollment_id = world.enroll_new(next_action_at=NOW + timedelta(days=1))
+
+    def claimed(session: Session) -> None:
+        enrollment = get_scoped(session, world.user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        factories.make_message(
+            session, enrollment, status=MessageStatus.SCHEDULED, sent_at=None, scheduled_at=NOW
+        )
+
+    world.write(claimed)
+    with pytest.raises(CampaignEngineError, match="already sent"):
+        world.write(
+            lambda s: engine_module.set_start(
+                s, world.user, world.campaign.id, settings=Settings(), now=NOW, starts_at=NOW
+            )
+        )
+
+
+# --- no send-time constraint: a leftover goes as soon as it can (#338, #354) ----------------
+
+TUESDAY = datetime(2026, 9, 29, tzinfo=UTC)  # the user is on UTC
+
+
+def _at(day: datetime, hours: float) -> datetime:
+    return day + timedelta(hours=hours)
+
+
+def test_a_step_due_at_nine_reached_at_ten_pm_fires_at_ten_pm(world: World) -> None:
+    """Deliberate (#338, maintainer's decision): netkeeper does not restrict send times.
+    A step due today at 09:00 that ``serve`` only reaches at 22:00 goes then. An
+    optional, user-chosen constraint is #354."""
+    enrollment_id = world.enroll_new(next_action_at=_at(TUESDAY, 9))
+    [(firing, _)] = world.tick(_at(TUESDAY, 22)).fired
+    assert firing.enrollment_id == enrollment_id
+
+
+def test_an_upgraded_campaigns_overdue_rows_fire_on_the_next_tick_whatever_the_hour(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """0031 sets ``starts_at = approved_at`` on a campaign already running. A row overdue
+    from earlier today goes at the first tick after the upgrade, even at 23:30; one from
+    an earlier day whose time of day has passed today goes too (the spill only waits
+    for a time of day still ahead)."""
+    approved = _at(TUESDAY, -10 * 24 + 10)
+    world = make_world(session_factory, approved_at=approved, starts_at=approved)
+    today = world.enroll_new(next_action_at=_at(TUESDAY, 10))
+    [(first, _)] = world.tick(_at(TUESDAY, 23.5)).fired
+    assert first.enrollment_id == today
+    sunday = world.enroll_new(next_action_at=_at(TUESDAY, -2 * 24 + 11))
+    spaced = world.read(lambda s: next_send_at(s, world.user, world.mailbox.id))
+    assert spaced is not None
+    [(second, _)] = world.tick(max(spaced, _at(TUESDAY, 23.75))).fired
+    assert second.enrollment_id == sunday
+
+
+def test_an_explicit_step_time_before_the_raw_delay_is_not_pushed_back(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#338 review, S2: step 1 went at Monday 23:30; step 2 is "1 day, at 09:00", so it
+    is due Tuesday 09:00, not Tuesday 23:30 (the raw delay)."""
+    world = make_world(session_factory)
+
+    def at_nine(session: Session) -> None:
+        campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+        assert campaign is not None
+        campaign.steps[1].delay_days, campaign.steps[1].send_time = 1, "09:00"
+
+    world.write(at_nine)
+    tuesday_nine = _at(TUESDAY, 9)
+    enrollment_id = world.enroll_new(current_step=1, next_action_at=tuesday_nine)
+
+    def step_one(session: Session) -> None:
+        enrollment = get_scoped(session, world.user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        factories.make_message(session, enrollment, position=1, sent_at=_at(TUESDAY, -0.5))
+
+    world.write(step_one)
+    [(firing, _)] = world.tick(tuesday_nine).fired
+    assert firing.step_position == 2
+
+
+def test_a_time_zone_that_cannot_be_read_sends_nothing(world: World) -> None:
+    def broken(session: Session) -> None:
+        user = session.get(User, world.user.id)
+        assert user is not None
+        user.timezone = "Mars/Olympus_Mons"
+
+    world.write(broken)
+    enrollment_id = world.enroll_new()
+    result = world.tick()
+    assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.BAD_SCHEDULE,)
     assert world.enrollment(enrollment_id).next_action_at == NOW  # nothing changed
+
+
+def test_a_holiday_list_that_cannot_be_read_sends_nothing(world: World) -> None:
+    enrollment_id = world.enroll_new()
+    settings = Settings(campaigns=CampaignSettings(holidays=("2026-13-01",)))
+    result = world.tick(settings=settings)
+    assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.BAD_SCHEDULE,)
+
+
+def test_a_holiday_never_blocks_a_due_step(world: World) -> None:
+    """Holidays are a suggestion now: a step due on one still goes."""
+    world.enroll_new()
+    settings = Settings(campaigns=CampaignSettings(holidays=("2026-09-29",)))
+    assert world.tick(settings=settings).fired != []
 
 
 # --- #261 requirement 4: status selects, not the due time --------------------------------
@@ -628,7 +837,8 @@ def test_a_merge_does_not_send_a_step_twice(world: World) -> None:
     world.write(lambda s: merge_contacts(s, world.user, survivor_id, loser_id))
     kept = world.enrollment(to_survivor)
     assert kept.current_step == 1
-    world.tick(NOW + timedelta(days=30))
+    # An hour past the time of day it was due, so the day-old due time does not spill.
+    world.tick(NOW + timedelta(days=30, hours=1))
     steps = [m.step_id for m in world.messages()]
     assert len(steps) == len(set(steps)) == 2  # step 1 once, then step 2
 
@@ -652,7 +862,8 @@ def test_the_next_step_counts_from_the_latest_outbound_message(world: World) -> 
     world.write(history)
     result = world.tick()
     assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.NOT_DUE,)
-    due = NOW - timedelta(days=1) + timedelta(days=7)
+    # A week after Monday 14:00 is Monday: the next suggested slot is Tuesday 09:00 (#338).
+    due = datetime(2026, 10, 6, 9, 0, tzinfo=UTC)
     assert world.enrollment(enrollment_id).next_action_at == due
     assert world.tick(due).fired != []
 
@@ -912,26 +1123,132 @@ def test_enroll_needs_a_writer(session_factory: sessionmaker[Session]) -> None:
         world.read(lambda s: enroll(s, world.user, world.campaign.id, [1], now=NOW))
 
 
-def test_activate_makes_pending_active_with_the_first_step_in_the_window(
+def _activate_at(world: World, starts_at: datetime, now: datetime = NOW) -> Campaign:
+    return world.write(
+        lambda s: activate(
+            s,
+            world.user,
+            world.campaign.id,
+            settings=Settings(),
+            now=now,
+            starts_at=starts_at,
+            gate=REVIEW_GATE,
+        )
+    )
+
+
+def test_activate_makes_pending_active_with_the_first_step_at_the_start(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#338: the start is stored on the campaign, and step 1 is due exactly then."""
+    world = make_world(
+        session_factory, status=CampaignStatus.REVIEWING, approved_at=NOW, starts_at=None
+    )
+    enrollment_id = world.enroll_new(status=EnrollmentStatus.PENDING, next_action_at=None)
+    start = datetime(2026, 10, 6, 9, 0, tzinfo=UTC)
+    _activate_at(world, start)
+    enrollment = world.enrollment(enrollment_id)
+    assert enrollment.status is EnrollmentStatus.ACTIVE
+    assert enrollment.next_action_at == start
+    campaign = world.read(lambda s: get_scoped(s, world.user, Campaign, world.campaign.id))
+    assert campaign is not None and campaign.status is CampaignStatus.ACTIVE
+    assert campaign.starts_at == start
+    assert world.tick(start - timedelta(seconds=1)).fired == []
+    assert world.tick(start).fired != []
+
+
+def test_a_start_already_past_starts_now(session_factory: sessionmaker[Session]) -> None:
+    world = make_world(
+        session_factory, status=CampaignStatus.REVIEWING, approved_at=NOW, starts_at=None
+    )
+    enrollment_id = world.enroll_new(status=EnrollmentStatus.PENDING, next_action_at=None)
+    campaign = _activate_at(world, NOW - timedelta(days=3))
+    assert campaign.starts_at == NOW
+    assert world.enrollment(enrollment_id).next_action_at == NOW
+
+
+def test_a_first_step_with_a_delay_aims_for_a_suggested_slot(
     session_factory: sessionmaker[Session],
 ) -> None:
     world = make_world(
-        session_factory,
-        status=CampaignStatus.REVIEWING,
-        approved_at=NOW,
-        send_window_json={"days": ["Wed"], "hours": ["10:00", "12:00"]},
+        session_factory, status=CampaignStatus.REVIEWING, approved_at=NOW, starts_at=None
     )
+
+    def delayed(session: Session) -> None:
+        campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+        assert campaign is not None
+        campaign.steps[0].delay_days = 2
+
+    world.write(delayed)
     enrollment_id = world.enroll_new(status=EnrollmentStatus.PENDING, next_action_at=None)
-    world.write(
-        lambda s: activate(
-            s, world.user, world.campaign.id, settings=Settings(), now=NOW, gate=REVIEW_GATE
+    _activate_at(world, NOW)  # Tuesday 14:00, so Thursday 14:00, inside the slot
+    assert world.enrollment(enrollment_id).next_action_at == NOW + timedelta(days=2)
+
+
+def test_activate_refuses_a_naive_start(session_factory: sessionmaker[Session]) -> None:
+    world = make_world(session_factory, status=CampaignStatus.REVIEWING, approved_at=NOW)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        _activate_at(world, datetime(2026, 10, 6, 9, 0))
+
+
+# --- moving the start, and a step's timing (#338) ---------------------------------------------
+
+
+def test_the_start_moves_until_the_first_send_and_takes_waiting_enrollments_with_it(
+    world: World,
+) -> None:
+    later = NOW + timedelta(days=1)
+    _start_at(world, later)
+    waiting = world.enroll_new(next_action_at=later)
+    parked = world.enroll_new(next_action_at=None)
+    sooner = NOW + timedelta(hours=1)
+    moved = world.write(
+        lambda s: engine_module.set_start(
+            s, world.user, world.campaign.id, settings=Settings(), now=NOW, starts_at=sooner
         )
     )
-    enrollment = world.enrollment(enrollment_id)
-    assert enrollment.status is EnrollmentStatus.ACTIVE
-    assert enrollment.next_action_at == datetime(2026, 9, 30, 10, 0, tzinfo=UTC)
-    campaign = world.read(lambda s: get_scoped(s, world.user, Campaign, world.campaign.id))
-    assert campaign is not None and campaign.status is CampaignStatus.ACTIVE
+    assert moved.starts_at == sooner
+    assert world.enrollment(waiting).next_action_at == sooner
+    assert world.enrollment(parked).next_action_at is None
+    assert world.tick(sooner).fired != []
+    with pytest.raises(CampaignEngineError, match="already sent"):
+        world.write(
+            lambda s: engine_module.set_start(
+                s, world.user, world.campaign.id, settings=Settings(), now=NOW, starts_at=later
+            )
+        )
+
+
+@pytest.mark.parametrize("status", [CampaignStatus.REVIEWING, CampaignStatus.COMPLETED])
+def test_the_start_moves_only_on_an_active_or_paused_campaign(
+    session_factory: sessionmaker[Session], status: CampaignStatus
+) -> None:
+    world = make_world(session_factory, status=status)
+    with pytest.raises(CampaignEngineError, match="only an active or paused"):
+        world.write(
+            lambda s: engine_module.set_start(
+                s, world.user, world.campaign.id, settings=Settings(), now=NOW, starts_at=NOW
+            )
+        )
+
+
+def test_a_changed_step_time_moves_the_enrollments_waiting_for_it(world: World) -> None:
+    enrollment_id = world.enroll_new()
+    world.tick()  # step 1 sent at 14:07; step 2 due a week on, 14:07
+    other = world.enroll_new(next_action_at=NOW + timedelta(days=1))  # still on step 1
+
+    def change(session: Session) -> int:
+        campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+        assert campaign is not None
+        step = campaign.steps[1]
+        step.delay_days, step.send_time = 3, "22:00"
+        return engine_module.reschedule_step(session, world.user, step, settings=Settings())
+
+    assert world.write(change) == 1
+    assert world.enrollment(enrollment_id).next_action_at == datetime(
+        2026, 10, 2, 22, 0, tzinfo=UTC
+    )
+    assert world.enrollment(other).next_action_at == NOW + timedelta(days=1)
 
 
 @pytest.mark.parametrize(
@@ -961,7 +1278,13 @@ def test_activate_is_refused_until_the_campaign_is_ready(
     with pytest.raises(CampaignEngineError, match=match):
         world.write(
             lambda s: activate(
-                s, world.user, world.campaign.id, settings=SETTINGS, now=NOW, gate=REVIEW_GATE
+                s,
+                world.user,
+                world.campaign.id,
+                settings=SETTINGS,
+                now=NOW,
+                starts_at=NOW,
+                gate=REVIEW_GATE,
             )
         )
 
@@ -973,7 +1296,9 @@ def test_activate_is_refused_outside_the_review_gate(
     world = make_world(session_factory, status=CampaignStatus.REVIEWING, approved_at=NOW)
     with pytest.raises(CampaignEngineError, match="review gate"):
         world.write(
-            lambda s: activate(s, world.user, world.campaign.id, settings=SETTINGS, now=NOW)
+            lambda s: activate(
+                s, world.user, world.campaign.id, settings=SETTINGS, now=NOW, starts_at=NOW
+            )
         )
     campaign = world.read(lambda s: get_scoped(s, world.user, Campaign, world.campaign.id))
     assert campaign is not None and campaign.status is CampaignStatus.REVIEWING
@@ -993,7 +1318,13 @@ def test_activate_is_refused_over_a_template_with_lint_errors(
     with pytest.raises(CampaignEngineError, match="step 2's template"):
         world.write(
             lambda s: activate(
-                s, world.user, world.campaign.id, settings=SETTINGS, now=NOW, gate=REVIEW_GATE
+                s,
+                world.user,
+                world.campaign.id,
+                settings=SETTINGS,
+                now=NOW,
+                starts_at=NOW,
+                gate=REVIEW_GATE,
             )
         )
 
@@ -1093,12 +1424,7 @@ def test_a_spacing_that_is_not_one_holds_every_send(world: World, median: int, f
     """Review of #264: refused before anything is claimed, never after the sender sent."""
     world.enroll_new()
     settings = Settings(
-        campaigns=CampaignSettings(
-            send_window_days=ALWAYS_OPEN.send_window_days,
-            send_window_hours=ALWAYS_OPEN.send_window_hours,
-            send_spacing_median_s=median,
-            send_spacing_floor_s=floor,
-        )
+        campaigns=CampaignSettings(send_spacing_median_s=median, send_spacing_floor_s=floor)
     )
     results = run_tick(world.factory, settings=settings, sender=world.sender, clock=lambda: NOW)
     assert results == [] and world.sender.firings == [] and world.messages() == []
@@ -1155,36 +1481,46 @@ def test_a_gap_in_step_positions_fires_the_next_position_up(
 # --- #264 review: rules that correct code had, and no test pinned -----------------------
 
 
-def test_one_minute_before_the_window_opens_nothing_fires(
-    session_factory: sessionmaker[Session],
-) -> None:
-    world = make_world(session_factory, send_window_json={"hours": ["15:00", "16:30"]})
-    enrollment_id = world.enroll_new()
-    early = world.tick(datetime(2026, 9, 29, 14, 59, tzinfo=UTC), settings=Settings())
-    assert early.fired == [] and reasons_of(early, enrollment_id) == (Skip.OUTSIDE_WINDOW,)
-    opens = datetime(2026, 9, 29, 15, 0, tzinfo=UTC)
-    assert world.enrollment(enrollment_id).next_action_at == opens
-    assert world.tick(opens, settings=Settings()).fired != []
-
-
-def test_exactly_at_the_close_nothing_fires(session_factory: sessionmaker[Session]) -> None:
-    """The hours are ``[start, end)``: 16:30 is already outside."""
+def test_a_long_batch_does_not_send_overnight(session_factory: sessionmaker[Session]) -> None:
+    """#338: a batch started at 22:00 sends until the local midnight, then the rest spills
+    to 22:00 the next day, not on through the night."""
     world = make_world(session_factory)
-    enrollment_id = world.enroll_new()
-    close = datetime(2026, 9, 29, 16, 30, tzinfo=UTC)
-    result = world.tick(close, settings=Settings())
-    assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.OUTSIDE_WINDOW,)
-    assert world.enrollment(enrollment_id).next_action_at == datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
+    _start_at(world, SATURDAY_NIGHT)
+    ids = [world.enroll_new(next_action_at=SATURDAY_NIGHT) for _ in range(40)]
+    now = SATURDAY_NIGHT
+    fired: list[datetime] = []
+    while now < SATURDAY_NIGHT + timedelta(hours=26):
+        result = world.tick(now, seed=len(fired))
+        if result.fired:
+            fired.append(now)
+            now += timedelta(minutes=1)
+            continue
+        wakes = [w for w in (result.next_wake,) if w is not None]
+        now = max(min(wakes), now + timedelta(minutes=1)) if wakes else now + timedelta(hours=1)
+    midnight = datetime(2026, 10, 4, tzinfo=UTC)
+    assert [at for at in fired if at < midnight]  # some went Saturday night
+    # Nothing between the local midnight and the next 22:00.
+    assert not [
+        at
+        for at in fired
+        if datetime(2026, 10, 4, tzinfo=UTC) <= at < datetime(2026, 10, 4, 22, tzinfo=UTC)
+    ]
+    assert [at for at in fired if at >= datetime(2026, 10, 4, 22, tzinfo=UTC)]
+    waiting = [
+        world.enrollment(i).next_action_at for i in ids if world.enrollment(i).current_step is None
+    ]
+    assert all(at is None or at >= datetime(2026, 10, 4, 22, tzinfo=UTC) for at in waiting)
 
 
 def test_the_time_is_read_once_the_write_lock_is_held(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """A tick that started at 16:29:30 and got the write lock at 16:30 must not claim."""
+    """A tick that started at 23:59:30 and got the write lock at midnight must not claim a
+    step due yesterday: at midnight it spills to tomorrow's start time (#338)."""
     world = make_world(session_factory)
     world.enroll_new()
-    times = iter([datetime(2026, 9, 29, 16, 29, 30, tzinfo=UTC)])
-    after = datetime(2026, 9, 29, 16, 30, tzinfo=UTC)
+    times = iter([datetime(2026, 9, 29, 23, 59, 30, tzinfo=UTC)])
+    after = datetime(2026, 9, 30, 0, 0, tzinfo=UTC)
     results = run_tick(
         world.factory,
         settings=Settings(),

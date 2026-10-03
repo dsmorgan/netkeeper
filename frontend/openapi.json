@@ -1,6 +1,25 @@
 {
   "components": {
     "schemas": {
+      "ActivateIn": {
+        "description": "When the campaign starts (#338).",
+        "properties": {
+          "starts_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          }
+        },
+        "title": "ActivateIn",
+        "type": "object"
+      },
       "ActivationRefusedOut": {
         "description": "The ``409`` body of an activation refused for an incomplete review.",
         "properties": {
@@ -1236,6 +1255,22 @@
             ],
             "title": "Source List Id"
           },
+          "start_editable": {
+            "title": "Start Editable",
+            "type": "boolean"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
           "status": {
             "$ref": "#/components/schemas/CampaignStatus"
           },
@@ -1258,6 +1293,8 @@
           "daily_cap",
           "contacted_within_days_guard",
           "approved_at",
+          "starts_at",
+          "start_editable",
           "created_at",
           "steps",
           "enrollments",
@@ -1327,6 +1364,18 @@
               }
             ],
             "title": "Next Action At"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
           },
           "status": {
             "$ref": "#/components/schemas/CampaignStatus"
@@ -8777,6 +8826,74 @@
         "title": "SortKey",
         "type": "object"
       },
+      "StartIn": {
+        "properties": {
+          "starts_at": {
+            "format": "date-time",
+            "title": "Starts At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "starts_at"
+        ],
+        "title": "StartIn",
+        "type": "object"
+      },
+      "StartOptionsOut": {
+        "properties": {
+          "at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "default_start": {
+            "format": "date-time",
+            "title": "Default Start",
+            "type": "string"
+          },
+          "reminder": {
+            "title": "Reminder",
+            "type": "string"
+          },
+          "suggestion": {
+            "title": "Suggestion",
+            "type": "string"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          },
+          "warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Warning"
+          }
+        },
+        "required": [
+          "timezone",
+          "default_start",
+          "suggestion",
+          "reminder",
+          "at",
+          "warning"
+        ],
+        "title": "StartOptionsOut",
+        "type": "object"
+      },
       "StartsWith": {
         "additionalProperties": false,
         "properties": {
@@ -8869,6 +8986,18 @@
             ],
             "title": "Same Thread"
           },
+          "send_time": {
+            "anyOf": [
+              {
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Send Time"
+          },
           "template_id": {
             "title": "Template Id",
             "type": "integer"
@@ -8922,6 +9051,17 @@
             "title": "Same Thread",
             "type": "boolean"
           },
+          "send_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Send Time"
+          },
           "sent": {
             "title": "Sent",
             "type": "integer"
@@ -8946,6 +9086,7 @@
           "mode",
           "condition",
           "delay_days",
+          "send_time",
           "same_thread",
           "template_id",
           "template_name",
@@ -9028,6 +9169,33 @@
           "error"
         ],
         "title": "StepPreviewOut",
+        "type": "object"
+      },
+      "StepScheduleIn": {
+        "properties": {
+          "delay_days": {
+            "maximum": 365.0,
+            "minimum": 0.0,
+            "title": "Delay Days",
+            "type": "integer"
+          },
+          "send_time": {
+            "anyOf": [
+              {
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Send Time"
+          }
+        },
+        "required": [
+          "delay_days"
+        ],
+        "title": "StepScheduleIn",
         "type": "object"
       },
       "SyncRunKind": {
@@ -11421,7 +11589,7 @@
     },
     "/api/v1/campaigns/{campaign_id}/activate": {
       "post": {
-        "description": "``reviewing`` to ``active``: ``409`` with ``missing`` unless every review\nrequirement is recorded and current, checked in this one writer transaction.",
+        "description": "``reviewing`` to ``active``, starting at ``starts_at`` (#338): ``409`` with\n``missing`` unless every review requirement is recorded and current, checked in\nthis one writer transaction. Nothing of the campaign is sent before its start.",
         "operationId": "activate_campaign_api_v1_campaigns__campaign_id__activate_post",
         "parameters": [
           {
@@ -11434,6 +11602,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ActivateIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -11459,14 +11644,7 @@
             "description": "The review is not complete (``missing`` lists what is not), or the campaign cannot be activated in its state"
           },
           "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
+            "description": "The send schedule (time zone or holidays) cannot be read"
           }
         },
         "summary": "Activate Campaign",
@@ -12168,6 +12346,177 @@
           }
         },
         "summary": "Test Send",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/start": {
+      "put": {
+        "description": "Move an active or paused campaign's scheduled start. ``409`` once it has sent.",
+        "operationId": "set_campaign_start",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "409": {
+            "description": "Refused in the campaign's state, or a name taken"
+          },
+          "422": {
+            "description": "A value a campaign cannot be made from"
+          }
+        },
+        "summary": "Set Start",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/start-options": {
+      "get": {
+        "description": "The default scheduled start, the suggestion and the reminder (#338), and a\nwarning when ``at`` is outside the suggested slots. Changes nothing.",
+        "operationId": "campaign_start_options",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "A start to check against the suggested slots, with its zone.",
+            "in": "query",
+            "name": "at",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A start to check against the suggested slots, with its zone.",
+              "title": "At"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartOptionsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "422": {
+            "description": "A value a campaign cannot be made from"
+          }
+        },
+        "summary": "Start Options",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/steps/{step_id}/schedule": {
+      "put": {
+        "description": "Set a step's day offset and time of day (#338). Only timing changes. ``409`` once\nthe campaign is completed or archived.",
+        "operationId": "set_step_schedule",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step_id",
+            "required": true,
+            "schema": {
+              "title": "Step Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StepScheduleIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, template, mailbox or list"
+          },
+          "409": {
+            "description": "Refused in the campaign's state, or a name taken"
+          },
+          "422": {
+            "description": "A value a campaign cannot be made from"
+          }
+        },
+        "summary": "Set Step Schedule",
         "tags": [
           "campaigns"
         ]

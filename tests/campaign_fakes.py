@@ -13,10 +13,8 @@ from netkeeper.models import Mailbox, MailboxStatus, User
 from netkeeper.services.campaign_engine import Firing, SendOutcome, SendResult
 
 NOW = datetime(2026, 9, 29, 14, 0, tzinfo=UTC)  # a Tuesday
-ALWAYS_OPEN = CampaignSettings(
-    send_window_days=("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
-    send_window_hours=("00:00", "23:59"),
-)
+# There is no send window any more (#338); the name stays for the tests that read it.
+ALWAYS_OPEN = CampaignSettings()
 SETTINGS = Settings(campaigns=ALWAYS_OPEN)
 LATENCY = timedelta(minutes=7)
 # A mailbox through both arming steps (#277): what the Gmail sender needs to send.

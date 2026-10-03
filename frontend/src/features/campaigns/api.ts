@@ -34,6 +34,7 @@ export type LintResult = Schemas['LintOut']
 export type TestSend = Schemas['TestSendOut']
 export type Enrollment = Schemas['EnrollmentOut']
 export type EnrollmentPage = Schemas['EnrollmentPageOut']
+export type StartOptions = Schemas['StartOptionsOut']
 
 /** A request the backend refused: its status, its sentence, and `missing` when it sent one. */
 export class CampaignApiError extends Error {
@@ -79,6 +80,30 @@ export const campaignKeys = {
   review: (id: number) => [...campaignKeys.all, 'review', id] as const,
   enrollments: (id: number, q: string, status: string, offset: number) =>
     [...campaignKeys.all, 'enrollments', id, q, status, offset] as const,
+  startOptions: (id: number, at: string | null) =>
+    [...campaignKeys.all, 'start-options', id, at] as const,
+}
+
+/**
+ * The default start (the next Tuesday at 09:00 in your time zone), the suggestion and
+ * the reminder, and a warning, never a refusal, when `at` is outside the suggested
+ * slots (#338). `at` is an ISO time with its zone, or null for none.
+ */
+export function startOptionsQuery(id: number, at: string | null) {
+  return queryOptions({
+    queryKey: campaignKeys.startOptions(id, at),
+    queryFn: async ({ signal }): Promise<StartOptions> => {
+      const { data, error, response } = await api.GET(
+        '/api/v1/campaigns/{campaign_id}/start-options',
+        {
+          params: { path: { campaign_id: id }, query: at === null ? {} : { at } },
+          signal,
+        },
+      )
+      if (data === undefined) fail(response.status, error, 'could not load the start options')
+      return data
+    },
+  })
 }
 
 export const campaignsQuery = queryOptions({
@@ -261,11 +286,45 @@ export async function acknowledgeGuards(id: number, review: Review): Promise<Rev
   return data
 }
 
-/** The gate: 409 with `missing` unless every requirement is met. */
-export async function activateCampaign(id: number): Promise<Review> {
+/**
+ * The gate: 409 with `missing` unless every requirement is met. `startsAt` is the
+ * scheduled start, an ISO time with its zone: nothing is sent before it (#338). Null
+ * leaves it to the backend's default, the next Tuesday at 09:00.
+ */
+export async function activateCampaign(id: number, startsAt: string | null): Promise<Review> {
   const { data, error, response } = await api.POST('/api/v1/campaigns/{campaign_id}/activate', {
     params: { path: { campaign_id: id } },
+    // Left out, the backend's default: the next Tuesday at 09:00, never "now".
+    body: startsAt === null ? {} : { starts_at: startsAt },
   })
   if (data === undefined) fail(response.status, error, 'could not activate the campaign')
+  return data
+}
+
+/** Move an active or paused campaign's start. 409 once it has sent anything. */
+export async function setCampaignStart(id: number, startsAt: string): Promise<Campaign> {
+  const { data, error, response } = await api.PUT('/api/v1/campaigns/{campaign_id}/start', {
+    params: { path: { campaign_id: id } },
+    body: { starts_at: startsAt },
+  })
+  if (data === undefined) fail(response.status, error, 'could not change the start')
+  return data
+}
+
+/** A step's day offset and time of day; `sendTime` null aims for the next suggested slot. */
+export async function setStepSchedule(
+  id: number,
+  stepId: number,
+  delayDays: number,
+  sendTime: string | null,
+): Promise<Campaign> {
+  const { data, error, response } = await api.PUT(
+    '/api/v1/campaigns/{campaign_id}/steps/{step_id}/schedule',
+    {
+      params: { path: { campaign_id: id, step_id: stepId } },
+      body: { delay_days: delayDays, send_time: sendTime },
+    },
+  )
+  if (data === undefined) fail(response.status, error, 'could not change the step timing')
   return data
 }

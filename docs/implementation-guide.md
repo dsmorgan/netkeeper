@@ -155,7 +155,7 @@ Drift signals to watch for at every checkpoint:
 ### CP7: first real batch, after the follow-up
 
 - **Demo:** The first batch of up to 100 in `send` mode; two weeks later, the campaign page: sends per day, replies per step, bounces, opted out, the inbox page.
-- **Questions:** Response rate against the benchmarks in the workflow doc? Any follow-up sent to someone who had replied (the one failure that must not happen)? Any send outside the window? Did Gmail push back in any way? What did you do by hand that the tool should have done?
+- **Questions:** Response rate against the benchmarks in the workflow doc? Any follow-up sent to someone who had replied (the one failure that must not happen)? Any send before the campaign's scheduled start? Did any send go at an hour that surprised you (see #354)? Did Gmail push back in any way? What did you do by hand that the tool should have done?
 - **Re-read:** workflow stages 3 to 5, the benchmarks table.
 - **Outcome:** This is the checkpoint that proves the product. Take a full pass over the backlog afterward.
 
@@ -504,7 +504,7 @@ Done when: each guard has a test; the excluded summary text is generated from th
 **P3-06 Engine and scheduler tick** · lane campaigns · L · `safety`
 Goal: the state machine from spec 11.3, the minute tick, send windows, holidays, per-mailbox and per-campaign caps, spacing with jitter, persistence of the next fire, pause and resume.
 Depends on: P3-04, P3-05, P3-03, P1-06.
-Done when: `simulate` runs a 100-contact sequence over three weeks with no send outside a window or over a cap, and step 2 timing derives from actual `sent_at`.
+Done when: `simulate` runs a 100-contact sequence over three weeks with no send outside a window or over a cap, and step 2 timing derives from actual `sent_at`. (#338 later replaced the send window with a scheduled start and suggested send slots: spec 11.4.)
 
 **P3-07 Send and draft modes** · lane campaigns · M
 Goal: RFC 2822 building, `send` and `draft` modes, in-thread follow-ups, campaign labels, draft-to-sent detection, discarded drafts.

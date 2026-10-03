@@ -11,12 +11,15 @@ Spec 11.3's transitions that belong to the engine, each a function here that
 needs a writer session:
 
 - :func:`enroll`: a contact the guards pass (spec 11.9) becomes ``pending``.
-- :func:`activate`: the campaign goes from ``reviewing`` to ``active``, and each
-  ``pending`` enrollment becomes ``active``, its first step due after the
-  step's delay, inside the send window.
+- :func:`activate`: the campaign goes from ``reviewing`` to ``active`` with a
+  scheduled start (``starts_at``, #338), and each ``pending`` enrollment becomes
+  ``active``, its first step due at the start, or after the step's delay
+  (:func:`netkeeper.campaigns.schedule.step_due`). :func:`set_start` moves the
+  start until the campaign's first message fires.
 - A step fires (the tick): ``current_step`` advances, and ``next_action_at`` is
   the next step's delay after the enrollment's **latest sent outbound message**,
-  pushed into the send window. Spec 11.3 says the previous step's actual
+  at the step's own time of day, or else the next suggested send slot after
+  that (#338). Spec 11.3 says the previous step's actual
   ``sent_at``; after a merge the enrollment can hold a newer message from the
   other contact, so the latest one decides (#242 review). After the last step,
   ``completed``.
@@ -35,8 +38,10 @@ The tick
 :func:`run_tick` runs every minute (:class:`CampaignEngine`). For each local user:
 
 1. **Choose**, in a writer session. Candidates are enrollments that are
-   ``active``, of a campaign that is ``active``, with ``next_action_at <= now``,
-   oldest due first. Status is what selects: a held pause keeps
+   ``active``, of a campaign that is ``active`` and whose scheduled start
+   (``starts_at``) has come, with ``next_action_at <= now``, oldest due first. A
+   campaign with no start, or one still to come, is never a candidate, and is
+   refused again below if it ever were (#338). Status is what selects: a held pause keeps
    ``next_action_at``, so a due time alone means nothing (#242 review). A
    candidate whose next step is on LinkedIn is left unfired (P4) and reported.
    Blocked and LinkedIn rows are left out of the query itself, so however many
@@ -44,8 +49,16 @@ The tick
    For the rest, in this order, what the campaign or mailbox decides first:
 
    - Its campaign or mailbox is already blocked this tick: skipped.
-   - The send window is closed: deferred to its next opening. A window that
-     cannot be read, or never opens, blocks the campaign.
+   - The campaign has not started (``starts_at`` unset or still to come): the
+     campaign is blocked until then.
+   - There is no send window (#338). A time zone or holiday list that cannot be
+     read blocks the campaign: nothing is sent under a schedule nobody can read.
+   - A due time left over from an earlier local day (the day's cap was reached,
+     or ``serve`` was not running) spills to today at the same local time, when
+     that is still to come, so a batch the caps hold back goes on at its start
+     time the next day (:func:`netkeeper.campaigns.schedule.spill`). Otherwise it fires at the next
+     tick, at any hour: netkeeper does not restrict send times (#354 tracks an
+     optional constraint).
    - The mailbox (spec 11.9, the last bullet): ``ChannelState`` is filled from
      :func:`netkeeper.services.mailboxes.mailbox_health` and today's count. A
      mailbox that is unknown, ``reauth_required`` or disabled, or at its cap,
@@ -180,7 +193,7 @@ TICK_INTERVAL_S: Final = 60.0
 
 RECHECK_AFTER: Final = timedelta(days=1)
 """A step a guard excluded for a reason that can pass (contacted recently, waiting for
-review, in another campaign ...) is checked again this much later, inside the window."""
+review, in another campaign ...) is checked again this much later."""
 
 SCAN_LIMIT: Final = 500
 """At most this many due enrollments are looked at in one tick. The rest wait a minute.
@@ -221,8 +234,9 @@ class Skip(enum.StrEnum):
     STEP_ALREADY_SENT = "step_already_sent"
     WAITING_ON_UNSENT = "waiting_on_unsent"
     NOT_DUE = "not_due"
-    OUTSIDE_WINDOW = "outside_window"
-    NO_SEND_WINDOW = "no_send_window"
+    NOT_STARTED = "not_started"
+    SPILLED = "spilled_to_next_day"
+    BAD_SCHEDULE = "bad_schedule"
     CAMPAIGN_AT_CAP = "campaign_at_cap"
     SPACING = "spacing"
     TEMPLATE_ERRORS = "template_errors"
@@ -489,19 +503,26 @@ def activate(
     *,
     settings: Settings,
     now: datetime,
+    starts_at: datetime,
     gate: object = None,
 ) -> Campaign:
-    """``reviewing`` to ``active``: every ``pending`` enrollment becomes ``active``.
+    """``reviewing`` to ``active``, starting at ``starts_at``: every ``pending``
+    enrollment becomes ``active``.
 
     Refused unless called through the review gate (``gate`` is :data:`REVIEW_GATE`:
     call :func:`netkeeper.services.campaign_review.activate`), and unless the campaign
     is ``reviewing`` with ``approved_at`` recorded (spec 11.8), has steps, has a mailbox when a step
-    is email, and every step's template is free of lint errors. Each first step is
-    due after its delay, inside the send window.
+    is email, and every step's template is free of lint errors.
+
+    ``starts_at`` is the scheduled start (#338); one already past is ``now``. Nothing
+    of the campaign is sent before it. Each first step is due at the start, or after
+    its delay (:func:`netkeeper.campaigns.schedule.step_due`).
     """
     _require_writer(session, "activate")
     if gate is not REVIEW_GATE:
         raise CampaignEngineError("activate only through the review gate (campaign_review)")
+    if starts_at.tzinfo is None or starts_at.utcoffset() is None:
+        raise ValueError("starts_at must be timezone-aware")
     campaign = _campaign(session, user, campaign_id)
     if campaign.status is not CampaignStatus.REVIEWING:
         raise CampaignEngineError(f"campaign {campaign_id} is {campaign.status}, not reviewing")
@@ -517,10 +538,10 @@ def activate(
         template = get_scoped(session, user, Template, step.template_id)
         if template is None or activation_errors(template, me_keys):
             raise CampaignEngineError(f"step {step.position}'s template has lint errors")
-    first_due = _in_window(
-        settings, user, campaign, now + timedelta(days=steps[0].delay_days)
-    ) or now + timedelta(days=steps[0].delay_days)
+    start = max(starts_at, now)
+    first_due = first_step_due(settings, user, steps[0], start)
     campaign.status = CampaignStatus.ACTIVE
+    campaign.starts_at = start
     pending = session.scalars(
         scoped(user, Enrollment).where(
             Enrollment.campaign_id == campaign_id, Enrollment.status == EnrollmentStatus.PENDING
@@ -530,8 +551,128 @@ def activate(
         enrollment.status = EnrollmentStatus.ACTIVE
         enrollment.next_action_at = first_due
     session.flush()
-    log.info("campaign %d active with %d enrollments", campaign_id, len(pending))
+    log.info(
+        "campaign %d active with %d enrollments, starting %s",
+        campaign_id,
+        len(pending),
+        start.isoformat(),
+    )
     return campaign
+
+
+START_EDITABLE: Final[frozenset[CampaignStatus]] = frozenset(
+    {CampaignStatus.ACTIVE, CampaignStatus.PAUSED}
+)
+"""A campaign whose scheduled start can move: activated, and not over."""
+
+
+def has_fired(session: Session, user: User, campaign_id: int) -> bool:
+    """Whether any outbound message of the campaign exists, whatever its status: once
+    one does, the campaign has started sending, and its start is fixed (#338)."""
+    found = session.scalar(
+        scoped(user, Message)
+        .with_only_columns(Message.id)
+        .join(Enrollment, Enrollment.id == Message.enrollment_id)
+        .where(
+            Enrollment.user_id == user.id,
+            Enrollment.campaign_id == campaign_id,
+            Message.direction == MessageDirection.OUT,
+        )
+        .limit(1)
+    )
+    return found is not None
+
+
+def set_start(
+    session: Session,
+    user: User,
+    campaign_id: int,
+    *,
+    settings: Settings,
+    now: datetime,
+    starts_at: datetime,
+) -> Campaign:
+    """Move an ``active`` or ``paused`` campaign's scheduled start, until its first send.
+
+    Refused once any outbound message of the campaign exists (:func:`has_fired`),
+    whatever its status, ``scheduled`` with no ``sent_at`` included. The check runs in
+    this writer transaction: on SQLite, ``BEGIN IMMEDIATE`` serializes it against the
+    tick's claim. Where writers are not serialized that way (PostgreSQL's default
+    isolation), a claim could commit between the check and the move; the tick's
+    "step already sent" refusal (:func:`step_has_message`) still keeps the step from
+    being sent twice. One already past is ``now``. Each live enrollment still waiting for
+    step 1 is due again from the new start; a parked one stays parked.
+    """
+    _require_writer(session, "set_start")
+    if starts_at.tzinfo is None or starts_at.utcoffset() is None:
+        raise ValueError("starts_at must be timezone-aware")
+    campaign = _campaign(session, user, campaign_id)
+    if campaign.status not in START_EDITABLE:
+        raise CampaignEngineError(
+            f"campaign {campaign_id} is {campaign.status}; only an active or paused"
+            " campaign has a start to change"
+        )
+    if has_fired(session, user, campaign_id):
+        raise CampaignEngineError(
+            f"campaign {campaign_id} has already sent; its start can no longer change"
+        )
+    steps = _steps(session, user, campaign_id)
+    if not steps:
+        raise CampaignEngineError(f"campaign {campaign_id} has no steps")
+    start = max(starts_at, now)
+    first_due = first_step_due(settings, user, steps[0], start)
+    campaign.starts_at = start
+    waiting = session.scalars(
+        scoped(user, Enrollment).where(
+            Enrollment.campaign_id == campaign_id,
+            Enrollment.status.in_((EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED)),
+            Enrollment.current_step.is_(None),
+            Enrollment.next_action_at.is_not(None),
+        )
+    ).all()
+    for enrollment in waiting:
+        enrollment.next_action_at = first_due
+    session.flush()
+    log.info("campaign %d now starts %s", campaign_id, start.isoformat())
+    return campaign
+
+
+def reschedule_step(session: Session, user: User, step: CampaignStep, *, settings: Settings) -> int:
+    """After a step's schedule changed: each live enrollment waiting for it is due again.
+
+    Only enrollments with a due time are moved; a parked one stays parked. Step 1
+    counts from the campaign's start, a later step from the enrollment's latest sent
+    outbound message. Returns how many moved.
+    """
+    _require_writer(session, "reschedule_step")
+    campaign = _campaign(session, user, step.campaign_id)
+    steps = _steps(session, user, campaign.id)
+    earlier = [s.position for s in steps if s.position < step.position]
+    previous = max(earlier) if earlier else None
+    statement = scoped(user, Enrollment).where(
+        Enrollment.campaign_id == campaign.id,
+        Enrollment.status.in_((EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED)),
+        Enrollment.next_action_at.is_not(None),
+    )
+    statement = statement.where(
+        Enrollment.current_step.is_(None)
+        if previous is None
+        else Enrollment.current_step == previous
+    )
+    moved = 0
+    for enrollment in session.scalars(statement).all():
+        if previous is None:
+            if campaign.starts_at is None:
+                continue
+            enrollment.next_action_at = first_step_due(settings, user, step, campaign.starts_at)
+        else:
+            latest = _latest_sent(session, user, enrollment.id)
+            if latest is None:
+                continue
+            enrollment.next_action_at = follow_up_due(settings, user, step, latest)
+        moved += 1
+    session.flush()
+    return moved
 
 
 def pause_campaign(session: Session, user: User, campaign_id: int) -> Campaign:
@@ -736,20 +877,46 @@ def _thread_id(session: Session, user: User, enrollment_id: int) -> str | None:
     )
 
 
-# --- windows, caps and spacing ------------------------------------------------------
+# --- schedule, caps and spacing -----------------------------------------------------
 
 
-def window_for(settings: Settings, user: User, campaign: Campaign) -> schedule.SendWindow:
-    """The campaign's send window. Raises :class:`~netkeeper.campaigns.schedule.WindowError`."""
-    return schedule.send_window(settings.campaigns, user.timezone, campaign.send_window_json)
+def slots_for(settings: Settings, user: User) -> schedule.Suggested:
+    """The user's suggested send slots and local day.
+    Raises :class:`~netkeeper.campaigns.schedule.ScheduleError`."""
+    return schedule.suggested(settings.campaigns, user.timezone)
 
 
-def _in_window(settings: Settings, user: User, campaign: Campaign, at: datetime) -> datetime | None:
-    """``at`` pushed into the campaign's window; None when the window is unreadable or shut."""
+def first_step_due(
+    settings: Settings, user: User, step: CampaignStep, starts_at: datetime
+) -> datetime:
+    """When step 1 is due for a campaign starting at ``starts_at``: never before it.
+
+    A schedule that cannot be read leaves the start plus the delay; the tick then
+    blocks the campaign, so nothing is sent under it."""
     try:
-        return window_for(settings, user, campaign).next_open(at)
-    except schedule.WindowError:
-        return None
+        return schedule.step_due(
+            starts_at,
+            delay_days=step.delay_days,
+            send_time=step.send_time,
+            slots=slots_for(settings, user),
+            first=True,
+        )
+    except schedule.ScheduleError:
+        return starts_at + timedelta(days=step.delay_days)
+
+
+def follow_up_due(settings: Settings, user: User, step: CampaignStep, latest: datetime) -> datetime:
+    """When a follow-up is due after the latest sent message: its own time of day, or
+    the next suggested slot after its delay. Unreadable: the delay alone, as above."""
+    try:
+        return schedule.step_due(
+            latest,
+            delay_days=step.delay_days,
+            send_time=step.send_time,
+            slots=slots_for(settings, user),
+        )
+    except schedule.ScheduleError:
+        return latest + timedelta(days=step.delay_days)
 
 
 def campaign_cap(settings: Settings, campaign: Campaign) -> int:
@@ -873,7 +1040,7 @@ class _Blocks:
 
     campaigns: dict[int, tuple[tuple[str, ...], datetime | None]] = field(default_factory=dict)
     mailboxes: dict[int, tuple[tuple[str, ...], datetime | None]] = field(default_factory=dict)
-    windows: dict[int, schedule.SendWindow] = field(default_factory=dict)
+    slots: schedule.Suggested | None = None
 
 
 def _next_step_join(user: User) -> ColumnElement[bool]:
@@ -912,8 +1079,13 @@ def _not_on_linkedin() -> ColumnElement[bool]:
 
 
 def _selected(user: User, now: datetime) -> Select[tuple[Enrollment]]:
-    """Due enrollments, selected on status (#242 review), never on the due time alone."""
-    return _selectable(user).where(Enrollment.next_action_at <= now)
+    """Due enrollments, selected on status (#242 review), never on the due time alone,
+    of a campaign whose scheduled start has come (#338)."""
+    return _selectable(user).where(
+        Enrollment.next_action_at <= now,
+        Campaign.starts_at.is_not(None),
+        Campaign.starts_at <= now,
+    )
 
 
 def _due(
@@ -1009,11 +1181,19 @@ def upcoming(session: Session, user: User, *, limit: int) -> tuple[list[Upcoming
 
 
 def _next_due(session: Session, user: User, now: datetime) -> datetime | None:
-    return session.scalar(
+    due = session.scalar(
         _selectable(user)
         .with_only_columns(func.min(Enrollment.next_action_at))
         .where(Enrollment.next_action_at > now, _not_on_linkedin())
     )
+    # A campaign still to start: its enrollments may already be due, and wait for it.
+    starts = session.scalar(
+        _selectable(user)
+        .with_only_columns(func.min(Campaign.starts_at))
+        .where(Campaign.starts_at > now, _not_on_linkedin())
+    )
+    found = [at for at in (due, starts) if at is not None]
+    return min(found) if found else None
 
 
 class _Chooser:
@@ -1043,13 +1223,9 @@ class _Chooser:
     def skip(self, enrollment: Enrollment, *reasons: str) -> None:
         self.result.decisions.append(Decision(enrollment.id, False, tuple(reasons)))
 
-    def defer(
-        self, enrollment: Enrollment, campaign: Campaign, until: datetime, *reasons: str
-    ) -> None:
-        """Move the due time to ``until``, pushed into the window when the window is known."""
-        window = self.blocks.windows.get(campaign.id)
-        opens = window.next_open(until) if window is not None else None
-        enrollment.next_action_at = opens or until
+    def defer(self, enrollment: Enrollment, until: datetime, *reasons: str) -> None:
+        """Move the due time to ``until``. There is no window to push it into (#338)."""
+        enrollment.next_action_at = until
         self.skip(enrollment, *reasons)
 
     def park(self, enrollment: Enrollment, *reasons: str) -> None:
@@ -1156,28 +1332,32 @@ class _Chooser:
                 self.skip(enrollment, Skip.MAILBOX_DISARMED)
                 return None
 
+        # The scheduled start (#338). The query already leaves out a campaign that
+        # has not started; this is the same rule again, where the claim is decided.
+        if campaign.starts_at is None or campaign.starts_at > now:
+            self.block_campaign(campaign.id, (Skip.NOT_STARTED,), campaign.starts_at)
+            self.skip(enrollment, Skip.NOT_STARTED)
+            return None
+
         try:
-            window = self.blocks.windows.get(campaign.id) or window_for(
-                self.settings, user, campaign
-            )
-        except schedule.WindowError as exc:
+            slots = self.blocks.slots or slots_for(self.settings, user)
+        except schedule.ScheduleError as exc:
             log.warning("campaign %d sends nothing: %s", campaign.id, exc)
-            self.block_campaign(campaign.id, (Skip.NO_SEND_WINDOW,))
-            self.skip(enrollment, Skip.NO_SEND_WINDOW)
+            self.block_campaign(campaign.id, (Skip.BAD_SCHEDULE,))
+            self.skip(enrollment, Skip.BAD_SCHEDULE)
             return None
-        self.blocks.windows[campaign.id] = window
+        self.blocks.slots = slots
 
-        opens = window.next_open(now)
-        if opens is None:
-            self.block_campaign(campaign.id, (Skip.NO_SEND_WINDOW,))
-            self.skip(enrollment, Skip.NO_SEND_WINDOW)
-            return None
-        if opens > now:
-            self.defer(enrollment, campaign, opens, Skip.OUTSIDE_WINDOW)
+        due = enrollment.next_action_at
+        resume = None if due is None else schedule.spill(due, now, slots)
+        if resume is not None:
+            self.defer(enrollment, resume, Skip.SPILLED)
             return None
 
-        day_start, day_end = window.day_bounds(now)
-        tomorrow = window.next_open(day_end) or day_end
+        # A cap reached today lifts at the local midnight; what is left of the batch
+        # then spills to its own time of day (above).
+        day_start, day_end = slots.day_bounds(now)
+        tomorrow = day_end
         mailbox_reasons = self._mailbox(campaign, day_start, day_end)
         if mailbox_reasons:
             until = tomorrow if ChannelReason.MAILBOX_AT_CAP.value in mailbox_reasons else None
@@ -1220,9 +1400,11 @@ class _Chooser:
             self.park(enrollment, Skip.WAITING_ON_UNSENT)
             return None
         if latest is not None:
-            due = latest + timedelta(days=step.delay_days)
+            # The step's own timing (#338 review, S2): an explicit time of day may come
+            # before the raw delay, and the suggested slot after it.
+            due = follow_up_due(self.settings, user, step, latest)
             if due > now:
-                self.defer(enrollment, campaign, due, Skip.NOT_DUE)
+                self.defer(enrollment, due, Skip.NOT_DUE)
                 return None
 
         verdict = check_step(session, user, enrollment, step, now=now)
@@ -1262,7 +1444,7 @@ class _Chooser:
                 _end(self.session, self.user, enrollment, status, reason.value)
                 self.skip(enrollment, Skip.ENDED, *reasons)
                 return
-        self.defer(enrollment, campaign, self.now + RECHECK_AFTER, Skip.GUARD_EXCLUDED, *reasons)
+        self.defer(enrollment, self.now + RECHECK_AFTER, Skip.GUARD_EXCLUDED, *reasons)
 
     def _claim(
         self,
@@ -1290,8 +1472,9 @@ class _Chooser:
         if contact is None or address is None:  # the guards passed it a moment ago
             self.park(enrollment, Skip.NO_ADDRESS)
             return None
-        window = self.blocks.windows[campaign.id]
-        today = window.local_date(self.now)
+        slots = self.blocks.slots
+        assert slots is not None  # _consider set it before any claim
+        today = slots.local_date(self.now)
         values = MergeValues(
             contact=contact_fields(contact, today),
             me=me,
@@ -1395,8 +1578,7 @@ def _advance(
         # step's delay counts from when it does (schedule_next).
         enrollment.next_action_at = None
         return
-    due = latest + timedelta(days=upcoming.delay_days)
-    enrollment.next_action_at = _in_window(settings, user, campaign, due) or due
+    enrollment.next_action_at = follow_up_due(settings, user, upcoming, latest)
     session.flush()
 
 
@@ -1533,7 +1715,7 @@ def _give_back(
     now: datetime,
 ) -> bool:
     """Undo a claim whose send sent nothing: the message row goes, so the step is free to
-    fire again, and the enrollment is due :func:`retry_after` later, inside the window.
+    fire again, and the enrollment is due :func:`retry_after` later.
 
     Deleting the row is safe only because nothing reached Gmail: a send whose outcome
     is unknown is never given back. The next claim writes a new row, and so a new
@@ -1544,6 +1726,9 @@ def _give_back(
     given back: the message keeps its row, with the reason as its ``error``, and
     False is returned for the caller to record it ``failed`` (#280). True when the
     claim was given back.
+
+    The retry is part of the batch the step was in: it is due ``retry_after`` later,
+    at any hour (#338).
     """
     reason = (result.error or "no reason given")[:ERROR_MAX_LENGTH]
     # A merge may have moved the message to another enrollment meanwhile: follow it.
@@ -1577,9 +1762,7 @@ def _give_back(
     )
     # A paused enrollment keeps its due time for the resume; an ended one has none.
     if enrollment.status in (EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED):
-        campaign = _campaign(session, user, enrollment.campaign_id)
-        due = now + wait
-        enrollment.next_action_at = _in_window(settings, user, campaign, due) or due
+        enrollment.next_action_at = now + wait
     return True
 
 
@@ -2138,7 +2321,7 @@ def tick_user(
     A sender that is a :class:`Reconciler` looks up what it sent before, first
     (P3-07). The time is read once the writer session holds the write lock, not
     before: the lock can take up to the busy timeout to get, and a claim decided on
-    the time from before the wait could land after the window closed (#264 review).
+    the time from before the wait would be decided on a time already past (#264 review).
     Nothing is claimed once ``stopping()`` is true: a claim is a send to come.
     """
     result = TickResult(user_id)

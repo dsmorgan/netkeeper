@@ -4,7 +4,8 @@ Resolution order (spec section 15): ``--config``, ``$NETKEEPER_CONFIG``,
 ``./config.toml``, ``<data_dir>/config.toml``, then the built-in defaults below.
 Unknown sections and keys are logged and ignored, except under ``[me]``, where
 unknown keys are kept as extra merge fields on purpose; wrong types raise
-:class:`ConfigError`.
+:class:`ConfigError`. A key netkeeper no longer reads (:data:`DEPRECATED_KEYS`) is
+ignored too, with one deprecation warning per file that names each such key.
 """
 
 from __future__ import annotations
@@ -33,6 +34,20 @@ _EXTRA = {_ROLE: "extra"}  # collects the table's unknown string keys
 
 class ConfigError(ValueError):
     """A config file could not be parsed, or a value has the wrong type or shape."""
+
+
+DEPRECATED_KEYS: dict[str, str] = {
+    "campaigns.send_window_days": "the send window is gone (#338)",
+    "campaigns.send_window_hours": "the send window is gone (#338)",
+}
+"""Keys an older config may still hold, and why netkeeper ignores them. A file that
+has any of them still loads: they are left out, with one warning (see
+:func:`_load_file`)."""
+
+DEPRECATED_ADVICE = (
+    "netkeeper no longer limits when campaigns send; each campaign has a scheduled start,"
+    " chosen when you activate it. Remove these keys from the file"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,8 +113,10 @@ class LinkedInSettings:
 
 @dataclass(frozen=True, slots=True)
 class CampaignSettings:
-    send_window_days: tuple[str, ...] = ("Tue", "Wed", "Thu")
-    send_window_hours: tuple[str, str] = ("09:00", "16:30")
+    """``[campaigns]``. There is no send window (#338): each campaign has a scheduled
+    start, and ``holidays`` only steer the suggested send slots
+    (:mod:`netkeeper.campaigns.schedule`)."""
+
     mailbox_daily_cap: int = 80
     send_spacing_median_s: int = 240
     send_spacing_floor_s: int = 90
@@ -160,9 +177,33 @@ def _load_file(path: Path) -> Settings:
             raw = tomllib.load(handle)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
+    raw = _drop_deprecated(raw, source=path)
     settings = _from_table(Settings, raw, prefix="", source=path)
     log.debug("loaded settings from %s", path)
     return replace(settings, source_path=path)
+
+
+def _drop_deprecated(raw: dict[str, Any], *, source: Path) -> dict[str, Any]:
+    """``raw`` without :data:`DEPRECATED_KEYS`, and one warning naming those it held."""
+    found: list[str] = []
+    cleaned: dict[str, Any] = dict(raw)
+    for key in DEPRECATED_KEYS:
+        section, name = key.split(".", 1)
+        table = cleaned.get(section)
+        if isinstance(table, Mapping) and name in table:
+            cleaned[section] = {k: v for k, v in table.items() if k != name}
+            found.append(key)
+    if found:
+        reasons = sorted({DEPRECATED_KEYS[key] for key in found})
+        log.warning(
+            "%s: ignoring deprecated %s %s (%s). %s",
+            source,
+            "key" if len(found) == 1 else "keys",
+            ", ".join(found),
+            "; ".join(reasons),
+            DEPRECATED_ADVICE,
+        )
+    return cleaned
 
 
 def _from_table[T: DataclassInstance](
