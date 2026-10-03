@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 
 import { budgetQuery, heatQuery } from './api'
 import { formatWhen } from './fields'
+import { ProfileViewNotice } from './profile-view-notice'
 import { RiskWarning } from './risk-warning'
 import { ACTION_CLASS_LABELS } from './types'
 
@@ -35,6 +36,7 @@ export function BudgetPanel() {
         {budget.isSuccess && (
           <>
             <RiskWarning text={budget.data.risk_warning} />
+            <ProfileViewNotice text={budget.data.profile_view_notice} />
             <ol className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
               <Step label="Warm-up" value={budget.data.profile_visits_today.ramp} />
               <Step label="After weekend" value={budget.data.profile_visits_today.after_weekend} />

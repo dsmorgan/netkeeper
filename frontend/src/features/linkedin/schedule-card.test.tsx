@@ -56,6 +56,24 @@ describe('ScheduleCard', () => {
     expect(calls.some((call) => call.path === '/api/v1/linkedin/schedule/arm')).toBe(false)
   })
 
+  it('shows the profile-view notice in the dialog, and arming still works (#325)', async () => {
+    const { calls } = renderCard({
+      'GET /api/v1/linkedin/budget': () => jsonResponse(BUDGET),
+      'POST /api/v1/linkedin/schedule/arm': () => jsonResponse(SCHEDULE_ARMED),
+    })
+    await screen.findByText('Disarmed — nothing runs on its own')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Arm scheduled runs' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(await within(dialog).findByRole('note', { name: 'Profile views' })).toHaveTextContent(
+      'Who viewed your profile',
+    )
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Arm scheduled runs' }))
+    expect(await screen.findByText(/^Armed/)).toBeInTheDocument()
+    expect(calls.some((call) => call.path === '/api/v1/linkedin/schedule/arm')).toBe(true)
+  })
+
   it('shows the profile-visit risk warning in the dialog above 100 a day, and still arms (#318)', async () => {
     const { calls } = renderCard({
       'GET /api/v1/linkedin/budget': () => jsonResponse({ ...BUDGET, risk_warning: RISK_WARNING }),

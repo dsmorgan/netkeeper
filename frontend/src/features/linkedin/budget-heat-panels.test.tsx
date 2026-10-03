@@ -18,6 +18,22 @@ function renderPanel(budget: BudgetStatus) {
   )
 }
 
+describe('BudgetPanel profile-view notice (#325)', () => {
+  it('shows the notice, with no risk warning, at the default limit', async () => {
+    renderPanel(BUDGET)
+    const note = await screen.findByRole('note', { name: 'Profile views' })
+    expect(note).toHaveTextContent('Who viewed your profile')
+    expect(note).toHaveTextContent(BUDGET.profile_view_notice)
+    expect(screen.queryByRole('note', { name: 'Profile-visit risk' })).toBeNull()
+  })
+
+  it('shows it beside the risk warning, not instead of it', async () => {
+    renderPanel({ ...BUDGET, risk_warning: RISK_WARNING })
+    expect(await screen.findByRole('note', { name: 'Profile views' })).toBeInTheDocument()
+    expect(screen.getByRole('note', { name: 'Profile-visit risk' })).toBeInTheDocument()
+  })
+})
+
 describe('BudgetPanel risk warning (#318)', () => {
   it('shows the warning the API returns for a daily limit above 100', async () => {
     renderPanel({ ...BUDGET, risk_warning: RISK_WARNING })

@@ -41,6 +41,27 @@ describe('StartRunCard', () => {
     expect(await screen.findByLabelText(/max visits/i)).toBeInTheDocument()
   })
 
+  it('shows the profile-view notice for enrichment only, and starting stays one click (#325)', async () => {
+    const { calls } = renderCard({
+      'POST /api/v1/linkedin/runs': () => jsonResponse({ run_id: 7 }),
+    })
+    const select = await screen.findByLabelText('Kind')
+    expect(screen.queryByRole('note', { name: 'Profile views' })).not.toBeInTheDocument()
+
+    fireEvent.change(select, { target: { value: 'enrich' } })
+    expect(await screen.findByRole('note', { name: 'Profile views' })).toHaveTextContent(
+      'Who viewed your profile',
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start run' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(within(dialog).getByRole('note', { name: 'Profile views' })).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    await waitFor(() =>
+      expect(calls.some((call) => call.path === '/api/v1/linkedin/runs')).toBe(true),
+    )
+  })
+
   it('clamps max visits to today’s remaining budget: it can only lower it', async () => {
     renderCard()
     fireEvent.change(await screen.findByLabelText('Kind'), { target: { value: 'enrich' } })

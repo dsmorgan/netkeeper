@@ -1146,6 +1146,9 @@ def linkedin_enrich(
     `[linkedin] active_hours` it refuses before recording a run, and a run the
     window closes on stops between profiles, saying so. Ctrl-C stops it between
     profiles; `--resume <run id>` picks up what it left.
+
+    Each visit can show up in the contact's Who viewed your profile. It says so
+    before the run starts, and it never asks you to confirm (#325).
     """
     _run_by_hand(ctx, SyncRunKind.ENRICH, max_visits=max_visits, resume=resume)
 
@@ -1196,6 +1199,8 @@ def _run_by_hand(
                 typer.echo(f"error: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
             run_id = run.id
+        if kind is SyncRunKind.ENRICH:
+            typer.echo(f"note: {budgets.PROFILE_VIEW_NOTICE}")
         typer.echo(
             f"run {run_id} ({kind.value}) started; `netkeeper linkedin cancel {run_id}` stops it"
         )
@@ -1432,7 +1437,8 @@ def linkedin_schedule_arm(
     active hours. Arm only after a supervised run by hand has gone well.
 
     When the daily profile-visit limit is above 100, it says so first, --yes or
-    not (#318). The warning informs; it does not stop arming.
+    not (#318). The warning informs; it does not stop arming. It also notes that
+    enrichment can show up in the contact's Who viewed your profile (#325).
     """
     settings = _load_settings_or_exit(ctx.ensure_object(CliState))
     engine = make_engine(database_url())
@@ -1451,6 +1457,7 @@ def linkedin_schedule_arm(
         risk = budgets.profile_visit_risk_warning(settings.linkedin.budget)
         if risk is not None:
             typer.echo(f"warning: {risk}")
+        typer.echo(f"note: {budgets.PROFILE_VIEW_NOTICE}")
         if not yes and not typer.confirm(
             "arm scheduled LinkedIn runs? netkeeper serve will then visit LinkedIn on its"
             " own schedule, without you starting each run"

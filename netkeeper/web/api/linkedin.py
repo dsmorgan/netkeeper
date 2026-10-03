@@ -324,6 +324,7 @@ def get_budget(request: Request, user: CurrentUser, session: SessionDep) -> Budg
             remaining=visits.remaining,
         ),
         risk_warning=budgets.profile_visit_risk_warning(settings.budget),
+        profile_view_notice=budgets.PROFILE_VIEW_NOTICE,
     )
 
 
