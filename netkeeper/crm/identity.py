@@ -1517,10 +1517,17 @@ def _merge_scalars(survivor: Contact, loser: Contact) -> None:
         survivor.met = loser.met
         survivor.met_source = loser.met_source
         survivor.triaged_at = loser.triaged_at
-    elif loser.met_source is MetSource.MANUAL and survivor.met_source is MetSource.AUTOMATIC:
+    elif (
+        loser.met is survivor.met
+        and loser.met_source is MetSource.MANUAL
+        and loser.triaged_at is not None
+        and survivor.met_source is MetSource.AUTOMATIC
+    ):
         # The same answer, but one of them is the person's own. Keeping the
         # batch's would throw away a confirmation and leave the survivor in the
-        # review queue for a decision that has already been reviewed.
+        # review queue for a decision that has already been reviewed. Only a
+        # triaged loser confirms anything (#331): ``manual`` is also the column
+        # default, so an untriaged contact carries it without anyone deciding.
         survivor.met_source = MetSource.MANUAL
     if loser.do_not_contact:
         if not survivor.do_not_contact:

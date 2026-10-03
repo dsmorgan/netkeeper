@@ -1468,6 +1468,100 @@ def test_merge_keeps_the_answer_the_person_gave_over_the_same_one_a_batch_gave(
     assert survivor.triaged_at == NOW
 
 
+def test_merge_keeps_a_batch_answer_automatic_when_the_loser_is_untriaged(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """An untriaged loser is ``manual`` only by the column default: it confirms nothing (#331)."""
+    alice, _ = users
+    survivor = factories.make_contact(
+        writer, alice, met=ContactMet.MET, met_source=MetSource.AUTOMATIC, triaged_at=NOW
+    )
+    loser = factories.make_contact(writer, alice)
+    assert (loser.met, loser.met_source, loser.triaged_at) == (
+        ContactMet.UNKNOWN,
+        MetSource.MANUAL,
+        None,
+    )
+    merge(writer, alice, survivor.id, loser.id)
+    assert (survivor.met, survivor.met_source) == (ContactMet.MET, MetSource.AUTOMATIC)
+    assert survivor.triaged_at == NOW
+
+
+def test_merge_needs_a_triaged_loser_even_when_the_answers_match(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """The same answer, ``manual``, but never triaged: still not a confirmation (#331)."""
+    alice, _ = users
+    survivor = factories.make_contact(
+        writer, alice, met=ContactMet.MET, met_source=MetSource.AUTOMATIC, triaged_at=NOW
+    )
+    loser = factories.make_contact(
+        writer, alice, met=ContactMet.MET, met_source=MetSource.MANUAL, triaged_at=None
+    )
+    merge(writer, alice, survivor.id, loser.id)
+    assert (survivor.met, survivor.met_source) == (ContactMet.MET, MetSource.AUTOMATIC)
+
+
+@pytest.mark.parametrize(
+    ("mine", "theirs", "expected", "source", "triaged_at"),
+    [
+        # The loser's answer is more decided: it wins, with who decided it and when.
+        (ContactMet.NOT_MET, ContactMet.MET, ContactMet.MET, MetSource.MANUAL, LATER),
+        # The survivor's answer is more decided: it stays, and stays the batch's,
+        # because the person never confirmed it.
+        (ContactMet.MET, ContactMet.NOT_MET, ContactMet.MET, MetSource.AUTOMATIC, NOW),
+        (ContactMet.NOT_MET, ContactMet.SKIP, ContactMet.NOT_MET, MetSource.AUTOMATIC, NOW),
+    ],
+)
+def test_merge_settles_a_different_hand_made_answer_by_rank(
+    writer: Session,
+    users: tuple[User, User],
+    mine: ContactMet,
+    theirs: ContactMet,
+    expected: ContactMet,
+    source: MetSource,
+    triaged_at: datetime,
+) -> None:
+    """A triaged loser that answered differently confirms nothing; the rank decides (#331)."""
+    alice, _ = users
+    survivor = factories.make_contact(
+        writer, alice, met=mine, met_source=MetSource.AUTOMATIC, triaged_at=NOW
+    )
+    loser = factories.make_contact(
+        writer, alice, met=theirs, met_source=MetSource.MANUAL, triaged_at=LATER
+    )
+    merge(writer, alice, survivor.id, loser.id)
+    assert (survivor.met, survivor.met_source, survivor.triaged_at) == (
+        expected,
+        source,
+        triaged_at,
+    )
+
+
+def test_merge_keeps_a_manual_survivor_manual(writer: Session, users: tuple[User, User]) -> None:
+    """A survivor the person already answered keeps its answer and source, whatever the loser is."""
+    alice, _ = users
+    survivor = factories.make_contact(
+        writer, alice, met=ContactMet.MET, met_source=MetSource.MANUAL, triaged_at=NOW
+    )
+    untriaged = factories.make_contact(writer, alice)
+    merge(writer, alice, survivor.id, untriaged.id)
+    assert (survivor.met, survivor.met_source, survivor.triaged_at) == (
+        ContactMet.MET,
+        MetSource.MANUAL,
+        NOW,
+    )
+    differing = factories.make_contact(
+        writer, alice, met=ContactMet.NOT_MET, met_source=MetSource.MANUAL, triaged_at=LATER
+    )
+    merge(writer, alice, survivor.id, differing.id)
+    assert (survivor.met, survivor.met_source, survivor.triaged_at) == (
+        ContactMet.MET,
+        MetSource.MANUAL,
+        NOW,
+    )
+
+
 def test_merge_does_not_let_a_batch_overwrite_the_person_s_own_answer(
     writer: Session, users: tuple[User, User]
 ) -> None:
