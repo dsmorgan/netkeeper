@@ -310,8 +310,12 @@ def record_email_out(
     session: Session, user: User, recipient: HistoryRecipient, campaign: str, at: datetime
 ) -> bool:
     """The recipient's imported ``email_out`` on its contact's timeline, once: False when
-    the row has no contact or already wrote one."""
-    if recipient.contact_id is None or recipient.email_out_interaction_id is not None:
+    the row has no contact, already wrote one, or was found only by subject."""
+    if (
+        recipient.found_by_subject  # a matching subject does not prove the campaign reached them
+        or recipient.contact_id is None
+        or recipient.email_out_interaction_id is not None
+    ):
         return False
     contact = resolve_survivor(session, user, recipient.contact_id)
     interaction = add_interaction(

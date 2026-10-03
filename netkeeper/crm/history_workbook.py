@@ -251,6 +251,12 @@ def read_tab(
     started = _date(value("start"))
     if started is None:
         raise WorkbookError("no start date")
+    subject = _text(value("subject"))
+    if subject is not None and ("{{" in subject or "}}" in subject):
+        warnings.append(
+            "the subject is personalized ({{...}}), so the Gmail scan's exact subject"
+            " match cannot find replies to it"
+        )
     last_batch = _date(value("last batch"))
     if value("last batch") is not None and last_batch is None:
         warnings.append("the last batch date could not be read")
@@ -285,7 +291,7 @@ def read_tab(
     return WorkbookCampaign(
         index=index,
         name=name,
-        subject=_text(value("subject")),
+        subject=subject,
         started_on=started,
         last_batch_on=last_batch,
         recipients_count=_count(value("recipients")),
@@ -372,14 +378,18 @@ def _walk(grid: _Grid, header_row: int, col: int, kind: ListKind) -> tuple[tuple
                 seen.add(email)
                 people.append(Person(first, last, email))
         elif not (
-            kind is ListKind.CLICKED
-            and first is None
-            and last is None
-            and _LINK.search(_text(grid.at(row, col + 2)) or "")
+            kind is ListKind.CLICKED and first is None and last is None and _is_link(grid, row, col)
         ):
             dropped += 1
         row += 1
     return tuple(people), dropped
+
+
+def _is_link(grid: _Grid, row: int, col: int) -> bool:
+    """Whether the address column holds a clicked link: link-shaped, and no ``@`` (a
+    malformed address such as ``ada@example.test;`` is reported, not taken for a link)."""
+    text = _text(grid.at(row, col + 2)) or ""
+    return "@" not in text and bool(_LINK.search(text))
 
 
 def _label(value: object) -> str | None:
