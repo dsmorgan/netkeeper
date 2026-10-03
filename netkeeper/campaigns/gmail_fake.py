@@ -40,7 +40,10 @@ get it wrong:
   is :class:`GmailRejected`; drafting one is not, as in Gmail.
 - **Labels.** ``modify_labels`` refuses ``DRAFT`` and ``SENT``, which Gmail
   does not let a client add or remove.
-- **Search.** ``from:`` and ``to:`` (whole words, as Gmail matches them),
+- **Search.** ``from:`` and ``to:`` (whole words, as Gmail matches them;
+  ``from:me`` is the mailbox's address or a verified alias), ``subject:`` (a
+  word or a quoted phrase, matched as whole words in the subject), a term
+  negated with a leading ``-``,
   ``rfc822msgid:``, ``in:`` (``inbox``, ``sent``, ``drafts``, ``scheduled``, and ``anywhere``,
   the one search that includes spam and trash), ``label:``, and
   ``after:``/``before:`` with epoch seconds only (Gmail reads a ``YYYY/MM/DD``
@@ -648,8 +651,23 @@ class FakeGmail:
         )
 
     def _term(self, term: str) -> Callable[[_Stored], bool]:
+        if term.startswith("-") and len(term) > 1:
+            inner = self._term(term[1:])
+            return lambda stored: not inner(stored)
         key, sep, value = term.partition(":")
         key = key.lower()
+        if key == "from" and value.lower() == "me":
+            own = {self.address, *self.aliases}
+            return lambda stored: any(
+                address.lower() in own
+                for _, address in getaddresses(
+                    [str(v) for v in stored.parsed.get_all("From") or []]
+                )
+            )
+        if key == "subject" and value.strip():
+            phrase = r"\s+".join(re.escape(word) for word in value.lower().split())
+            in_subject = re.compile(rf"(?<![^\W_]){phrase}(?![^\W_])")
+            return lambda stored: bool(in_subject.search((stored.header("Subject") or "").lower()))
         if not sep and "@" in term:
             return self._full_text(term)
         if not sep or not value:

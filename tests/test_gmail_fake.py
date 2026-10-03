@@ -552,17 +552,26 @@ def test_a_bare_address_matches_it_as_a_whole_word_in_headers_and_body(gmail: Fa
     assert gmail.search("da@example.com", purpose="s") == []
 
 
+def test_subject_phrase_from_me_and_negation(gmail: FakeGmail) -> None:
+    """What the history scan's subject pass asks (#65): a quoted subject phrase, not
+    from the mailbox itself."""
+    mine = gmail.send(_mail("Catching up"), purpose="send")
+    theirs = gmail.deliver(_inbound("Re: Catching up"))
+    gmail.deliver(_inbound("Catching upstream news"))
+    assert gmail.search('subject:"catching up"', purpose="s") == [theirs, mine]
+    assert gmail.search('subject:"Catching up" -from:me', purpose="s") == [theirs]
+    assert gmail.search("from:me", purpose="s") == [mine]
+
+
 @pytest.mark.parametrize(
     "query",
     [
         "hello",
         "after:2026/10/06",
-        "subject:hi",
         "in:chats",
         # Gmail finds matches for these; the fake would answer none, so it refuses (#270).
         "label:SPAM",
         "label:trash",
-        "from:me",
         "to:ME",
     ],
 )
