@@ -18,6 +18,8 @@ The quickest way through is the setup guide on the Settings page. Run `netkeeper
 - You mark the rest done yourself, since netkeeper can't see into Google's console. You can reopen any step, and **Mark not done** undoes a step you marked by mistake.
 - When a mailbox is connected, the guide folds away. **Show setup steps** reopens it, for the optional publishing step.
 
+The links need your project ID, not its name. Until you save an ID in step 1, the links that take a project are disabled, with a hint.
+
 netkeeper never drives the Google console. Every link opens in your own browser, and netkeeper never runs `gcloud`: it shows the commands, and you run them. The rest of this page is the same steps in writing, for the command line or for reference.
 
 ## What netkeeper asks Google for
@@ -56,7 +58,7 @@ gcloud projects create netkeeper-ab12cd --name=netkeeper
 2. Name it `netkeeper`. Under the name, choose **Edit** next to the project ID and enter yours. Leave the organization as it is and choose **Create**.
 3. Make sure the new project is selected in the project picker before you go on.
 
-If you already have a project, use its ID instead.
+If you already have a project, use its ID instead. The ID isn't the name. To find it, open the project picker at the top of the console: the list shows **Name**, **Type** and **ID**. When Google creates a project for you, it usually adds a number to the ID, so a project named `netkeeper` might have the ID `netkeeper-510123`. Every console link in this guide takes the ID in `?project=`. If you use the name, the console doesn't show an error. It opens a page that suggests you request more permissions.
 
 ## 2. Enable the Gmail API
 

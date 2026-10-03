@@ -36,12 +36,25 @@ describe('consoleLinks', () => {
     expect(links.branding).toBe(
       'https://console.cloud.google.com/auth/branding?project=a%20b%26c%3Dd%23e%2Ff%3Fg',
     )
-    expect(new URL(links.createClient).searchParams.get('project')).toBe('a b&c=d#e/f?g')
-    expect(new URL(links.gmailApi).hash).toBe('')
+    expect(new URL(links.createClient as string).searchParams.get('project')).toBe('a b&c=d#e/f?g')
+    expect(new URL(links.gmailApi as string).hash).toBe('')
   })
 
-  it('leaves the project off before there is one', () => {
-    expect(consoleLinks(null).branding).toBe('https://console.cloud.google.com/auth/branding')
+  it('has no link for a project page before there is a project ID', () => {
+    const links = consoleLinks(null)
+    expect(links.gmailApi).toBeNull()
+    expect(links.branding).toBeNull()
+    expect(links.audience).toBeNull()
+    expect(links.createClient).toBeNull()
+    expect(links.createProject).toBe('https://console.cloud.google.com/projectcreate')
+  })
+
+  it('puts the project ID, never a name, in every project link', () => {
+    const links = consoleLinks('netkeeper-510123')
+    const projectLinks = [links.gmailApi, links.branding, links.audience, links.createClient]
+    for (const href of projectLinks) {
+      expect(new URL(href as string).searchParams.get('project')).toBe('netkeeper-510123')
+    }
   })
 })
 

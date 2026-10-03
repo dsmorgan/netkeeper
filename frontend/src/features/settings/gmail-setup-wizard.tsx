@@ -32,8 +32,24 @@ function message(error: unknown): string {
 
 const EMPTY: GmailSetup = { project_id: null, sender_email: null, done: [], steps: [] }
 
-/** A console page, opened in your own browser. netkeeper never drives it. */
-function ConsoleLink({ href, children }: { href: string; children: ReactNode }) {
+/**
+ * A console page, opened in your own browser. netkeeper never drives it. A page
+ * that needs the project ID has no `href` until you save one: it shows as
+ * disabled text, with a hint, rather than a link to the wrong project.
+ */
+function ConsoleLink({ href, children }: { href: string | null; children: ReactNode }) {
+  if (href === null) {
+    return (
+      <span
+        role="link"
+        aria-disabled="true"
+        title="Save your project ID in step 1 to enable this link"
+        className="font-medium text-muted-foreground line-through decoration-dotted"
+      >
+        {children}
+      </span>
+    )
+  }
   return (
     <a
       href={href}
@@ -43,6 +59,15 @@ function ConsoleLink({ href, children }: { href: string; children: ReactNode }) 
     >
       {children}
     </a>
+  )
+}
+
+/** Why a link is disabled, shown once per step that has one. */
+function NeedsProjectId() {
+  return (
+    <p role="note" className="text-muted-foreground">
+      The link needs your project ID. Save it in step 1 first.
+    </p>
   )
 }
 
@@ -241,12 +266,21 @@ function StepBody({
   const links = consoleLinks(setup.project_id)
   const sender = setup.sender_email ?? 'the Gmail address you send from'
   const commands = setup.project_id === null ? null : gcloudCommands(setup.project_id)
+  const hint = setup.project_id === null ? <NeedsProjectId /> : null
 
   switch (step.key) {
     case 'project':
       return (
         <>
           <ProjectForm setup={setup} saving={saving} persist={persist} />
+          <p className="text-muted-foreground">
+            Already have a project? Use its <strong>ID</strong>, not its name. In the console,
+            choose the project picker at the top; the list shows <strong>Name</strong>,{' '}
+            <strong>Type</strong> and <strong>ID</strong>. Google often adds a number to the ID, so{' '}
+            <code className="font-mono">netkeeper</code> might be{' '}
+            <code className="font-mono">netkeeper-510123</code>. Every link below uses the ID, and
+            a wrong one lands on a confusing permission page with no error.
+          </p>
           {setup.project_id !== null && commands !== null && (
             <>
               <p>
@@ -268,9 +302,6 @@ function StepBody({
                   <CopyValue label="Create the project" value={commands.createProject} />
                 </div>
               </details>
-              <p className="text-muted-foreground">
-                Already have a project? Enter its ID above instead.
-              </p>
             </>
           )}
           <MarkDone
@@ -295,6 +326,7 @@ function StepBody({
             Open the <ConsoleLink href={links.gmailApi}>Gmail API</ConsoleLink> page for your
             project and choose <strong>Enable</strong>.
           </p>
+          {hint}
           {commands !== null && (
             <details>
               <summary className="cursor-pointer text-muted-foreground">Or use gcloud</summary>
@@ -317,6 +349,7 @@ function StepBody({
             Open <ConsoleLink href={links.branding}>Branding</ConsoleLink> (choose{' '}
             <strong>Get started</strong> if the console offers it) and fill in:
           </p>
+          {hint}
           <div className="space-y-1">
             <CopyValue label="App name" value="netkeeper" />
             <CopyValue label="User support email" value={sender} />
@@ -348,6 +381,7 @@ function StepBody({
             it. Open <ConsoleLink href={links.audience}>Audience</ConsoleLink>, and under{' '}
             <strong>Test users</strong> choose <strong>Add users</strong>:
           </p>
+          {hint}
           <CopyValue label="Test user" value={sender} />
           <p className="text-muted-foreground">
             In Testing, Google expires the token after 7 days. netkeeper notices, pauses email
@@ -363,6 +397,7 @@ function StepBody({
           <p>
             Open <ConsoleLink href={links.createClient}>Create OAuth client</ConsoleLink>:
           </p>
+          {hint}
           <div className="space-y-1">
             <p>
               <span className="text-muted-foreground">Application type:</span>{' '}
@@ -455,6 +490,7 @@ function StepBody({
             Google’s rules say both pages must be on a domain you own, listed under{' '}
             <strong>Authorized domains</strong>, with the privacy policy on the home page’s domain.
           </p>
+          {hint}
           <p className="text-muted-foreground">
             A GitHub repository URL (github.com) isn’t a domain you own, so Google’s rules don’t
             allow it. netkeeper hasn’t confirmed whether the console refuses it for an app that’s
