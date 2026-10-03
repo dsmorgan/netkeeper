@@ -2131,3 +2131,24 @@ def test_with_any_time_an_overdue_send_shows_now(writer: Session, user: User) ->
     tonight = datetime(2026, 9, 24, 2, 0, tzinfo=UTC)
     row = _row(_report(writer, user, now=tonight), "next campaign send")
     assert "(2026-09-24 02:00 UTC)" in row.value, row.value
+
+
+def test_an_upgraded_campaign_approved_today_shows_the_next_opening_at_nine_pm(
+    writer: Session, user: User
+) -> None:
+    """#338 review: 0031 backfilled the start (``start_chosen`` false), so read at 21:00
+    New York with the default hours, the next send is Thursday 09:00, not now."""
+    approved = datetime(2026, 9, 23, 14, 0, tzinfo=UTC)  # 10:00 New York, Wednesday
+    mailbox = make_mailbox(writer, user, email="me@example.test")
+    campaign = factories.make_campaign(
+        writer, user, name="Autumn", mailbox_id=mailbox.id, approved_at=approved, starts_at=approved
+    )
+    assert campaign.start_chosen is False
+    factories.make_enrollment(
+        writer, campaign, factories.make_contact(writer, user), next_action_at=approved
+    )
+    writer.flush()
+    nine_pm = datetime(2026, 9, 24, 1, 0, tzinfo=UTC)  # 21:00 New York
+    row = _row(_report(writer, user, now=nine_pm), "next campaign send")
+    assert "(2026-09-24 13:00 UTC)" in row.value, row.value  # 09:00 New York, Thursday
+    assert "(2026-09-24 01:00 UTC)" not in row.value
