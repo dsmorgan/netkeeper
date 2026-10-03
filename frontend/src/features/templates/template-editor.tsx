@@ -356,7 +356,7 @@ export function TemplateEditor({
           onOpenChange={setConfirmDelete}
           title={`Delete “${template.name}”?`}
           confirmLabel="Delete template"
-          onConfirm={() => remove.mutate(template.id)}
+          onConfirm={() => remove.mutateAsync(template.id)}
           pending={remove.isPending}
           error={remove.isError ? remove.error.message : null}
         >

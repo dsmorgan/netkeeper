@@ -234,7 +234,7 @@ function RollbackCard({ run, onDone }: { run: ImportRun; onDone: (r: RollbackRes
         }
         pending={rollback.isPending}
         error={rollback.isError ? message(rollback.error) : null}
-        onConfirm={() => rollback.mutate(false)}
+        onConfirm={() => rollback.mutateAsync(false)}
       >
         <p>
           This deletes the {run.created_count} {run.created_count === 1 ? 'contact' : 'contacts'}{' '}

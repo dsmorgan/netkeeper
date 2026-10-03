@@ -263,9 +263,9 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
         confirmLabel="Disconnect"
         pending={disconnect.isPending}
         error={disconnect.isError ? message(disconnect.error) : null}
-        onConfirm={() => {
-          if (disconnecting !== null) disconnect.mutate(disconnecting.id)
-        }}
+        onConfirm={() =>
+          disconnecting === null ? Promise.resolve() : disconnect.mutateAsync(disconnecting.id)
+        }
       >
         netkeeper forgets {disconnecting?.email}’s token and stops using it. Email steps pause.
         Campaigns that sent from it keep their history. To revoke access on Google’s side too,
@@ -283,9 +283,7 @@ export function GmailSection({ outcome }: { outcome: GmailOutcome }) {
         confirmLabel={arming?.mode === 'send' ? 'Arm to send' : 'Arm for drafts'}
         pending={arm.isPending}
         error={arm.isError ? message(arm.error) : null}
-        onConfirm={() => {
-          if (arming !== null) arm.mutate(arming)
-        }}
+        onConfirm={() => (arming === null ? Promise.resolve() : arm.mutateAsync(arming))}
       >
         {arming?.mode === 'send'
           ? `netkeeper serve will send campaign email from ${arming.mailbox.email} on its own, with no one pressing Send. Disarm stops it from the next minute.`

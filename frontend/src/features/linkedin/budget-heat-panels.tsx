@@ -1,9 +1,12 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useState } from 'react'
 
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { cn } from '@/lib/utils'
 
-import { budgetQuery, heatQuery } from './api'
+import { budgetQuery, clearHeat, heatQuery, linkedinKeys } from './api'
 import { formatWhen } from './fields'
 import { ProfileViewNotice } from './profile-view-notice'
 import { RiskWarning } from './risk-warning'
@@ -108,9 +111,32 @@ function Step({
   )
 }
 
-/** Heat: the score, its threshold, the slowdown multiplier, and when runs resume (spec 9.7). */
+/**
+ * Heat: the score, its threshold, the slowdown multiplier, and when runs resume
+ * (spec 9.7). While heat is raised, "Clear heat" is spec 9.7's manual clear for
+ * "the block was something else" (#181). It always asks first, and sends the
+ * time heat was last raised as shown here: a throttle that raises it again
+ * while the dialog is open is refused by the server, never cleared unseen.
+ */
 export function HeatPanel() {
   const heat = useQuery(heatQuery)
+  const queryClient = useQueryClient()
+  const [asking, setAsking] = useState(false)
+
+  const clear = useMutation({
+    mutationFn: clearHeat,
+    onSuccess: (data) => {
+      queryClient.setQueryData(linkedinKeys.heat(), data)
+      // Heat shrinks today's visit budget and trips the banner's heat skip.
+      void queryClient.invalidateQueries({ queryKey: linkedinKeys.budget() })
+      void queryClient.invalidateQueries({ queryKey: linkedinKeys.status() })
+      setAsking(false)
+    },
+    // A refusal means heat is not what this panel shows any more; reread it.
+    onError: () => void queryClient.invalidateQueries({ queryKey: linkedinKeys.heat() }),
+  })
+
+  const lastRaisedAt = heat.data?.last_raised_at ?? null
 
   return (
     <Card size="sm">
@@ -152,9 +178,46 @@ export function HeatPanel() {
             {heat.data.cleared_at !== null && (
               <p className="text-muted-foreground">Cleared {formatWhen(heat.data.cleared_at)}</p>
             )}
+            {lastRaisedAt !== null && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  clear.reset()
+                  setAsking(true)
+                }}
+              >
+                Clear heat…
+              </Button>
+            )}
           </>
         )}
       </CardContent>
+
+      {heat.isSuccess && lastRaisedAt !== null && (
+        <ConfirmDialog
+          open={asking}
+          onOpenChange={(open) => {
+            if (!open) setAsking(false)
+          }}
+          title="Clear heat?"
+          confirmLabel="Clear heat"
+          pending={clear.isPending}
+          error={clear.isError ? message(clear.error) : null}
+          onConfirm={() => clear.mutateAsync(lastRaisedAt)}
+        >
+          <p>
+            Heat is {heat.data.score.toFixed(2)} of {heat.data.threshold.toFixed(2)}, last raised{' '}
+            {formatWhen(lastRaisedAt)}. Clearing sets it to 0: runs go back to full pace and
+            today&apos;s full visit budget, and scheduled runs are no longer skipped for heat.
+          </p>
+          <p>
+            Heat rises when LinkedIn throttles this account or shows a checkpoint. Clear it only if
+            you are sure the block that raised it was something else.
+          </p>
+          <p>If heat is raised again while this is open, nothing is cleared.</p>
+        </ConfirmDialog>
+      )}
     </Card>
   )
 }

@@ -33,6 +33,9 @@ export type LinkedInStatus = JsonOf<paths['/api/v1/linkedin/status']['get']['res
 export type SessionFlag = NonNullable<LinkedInStatus['session_flag']>
 
 export type BrowserLaunch = JsonOf<paths['/api/v1/linkedin/browser']['get']['responses'][200]>
+export type BrowserHealth = JsonOf<
+  paths['/api/v1/linkedin/browser/health']['get']['responses'][200]
+>
 
 /** The run kinds the worker can actually run (`RUNNABLE_KINDS`, `netkeeper/services/runs.py`).
  *

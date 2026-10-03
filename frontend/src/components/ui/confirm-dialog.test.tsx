@@ -1,11 +1,11 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { ConfirmDialog } from './confirm-dialog'
 
 /** A minimal caller: opens the dialog, tracks confirm calls, never actually resolves. */
-function Harness({ onConfirm }: { onConfirm: () => void }) {
+function Harness({ onConfirm }: { onConfirm: () => Promise<unknown> | void }) {
   const [open, setOpen] = useState(true)
   return (
     <ConfirmDialog
@@ -168,6 +168,70 @@ describe('ConfirmDialog', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'simulate settle' }))
     fireEvent.click(screen.getByRole('button', { name: 'Do it' }))
+    expect(onConfirm).toHaveBeenCalledTimes(2)
+  })
+
+  it('takes a third confirm after two fast failures with the same error text (#181)', async () => {
+    // The jam: each attempt fails before React commits a render with `pending`
+    // true, and both fail with the same text, so neither `pending`, `open`, nor
+    // `error` changes between the second click and the third. Only the
+    // promise settling can tell the dialog the action is over.
+    const onConfirm = vi.fn()
+    function FailingHarness() {
+      const [error, setError] = useState<string | null>(null)
+      return (
+        <ConfirmDialog
+          open
+          onOpenChange={() => undefined}
+          title="Do the thing?"
+          confirmLabel="Do it"
+          error={error}
+          onConfirm={() => {
+            onConfirm()
+            setError('run 3 is still running (409)')
+            return Promise.reject(new Error('run 3 is still running (409)'))
+          }}
+        >
+          <p>This does the thing.</p>
+        </ConfirmDialog>
+      )
+    }
+    render(<FailingHarness />)
+    const button = screen.getByRole('button', { name: 'Do it' })
+
+    for (const attempt of [1, 2, 3]) {
+      await act(async () => {
+        fireEvent.click(button)
+        await Promise.resolve()
+      })
+      expect(onConfirm).toHaveBeenCalledTimes(attempt)
+    }
+    expect(screen.getByRole('alert')).toHaveTextContent('run 3 is still running (409)')
+  })
+
+  it('holds further confirms until the promise settles, then takes the next one', async () => {
+    let settle: () => void = () => undefined
+    const onConfirm = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve
+        }),
+    )
+    render(<Harness onConfirm={onConfirm} />)
+    const button = screen.getByRole('button', { name: 'Do it' })
+
+    fireEvent.click(button)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    fireEvent.click(button)
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      settle()
+      await Promise.resolve()
+    })
+    fireEvent.click(button)
     expect(onConfirm).toHaveBeenCalledTimes(2)
   })
 })

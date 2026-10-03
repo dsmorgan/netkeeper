@@ -223,7 +223,7 @@ function LiveRun({ runId }: { runId: number }) {
         confirmLabel="Cancel run"
         pending={cancel.isPending}
         error={cancel.isError ? message(cancel.error) : null}
-        onConfirm={() => cancel.mutate()}
+        onConfirm={() => cancel.mutateAsync()}
       >
         <p>
           The run stops at its next check, between pages or profiles, and keeps what it already did.
@@ -242,7 +242,7 @@ function LiveRun({ runId }: { runId: number }) {
         confirmLabel="Resume"
         pending={resume.isPending}
         error={resume.isError ? message(resume.error) : null}
-        onConfirm={() => resume.mutate()}
+        onConfirm={() => resume.mutateAsync()}
       >
         <p>
           Starts a new run on the rest of this plan, in the same order, right now. It visits

@@ -100,6 +100,40 @@ def clear(session: Session, user: User, account_id: int, *, now: datetime) -> No
     _store(session, user, account_id, heat_math.clear(now))
 
 
+class HeatClearRefused(Exception):
+    """:func:`clear_confirmed` refused: nothing to clear, or heat rose since the confirm."""
+
+
+def clear_confirmed(
+    session: Session, user: User, account_id: int, *, last_raised_at: datetime, now: datetime
+) -> None:
+    """The manual clear, only if heat is still what a person confirmed clearing (#181).
+
+    Refuses when there is nothing to clear: heat never raised, or already
+    cleared (a stored score of exactly 0.0, which only :func:`clear` writes).
+    Refuses when the stored state was written at any other time than
+    ``last_raised_at``, the time the person was shown: a throttle that raised
+    heat again in between is new evidence, and an answer given about older heat
+    must not wipe it. The same compare-before-clear ``netkeeper linkedin
+    clear-flag`` makes for the session flag. Needs a writer session.
+    """
+    _require_writer(session, "heat.clear_confirmed")
+    stored = state(session, user, account_id)
+    if stored is None:
+        raise HeatClearRefused("heat was never raised; there is nothing to clear")
+    if stored.score == 0:
+        raise HeatClearRefused("heat is already cleared; there is nothing to clear")
+    if _as_utc(stored.updated_at) != _as_utc(last_raised_at):
+        raise HeatClearRefused(
+            "heat was raised again since you confirmed; not clearing it. Look at it again"
+        )
+    clear(session, user, account_id, now=now)
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 def _key(account_id: int) -> str:
     return f"{_KEY_PREFIX}.{account_id}"
 

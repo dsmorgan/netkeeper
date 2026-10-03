@@ -8,6 +8,7 @@ import { queryOptions } from '@tanstack/react-query'
 import { api } from '@/api/client'
 
 import type {
+  BrowserHealth,
   BrowserLaunch,
   BudgetStatus,
   Heat,
@@ -52,6 +53,7 @@ export const linkedinKeys = {
   all: ['linkedin'] as const,
   status: () => [...linkedinKeys.all, 'status'] as const,
   browser: () => [...linkedinKeys.all, 'browser'] as const,
+  browserHealth: () => [...linkedinKeys.all, 'browser-health'] as const,
   budget: () => [...linkedinKeys.all, 'budget'] as const,
   heat: () => [...linkedinKeys.all, 'heat'] as const,
   pins: () => [...linkedinKeys.all, 'pins'] as const,
@@ -82,6 +84,22 @@ export const browserQuery = queryOptions({
   },
   // Config-derived and unchanging for the life of the process; no need to refetch it often.
   staleTime: 60_000,
+})
+
+/**
+ * What netkeeper already knows about Chrome and the session (#181): the last
+ * preflight's or run's evidence, and the newest run that could not reach Chrome.
+ * The server never probes the browser to answer this.
+ */
+export const browserHealthQuery = queryOptions({
+  queryKey: linkedinKeys.browserHealth(),
+  queryFn: async ({ signal }): Promise<BrowserHealth> => {
+    const { data, error, response } = await api.GET('/api/v1/linkedin/browser/health', {
+      signal,
+    })
+    if (data === undefined) throw apiError(error, response, 'GET /api/v1/linkedin/browser/health')
+    return data
+  },
 })
 
 export const budgetQuery = queryOptions({
@@ -275,5 +293,37 @@ export async function unpauseSchedule(): Promise<Schedule> {
   if (data === undefined) {
     throw apiError(error, response, 'POST /api/v1/linkedin/schedule/unpause')
   }
+  return data
+}
+
+// --- the session flag and heat: confirmed manual clears (#181) ---------------------------
+
+/**
+ * Clear the session flag: `netkeeper linkedin clear-flag`. Sends the flag the
+ * person was shown; the server clears only that one and answers 409 if it is gone
+ * or changed since.
+ */
+export async function clearSessionFlag(
+  outcome: string,
+  flaggedAt: string,
+): Promise<LinkedInStatus> {
+  const { data, error, response } = await api.POST('/api/v1/linkedin/session-flag/clear', {
+    body: { confirm: true, outcome, flagged_at: flaggedAt },
+  })
+  if (data === undefined) {
+    throw apiError(error, response, 'POST /api/v1/linkedin/session-flag/clear')
+  }
+  return data
+}
+
+/**
+ * Clear heat by hand (spec 9.7). Sends when the person saw it last raised; the
+ * server refuses with 409 if it was raised again since, or there is nothing to clear.
+ */
+export async function clearHeat(lastRaisedAt: string): Promise<Heat> {
+  const { data, error, response } = await api.POST('/api/v1/linkedin/heat/clear', {
+    body: { confirm: true, last_raised_at: lastRaisedAt },
+  })
+  if (data === undefined) throw apiError(error, response, 'POST /api/v1/linkedin/heat/clear')
   return data
 }

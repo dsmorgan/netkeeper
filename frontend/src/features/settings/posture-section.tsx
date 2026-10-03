@@ -196,21 +196,15 @@ function ProtectionRow({ row, expanded }: { row: Protection; expanded: boolean }
 }
 
 function ProtectionBlock({ row, expanded }: { row: Protection; expanded: boolean }) {
-  // `p-2`, not the card's usual `p-3`: this app's sidebar nav does not
-  // collapse below `sm` (out of scope here), so the content column left for
-  // a card at 390px is already only ~166px — every point of padding this
-  // block keeps for itself is a point the prose below cannot wrap in.
   return (
     <li className="rounded-lg border border-border/60 p-2">
-      <div className="flex items-center justify-between gap-2">
-        {/* `min-w-0`: a flex item's default `min-width: auto` refuses to
-            shrink below its content's own min-content width (the longest
-            unbreakable word), so without it a long name pushes the badge
-            past the card's own right edge instead of wrapping — measured in
-            a real browser at 390px (review179r2), where the effective
-            content column is much narrower than the viewport (the sidebar
-            nav does not collapse below `sm`). */}
-        <span className="min-w-0 break-words font-medium">{row.name}</span>
+      {/* `flex-wrap`, and the name keeps its own min-content width: when the
+          name and the badge do not fit on one line, the badge moves below the
+          name instead of the name breaking mid-word (#181 measured "linkedin
+          session" split as "linkedi/n" at 390px). `break-words` on the name
+          now only applies to a single word wider than the whole block. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+        <span className="max-w-full font-medium break-words">{row.name}</span>
         <StatusBadge status={row.status} />
       </div>
       <div className="mt-2 break-words text-muted-foreground">

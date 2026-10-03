@@ -1968,6 +1968,59 @@ class LinkedInStatusOut(BaseModel):
     can_start_runs: bool
 
 
+class SessionFlagClearIn(BaseModel):
+    """Clear the session flag by hand (#181), what ``netkeeper linkedin clear-flag`` does.
+
+    ``confirm`` must be true, and ``outcome`` and ``flagged_at`` name the flag the
+    person saw when they confirmed: the route clears only that exact flag, the same
+    re-read the command makes after its prompt, so a flag raised again in between
+    is never cleared by an answer given about an older one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: bool
+    outcome: str
+    flagged_at: datetime
+
+
+class HeatClearIn(BaseModel):
+    """Clear heat by hand (#181): "the block was something else" (spec 9.7).
+
+    ``confirm`` must be true, and ``last_raised_at`` is the time the person saw heat
+    last raised: a throttle that raised it again in between refuses the clear.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: bool
+    last_raised_at: datetime
+
+
+class BrowserHealthOut(BaseModel):
+    """What netkeeper already knows about Chrome and the LinkedIn session (#181).
+
+    Built only from what was recorded: the last ``netkeeper preflight`` or
+    ``posture --probe``, the newest run that read LinkedIn, the session flag, and
+    the newest run that could not reach Chrome. Nothing here attaches to the
+    browser; a request handler never does (spec 9.9, CLAUDE.md).
+
+    ``session_status`` and ``session_summary`` are the posture report's
+    ``linkedin session`` row, word for word. ``chrome_unreachable_at`` is set when
+    the newest run that ended ``browser_unavailable`` is newer than the last sign
+    of a working session.
+    """
+
+    checked_at: datetime
+    can_start_runs: bool
+    session_status: str
+    session_summary: str
+    session_warnings: list[str]
+    chrome_unreachable_at: datetime | None
+    chrome_unreachable_run_id: int | None
+    running_run_id: int | None
+
+
 class ProtectionOut(BaseModel):
     """One row of the posture report (spec section 9): what it is, whether it is in
     force, and anything wrong with it. ``status`` is `netkeeper.services.posture.Status`'s
@@ -2021,7 +2074,8 @@ class BrowserLaunchOut(BaseModel):
     Read-only and built from config alone -- no attach, no CDP connection, nothing
     awaited. Whether Chrome is actually reachable, and whether the session it holds
     is healthy, is what ``netkeeper preflight`` checks; that attaches, so it cannot
-    run inside a request handler and has no API endpoint yet (a follow-up).
+    run inside a request handler. ``GET /linkedin/browser/health`` reports what the
+    last preflight or run recorded instead (#181).
     """
 
     cdp_url: str

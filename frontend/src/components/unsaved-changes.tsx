@@ -46,7 +46,10 @@ export function DiscardChangesDialog({ open, onDiscard, onKeep }: DiscardChanges
       }}
       title="Discard unsaved changes?"
       confirmLabel="Discard changes"
-      onConfirm={onDiscard}
+      onConfirm={() => {
+        onDiscard()
+        return Promise.resolve()
+      }}
     >
       <p>Your edits haven't been saved. Cancel to go back to them.</p>
     </ConfirmDialog>

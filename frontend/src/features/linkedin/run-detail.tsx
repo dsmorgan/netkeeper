@@ -139,7 +139,7 @@ export function RunDetail({
         confirmLabel="Resume"
         pending={resume.isPending}
         error={resume.isError ? message(resume.error) : null}
-        onConfirm={() => resume.mutate()}
+        onConfirm={() => resume.mutateAsync()}
       >
         <p>Starts a new run on the rest of this plan, in the same order, right now.</p>
         <ProfileViewNotice text={budget.data?.profile_view_notice} />

@@ -249,6 +249,25 @@ def running_run(session: Session, user: User, account_id: int) -> SyncRun | None
     ).first()
 
 
+def last_browser_unavailable(session: Session, user: User, account_id: int) -> SyncRun | None:
+    """The account's newest ended run that could not reach Chrome (#181). Read-only.
+
+    A run ends ``browser_unavailable`` when the worker could not attach, or Chrome
+    went away mid-run. This only reads what the worker already recorded; it never
+    looks at the browser itself.
+    """
+    return session.scalars(
+        scoped(user, SyncRun)
+        .where(
+            SyncRun.linkedin_account_id == account_id,
+            SyncRun.stop_reason == "browser_unavailable",
+            SyncRun.completed_at.is_not(None),
+        )
+        .order_by(SyncRun.completed_at.desc(), SyncRun.id.desc())
+        .limit(1)
+    ).first()
+
+
 def latest_run(
     session: Session,
     user: User,
