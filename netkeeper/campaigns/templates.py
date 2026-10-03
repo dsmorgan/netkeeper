@@ -47,6 +47,7 @@ from netkeeper.campaigns.render import (
     lint,
     render,
 )
+from netkeeper.crm.positions import last_position_change
 from netkeeper.db import is_writer
 from netkeeper.models import (
     TEMPLATE_NAME_MAX_LENGTH,
@@ -416,28 +417,6 @@ def _whole_years(since: date, today: date) -> int:
     if (today.month, today.day) < (since.month, since.day):
         years -= 1
     return max(years, 0)
-
-
-def last_position_change(contact: Contact, today: date) -> date | None:
-    """The ``last_position_change`` merge field (spec 11.1): the latest
-    ``started_on`` or ``ended_on`` on or before ``today`` among the contact's
-    positions, or None when no position has such a date.
-
-    Leaving a job is a change just as starting one is (#232), and neither an
-    announced departure nor an announced new job has happened yet (#255).
-    Snapshots play no part: a headline-only snapshot is not a position change.
-    The ``campaign-audience`` export's "Last Position Change" column calls this
-    too, so the file and the merge field cannot drift apart (#333). It reads
-    only ``contact.positions``; a caller over many contacts eager-loads that
-    collection.
-    """
-    changes = [
-        day
-        for p in contact.positions
-        for day in (p.started_on, p.ended_on)
-        if day is not None and day <= today
-    ]
-    return max(changes) if changes else None
 
 
 def contact_fields(contact: Contact, today: date) -> dict[str, object]:
