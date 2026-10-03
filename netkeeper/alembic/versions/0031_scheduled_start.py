@@ -18,6 +18,10 @@ that was already sending keeps sending, and one that was not still sends nothing
 before its enrollments are due. A ``draft`` or ``reviewing`` campaign keeps NULL:
 activation sets it. Every step keeps NULL, the suggested slot.
 
+``campaigns.start_chosen`` says whether a person chose ``starts_at``: only a chosen
+start is exempt from the sending hours on its own day. Every backfilled start is
+false; activation, ``campaigns start`` and the API set it true.
+
 ``campaigns.send_window_json`` is left in place, unread, so the downgrade has
 each campaign's window back.
 
@@ -57,6 +61,10 @@ _campaigns = sa.table(
 
 def upgrade() -> None:
     op.add_column("campaigns", sa.Column("starts_at", sa.DateTime(), nullable=True))
+    op.add_column(
+        "campaigns",
+        sa.Column("start_chosen", sa.Boolean(), nullable=False, server_default=sa.false()),
+    )
     op.add_column("campaign_steps", sa.Column("send_time", sa.String(length=5), nullable=True))
     op.get_bind().execute(
         sa.update(_campaigns)
@@ -67,4 +75,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_column("campaign_steps", "send_time")
+    op.drop_column("campaigns", "start_chosen")
     op.drop_column("campaigns", "starts_at")

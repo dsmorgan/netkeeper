@@ -2329,11 +2329,16 @@ export interface paths {
         /**
          * Get Sending Hours
          * @description The sending hours: when campaign email may go out, after each campaign's start.
+         *     ``readable`` is false, with the defaults, when the stored value cannot be read.
          */
         get: operations["get_sending_hours"];
         /**
          * Set Sending Hours
-         * @description Replace the sending hours. Applies from the next tick to every campaign.
+         * @description Replace the sending hours. Every send the tick considers from now on keeps them.
+         *
+         *     A row already waiting for the old hours' next opening keeps that due time: after
+         *     widening, it still waits for it; after narrowing, the tick holds it again at its
+         *     due time. Rows are not recomputed here, so no due time ever moves earlier.
          */
         put: operations["set_sending_hours"];
         post?: never;
@@ -5851,6 +5856,11 @@ export interface components {
             enabled: boolean;
             /** End */
             end: string;
+            /**
+             * Readable
+             * @default true
+             */
+            readable: boolean;
             /** Start */
             start: string;
             /** Summary */
@@ -11664,13 +11674,6 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SendingHoursOut"];
                 };
-            };
-            /** @description The stored value cannot be read */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
         };
     };

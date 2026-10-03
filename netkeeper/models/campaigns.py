@@ -232,6 +232,12 @@ class Campaign(UserOwned, TimestampMixin, Base):
     # Set at activation, and changeable until the campaign's first message fires. NULL
     # before activation; an active or paused campaign with none sends nothing.
     starts_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # Whether a person chose ``starts_at`` (activation, ``campaigns start``, the API).
+    # Only a chosen start is exempt from the sending hours on its own day; one 0031
+    # backfilled from ``approved_at`` is not (#338 review N5).
+    start_chosen: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     # Spec 11.9's recency guard, in days; 0 turns it off. No default: whatever creates a
     # campaign copies ``[campaigns] contacted_within_days_guard`` from the config, so a
     # later config change never changes a campaign already reviewed.

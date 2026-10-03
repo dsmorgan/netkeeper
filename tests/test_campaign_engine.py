@@ -389,11 +389,12 @@ def test_the_campaign_cap_holds_for_the_local_day(session_factory: sessionmaker[
     capped = world.tick(NOW + timedelta(hours=2))
     assert reasons_of(capped, ids[2]) == (Skip.CAMPAIGN_AT_CAP,)
     assert capped.next_wake == datetime(2026, 9, 30, tzinfo=UTC)  # the local midnight
-    # #338: the cap-held rest of the batch spills to the next day at its start time,
-    # 14:00 (inside the default sending hours), rather than going at midnight.
+    # #338: the cap-held rest of the batch waits for the next opening of the sending
+    # hours, Wednesday 09:00, rather than going at midnight; it uses the whole day.
     midnight = world.tick(datetime(2026, 9, 30, 0, 1, tzinfo=UTC))
-    assert midnight.fired == [] and reasons_of(midnight, ids[2]) == (Skip.SPILLED,)
-    resume = datetime(2026, 9, 30, 14, 0, tzinfo=UTC)
+    assert midnight.fired == []
+    assert reasons_of(midnight, ids[2]) == (Skip.OUTSIDE_SENDING_HOURS,)
+    resume = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
     assert world.enrollment(ids[2]).next_action_at == resume
     assert world.tick(resume - timedelta(minutes=1)).fired == []
     assert world.tick(resume).fired != []
@@ -450,6 +451,7 @@ def _start_at(world: World, starts_at: datetime | None) -> None:
         campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
         assert campaign is not None
         campaign.starts_at = starts_at
+        campaign.start_chosen = starts_at is not None  # as activation records it
 
     world.write(move)
 
@@ -677,6 +679,134 @@ def test_a_stored_sending_hours_value_that_cannot_be_read_sends_nothing(world: W
     enrollment_id = world.enroll_new()
     result = world.tick()
     assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.BAD_SCHEDULE,)
+
+
+def test_a_tuesday_ten_pm_start_resumes_wednesday_at_nine(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#338 review S1: the cap-held rest of a night start uses the next day's hours from
+    their opening, never skipping a day."""
+    world = make_world(session_factory, daily_cap=3)
+    start = _at(TUESDAY, 22)
+    _start_at(world, start)
+    _enroll_many(world, 10, start)
+    fired = _run(world, start, _at(TUESDAY, 24 + 12))
+    tuesday = [at for at in fired if at < _at(TUESDAY, 24)]
+    wednesday = [at for at in fired if at >= _at(TUESDAY, 24)]
+    assert len(tuesday) == 3
+    assert wednesday and min(wednesday) == _at(TUESDAY, 24 + 9)
+
+
+def test_a_tuesday_four_pm_start_uses_all_of_wednesday_until_the_cap(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#338 review S1: not only 16:00 to 17:00 on the days after a 16:00 start."""
+    world = make_world(session_factory, daily_cap=5)
+    start = _at(TUESDAY, 16)
+    _start_at(world, start)
+    _enroll_many(world, 20, start)
+    fired = _run(world, start, _at(TUESDAY, 2 * 24))
+    wednesday = [at for at in fired if _at(TUESDAY, 24) <= at < _at(TUESDAY, 2 * 24)]
+    assert len(wednesday) == 5  # the cap, reached
+    assert min(wednesday) == _at(TUESDAY, 24 + 9)
+    assert max(wednesday) < _at(TUESDAY, 24 + 12)  # all well before 16:00
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {"enabled": "yes", "days": ["Mon"], "start": "09:00", "end": "17:00"},
+        {"enabled": True, "days": "Mon", "start": "09:00", "end": "17:00"},
+        {"enabled": True, "days": ["Mon"], "start": 900, "end": "17:00"},
+        {"enabled": True, "days": ["Mon"], "start": "09:00"},
+        {"enabled": True, "days": [1], "start": "09:00", "end": "17:00"},
+        ["Mon"],
+        "any time",
+    ],
+)
+def test_stored_sending_hours_of_the_wrong_type_are_refused_never_defaulted(
+    world: World, stored: Any
+) -> None:
+    """#338 review S3a: never read as the defaults, which would send."""
+
+    def corrupt(session: Session) -> None:
+        user = session.get(User, world.user.id)
+        assert user is not None
+        set_setting(session, user, sending_hours.KEY, stored)
+
+    world.write(corrupt)
+    enrollment_id = world.enroll_new()
+    result = world.tick()
+    assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.BAD_SCHEDULE,)
+
+
+def test_a_follow_up_on_the_start_day_never_uses_the_start_exemption(world: World) -> None:
+    """#338 review S3b: step 2 was set for 22:00 on the start's day while the hours were
+    "any time"; the hours are then turned on. It waits: only step 1 is exempt."""
+    _start_at(world, _at(TUESDAY, 8))
+    enrollment_id = world.enroll_new(current_step=1, next_action_at=_at(TUESDAY, 22))
+
+    def step_one(session: Session) -> None:
+        enrollment = get_scoped(session, world.user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        factories.make_message(session, enrollment, position=1, sent_at=_at(TUESDAY, -7 * 24))
+
+    world.write(step_one)
+    result = world.tick(_at(TUESDAY, 22))
+    assert result.fired == []
+    assert reasons_of(result, enrollment_id) == (Skip.OUTSIDE_SENDING_HOURS,)
+
+
+def test_an_upgraded_campaign_approved_today_does_not_send_at_nine_pm(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#338 review N5: 0031 backfilled ``starts_at = approved_at`` (today at 10:00) with
+    ``start_chosen`` false, so its step 1 has no start-day exemption."""
+    approved = _at(TUESDAY, 10)
+    world = make_world(session_factory, approved_at=approved, starts_at=approved)
+    campaign = world.read(lambda s: get_scoped(s, world.user, Campaign, world.campaign.id))
+    assert campaign is not None and campaign.start_chosen is False
+    enrollment_id = world.enroll_new(next_action_at=approved)
+    result = world.tick(_at(TUESDAY, 21))
+    assert result.fired == []
+    assert reasons_of(result, enrollment_id) == (Skip.OUTSIDE_SENDING_HOURS,)
+
+
+def test_a_guard_recheck_lands_inside_the_sending_hours(world: World) -> None:
+    """#338 review N1: a re-check a day after Friday 16:00 is Saturday: Monday 09:00."""
+    friday_four = _at(TUESDAY, 3 * 24 + 16)
+    enrollment_id = world.enroll_new(next_action_at=friday_four)
+
+    def called(session: Session) -> None:
+        enrollment = get_scoped(session, world.user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        add_interaction(
+            session, world.user, enrollment.contact_id, InteractionKind.CALL, friday_four
+        )
+
+    world.write(called)
+    world.tick(friday_four)
+    assert world.enrollment(enrollment_id).next_action_at == _at(TUESDAY, 6 * 24 + 9)
+
+
+def test_a_first_step_due_on_a_later_day_keeps_the_sending_hours(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#338 review N1: step 1 "a day after the start, at 22:00" from Tuesday 10:00 is
+    Wednesday 22:00, outside the hours: Thursday 09:00."""
+    world = make_world(
+        session_factory, status=CampaignStatus.REVIEWING, approved_at=NOW, starts_at=None
+    )
+
+    def late(session: Session) -> None:
+        campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+        assert campaign is not None
+        campaign.steps[0].delay_days, campaign.steps[0].send_time = 1, "22:00"
+
+    world.write(late)
+    enrollment_id = world.enroll_new(status=EnrollmentStatus.PENDING, next_action_at=None)
+    _activate_at(world, _at(TUESDAY, 10), now=_at(TUESDAY, 9))
+    assert world.enrollment(enrollment_id).next_action_at == _at(TUESDAY, 2 * 24 + 9)
 
 
 def test_an_explicit_step_time_before_the_raw_delay_is_not_pushed_back(
@@ -1246,6 +1376,7 @@ def test_activate_makes_pending_active_with_the_first_step_at_the_start(
     campaign = world.read(lambda s: get_scoped(s, world.user, Campaign, world.campaign.id))
     assert campaign is not None and campaign.status is CampaignStatus.ACTIVE
     assert campaign.starts_at == start
+    assert campaign.start_chosen is True  # a person chose it (#338 review N5)
     assert world.tick(start - timedelta(seconds=1)).fired == []
     assert world.tick(start).fired != []
 

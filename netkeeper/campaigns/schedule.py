@@ -386,11 +386,14 @@ def hold(
 
     1. **The start is unbounded.** Step 1 on the local day of the campaign's start
        goes now, whatever the hour or day: the first batch runs at the scheduled
-       start until the caps stop it.
-    2. **The spill.** A due time from an earlier local day moves to today at its own
-       time of day when that is still ahead (:func:`spill`), then into the sending
-       hours.
-    3. **Sending hours.** Anything else outside them waits for their next opening.
+       start until the caps stop it. ``starts_at`` is None for a start nobody chose
+       (one 0031 backfilled), which has no exemption.
+    2. **Sending hours on:** anything else goes now when now is inside them, and
+       otherwise waits for their next opening. A leftover is not moved to its old
+       time of day first: that would skip a day after a night start, or squeeze a
+       16:00 start's next days into one hour (#338 review S1).
+    3. **"Any time":** the spill only. A due time from an earlier local day moves to
+       today at its own time of day when that is still ahead (:func:`spill`).
     """
     if (
         first_step
@@ -398,9 +401,8 @@ def hold(
         and slots.local_date(now) == slots.local_date(starts_at)
     ):
         return None
-    spilled = spill(due, now, slots)
-    if spilled is not None:
-        return next_opening(spilled, hours, slots)
+    if not hours.enabled:
+        return spill(due, now, slots)
     if not within_sending_hours(now, hours, slots):
         return next_opening(now, hours, slots)
     return None

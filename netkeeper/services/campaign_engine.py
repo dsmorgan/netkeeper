@@ -544,6 +544,7 @@ def activate(
     first_due = first_step_due(settings, user, steps[0], start, hours_for(session, user))
     campaign.status = CampaignStatus.ACTIVE
     campaign.starts_at = start
+    campaign.start_chosen = True
     pending = session.scalars(
         scoped(user, Enrollment).where(
             Enrollment.campaign_id == campaign_id, Enrollment.status == EnrollmentStatus.PENDING
@@ -624,6 +625,7 @@ def set_start(
     start = max(starts_at, now)
     first_due = first_step_due(settings, user, steps[0], start, hours_for(session, user))
     campaign.starts_at = start
+    campaign.start_chosen = True
     waiting = session.scalars(
         scoped(user, Enrollment).where(
             Enrollment.campaign_id == campaign_id,
@@ -1384,8 +1386,9 @@ class _Chooser:
             return None
         self.blocks.slots, self.blocks.hours = slots, hours
 
-        # The start is unbounded; everything after it keeps the sending hours, and a
-        # leftover from an earlier day spills to its own time of day (schedule.hold).
+        # The start is unbounded, but only a start someone chose (``start_chosen``; 0031
+        # backfilled ones are not); everything after it keeps the sending hours, and
+        # with "any time" a leftover spills to its own time of day (schedule.hold).
         due = enrollment.next_action_at
         resume = (
             None
@@ -1395,13 +1398,14 @@ class _Chooser:
                 now,
                 slots=slots,
                 hours=hours,
-                starts_at=campaign.starts_at,
+                starts_at=campaign.starts_at if campaign.start_chosen else None,
                 first_step=enrollment.current_step is None,
             )
         )
         if resume is not None:
-            spilled = schedule.spill(due, now, slots) is not None if due is not None else False
-            self.defer(enrollment, resume, Skip.SPILLED if spilled else Skip.OUTSIDE_SENDING_HOURS)
+            self.defer(
+                enrollment, resume, Skip.OUTSIDE_SENDING_HOURS if hours.enabled else Skip.SPILLED
+            )
             return None
 
         # A cap reached today lifts at the local midnight; what is left of the batch
@@ -1821,6 +1825,9 @@ def _give_back(
     # A paused enrollment keeps its due time for the resume; an ended one has none.
     if enrollment.status in (EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED):
         due = now + wait
+        # Conservative on purpose (#338 review N4): a retry is never covered by the
+        # start-day exemption, even on the start's own day. Only the first try of step
+        # 1 goes outside the sending hours; a retry waits for their next opening.
         window = hours_for(session, user)
         if window is not None:
             # A schedule that cannot be read keeps the plain retry: the tick blocks it.

@@ -42,6 +42,7 @@ describe('settings', () => {
           end: '17:00',
           timezone: 'America/New_York',
           summary: 'Mon to Fri, 09:00 to 17:00',
+          readable: true,
         })
       }
       if (pathname === '/api/v1/gmail-setup') {

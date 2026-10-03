@@ -2697,6 +2697,7 @@ def test_0031_starts_every_activated_campaign_at_its_activation(migration_engine
     migrations.upgrade(migration_engine, "0031")
     with migration_engine.begin() as connection:
         rows = connection.execute(text("SELECT id, starts_at FROM campaigns ORDER BY id")).all()
+        chosen = connection.execute(text("SELECT start_chosen FROM campaigns")).scalars().all()
         times = connection.execute(text("SELECT send_time FROM campaign_steps")).scalars().all()
     starts = {row[0]: None if row[1] is None else str(row[1])[:19] for row in rows}
     assert starts == {
@@ -2708,6 +2709,7 @@ def test_0031_starts_every_activated_campaign_at_its_activation(migration_engine
         6: STAMP,
     }
     assert times == [None] * 6
+    assert [bool(c) for c in chosen] == [False] * 6  # a backfilled start was not chosen
 
 
 def test_0031_downgrades_to_campaigns_without_a_start(migration_engine: Engine) -> None:
@@ -2717,7 +2719,8 @@ def test_0031_downgrades_to_campaigns_without_a_start(migration_engine: Engine) 
         connection.execute(text("UPDATE campaign_steps SET send_time = '22:00'"))
     migrations.downgrade(migration_engine, "0030")
     inspector = inspect(migration_engine)
-    assert "starts_at" not in {c["name"] for c in inspector.get_columns("campaigns")}
+    columns = {c["name"] for c in inspector.get_columns("campaigns")}
+    assert columns.isdisjoint({"starts_at", "start_chosen"})
     assert "send_time" not in {c["name"] for c in inspector.get_columns("campaign_steps")}
     with migration_engine.begin() as connection:
         assert _count(connection, "campaigns") == 1

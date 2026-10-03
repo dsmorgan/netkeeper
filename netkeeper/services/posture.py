@@ -1428,7 +1428,7 @@ def _effective_send(
         at,
         slots=slots,
         hours=hours,
-        starts_at=fire.campaign.starts_at,
+        starts_at=fire.campaign.starts_at if fire.campaign.start_chosen else None,
         first_step=fire.enrollment.current_step is None,
     )
     return held or at

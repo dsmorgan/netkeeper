@@ -15,14 +15,15 @@ const DEFAULT: SendingHours = {
   end: '17:00',
   timezone: 'America/New_York',
   summary: 'Mon to Fri, 09:00 to 17:00',
+  readable: true,
 }
 
-function renderSection() {
+function renderSection(current: SendingHours = DEFAULT) {
   const puts: SendingHoursIn[] = []
   mockFetch(async (request) => {
     const { pathname } = new URL(request.url)
     if (pathname !== '/api/v1/settings/sending-hours') return jsonResponse({}, 500)
-    if (request.method === 'GET') return jsonResponse(DEFAULT)
+    if (request.method === 'GET') return jsonResponse(puts.length === 0 ? current : DEFAULT)
     expect(request.headers.get('X-Netkeeper-Client')).not.toBeNull() // the CSRF header
     const body = (await request.json()) as SendingHoursIn
     puts.push(body)
@@ -69,6 +70,15 @@ describe('SendingHoursSection', () => {
       end: '16:00',
     })
     expect(await screen.findByText(/Saved: Tue, Wed, Thu, Fri, Sat, 09:00 to 16:00/)).toBeVisible()
+  })
+
+  it('shows the defaults to save when the stored value cannot be read', async () => {
+    const { puts } = renderSection({ ...DEFAULT, readable: false })
+    expect(await screen.findByText(/no campaign sends until you save them/)).toBeVisible()
+    const form = within(screen.getByRole('form', { name: 'Sending hours' }))
+    fireEvent.click(form.getByRole('button', { name: 'Save sending hours' }))
+    await waitFor(() => expect(puts).toHaveLength(1))
+    expect(puts[0]?.days).toEqual(['Mon', 'Tue', 'Wed', 'Thu', 'Fri'])
   })
 
   it('turns them off with any time', async () => {
