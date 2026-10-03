@@ -1971,7 +1971,28 @@ def test_a_reply_poll_summary_counts_mailboxes_never_polled(writer: Session, use
         replies_polled_at=NOW - timedelta(minutes=5),
     )
     row = _row(_report(writer, user), "reply poll")
-    assert row.summary == "every 10 min; 2 armed mailboxes, 1 never polled"
+    assert row.summary == "every 10 min; 2 armed mailboxes, 1 never polled; oldest poll 5 min ago"
+
+
+def test_a_reply_poll_summary_names_the_oldest_poll(writer: Session, user: User) -> None:
+    """With two polled mailboxes, the summary reports the stalest one, and its note."""
+    _mailbox(writer, user, armed_at=ARMED_AT, replies_polled_at=NOW - timedelta(minutes=5))
+    make_mailbox(
+        writer,
+        user,
+        email="other@example.test",
+        armed_at=ARMED_AT,
+        replies_polled_at=NOW - timedelta(hours=3),
+    )
+    report = _report(writer, user)
+    row = _row(report, "reply poll")
+    assert row.summary == "every 10 min; 2 armed mailboxes, oldest poll 3 h ago"
+    assert len(row.notes) == 1
+    assert "reply poll" in posture_module.render_summary(report)
+    line = next(
+        line for line in posture_module.render_summary(report).splitlines() if "reply poll" in line
+    )
+    assert line.endswith("oldest poll 3 h ago (1 note)")
 
 
 def test_the_summary_shows_every_warning_and_leaves_the_details_out(
@@ -1994,9 +2015,30 @@ def test_the_summary_shows_every_warning_and_leaves_the_details_out(
     assert "(1 note)" in text  # the budget row says it has one
     assert "JOB" not in text and "not covered by this report" not in text
     assert "hard max" not in text
-    assert "1 note, each row's detail, the schedule, and what this report cannot see:" in text
-    assert "`netkeeper posture --details`" in text
+    assert (
+        "run `netkeeper posture --details` for 1 note, each row's detail, the schedule,"
+        " and what this report cannot see"
+    ) in flat
+    assert all(len(line) <= 88 for line in text.splitlines() if "--details" in line)
     assert text.rstrip().endswith(verdict(report))
 
     full = render(report)
     assert "Profile visits are set to 101" in full and "not covered by this report" in full
+
+
+def test_the_summary_shows_a_warning_on_a_row_that_is_still_on(writer: Session, user: User) -> None:
+    """#340 review: a budget above the hard max is clamped (``on``) but warns, and
+    that warning is in the summary too, not only off or unknown rows' warnings."""
+    report = _report(writer, user, settings=_budget(profile_visits_per_day=300))
+    row = _row(report, "budget profile_visits")
+    assert row.status is Status.ON
+    assert any("config asks for 300 a day" in warning for warning in row.warnings)
+
+    flat = " ".join(posture_module.render_summary(report).split())
+    assert "warning: budget profile_visits: config asks for 300 a day" in flat
+    budget_line = next(
+        line
+        for line in posture_module.render_summary(report).splitlines()
+        if line.startswith("budget profile_visits")
+    )
+    assert budget_line.split()[2] == "on"
