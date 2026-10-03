@@ -582,32 +582,42 @@ def test_campaign_audience_position_change_ignores_a_newer_headline_only_snapsho
     assert csv_row["Last Position Change"] == "2025-03-01"
 
 
-_POSITION_CASES: dict[str, list[dict[str, object]]] = {
-    "no positions": [],
-    "undated position": [{"title": "Engineer"}],
-    "future-dated start": [
-        {"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": date(2026, 8, 31)},
-        {"title": "Lead", "started_on": date(2026, 12, 1)},
-    ],
-    "future-dated end": [
-        {"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": date(2027, 1, 31)},
-    ],
-    "ended position": [
-        {"title": "Advisor", "started_on": date(2019, 4, 1)},
-        {"title": "VP", "started_on": date(2021, 2, 1), "ended_on": date(2026, 8, 15)},
-    ],
+_POSITION_CASES: dict[str, tuple[list[dict[str, object]], str | None]] = {
+    "no positions": ([], None),
+    "undated position": ([{"title": "Engineer"}], None),
+    "future-dated start": (
+        [
+            {"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": date(2026, 8, 31)},
+            {"title": "Lead", "started_on": date(2026, 12, 1)},
+        ],
+        "2026-08-31",
+    ),
+    "future-dated end": (
+        [{"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": date(2027, 1, 31)}],
+        "2021-06-01",
+    ),
+    "ended position": (
+        [
+            {"title": "Advisor", "started_on": date(2019, 4, 1)},
+            {"title": "VP", "started_on": date(2021, 2, 1), "ended_on": date(2026, 8, 15)},
+        ],
+        "2026-08-15",
+    ),
 }
+"""Positions, and the column's value on ``NOW`` (2026-09-21), written out."""
 
 
 @pytest.mark.parametrize("case", list(_POSITION_CASES))
 def test_campaign_audience_position_change_equals_the_merge_field(
     session: Session, case: str
 ) -> None:
-    """The column and the ``last_position_change`` merge field agree (#333), with a
-    newer snapshot present so a snapshot-based reading would disagree."""
+    """The column has the pinned date and agrees with the ``last_position_change``
+    merge field (#333), with a newer snapshot present so a snapshot-based reading
+    would disagree."""
+    positions, expected = _POSITION_CASES[case]
     user = factories.make_user(session)
     contact = factories.make_contact(
-        session, user, emails=["reach@example.test"], positions=_POSITION_CASES[case]
+        session, user, emails=["reach@example.test"], positions=positions
     )
     session.add(
         ContactSnapshot(
@@ -619,11 +629,42 @@ def test_campaign_audience_position_change_equals_the_merge_field(
     )
     session.commit()
 
-    merge_value = contact_fields(contact, NOW.date())["last_position_change"]
-    assert merge_value is None or isinstance(merge_value, date)
     text = _run(session, user, preset="campaign-audience", output_format="json", now=NOW)
     (row,) = json.loads(text)
-    assert row["last_position_change"] == (None if merge_value is None else merge_value.isoformat())
+    assert row["last_position_change"] == expected
+
+    merge_value = contact_fields(contact, NOW.date())["last_position_change"]
+    assert (None if merge_value is None else str(merge_value)) == expected
+
+
+def test_campaign_audience_position_change_uses_the_users_local_today(
+    session: Session,
+) -> None:
+    """At 03:00 UTC on 21 September it is still the 20th in Los Angeles: a job
+    starting on the 21st has not started yet for this user, though it has in UTC."""
+    now = datetime(2026, 9, 21, 3, 0, tzinfo=UTC)
+    user = factories.make_user(session)
+    user.timezone = "America/Los_Angeles"
+    factories.make_contact(
+        session,
+        user,
+        emails=["reach@example.test"],
+        positions=[
+            {"title": "Lead", "started_on": date(2026, 9, 21)},
+            {"title": "Engineer", "started_on": date(2021, 6, 1), "ended_on": date(2026, 9, 1)},
+        ],
+    )
+    session.commit()
+
+    text = _run(session, user, preset="campaign-audience", output_format="json", now=now)
+    (row,) = json.loads(text)
+    assert row["last_position_change"] == "2026-09-01"
+
+    user.timezone = "UTC"
+    session.commit()
+    text = _run(session, user, preset="campaign-audience", output_format="json", now=now)
+    (row,) = json.loads(text)
+    assert row["last_position_change"] == "2026-09-21"
 
 
 def test_campaign_audience_export_does_not_query_per_contact(session: Session) -> None:
