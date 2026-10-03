@@ -538,6 +538,20 @@ def test_to_does_not_match_an_address_that_only_contains_the_one_asked_for(
     assert gmail.search(f"to:{ADA}", purpose="s") == [wanted]
 
 
+def test_a_bare_address_matches_it_as_a_whole_word_in_headers_and_body(gmail: FakeGmail) -> None:
+    """Gmail's full-text search finds an address a bounce notice names (#65)."""
+    sent = gmail.send(_mail(), purpose="send")
+    notice = gmail.bounce(sent)
+    gmail.deliver(_inbound("About bada@example.com", sender="cy@example.com"))
+    assert gmail.search(f"from:mailer-daemon {ADA}", purpose="s") == [notice]
+    # The body names it too: a whole-word match, never a substring of another address.
+    other = _inbound("Hi", sender="dee@example.com")
+    other.set_content(f"Please write to {ADA} instead.")
+    mention = gmail.deliver(other)
+    assert gmail.search(f"{ADA} from:dee@example.com", purpose="s") == [mention]
+    assert gmail.search("da@example.com", purpose="s") == []
+
+
 @pytest.mark.parametrize(
     "query",
     [
