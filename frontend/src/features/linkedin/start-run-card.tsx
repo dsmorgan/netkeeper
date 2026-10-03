@@ -8,6 +8,7 @@ import { INPUT_CLASS, SELECT_CLASS } from '@/features/imports/styles'
 import { cn } from '@/lib/utils'
 
 import { budgetQuery, linkedinKeys, startRun } from './api'
+import { ProfileViewNotice } from './profile-view-notice'
 import { RUNNABLE_KINDS, RUN_KIND_LABELS, type RunKind } from './types'
 
 function message(error: unknown): string {
@@ -131,6 +132,8 @@ export function StartRunCard({ onStarted }: { onStarted: (runId: number) => void
           </div>
         )}
 
+        {kind === 'enrich' && <ProfileViewNotice text={budget.data?.profile_view_notice} />}
+
         {start.isError && <p role="alert">{message(start.error)}</p>}
 
         <Button onClick={() => setAsking(true)} disabled={budgetExhausted}>
@@ -153,6 +156,7 @@ export function StartRunCard({ onStarted }: { onStarted: (runId: number) => void
             ? `Starts now, and visits up to ${maxVisits === '' ? "today's remaining budget" : `${maxVisits} profile${maxVisits === '1' ? '' : 's'}`}.`
             : 'Starts now, against the browser this server is attached to.'}
         </p>
+        {kind === 'enrich' && <ProfileViewNotice text={budget.data?.profile_view_notice} />}
         <p>
           Refused if the session is flagged, heat is over its threshold, or a run of this account is
           already going.

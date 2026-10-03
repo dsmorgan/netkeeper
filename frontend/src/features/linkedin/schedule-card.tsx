@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 
 import { armSchedule, budgetQuery, disarmSchedule, linkedinKeys, scheduleQuery } from './api'
 import { formatWhen } from './fields'
+import { ProfileViewNotice } from './profile-view-notice'
 import { RiskWarning } from './risk-warning'
 
 function message(error: unknown): string {
@@ -111,6 +112,7 @@ export function ScheduleCard() {
           hours, from now on — without you starting or watching each one.
         </p>
         <RiskWarning text={budget.data?.risk_warning} />
+        <ProfileViewNotice text={budget.data?.profile_view_notice} />
         <p>
           You can disarm again with one click, any time, and a run already going is not cancelled by
           disarming.

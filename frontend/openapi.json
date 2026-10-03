@@ -829,7 +829,7 @@
         "type": "object"
       },
       "BudgetStatusOut": {
-        "description": "Every action class's counters, today's profile-visit chain, and any risk warning.\n\n``risk_warning`` is set when the daily profile-visit limit is above the 100\na day netkeeper was designed around (#318): one plain sentence for the page\nto show as it is. It never blocks anything.",
+        "description": "Every action class's counters, today's profile-visit chain, and any risk warning.\n\n``risk_warning`` is set when the daily profile-visit limit is above the 100\na day netkeeper was designed around (#318): one plain sentence for the page\nto show as it is. It never blocks anything.\n\n``profile_view_notice`` is always set (#325): the one sentence saying that\nenrichment can show up in the contact's *Who viewed your profile*. Pages show\nit wherever enrichment starts or is enabled; it never blocks anything either.",
         "properties": {
           "budgets": {
             "items": {
@@ -837,6 +837,10 @@
             },
             "title": "Budgets",
             "type": "array"
+          },
+          "profile_view_notice": {
+            "title": "Profile View Notice",
+            "type": "string"
           },
           "profile_visits_today": {
             "$ref": "#/components/schemas/TodaysVisitsOut"
@@ -856,7 +860,8 @@
         "required": [
           "budgets",
           "profile_visits_today",
-          "risk_warning"
+          "risk_warning",
+          "profile_view_notice"
         ],
         "title": "BudgetStatusOut",
         "type": "object"

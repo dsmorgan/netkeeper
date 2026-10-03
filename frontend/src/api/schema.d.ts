@@ -2862,10 +2862,16 @@ export interface components {
          *     ``risk_warning`` is set when the daily profile-visit limit is above the 100
          *     a day netkeeper was designed around (#318): one plain sentence for the page
          *     to show as it is. It never blocks anything.
+         *
+         *     ``profile_view_notice`` is always set (#325): the one sentence saying that
+         *     enrichment can show up in the contact's *Who viewed your profile*. Pages show
+         *     it wherever enrichment starts or is enabled; it never blocks anything either.
          */
         BudgetStatusOut: {
             /** Budgets */
             budgets: components["schemas"]["BudgetOut"][];
+            /** Profile View Notice */
+            profile_view_notice: string;
             profile_visits_today: components["schemas"]["TodaysVisitsOut"];
             /** Risk Warning */
             risk_warning: string | null;

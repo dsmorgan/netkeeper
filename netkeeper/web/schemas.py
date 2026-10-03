@@ -1863,11 +1863,16 @@ class BudgetStatusOut(BaseModel):
     ``risk_warning`` is set when the daily profile-visit limit is above the 100
     a day netkeeper was designed around (#318): one plain sentence for the page
     to show as it is. It never blocks anything.
+
+    ``profile_view_notice`` is always set (#325): the one sentence saying that
+    enrichment can show up in the contact's *Who viewed your profile*. Pages show
+    it wherever enrichment starts or is enabled; it never blocks anything either.
     """
 
     budgets: list[BudgetOut]
     profile_visits_today: TodaysVisitsOut
     risk_warning: str | None
+    profile_view_notice: str
 
 
 class HeatOut(BaseModel):

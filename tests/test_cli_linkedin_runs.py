@@ -27,7 +27,7 @@ from netkeeper.db import database_url, make_engine, make_session_factory, sessio
 from netkeeper.linkedin.classify import Outcome
 from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
 from netkeeper.scoping import install_scope_guard
-from netkeeper.services import route_breaker, runs
+from netkeeper.services import budgets, route_breaker, runs
 from netkeeper.services.linkedin_accounts import (
     account_id_for,
     ensure_account,
@@ -101,6 +101,24 @@ def test_arming_asks_first_and_no_leaves_it_disarmed(cli_db: sessionmaker[Sessio
     runner.invoke(cli, ["linkedin", "schedule", "disarm"])
     assert not _armed(cli_db)
     assert runner.invoke(cli, ["linkedin", "schedule", "arm", "--yes"]).exit_code == 0
+    assert _armed(cli_db)
+
+
+def test_arming_shows_the_profile_view_notice_with_or_without_yes_and_still_arms(
+    cli_db: sessionmaker[Session],
+) -> None:
+    """#325: informational. It comes before the question and gates nothing."""
+    runner = CliRunner()
+    declined = runner.invoke(cli, ["linkedin", "schedule", "arm"], input="n\n")
+    assert budgets.PROFILE_VIEW_NOTICE in declined.output
+    assert declined.output.index("Who viewed your profile") < declined.output.index(
+        "arm scheduled LinkedIn runs?"
+    )
+    assert not _armed(cli_db)
+
+    armed = runner.invoke(cli, ["linkedin", "schedule", "arm", "--yes"])
+    assert armed.exit_code == 0, armed.output
+    assert budgets.PROFILE_VIEW_NOTICE in armed.output
     assert _armed(cli_db)
 
 
@@ -350,6 +368,40 @@ def test_a_sync_by_hand_runs_while_disarmed_and_reports_itself(
             SyncRunStatus.COMPLETED,
         )
     assert not _armed(cli_db)  # a run by hand arms nothing
+
+
+def test_enrich_says_it_can_show_up_in_who_viewed_your_profile_before_it_starts(
+    cli_db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#325: an informational note before the run starts. It asks nothing."""
+
+    async def no_run(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("netkeeper.cli._execute_printing", no_run)
+
+    result = CliRunner().invoke(cli, ["linkedin", "enrich", "--max-visits", "5"])
+
+    assert "Who viewed your profile" in result.output
+    assert budgets.PROFILE_VIEW_NOTICE in result.output
+    assert result.output.index("Who viewed your profile") < result.output.index("started;")
+    assert "never changes that setting" in result.output
+
+
+def test_a_sync_by_hand_does_not_show_the_profile_view_notice(
+    cli_db: sessionmaker[Session], fake_chrome: ConnectionsContext
+) -> None:
+    result = CliRunner().invoke(cli, ["linkedin", "sync"])
+    assert "Who viewed your profile" not in result.output
+
+
+def test_a_refused_enrich_does_not_show_the_profile_view_notice(
+    cli_db: sessionmaker[Session],
+) -> None:
+    with session_scope(cli_db, write=True) as session:
+        flag_session(session, _user(session), Outcome.CHECKPOINT, url="/checkpoint/x")
+    result = CliRunner().invoke(cli, ["linkedin", "enrich"])
+    assert result.exit_code == 1 and "Who viewed your profile" not in result.output
 
 
 def test_a_flagged_session_refuses_the_run_and_records_nothing(

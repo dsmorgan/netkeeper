@@ -127,6 +127,8 @@ async def test_budget_heat_and_status_read_what_posture_reads(
     today = budget["profile_visits_today"]
     assert today["spent_today"] == 1 and today["ramp"] == settings.budget.warmup_start
     assert budget["risk_warning"] is None  # 60 a day, the default
+    assert budget["profile_view_notice"] == budgets.PROFILE_VIEW_NOTICE  # always set (#325)
+    assert "Who viewed your profile" in budget["profile_view_notice"]
     assert (heat["score"], heat["tripped"], heat["threshold"]) == (0.0, False, 2.5)
     assert status == {
         "session_flag": None,

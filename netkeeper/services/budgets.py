@@ -160,6 +160,20 @@ def profile_visit_week_note(settings: BudgetSettings) -> str | None:
     )
 
 
+# One sentence for every place enrichment starts or is enabled (#325): the CLI
+# before `linkedin enrich` and `linkedin schedule arm`, `GET /linkedin/budget`
+# (the LinkedIn page's budget panel, arm dialog, and manual-run dialog), and the
+# docs. It informs and never blocks, and it is not a posture note: it does not
+# change the verdict. The menu path is left out on purpose, since LinkedIn
+# renames its settings pages.
+PROFILE_VIEW_NOTICE = (
+    "Enrichment opens each contact's LinkedIn profile from your account, so they may see a"
+    " visit in Who viewed your profile. Whether they see your name or an anonymous viewer"
+    " depends on the Profile viewing options in LinkedIn's Visibility settings. netkeeper"
+    " never changes that setting."
+)
+
+
 def profile_visit_risk_warning(settings: BudgetSettings) -> str | None:
     """The warning for a daily profile-visit limit above the design level, or None.
 
