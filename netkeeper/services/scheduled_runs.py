@@ -7,11 +7,13 @@ and enrichment). A handler:
 
 1. records nothing while the account's schedule is paused (#324; the
    scheduler's gate already skipped the fire, so this only closes the moment
-   between that gate and the handler), and otherwise records a ``scheduled``
+   between that gate and the handler, and answers
+   :attr:`~netkeeper.services.scheduler.JobOutcome.SKIPPED` so the fire counts as
+   skipped, not run), and otherwise records a ``scheduled``
    run through :func:`netkeeper.services.runs.create_run`,
    which refuses on a disarmed account -- the scheduler's arm gate already
    skipped the fire, so reaching this refusal means something bypassed that
-   gate, and it is logged as an error and nothing runs;
+   gate, and it is logged as an error, nothing runs, and the answer is ``SKIPPED``;
 2. submits the run to the task runner, so it is a task like any other (its
    progress on the event stream, cancelled with the process), and waits for it,
    because the scheduler's heartbeat runs one fire at a time on purpose;
@@ -102,6 +104,10 @@ def submit_run(
     return info.id, lambda: outcome[0] if outcome else runs.RunOutcome.DONE
 
 
+class _SchedulePaused(Exception):
+    """The schedule was paused between the scheduler's gate and the handler (#324)."""
+
+
 def _handler(
     factory: sessionmaker[Session],
     executor: runs.RunExecutor,
@@ -118,8 +124,7 @@ def _handler(
                 return None
             if schedule_paused(session, user, ctx.account_id):
                 # Paused between the scheduler's gate and here (#324): nothing new starts.
-                log.info("scheduled %s not started: the schedule is paused", run_kind.value)
-                return None
+                raise _SchedulePaused
             return runs.create_run(
                 session, user, run_kind, trigger=SyncRunTrigger.SCHEDULED, now=clock()
             ).id
@@ -130,6 +135,9 @@ def _handler(
             run_id = await off_loop(record, ctx)
             if run_id is None:
                 return None
+        except _SchedulePaused:
+            log.info("scheduled %s not started: the schedule is paused", run_kind.value)
+            return JobOutcome.SKIPPED
         except runs.ScheduledRunsDisarmed:
             log.error(
                 "scheduled %s reached a disarmed account %d past the scheduler's arm gate;"
@@ -137,7 +145,7 @@ def _handler(
                 run_kind.value,
                 ctx.account_id,
             )
-            return None
+            return JobOutcome.SKIPPED
         except runs.RunAlreadyRunning as exc:
             log.info("scheduled %s not started: %s", run_kind.value, exc)
             return JobOutcome.RETRY_LATER

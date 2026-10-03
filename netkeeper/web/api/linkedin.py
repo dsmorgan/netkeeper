@@ -63,8 +63,8 @@ from netkeeper.services.linkedin_accounts import (
     ensure_account,
     find_account,
     pause_schedule,
+    schedule_pause_state,
     schedule_paused,
-    schedule_paused_at,
     scheduled_runs_armed,
     unpause_schedule,
 )
@@ -464,12 +464,12 @@ def unpin_contact(contact_id: int, user: CurrentUser, session: SessionDep) -> li
 def _schedule_out(request: Request, session: SessionDep, user: User) -> ScheduleOut:
     account = find_account(session, user)
     account_id = account_id_for(session, user)
-    paused_at = None if account is None else schedule_paused_at(session, user, account.id)
+    pause = None if account is None else schedule_pause_state(session, user, account.id)
     return ScheduleOut(
         armed=account is not None and scheduled_runs_armed(session, user, account.id),
         armed_at=None if account is None else account.scheduled_runs_armed_at,
-        paused=paused_at is not None,
-        paused_at=paused_at,
+        paused=pause is not None and pause.paused,
+        paused_at=None if pause is None else pause.paused_at,
         scheduler_running=request.app.state.scheduler is not None,
         jobs=[
             ScheduledJobOut(

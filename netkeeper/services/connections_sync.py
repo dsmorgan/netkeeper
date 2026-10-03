@@ -361,21 +361,18 @@ async def sync_connections(
                 mapping.apply_page(session, user, page, counts)
                 # The dashboard's last few contacts (#324): who this page added or
                 # confirmed, in the same transaction as the page.
+                touched = {i: run_contacts.ADDED for i in counts.created_contact_ids - created}
+                touched.update(
+                    (i, run_contacts.CONFIRMED) for i in counts.confirmed_contact_ids - confirmed
+                )
                 run_contacts.record(
                     session,
                     user,
                     account_id,
                     run_id,
-                    [
-                        *(
-                            (i, run_contacts.ADDED)
-                            for i in sorted(counts.created_contact_ids - created)
-                        ),
-                        *(
-                            (i, run_contacts.CONFIRMED)
-                            for i in sorted(counts.confirmed_contact_ids - confirmed)
-                        ),
-                    ],
+                    run_contacts.in_page_order(
+                        session, user, touched, [c.urn for c in page.connections]
+                    ),
                 )
 
         async def on_page(page: ConnectionsPage) -> None:

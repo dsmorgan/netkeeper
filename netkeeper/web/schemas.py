@@ -1936,6 +1936,8 @@ class ScheduleOut(BaseModel):
     ``scheduler_running`` is whether this process runs a scheduler at all.
     ``paused`` is whether a person paused the schedule (#324): armed or not, no
     new scheduled run starts until it is unpaused, and nothing missed is replayed.
+    ``paused_at`` is null when not paused, and for a pause whose stored value
+    could not be read (still ``paused``: it fails closed).
     """
 
     armed: bool

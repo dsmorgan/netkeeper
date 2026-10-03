@@ -16,7 +16,9 @@ from collections.abc import Callable
 from datetime import UTC, datetime, time, timedelta
 
 import factories
+import httpx
 import pytest
+from fastapi import FastAPI
 from profile_fakes import FakeBrowser
 from run_fakes import Clock as ServeClock
 from run_fakes import fake_provider
@@ -38,15 +40,16 @@ from netkeeper.config import Settings
 from netkeeper.db import session_scope
 from netkeeper.linkedin.connections import SyncMode
 from netkeeper.linkedin.enrich import StopReason
-from netkeeper.models import SyncRunKind, SyncRunStatus, SyncRunTrigger, User
+from netkeeper.models import Contact, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
+from netkeeper.scoping import scoped
 from netkeeper.services import enrich_plan, run_contacts, runs, scheduler
 from netkeeper.services.connections_sync import sync_connections
 from netkeeper.services.linkedin_accounts import (
     arm_scheduled_runs,
     ensure_account,
     pause_schedule,
+    schedule_pause_state,
     schedule_paused,
-    schedule_paused_at,
     unpause_schedule,
 )
 from netkeeper.services.settings_kv import set_setting
@@ -280,6 +283,36 @@ async def test_a_sync_records_the_connections_it_added(
     assert {t.outcome for t in touched} == {"added"}
     assert touched[0].outcome_text == "new connection added"
     assert {t.contact_id for t in touched} <= report.pages.created_contact_ids
+    # Newest first is the page's order backwards: the last people on the page lead.
+    urns = {c.id: c.li_urn for c in _contacts_of(session_factory, user_id)}
+    assert [urns[t.contact_id] for t in touched] == [p.urn for p in reversed(PEOPLE)][:10]
+
+
+def _contacts_of(factory: sessionmaker[Session], user_id: int) -> list[Contact]:
+    with session_scope(factory) as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        rows = list(session.scalars(scoped(user, Contact)))
+        session.expunge_all()
+    return rows
+
+
+def test_a_pages_touched_contacts_keep_the_pages_order_not_their_ids(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The contact made last is first on the page: it is recorded first, not last."""
+    with session_scope(session_factory, write=True) as session:
+        user = factories.make_user(session)
+        early = factories.make_contact(session, user, li_urn="urn:li:fsd_profile:EARLY")
+        late = factories.make_contact(session, user, li_urn="urn:li:fsd_profile:LATE")
+        stray = factories.make_contact(session, user, li_urn=None)
+        ordered = run_contacts.in_page_order(
+            session,
+            user,
+            {early.id: "added", late.id: "confirmed", stray.id: "added"},
+            ["urn:li:fsd_profile:LATE", None, "urn:li:fsd_profile:EARLY"],
+        )
+    assert ordered == [(late.id, "confirmed"), (early.id, "added"), (stray.id, "added")]
 
 
 # --- pause the schedule: the scheduler's gate -------------------------------------------------
@@ -407,14 +440,16 @@ def test_pause_is_idempotent_and_an_unreadable_one_counts_as_paused(
     with session_scope(session_factory, write=True) as session:
         owner = factories.make_user(session)
         account = ensure_account(session, owner).id
-        assert schedule_paused_at(session, owner, account) is None
+        assert not schedule_pause_state(session, owner, account).paused
         pause_schedule(session, owner, now=NOW)
         pause_schedule(session, owner, now=NOW + timedelta(hours=1))
-        assert schedule_paused_at(session, owner, account) == NOW  # keeps the first time
+        assert schedule_pause_state(session, owner, account).paused_at == NOW  # the first time
         unpause_schedule(session, owner)
         assert not schedule_paused(session, owner, account)
         set_setting(session, owner, f"linkedin.schedule.{account}.paused_at", "not a time")
         assert schedule_paused(session, owner, account)  # fail closed: nothing starts
+        state = schedule_pause_state(session, owner, account)
+        assert (state.paused, state.paused_at, state.unreadable) == (True, None, True)
 
 
 def test_another_users_pause_pauses_nothing_here(session_factory: sessionmaker[Session]) -> None:
@@ -450,11 +485,83 @@ async def test_the_served_handler_records_nothing_while_paused(
         due=NOW,
         catch_up=False,
     )
-    assert await registry[scheduler.JobKind.ENRICH](ctx) is None
+    assert await registry[scheduler.JobKind.ENRICH](ctx) is scheduler.JobOutcome.SKIPPED
     with session_scope(session_factory) as session:
         user = session.get(User, owner.id)
         assert user is not None
         assert runs.list_runs(session, user)[1] == 0
+
+
+async def test_a_pause_that_lands_after_the_gate_keeps_first_setup_standing(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The narrow race: the gate let the never-run full sync through, then a person
+    paused before the handler recorded a run. The handler starts nothing and says
+    so; the fire counts as skipped, so the full sync is offered again within the
+    hour, not a week later, and runs then."""
+    from netkeeper.services.events import EventBus
+    from netkeeper.services.scheduled_runs import serve_registry
+    from netkeeper.services.tasks import TaskRunner
+
+    first = scheduler.JobSchedule(
+        scheduler.JobKind.CONNECTIONS_FULL, timedelta(days=7), run_on_first_setup=True
+    )
+    owner, account = _armed_account(session_factory)
+    with session_scope(session_factory, write=True) as session:
+        due = scheduler.establish_schedule(
+            session,
+            owner,
+            account,
+            first.kind,
+            now=NOW,
+            schedule=first,
+            rng=random.Random(0),
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        ).due
+
+    class Never:
+        async def execute(self, run_id: int, user_id: int) -> runs.RunOutcome:
+            raise AssertionError("a paused schedule reached the worker")
+
+    served = serve_registry(session_factory, Never(), TaskRunner(EventBus()), clock=lambda: NOW)
+    calls: list[scheduler.JobContext] = []
+
+    async def pause_then_handle(ctx: scheduler.JobContext) -> scheduler.JobOutcome | None:
+        with session_scope(session_factory, write=True) as session:
+            pause_schedule(session, owner, now=NOW)
+        return await served[first.kind](ctx)
+
+    async def record(ctx: scheduler.JobContext) -> None:
+        calls.append(ctx)
+
+    async def poll(at: datetime, handler: scheduler.JobHandler) -> scheduler.FireResult | None:
+        return await scheduler.poll_and_fire(
+            session_factory,
+            owner,
+            account,
+            first.kind,
+            now=at,
+            schedule=first,
+            registry={first.kind: handler},
+            tz="UTC",
+            active_start=ALL_DAY[0],
+            active_end=ALL_DAY[1],
+        )
+
+    raced = await poll(due, pause_then_handle)
+    assert raced is not None and not raced.fired
+    assert raced.next_due == due + scheduler.FIRST_SETUP_RETRY
+    with session_scope(session_factory) as session:
+        user = session.get(User, owner.id)
+        assert user is not None
+        assert runs.list_runs(session, user)[1] == 0
+
+    with session_scope(session_factory, write=True) as session:
+        unpause_schedule(session, owner)
+    again = await poll(raced.next_due, record)
+    assert again is not None and again.fired and len(calls) == 1
 
 
 def test_posture_says_the_schedule_is_paused(session_factory: sessionmaker[Session]) -> None:
@@ -469,6 +576,11 @@ def test_posture_says_the_schedule_is_paused(session_factory: sessionmaker[Sessi
         (row,) = [p for p in report.protections if p.name == "scheduled runs"]
         assert row.value.startswith("armed since 2026-09-23 15:00 UTC; paused since")
         assert "schedule unpause" in row.value
+
+        set_setting(session, user, f"linkedin.schedule.{account}.paused_at", "garbled")
+        report = posture(session, user, account, now=NOW, settings=Settings())
+        (row,) = [p for p in report.protections if p.name == "scheduled runs"]
+        assert "paused (unreadable value)" in row.value
 
 
 # --- the API ------------------------------------------------------------------------------
@@ -598,3 +710,42 @@ async def test_the_schedule_pause_survives_a_restart_and_unpause_lets_runs_start
 @pytest.fixture
 def no_frontend(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NETKEEPER_FRONTEND_DIST", "/nonexistent-dist")
+
+
+async def test_pausing_a_running_sync_is_refused_and_sets_no_flag(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    factory = running_app.state.session_factory
+    with session_scope(factory, write=True) as session:
+        user = _local(session)
+        sync = runs.create_run(
+            session,
+            user,
+            SyncRunKind.CONNECTIONS_INCREMENTAL,
+            trigger=SyncRunTrigger.MANUAL,
+            now=datetime.now(UTC),
+        ).id
+
+    refused = await client.post(f"/api/v1/linkedin/runs/{sync}/pause", headers=HEADERS)
+
+    assert refused.status_code == 409 and "only an enrichment run" in refused.json()["detail"]
+    with session_scope(factory) as session:
+        user = _local(session)
+        run = runs.get_run(session, user, sync)
+        assert run.status is SyncRunStatus.RUNNING and run.cancel_requested_at is None
+        assert not runs.pause_requested(session, user, sync)
+
+
+async def test_an_unreadable_pause_reads_paused_with_no_time(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    with session_scope(running_app.state.session_factory, write=True) as session:
+        user = _local(session)
+        account = ensure_account(session, user).id
+        set_setting(session, user, f"linkedin.schedule.{account}.paused_at", "garbled")
+
+    schedule = (await client.get("/api/v1/linkedin/schedule")).json()
+    status = (await client.get("/api/v1/linkedin/status")).json()
+
+    assert (schedule["paused"], schedule["paused_at"]) == (True, None)
+    assert status["schedule_paused"] is True

@@ -9,6 +9,7 @@ made since, on the first run that needs it.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -127,8 +128,24 @@ def _pause_key(account_id: int) -> str:
     return f"linkedin.schedule.{account_id}.paused_at"
 
 
-def schedule_paused_at(session: Session, user: User, account_id: int) -> datetime | None:
-    """When a person paused ``account_id``'s schedule, or ``None`` while it is not. Read-only.
+@dataclass(frozen=True, slots=True)
+class SchedulePause:
+    """Whether an account's schedule is paused, and since when (#324).
+
+    ``paused_at`` is ``None`` while not paused, and also for a pause whose stored
+    value could not be read: that one is ``paused`` (fail closed) with no time.
+    """
+
+    paused: bool
+    paused_at: datetime | None = None
+
+    @property
+    def unreadable(self) -> bool:
+        return self.paused and self.paused_at is None
+
+
+def schedule_pause_state(session: Session, user: User, account_id: int) -> SchedulePause:
+    """Whether a person paused ``account_id``'s schedule, and when. Read-only.
 
     A pause holds the scheduler without disarming it: no new scheduled run starts
     until :func:`unpause_schedule`, and a run already going is not stopped. It is
@@ -138,20 +155,22 @@ def schedule_paused_at(session: Session, user: User, account_id: int) -> datetim
     """
     raw = get_setting(session, user, _pause_key(account_id))
     if raw is None:
-        return None
+        return SchedulePause(paused=False)
     try:
         when = datetime.fromisoformat(str(raw))
     except ValueError:
         log.warning(
             "the schedule pause for account %d is unreadable; treating it as paused", account_id
         )
-        return datetime.min.replace(tzinfo=UTC)
-    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+        return SchedulePause(paused=True)
+    return SchedulePause(
+        paused=True, paused_at=when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+    )
 
 
 def schedule_paused(session: Session, user: User, account_id: int) -> bool:
-    """Whether ``account_id``'s schedule is paused (:func:`schedule_paused_at`). Read-only."""
-    return schedule_paused_at(session, user, account_id) is not None
+    """Whether ``account_id``'s schedule is paused (:func:`schedule_pause_state`). Read-only."""
+    return schedule_pause_state(session, user, account_id).paused
 
 
 def pause_schedule(session: Session, user: User, *, now: datetime) -> LinkedInAccount:
@@ -160,7 +179,7 @@ def pause_schedule(session: Session, user: User, *, now: datetime) -> LinkedInAc
         raise ValueError("now must be timezone-aware")
     _require_writer(session, "pause_schedule")
     account = ensure_account(session, user)
-    if schedule_paused_at(session, user, account.id) is None:
+    if not schedule_paused(session, user, account.id):
         set_setting(session, user, _pause_key(account.id), now.isoformat())
         log.warning("scheduled LinkedIn runs paused for account %d (user %d)", account.id, user.id)
     return account

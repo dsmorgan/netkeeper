@@ -24,7 +24,7 @@ Writers need a writer session; transactions belong to the caller.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -99,6 +99,33 @@ def record(
         _key(account_id),
         {"run_id": run_id, "items": [[contact_id, outcome] for contact_id, outcome in kept]},
     )
+
+
+def in_page_order(
+    session: Session,
+    user: User,
+    touched: Mapping[int, str],
+    urns: Sequence[str | None],
+) -> list[tuple[int, str]]:
+    """``touched`` (contact id to outcome) in the order a sync's page listed them.
+
+    A page lists connections by URN; each touched contact is placed where its URN
+    sits on the page, and one whose URN the page does not hold goes last, by id.
+    Read-only.
+    """
+    if not touched:
+        return []
+    position = {urn: index for index, urn in enumerate(urns) if urn is not None}
+    held = {
+        contact.id: contact.li_urn
+        for contact in session.scalars(scoped(user, Contact).where(Contact.id.in_(touched)))
+    }
+
+    def place(contact_id: int) -> tuple[int, int]:
+        urn = held.get(contact_id)
+        return (position.get(urn, len(position)) if urn is not None else len(position), contact_id)
+
+    return [(contact_id, touched[contact_id]) for contact_id in sorted(touched, key=place)]
 
 
 def recent(session: Session, user: User, run: SyncRun) -> list[TouchedContact]:

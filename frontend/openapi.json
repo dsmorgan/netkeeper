@@ -8527,7 +8527,7 @@
         "type": "object"
       },
       "ScheduleOut": {
-        "description": "Whether scheduled runs may fire, and when each kind is next due.\n\n``armed`` is false on every install until a person arms it; while false the\nscheduler still keeps due times, and no scheduled LinkedIn job fires.\n``scheduler_running`` is whether this process runs a scheduler at all.\n``paused`` is whether a person paused the schedule (#324): armed or not, no\nnew scheduled run starts until it is unpaused, and nothing missed is replayed.",
+        "description": "Whether scheduled runs may fire, and when each kind is next due.\n\n``armed`` is false on every install until a person arms it; while false the\nscheduler still keeps due times, and no scheduled LinkedIn job fires.\n``scheduler_running`` is whether this process runs a scheduler at all.\n``paused`` is whether a person paused the schedule (#324): armed or not, no\nnew scheduled run starts until it is unpaused, and nothing missed is replayed.\n``paused_at`` is null when not paused, and for a pause whose stored value\ncould not be read (still ``paused``: it fails closed).",
         "properties": {
           "armed": {
             "title": "Armed",

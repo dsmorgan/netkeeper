@@ -307,6 +307,18 @@ describe('NextLinkedInRunCard', () => {
     expect((await body.findAllByRole('listitem')).length).toBe(2)
   })
 
+  it('says both when the schedule is disarmed and paused (#324)', async () => {
+    renderCard(NextLinkedInRunCard, {
+      [SCHEDULE]: json(schedule({ armed: false, paused: true, paused_at: '2026-09-21T08:00:00Z' })),
+    })
+    const body = await card('Next LinkedIn run')
+    expect(await body.findByText(/Scheduled runs are off/)).toBeInTheDocument()
+    expect(body.getByRole('link', { name: 'Open LinkedIn' })).toHaveAttribute('href', '/linkedin')
+    expect(body.getByText(/no new scheduled run starts/)).toBeInTheDocument()
+    expect(body.getByRole('button', { name: 'Unpause schedule' })).toBeInTheDocument()
+    expect(body.queryByText(/2099/)).not.toBeInTheDocument()
+  })
+
   it('offers to pause an armed schedule (#324)', async () => {
     const { seen } = renderCard(NextLinkedInRunCard, {
       [SCHEDULE]: json(schedule({ paused: false, paused_at: null })),
