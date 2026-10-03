@@ -204,6 +204,13 @@ def test_another_users_slug_is_unknown_to_this_user(writer: Session, user: User)
         ("View", "Priya Okafor's profile", None),  # the link's aria-label
         ("Priya", "Okafor Data engineer at Fictional", "Data engineer at Fictional"),
         ("Priya", "OkaforData engineer", "Data engineer"),  # text nodes run together
+        # The run-on join after any word character, in any case (#186).
+        ("Jane", "Doe, MBAData engineer", "Data engineer"),  # after a capital
+        ("Jane", "DOEData engineer", "Data engineer"),
+        ("王", "小明Engineer", "Engineer"),  # after CJK
+        ("Jane", "DoeData Engineer", "Data engineer"),  # the headline in another case
+        ("Jane", "DoeiOS developer", "iOS developer"),  # a headline that starts lowercase
+        ("Jane", "Doe2Data engineer", "Data engineer"),  # after a digit
         ("Priya", "Okafor 2nd degree connection", None),
         ("Priya", "Okafor · Data engineer", None),
         ("Priya", "Okafor | Fictional Robotics", None),
@@ -251,6 +258,25 @@ def test_a_headline_is_matched_as_words_not_letters() -> None:
     """A headline of "Ann" is not inside "Anna Karenina"; it is inside "Jo Ann Smith"."""
     assert mapping.card_name("Anna", "Karenina", "Ann") == ("Anna", "Karenina")
     assert mapping.card_name("Jo", "Ann Smith", "Ann") == ("", "")
+
+
+@pytest.mark.parametrize(
+    ("first", "last", "headline"),
+    [
+        ("Anna", "Karenina", "Ann"),  # the headline runs on into a letter
+        ("Jane", "Doe", "Data engineer"),
+        ("Jane", "Doe", "Doe Industries"),  # the name is inside the headline, not the reverse
+        ("王", "小明", "Engineer"),
+        ("Jane", "Doe", "iOS developer"),
+        ("Jane", "Doe", ""),
+        ("Jane", "Doe", "   "),
+    ],
+)
+def test_the_run_on_check_keeps_a_name_without_its_headline(
+    first: str, last: str, headline: str
+) -> None:
+    """The open left side of the run-on check still needs the headline to end the word."""
+    assert mapping.card_name(first, last, headline) == (first, last)
 
 
 def test_direction_marks_are_stripped_not_refused() -> None:
@@ -561,6 +587,69 @@ def test_merging_a_real_contact_into_a_card_contact_confirms_it_and_the_real_val
     }
 
 
+def test_merging_into_a_card_contact_keeps_a_field_the_person_recorded_on_it(
+    writer: Session, user: User
+) -> None:
+    """r2c of #186: only the card's unrecorded text counts as empty. A name the
+    person typed on the card contact before the merge is theirs, and it stays."""
+    mapping.apply_page(writer, user, _page([_card("card-slug", "Pri", "Oka", "Card headline")]))
+    card = _by_slug(writer, user, "card-slug")
+    contacts_service.update_contact(writer, user, card.id, {"first_name": "Priyanka"})
+    real = factories.make_contact(
+        writer,
+        user,
+        first_name="Priya",
+        last_name="Okafor",
+        headline="Data engineer at Fictional Robotics Co",
+        field_sources={"first_name": "sync", "last_name": "sync", "headline": "sync"},
+    )
+
+    merge(writer, user, card.id, real.id)
+
+    assert card.needs_review_at is None
+    assert (card.first_name, card.field_sources["first_name"]) == ("Priyanka", "manual")
+    # The unrecorded card text still gives way to the real contact's.
+    assert (card.last_name, card.field_sources["last_name"]) == ("Okafor", "sync")
+    assert card.headline == "Data engineer at Fictional Robotics Co"
+
+
+def test_merging_a_headless_real_contact_into_a_card_contact_drops_the_cards_headline(
+    writer: Session, user: User
+) -> None:
+    """#186: the sync drops a card headline the URN row does not replace; so does a merge."""
+    mapping.apply_page(writer, user, _page([_card("card-slug", "Pri", "Oka", "Card headline")]))
+    card = _by_slug(writer, user, "card-slug")
+    real = factories.make_contact(
+        writer,
+        user,
+        first_name="Priya",
+        last_name="Okafor",
+        headline=None,
+        field_sources={"first_name": "sync", "last_name": "sync"},
+    )
+
+    merge(writer, user, card.id, real.id)
+
+    assert card.needs_review_at is None
+    assert card.headline is None
+    assert "headline" not in card.field_sources
+
+
+def test_merging_into_a_card_contact_keeps_a_headline_the_person_typed(
+    writer: Session, user: User
+) -> None:
+    mapping.apply_page(writer, user, _page([_card("card-slug", "Pri", "Oka", "Card headline")]))
+    card = _by_slug(writer, user, "card-slug")
+    contacts_service.update_contact(writer, user, card.id, {"headline": "Typed by hand"})
+    real = factories.make_contact(
+        writer, user, headline=None, field_sources={"first_name": "sync", "last_name": "sync"}
+    )
+
+    merge(writer, user, card.id, real.id)
+
+    assert (card.headline, card.field_sources["headline"]) == ("Typed by hand", "manual")
+
+
 def test_merging_two_card_contacts_confirms_neither(writer: Session, user: User) -> None:
     mapping.apply_page(writer, user, _page([_card("card-a"), _card("card-b")]))
     a, b = _by_slug(writer, user, "card-a"), _by_slug(writer, user, "card-b")
@@ -568,6 +657,37 @@ def test_merging_two_card_contacts_confirms_neither(writer: Session, user: User)
     merge(writer, user, a.id, b.id)
 
     assert a.needs_review_at == NOW
+
+
+def test_merging_two_card_contacts_leaves_both_sides_fields_alone(
+    writer: Session, user: User
+) -> None:
+    """r2d of #186: neither side is confirmed, so neither card's text counts as empty.
+    The survivor keeps its own card text, unrecorded, and takes nothing from the
+    loser's where it has a value; it takes the loser's card text, unrecorded too,
+    only into a field it had empty."""
+    mapping.apply_page(
+        writer,
+        user,
+        _page(
+            [
+                _card("card-a", "Priya", "Okafor", "Headline A"),
+                _card("card-b", "Pri", "Oka", "Headline B"),
+            ]
+        ),
+    )
+    a, b = _by_slug(writer, user, "card-a"), _by_slug(writer, user, "card-b")
+    b.location = "Lagos"  # a card gives no location; a is left without one
+    writer.flush()
+
+    merge(writer, user, a.id, b.id)
+
+    assert (a.first_name, a.last_name, a.headline) == ("Priya", "Okafor", "Headline A")
+    assert a.location == "Lagos"
+    assert not {"first_name", "last_name", "headline", "location"} & set(a.field_sources)
+    # The loser keeps its own values; only its identity moved.
+    assert (b.first_name, b.last_name, b.headline) == ("Pri", "Oka", "Headline B")
+    assert b.li_public_id is None and b.merged_into_id == a.id
 
 
 # --- confirm and reject -----------------------------------------------------------------

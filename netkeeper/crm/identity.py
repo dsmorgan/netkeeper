@@ -1534,6 +1534,12 @@ def _merge_scalars(survivor: Contact, loser: Contact) -> None:
         if open_to_loser and theirs not in (None, ""):
             setattr(survivor, name, theirs)
             _take_source(survivor, loser, name)
+    if card_survivor and "headline" not in survivor.field_sources:
+        # #186: the loser gave no headline, so the card's is still there. The merge
+        # says who this contact is, not that the card was theirs: the slug may have
+        # passed to this person since the card was read. The sync drops it in the
+        # same case (crm/apply.py, a card contact confirmed by its URN).
+        survivor.headline = None
     if survivor_default_name:
         # "" means "use first_name" on a stored row (the preferred_name validator).
         survivor.preferred_name = loser.preferred_name if loser_custom_name else ""
