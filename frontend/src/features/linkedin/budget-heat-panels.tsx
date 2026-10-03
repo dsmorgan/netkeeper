@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { cn } from '@/lib/utils'
 
-import { budgetQuery, clearHeat, heatQuery, linkedinKeys } from './api'
+import { budgetQuery, clearHeat, heatQuery, linkedinKeys, statusQuery } from './api'
 import { formatWhen } from './fields'
 import { ProfileViewNotice } from './profile-view-notice'
 import { RiskWarning } from './risk-warning'
@@ -114,14 +114,28 @@ function Step({
 /**
  * Heat: the score, its threshold, the slowdown multiplier, and when runs resume
  * (spec 9.7). While heat is raised, "Clear heat" is spec 9.7's manual clear for
- * "the block was something else" (#181). It always asks first, and sends the
- * time heat was last raised as shown here: a throttle that raises it again
- * while the dialog is open is refused by the server, never cleared unseen.
+ * "the block was something else" (#181). It always asks first.
+ *
+ * The dialog works from a snapshot taken when "Clear heat…" is clicked, not
+ * from the live query: a run that ends while the dialog is open refetches
+ * heat, and a throttle it recorded must not slip into the request the person
+ * is about to confirm. The snapshot's `last_raised_at` is what is sent, so the
+ * server refuses (409) when heat was raised again since, and the dialog shows
+ * that refusal. A run going right now does not block the clear (the CLI's
+ * `clear-flag` does not either), but the dialog says so.
  */
+interface HeatSnapshot {
+  score: number
+  threshold: number
+  lastRaisedAt: string
+}
+
 export function HeatPanel() {
   const heat = useQuery(heatQuery)
+  const status = useQuery(statusQuery)
   const queryClient = useQueryClient()
   const [asking, setAsking] = useState(false)
+  const [seen, setSeen] = useState<HeatSnapshot | null>(null)
 
   const clear = useMutation({
     mutationFn: clearHeat,
@@ -184,6 +198,11 @@ export function HeatPanel() {
                 size="sm"
                 onClick={() => {
                   clear.reset()
+                  setSeen({
+                    score: heat.data.score,
+                    threshold: heat.data.threshold,
+                    lastRaisedAt,
+                  })
                   setAsking(true)
                 }}
               >
@@ -194,7 +213,7 @@ export function HeatPanel() {
         )}
       </CardContent>
 
-      {heat.isSuccess && lastRaisedAt !== null && (
+      {seen !== null && (
         <ConfirmDialog
           open={asking}
           onOpenChange={(open) => {
@@ -204,17 +223,23 @@ export function HeatPanel() {
           confirmLabel="Clear heat"
           pending={clear.isPending}
           error={clear.isError ? message(clear.error) : null}
-          onConfirm={() => clear.mutateAsync(lastRaisedAt)}
+          onConfirm={() => clear.mutateAsync(seen.lastRaisedAt)}
         >
           <p>
-            Heat is {heat.data.score.toFixed(2)} of {heat.data.threshold.toFixed(2)}, last raised{' '}
-            {formatWhen(lastRaisedAt)}. Clearing sets it to 0: runs go back to full pace and
+            Heat is {seen.score.toFixed(2)} of {seen.threshold.toFixed(2)}, last raised{' '}
+            {formatWhen(seen.lastRaisedAt)}. Clearing sets it to 0: runs go back to full pace and
             today&apos;s full visit budget, and scheduled runs are no longer skipped for heat.
           </p>
           <p>
             Heat rises when LinkedIn throttles this account or shows a checkpoint. Clear it only if
             you are sure the block that raised it was something else.
           </p>
+          {status.data?.running_run_id != null && (
+            <p className="font-medium text-foreground">
+              Run {status.data.running_run_id} is running. It picks up the cleared heat at its next
+              check.
+            </p>
+          )}
           <p>If heat is raised again while this is open, nothing is cleared.</p>
         </ConfirmDialog>
       )}

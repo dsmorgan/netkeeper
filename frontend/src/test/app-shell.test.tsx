@@ -100,6 +100,33 @@ describe('app shell', () => {
       await waitFor(() => expect(router.state.location.pathname).toBe('/settings'))
     })
 
+    it('is modal while open: a labeled dialog, the rest inert, and Tab wraps inside it (#364 S2)', async () => {
+      await renderApp('/')
+      const menu = screen.getByRole('button', { name: 'Open navigation' })
+      expect(screen.queryByRole('dialog', { name: 'Navigation' })).not.toBeInTheDocument()
+
+      fireEvent.click(menu)
+
+      const drawer = screen.getByRole('dialog', { name: 'Navigation' })
+      expect(drawer).toHaveAttribute('aria-modal', 'true')
+      expect(screen.getByTestId('shell-content')).toHaveAttribute('inert')
+
+      const close = within(drawer).getByRole('button', { name: 'Close navigation' })
+      const links = within(drawer).getAllByRole('link')
+      const last = links.at(-1) as HTMLElement
+
+      last.focus()
+      fireEvent.keyDown(document, { key: 'Tab' })
+      expect(close).toHaveFocus()
+
+      fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+      expect(last).toHaveFocus()
+
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(screen.getByTestId('shell-content')).not.toHaveAttribute('inert')
+      expect(menu).toHaveFocus()
+    })
+
     it('ignores Escape while closed', async () => {
       await renderApp('/')
       const menu = screen.getByRole('button', { name: 'Open navigation' })
