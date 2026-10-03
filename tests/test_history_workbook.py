@@ -196,3 +196,26 @@ def test_a_tab_that_is_not_a_campaign_is_skipped_with_a_reason() -> None:
 def test_a_file_that_is_not_a_workbook_is_refused() -> None:
     with pytest.raises(WorkbookError):
         read_workbook(b"First Name,Last Name,Email\n")
+
+
+@pytest.mark.parametrize(("row", "col"), [(8, 8), (9, 3)])
+def test_a_text_only_row_outside_the_clicks_list_is_reported_not_a_link(row: int, col: int) -> None:
+    """N25: only the clicks list holds links; link-shaped text elsewhere is a dropped row."""
+    campaign = read_tab(0, grid(Tab(extra_rows=[(row, col, "example.test/landing page")])))
+    assert len(campaign.warnings) == 1
+    assert campaign.warnings[0].endswith("list were dropped: no usable address")
+
+
+def test_a_malformed_address_in_the_clicks_list_is_reported_not_taken_for_a_link() -> None:
+    """Nit 6: no name, and an address with a stray character."""
+    campaign = read_tab(0, grid(Tab(extra_rows=[(6, 13, "eve@example.test;")])))
+    assert campaign.warnings == ("1 row(s) of the clicked list were dropped: no usable address",)
+
+
+def test_a_personalized_subject_is_warned_about() -> None:
+    """Nit 4: the scan's exact subject match cannot work on {{first_name}}."""
+    campaign = read_tab(0, grid(Tab(subject="Catching up, {{first_name}}?")))
+    assert campaign.warnings == (
+        "the subject is personalized ({{...}}), so the Gmail scan's exact subject"
+        " match cannot find replies to it",
+    )

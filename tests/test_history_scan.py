@@ -494,7 +494,8 @@ def test_the_subject_pass_finds_an_unlisted_replier_and_flags_them(
     assert report.by_subject == {spring: 2}
     assert sorted(report.subject_samples) == ["hal@example.test", "kim@example.test"]
 
-    # Hal: matched, emailed by the campaign, and waiting for review.
+    # Hal: matched and waiting for review, but nothing claims the campaign reached him:
+    # no email_out, and last_contacted_at is untouched.
     row = found["hal@example.test"]
     assert (row.contact_id, row.reply_kind, row.replied_at) == (
         hal.id,
@@ -502,19 +503,23 @@ def test_the_subject_pass_finds_an_unlisted_replier_and_flags_them(
         _at(5),
     )
     assert hal.needs_review_at == NOW
-    kinds = sorted(
-        e.kind
-        for e in writer.scalars(scoped(user, Interaction).where(Interaction.contact_id == hal.id))
+    assert hal.last_contacted_at is None
+    (entry,) = writer.scalars(scoped(user, Interaction).where(Interaction.contact_id == hal.id))
+    assert entry.kind is InteractionKind.EMAIL_IN
+    assert entry.summary is not None and entry.summary.startswith(
+        "Imported history: possible reply to old campaign 'Spring check-in' (matched by subject)"
     )
-    assert kinds == sorted([InteractionKind.EMAIL_OUT, InteractionKind.EMAIL_IN])
+    assert row.email_out_interaction_id is None
     campaign = factories.make_campaign(writer, user, contacted_within_days_guard=0)
     (verdict,) = check_enrollment(writer, user, campaign, [hal.id], now=NOW)
     assert Reason.NEEDS_REVIEW in verdict.reasons
 
-    # Kim: no contact, asked to unsubscribe: the address is off limits anyway.
+    # Kim: no contact, and a subject match never puts anyone on the do-not-send list.
     assert found["kim@example.test"].reply_kind is HistoryReplyKind.UNSUBSCRIBE
-    entry = do_not_send.find(writer, user, "kim@example.test")
-    assert entry is not None and entry.reason is DoNotSendReason.OPTED_OUT
+    assert do_not_send.find(writer, user, "kim@example.test") is None
+    assert report.by_subject_unsubscribe == {spring: 1}
+    assert report.no_contact == ["kim@example.test"]
+    assert report.opted_out == 0
     # Ada was already listed: no second row, and the listed pass did not run here for her.
     assert _row(writer, user, "ada@example.test").found_by_subject is False
 
@@ -812,3 +817,213 @@ def test_a_rescan_after_the_entry_was_deleted_does_not_re_flag(
 
     assert ada.needs_review_at is None
     assert report.flagged == 0
+
+
+# --- the second review: subject matches are review only ----------------------------------
+
+
+def test_a_friend_on_an_unrelated_thread_is_flagged_for_review_only(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """S2: "Catching up" is a generic subject; a friend's unrelated thread proves nothing."""
+    friend = factories.make_contact(writer, user, emails=["lee@example.test"])
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    fake.deliver(_mail("lee@example.test", "Re: Catching up", "Dinner on Friday?"), at=_at(7))
+
+    _subject_scan(writer, user, fake)
+
+    assert friend.needs_review_at == NOW
+    assert friend.last_contacted_at is None
+    assert not friend.do_not_contact
+    kinds = [
+        e.kind
+        for e in writer.scalars(
+            scoped(user, Interaction).where(Interaction.contact_id == friend.id)
+        )
+    ]
+    assert kinds == [InteractionKind.EMAIL_IN]
+    campaign = factories.make_campaign(writer, user, contacted_within_days_guard=30)
+    (verdict,) = check_enrollment(writer, user, campaign, [friend.id], now=NOW)
+    assert Reason.CONTACTED_RECENTLY not in verdict.reasons
+
+
+def test_a_colleague_relaying_a_decline_is_flagged_not_opted_out(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """S3: "please remove her" from a colleague is about someone else: a person decides."""
+    colleague = factories.make_contact(
+        writer, user, emails=["max@example.test", "max.alt@example.test"]
+    )
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    fake.deliver(
+        _mail("max@example.test", "Re: Catching up", "Fay asked me to say: remove me."),
+        at=_at(7),
+    )
+
+    _subject_scan(writer, user, fake)
+
+    assert not colleague.do_not_contact
+    assert do_not_send.find(writer, user, "max@example.test") is None
+    assert do_not_send.find(writer, user, "max.alt@example.test") is None
+    assert colleague.needs_review_at == NOW
+    (entry,) = _inbound(writer, user, colleague)
+    assert entry.summary is not None
+    assert "(matched by subject), asks to unsubscribe" in entry.summary
+    assert not people["fay"].do_not_contact  # whom it was about: the person marks her
+
+
+def test_a_newsletter_s_unsubscribe_link_is_not_a_request() -> None:
+    """S1: bulk mail stays automatic; only a real auto-reply's phrase counts."""
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    for precedence in ("bulk", "list", "junk"):
+        ref = fake.deliver(
+            _mail("ada@example.test", "News", "Click here to unsubscribe.", Precedence=precedence),
+            at=_at(4),
+        )
+        message = fake.get_message(ref.id, purpose="test")
+        assert history_scan.classify_from(message, "ada@example.test") is HistoryReplyKind.AUTO
+    for header, value in (("X_Autoreply", "yes"), ("Auto_Submitted", "auto-replied")):
+        ref = fake.deliver(
+            _mail(
+                "ada@example.test", "Away", "Please remove me from your list.", **{header: value}
+            ),
+            at=_at(4),
+        )
+        message = fake.get_message(ref.id, purpose="test")
+        assert (
+            history_scan.classify_from(message, "ada@example.test") is HistoryReplyKind.UNSUBSCRIBE
+        )
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "SV: Catching up",
+        "VS: Catching up",
+        "Antw: Catching up",
+        "RV: Catching up",
+        "AW: Catching up",
+        "WG: Catching up",
+        "[External] Re: Catching up",
+        "Re: [ext] FW: Catching up",
+    ],
+)
+def test_reply_prefixes_and_tags_are_stripped(subject: str) -> None:
+    assert history_scan.normalize_subject(subject) == "catching up"
+
+
+def test_a_limited_scan_skips_the_subject_search_and_marks_nothing(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """Nit 2: the CLI passes no subject targets with --limit; nothing is marked searched."""
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    read = read_gmail(fake, scan_targets(writer, user, limit=1), ())
+    apply_scan(writer, user, read, now=NOW)
+    assert all(c.subject_scanned_at is None for c in writer.scalars(scoped(user, HistoryCampaign)))
+
+
+def test_a_subject_search_that_fails_partway_leaves_the_campaign_unmarked(
+    writer: Session, user: User, people: dict[str, Contact], answers: FakeGmail
+) -> None:
+    """N09: the search answered, a read failed: the campaign is searched again next time."""
+    answers.fail_next("messages.get", GmailRateLimited("429", code="rateLimitExceeded"))
+    report = apply_scan(
+        writer,
+        user,
+        read_gmail(answers, [], history_scan.subject_targets(writer, user)),
+        now=NOW,
+    )
+    assert report.stopped == "rateLimitExceeded"
+    assert report.subject_remaining == 2
+    assert all(c.subject_scanned_at is None for c in writer.scalars(scoped(user, HistoryCampaign)))
+    assert len(history_scan.subject_targets(writer, user)) == 2
+
+
+class _QueryLog(FakeGmail):
+    def __init__(self) -> None:
+        super().__init__(ME, mailbox_id=1, clock=lambda: NOW)
+        self.queries: list[str] = []
+
+    def search(self, query: str, *, max_results: int = 100, purpose: str) -> list[MessageRef]:
+        self.queries.append(query)
+        return super().search(query, max_results=max_results, purpose=purpose)
+
+
+def test_the_bounce_query_quotes_the_address(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """N21."""
+    fake = _QueryLog()
+    read_gmail(fake, [t for t in scan_targets(writer, user) if t.email == "bob@example.test"])
+    assert any(q.startswith('from:mailer-daemon "bob@example.test" after:') for q in fake.queries)
+
+
+def test_a_mail_system_or_own_message_in_the_subject_results_is_not_a_reply(
+    writer: Session, user: User, people: dict[str, Contact]
+) -> None:
+    """N23: a daemon's message and one labelled as the mailbox's own are skipped."""
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    fake.deliver(_mail("Postmaster <postmaster@example.test>", "Catching up", "Note."), at=_at(5))
+    fake.deliver(
+        _mail("ned@example.test", "Re: Catching up", "Sent from elsewhere."),
+        at=_at(5),
+        labels=("SENT",),
+    )
+
+    report = _subject_scan(writer, user, fake)
+
+    assert report.by_subject == {}
+    assert not list(
+        writer.scalars(
+            scoped(user, HistoryRecipient).where(HistoryRecipient.found_by_subject.is_(True))
+        )
+    )
+
+
+def test_a_capped_subject_search_is_reported(
+    writer: Session, user: User, people: dict[str, Contact], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nit 3."""
+    monkeypatch.setattr(history_scan, "SUBJECT_SEARCH_MAX", 1)
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    fake.deliver(_mail("lee@example.test", "Re: Catching up", "Hi."), at=_at(20))
+    report = _subject_scan(writer, user, fake)
+    assert len(report.subject_capped) == 2  # both campaigns share the subject
+
+
+def test_campaigns_without_a_subject_are_named(writer: Session, user: User) -> None:
+    """Nit 3."""
+    import_workbook(writer, user, read_workbook(workbook_bytes(Tab(subject=""))))
+    assert history_scan.campaigns_without_subject(writer, user) == ["Spring check-in"]
+    assert history_scan.subject_targets(writer, user) == []
+
+
+def test_a_delay_notice_is_never_a_bounce() -> None:
+    """M20."""
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW)
+    ref = fake.deliver(
+        _mail(
+            MAILER_DAEMON,
+            "Delivery Status Notification (Delay)",
+            "Still trying bob@example.test.",
+        ),
+        at=_at(2),
+    )
+    message = fake.get_message(ref.id, purpose="test")
+    assert not history_scan.names_failed_recipient(message, "bob@example.test")
+
+
+def test_a_merge_does_not_treat_a_replier_as_a_card(
+    writer: Session, user: User, people: dict[str, Contact], gmail: FakeGmail
+) -> None:
+    """Nit 5: a flagged replier's own fields keep their provenance in a merge."""
+    _scan(writer, user, gmail)
+    ada = people["ada"]
+    ada.field_sources.pop("current_title", None)
+    title = ada.current_title
+    other = factories.make_contact(writer, user, emails=["ada.home@example.test"])
+
+    merge(writer, user, ada.id, other.id)
+
+    assert ada.current_title == title  # a card survivor's unrecorded field would be replaced
+    assert ada.needs_review_at == NOW

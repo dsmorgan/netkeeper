@@ -53,15 +53,25 @@ netkeeper history scan-gmail
 
 For each imported recipient, the scan makes two searches, from the day before the campaign started until 120 days after its last batch: messages from the recipient's address, and delivery-failure notices that name it. It reads only each message's headers and Gmail's short preview, never the body, and it changes nothing in Gmail: no labels, no read state, no deletes.
 
-The workbook names only the people who opened, clicked, or bounced, so the scan also looks for everyone else who replied. Replies usually keep the campaign's subject, so for each campaign it searches for messages with that subject, not sent by you, in the same window. A message counts only when its subject, without `Re:` or `Fwd:`, is exactly the campaign's subject, it arrived on or after the campaign's start day, and its sender isn't one of your own mailboxes or already a recipient of that campaign. Each such sender becomes a recipient of the campaign, marked as found by subject, is matched to a contact, gets the same imported **email out** entry, and is handled like any other recipient in the table below. The report's **FOUND BY SUBJECT** column counts them per campaign, and the first 20 addresses are listed. Each campaign's subject search runs once, unless you add `--rescan`.
+The workbook names only the people who opened, clicked, or bounced, so the scan also looks for everyone else who replied. Replies usually keep the campaign's subject, so for each campaign it searches for messages with that subject, not sent by you, in the same window. A message counts only when it meets all of these conditions:
 
-To try the scan on a few recipients first, add `--limit 5`. If your account has more than one mailbox, name the one that received the replies with `--mailbox you@example.com`.
+- Without leading tags such as `[External]` and reply or forward prefixes such as `Re:`, `Fwd:`, `AW:` or `SV:`, its subject is exactly the campaign's subject.
+- It arrived on or after the campaign's start day.
+- Its sender isn't one of your own mailboxes and isn't already a recipient of that campaign.
+
+A matching subject doesn't prove that the old tool emailed the sender. "Catching up" is a common subject, and a friend, a forward, or a colleague answering for someone else can all match it. So a subject match is for review only. netkeeper adds the message to the sender's timeline as an **email in** entry, labeled "possible reply to old campaign '…' (matched by subject)" (with "asks to unsubscribe" when the message asks to be removed), and marks the contact **Needs review**. It never adds an **email out** entry, and it never sets **Do not contact** or adds the address to the do-not-send list, even when the message asks to unsubscribe. You read the message and decide. If a colleague relays a decline ("she asked me to tell you to remove her"), set **Do not contact** on the person the message is about, not only on the colleague.
+
+The report's **BY SUBJECT (REVIEW)** column counts these people per campaign, **OF THEM UNSUBSCRIBE** counts those whose message asks to unsubscribe, and the first 20 addresses are listed. Each campaign's subject search runs once, unless you add `--rescan`. The report says when a campaign has no subject, and when a subject search reached its limit of 200 messages, so some may be unread. A personalized subject, such as one with `{{first_name}}`, can't match exactly; the import warns about it.
+
+To try the scan on a few recipients first, add `--limit 5`. A limited run skips the subject search, says so, and marks no campaign as searched, so a later full run still does it. If your account has more than one mailbox, name the one that received the replies with `--mailbox you@example.com`.
 
 The report counts what the scan found in each campaign and lists the first 20 addresses of each kind. When the counts look right, apply them:
 
 ```sh
 netkeeper history scan-gmail --apply
 ```
+
+For a recipient the workbook lists:
 
 | What the scan found | What `--apply` does |
 |---|---|
@@ -72,7 +82,7 @@ netkeeper history scan-gmail --apply
 
 The scan can't tell a polite "no, thanks" from a friendly reply, so every replier with a contact waits for you. The scan first tries again to match a recipient that had no contact at import time, so a contact you created or gave the address to since then is flagged too. A replier whose address no contact holds, or more than one contact holds, can't be flagged: the report lists them instead. An unsubscribe request from such an address still puts the address on the do-not-send list.
 
-An unsubscribe phrase counts even inside an automatic answer. A failure notice counts as a bounce only when it lists the address as a failed recipient or, if it lists none, names the exact address. A notice about `jim.bob@example.com` isn't a bounce of `bob@example.com`. The report counts the notices it skipped this way.
+An unsubscribe phrase counts even inside a real automatic answer, one marked `Auto-Submitted` or `X-Autoreply`. Bulk mail, marked `Precedence: bulk`, `list` or `junk`, such as a newsletter with an "Unsubscribe" link, is only an automatic answer. A failure notice counts as a bounce only when it lists the address as a failed recipient or, if it lists none, names the exact address. A notice about `jim.bob@example.com` isn't a bounce of `bob@example.com`. The report counts the notices it skipped this way.
 
 A scan that Gmail stops, for example at a rate limit, saves what it finished and exits with an error. Run the same command again later, and it continues with the recipients it didn't reach. A recipient already scanned is skipped unless you add `--rescan`.
 
