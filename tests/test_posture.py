@@ -1919,3 +1919,84 @@ def test_a_late_reply_poll_is_a_note_past_three_intervals(writer: Session, user:
         writer, user, now=NOW + timedelta(minutes=1), settings=_campaigns(reply_poll_minutes=20)
     )
     assert _notes_for(longer, "reply poll") == ()
+
+
+# --- #340: a short summary first, the details behind --details --------------------------
+
+
+def test_the_long_rows_have_a_one_line_summary_and_keep_their_full_value(
+    writer: Session,
+) -> None:
+    """#340: scheduled jobs, reply poll, and the budgets summarize in a few words; the
+    full ``value`` (what the API and ``--details`` show) is unchanged."""
+    user = _served_user(writer)
+    _mailbox(writer, user, armed_at=ARMED_AT, replies_polled_at=NOW - timedelta(minutes=12))
+    report = _report(writer, user)
+
+    jobs = _row(report, "scheduled jobs")
+    assert jobs.summary.startswith("3 of 3 scheduled; next ")
+    assert "not applicable" not in jobs.summary and "not applicable" in jobs.value
+
+    poll = _row(report, "reply poll")
+    assert poll.summary == "every 10 min; 1 armed mailbox, polled 12 min ago"
+    assert "me@example.test" in poll.value
+
+    budget = _row(report, "budget profile_visits")
+    assert "hard max" not in budget.summary and "hard max" in budget.value
+    assert budget.value.startswith(budget.summary)
+
+    # Where active hours were set stays in the summary (#213 asks posture to say so).
+    assert "; set in " in _row(report, "active hours").summary
+
+    # A row with no brief summarizes as its own value.
+    assert _row(report, "heat skip gate").summary == _row(report, "heat skip gate").value
+
+
+def test_a_schedule_missing_or_absent_summarizes_as_such(writer: Session) -> None:
+    user = _served_user(writer)
+    _drop_one_job(JobKind.ENRICH)(writer, user)
+    assert _row(_report(writer, user), "scheduled jobs").summary == "missing: enrich"
+
+    bare = _report(writer, _make_user(writer, schedule=False))
+    assert _row(bare, "scheduled jobs").summary.startswith("nothing scheduled (0 of ")
+
+
+def test_a_reply_poll_summary_counts_mailboxes_never_polled(writer: Session, user: User) -> None:
+    _mailbox(writer, user, armed_at=ARMED_AT)
+    make_mailbox(
+        writer,
+        user,
+        email="other@example.test",
+        armed_at=ARMED_AT,
+        replies_polled_at=NOW - timedelta(minutes=5),
+    )
+    row = _row(_report(writer, user), "reply poll")
+    assert row.summary == "every 10 min; 2 armed mailboxes, 1 never polled"
+
+
+def test_the_summary_shows_every_warning_and_leaves_the_details_out(
+    writer: Session, user: User
+) -> None:
+    """#340: warnings always print in the summary; notes, the schedule, and the gaps
+    do not, and the summary says where they are."""
+    report = _report(
+        writer, user, browser_mode="launch", settings=_budget(profile_visits_per_day=101)
+    )
+    assert report.warnings and report.notes
+    text = posture_module.render_summary(report)
+
+    assert "SUMMARY" in text and "DETAIL" not in text
+    flat = " ".join(text.split())
+    for warning in report.warnings:
+        assert " ".join(warning.split()) in flat
+    assert text.count("warning: ") == len(report.warnings)
+    assert "note:" not in text and "Profile visits are set to 101" not in text
+    assert "(1 note)" in text  # the budget row says it has one
+    assert "JOB" not in text and "not covered by this report" not in text
+    assert "hard max" not in text
+    assert "1 note, each row's detail, the schedule, and what this report cannot see:" in text
+    assert "`netkeeper posture --details`" in text
+    assert text.rstrip().endswith(verdict(report))
+
+    full = render(report)
+    assert "Profile visits are set to 101" in full and "not covered by this report" in full

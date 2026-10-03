@@ -108,6 +108,7 @@ from netkeeper.services.linkedin_session import (
 from netkeeper.services.pacing import profiles as pacing_profiles
 from netkeeper.services.posture import SessionProbe, describe_active_hours, posture
 from netkeeper.services.posture import render as render_posture
+from netkeeper.services.posture import render_summary as render_posture_summary
 from netkeeper.services.scheduled_runs import seed_served_schedule
 from netkeeper.services.simulate_campaign import DEFAULT_SCHEDULE_DAYS
 from netkeeper.services.simulate_run import DEFAULT_DAYS as DEFAULT_SIMULATION_DAYS
@@ -764,6 +765,15 @@ def posture_command(
             " local user's account."
         ),
     ] = None,
+    details: Annotated[
+        bool,
+        typer.Option(
+            "--details",
+            help="Print the full report: each protection's detail and notes, today's"
+            " budget arithmetic, the schedule, and what the report cannot see. Without"
+            " it, the report is one line per protection, every warning, and the verdict.",
+        ),
+    ] = False,
 ) -> None:
     """Every protection the LinkedIn extractor has, and a warning for anything that is off.
 
@@ -781,6 +791,10 @@ def posture_command(
     is read. --no-probe skips the probe and reports the session from the last
     recorded check or the newest run that read LinkedIn, or as unknown when
     there is neither, rather than assuming it is fine.
+
+    By default it prints a summary: one line per protection and every warning.
+    --details prints every row in full, with its notes. The exit code is the
+    same either way.
     """
     state = ctx.ensure_object(CliState)
     settings = _load_settings_or_exit(state)
@@ -812,7 +826,8 @@ def posture_command(
             )
     finally:
         engine.dispose()
-    typer.echo(render_posture(report), nl=False)
+    render = render_posture if details else render_posture_summary
+    typer.echo(render(report), nl=False)
     if not report.ok:
         raise typer.Exit(code=1)
 

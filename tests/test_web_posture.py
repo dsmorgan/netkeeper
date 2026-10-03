@@ -110,3 +110,18 @@ async def test_the_verdict_is_the_services_own_sentence(
             session, user, account_id, now=utcnow(), settings=Settings(), probe=None
         )
     assert report["verdict"] == posture_service.verdict(expected)
+
+
+async def test_each_row_carries_its_summary_beside_its_full_value(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """#340: the summary is extra, for the collapsed view. ``value`` keeps the full
+    detail, so the long rows' summaries are shorter than their values."""
+    report = (await client.get("/api/v1/posture")).json()
+    rows = {row["name"]: row for row in report["protections"]}
+
+    assert all(row["summary"] for row in rows.values())
+    budget = rows["budget profile_visits"]
+    assert "hard max" in budget["value"] and "hard max" not in budget["summary"]
+    assert rows["reply poll"]["summary"] == "no armed mailbox"
+    assert rows["linkedin session"]["summary"] == rows["linkedin session"]["value"]
