@@ -40,13 +40,20 @@ get it wrong:
   is :class:`GmailRejected`; drafting one is not, as in Gmail.
 - **Labels.** ``modify_labels`` refuses ``DRAFT`` and ``SENT``, which Gmail
   does not let a client add or remove.
-- **Search.** ``from:`` and ``to:`` (whole words, as Gmail matches them),
+- **Search.** ``from:`` and ``to:`` (whole words, as Gmail matches them;
+  ``from:me`` is the mailbox's address or a verified alias), ``subject:`` (a
+  word or a quoted phrase, matched as whole words in the subject), a term
+  negated with a leading ``-``,
   ``rfc822msgid:``, ``in:`` (``inbox``, ``sent``, ``drafts``, ``scheduled``, and ``anywhere``,
   the one search that includes spam and trash), ``label:``, and
   ``after:``/``before:`` with epoch seconds only (Gmail reads a ``YYYY/MM/DD``
-  date in Pacific time, a trap for the engine). Terms are ANDed. Anything else
-  raises :class:`ValueError` rather than matching everything, so a test cannot
-  pass on a query Gmail would read differently.
+  date in Pacific time, a trap for the engine). A bare address with no operator
+  (``ada@example.com``) matches it as a whole word in the ``From``, ``To``, ``Cc``,
+  ``Subject`` and ``X-Failed-Recipients`` headers or the plain-text body, as
+  Gmail's full-text search finds an address a bounce notice names (#65); any
+  other bare word is refused. Terms are ANDed. Anything else raises
+  :class:`ValueError` rather than matching everything, so a test cannot pass on
+  a query Gmail would read differently.
 
 Nothing here is sent anywhere. A test scripts failures with
 :meth:`FakeGmail.fail_next`, and reads :attr:`FakeGmail.calls` for the methods
@@ -644,8 +651,25 @@ class FakeGmail:
         )
 
     def _term(self, term: str) -> Callable[[_Stored], bool]:
+        if term.startswith("-") and len(term) > 1:
+            inner = self._term(term[1:])
+            return lambda stored: not inner(stored)
         key, sep, value = term.partition(":")
         key = key.lower()
+        if key == "from" and value.lower() == "me":
+            own = {self.address, *self.aliases}
+            return lambda stored: any(
+                address.lower() in own
+                for _, address in getaddresses(
+                    [str(v) for v in stored.parsed.get_all("From") or []]
+                )
+            )
+        if key == "subject" and value.strip():
+            phrase = r"\s+".join(re.escape(word) for word in value.lower().split())
+            in_subject = re.compile(rf"(?<![^\W_]){phrase}(?![^\W_])")
+            return lambda stored: bool(in_subject.search((stored.header("Subject") or "").lower()))
+        if not sep and "@" in term:
+            return self._full_text(term)
         if not sep or not value:
             raise ValueError(f"the fake does not search for {term!r}; use an operator it knows")
         if key in {"from", "to"}:
@@ -690,6 +714,23 @@ class FakeGmail:
             ids = {label.id for label in self._labels.values() if label.name.lower() == wanted}
             return lambda stored: bool(stored.labels & ids)
         raise ValueError(f"the fake does not search for {key}:")
+
+    @staticmethod
+    def _full_text(term: str) -> Callable[[_Stored], bool]:
+        word = re.compile(rf"(?<![^\W_]){re.escape(term.lower())}(?![^\W_])")
+        return lambda stored: bool(word.search(_full_text_of(stored.parsed)))
+
+
+_FULL_TEXT_HEADERS: Final = ("From", "To", "Cc", "Subject", "X-Failed-Recipients")
+
+
+def _full_text_of(parsed: EmailMessage) -> str:
+    """What a bare search word is matched against: some headers and the plain-text body."""
+    parts = [str(v) for name in _FULL_TEXT_HEADERS for v in parsed.get_all(name) or []]
+    body = parsed.get_body(preferencelist=("plain",))
+    if isinstance(body, EmailMessage):
+        parts.append(str(body.get_content()))
+    return "\n".join(parts).lower()
 
 
 def _require_recipient(parsed: EmailMessage) -> None:
