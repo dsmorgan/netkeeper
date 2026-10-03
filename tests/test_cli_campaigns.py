@@ -47,8 +47,9 @@ from netkeeper.models import (
     UserKind,
 )
 from netkeeper.scoping import install_scope_guard, scoped
-from netkeeper.services import campaign_engine, campaign_review
+from netkeeper.services import campaign_engine, campaign_review, sending_hours
 from netkeeper.services import campaigns as campaign_service
+from netkeeper.services.settings_kv import set_setting
 from netkeeper.services.users import ensure_local_user
 
 runner = CliRunner()
@@ -576,6 +577,18 @@ def test_sending_hours_that_cannot_be_used_are_refused(world: World, args: tuple
     result = _run("campaigns", "sending-hours", *args)
     assert result.exit_code == 1, result.output
     assert "Mon to Fri, 09:00 to 17:00" in _ok("campaigns", "sending-hours")
+
+
+def test_unreadable_sending_hours_are_said_not_shown_as_the_defaults(world: World) -> None:
+    """#338 review N2: with no options, say nothing sends, rather than print the defaults."""
+    with session_scope(world.factory, write=True) as session:
+        set_setting(session, _local(session), sending_hours.KEY, {"enabled": "yes"})
+    result = _run("campaigns", "sending-hours")
+    assert result.exit_code == 1
+    assert "cannot be read" in result.output and "no campaign sends" in result.output
+    assert "Mon to Fri" not in result.output
+    fixed = _ok("campaigns", "sending-hours", "--days", "mon", "--from", "09:00", "--to", "12:00")
+    assert "sending hours now: Mon, 09:00 to 12:00" in fixed
 
 
 def test_step_time_warns_outside_the_sending_hours(world: World) -> None:

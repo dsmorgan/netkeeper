@@ -37,6 +37,12 @@ export function SendingHoursSection() {
       <CardContent className="space-y-3 text-sm">
         {current.isPending && <p role="status">Loading…</p>}
         {current.isError && <p role="alert">{message(current.error)}</p>}
+        {current.data !== undefined && !current.data.readable && (
+          <p role="alert" className="text-destructive">
+            The stored sending hours cannot be read, so no campaign sends until you save them. The
+            form shows the defaults.
+          </p>
+        )}
         {current.data !== undefined && <SendingHoursForm current={current.data} />}
       </CardContent>
     </Card>

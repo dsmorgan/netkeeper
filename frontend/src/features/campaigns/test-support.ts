@@ -241,6 +241,7 @@ export const SENDING_HOURS: SendingHours = {
   end: '17:00',
   timezone: 'America/New_York',
   summary: 'Mon to Fri, 09:00 to 17:00',
+  readable: true,
 }
 
 /** The next Tuesday at 09:00 in New York, as the backend answers it (#338). */

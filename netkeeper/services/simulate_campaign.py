@@ -323,6 +323,7 @@ def _seed_scratch(
         contacted_within_days_guard=0,
         approved_at=start,
         starts_at=start,
+        start_chosen=True,
     )
     for step in shape.steps:
         email = step.channel is TemplateChannel.EMAIL

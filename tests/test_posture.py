@@ -2080,7 +2080,8 @@ def test_an_overdue_next_campaign_send_shows_where_it_will_really_go(
     writer: Session, user: User
 ) -> None:
     """#338 review, N4: a row due yesterday at 10:00 New York, read at 03:00 today,
-    spills to 10:00 today; one whose time has passed today goes at the next tick (now)."""
+    waits for the next opening of the sending hours, 09:00 today; read at 22:00, the next
+    opening is 09:00 tomorrow."""
     mailbox = make_mailbox(writer, user, email="me@example.test")
     campaign = factories.make_campaign(writer, user, name="Autumn", mailbox_id=mailbox.id)
     yesterday_ten = datetime(2026, 9, 22, 14, 0, tzinfo=UTC)  # 10:00 New York
@@ -2090,8 +2091,9 @@ def test_an_overdue_next_campaign_send_shows_where_it_will_really_go(
     writer.flush()
     early = datetime(2026, 9, 23, 7, 0, tzinfo=UTC)  # 03:00 New York
     row = _row(_report(writer, user, now=early), "next campaign send")
-    assert "(2026-09-23 14:00 UTC)" in row.value, row.value
-    assert "Wed Sep 23, 10:00" in row.value
+    # The next opening of the sending hours, 09:00 New York (#338 review S1).
+    assert "(2026-09-23 13:00 UTC)" in row.value, row.value
+    assert "Wed Sep 23, 09:00" in row.value
     tonight = datetime(2026, 9, 24, 2, 0, tzinfo=UTC)  # 22:00 New York
     row = _row(_report(writer, user, now=tonight), "next campaign send")
     # Outside the sending hours: their next opening, Thursday 09:00 New York (#338).

@@ -2989,8 +2989,15 @@ def campaigns_sending_hours(
         timezone = user.timezone
         try:
             hours = sending_hours_service.read(session, user)
-        except schedule_module.ScheduleError:
-            hours = schedule_module.DEFAULT_SENDING_HOURS  # a bad stored value is replaced
+        except schedule_module.ScheduleError as exc:
+            if not changing:
+                typer.echo(
+                    f"error: the stored sending hours cannot be read ({exc}); no campaign"
+                    " sends until you set them with --days/--from/--to or --any-time",
+                    err=True,
+                )
+                raise typer.Exit(code=1) from exc
+            hours = schedule_module.DEFAULT_SENDING_HOURS  # replaced below
         if changing:
             current_days = [schedule_module.DAY_NAMES[d] for d in sorted(hours.days)]
             try:
