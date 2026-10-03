@@ -41,8 +41,6 @@ half_life_hours = 6
 skip_threshold = 2.5
 
 [campaigns]
-send_window_days = ["Tue", "Wed", "Thu"]
-send_window_hours = ["09:00", "16:30"]
 mailbox_daily_cap = 80
 send_spacing_median_s = 240
 send_spacing_floor_s = 90

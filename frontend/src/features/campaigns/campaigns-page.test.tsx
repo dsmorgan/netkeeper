@@ -285,7 +285,8 @@ describe('campaign detail', () => {
 
     const stepRow = (await screen.findByRole('rowheader', { name: '1' })).closest('tr')
     const cells = within(stepRow as HTMLElement).getAllByRole('cell')
-    expect(cells.slice(-2).map((c) => c.textContent)).toEqual(['2', '1'])
+    // Fired, sent, and the timing editor's cell (#338).
+    expect(cells.slice(-3).map((c) => c.textContent)).toEqual(['2', '1', 'Timing'])
     expect(screen.queryByRole('heading', { name: 'Review' })).toBeNull()
 
     const enrollment = (await screen.findByRole('link', { name: 'Tobias Marrowbone' })).closest(

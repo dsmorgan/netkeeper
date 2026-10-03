@@ -18,6 +18,7 @@ import type {
   EnrollmentPreview,
   Missing,
   Review,
+  StartOptions,
 } from './api'
 
 export type { Call }
@@ -75,6 +76,7 @@ export const STEPS: Campaign['steps'] = [
     mode: 'draft',
     condition: 'always',
     delay_days: 0,
+    send_time: null,
     same_thread: false,
     template_id: 11,
     template_name: 'Catching up',
@@ -89,6 +91,7 @@ export const STEPS: Campaign['steps'] = [
     mode: 'send',
     condition: 'no_reply',
     delay_days: 7,
+    send_time: null,
     same_thread: true,
     template_id: 12,
     template_name: 'Follow-up nudge',
@@ -110,6 +113,8 @@ export function campaign(overrides: Partial<Campaign> = {}): Campaign {
     daily_cap: null,
     contacted_within_days_guard: 30,
     approved_at: null,
+    starts_at: null,
+    start_editable: false,
     created_at: '2030-06-15T12:00:00Z',
     steps: STEPS,
     enrollments: {},
@@ -227,6 +232,22 @@ export const ENROLLMENTS: EnrollmentPage = {
 
 type Handler = (call: Call) => Response | Promise<Response>
 
+/** The next Tuesday at 09:00 in New York, as the backend answers it (#338). */
+export const DEFAULT_START = '2030-06-18T13:00:00Z'
+
+export function startOptions(overrides: Partial<StartOptions> = {}): StartOptions {
+  return {
+    timezone: 'America/New_York',
+    default_start: DEFAULT_START,
+    suggestion: 'Most effective: Tue–Thu mornings.',
+    reminder:
+      'netkeeper sends only while `serve` is running and this Mac is awake. Keep it running from the start time until the batch finishes.',
+    at: null,
+    warning: null,
+    ...overrides,
+  }
+}
+
 /**
  * A stand-in backend for one campaign. `state` is read on every call, so a
  * handler a test passes can change what the next fetch sees.
@@ -243,6 +264,8 @@ export function campaignBackend(
       [`GET /api/v1/campaigns/${id}`]: () => jsonResponse(state.campaign),
       [`GET /api/v1/campaigns/${id}/review`]: () => jsonResponse(state.review),
       [`GET /api/v1/campaigns/${id}/enrollments`]: () => jsonResponse(ENROLLMENTS),
+      [`GET /api/v1/campaigns/${id}/start-options`]: (call) =>
+        jsonResponse(startOptions({ at: call.query.get('at') })),
       'GET /api/v1/lists': () => jsonResponse(LISTS),
       'GET /api/v1/templates': () => jsonResponse(TEMPLATES),
       'GET /api/v1/mailboxes': () => jsonResponse([MAILBOX]),

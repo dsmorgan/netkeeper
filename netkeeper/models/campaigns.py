@@ -221,11 +221,17 @@ class Campaign(UserOwned, TimestampMixin, Base):
     # No ON DELETE: a mailbox is never deleted, only disconnected (``mailboxes`` since
     # 0019, P3-01), so a campaign never loses the account it sent from.
     mailbox_id: Mapped[int | None] = mapped_column(ForeignKey("mailboxes.id"), index=True)
-    # The campaign's own send window and cap (spec 11.4); NULL for the config's.
+    # The campaign's own send window, from before #338. Nothing reads it any more:
+    # netkeeper no longer limits when a campaign sends (``starts_at`` below). Kept so
+    # a downgrade has its values back.
     send_window_json: Mapped[dict[str, Any] | None] = mapped_column(
         JSON(none_as_null=True), nullable=True
     )
     daily_cap: Mapped[int | None] = mapped_column(Integer)
+    # The scheduled start (#338): the engine sends nothing for the campaign before it.
+    # Set at activation, and changeable until the campaign's first message fires. NULL
+    # before activation; an active or paused campaign with none sends nothing.
+    starts_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     # Spec 11.9's recency guard, in days; 0 turns it off. No default: whatever creates a
     # campaign copies ``[campaigns] contacted_within_days_guard`` from the config, so a
     # later config change never changes a campaign already reviewed.
@@ -294,6 +300,10 @@ class CampaignStep(UserOwned, TimestampMixin, Base):
     # The template version this step sends. No ON DELETE action: see the module docstring.
     template_id: Mapped[int] = mapped_column(ForeignKey("templates.id"), nullable=False, index=True)
     delay_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # An explicit local time of day, ``HH:MM`` (#338): the step is due at that time on
+    # the day ``delay_days`` after the step before. NULL: it aims for the next
+    # suggested send slot after its delay (``netkeeper.campaigns.schedule``).
+    send_time: Mapped[str | None] = mapped_column(String(5))
     mode: Mapped[StepMode] = mapped_column(string_enum(StepMode, "step_mode"), nullable=False)
     condition: Mapped[StepCondition] = mapped_column(
         string_enum(StepCondition, "step_condition"),

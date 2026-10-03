@@ -1,6 +1,8 @@
 /**
  * One campaign (P3-11a): its steps and their progress, its audience, the review
  * gate while it is a draft or reviewing, its enrollments, and pause and resume.
+ * Its scheduled start, changeable until the first send, and each step's timing,
+ * changeable until the campaign is over (#338).
  */
 import { Link } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -23,7 +25,10 @@ import {
   enrollmentsQuery,
   pauseCampaign,
   resumeCampaign,
+  setCampaignStart,
+  setStepSchedule,
   type Campaign,
+  type Step,
   type EnrollOut,
   type EnrollmentStatus,
 } from './api'
@@ -36,9 +41,14 @@ import {
   ENROLLMENT_STATUS_LABELS,
   MODE_LABELS,
   countsText,
+  formatStart,
   formatWhen,
+  timingText,
+  toLocalInput,
 } from './format'
 import { ReviewPanel } from './review-panel'
+import { UNCHOSEN, startIso, type StartChoice } from './start'
+import { StartPicker } from './start-picker'
 
 export function NoSuchCampaign() {
   return (
@@ -100,6 +110,12 @@ function Overview({ campaign }: { campaign: Campaign }) {
         <Facts
           items={[
             ['Mailbox', campaign.mailbox_email],
+            [
+              'Starts',
+              campaign.starts_at === null
+                ? 'when you activate it'
+                : formatStart(campaign.starts_at),
+            ],
             ['Next send', formatWhen(campaign.next_action_at)],
             ['Daily cap', campaign.daily_cap ?? 'the mailbox’s'],
             ['Recent-contact guard', `${campaign.contacted_within_days_guard} days`],
@@ -124,18 +140,79 @@ function Overview({ campaign }: { campaign: Campaign }) {
           </div>
         )}
         {toggle.isError && <ErrorNote label="Not changed." error={toggle.error} />}
+        {campaign.start_editable && <ChangeStart campaign={campaign} />}
       </CardContent>
     </Card>
   )
 }
 
+function ChangeStart({ campaign }: { campaign: Campaign }) {
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState(false)
+  const [start, setStart] = useState<StartChoice>(UNCHOSEN)
+  const save = useMutation({
+    mutationFn: () => {
+      const startsAt = startIso(start)
+      if (startsAt === null) throw new Error('Choose a start date and time, or Now.')
+      return setCampaignStart(campaign.id, startsAt)
+    },
+    onSuccess: (updated) => {
+      queryClient.setQueryData(campaignKeys.one(campaign.id), updated)
+      void queryClient.invalidateQueries({ queryKey: campaignKeys.all })
+      setEditing(false)
+    },
+  })
+
+  if (!editing) {
+    return (
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          className="w-fit"
+          onClick={() => {
+            save.reset()
+            setStart(
+              campaign.starts_at === null
+                ? UNCHOSEN
+                : { now: false, value: toLocalValue(campaign.starts_at) },
+            )
+            setEditing(true)
+          }}
+        >
+          Change start
+        </Button>
+        <span className="text-muted-foreground">You can change it until the first send.</span>
+      </div>
+    )
+  }
+  return (
+    <section aria-label="Change start" className="flex flex-col gap-3">
+      <StartPicker campaignId={campaign.id} choice={start} onChange={setStart} />
+      <div className="flex gap-2">
+        <Button className="w-fit" disabled={save.isPending} onClick={() => save.mutate()}>
+          Save start
+        </Button>
+        <Button variant="outline" onClick={() => setEditing(false)}>
+          Cancel
+        </Button>
+      </div>
+      {save.isError && <ErrorNote label="The start did not change." error={save.error} />}
+    </section>
+  )
+}
+
+const TIMING_EDITABLE = new Set<Campaign['status']>(['draft', 'reviewing', 'active', 'paused'])
+
 function StepsCard({ campaign }: { campaign: Campaign }) {
+  const [editing, setEditing] = useState<number | null>(null)
+  const editable = TIMING_EDITABLE.has(campaign.status)
   return (
     <Card>
       <CardHeader>
         <CardTitle level={2}>Steps</CardTitle>
         <CardDescription>
-          Fired counts every message a step made; sent, those that went out.
+          Fired counts every message a step made; sent, those that went out. A step with no time of
+          its own aims for the next suggested slot (Tue–Thu, 09:00 to 16:30) after its delay.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -157,38 +234,162 @@ function StepsCard({ campaign }: { campaign: Campaign }) {
               <th scope="col" className="py-1 pr-3 font-medium">
                 Fired
               </th>
-              <th scope="col" className="py-1 font-medium">
+              <th scope="col" className="py-1 pr-3 font-medium">
                 Sent
               </th>
+              {editable && (
+                <th scope="col" className="py-1 font-medium">
+                  <span className="sr-only">Edit</span>
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
             {campaign.steps.map((step) => (
-              <tr key={step.id} className="border-t border-border/60">
-                <th scope="row" className="py-2 pr-3 font-normal tabular-nums">
-                  {step.position}
-                </th>
-                <td className="py-2 pr-3">
-                  {step.template_name}{' '}
-                  <span className="text-muted-foreground">
-                    v{step.template_version}, {step.channel === 'email' ? 'email' : 'LinkedIn'}
-                  </span>
-                </td>
-                <td className="py-2 pr-3 text-muted-foreground">
-                  {step.delay_days === 0 ? 'at once' : `after ${step.delay_days} days`},{' '}
-                  {CONDITION_LABELS[step.condition].toLowerCase()}
-                  {step.same_thread && ', same thread'}
-                </td>
-                <td className="py-2 pr-3 text-muted-foreground">{MODE_LABELS[step.mode]}</td>
-                <td className="py-2 pr-3 tabular-nums">{step.fired}</td>
-                <td className="py-2 tabular-nums">{step.sent}</td>
-              </tr>
+              <StepRow
+                key={step.id}
+                campaign={campaign}
+                step={step}
+                editable={editable}
+                editing={editing === step.id}
+                onEdit={(on) => setEditing(on ? step.id : null)}
+              />
             ))}
           </tbody>
         </table>
       </CardContent>
     </Card>
   )
+}
+
+function StepRow({
+  campaign,
+  step,
+  editable,
+  editing,
+  onEdit,
+}: {
+  campaign: Campaign
+  step: Step
+  editable: boolean
+  editing: boolean
+  onEdit: (on: boolean) => void
+}) {
+  return (
+    <>
+      <tr className="border-t border-border/60">
+        <th scope="row" className="py-2 pr-3 font-normal tabular-nums">
+          {step.position}
+        </th>
+        <td className="py-2 pr-3">
+          {step.template_name}{' '}
+          <span className="text-muted-foreground">
+            v{step.template_version}, {step.channel === 'email' ? 'email' : 'LinkedIn'}
+          </span>
+        </td>
+        <td className="py-2 pr-3 text-muted-foreground">
+          {timingText(step)}, {CONDITION_LABELS[step.condition].toLowerCase()}
+          {step.same_thread && ', same thread'}
+        </td>
+        <td className="py-2 pr-3 text-muted-foreground">{MODE_LABELS[step.mode]}</td>
+        <td className="py-2 pr-3 tabular-nums">{step.fired}</td>
+        <td className="py-2 pr-3 tabular-nums">{step.sent}</td>
+        {editable && (
+          <td className="py-2">
+            <Button
+              variant="outline"
+              size="sm"
+              aria-label={`Edit step ${step.position} timing`}
+              onClick={() => onEdit(!editing)}
+            >
+              Timing
+            </Button>
+          </td>
+        )}
+      </tr>
+      {editing && (
+        <tr>
+          <td colSpan={7} className="pb-3">
+            <StepTimingForm campaign={campaign} step={step} onDone={() => onEdit(false)} />
+          </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+function StepTimingForm({
+  campaign,
+  step,
+  onDone,
+}: {
+  campaign: Campaign
+  step: Step
+  onDone: () => void
+}) {
+  const queryClient = useQueryClient()
+  const [days, setDays] = useState(String(step.delay_days))
+  const [time, setTime] = useState(step.send_time ?? '')
+  const save = useMutation({
+    mutationFn: () =>
+      setStepSchedule(campaign.id, step.id, Number(days), time === '' ? null : time),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(campaignKeys.one(campaign.id), updated)
+      void queryClient.invalidateQueries({ queryKey: campaignKeys.all })
+      onDone()
+    },
+  })
+  const valid = /^\d+$/.test(days) && Number(days) <= 365
+  const reviewing = campaign.status === 'draft' || campaign.status === 'reviewing'
+  return (
+    <form
+      aria-label={`Step ${step.position} timing`}
+      className="flex flex-col gap-2 rounded-lg bg-muted/40 p-3"
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (valid) save.mutate()
+      }}
+    >
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1">
+          <span>{step.position === 1 ? 'Days after the start' : 'Days after the step before'}</span>
+          <Input
+            type="number"
+            min={0}
+            max={365}
+            value={days}
+            onChange={(event) => setDays(event.target.value)}
+            className="w-24"
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span>Time of day (leave empty for the next suggested slot)</span>
+          <Input
+            type="time"
+            value={time}
+            onChange={(event) => setTime(event.target.value)}
+            className="w-fit"
+          />
+        </label>
+        <Button type="submit" disabled={!valid || save.isPending}>
+          Save timing
+        </Button>
+        <Button type="button" variant="outline" onClick={onDone}>
+          Cancel
+        </Button>
+      </div>
+      <p className="text-muted-foreground">
+        {reviewing
+          ? 'Changing the timing means the review records that name this step need doing again.'
+          : 'Contacts already waiting for this step are due again by the new timing.'}
+      </p>
+      {save.isError && <ErrorNote label="The timing did not change." error={save.error} />}
+    </form>
+  )
+}
+
+function toLocalValue(iso: string): string {
+  return toLocalInput(iso)
 }
 
 function currentSource(campaign: Campaign, listName: string | undefined): string {

@@ -9,7 +9,7 @@ come from that ``sent_at`` and not from the fire time.
 **Minute ticks, without every minute.** The real loop ticks every minute. Here
 a tick that fired is followed by one a minute later, as in ``serve``; a tick
 that did not fire jumps to its ``next_wake`` (the earliest due time, the end of
-the spacing, or the next day's window when a cap is reached), rounded up to a
+the spacing, or the next local day when a cap is reached), rounded up to a
 whole minute, which is when the real loop would next have something to do.
 Every other minute in between is a tick that would have done nothing.
 
@@ -18,9 +18,10 @@ stops moving fails fast instead of hanging.
 
 ``netkeeper simulate --campaign ID`` (P3-13) drives it through
 :func:`campaign_shape` and :func:`simulate_schedule`: the campaign's shape (its
-steps, delays, modes, send window, caps and audience size) is read from the real
+steps, delays, times of day, modes, caps and audience size) is read from the real
 database, and the replay runs in a throwaway one built for the purpose, with
-synthetic contacts. The real database is only read; nothing is sent.
+synthetic contacts, as if activated to start at the replay's start (#338). The
+real database is only read; nothing is sent.
 """
 
 from __future__ import annotations
@@ -31,12 +32,13 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Final
+from typing import Final
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session, sessionmaker
 
+from netkeeper.campaigns import schedule
 from netkeeper.config import Settings
 from netkeeper.db import session_scope
 from netkeeper.models import (
@@ -175,6 +177,7 @@ class StepShape:
     delay_days: int
     condition: StepCondition
     same_thread: bool
+    send_time: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,7 +191,6 @@ class CampaignShape:
     audience: int
     audience_from: str
     """``enrollments`` (its live ones) or ``source`` (its list or filter, nobody enrolled)."""
-    send_window_json: dict[str, Any] | None
     daily_cap: int | None
     mailbox_daily_cap: int
     timezone: str
@@ -221,7 +223,9 @@ def campaign_shape(
     if campaign is None:
         raise InvalidSchedule(f"no campaign {campaign_id}")
     steps = tuple(
-        StepShape(s.position, s.channel, s.mode, s.delay_days, s.condition, s.same_thread)
+        StepShape(
+            s.position, s.channel, s.mode, s.delay_days, s.condition, s.same_thread, s.send_time
+        )
         for s in session.scalars(
             scoped(user, CampaignStep)
             .where(CampaignStep.campaign_id == campaign_id)
@@ -260,7 +264,6 @@ def campaign_shape(
         steps=steps,
         audience=audience,
         audience_from=audience_from,
-        send_window_json=campaign.send_window_json,
         daily_cap=campaign.daily_cap,
         mailbox_daily_cap=(
             settings.campaigns.mailbox_daily_cap if mailbox is None else mailbox.daily_cap
@@ -291,7 +294,9 @@ class ScheduleReport:
     """Enrollments that fired every step."""
 
 
-def _seed_scratch(session: Session, shape: CampaignShape, *, start: datetime) -> int:
+def _seed_scratch(
+    session: Session, shape: CampaignShape, *, start: datetime, settings: Settings
+) -> int:
     """The shape as an active campaign in the scratch database, with synthetic contacts.
 
     Written straight in as ``active``: this database is thrown away after the replay,
@@ -314,10 +319,10 @@ def _seed_scratch(session: Session, shape: CampaignShape, *, start: datetime) ->
         name=f"Simulated {shape.campaign_id}",
         status=CampaignStatus.ACTIVE,
         mailbox_id=mailbox.id,
-        send_window_json=shape.send_window_json,
         daily_cap=shape.daily_cap,
         contacted_within_days_guard=0,
         approved_at=start,
+        starts_at=start,
     )
     for step in shape.steps:
         email = step.channel is TemplateChannel.EMAIL
@@ -339,11 +344,22 @@ def _seed_scratch(session: Session, shape: CampaignShape, *, start: datetime) ->
                 mode=step.mode,
                 condition=step.condition,
                 same_thread=step.same_thread,
+                send_time=step.send_time,
             )
         )
     session.add(campaign)
     session.flush()
-    first_due = start + timedelta(days=shape.steps[0].delay_days)
+    first = shape.steps[0]
+    try:
+        first_due = schedule.step_due(
+            start,
+            delay_days=first.delay_days,
+            send_time=first.send_time,
+            slots=schedule.suggested(settings.campaigns, shape.timezone),
+            first=True,
+        )
+    except schedule.ScheduleError as exc:
+        raise InvalidSchedule(str(exc)) from exc
     for n in range(1, shape.audience + 1):
         contact = Contact(user_id=user.id, first_name=f"Sim{n}", last_name="Contact")
         contact.emails.append(
@@ -386,7 +402,7 @@ def simulate_schedule(
     zone = ZoneInfo(shape.timezone)
     with scratch_database() as factory, _quiet_engine():
         with session_scope(factory, write=True) as session:
-            user_id = _seed_scratch(session, shape, start=start)
+            user_id = _seed_scratch(session, shape, start=start, settings=settings)
         run = simulate_campaign(
             factory, settings=settings, start=start, end=start + timedelta(days=days), seed=seed
         )
@@ -444,7 +460,8 @@ def render_schedule(report: ScheduleReport) -> str:
         f" {report.start.astimezone(zone):%Y-%m-%d %H:%M} {shape.timezone}, seed {report.seed}",
         "steps: "
         + "; ".join(
-            f"{s.position} {s.channel.value} {s.mode.value} +{s.delay_days}d {s.condition.value}"
+            f"{s.position} {s.channel.value} {s.mode.value} +{s.delay_days}d"
+            f"{'' if s.send_time is None else ' at ' + s.send_time} {s.condition.value}"
             for s in shape.steps
         ),
         f"caps: campaign {'config' if shape.daily_cap is None else shape.daily_cap},"

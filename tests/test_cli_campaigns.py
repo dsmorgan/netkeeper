@@ -11,9 +11,10 @@ import inspect
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import factories
 import pytest
@@ -446,6 +447,99 @@ def test_no_command_activates_without_a_complete_review(
     assert _campaign(world, campaign_id).status is CampaignStatus.ACTIVE
 
 
+# --- the scheduled start (#338) ------------------------------------------------------
+
+
+def _ready(world: World) -> int:
+    campaign_id = _reviewing(world)
+    _complete_review(world, campaign_id)
+    return campaign_id
+
+
+def _user_zone(world: World) -> ZoneInfo:
+    with session_scope(world.factory) as session:
+        return ZoneInfo(_local(session).timezone)
+
+
+def test_activate_defaults_to_the_next_tuesday_at_nine_and_says_so(world: World) -> None:
+    campaign_id = _ready(world)
+    before = datetime.now(UTC)
+    output = _ok("campaigns", "activate", str(campaign_id), "--yes")
+    starts_at = _campaign(world, campaign_id).starts_at
+    assert starts_at is not None and starts_at > before
+    local = starts_at.astimezone(_user_zone(world))
+    assert (local.strftime("%a"), local.hour, local.minute) == ("Tue", 9, 0)
+    assert starts_at - before <= timedelta(days=7)
+    assert "starts: Tue" in output
+    assert "Most effective: Tue–Thu mornings." in output  # noqa: RUF001
+    assert "netkeeper sends only while `serve` is running and this Mac is awake." in output
+    assert "warning:" not in output
+
+
+def test_activate_at_an_explicit_time_outside_the_slots_warns_and_keeps_it(
+    world: World,
+) -> None:
+    campaign_id = _ready(world)
+    output = _ok(
+        "campaigns", "activate", str(campaign_id), "--start", "2099-01-03T22:00", "--yes"
+    )  # a Saturday night
+    assert "warning: That is outside the suggested slots" in output
+    starts_at = _campaign(world, campaign_id).starts_at
+    assert starts_at is not None
+    assert starts_at.astimezone(_user_zone(world)).replace(tzinfo=None) == datetime(
+        2099, 1, 3, 22, 0
+    )
+
+
+def test_activate_now_starts_at_once(world: World) -> None:
+    campaign_id = _ready(world)
+    before = datetime.now(UTC)
+    output = _ok("campaigns", "activate", str(campaign_id), "--now", "--yes")
+    starts_at = _campaign(world, campaign_id).starts_at
+    assert starts_at is not None and before <= starts_at <= datetime.now(UTC)
+    assert "starts: now" in output
+
+
+def test_activate_refuses_both_a_start_and_now(world: World) -> None:
+    campaign_id = _ready(world)
+    result = _run(
+        "campaigns", "activate", str(campaign_id), "--now", "--start", "2099-01-03T22:00", "--yes"
+    )
+    assert result.exit_code == 1 and "not both" in result.output
+    assert _campaign(world, campaign_id).status is CampaignStatus.REVIEWING
+
+
+def test_the_start_moves_until_the_first_send(world: World) -> None:
+    campaign_id = _ready(world)
+    _ok("campaigns", "activate", str(campaign_id), "--start", "2099-01-05T09:00", "--yes")
+    output = _ok("campaigns", "start", str(campaign_id), "--start", "2099-01-06T10:30")
+    assert "now starts Tue Jan 6, 10:30" in output
+    status = _ok("campaigns", "status", str(campaign_id))
+    assert "starts: Tue Jan 6, 10:30" in status
+    with session_scope(world.factory, write=True) as session:
+        user = _local(session)
+        enrollment = session.scalars(
+            scoped(user, Enrollment).where(Enrollment.campaign_id == campaign_id)
+        ).first()
+        assert enrollment is not None
+        factories.make_message(session, enrollment, position=1)
+    result = _run("campaigns", "start", str(campaign_id), "--now")
+    assert result.exit_code == 1 and "already sent" in result.output
+
+
+def test_step_time_sets_a_steps_day_offset_and_time_of_day(world: World) -> None:
+    campaign_id = _create(world)
+    output = _ok(
+        "campaigns", "step-time", str(campaign_id), "2", "--delay-days", "3", "--at", "22:00"
+    )
+    assert f"campaign {campaign_id} step 2: +3d, at 22:00" in output
+    assert "+3d at 22:00" in _ok("campaigns", "status", str(campaign_id))
+    _ok("campaigns", "step-time", str(campaign_id), "2", "--delay-days", "5")
+    assert "+5d suggested slot" in _ok("campaigns", "status", str(campaign_id))
+    bad = _run("campaigns", "step-time", str(campaign_id), "2", "--delay-days", "5", "--at", "9pm")
+    assert bad.exit_code == 1 and "HH:MM" in bad.output
+
+
 # --- simulate --campaign ------------------------------------------------------------
 
 
@@ -458,7 +552,7 @@ def test_simulate_replays_the_campaign_schedule_and_changes_nothing(world: World
         "--campaign",
         str(campaign_id),
         "--start",
-        "2026-09-28T08:00",  # a Monday, in the user's zone (UTC)
+        "2026-09-29T09:00",  # the default start, a Tuesday, in the user's zone (UTC)
         "--days",
         "14",
         "--seed",
@@ -471,8 +565,8 @@ def test_simulate_replays_the_campaign_schedule_and_changes_nothing(world: World
     )
     header = next(line for line in lines if line.startswith("DATE"))
     assert header.split() == ["DATE", "DAY", "STEP", "1", "STEP", "2", "TOTAL"]
-    # Step 1 on the first window day (Tuesday), step 2 five days after each send, pushed to
-    # the next window day (the following Tuesday).
+    # Step 1 at the start (Tuesday), step 2 five days after each send (a Sunday), in the
+    # next suggested slot (the following Tuesday).
     assert any(line.split() == ["2026-09-29", "Tue", "3", "0", "3"] for line in lines), output
     assert any(line.split() == ["2026-10-06", "Tue", "0", "3", "3"] for line in lines), output
     assert "per step: step 1 3, step 2 3" in output
@@ -488,7 +582,7 @@ def test_simulate_replays_the_campaign_schedule_and_changes_nothing(world: World
         "--campaign",
         str(campaign_id),
         "--start",
-        "2026-09-28T08:00",
+        "2026-09-29T09:00",
         "--days",
         "14",
         "--seed",

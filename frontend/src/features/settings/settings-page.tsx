@@ -17,7 +17,7 @@ export function SettingsPage({ gmail = {} }: { gmail?: GmailOutcome }) {
         <CardHeader>
           <CardTitle level={2}>Settings</CardTitle>
           <CardDescription>
-            Gmail auth, pacing, budgets, send windows, LLM, [me] merge fields, backups.
+            Gmail auth, pacing, budgets, LLM, [me] merge fields, backups.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex items-center gap-2">
