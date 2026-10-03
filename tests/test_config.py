@@ -146,11 +146,47 @@ def test_absent_keys_keep_defaults(isolated: Path) -> None:
 def test_lists_become_tuples(isolated: Path) -> None:
     path = _write(
         isolated / "c.toml",
-        '[campaigns]\nsend_window_days = ["Mon"]\nholidays = ["2026-12-25", "2027-01-01"]\n',
+        '[campaigns]\nholidays = ["2026-12-25", "2027-01-01"]\n',
     )
     settings = load_settings(path)
-    assert settings.campaigns.send_window_days == ("Mon",)
     assert settings.campaigns.holidays == ("2026-12-25", "2027-01-01")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '[campaigns]\nsend_window_days = ["Tue", "Wed", "Thu"]\n'
+        'send_window_hours = ["09:00", "16:30"]\nmailbox_daily_cap = 40\n',
+        # Even a shape the old loader refused: the keys are not read at all.
+        '[campaigns]\nsend_window_days = "Tue"\nsend_window_hours = [9]\nmailbox_daily_cap = 40\n',
+    ],
+)
+def test_an_old_config_with_send_window_keys_loads_with_one_deprecation_warning(
+    isolated: Path, caplog: pytest.LogCaptureFixture, body: str
+) -> None:
+    """#338: the hard send window is gone. A config that still has its keys loads, the keys
+    are ignored, and one warning names both, rather than one unknown-key warning each."""
+    path = _write(isolated / "c.toml", body)
+    with caplog.at_level(logging.WARNING, logger="netkeeper.config"):
+        settings = load_settings(path)
+    assert settings.campaigns.mailbox_daily_cap == 40
+    assert not hasattr(settings.campaigns, "send_window_days")
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, warnings
+    assert (
+        "deprecated keys campaigns.send_window_days, campaigns.send_window_hours" in (warnings[0])
+    )
+    assert "scheduled start" in warnings[0]
+
+
+def test_one_deprecated_key_is_named_alone(
+    isolated: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = _write(isolated / "c.toml", '[campaigns]\nsend_window_hours = ["09:00", "16:30"]\n')
+    with caplog.at_level(logging.WARNING, logger="netkeeper.config"):
+        load_settings(path)
+    [warning] = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert "deprecated key campaigns.send_window_hours (" in warning
 
 
 def test_unknown_key_warns_and_is_ignored(isolated: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -231,9 +267,6 @@ def test_top_level_section_must_be_a_table(isolated: Path) -> None:
         ('[linkedin]\nactive_hours = ["08:30", 2130]\n', "linkedin.active_hours[1]"),
         ("[linkedin.pacing]\nburst_size = [8]\n", "linkedin.pacing.burst_size"),
         ('[linkedin.pacing]\nburst_size = [8, "15"]\n', "linkedin.pacing.burst_size[1]"),
-        ('[campaigns]\nsend_window_days = "Tue"\n', "campaigns.send_window_days"),
-        ('[campaigns]\nsend_window_days = ["Tue", 3]\n', "campaigns.send_window_days[1]"),
-        ('[campaigns]\nsend_window_hours = ["09:00"]\n', "campaigns.send_window_hours"),
         ("[campaigns]\nholidays = [1]\n", "campaigns.holidays[0]"),
     ],
 )

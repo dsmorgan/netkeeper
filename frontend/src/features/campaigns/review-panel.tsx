@@ -7,7 +7,8 @@
  * with, any enrollment you searched for, lint, a test per email step to your own
  * mailbox (a draft in your Drafts while Gmail is armed for drafts, a message sent
  * to you once it is armed to send), and the guard summary acknowledged as shown.
- * Activation asks first, and a `409` shows what is still missing.
+ * Activation asks first, with the scheduled start (#338), and a `409` shows what is
+ * still missing.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, CircleDashed } from 'lucide-react'
@@ -18,6 +19,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Input } from '@/components/ui/input'
 import { Callout, ErrorNote, LoadingNote } from '@/features/crm/controls'
+
+import { UNCHOSEN, startIso, type StartChoice } from './start'
+import { StartPicker } from './start-picker'
 
 import {
   CampaignApiError,
@@ -659,8 +663,15 @@ function ActivateSection({
   onChange: () => Promise<unknown>
 }) {
   const [open, setOpen] = useState(false)
+  const [start, setStart] = useState<StartChoice>(UNCHOSEN)
   const activate = useMutation({
-    mutationFn: () => activateCampaign(campaign.id),
+    mutationFn: () => {
+      // Nothing chosen yet (the default still loading): the backend's own default.
+      if (!start.now && start.value === '') return activateCampaign(campaign.id, null)
+      const startsAt = startIso(start)
+      if (startsAt === null) throw new Error('Choose a start date and time, or Now.')
+      return activateCampaign(campaign.id, startsAt)
+    },
     onSuccess: async () => {
       setOpen(false)
       await onChange()
@@ -690,6 +701,7 @@ function ActivateSection({
         disabled={missing.length > 0}
         onClick={() => {
           activate.reset()
+          setStart(UNCHOSEN)
           setOpen(true)
         }}
       >
@@ -707,9 +719,11 @@ function ActivateSection({
       >
         <p>
           {pending} pending {pending === 1 ? 'enrollment becomes' : 'enrollments become'} active.
-          Step 1 fires after its delay, inside the send window and under the caps, for each of them.
-          You can pause the campaign at any time.
+          Nothing is sent before the start. From then, step 1 fires for each of them, one at a time
+          and under the daily caps; a batch the caps hold back goes on the next day at the same
+          time. You can pause the campaign at any time.
         </p>
+        <StartPicker campaignId={campaign.id} choice={start} onChange={setStart} />
         {refusedWith !== null && refusedWith.length > 0 && (
           <ul aria-label="Still missing" className="list-disc pl-5 text-foreground">
             {refusedWith.map((m, index) => (

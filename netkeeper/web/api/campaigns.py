@@ -10,6 +10,13 @@ activates a campaign. ``netkeeper campaigns`` mirrors each route.
   (spec 11.9), as ``pending``, while the campaign is ``draft`` or ``reviewing``.
 - ``POST /campaigns/{id}/pause`` and ``.../resume`` are the engine's pause and
   resume: enrollments keep their state and due times.
+- ``GET /campaigns/{id}/start-options`` is the scheduled start's default (the next
+  Tuesday at 09:00), the suggestion and the reminder, and a warning, never a
+  refusal, for a chosen start outside the suggested slots (#338).
+- ``PUT /campaigns/{id}/start`` moves an active or paused campaign's start, until
+  its first send.
+- ``PUT /campaigns/{id}/steps/{step_id}/schedule`` sets a step's day offset and
+  time of day, while the campaign is not over.
 
 A campaign, template, mailbox or list that is not the user's answers ``404``.
 """
@@ -22,7 +29,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 from sqlalchemy.orm import Session
 
 from netkeeper.campaigns.render import me_fields
@@ -63,6 +70,10 @@ def translate_errors() -> Iterator[None]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+SendTime = Annotated[str, Field(pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$")]
+"""A local time of day, ``HH:MM``, 24-hour."""
+
+
 class StepIn(BaseModel):
     """One step. Left out, a field takes spec 11.2's default: the first step at once and
     every other seven days on, ``no_reply`` after the first, ``draft`` for email and
@@ -73,6 +84,9 @@ class StepIn(BaseModel):
     mode: StepMode | None = None
     condition: StepCondition | None = None
     same_thread: bool | None = None
+    send_time: SendTime | None = None
+    """An explicit local time of day, ``HH:MM`` (#338). Left out, the step aims for the
+    next suggested send slot after its delay."""
 
 
 class CampaignCreate(BaseModel):
@@ -117,6 +131,8 @@ class CampaignSummaryOut(BaseModel):
     created_at: datetime
     next_action_at: datetime | None = None
     """The soonest due time of an active enrollment, while the campaign is active."""
+    starts_at: datetime | None = None
+    """The scheduled start (#338); None before activation."""
 
 
 class StepOut(BaseModel):
@@ -127,6 +143,8 @@ class StepOut(BaseModel):
     mode: StepMode
     condition: StepCondition
     delay_days: int
+    send_time: str | None
+    """The step's own local time of day, ``HH:MM``; None for the next suggested slot."""
     same_thread: bool
     template_id: int
     template_name: str
@@ -146,12 +164,41 @@ class CampaignOut(BaseModel):
     daily_cap: int | None
     contacted_within_days_guard: int
     approved_at: datetime | None
+    starts_at: datetime | None
+    """The scheduled start (#338): nothing is sent before it. None before activation."""
+    start_editable: bool
+    """Whether ``PUT .../start`` can still move it: active or paused, nothing sent yet."""
     created_at: datetime
     steps: list[StepOut]
     enrollments: dict[EnrollmentStatus, int]
     next_action_at: datetime | None
     missing: list[MissingOut]
     """What the review gate still needs, for a ``draft`` or ``reviewing`` campaign."""
+
+
+class StartOptionsOut(BaseModel):
+    timezone: str
+    """The time zone the default and the suggestion are in: your ``linkedin.timezone``."""
+    default_start: datetime
+    """The next Tuesday at 09:00 local time; today when it is Tuesday before 09:00."""
+    suggestion: str
+    reminder: str
+    """``serve`` must be running, and the Mac awake, for anything to send."""
+    at: datetime | None
+    warning: str | None
+    """Why ``at`` is outside the suggested slots. A warning only: nothing is refused."""
+
+
+class StartIn(BaseModel):
+    starts_at: AwareDatetime
+    """The new scheduled start. A time already past starts the campaign now."""
+
+
+class StepScheduleIn(BaseModel):
+    delay_days: Annotated[int, Field(ge=0, le=service.MAX_DELAY_DAYS)]
+    """Days after the step before; for step 1, after the start."""
+    send_time: SendTime | None = None
+    """An explicit local time of day, ``HH:MM``; None for the next suggested slot."""
 
 
 class EnrollmentOut(BaseModel):
@@ -198,6 +245,7 @@ def _summary_out(row: service.CampaignSummary) -> CampaignSummaryOut:
         enrollments=dict(row.enrollments),
         created_at=c.created_at,
         next_action_at=row.next_action_at,
+        starts_at=c.starts_at,
     )
 
 
@@ -214,6 +262,8 @@ def _campaign_out(detail: service.CampaignDetail) -> CampaignOut:
         daily_cap=c.daily_cap,
         contacted_within_days_guard=c.contacted_within_days_guard,
         approved_at=c.approved_at,
+        starts_at=c.starts_at,
+        start_editable=detail.start_editable,
         created_at=c.created_at,
         steps=[
             StepOut(
@@ -223,6 +273,7 @@ def _campaign_out(detail: service.CampaignDetail) -> CampaignOut:
                 mode=s.step.mode,
                 condition=s.step.condition,
                 delay_days=s.step.delay_days,
+                send_time=s.step.send_time,
                 same_thread=s.step.same_thread,
                 template_id=s.step.template_id,
                 template_name=s.template_name,
@@ -281,6 +332,7 @@ def create_campaign(
                     mode=s.mode,
                     condition=s.condition,
                     same_thread=s.same_thread,
+                    send_time=s.send_time,
                 )
                 for s in body.steps
             ],
@@ -394,4 +446,83 @@ def resume(
     """``paused`` to ``active``: a step that came due meanwhile fires at the next chance."""
     with translate_errors():
         service.resume(session, user, campaign_id)
+        return _detail(session, user, campaign_id, request)
+
+
+@router.get(
+    "/campaigns/{campaign_id}/start-options",
+    operation_id="campaign_start_options",
+    responses={**NOT_FOUND, **INVALID},
+)
+def start_options(
+    campaign_id: int,
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+    at: Annotated[
+        AwareDatetime | None,
+        Query(description="A start to check against the suggested slots, with its zone."),
+    ] = None,
+) -> StartOptionsOut:
+    """The default scheduled start, the suggestion and the reminder (#338), and a
+    warning when ``at`` is outside the suggested slots. Changes nothing."""
+    with translate_errors():
+        service.get_campaign(session, user, campaign_id)
+        options = service.start_options(user, settings=_settings(request), now=utcnow(), at=at)
+    return StartOptionsOut(
+        timezone=options.timezone,
+        default_start=options.default_start,
+        suggestion=options.suggestion,
+        reminder=options.reminder,
+        at=options.at,
+        warning=options.warning,
+    )
+
+
+@router.put(
+    "/campaigns/{campaign_id}/start",
+    operation_id="set_campaign_start",
+    responses={**NOT_FOUND, **CONFLICT, **INVALID},
+)
+def set_start(
+    campaign_id: int, body: StartIn, request: Request, session: SessionDep, user: CurrentUser
+) -> CampaignOut:
+    """Move an active or paused campaign's scheduled start. ``409`` once it has sent."""
+    with translate_errors():
+        service.set_start(
+            session,
+            user,
+            campaign_id,
+            settings=_settings(request),
+            now=utcnow(),
+            starts_at=body.starts_at,
+        )
+        return _detail(session, user, campaign_id, request)
+
+
+@router.put(
+    "/campaigns/{campaign_id}/steps/{step_id}/schedule",
+    operation_id="set_step_schedule",
+    responses={**NOT_FOUND, **CONFLICT, **INVALID},
+)
+def set_step_schedule(
+    campaign_id: int,
+    step_id: int,
+    body: StepScheduleIn,
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+) -> CampaignOut:
+    """Set a step's day offset and time of day (#338). Only timing changes. ``409`` once
+    the campaign is completed or archived."""
+    with translate_errors():
+        service.set_step_schedule(
+            session,
+            user,
+            campaign_id,
+            step_id,
+            settings=_settings(request),
+            delay_days=body.delay_days,
+            send_time=body.send_time,
+        )
         return _detail(session, user, campaign_id, request)

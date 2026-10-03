@@ -238,6 +238,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "scheduled jobs",
         "scheduled runs",
         "reply poll",
+        "next campaign send",
         "route-changed breaker",
         "answer-lost limit",
         "network aging",
@@ -2042,3 +2043,32 @@ def test_the_summary_shows_a_warning_on_a_row_that_is_still_on(writer: Session, 
         if line.startswith("budget profile_visits")
     )
     assert budget_line.split()[2] == "on"
+
+
+# --- #338: the next scheduled campaign send ------------------------------------------------
+
+
+def test_with_nothing_scheduled_the_next_campaign_send_says_so(writer: Session, user: User) -> None:
+    row = _row(_report(writer, user), "next campaign send")
+    assert (row.status, row.value, row.warnings) == (Status.ON, "no campaign send is scheduled", ())
+
+
+def test_the_next_campaign_send_names_the_soonest_and_the_serve_reminder(
+    writer: Session, user: User
+) -> None:
+    mailbox = make_mailbox(writer, user, email="me@example.test")
+    campaign = factories.make_campaign(writer, user, name="Autumn", mailbox_id=mailbox.id)
+    for hours in (30, 6):
+        factories.make_enrollment(
+            writer,
+            campaign,
+            factories.make_contact(writer, user),
+            next_action_at=NOW + timedelta(hours=hours),
+        )
+    writer.flush()
+    row = _row(_report(writer, user), "next campaign send")
+    soonest = NOW + timedelta(hours=6)
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value.startswith("'Autumn' step 1 at ")
+    assert f"({soonest:%Y-%m-%d %H:%M} UTC)" in row.value
+    assert "netkeeper sends only while `serve` is running and this Mac is awake." in row.value

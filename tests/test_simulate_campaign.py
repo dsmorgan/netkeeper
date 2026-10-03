@@ -1,5 +1,6 @@
-"""P3-06's "done when": 100 contacts over three weeks, nothing outside a window or over a cap,
-and step 2's timing from the actual ``sent_at`` (spec 11.3, 11.4)."""
+"""P3-06's "done when": 100 contacts over three weeks, nothing before the scheduled start,
+overnight or over a cap, and step 2's timing from the actual ``sent_at`` (spec 11.3, 11.4,
+#338)."""
 
 from __future__ import annotations
 
@@ -32,7 +33,8 @@ from netkeeper.services.campaign_engine import REVIEW_GATE, activate
 from netkeeper.services.simulate_campaign import simulate_campaign
 
 ZONE = ZoneInfo("America/New_York")
-START = datetime(2026, 9, 28, 8, 0, tzinfo=ZONE).astimezone(UTC)  # a Monday morning
+NOW = datetime(2026, 9, 28, 8, 0, tzinfo=ZONE).astimezone(UTC)  # a Monday morning
+START = datetime(2026, 9, 29, 9, 0, tzinfo=ZONE).astimezone(UTC)  # the default start, Tuesday
 END = START + timedelta(weeks=3)
 HOLIDAY = date(2026, 10, 7)  # the second Wednesday
 # Week 1: the big campaign's cap and the mailbox's both bind while step 1 goes out
@@ -66,7 +68,9 @@ def _campaign(session: Session, user: User, mailbox_id: int, contacts: int, cap:
         )
         factories.make_enrollment(session, campaign, contact, status=EnrollmentStatus.PENDING)
     session.flush()
-    activate(session, user, campaign.id, settings=SETTINGS, now=START, gate=REVIEW_GATE)
+    activate(
+        session, user, campaign.id, settings=SETTINGS, now=NOW, starts_at=START, gate=REVIEW_GATE
+    )
     return campaign.id
 
 
@@ -80,7 +84,7 @@ def test_a_hundred_contacts_over_three_weeks_keep_every_window_cap_and_cadence(
         big = _campaign(session, user, mailbox.id, 100, BIG_CAP)
         small = _campaign(session, user, mailbox.id, 10, SMALL_CAP)
 
-    run = simulate_campaign(session_factory, settings=SETTINGS, start=START, end=END, seed=3)
+    run = simulate_campaign(session_factory, settings=SETTINGS, start=NOW, end=END, seed=3)
 
     with session_scope(session_factory) as session:
         messages = list(session.scalars(scoped(user, Message).order_by(Message.scheduled_at)))
@@ -91,13 +95,17 @@ def test_a_hundred_contacts_over_three_weeks_keep_every_window_cap_and_cadence(
     assert all(m.status is MessageStatus.SENT for m in messages)
     assert run.ticks < 5_000
 
-    # Nothing outside the window: Tuesday to Thursday, 09:00 to 16:30 New York, no holiday.
+    # Nothing before the start, and nothing overnight: step 1 goes from the start and a
+    # follow-up in a suggested slot (09:00 to 16:30 New York), and what a cap holds back
+    # spills to the next day at the same time (#338). A suggested day is never a holiday.
+    days: Counter[str] = Counter()
     for message in messages:
         assert message.scheduled_at is not None and message.sent_at is not None
+        assert message.scheduled_at >= START
         local = message.scheduled_at.astimezone(ZONE)
-        assert local.strftime("%a") in ("Tue", "Wed", "Thu"), local
         assert time(9, 0) <= local.time() < time(16, 30), local
-        assert local.date() != HOLIDAY, local
+        days[local.strftime("%a")] += 1
+    assert days["Sat"] == days["Sun"] == days["Mon"] == 0, days
 
     # Nothing over a cap, per local day: each campaign's, and the mailbox's across both.
     per_campaign: Counter[tuple[int, date]] = Counter()
@@ -122,8 +130,8 @@ def test_a_hundred_contacts_over_three_weeks_keep_every_window_cap_and_cadence(
     assert set(per_step.values()) == {1}
     assert {e for e, position in per_step if position == 1} == set(enrollments)
 
-    # Step 2 derives from step 1's actual sent_at (a few minutes after it fired), pushed
-    # into the window.
+    # Step 2 derives from step 1's actual sent_at (a few minutes after it fired), in the
+    # next suggested slot.
     first = {m.enrollment_id: m for m in messages if steps[m.step_id or 0].position == 1}
     seconds = [m for m in messages if steps[m.step_id or 0].position == 2]
     assert len(seconds) > 50
