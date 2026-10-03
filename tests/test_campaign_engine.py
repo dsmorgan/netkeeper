@@ -434,6 +434,8 @@ def test_nothing_sends_before_the_scheduled_start(world: World) -> None:
     for at in (NOW, NOW + timedelta(hours=1), start - timedelta(seconds=1)):
         result = world.tick(at)
         assert result.fired == [], at
+        # Left out by the tick's query itself, not refused later (#338 review, S3a).
+        assert enrollment_id not in result.skipped(), at
         assert result.next_wake == start
     assert world.sender.firings == [] and world.messages() == []
     assert world.enrollment(enrollment_id).next_action_at == NOW  # nothing changed
@@ -520,6 +522,158 @@ def test_without_a_window_a_campaign_short_of_the_review_gate_sends_nothing(
     world = make_world(session_factory, status=status, starts_at=NOW - timedelta(days=1))
     world.enroll_new()
     assert world.tick(SATURDAY_NIGHT).fired == [] and world.messages() == []
+
+
+def test_a_moved_start_is_refused_once_a_message_is_scheduled_even_if_not_sent(
+    world: World,
+) -> None:
+    """#338 review, S3b: a claimed message with no ``sent_at`` may be in Gmail's hands."""
+    _start_at(world, NOW + timedelta(days=1))
+    enrollment_id = world.enroll_new(next_action_at=NOW + timedelta(days=1))
+
+    def claimed(session: Session) -> None:
+        enrollment = get_scoped(session, world.user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        factories.make_message(
+            session, enrollment, status=MessageStatus.SCHEDULED, sent_at=None, scheduled_at=NOW
+        )
+
+    world.write(claimed)
+    with pytest.raises(CampaignEngineError, match="already sent"):
+        world.write(
+            lambda s: engine_module.set_start(
+                s, world.user, world.campaign.id, settings=Settings(), now=NOW, starts_at=NOW
+            )
+        )
+
+
+# --- off hours: a send nobody chose for off hours never goes out then (#338 review, B1) ----
+
+TUESDAY = datetime(2026, 9, 29, tzinfo=UTC)  # the user is on UTC
+
+
+def _at(day: datetime, hours: float) -> datetime:
+    return day + timedelta(hours=hours)
+
+
+def test_a_step_due_at_nine_with_the_mac_asleep_until_ten_pm_waits_for_the_next_morning(
+    world: World,
+) -> None:
+    enrollment_id = world.enroll_new(next_action_at=_at(TUESDAY, 9))
+    late = world.tick(_at(TUESDAY, 22))
+    assert late.fired == [] and reasons_of(late, enrollment_id) == (Skip.OFF_HOURS,)
+    wednesday_nine = _at(TUESDAY, 24 + 9)
+    assert world.enrollment(enrollment_id).next_action_at == wednesday_nine
+    assert world.tick(_at(TUESDAY, 24 + 3)).fired == []  # nor overnight
+    assert world.tick(wednesday_nine - timedelta(minutes=1)).fired == []
+    assert world.tick(wednesday_nine).fired != []
+
+
+def test_a_thursday_step_does_not_fire_on_saturday_night(world: World) -> None:
+    thursday_ten = _at(TUESDAY, 2 * 24 + 10)
+    enrollment_id = world.enroll_new(next_action_at=thursday_ten)
+    saturday_night = _at(TUESDAY, 4 * 24 + 23.5)
+    result = world.tick(saturday_night)
+    assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.OFF_HOURS,)
+    for hours in (0.5, 3, 9.9):  # Sunday's small hours and early morning
+        assert world.tick(_at(TUESDAY, 5 * 24 + hours)).fired == []
+    assert world.messages() == []
+    assert world.enrollment(enrollment_id).next_action_at == _at(TUESDAY, 5 * 24 + 10)
+
+
+def test_an_explicit_off_hours_step_time_still_fires_late(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A step whose time of day is 22:00 was chosen for off hours: it goes, even overdue."""
+    world = make_world(session_factory)
+
+    def at_ten_pm(session: Session) -> None:
+        campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+        assert campaign is not None
+        campaign.steps[1].send_time = "22:00"
+
+    world.write(at_ten_pm)
+    enrollment_id = world.enroll_new(current_step=1, next_action_at=_at(TUESDAY, 22))
+
+    def step_one(session: Session) -> None:
+        enrollment = get_scoped(session, world.user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        factories.make_message(session, enrollment, position=1, sent_at=_at(TUESDAY, -7 * 24 + 1))
+
+    world.write(step_one)
+    [(firing, _)] = world.tick(_at(TUESDAY, 23)).fired
+    assert firing.step_position == 2
+
+
+def test_an_upgraded_campaigns_overdue_rows_do_not_fire_at_night(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """0031 sets ``starts_at = approved_at`` on a campaign already running. Its rows
+    overdue from before the upgrade wait for their own time of day, not the first tick."""
+    approved = _at(TUESDAY, -10 * 24 + 10)
+    world = make_world(session_factory, approved_at=approved, starts_at=approved)
+    overdue = [
+        world.enroll_new(next_action_at=_at(TUESDAY, 10)),  # due today, at 10:00
+        world.enroll_new(next_action_at=_at(TUESDAY, -2 * 24 + 11)),  # Sunday, 11:00
+    ]
+    for hours in (21, 23.5, 24 + 2):  # the first ticks after the upgrade, at night
+        assert world.tick(_at(TUESDAY, hours)).fired == []
+    assert world.messages() == []
+    due = [world.enrollment(i).next_action_at for i in overdue]
+    assert due == [_at(TUESDAY, 24 + 10), _at(TUESDAY, 24 + 11)]
+
+
+def test_a_retry_after_nothing_was_sent_never_lands_off_hours(world: World) -> None:
+    """#338 review, S1: the claim was at 16:20; a 15-minute retry would be 16:35, so it
+    waits for 16:20 the next day."""
+    claim = _at(TUESDAY, 16 + 20 / 60)
+    world.sender.outcome = SendOutcome.NOT_SENT
+    enrollment_id = world.enroll_new(next_action_at=claim)
+    world.tick(claim)
+    assert world.enrollment(enrollment_id).next_action_at == claim + timedelta(days=1)
+    assert world.enrollment(enrollment_id).not_sent_count == 1
+
+
+def test_a_retry_inside_the_hours_keeps_its_wait(world: World) -> None:
+    world.sender.outcome = SendOutcome.NOT_SENT
+    enrollment_id = world.enroll_new()
+    world.tick()
+    assert world.enrollment(enrollment_id).next_action_at == NOW + engine_module.RETRY_AFTER
+
+
+def test_a_retry_of_an_explicit_off_hours_send_keeps_its_wait(world: World) -> None:
+    _start_at(world, SATURDAY_NIGHT)
+    world.sender.outcome = SendOutcome.NOT_SENT
+    enrollment_id = world.enroll_new(next_action_at=SATURDAY_NIGHT)
+    world.tick(SATURDAY_NIGHT)
+    due = SATURDAY_NIGHT + engine_module.RETRY_AFTER
+    assert world.enrollment(enrollment_id).next_action_at == due
+
+
+def test_an_explicit_step_time_before_the_raw_delay_is_not_pushed_back(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """#338 review, S2: step 1 went at Monday 23:30; step 2 is "1 day, at 09:00", so it
+    is due Tuesday 09:00, not Tuesday 23:30 (the raw delay)."""
+    world = make_world(session_factory)
+
+    def at_nine(session: Session) -> None:
+        campaign = get_scoped(session, world.user, Campaign, world.campaign.id)
+        assert campaign is not None
+        campaign.steps[1].delay_days, campaign.steps[1].send_time = 1, "09:00"
+
+    world.write(at_nine)
+    tuesday_nine = _at(TUESDAY, 9)
+    enrollment_id = world.enroll_new(current_step=1, next_action_at=tuesday_nine)
+
+    def step_one(session: Session) -> None:
+        enrollment = get_scoped(session, world.user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        factories.make_message(session, enrollment, position=1, sent_at=_at(TUESDAY, -0.5))
+
+    world.write(step_one)
+    [(firing, _)] = world.tick(tuesday_nine).fired
+    assert firing.step_position == 2
 
 
 def test_a_time_zone_that_cannot_be_read_sends_nothing(world: World) -> None:
@@ -772,7 +926,8 @@ def test_the_next_step_counts_from_the_latest_outbound_message(world: World) -> 
     world.write(history)
     result = world.tick()
     assert result.fired == [] and reasons_of(result, enrollment_id) == (Skip.NOT_DUE,)
-    due = NOW - timedelta(days=1) + timedelta(days=7)
+    # A week after Monday 14:00 is Monday: the next suggested slot is Tuesday 09:00 (#338).
+    due = datetime(2026, 10, 6, 9, 0, tzinfo=UTC)
     assert world.enrollment(enrollment_id).next_action_at == due
     assert world.tick(due).fired != []
 
