@@ -236,8 +236,8 @@ export function HeatPanel() {
           </p>
           {status.data?.running_run_id != null && (
             <p className="font-medium text-foreground">
-              Run {status.data.running_run_id} is running. It picks up the cleared heat at its next
-              check.
+              Run {status.data.running_run_id} is running and keeps its current pace; the next run
+              uses the cleared heat.
             </p>
           )}
           <p>If heat is raised again while this is open, nothing is cleared.</p>
