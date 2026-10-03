@@ -1453,7 +1453,7 @@ def test_merge_keeps_the_answer_the_person_gave_over_the_same_one_a_batch_gave(
     Ranking alone cannot choose here — the values are equal, so the survivor
     keeps theirs — and keeping ``automatic`` would throw away a confirmation
     and leave the survivor in the review queue for a decision that has already
-    been reviewed.
+    been reviewed. The confirmation's ``triaged_at`` comes with it (#331).
     """
     alice, _ = users
     survivor = factories.make_contact(
@@ -1464,8 +1464,8 @@ def test_merge_keeps_the_answer_the_person_gave_over_the_same_one_a_batch_gave(
     )
     merge(writer, alice, survivor.id, loser.id)
     assert (survivor.met, survivor.met_source) == (ContactMet.MET, MetSource.MANUAL)
-    # The value did not move, so neither did the moment it was decided.
-    assert survivor.triaged_at == NOW
+    # The moment the person confirmed it, as record_met would have stamped it.
+    assert survivor.triaged_at == LATER
 
 
 def test_merge_keeps_a_batch_answer_automatic_when_the_loser_is_untriaged(
@@ -1502,40 +1502,113 @@ def test_merge_needs_a_triaged_loser_even_when_the_answers_match(
     assert (survivor.met, survivor.met_source) == (ContactMet.MET, MetSource.AUTOMATIC)
 
 
-@pytest.mark.parametrize(
-    ("mine", "theirs", "expected", "source", "triaged_at"),
-    [
-        # The loser's answer is more decided: it wins, with who decided it and when.
-        (ContactMet.NOT_MET, ContactMet.MET, ContactMet.MET, MetSource.MANUAL, LATER),
-        # The survivor's answer is more decided: it stays, and stays the batch's,
-        # because the person never confirmed it.
-        (ContactMet.MET, ContactMet.NOT_MET, ContactMet.MET, MetSource.AUTOMATIC, NOW),
-        (ContactMet.NOT_MET, ContactMet.SKIP, ContactMet.NOT_MET, MetSource.AUTOMATIC, NOW),
-    ],
-)
-def test_merge_settles_a_different_hand_made_answer_by_rank(
-    writer: Session,
-    users: tuple[User, User],
-    mine: ContactMet,
-    theirs: ContactMet,
-    expected: ContactMet,
-    source: MetSource,
-    triaged_at: datetime,
+@pytest.mark.parametrize("mine", [ContactMet.NOT_MET, ContactMet.SKIP])
+def test_merge_never_lets_a_batch_answer_overwrite_a_confirmed_one(
+    writer: Session, users: tuple[User, User], mine: ContactMet
 ) -> None:
-    """A triaged loser that answered differently confirms nothing; the rank decides (#331)."""
+    """A more decided batch answer still loses to the person's own (#331 review)."""
     alice, _ = users
     survivor = factories.make_contact(
-        writer, alice, met=mine, met_source=MetSource.AUTOMATIC, triaged_at=NOW
+        writer, alice, met=mine, met_source=MetSource.MANUAL, triaged_at=NOW
     )
     loser = factories.make_contact(
-        writer, alice, met=theirs, met_source=MetSource.MANUAL, triaged_at=LATER
+        writer, alice, met=ContactMet.MET, met_source=MetSource.AUTOMATIC, triaged_at=LATER
     )
     merge(writer, alice, survivor.id, loser.id)
     assert (survivor.met, survivor.met_source, survivor.triaged_at) == (
-        expected,
-        source,
-        triaged_at,
+        mine,
+        MetSource.MANUAL,
+        NOW,
     )
+
+
+def test_merge_of_two_batch_answers_stays_automatic(
+    writer: Session, users: tuple[User, User]
+) -> None:
+    """Two machine answers that agree confirm nothing (#331 review)."""
+    alice, _ = users
+    survivor = factories.make_contact(
+        writer, alice, met=ContactMet.MET, met_source=MetSource.AUTOMATIC, triaged_at=NOW
+    )
+    loser = factories.make_contact(
+        writer, alice, met=ContactMet.MET, met_source=MetSource.AUTOMATIC, triaged_at=LATER
+    )
+    merge(writer, alice, survivor.id, loser.id)
+    assert (survivor.met, survivor.met_source, survivor.triaged_at) == (
+        ContactMet.MET,
+        MetSource.AUTOMATIC,
+        NOW,
+    )
+
+
+# The three Met states a contact can be in: untriaged (the column defaults),
+# confirmed by the person, and decided by a batch.
+_UNTRIAGED = "untriaged"
+_CONFIRMED = "confirmed"
+_AUTOMATIC = "automatic"
+# How the two answers compare: the same, the loser's more decided, or the
+# survivor's more decided. An untriaged contact is always ``unknown``.
+_SAME = "same"
+_LOSER_HIGHER = "loser higher"
+_SURVIVOR_HIGHER = "survivor higher"
+_ANSWERS: dict[str, tuple[ContactMet, ContactMet]] = {
+    _SAME: (ContactMet.NOT_MET, ContactMet.NOT_MET),
+    _LOSER_HIGHER: (ContactMet.NOT_MET, ContactMet.MET),
+    _SURVIVOR_HIGHER: (ContactMet.MET, ContactMet.NOT_MET),
+}
+
+
+def _met_contact(
+    session: Session, user: User, state: str, met: ContactMet, at: datetime
+) -> Contact:
+    if state == _UNTRIAGED:
+        return factories.make_contact(session, user)
+    source = MetSource.MANUAL if state == _CONFIRMED else MetSource.AUTOMATIC
+    return factories.make_contact(session, user, met=met, met_source=source, triaged_at=at)
+
+
+@pytest.mark.parametrize(
+    ("mine", "theirs", "answers", "winner"),
+    [
+        (_UNTRIAGED, _UNTRIAGED, _SAME, "survivor"),
+        (_UNTRIAGED, _CONFIRMED, _LOSER_HIGHER, "loser"),
+        (_UNTRIAGED, _AUTOMATIC, _LOSER_HIGHER, "loser"),
+        (_CONFIRMED, _UNTRIAGED, _SURVIVOR_HIGHER, "survivor"),
+        (_AUTOMATIC, _UNTRIAGED, _SURVIVOR_HIGHER, "survivor"),
+        (_CONFIRMED, _CONFIRMED, _SAME, "survivor"),
+        (_CONFIRMED, _CONFIRMED, _LOSER_HIGHER, "loser"),
+        (_CONFIRMED, _CONFIRMED, _SURVIVOR_HIGHER, "survivor"),
+        # A confirmed answer beats a batch's whatever the values.
+        (_CONFIRMED, _AUTOMATIC, _SAME, "survivor"),
+        (_CONFIRMED, _AUTOMATIC, _LOSER_HIGHER, "survivor"),
+        (_CONFIRMED, _AUTOMATIC, _SURVIVOR_HIGHER, "survivor"),
+        (_AUTOMATIC, _CONFIRMED, _SAME, "loser"),
+        (_AUTOMATIC, _CONFIRMED, _LOSER_HIGHER, "loser"),
+        (_AUTOMATIC, _CONFIRMED, _SURVIVOR_HIGHER, "loser"),
+        (_AUTOMATIC, _AUTOMATIC, _SAME, "survivor"),
+        (_AUTOMATIC, _AUTOMATIC, _LOSER_HIGHER, "loser"),
+        (_AUTOMATIC, _AUTOMATIC, _SURVIVOR_HIGHER, "survivor"),
+    ],
+)
+def test_merge_met_matrix(
+    writer: Session, users: tuple[User, User], mine: str, theirs: str, answers: str, winner: str
+) -> None:
+    """A confirmed answer is never lost or downgraded; a machine's never looks hand-made (#331).
+
+    The winner's ``met``, ``met_source``, and ``triaged_at`` move together, so
+    each row asserts the whole triple the winning contact started with.
+    """
+    alice, _ = users
+    mine_met, theirs_met = _ANSWERS[answers]
+    survivor = _met_contact(writer, alice, mine, mine_met, NOW)
+    loser = _met_contact(writer, alice, theirs, theirs_met, LATER)
+    expected = (
+        (survivor.met, survivor.met_source, survivor.triaged_at)
+        if winner == "survivor"
+        else (loser.met, loser.met_source, loser.triaged_at)
+    )
+    merge(writer, alice, survivor.id, loser.id)
+    assert (survivor.met, survivor.met_source, survivor.triaged_at) == expected
 
 
 def test_merge_keeps_a_manual_survivor_manual(writer: Session, users: tuple[User, User]) -> None:
