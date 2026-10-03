@@ -1825,9 +1825,8 @@ def _give_back(
     # A paused enrollment keeps its due time for the resume; an ended one has none.
     if enrollment.status in (EnrollmentStatus.ACTIVE, EnrollmentStatus.PAUSED):
         due = now + wait
-        # Conservative on purpose (#338 review N4): a retry is never covered by the
-        # start-day exemption, even on the start's own day. Only the first try of step
-        # 1 goes outside the sending hours; a retry waits for their next opening.
+        # A retry is never covered by the start-day exemption, even on the start's own
+        # day: only the first try of step 1 goes outside the sending hours.
         window = hours_for(session, user)
         if window is not None:
             # A schedule that cannot be read keeps the plain retry: the tick blocks it.

@@ -366,6 +366,11 @@ def next_opening(at: datetime, hours: SendingHours, slots: Suggested) -> datetim
         day = today + timedelta(days=offset)
         if day.weekday() not in hours.days:
             continue
+        # Conservative at a daylight-saving fall-back (#338 review N4): ``at_local``
+        # takes the first of a repeated local time. With hours inside the repeated hour
+        # (Sun 01:30 to 02:00, say) and ``at`` at the second 01:10, today's opening is
+        # the first 01:30, already past, so this answers next week although the second
+        # 01:30 is open. It only ever waits longer, never sends outside the hours.
         opens = slots.at_local(day, hours.start)
         if opens >= now:
             return opens
