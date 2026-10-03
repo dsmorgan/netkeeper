@@ -741,6 +741,59 @@ def sync_account_schedule(
     return results
 
 
+def seed_missing_kinds(
+    session: Session,
+    user: User,
+    account_id: int,
+    *,
+    now: datetime,
+    schedules: Mapping[JobKind, JobSchedule],
+    rng: random.Random,
+    tz: str,
+    active_start: time = pacing.DEFAULT_ACTIVE_START,
+    active_end: time = pacing.DEFAULT_ACTIVE_END,
+) -> dict[JobKind, ScheduleResult]:
+    """Give every kind in ``schedules`` that has no stored due time its first one (#327).
+
+    The kind's normal first-due rule applies (:func:`establish_schedule` with no row):
+    one interval out, or soon for a kind that runs on first setup. A kind that already
+    has a due time is left exactly as it is. A new due time that lands within
+    :data:`MIN_JOB_KIND_GAP` of any other is pushed later, never the other one.
+    Returns the kinds it seeded. Arming calls it, so a kind added after the schedule
+    was established gets a due time without waiting for a restart.
+    """
+    # Every kind's due time, not only those being seeded: the gap is between any two.
+    stored = (stored_due(session, user, account_id, kind) for kind in JobKind)
+    taken = [due for due in stored if due is not None]
+    seeded: dict[JobKind, ScheduleResult] = {}
+    for kind, schedule in schedules.items():
+        if _load_state(session, user, account_id, kind) is not None:
+            continue
+        result = establish_schedule(
+            session,
+            user,
+            account_id,
+            kind,
+            now=now,
+            schedule=schedule,
+            rng=rng,
+            tz=tz,
+            active_start=active_start,
+            active_end=active_end,
+        )
+        due = result.due
+        while any(abs(due - other) < MIN_JOB_KIND_GAP for other in taken):
+            due += MIN_JOB_KIND_GAP
+        if due != result.due:
+            state = _load_state(session, user, account_id, kind)
+            assert state is not None  # just written by establish_schedule above
+            _store_state(session, user, account_id, kind, replace(state, due=due))
+            result = replace(result, due=due)
+        taken.append(due)
+        seeded[kind] = result
+    return seeded
+
+
 # --- the hot path: poll and fire, never re-derive ----------------------------
 
 

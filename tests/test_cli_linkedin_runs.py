@@ -34,7 +34,8 @@ from netkeeper.services.linkedin_accounts import (
     scheduled_runs_armed,
 )
 from netkeeper.services.linkedin_session import flag_session
-from netkeeper.services.settings_kv import set_setting
+from netkeeper.services.scheduler import SERVED_SCHEDULES, JobKind, stored_due
+from netkeeper.services.settings_kv import delete_setting, set_setting
 from netkeeper.services.users import ensure_local_user
 from netkeeper.worker import BrowserWorker
 
@@ -120,6 +121,36 @@ def test_arming_shows_the_profile_view_notice_with_or_without_yes_and_still_arms
     assert armed.exit_code == 0, armed.output
     assert budgets.PROFILE_VIEW_NOTICE in armed.output
     assert _armed(cli_db)
+
+
+def test_arming_seeds_each_served_kind_with_no_due_time(cli_db: sessionmaker[Session]) -> None:
+    """#327: arming gives each kind ``serve`` runs a due time if it has none, already
+    armed or not, and leaves one that has a due time alone. The inbox poll has no
+    runner, so it gets none."""
+
+    def dues() -> dict[JobKind, datetime | None]:
+        with session_scope(cli_db) as session:
+            user = _user(session)
+            account = account_id_for(session, user)
+            return {kind: stored_due(session, user, account, kind) for kind in JobKind}
+
+    runner = CliRunner()
+    assert runner.invoke(cli, ["linkedin", "schedule", "arm", "--yes"]).exit_code == 0
+    first = dues()
+    assert first[JobKind.INBOX] is None
+    assert all(first[kind] is not None for kind in SERVED_SCHEDULES)
+
+    with session_scope(cli_db, write=True) as session:  # a kind added after arming
+        user = _user(session)
+        account = account_id_for(session, user)
+        assert delete_setting(session, user, f"scheduler.job.{account}.enrich")
+    rearmed = runner.invoke(cli, ["linkedin", "schedule", "arm", "--yes"])
+    assert rearmed.exit_code == 0 and "already armed" in rearmed.output
+    second = dues()
+    assert second[JobKind.ENRICH] is not None
+    assert {k: v for k, v in second.items() if k is not JobKind.ENRICH} == {
+        k: v for k, v in first.items() if k is not JobKind.ENRICH
+    }
 
 
 def test_arming_shows_the_profile_visit_risk_warning_above_100_a_day_and_still_arms(

@@ -53,6 +53,7 @@ from netkeeper.services.scheduler import (
     JobOutcome,
     JobRegistry,
     build_scheduler,
+    seed_missing_kinds,
 )
 from netkeeper.services.tasks import TaskRunner
 
@@ -227,6 +228,41 @@ def start_serve_scheduler(
     built.start()
     log.info("scheduler started: %s", ", ".join(kind.value for kind in SERVED_SCHEDULES))
     return ServeScheduler(executor=executor, scheduler=built)
+
+
+def seed_served_schedule(
+    session: Session,
+    user: User,
+    settings: LinkedInSettings,
+    *,
+    now: datetime,
+    rng: random.Random | None = None,
+) -> list[JobKind]:
+    """Seed a due time for each served kind that has none, as arming does (#327).
+
+    ``serve`` startup already gives a missing kind its first due time
+    (:func:`~netkeeper.services.scheduler.build_scheduler`); arming does it too, so a
+    kind added after the schedule was established never waits for a restart. A kind
+    that has a due time keeps it. Needs a writer session. Returns the kinds seeded.
+    """
+    account = find_account(session, user)
+    if account is None:
+        return []
+    start, end = (time.fromisoformat(value) for value in settings.active_hours)
+    seeded = seed_missing_kinds(
+        session,
+        user,
+        account.id,
+        now=now,
+        schedules=SERVED_SCHEDULES,
+        rng=rng if rng is not None else random.Random(),  # noqa: S311 -- jitter, not crypto
+        tz=user.timezone,
+        active_start=start,
+        active_end=end,
+    )
+    for kind, result in seeded.items():
+        log.info("scheduler: seeded %s for account %d, due %s", kind.value, account.id, result.due)
+    return list(seeded)
 
 
 def _local_accounts(factory: sessionmaker[Session]) -> Callable[[], list[tuple[User, int]]]:

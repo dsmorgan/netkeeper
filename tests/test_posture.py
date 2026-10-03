@@ -43,6 +43,7 @@ import factories
 import pytest
 import test_browser_safety as browser_safety
 from browser_fakes import FakeBrowser, FakeConnector, FakeContext
+from campaign_fakes import make_mailbox
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -69,6 +70,9 @@ from netkeeper.services.posture import (
     MAX_BLOCKS_BEFORE_SKIP,
     MAX_PLAUSIBLE_HOLD_HOURS,
     MIN_HALF_LIFE_HOURS,
+    MISSING_MEANS,
+    NOT_SERVED_BECAUSE,
+    REPLY_POLL_LATE_AFTER_POLLS,
     SINGLE_ACCOUNT_ID,
     UNENFORCED_TODAY,
     WEEKEND_DAMPING_CEILING,
@@ -86,6 +90,7 @@ from netkeeper.services.scheduler import (
     DEFAULT_SCHEDULES,
     HEAT_SKIP_DISABLED,
     MIN_JOB_KIND_GAP,
+    SERVED_SCHEDULES,
     HeatGate,
     JobKind,
     sync_account_schedule,
@@ -232,6 +237,7 @@ def test_the_baseline_covers_every_protection_the_item_asks_for(
         "heat skip gate",
         "scheduled jobs",
         "scheduled runs",
+        "reply poll",
         "route-changed breaker",
         "answer-lost limit",
         "network aging",
@@ -1769,3 +1775,112 @@ def test_a_corrupt_answer_lost_row_warns_unknown(writer: Session, user: User) ->
     assert row.status is Status.UNKNOWN
     assert row.warnings and "connections_full" in row.warnings[0]
     assert not report.ok
+
+
+# --- #327: the job kinds by name, and the Gmail reply poll ------------------------------
+
+
+def _served_user(writer: Session) -> User:
+    """A user whose schedule is what ``netkeeper serve`` establishes: the served kinds."""
+    user = _make_user(writer, schedule=False)
+    sync_account_schedule(
+        writer, user, ACCOUNT, now=NOW, schedules=SERVED_SCHEDULES, rng=random.Random(4), tz=ZONE
+    )
+    return user
+
+
+def test_a_served_schedule_is_on_and_names_each_kind(writer: Session) -> None:
+    """#327: ``serve`` never schedules the inbox poll, so a schedule it established in
+    full is in force, and the row says which kind is which, rather than "3 of 4"."""
+    report = _report(writer, _served_user(writer))
+    row = _row(report, "scheduled jobs")
+
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value.startswith(
+        "connections_incremental scheduled; connections_full scheduled; enrich scheduled;"
+        " inbox not applicable (the LinkedIn inbox poll has no runner yet"
+    )
+    assert "Gmail replies are polled by the campaign engine" in row.value
+    assert report.scheduler.unscheduled == ()
+    assert report.scheduler.not_applicable == (("inbox", NOT_SERVED_BECAUSE[JobKind.INBOX]),)
+    table = render(report)
+    assert "inbox" in table and "not applicable" in table
+
+
+def test_a_missing_served_kind_is_off_and_says_what_that_means(writer: Session) -> None:
+    user = _served_user(writer)
+    _drop_one_job(JobKind.ENRICH)(writer, user)
+    row = _row(_report(writer, user), "scheduled jobs")
+
+    assert row.status is Status.OFF
+    assert "enrich missing" in row.value and "inbox not applicable" in row.value
+    [warning] = row.warnings
+    assert "enrich: enrichment never runs on its own" in warning
+    assert "`netkeeper linkedin schedule arm`" in warning
+
+
+def test_every_served_kind_has_a_meaning_when_missing() -> None:
+    assert set(MISSING_MEANS) == set(SERVED_SCHEDULES)
+    assert set(NOT_SERVED_BECAUSE) == set(JobKind) - set(SERVED_SCHEDULES)
+
+
+def test_the_reply_poll_is_late_after_three_intervals() -> None:
+    assert REPLY_POLL_LATE_AFTER_POLLS == 3
+
+
+def _mailbox(writer: Session, user: User, **fields: Any) -> None:
+    make_mailbox(writer, user, email="me@example.test", **fields)
+
+
+ARMED_AT = NOW - timedelta(days=1)
+
+
+def test_no_armed_mailbox_means_no_reply_poll_and_no_warning(writer: Session, user: User) -> None:
+    _mailbox(writer, user)  # connected, never armed
+    row = _row(_report(writer, user), "reply poll")
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value.startswith("no armed mailbox")
+
+
+@pytest.mark.parametrize("send", [False, True])
+def test_a_recent_reply_poll_is_on_for_a_draft_or_send_armed_mailbox(
+    writer: Session, user: User, send: bool
+) -> None:
+    _mailbox(
+        writer,
+        user,
+        armed_at=ARMED_AT,
+        send_armed_at=ARMED_AT if send else None,
+        replies_polled_at=NOW - timedelta(minutes=12),
+    )
+    row = _row(_report(writer, user), "reply poll")
+    arm = "send" if send else "draft"
+    assert row.status is Status.ON and row.warnings == ()
+    assert row.value == (
+        f"every 10 min; me@example.test ({arm}-armed): last polled 2026-09-23 17:48 UTC"
+        " (12 min ago)"
+    )
+
+
+def test_an_armed_mailbox_never_polled_warns(writer: Session, user: User) -> None:
+    _mailbox(writer, user, armed_at=ARMED_AT)
+    row = _row(_report(writer, user), "reply poll")
+    assert row.status is Status.OFF
+    assert "never polled" in row.value
+    assert "has never been polled for replies" in _warning_for(_report(writer, user), "reply poll")
+
+
+def test_a_late_reply_poll_warns_past_three_intervals(writer: Session, user: User) -> None:
+    _mailbox(writer, user, armed_at=ARMED_AT, replies_polled_at=NOW - timedelta(minutes=30))
+    assert _row(_report(writer, user), "reply poll").status is Status.ON  # exactly 3 x 10
+
+    late = _report(writer, user, now=NOW + timedelta(minutes=1))
+    assert _row(late, "reply poll").status is Status.OFF
+    warning = _warning_for(late, "reply poll")
+    assert "last polled for replies 31 min ago, more than 3 times the 10 min" in warning
+    assert "`netkeeper serve` is running" in warning
+
+    longer = _report(
+        writer, user, now=NOW + timedelta(minutes=1), settings=_campaigns(reply_poll_minutes=20)
+    )
+    assert _row(longer, "reply poll").status is Status.ON

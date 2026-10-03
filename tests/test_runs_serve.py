@@ -48,6 +48,7 @@ from netkeeper.services.linkedin_accounts import (
 )
 from netkeeper.services.linkedin_session import flag_session
 from netkeeper.services.scheduled_runs import ServeExtractor, serve_registry
+from netkeeper.services.settings_kv import delete_setting
 from netkeeper.web.app import create_app
 from netkeeper.web.security import CLIENT_HEADER, CLIENT_HEADER_VALUE
 
@@ -401,6 +402,33 @@ async def test_arming_takes_confirm_and_the_client_header(
         assert armed.json()["armed"] is True
         disarmed = await client.post("/api/v1/linkedin/schedule/disarm", headers=HEADERS)
         assert disarmed.json()["armed"] is False
+
+
+async def test_arming_through_the_api_seeds_a_served_kind_with_no_due_time(
+    bare_engine: Engine, settings: Settings, no_frontend: None
+) -> None:
+    """#327: a served kind with no due time (added after the schedule was established)
+    gets one when a person arms, without waiting for a restart."""
+    provider, _ = fake_provider()
+    async with (
+        served(bare_engine, settings, provider, Clock(START)) as app,
+        client_for(app) as client,
+    ):
+        factory = app.state.session_factory
+        with session_scope(factory, write=True) as session:
+            user = _local(session)
+            account = ensure_account(session, user).id
+            assert delete_setting(session, user, f"scheduler.job.{account}.enrich")
+        before = (await client.get("/api/v1/linkedin/schedule")).json()
+        armed = await client.post(
+            "/api/v1/linkedin/schedule/arm", json={"confirm": True}, headers=HEADERS
+        )
+    due = {job["kind"]: job["next_due"] for job in before["jobs"]}
+    after = {job["kind"]: job["next_due"] for job in armed.json()["jobs"]}
+    assert due["enrich"] is None and after["enrich"] is not None
+    assert {k: v for k, v in after.items() if k != "enrich"} == {
+        k: v for k, v in due.items() if k != "enrich"
+    }
 
 
 # --- start, watch, stop: P2-10's done-when ---------------------------------------------
