@@ -30,6 +30,7 @@ import {
 } from './api'
 import { BulkActionBar } from './bulk-actions'
 import { Callout, EmptyState, ErrorNote, LoadingNote } from './controls'
+import { ContactPicker } from './contact-picker'
 import { ExportDialog } from './export-dialog'
 import { FilterBuilder } from './filter-builder'
 import { emptyTree, validateTree } from './tree'
@@ -280,18 +281,12 @@ function SmartListFilter({
 }
 
 function StaticListMembers({ list, onChanged }: { list: ListOut; onChanged: () => void }) {
-  const [ids, setIds] = useState('')
+  const client = useQueryClient()
   const add = useMutation({
-    mutationFn: () =>
-      addMembers(
-        list.id,
-        ids
-          .split(/[\s,]+/)
-          .map((part) => Number(part))
-          .filter((value) => Number.isInteger(value) && value > 0),
-      ),
+    mutationFn: (contactIds: number[]) => addMembers(list.id, contactIds),
     onSuccess: () => {
-      setIds('')
+      // The picker's "In list" marks come from the server, so they refresh too.
+      void client.invalidateQueries({ queryKey: ['lists', list.id, 'picker'] })
       onChanged()
     },
   })
@@ -305,26 +300,11 @@ function StaticListMembers({ list, onChanged }: { list: ListOut; onChanged: () =
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
-        <form
-          className="flex items-end gap-2"
-          onSubmit={(event) => {
-            event.preventDefault()
-            if (ids.trim() !== '') add.mutate()
-          }}
-        >
-          <div className="grid flex-1 gap-1">
-            <Label htmlFor="add-members">Add contacts by id</Label>
-            <Input
-              id="add-members"
-              value={ids}
-              placeholder="12, 40, 91"
-              onChange={(event) => setIds(event.target.value)}
-            />
-          </div>
-          <Button type="submit" disabled={ids.trim() === '' || add.isPending}>
-            Add
-          </Button>
-        </form>
+        <ContactPicker
+          listId={list.id}
+          adding={add.isPending}
+          onAdd={(contactIds) => add.mutate(contactIds)}
+        />
         {add.isError && <ErrorNote label="Could not add the contacts" error={add.error} />}
         {add.isSuccess && (
           <p role="status" className="text-sm text-muted-foreground">
