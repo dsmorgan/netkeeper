@@ -2620,6 +2620,196 @@ def campaigns_enroll(
     typer.echo(outcome.summary)
 
 
+def _message_lines(m: campaign_review.MessagePreview) -> list[str]:
+    who = m.contact_name or "unnamed contact"
+    to = f" <{m.to_address}>" if m.to_address else ""
+    state = "approved" if m.approved else "not approved"
+    lines = [f"enrollment {m.enrollment_id}: {who}{to} ({state})"]
+    if m.blocked is not None:
+        lines.append(f"  blocked: {m.blocked}")
+    if m.subject is not None:
+        lines.append(f"  subject: {m.subject}")
+    if m.body is not None:
+        lines.extend(f"  | {line}" for line in m.body.splitlines() or [""])
+    lines.extend(f"  {i.severity.value}: {i.message}" for i in m.issues)
+    return lines
+
+
+@campaigns_app.command("review-step")
+def campaigns_review_step(
+    ctx: typer.Context,
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+    position: Annotated[int, typer.Argument(help="The step's position: 1 is the first.")],
+    index: Annotated[
+        int, typer.Option("--index", min=1, help="Which message to show: 1 is the first.")
+    ] = 1,
+) -> None:
+    """Show one step's review (GET /campaigns/{id}/review/steps/{step_id}).
+
+    It shows one rendered message at a time, as "3 of 10" (`--index` pages through
+    them), every blocked message, and whether the step is approved. Approve the
+    step with `netkeeper campaigns approve-step`.
+    """
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
+    with _campaign_db() as factory, session_scope(factory) as session, _campaign_errors():
+        user = _local_user_or_exit(session)
+        step = campaign_review.step_at(session, user, campaign_id, position)
+        review = campaign_review.review_step(
+            session,
+            user,
+            campaign_id,
+            step.id,
+            me=me_fields(settings.me),
+            now=datetime.now(UTC),
+            offset=index - 1,
+            limit=1,
+        )
+    if review.per_message:
+        state = f"each message is approved on its own; {review.unapproved} not approved yet"
+    else:
+        state = "approved" if review.approved else "not approved"
+    lines = [
+        f"step {review.position} of campaign {campaign_id}: {review.channel.value},"
+        f" {review.template_name}",
+        f"approval: {state}",
+    ]
+    if review.per_message:
+        lines.append(
+            "the template uses {{ personal_line }}, so every message differs and each is"
+            " reviewed and approved on its own"
+        )
+    if review.messages:
+        lines.append(f"message {index} of {review.total}:")
+        lines.extend(_message_lines(review.messages[0]))
+    elif review.total:
+        lines.append(f"no message {index}: the step has {review.total}")
+    else:
+        lines.append("no message of this step can be sent")
+    if review.blocked:
+        lines.append(f"blocked, never sent ({len(review.blocked)}):")
+        lines.extend(
+            f"  - enrollment {m.enrollment_id}: {m.contact_name or 'unnamed contact'}: {m.blocked}"
+            for m in review.blocked
+        )
+    typer.echo("\n".join(lines))
+
+
+@campaigns_app.command("approve-step")
+def campaigns_approve_step(
+    ctx: typer.Context,
+    campaign_id: Annotated[int, typer.Argument(help="The campaign's ID.")],
+    position: Annotated[int, typer.Argument(help="The step's position: 1 is the first.")],
+    enrollment: Annotated[
+        list[int] | None,
+        typer.Option(
+            "--enrollment",
+            help="For a step that uses {{ personal_line }}: approve this enrollment's message."
+            " Repeat for each.",
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    """Approve a step of a campaign under review, once for all its messages.
+
+    POST /campaigns/{id}/review/steps/{step_id}/approve. The approval covers the
+    step's messages rendered later too, until the step or its template changes.
+    Blocked messages stay blocked. A step whose template uses {{ personal_line }}
+    is approved message by message instead, with `--enrollment`
+    (POST .../messages/approve). Review the step first with `review-step`.
+    """
+    settings = _load_settings_or_exit(ctx.ensure_object(CliState))
+    me = me_fields(settings.me)
+    picked = sorted(set(enrollment or ()))
+    with _campaign_db() as factory:
+        # Read, then ask, then write: a writer held across the prompt would lock out serve.
+        with session_scope(factory) as session, _campaign_errors():
+            user = _local_user_or_exit(session)
+            step = campaign_review.step_at(session, user, campaign_id, position)
+            review = campaign_review.review_step(
+                session,
+                user,
+                campaign_id,
+                step.id,
+                me=me,
+                now=datetime.now(UTC),
+                limit=campaign_review.STEP_PAGE_MAX,
+            )
+            seen: dict[int, str] = {}
+            if review.per_message:
+                if not picked:
+                    typer.echo(
+                        f"error: step {position} uses {{{{ personal_line }}}}; approve each"
+                        " message with --enrollment ID",
+                        err=True,
+                    )
+                    raise typer.Exit(code=1)
+                offset = 0
+                while offset < review.total and len(seen) < len(picked):
+                    page = campaign_review.review_step(
+                        session,
+                        user,
+                        campaign_id,
+                        step.id,
+                        me=me,
+                        now=datetime.now(UTC),
+                        offset=offset,
+                        limit=campaign_review.STEP_PAGE_MAX,
+                    )
+                    seen.update(
+                        (m.enrollment_id, m.fingerprint)
+                        for m in page.messages
+                        if m.enrollment_id in picked
+                    )
+                    offset += campaign_review.STEP_PAGE_MAX
+                if absent := [i for i in picked if i not in seen]:
+                    typer.echo(
+                        f"error: enrollment {absent[0]} is not pending in campaign {campaign_id}",
+                        err=True,
+                    )
+                    raise typer.Exit(code=1)
+            elif picked:
+                typer.echo(
+                    f"error: step {position} is approved as a whole; --enrollment is only for a"
+                    " step that uses {{ personal_line }}",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+        if review.per_message:
+            question = f"approve {len(picked)} messages of step {position}?"
+        else:
+            question = (
+                f"approve step {position} for all {review.total} messages that can be sent,"
+                " and any rendered later until the step or its template changes?"
+                f" {len(review.blocked)} blocked stay blocked"
+            )
+        if not yes and not typer.confirm(question):
+            typer.echo(f"cancelled: step {position} is not approved")
+            raise typer.Exit(code=1)
+        with (
+            session_scope(factory, write=True) as session,
+            _campaign_errors(),
+        ):
+            user = _local_user_or_exit(session)
+            if review.per_message:
+                campaign_review.approve_messages(
+                    session, user, campaign_id, step.id, seen, me=me, now=datetime.now(UTC)
+                )
+            else:
+                campaign_review.approve_step(
+                    session,
+                    user,
+                    campaign_id,
+                    step.id,
+                    fingerprint_seen=review.fingerprint,
+                    me=me,
+                    now=datetime.now(UTC),
+                )
+    if review.per_message:
+        typer.echo(f"approved {len(picked)} messages of step {position}")
+    else:
+        typer.echo(f"step {position} of campaign {campaign_id} approved")
+
+
 @campaigns_app.command("activate")
 def campaigns_activate(
     ctx: typer.Context,
@@ -2629,8 +2819,9 @@ def campaigns_activate(
     """Activate a reviewed campaign through the review gate (POST /campaigns/{id}/activate).
 
     Refused, with the list of what is missing, unless every review requirement is
-    recorded and current: sampled and searched previews approved, a test send of
-    each email step, a clean lint, and the guard summary acknowledged. Once active,
+    recorded and current: every step approved (each message of a step that uses
+    {{ personal_line }}), a test send of each email step, a clean lint, and the
+    guard summary acknowledged. Once active,
     `netkeeper serve` fires its steps on an armed mailbox.
     """
     settings = _load_settings_or_exit(ctx.ensure_object(CliState))

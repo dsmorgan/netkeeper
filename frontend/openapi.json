@@ -71,44 +71,6 @@
         "title": "And",
         "type": "object"
       },
-      "ApprovalIn": {
-        "properties": {
-          "enrollment_id": {
-            "title": "Enrollment Id",
-            "type": "integer"
-          },
-          "fingerprint": {
-            "maxLength": 64,
-            "title": "Fingerprint",
-            "type": "string"
-          }
-        },
-        "required": [
-          "enrollment_id",
-          "fingerprint"
-        ],
-        "title": "ApprovalIn",
-        "type": "object"
-      },
-      "ApproveIn": {
-        "description": "Each enrollment with the ``fingerprint`` its preview came with.",
-        "properties": {
-          "previews": {
-            "items": {
-              "$ref": "#/components/schemas/ApprovalIn"
-            },
-            "maxItems": 50,
-            "minItems": 1,
-            "title": "Previews",
-            "type": "array"
-          }
-        },
-        "required": [
-          "previews"
-        ],
-        "title": "ApproveIn",
-        "type": "object"
-      },
       "ArchiveConnectionCountsOut": {
         "description": "What ``Connections.csv`` did (:class:`netkeeper.crm.archive.ConnectionCounts`).",
         "properties": {
@@ -3701,52 +3663,6 @@
         "title": "EnrollmentPageOut",
         "type": "object"
       },
-      "EnrollmentPreviewOut": {
-        "properties": {
-          "approved": {
-            "title": "Approved",
-            "type": "boolean"
-          },
-          "contact_id": {
-            "title": "Contact Id",
-            "type": "integer"
-          },
-          "contact_name": {
-            "title": "Contact Name",
-            "type": "string"
-          },
-          "enrollment_id": {
-            "title": "Enrollment Id",
-            "type": "integer"
-          },
-          "fingerprint": {
-            "title": "Fingerprint",
-            "type": "string"
-          },
-          "sampled": {
-            "title": "Sampled",
-            "type": "boolean"
-          },
-          "steps": {
-            "items": {
-              "$ref": "#/components/schemas/StepPreviewOut"
-            },
-            "title": "Steps",
-            "type": "array"
-          }
-        },
-        "required": [
-          "enrollment_id",
-          "contact_id",
-          "contact_name",
-          "sampled",
-          "approved",
-          "fingerprint",
-          "steps"
-        ],
-        "title": "EnrollmentPreviewOut",
-        "type": "object"
-      },
       "EnrollmentStatus": {
         "description": "One contact's state in one campaign: spec 11.3's state machine.",
         "enum": [
@@ -7052,6 +6968,134 @@
         "title": "MergedConflict",
         "type": "object"
       },
+      "MessageApprovalIn": {
+        "properties": {
+          "enrollment_id": {
+            "title": "Enrollment Id",
+            "type": "integer"
+          },
+          "fingerprint": {
+            "maxLength": 64,
+            "title": "Fingerprint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "fingerprint"
+        ],
+        "title": "MessageApprovalIn",
+        "type": "object"
+      },
+      "MessagePreviewOut": {
+        "description": "One message of a step, rendered for a pending enrollment. ``blocked`` says why\nit cannot be sent, or is null. ``approved``: an approval covers it.",
+        "properties": {
+          "approved": {
+            "title": "Approved",
+            "type": "boolean"
+          },
+          "blocked": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked"
+          },
+          "body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body"
+          },
+          "contact_id": {
+            "title": "Contact Id",
+            "type": "integer"
+          },
+          "contact_name": {
+            "title": "Contact Name",
+            "type": "string"
+          },
+          "enrollment_id": {
+            "title": "Enrollment Id",
+            "type": "integer"
+          },
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/LintIssueOut"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "to_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Address"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "contact_id",
+          "contact_name",
+          "to_address",
+          "subject",
+          "body",
+          "issues",
+          "blocked",
+          "approved",
+          "fingerprint"
+        ],
+        "title": "MessagePreviewOut",
+        "type": "object"
+      },
+      "MessagesApproveIn": {
+        "description": "Each message with the ``fingerprint`` it came with.",
+        "properties": {
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/MessageApprovalIn"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Messages",
+            "type": "array"
+          }
+        },
+        "required": [
+          "messages"
+        ],
+        "title": "MessagesApproveIn",
+        "type": "object"
+      },
       "MetSource": {
         "description": "Who decided ``met``: the person, or netkeeper on their behalf (spec 10.2).\n\n``manual`` is the resting state and covers a contact nobody has decided yet.\n``automatic`` is set only by a triage batch the person accepted\n(:func:`netkeeper.crm.triage.apply_suggestion`), so a decision netkeeper made\nnever reads as one the person made by hand, and the review queue can serve\nexactly those contacts back for checking. No import writes either: ``met``\nstays a field the person owns.",
         "enum": [
@@ -7669,45 +7713,6 @@
           "decision"
         ],
         "title": "PreferredNameOut",
-        "type": "object"
-      },
-      "PreviewsIn": {
-        "properties": {
-          "enrollment_ids": {
-            "items": {
-              "type": "integer"
-            },
-            "maxItems": 50,
-            "minItems": 1,
-            "title": "Enrollment Ids",
-            "type": "array"
-          }
-        },
-        "required": [
-          "enrollment_ids"
-        ],
-        "title": "PreviewsIn",
-        "type": "object"
-      },
-      "PreviewsOut": {
-        "properties": {
-          "content_fingerprint": {
-            "title": "Content Fingerprint",
-            "type": "string"
-          },
-          "enrollments": {
-            "items": {
-              "$ref": "#/components/schemas/EnrollmentPreviewOut"
-            },
-            "title": "Enrollments",
-            "type": "array"
-          }
-        },
-        "required": [
-          "content_fingerprint",
-          "enrollments"
-        ],
-        "title": "PreviewsOut",
         "type": "object"
       },
       "ProtectionOut": {
@@ -8808,6 +8813,21 @@
         "title": "StartsWith",
         "type": "object"
       },
+      "StepApproveIn": {
+        "description": "The step ``fingerprint`` its review came with.",
+        "properties": {
+          "fingerprint": {
+            "maxLength": 64,
+            "title": "Fingerprint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fingerprint"
+        ],
+        "title": "StepApproveIn",
+        "type": "object"
+      },
       "StepCondition": {
         "description": "When a step fires (spec 11.2): every time, or only if nobody has replied yet.",
         "enum": [
@@ -8951,78 +8971,79 @@
         "title": "StepOut",
         "type": "object"
       },
-      "StepPreviewOut": {
+      "StepReviewOut": {
+        "description": "One step's review. ``messages`` is the page from ``offset`` of the ``total`` in\nthe pager; ``blocked`` lists every message that cannot be sent. ``per_message``:\nthe template uses ``{{ personal_line }}``, so each message is approved on its own,\nand ``unapproved`` counts those not approved yet.",
         "properties": {
-          "body": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Body"
+          "approved": {
+            "title": "Approved",
+            "type": "boolean"
+          },
+          "blocked": {
+            "items": {
+              "$ref": "#/components/schemas/MessagePreviewOut"
+            },
+            "title": "Blocked",
+            "type": "array"
           },
           "channel": {
             "title": "Channel",
             "type": "string"
           },
-          "error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error"
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
           },
-          "issues": {
+          "messages": {
             "items": {
-              "$ref": "#/components/schemas/LintIssueOut"
+              "$ref": "#/components/schemas/MessagePreviewOut"
             },
-            "title": "Issues",
+            "title": "Messages",
             "type": "array"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "per_message": {
+            "title": "Per Message",
+            "type": "boolean"
           },
           "position": {
             "title": "Position",
             "type": "integer"
           },
-          "subject": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Subject"
+          "step_id": {
+            "title": "Step Id",
+            "type": "integer"
           },
-          "to_address": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "To Address"
+          "template_name": {
+            "title": "Template Name",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "unapproved": {
+            "title": "Unapproved",
+            "type": "integer"
           }
         },
         "required": [
+          "step_id",
           "position",
           "channel",
-          "to_address",
-          "subject",
-          "body",
-          "issues",
-          "error"
+          "template_name",
+          "fingerprint",
+          "per_message",
+          "approved",
+          "total",
+          "offset",
+          "messages",
+          "blocked",
+          "unapproved"
         ],
-        "title": "StepPreviewOut",
+        "title": "StepReviewOut",
         "type": "object"
       },
       "SyncRunKind": {
@@ -11768,72 +11789,6 @@
         ]
       }
     },
-    "/api/v1/campaigns/{campaign_id}/review/approve": {
-      "post": {
-        "description": "Approve viewed previews, each for the ``fingerprint`` it was shown with.",
-        "operationId": "approve_previews_api_v1_campaigns__campaign_id__review_approve_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "campaign_id",
-            "required": true,
-            "schema": {
-              "title": "Campaign Id",
-              "type": "integer"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ApproveIn"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ReviewOut"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "404": {
-            "description": "No such campaign, step or enrollment for this user"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RefusedOut"
-                }
-              }
-            },
-            "description": "Refused in the campaign's state; the detail says why. ``code`` is ``stale`` when only a fingerprint went stale: show it again and retry"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Approve Previews",
-        "tags": [
-          "campaigns"
-        ]
-      }
-    },
     "/api/v1/campaigns/{campaign_id}/review/guards/acknowledge": {
       "post": {
         "description": "Acknowledge the guard summary; refused unless it is still the current one.",
@@ -11949,114 +11904,6 @@
         ]
       }
     },
-    "/api/v1/campaigns/{campaign_id}/review/previews": {
-      "post": {
-        "description": "The rendered previews of enrollments the person looked up. Each must be approved.",
-        "operationId": "view_previews_api_v1_campaigns__campaign_id__review_previews_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "campaign_id",
-            "required": true,
-            "schema": {
-              "title": "Campaign Id",
-              "type": "integer"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PreviewsIn"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PreviewsOut"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "404": {
-            "description": "No such campaign, step or enrollment for this user"
-          },
-          "409": {
-            "description": "Refused in the campaign's state; the detail says why"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "View Previews",
-        "tags": [
-          "campaigns"
-        ]
-      }
-    },
-    "/api/v1/campaigns/{campaign_id}/review/sample": {
-      "post": {
-        "description": "The sample's rendered previews, drawn by the server once per audience.",
-        "operationId": "sample_previews_api_v1_campaigns__campaign_id__review_sample_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "campaign_id",
-            "required": true,
-            "schema": {
-              "title": "Campaign Id",
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PreviewsOut"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "404": {
-            "description": "No such campaign, step or enrollment for this user"
-          },
-          "409": {
-            "description": "Refused in the campaign's state; the detail says why"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Sample Previews",
-        "tags": [
-          "campaigns"
-        ]
-      }
-    },
     "/api/v1/campaigns/{campaign_id}/review/start": {
       "post": {
         "description": "``draft`` to ``reviewing``: needs a step and someone enrolled.",
@@ -12101,6 +11948,237 @@
           }
         },
         "summary": "Start Review",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/review/steps/{step_id}": {
+      "get": {
+        "description": "One step's review: a page of its rendered messages to page through, every\nblocked message, and the ``fingerprint`` an approval of the step is given for.",
+        "operationId": "review_step_api_v1_campaigns__campaign_id__review_steps__step_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step_id",
+            "required": true,
+            "schema": {
+              "title": "Step Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StepReviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, step or enrollment for this user"
+          },
+          "409": {
+            "description": "Refused in the campaign's state; the detail says why"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Step",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/review/steps/{step_id}/approve": {
+      "post": {
+        "description": "Approve every message of the step at once, for the ``fingerprint`` its review came\nwith. It covers messages rendered later too, until the step or its template changes,\nand never a blocked one. Refused for a step that uses ``{{ personal_line }}``.",
+        "operationId": "approve_step_api_v1_campaigns__campaign_id__review_steps__step_id__approve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step_id",
+            "required": true,
+            "schema": {
+              "title": "Step Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StepApproveIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, step or enrollment for this user"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusedOut"
+                }
+              }
+            },
+            "description": "Refused in the campaign's state; the detail says why. ``code`` is ``stale`` when only a fingerprint went stale: show it again and retry"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Approve Step",
+        "tags": [
+          "campaigns"
+        ]
+      }
+    },
+    "/api/v1/campaigns/{campaign_id}/review/steps/{step_id}/messages/approve": {
+      "post": {
+        "description": "Approve messages of a step that uses ``{{ personal_line }}`` one by one, each for\nthe ``fingerprint`` it was shown with. Refused for any other step.",
+        "operationId": "approve_messages_api_v1_campaigns__campaign_id__review_steps__step_id__messages_approve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step_id",
+            "required": true,
+            "schema": {
+              "title": "Step Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MessagesApproveIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such campaign, step or enrollment for this user"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusedOut"
+                }
+              }
+            },
+            "description": "Refused in the campaign's state; the detail says why. ``code`` is ``stale`` when only a fingerprint went stale: show it again and retry"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Approve Messages",
         "tags": [
           "campaigns"
         ]

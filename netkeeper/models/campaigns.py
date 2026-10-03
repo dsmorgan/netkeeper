@@ -456,6 +456,43 @@ class ReviewPreview(UserOwned, TimestampMixin, Base):
     approved_fingerprint: Mapped[str | None] = mapped_column(String(64))
 
 
+class StepApproval(UserOwned, TimestampMixin, Base):
+    """A campaign step approved in its review (spec 11.8; #339).
+
+    With no ``enrollment_id``, the step is approved as a whole: once, for every
+    message of it, including messages rendered later for contacts enrolled or
+    edited since. It never covers a message that fails to render, has a lint
+    error or is excluded by a guard: those stay blocked.
+
+    A step whose template uses ``{{ personal_line }}`` differs message by message,
+    so it is not approved as a whole: each of its messages is approved on its
+    own, one row per ``enrollment_id``.
+
+    Each row counts while ``fingerprint`` is the current one: the step's
+    (:func:`netkeeper.services.campaign_review.step_fingerprint`), or for one
+    message, the step's with the contact's merge values and address. Any change
+    to the step or its template undoes it. ``NULL`` is not equal to ``NULL`` in a
+    unique constraint, so the service, not the schema, keeps one whole-step row
+    per step.
+    """
+
+    __tablename__ = "campaign_step_approvals"
+    __table_args__ = (UniqueConstraint("user_id", "step_id", "enrollment_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, sort_order=-100)
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    step_id: Mapped[int] = mapped_column(
+        ForeignKey("campaign_steps.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    enrollment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("enrollments.id", ondelete="CASCADE"), index=True
+    )
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+
+
 class TestSend(UserOwned, TimestampMixin, Base):
     """One test send of an email step to the campaign's own mailbox (spec 11.8; P3-09).
 
@@ -489,8 +526,8 @@ class TestSend(UserOwned, TimestampMixin, Base):
     sent_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
 
 
-REVIEW_TABLES: tuple[type[UserOwned], ...] = (ReviewPreview, TestSend)
-"""The tables P3-09 added, for tests and tooling that iterate them."""
+REVIEW_TABLES: tuple[type[UserOwned], ...] = (ReviewPreview, StepApproval, TestSend)
+"""The review gate's tables (P3-09, #339), for tests and tooling that iterate them."""
 
 TEMPLATE_TABLES: tuple[type[UserOwned], ...] = (Template,)
 """The tables P3-03 added, for tests and tooling that iterate them."""

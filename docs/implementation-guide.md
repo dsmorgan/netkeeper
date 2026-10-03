@@ -517,7 +517,7 @@ Depends on: P3-07.
 Done when: a reply moves the enrollment to `replied` before the next step fires in `simulate`; the follow-up never fires for a replied enrollment.
 
 **P3-09 Review gate and test send** · lane campaigns · M · `safety`
-Goal: the activation requirements in spec 11.8: sampled previews, searched previews, test send per email step, lint clean, guard summary acknowledged.
+Goal: the activation requirements in spec 11.8: sampled previews, searched previews, test send per email step, lint clean, guard summary acknowledged. (Since #339, one approval per step replaces the sampled and searched previews.)
 Depends on: P3-06, P3-07.
 Done when: activation is impossible through the API without every requirement recorded.
 
@@ -584,7 +584,7 @@ Done when: the module is inert without a key; the cap stops a bulk run.
 **P5-02 Personal line** · lane campaigns · M
 Goal: `{{ personal_line }}` generated at preview time from contact data and your notes, stored with the message, editable in the review gate.
 Depends on: P5-01, P3-09.
-Done when: a campaign using the field cannot activate until every sampled line was viewed.
+Done when: a campaign using the field cannot activate until every message of a step using it was approved on its own (the review gate already requires this since #339).
 
 **P5-03 Title classification** · lane crm · S
 Goal: LLM tags with confidence, applied above a threshold as `kind = llm`, suggested below it.

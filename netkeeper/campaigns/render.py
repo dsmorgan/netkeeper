@@ -867,6 +867,21 @@ def lint(
     return issues
 
 
+def fields_used(channel: TemplateChannel, subject: str | None, body: str) -> frozenset[str]:
+    """The merge fields a template names, in its subject or its body.
+
+    A part that does not parse names nothing here; lint reports it as an error.
+    """
+    _, analyses = _lint(channel, subject, body, ())
+    return frozenset(name for analysis in analyses.values() for name in analysis.references)
+
+
+def uses_personal_line(channel: TemplateChannel, subject: str | None, body: str) -> bool:
+    """Whether a template names ``{{ personal_line }}``: its messages differ one by one,
+    so the review gate approves each of them, never the step as a whole (#339)."""
+    return PERSONAL_LINE in fields_used(channel, subject, body)
+
+
 # --- render -----------------------------------------------------------------
 
 

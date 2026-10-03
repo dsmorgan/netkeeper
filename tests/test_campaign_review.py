@@ -31,7 +31,7 @@ from netkeeper.models import (
     Mailbox,
     MailboxStatus,
     Message,
-    ReviewPreview,
+    StepApproval,
     StepMode,
     Template,
     TemplateChannel,
@@ -48,11 +48,12 @@ from netkeeper.services.campaign_sender import GmailSender
 
 CSRF = {"X-Netkeeper-Client": "1"}
 ARMED_FOR_DRAFTS: dict[str, Any] = {"armed_at": utcnow() - timedelta(days=1), "armed_by": "test"}
-REQUIREMENTS = ("sample_previews", "searched_previews", "test_sends", "lint", "guards")
+REQUIREMENTS = ("step_approvals", "test_sends", "lint", "guards")
 
 
-def test_the_sample_is_ten() -> None:
-    assert campaign_review.SAMPLE_SIZE == 10
+def test_the_step_review_limits_are_pinned() -> None:
+    assert (campaign_review.STEP_PAGE, campaign_review.STEP_PAGE_MAX) == (20, 50)
+    assert campaign_review.APPROVE_MAX == 50
 
 
 @dataclass
@@ -132,33 +133,30 @@ async def _review(client: httpx.AsyncClient, s: Setup) -> Any:
     return await _ok(await client.get(f"{s.base}/review"))
 
 
-async def _approve_sample(client: httpx.AsyncClient, s: Setup) -> Any:
-    sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
-    await _approve(client, s, sample["enrollments"])
-    return sample
-
-
-async def _search_one(client: httpx.AsyncClient, s: Setup, sample: Any) -> tuple[int, Any]:
-    sampled = {e["enrollment_id"] for e in sample["enrollments"]}
-    other = next(i for i in s.enrollment_ids if i not in sampled)
-    viewed = await _ok(
-        await client.post(
-            f"{s.base}/review/previews", json={"enrollment_ids": [other]}, headers=CSRF
+async def _step_review(
+    client: httpx.AsyncClient, s: Setup, step_id: int, *, offset: int = 0, limit: int = 20
+) -> Any:
+    return await _ok(
+        await client.get(
+            f"{s.base}/review/steps/{step_id}", params={"offset": offset, "limit": limit}
         )
     )
-    return other, viewed
 
 
-def _approval(previews: list[Any]) -> dict[str, Any]:
-    return {
-        "previews": [
-            {"enrollment_id": p["enrollment_id"], "fingerprint": p["fingerprint"]} for p in previews
-        ]
-    }
+async def _approve_step(client: httpx.AsyncClient, s: Setup, step_id: int) -> Any:
+    review = await _step_review(client, s, step_id)
+    return await _ok(
+        await client.post(
+            f"{s.base}/review/steps/{step_id}/approve",
+            json={"fingerprint": review["fingerprint"]},
+            headers=CSRF,
+        )
+    )
 
 
-async def _approve(client: httpx.AsyncClient, s: Setup, previews: list[Any]) -> None:
-    await _ok(await client.post(f"{s.base}/review/approve", json=_approval(previews), headers=CSRF))
+async def _approve_steps(client: httpx.AsyncClient, s: Setup) -> None:
+    for step_id in s.step_ids:
+        await _approve_step(client, s, step_id)
 
 
 async def _test_send_all(client: httpx.AsyncClient, s: Setup) -> None:
@@ -187,15 +185,9 @@ async def _ack(client: httpx.AsyncClient, s: Setup) -> None:
 
 
 async def _complete(client: httpx.AsyncClient, s: Setup, *, skip: str | None = None) -> None:
-    """Record every requirement but ``skip``. A searched preview is always viewed, and
-    approved unless ``skip`` is ``searched_previews``."""
-    if skip != "sample_previews":
-        sample = await _approve_sample(client, s)
-    else:
-        sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
-    _other, viewed = await _search_one(client, s, sample)
-    if skip != "searched_previews":
-        await _approve(client, s, viewed["enrollments"])
+    """Record every requirement but ``skip``."""
+    if skip != "step_approvals":
+        await _approve_steps(client, s)
     if skip != "test_sends":
         await _test_send_all(client, s)
     if skip != "lint":
@@ -255,23 +247,28 @@ async def test_nothing_recorded_lists_every_requirement(
     response = await client.post(f"{s.base}/activate", headers=CSRF)
     assert response.status_code == 409
     body = response.json()
-    assert _missing(body) == {"sample_previews", "test_sends", "lint", "guards"}
-    tests = next(m for m in body["missing"] if m["requirement"] == "test_sends")
-    assert tests["step_positions"] == [1, 2]
+    assert _missing(body) == {"step_approvals", "test_sends", "lint", "guards"}
+    for requirement in ("step_approvals", "test_sends"):
+        gap = next(m for m in body["missing"] if m["requirement"] == requirement)
+        assert gap["step_positions"] == [1, 2]
 
 
-async def test_one_sampled_preview_left_unapproved_is_named(
-    client: httpx.AsyncClient, running_app: FastAPI
+@pytest.mark.parametrize("unapproved", [0, 1])
+async def test_activation_is_refused_while_any_step_is_unapproved(
+    client: httpx.AsyncClient, running_app: FastAPI, unapproved: int
 ) -> None:
     s = _build(running_app)
-    await _complete(client, s, skip="sample_previews")
-    sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
-    ids = [e["enrollment_id"] for e in sample["enrollments"]]
-    await _approve(client, s, sample["enrollments"][1:])
+    await _complete(client, s, skip="step_approvals")
+    for n, step_id in enumerate(s.step_ids):
+        if n != unapproved:
+            await _approve_step(client, s, step_id)
     response = await client.post(f"{s.base}/activate", headers=CSRF)
     assert response.status_code == 409
     [gap] = response.json()["missing"]
-    assert (gap["requirement"], gap["enrollment_ids"]) == ("sample_previews", [ids[0]])
+    assert (gap["requirement"], gap["step_positions"]) == ("step_approvals", [unapproved + 1])
+    status, approved_at, enrollments = _campaign(s)
+    assert (status, approved_at) == (CampaignStatus.REVIEWING, None)
+    assert set(enrollments) == {EnrollmentStatus.PENDING}
 
 
 async def test_a_draft_campaign_is_not_activated(
@@ -348,12 +345,13 @@ def _edit(s: Setup, change: str) -> None:
 @pytest.mark.parametrize(
     ("change", "undone", "steps"),
     [
-        ("template", {"sample_previews", "searched_previews", "test_sends", "lint"}, [1]),
-        ("template_version", {"sample_previews", "searched_previews", "test_sends", "lint"}, [1]),
-        ("step_mode", {"sample_previews", "searched_previews", "test_sends", "lint"}, [2]),
-        ("step_added", {"sample_previews", "searched_previews", "test_sends", "lint"}, [3]),
-        ("enrolled", {"sample_previews", "guards"}, None),
-        ("removed", {"sample_previews", "guards"}, None),
+        ("template", {"step_approvals", "test_sends", "lint"}, [1]),
+        ("template_version", {"step_approvals", "test_sends", "lint"}, [1]),
+        ("step_mode", {"step_approvals", "test_sends", "lint"}, [2]),
+        ("step_added", {"step_approvals", "test_sends", "lint"}, [3]),
+        # A step approval covers the messages of contacts enrolled later (#339).
+        ("enrolled", {"guards"}, None),
+        ("removed", {"guards"}, None),
     ],
 )
 async def test_a_change_after_the_review_undoes_the_affected_approvals(
@@ -370,8 +368,9 @@ async def test_a_change_after_the_review_undoes_the_affected_approvals(
     assert response.status_code == 409
     assert _missing(response.json()) == undone
     if steps is not None:
-        tests = next(m for m in response.json()["missing"] if m["requirement"] == "test_sends")
-        assert tests["step_positions"] == steps
+        for requirement in ("step_approvals", "test_sends"):
+            gap = next(m for m in response.json()["missing"] if m["requirement"] == requirement)
+            assert gap["step_positions"] == steps
     assert _campaign(s)[0] is CampaignStatus.REVIEWING
 
 
@@ -392,56 +391,85 @@ async def test_guard_results_that_change_undo_the_acknowledgement(
     assert _missing(response.json()) == {"guards"}
 
 
-async def test_an_approval_for_previews_that_changed_since_is_refused(
+async def test_a_template_edited_after_the_review_was_shown_refuses_the_approval(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
     s = _build(running_app)
-    sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
+    review = await _step_review(client, s, s.step_ids[0])
     _edit(s, "template")
     response = await client.post(
-        f"{s.base}/review/approve", json=_approval(sample["enrollments"]), headers=CSRF
-    )
-    assert response.status_code == 409
-    assert "changed since they were viewed" in response.json()["detail"]
-    assert response.json()["code"] == "stale"  # show it again and retry (#299)
-
-
-async def test_previews_never_viewed_cannot_be_approved(
-    client: httpx.AsyncClient, running_app: FastAPI
-) -> None:
-    s = _build(running_app)
-    response = await client.post(
-        f"{s.base}/review/approve",
-        json={"previews": [{"enrollment_id": s.enrollment_ids[0], "fingerprint": "x"}]},
+        f"{s.base}/review/steps/{s.step_ids[0]}/approve",
+        json={"fingerprint": review["fingerprint"]},
         headers=CSRF,
     )
     assert response.status_code == 409
-    assert "not viewed" in response.json()["detail"]
-    assert response.json().get("code") is None  # a real refusal, not a stale one (#299)
+    assert "changed since it was shown" in response.json()["detail"]
+    assert response.json()["code"] == "stale"  # show it again and retry (#299)
+    with session_scope(s.factory) as session:
+        assert session.scalar(unscoped(select(func.count()).select_from(StepApproval))) == 0
 
 
-async def test_an_enrollment_no_longer_pending_cannot_be_approved(
+async def test_a_template_edit_after_the_approval_undoes_it(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """The approval covers the step only while its template is the one approved (#339)."""
+    s = _build(running_app)
+    await _approve_steps(client, s)
+    assert (await _step_review(client, s, s.step_ids[0]))["approved"] is True
+    _edit(s, "template")
+    review = await _step_review(client, s, s.step_ids[0])
+    assert review["approved"] is False
+    assert not any(m["approved"] for m in review["messages"])
+    assert (await _step_review(client, s, s.step_ids[1]))["approved"] is True
+    gaps = (await _review(client, s))["missing"]
+    [gap] = [m for m in gaps if m["requirement"] == "step_approvals"]
+    assert gap["step_positions"] == [1]
+    await _approve_step(client, s, s.step_ids[0])  # approved again, for the new text
+    assert "step_approvals" not in _missing(await _review(client, s))
+
+
+async def test_a_step_of_another_campaign_is_404(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
     s = _build(running_app)
-    sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
-    first = sample["enrollments"][0]
     with session_scope(s.factory, write=True) as session:
-        user = _local(session)
-        enrollment = get_scoped(session, user, Enrollment, first["enrollment_id"])
-        assert enrollment is not None
-        enrollment.status = EnrollmentStatus.REMOVED
-    response = await client.post(f"{s.base}/review/approve", json=_approval([first]), headers=CSRF)
-    assert response.status_code == 409
-    assert "not pending" in response.json()["detail"]
-    assert response.json().get("code") is None  # a real refusal, not a stale one (#299)
-    with session_scope(s.factory) as session:
-        row = session.scalars(
-            unscoped(select(ReviewPreview)).where(
-                ReviewPreview.enrollment_id == first["enrollment_id"]
-            )
-        ).one()
-        assert row.approved_at is None
+        other = factories.make_campaign(session, _local(session), status=CampaignStatus.REVIEWING)
+        other_step = other.steps[0].id
+    assert (await client.get(f"{s.base}/review/steps/{other_step}")).status_code == 404
+    response = await client.post(
+        f"{s.base}/review/steps/{other_step}/approve", json={"fingerprint": "x"}, headers=CSRF
+    )
+    assert response.status_code == 404
+
+
+async def test_an_approval_on_a_campaign_no_longer_reviewing_is_a_real_refusal(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    """Only a stale fingerprint answers ``code: stale``; a campaign moved on is not one
+    that showing the step again can fix (#299)."""
+    s = _build(running_app)
+    step = await _step_review(client, s, s.step_ids[0])
+    with session_scope(s.factory, write=True) as session:
+        campaign = session.scalars(unscoped(select(Campaign))).one()
+        campaign.status = CampaignStatus.DRAFT
+    approve = await client.post(
+        f"{s.base}/review/steps/{s.step_ids[0]}/approve",
+        json={"fingerprint": step["fingerprint"]},
+        headers=CSRF,
+    )
+    review = await _review(client, s)
+    ack = await client.post(
+        f"{s.base}/review/guards/acknowledge",
+        json={
+            "summary": review["guard_summary"],
+            "audience_fingerprint": review["audience_fingerprint"],
+        },
+        headers=CSRF,
+    )
+    for response in (approve, ack):
+        assert response.status_code == 409
+        assert "not reviewing" in response.json()["detail"]
+        assert response.json().get("code") is None
 
 
 async def test_a_summary_that_is_not_the_current_one_is_not_acknowledged(
@@ -460,34 +488,6 @@ async def test_a_summary_that_is_not_the_current_one_is_not_acknowledged(
     assert response.status_code == 409
     assert response.json()["code"] == "stale"
     assert review["guard_summary"] == "12 in audience, none excluded"
-
-
-async def test_an_approval_on_a_campaign_no_longer_reviewing_is_a_real_refusal(
-    client: httpx.AsyncClient, running_app: FastAPI
-) -> None:
-    """Only a stale fingerprint answers ``code: stale``; a campaign moved on is not one
-    that showing the previews again can fix (#299)."""
-    s = _build(running_app)
-    sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
-    with session_scope(s.factory, write=True) as session:
-        campaign = session.scalars(unscoped(select(Campaign))).one()
-        campaign.status = CampaignStatus.DRAFT
-    approve = await client.post(
-        f"{s.base}/review/approve", json=_approval(sample["enrollments"]), headers=CSRF
-    )
-    review = await _review(client, s)
-    ack = await client.post(
-        f"{s.base}/review/guards/acknowledge",
-        json={
-            "summary": review["guard_summary"],
-            "audience_fingerprint": review["audience_fingerprint"],
-        },
-        headers=CSRF,
-    )
-    for response in (approve, ack):
-        assert response.status_code == 409
-        assert "not reviewing" in response.json()["detail"]
-        assert response.json().get("code") is None
 
 
 @pytest.mark.parametrize("status", [MailboxStatus.REAUTH_REQUIRED, MailboxStatus.DISABLED])
@@ -537,33 +537,86 @@ async def test_a_linkedin_only_campaign_needs_no_mailbox_health(
     assert "mailbox" not in _missing(await _review(client, s))
 
 
-# --- the sample, lint, the transition -----------------------------------------------
+# --- the step review: paging, blocked messages, lint, the transition ------------------
 
 
-async def test_the_sample_is_ten_drawn_once_per_audience(
+async def test_the_step_review_pages_through_every_message(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
     s = _build(running_app)
-    first = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
-    again = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
-    ids = [e["enrollment_id"] for e in first["enrollments"]]
-    assert len(ids) == 10 and set(ids) <= set(s.enrollment_ids)
-    assert [e["enrollment_id"] for e in again["enrollments"]] == ids
-    step = first["enrollments"][0]["steps"][0]
-    assert step["subject"] == "Hello" and step["body"].startswith("Hi First")
-    assert step["to_address"] in s.contact_emails
-    _edit(s, "enrolled")
-    redrawn = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
-    assert len(redrawn["enrollments"]) == 10
-    assert all(not e["approved"] for e in redrawn["enrollments"])
+    first = await _step_review(client, s, s.step_ids[0], limit=5)
+    assert (first["total"], first["offset"], first["position"]) == (12, 0, 1)
+    assert first["per_message"] is False and first["approved"] is False
+    assert first["blocked"] == []
+    pages = [first["messages"]]
+    for offset in (5, 10):
+        page = await _step_review(client, s, s.step_ids[0], offset=offset, limit=5)
+        assert page["fingerprint"] == first["fingerprint"]
+        pages.append(page["messages"])
+    assert [len(p) for p in pages] == [5, 5, 2]
+    seen = [m["enrollment_id"] for page in pages for m in page]
+    assert seen == s.enrollment_ids  # every contact, once, in order
+    message = pages[0][0]
+    assert message["subject"] == "Hello" and message["body"].startswith("Hi First")
+    assert message["to_address"] == s.contact_emails[0]
+    assert message["blocked"] is None and message["approved"] is False
+    past = await _step_review(client, s, s.step_ids[0], offset=12)
+    assert (past["total"], past["messages"]) == (12, [])
+    too_many = await client.get(f"{s.base}/review/steps/{s.step_ids[0]}", params={"limit": 51})
+    assert too_many.status_code == 422
 
 
-async def test_a_small_audience_is_sampled_whole(
+async def test_a_step_approval_covers_contacts_enrolled_after_it(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
-    s = _build(running_app, people=3)
-    sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
-    assert sorted(e["enrollment_id"] for e in sample["enrollments"]) == s.enrollment_ids
+    s = _build(running_app)
+    await _complete(client, s)
+    _edit(s, "enrolled")
+    await _ack(client, s)  # the audience changed, so the guard summary is acknowledged again
+    review = await _step_review(client, s, s.step_ids[0], limit=50)
+    assert review["approved"] is True and review["total"] == 13
+    assert all(m["approved"] for m in review["messages"])
+    assert _missing(await _review(client, s)) == set()
+    assert (await client.post(f"{s.base}/activate", headers=CSRF)).status_code == 200
+
+
+def _block(s: Setup, enrollment_id: int, how: str) -> None:
+    with session_scope(s.factory, write=True) as session:
+        user = _local(session)
+        enrollment = get_scoped(session, user, Enrollment, enrollment_id)
+        assert enrollment is not None
+        contact = get_scoped(session, user, Contact, enrollment.contact_id)
+        assert contact is not None
+        if how == "do_not_contact":
+            contact.do_not_contact = True
+        elif how == "no_email":
+            contact.emails.clear()
+        else:
+            raise AssertionError(how)
+
+
+async def test_blocked_messages_are_listed_apart_and_never_approved(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app, people=4)
+    _block(s, s.enrollment_ids[1], "do_not_contact")
+    _block(s, s.enrollment_ids[2], "no_email")
+    review = await _step_review(client, s, s.step_ids[0])
+    assert review["total"] == 2
+    assert [m["enrollment_id"] for m in review["messages"]] == [
+        s.enrollment_ids[0],
+        s.enrollment_ids[3],
+    ]
+    blocked = {m["enrollment_id"]: m["blocked"] for m in review["blocked"]}
+    assert blocked == {
+        s.enrollment_ids[1]: "excluded by a guard: do-not-contact",
+        s.enrollment_ids[2]: "excluded by a guard: no email",
+    }
+    await _approve_steps(client, s)  # a step with blocked messages is approved for the rest
+    review = await _step_review(client, s, s.step_ids[0])
+    assert review["approved"] is True
+    assert all(m["approved"] for m in review["messages"])
+    assert not any(m["approved"] for m in review["blocked"])
 
 
 async def test_lint_errors_are_answered_and_not_recorded(
@@ -601,6 +654,149 @@ async def test_review_starts_from_draft(client: httpx.AsyncClient, running_app: 
     s = _build(running_app, status=CampaignStatus.DRAFT)
     body = await _ok(await client.post(f"{s.base}/review/start", headers=CSRF))
     assert body["status"] == "reviewing"
+
+
+# --- personal_line: each message approved on its own (#339) --------------------------
+
+
+def _personal_line(s: Setup, position: int = 1) -> int:
+    """Step ``position``'s template made to name ``{{ personal_line }}``; its step id."""
+    with session_scope(s.factory, write=True) as session:
+        user = _local(session)
+        step = session.scalars(
+            unscoped(select(CampaignStep)).where(CampaignStep.position == position)
+        ).one()
+        template = get_scoped(session, user, Template, step.template_id)
+        assert template is not None
+        template.body = "Hi {{ first_name }}. {{ personal_line }}"
+        return step.id
+
+
+async def _approve_messages(
+    client: httpx.AsyncClient, s: Setup, step_id: int, messages: list[Any]
+) -> httpx.Response:
+    return await client.post(
+        f"{s.base}/review/steps/{step_id}/messages/approve",
+        json={
+            "messages": [
+                {"enrollment_id": m["enrollment_id"], "fingerprint": m["fingerprint"]}
+                for m in messages
+            ]
+        },
+        headers=CSRF,
+    )
+
+
+async def test_a_personal_line_step_cannot_be_approved_as_a_whole(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app, people=3)
+    step_id = _personal_line(s)
+    review = await _step_review(client, s, step_id)
+    assert review["per_message"] is True and review["approved"] is False
+    assert (review["total"], review["unapproved"]) == (3, 3)
+    response = await client.post(
+        f"{s.base}/review/steps/{step_id}/approve",
+        json={"fingerprint": review["fingerprint"]},
+        headers=CSRF,
+    )
+    assert response.status_code == 409
+    assert "approved on its own" in response.json()["detail"]
+    assert response.json().get("code") is None  # a real refusal, not a stale one
+    with session_scope(s.factory) as session:
+        assert session.scalar(unscoped(select(func.count()).select_from(StepApproval))) == 0
+
+
+async def test_a_personal_line_step_needs_every_message_approved_to_activate(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app, people=3)
+    step_id = _personal_line(s)
+    await _approve_step(client, s, s.step_ids[1])
+    await _complete(client, s, skip="step_approvals")
+    review = await _step_review(client, s, step_id)
+    await _ok(await _approve_messages(client, s, step_id, review["messages"][:2]))
+
+    response = await client.post(f"{s.base}/activate", headers=CSRF)
+    assert response.status_code == 409
+    [gap] = response.json()["missing"]
+    assert gap["requirement"] == "message_approvals"
+    assert (gap["enrollment_ids"], gap["step_positions"]) == ([s.enrollment_ids[2]], [1])
+    assert _campaign(s)[0] is CampaignStatus.REVIEWING
+
+    review = await _step_review(client, s, step_id)
+    assert [m["approved"] for m in review["messages"]] == [True, True, False]
+    assert review["unapproved"] == 1
+    await _ok(await _approve_messages(client, s, step_id, review["messages"][2:]))
+    assert (await client.post(f"{s.base}/activate", headers=CSRF)).status_code == 200
+
+
+async def test_editing_a_contact_undoes_its_personal_line_message_approval(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app, people=2)
+    step_id = _personal_line(s)
+    review = await _step_review(client, s, step_id)
+    await _ok(await _approve_messages(client, s, step_id, review["messages"]))
+    with session_scope(s.factory, write=True) as session:
+        user = _local(session)
+        enrollment = get_scoped(session, user, Enrollment, s.enrollment_ids[0])
+        assert enrollment is not None
+        contact = get_scoped(session, user, Contact, enrollment.contact_id)
+        assert contact is not None
+        contact.preferred_name = "Somebody Else"
+    gaps = (await _review(client, s))["missing"]
+    [gap] = [m for m in gaps if m["requirement"] == "message_approvals"]
+    assert gap["enrollment_ids"] == [s.enrollment_ids[0]]
+    stale = await _approve_messages(client, s, step_id, review["messages"][:1])
+    assert stale.status_code == 409 and stale.json()["code"] == "stale"
+
+
+async def test_a_template_edit_undoes_personal_line_message_approvals(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app, people=2)
+    step_id = _personal_line(s)
+    review = await _step_review(client, s, step_id)
+    await _ok(await _approve_messages(client, s, step_id, review["messages"]))
+    with session_scope(s.factory, write=True) as session:
+        step = session.scalars(
+            unscoped(select(CampaignStep)).where(CampaignStep.id == step_id)
+        ).one()
+        template = get_scoped(session, _local(session), Template, step.template_id)
+        assert template is not None
+        template.body = "Hello {{ first_name }}. {{ personal_line }}"
+    gaps = (await _review(client, s))["missing"]
+    [gap] = [m for m in gaps if m["requirement"] == "message_approvals"]
+    assert gap["enrollment_ids"] == s.enrollment_ids
+
+
+async def test_messages_of_a_step_approved_as_a_whole_are_not_approved_one_by_one(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app, people=2)
+    review = await _step_review(client, s, s.step_ids[0])
+    response = await _approve_messages(client, s, s.step_ids[0], review["messages"])
+    assert response.status_code == 409
+    assert "approved as a whole" in response.json()["detail"]
+
+
+async def test_a_message_of_an_enrollment_no_longer_pending_is_not_approved(
+    client: httpx.AsyncClient, running_app: FastAPI
+) -> None:
+    s = _build(running_app, people=2)
+    step_id = _personal_line(s)
+    review = await _step_review(client, s, step_id)
+    with session_scope(s.factory, write=True) as session:
+        enrollment = get_scoped(session, _local(session), Enrollment, s.enrollment_ids[0])
+        assert enrollment is not None
+        enrollment.status = EnrollmentStatus.REMOVED
+    response = await _approve_messages(client, s, step_id, review["messages"][:1])
+    assert response.status_code == 409
+    assert "not pending" in response.json()["detail"]
+    assert response.json().get("code") is None
+    with session_scope(s.factory) as session:
+        assert session.scalar(unscoped(select(func.count()).select_from(StepApproval))) == 0
 
 
 # --- the test send ------------------------------------------------------------------
@@ -744,9 +940,13 @@ async def test_a_test_send_gmail_refused_records_nothing(
     [
         ("GET", "/review", None),
         ("POST", "/review/start", None),
-        ("POST", "/review/sample", None),
-        ("POST", "/review/previews", {"enrollment_ids": [1]}),
-        ("POST", "/review/approve", {"previews": [{"enrollment_id": 1, "fingerprint": "x"}]}),
+        ("GET", "/review/steps/{step}", None),
+        ("POST", "/review/steps/{step}/approve", {"fingerprint": "x"}),
+        (
+            "POST",
+            "/review/steps/{step}/messages/approve",
+            {"messages": [{"enrollment_id": 1, "fingerprint": "x"}]},
+        ),
         ("POST", "/review/lint", None),
         ("POST", "/review/guards/acknowledge", {"summary": "x", "audience_fingerprint": "x"}),
         ("POST", "/review/test-send", {"step_id": 1}),
@@ -766,10 +966,13 @@ async def test_another_users_campaign_is_404(
         campaign = factories.make_campaign(session, other, status=CampaignStatus.REVIEWING)
         contact = factories.make_contact(session, other, emails=["them@contacts.example"])
         factories.make_enrollment(session, campaign, contact, status=EnrollmentStatus.PENDING)
-        campaign_id = campaign.id
+        campaign_id, step_id = campaign.id, campaign.steps[0].id
     running_app.state.gmail_opener = lambda *_: pytest.fail("no Gmail for another user")
     response = await client.request(
-        method, f"/api/v1/campaigns/{campaign_id}{path}", json=body, headers=CSRF
+        method,
+        f"/api/v1/campaigns/{campaign_id}{path.format(step=step_id)}",
+        json=body,
+        headers=CSRF,
     )
     assert response.status_code == 404
     with session_scope(factory) as session:
@@ -858,16 +1061,15 @@ async def test_an_arming_changed_after_the_first_check_decides_the_test(
 
 
 @pytest.mark.parametrize("edit", ["renamed", "new_email"])
-async def test_editing_an_approved_contact_undoes_its_approval(
+async def test_editing_a_contact_keeps_the_step_approval(
     client: httpx.AsyncClient, running_app: FastAPI, edit: str
 ) -> None:
+    """A step approval covers the step's messages as they render later (#339)."""
     s = _build(running_app)
     await _complete(client, s)
-    sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
-    enrollment_id = sample["enrollments"][0]["enrollment_id"]
     with session_scope(s.factory, write=True) as session:
         user = _local(session)
-        enrollment = get_scoped(session, user, Enrollment, enrollment_id)
+        enrollment = get_scoped(session, user, Enrollment, s.enrollment_ids[0])
         assert enrollment is not None
         contact = get_scoped(session, user, Contact, enrollment.contact_id)
         assert contact is not None
@@ -875,11 +1077,9 @@ async def test_editing_an_approved_contact_undoes_its_approval(
             contact.preferred_name = "Somebody Else"
         else:
             contact.emails[0].email = "moved@contacts.example"
-    response = await client.post(f"{s.base}/activate", headers=CSRF)
-    assert response.status_code == 409
-    [gap] = response.json()["missing"]
-    assert (gap["requirement"], gap["enrollment_ids"]) == ("sample_previews", [enrollment_id])
-    assert _campaign(s)[0] is CampaignStatus.REVIEWING
+    review = await _step_review(client, s, s.step_ids[0])
+    assert review["messages"][0]["approved"] is True
+    assert (await client.post(f"{s.base}/activate", headers=CSRF)).status_code == 200
 
 
 async def test_an_old_audience_fingerprint_is_not_acknowledged(
@@ -904,40 +1104,20 @@ async def test_an_old_audience_fingerprint_is_not_acknowledged(
     assert response.json()["code"] == "stale"
 
 
-async def test_previews_viewed_in_an_earlier_sample_must_still_be_approved(
+async def test_a_test_send_renders_for_the_first_pending_enrollment(
     client: httpx.AsyncClient, running_app: FastAPI
 ) -> None:
     s = _build(running_app)
-    await _complete(client, s, skip="sample_previews")
-    first = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
-    _edit(s, "enrolled")
-    await _ack(client, s)
-    second = await _approve_sample(client, s)
-    dropped = {e["enrollment_id"] for e in first["enrollments"]} - {
-        e["enrollment_id"] for e in second["enrollments"]
-    }
-    body = await _review(client, s)
-    searched = [m for m in body["missing"] if m["requirement"] == "searched_previews"]
-    if dropped:
-        assert _missing(body) == {"searched_previews"}
-        assert set(searched[0]["enrollment_ids"]) == dropped
-    else:  # every earlier draw was drawn again (about 1 in 286)
-        assert _missing(body) == set()
-
-
-async def test_a_test_send_renders_for_the_first_sampled_enrollment(
-    client: httpx.AsyncClient, running_app: FastAPI
-) -> None:
-    s = _build(running_app)
-    sample = await _ok(await client.post(f"{s.base}/review/sample", headers=CSRF))
+    review = await _step_review(client, s, s.step_ids[0])
     await _ok(
         await client.post(
             f"{s.base}/review/test-send", json={"step_id": s.step_ids[0]}, headers=CSRF
         )
     )
     [sent] = s.gmail.sent()
-    first = sample["enrollments"][0]
-    assert first["steps"][0]["body"] in s.gmail.raw(sent.id).get_content()
+    first = review["messages"][0]
+    assert first["enrollment_id"] == s.enrollment_ids[0]
+    assert first["body"] in s.gmail.raw(sent.id).get_content()
 
 
 # --- a fresh mailbox, end to end (#304) --------------------------------------------------

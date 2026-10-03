@@ -4,10 +4,15 @@ The flow, for the campaign builder (P3-11):
 
 1. ``POST /campaigns/{id}/review/start``: ``draft`` to ``reviewing``, once the
    campaign has a step and someone enrolled.
-2. ``POST .../review/sample`` draws the sample (the same one while the audience
-   is unchanged) and answers its previews; ``POST .../review/previews`` answers
-   the previews of enrollments the person looked up. ``POST .../review/approve``
-   approves viewed previews, each with the ``fingerprint`` it came with.
+2. ``GET .../review/steps/{step_id}`` answers one step's review: one page of its
+   rendered messages (``offset``, ``limit``) to page through, every message that
+   is blocked (it fails to render, has a lint error, or a guard excludes the
+   contact), and the step's ``fingerprint``. ``POST .../review/steps/{step_id}/approve``
+   approves the step as a whole for that ``fingerprint``, which covers its
+   messages rendered later too, until the step or its template changes. A step
+   whose template uses ``{{ personal_line }}`` is not approved as a whole:
+   ``POST .../review/steps/{step_id}/messages/approve`` approves its messages
+   one by one, each with the ``fingerprint`` it came with (#339).
 3. ``POST .../review/lint``, ``POST .../review/guards/acknowledge`` (with the
    summary and ``audience_fingerprint`` from ``GET .../review``), and
    ``POST .../review/test-send`` for each email step: sent on a mailbox armed to
@@ -28,7 +33,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -111,44 +116,59 @@ class ReviewOut(BaseModel):
     missing: list[MissingOut]
 
 
-class StepPreviewOut(BaseModel):
-    position: int
-    channel: str
+class MessagePreviewOut(BaseModel):
+    """One message of a step, rendered for a pending enrollment. ``blocked`` says why
+    it cannot be sent, or is null. ``approved``: an approval covers it."""
+
+    enrollment_id: int
+    contact_id: int
+    contact_name: str
     to_address: str | None
     subject: str | None
     body: str | None
     issues: list[LintIssueOut]
-    error: str | None
-
-
-class EnrollmentPreviewOut(BaseModel):
-    enrollment_id: int
-    contact_id: int
-    contact_name: str
-    sampled: bool
+    blocked: str | None
     approved: bool
     fingerprint: str
-    steps: list[StepPreviewOut]
 
 
-class PreviewsOut(BaseModel):
-    content_fingerprint: str
-    enrollments: list[EnrollmentPreviewOut]
+class StepReviewOut(BaseModel):
+    """One step's review. ``messages`` is the page from ``offset`` of the ``total`` in
+    the pager; ``blocked`` lists every message that cannot be sent. ``per_message``:
+    the template uses ``{{ personal_line }}``, so each message is approved on its own,
+    and ``unapproved`` counts those not approved yet."""
+
+    step_id: int
+    position: int
+    channel: str
+    template_name: str
+    fingerprint: str
+    per_message: bool
+    approved: bool
+    total: int
+    offset: int
+    messages: list[MessagePreviewOut]
+    blocked: list[MessagePreviewOut]
+    unapproved: int
 
 
-class PreviewsIn(BaseModel):
-    enrollment_ids: Annotated[list[int], Field(min_length=1, max_length=service.VIEW_MAX)]
+class StepApproveIn(BaseModel):
+    """The step ``fingerprint`` its review came with."""
+
+    fingerprint: Annotated[str, Field(max_length=64)]
 
 
-class ApprovalIn(BaseModel):
+class MessageApprovalIn(BaseModel):
     enrollment_id: int
     fingerprint: Annotated[str, Field(max_length=64)]
 
 
-class ApproveIn(BaseModel):
-    """Each enrollment with the ``fingerprint`` its preview came with."""
+class MessagesApproveIn(BaseModel):
+    """Each message with the ``fingerprint`` it came with."""
 
-    previews: Annotated[list[ApprovalIn], Field(min_length=1, max_length=service.VIEW_MAX)]
+    messages: Annotated[
+        list[MessageApprovalIn], Field(min_length=1, max_length=service.APPROVE_MAX)
+    ]
 
 
 class LintStepOut(BaseModel):
@@ -212,32 +232,35 @@ def _me(request: Request) -> dict[str, str]:
     return me_fields(_settings(request).me)
 
 
-def _previews_out(previews: service.Previews) -> PreviewsOut:
-    return PreviewsOut(
-        content_fingerprint=previews.content_fingerprint,
-        enrollments=[
-            EnrollmentPreviewOut(
-                enrollment_id=e.enrollment_id,
-                contact_id=e.contact_id,
-                contact_name=e.contact_name,
-                sampled=e.sampled,
-                approved=e.approved,
-                fingerprint=e.fingerprint,
-                steps=[
-                    StepPreviewOut(
-                        position=s.position,
-                        channel=s.channel.value,
-                        to_address=s.to_address,
-                        subject=s.subject,
-                        body=s.body,
-                        issues=[LintIssueOut.model_validate(i.to_json()) for i in s.issues],
-                        error=s.error,
-                    )
-                    for s in e.steps
-                ],
-            )
-            for e in previews.enrollments
-        ],
+def _message_out(m: service.MessagePreview) -> MessagePreviewOut:
+    return MessagePreviewOut(
+        enrollment_id=m.enrollment_id,
+        contact_id=m.contact_id,
+        contact_name=m.contact_name,
+        to_address=m.to_address,
+        subject=m.subject,
+        body=m.body,
+        issues=[LintIssueOut.model_validate(i.to_json()) for i in m.issues],
+        blocked=m.blocked,
+        approved=m.approved,
+        fingerprint=m.fingerprint,
+    )
+
+
+def _step_review_out(r: service.StepReview) -> StepReviewOut:
+    return StepReviewOut(
+        step_id=r.step_id,
+        position=r.position,
+        channel=r.channel.value,
+        template_name=r.template_name,
+        fingerprint=r.fingerprint,
+        per_message=r.per_message,
+        approved=r.approved,
+        total=r.total,
+        offset=r.offset,
+        messages=[_message_out(m) for m in r.messages],
+        blocked=[_message_out(m) for m in r.blocked],
+        unapproved=r.unapproved,
     )
 
 
@@ -274,41 +297,81 @@ def start_review(
         return _review(session, user, campaign_id, _me(request))
 
 
-@router.post("/campaigns/{campaign_id}/review/sample", responses={**NOT_FOUND, **CONFLICT})
-def sample_previews(
-    campaign_id: int, request: Request, session: SessionDep, user: CurrentUser
-) -> PreviewsOut:
-    """The sample's rendered previews, drawn by the server once per audience."""
+@router.get("/campaigns/{campaign_id}/review/steps/{step_id}", responses={**NOT_FOUND, **CONFLICT})
+def review_step(
+    campaign_id: int,
+    step_id: int,
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=service.STEP_PAGE_MAX)] = service.STEP_PAGE,
+) -> StepReviewOut:
+    """One step's review: a page of its rendered messages to page through, every
+    blocked message, and the ``fingerprint`` an approval of the step is given for."""
     with translate_errors():
-        return _previews_out(
-            service.draw_sample(session, user, campaign_id, me=_me(request), now=utcnow())
-        )
-
-
-@router.post("/campaigns/{campaign_id}/review/previews", responses={**NOT_FOUND, **CONFLICT})
-def view_previews(
-    campaign_id: int, body: PreviewsIn, request: Request, session: SessionDep, user: CurrentUser
-) -> PreviewsOut:
-    """The rendered previews of enrollments the person looked up. Each must be approved."""
-    with translate_errors():
-        return _previews_out(
-            service.view(
-                session, user, campaign_id, body.enrollment_ids, me=_me(request), now=utcnow()
+        return _step_review_out(
+            service.review_step(
+                session,
+                user,
+                campaign_id,
+                step_id,
+                me=_me(request),
+                now=utcnow(),
+                offset=offset,
+                limit=limit,
             )
         )
 
 
-@router.post("/campaigns/{campaign_id}/review/approve", responses={**NOT_FOUND, **STALE})
-def approve_previews(
-    campaign_id: int, body: ApproveIn, request: Request, session: SessionDep, user: CurrentUser
+@router.post(
+    "/campaigns/{campaign_id}/review/steps/{step_id}/approve", responses={**NOT_FOUND, **STALE}
+)
+def approve_step(
+    campaign_id: int,
+    step_id: int,
+    body: StepApproveIn,
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
 ) -> ReviewOut:
-    """Approve viewed previews, each for the ``fingerprint`` it was shown with."""
+    """Approve every message of the step at once, for the ``fingerprint`` its review came
+    with. It covers messages rendered later too, until the step or its template changes,
+    and never a blocked one. Refused for a step that uses ``{{ personal_line }}``."""
     with translate_errors():
-        service.approve(
+        service.approve_step(
             session,
             user,
             campaign_id,
-            {p.enrollment_id: p.fingerprint for p in body.previews},
+            step_id,
+            fingerprint_seen=body.fingerprint,
+            me=_me(request),
+            now=utcnow(),
+        )
+        return _review(session, user, campaign_id, _me(request))
+
+
+@router.post(
+    "/campaigns/{campaign_id}/review/steps/{step_id}/messages/approve",
+    responses={**NOT_FOUND, **STALE},
+)
+def approve_messages(
+    campaign_id: int,
+    step_id: int,
+    body: MessagesApproveIn,
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+) -> ReviewOut:
+    """Approve messages of a step that uses ``{{ personal_line }}`` one by one, each for
+    the ``fingerprint`` it was shown with. Refused for any other step."""
+    with translate_errors():
+        service.approve_messages(
+            session,
+            user,
+            campaign_id,
+            step_id,
+            {m.enrollment_id: m.fingerprint for m in body.messages},
             me=_me(request),
             now=utcnow(),
         )
