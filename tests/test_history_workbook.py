@@ -113,9 +113,52 @@ def test_a_row_with_a_name_but_no_address_is_counted_as_a_warning() -> None:
     campaign = read_tab(0, grid(tab))
     assert [p.email for p in campaign.opened] == ["ada@example.test"]
     assert campaign.warnings == (
-        "1 row(s) of the opened list had no usable address",
+        "1 row(s) of the opened list were dropped: no usable address",
         "the opens list has 1 people but the opens cell says 2",
     )
+
+
+def test_only_a_link_shaped_row_in_the_clicks_list_is_a_link() -> None:
+    """A text-only row is a clicked link only in the clicks list, and only when it looks
+    like one; anything else is reported (#65 review, N3)."""
+    tab = Tab(
+        extra_rows=[
+            (5, 13, "a note, not a link"),  # the blank row after Ada's link group
+            (8, 8, "stray text in the opens list"),  # right below the three openers
+        ]
+    )
+    campaign = read_tab(0, grid(tab))
+    assert [p.email for p in campaign.clicked] == ["ada@example.test"]
+    assert sorted(campaign.warnings) == [
+        "1 row(s) of the clicked list were dropped: no usable address",
+        "1 row(s) of the opened list were dropped: no usable address",
+    ]
+
+
+@pytest.mark.parametrize("value", ["mailto:ada@example.test", "ada:x@example.test"])
+def test_a_colon_in_the_local_part_is_not_an_address(value: str) -> None:
+    tab = Tab(
+        opened=(("Ada", "Lovelace", value), ("Bob", "Babbage", "bob@example.test")),
+        opens="2 (40.0%)",
+    )
+    campaign = read_tab(0, grid(tab))
+    assert [p.email for p in campaign.opened] == ["bob@example.test"]
+
+
+def test_a_formula_with_no_saved_value_is_reported_not_read_as_blank() -> None:
+    tab = Tab(
+        opened=(
+            ("Ada", "Lovelace", '=LOWER("ADA@example.test")'),
+            ("Bob", "Babbage", "bob@example.test"),
+        ),
+        opens="2 (40.0%)",
+    )
+    (campaign,) = read_workbook(workbook_bytes(tab)).campaigns
+    assert campaign.warnings[0] == (
+        "1 formula cell(s) have no saved value and read as empty;"
+        " open the sheet, let it calculate, and export it again"
+    )
+    assert "1 row(s) of the opened list were dropped: no usable address" in campaign.warnings
 
 
 def test_a_tab_without_a_campaign_header_is_refused() -> None:
