@@ -202,9 +202,16 @@ class JobOutcome(enum.Enum):
     page's answers, so it could not age anyone): offer it again
     :data:`NOT_DONE_RETRY` later instead of a whole interval out."""
 
+    SKIPPED = "skipped"
+    """The handler started nothing: the schedule was paused, or the account
+    disarmed, after the gate let the fire through (#324). The fire counts as
+    skipped, not run, so a first-setup kind keeps its standing and is offered
+    again :data:`FIRST_SETUP_RETRY` later, as a fire the gate skipped would be."""
+
 
 #: A handler returns ``None`` when the fire ran (whatever the run made of it),
-#: :attr:`JobOutcome.RETRY_LATER`, or :attr:`JobOutcome.NOT_DONE`.
+#: :attr:`JobOutcome.RETRY_LATER`, :attr:`JobOutcome.NOT_DONE`, or
+#: :attr:`JobOutcome.SKIPPED`.
 JobHandler = Callable[[JobContext], Awaitable[JobOutcome | None]]
 JobRegistry = Mapping[JobKind, JobHandler]
 
@@ -910,6 +917,47 @@ def record_fired(
     return next_due
 
 
+def _record_skipped(
+    session_factory: sessionmaker[Session],
+    user: User,
+    account_id: int,
+    kind: JobKind,
+    *,
+    fired_before: bool,
+    due: datetime,
+    now: datetime,
+    schedule: JobSchedule,
+    tz: str,
+    active_start: time,
+    active_end: time,
+) -> datetime:
+    """Undo what claiming a fire assumed when its handler started nothing (#324).
+
+    The claim advanced the due time as if the fire ran. A fire that did not run
+    must not spend a first-setup kind's standing: it is put back, and the kind is
+    offered again :data:`FIRST_SETUP_RETRY` after the later of ``due`` and ``now``,
+    exactly as :func:`record_fired` treats a fire the gate skipped. Any other kind's
+    cadence already moved on the same way a skip moves it, and is left alone.
+    """
+    with session_scope(session_factory, write=True) as session:
+        state = _load_state(session, user, account_id, kind)
+        if state is None:
+            raise RuntimeError(
+                f"_record_skipped: no established schedule for account {account_id}/{kind.value}"
+            )
+        if fired_before or not schedule.run_on_first_setup:
+            return state.due
+        retry = _snap_to_active_hours(
+            max(due, now) + FIRST_SETUP_RETRY,
+            tz,
+            start=active_start,
+            end=active_end,
+            respect_active_hours=schedule.respect_active_hours,
+        )
+        _store_state(session, user, account_id, kind, replace(state, due=retry, fired_once=False))
+    return retry
+
+
 def _defer_as_catchup(
     session: Session,
     user: User,
@@ -1005,7 +1053,7 @@ async def poll_and_fire(
     the SQLite write lock for its duration.
     """
 
-    def claim() -> tuple[datetime, bool, bool, str | None, datetime] | None:
+    def claim() -> tuple[datetime, bool, bool, bool, str | None, datetime] | None:
         # The one writer session that reads and advances the due time, run whole
         # off the event loop (#259); it commits before the handler is awaited.
         with session_scope(session_factory, write=True) as session:
@@ -1038,6 +1086,7 @@ async def poll_and_fire(
             due = state.due
             is_catchup = state.is_catchup
             was_reoffer = state.resume_due is not None
+            fired_before = state.fired_once
             skipped_reason: str | None = None
             if not isinstance(armed, Arming) and not armed(session, user, account_id):
                 skipped_reason = "disarmed"
@@ -1079,12 +1128,12 @@ async def poll_and_fire(
                 handler_ran=skipped_reason is None,
                 now=now,
             )
-        return due, is_catchup, was_reoffer, skipped_reason, next_due
+        return due, is_catchup, was_reoffer, fired_before, skipped_reason, next_due
 
     claimed = await off_loop(claim)
     if claimed is None:
         return None
-    due, is_catchup, was_reoffer, skipped_reason, next_due = claimed
+    due, is_catchup, was_reoffer, fired_before, skipped_reason, next_due = claimed
     fired = skipped_reason is None
     if fired:
         handler = registry[kind]
@@ -1092,7 +1141,25 @@ async def poll_and_fire(
             user_id=user.id, account_id=account_id, kind=kind, due=due, catch_up=is_catchup
         )
         outcome = await handler(ctx)
-        if outcome is JobOutcome.NOT_DONE and was_reoffer:
+        if outcome is JobOutcome.SKIPPED:
+            # The handler started nothing (#324): the fire was skipped, not run.
+            fired = False
+            skipped_reason = "skipped_by_handler"
+            next_due = await off_loop(
+                _record_skipped,
+                session_factory,
+                user,
+                account_id,
+                kind,
+                fired_before=fired_before,
+                due=due,
+                now=now,
+                schedule=schedule,
+                tz=tz,
+                active_start=active_start,
+                active_end=active_end,
+            )
+        elif outcome is JobOutcome.NOT_DONE and was_reoffer:
             # One re-offer per interval (#201 review, M1): a re-offer that was not
             # done either goes back to the normal cadence, so a loss rate that never
             # clears -- or a wall that looks like unreadable bodies -- cannot turn the

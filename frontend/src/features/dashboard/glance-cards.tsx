@@ -156,7 +156,7 @@ export function NextLinkedInRunCard() {
         <Checking />
       ) : schedule.isError ? (
         <Failed what="The LinkedIn schedule" />
-      ) : !schedule.data.armed && !schedule.data.paused ? (
+      ) : !schedule.data.armed ? (
         <>
           <Muted>
             Scheduled runs are off. Nothing visits LinkedIn on its own until you arm them.
@@ -166,6 +166,8 @@ export function NextLinkedInRunCard() {
               Open LinkedIn
             </Button>
           </div>
+          {/* Disarmed and paused are separate switches: both say so, and either can be undone. */}
+          {schedule.data.paused && <SchedulePause schedule={schedule.data} />}
         </>
       ) : schedule.data.paused ? (
         <SchedulePause schedule={schedule.data} />

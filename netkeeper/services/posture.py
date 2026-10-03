@@ -92,7 +92,7 @@ from netkeeper.services.budgets import (
 from netkeeper.services.budgets import status as budget_status
 from netkeeper.services.linkedin_accounts import (
     find_account,
-    schedule_paused_at,
+    schedule_pause_state,
     scheduled_runs_armed,
 )
 from netkeeper.services.linkedin_session import (
@@ -1441,12 +1441,16 @@ def _scheduled_runs_armed(session: Session, user: User, account_id: int) -> Prot
     """
     account = find_account(session, user)
     armed = scheduled_runs_armed(session, user, account_id)
-    paused_at = schedule_paused_at(session, user, account_id)
+    pause = schedule_pause_state(session, user, account_id)
+    since = (
+        "paused (unreadable value)"
+        if pause.paused_at is None
+        else f"paused since {pause.paused_at:%Y-%m-%d %H:%M UTC}"
+    )
     paused = (
-        ""
-        if paused_at is None
-        else f"; paused since {paused_at:%Y-%m-%d %H:%M UTC}: no new scheduled run starts"
-        " until `netkeeper linkedin schedule unpause`"
+        f"; {since}: no new scheduled run starts until `netkeeper linkedin schedule unpause`"
+        if pause.paused
+        else ""
     )
     if not armed or account is None or account.scheduled_runs_armed_at is None:
         return Protection(
