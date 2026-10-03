@@ -231,6 +231,16 @@ describe('PostureSection', () => {
       )
       expect(screen.getByText('Not covered by this report')).toBeInTheDocument()
 
+      // The stacked layout below `sm` expands too.
+      const blocks = screen.getByTestId('posture-blocks')
+      const block = within(blocks).getByText('budget profile_visits').closest('li') as HTMLElement
+      expect(
+        within(block).getByText('0/150 today, 0/750 this week (hard max 250/day, 1250/week)'),
+      ).toBeInTheDocument()
+      expect(within(block).getByRole('list', { name: 'Notes' })).toHaveTextContent(
+        'Profile visits are set to 150 a day',
+      )
+
       fireEvent.click(toggle)
       expect(screen.getByRole('button', { name: 'Show details' })).toBeInTheDocument()
       expect(screen.queryByRole('list', { name: 'Notes' })).not.toBeInTheDocument()

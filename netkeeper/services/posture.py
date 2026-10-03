@@ -1449,11 +1449,14 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
             )
     value = f"every {minutes} min; " + "; ".join(details)
     mailboxes = f"{len(armed)} armed mailbox{'es' if len(armed) != 1 else ''}"
+    poll_parts: list[str] = []
     if never_polled:
-        polled_brief = f"{never_polled} never polled"
-    else:
-        assert oldest is not None  # every armed mailbox has a poll time here
-        polled_brief = f"oldest poll {_ago(oldest)}" if len(armed) > 1 else f"polled {_ago(oldest)}"
+        poll_parts.append(f"{never_polled} never polled")
+    if oldest is not None:
+        poll_parts.append(
+            f"oldest poll {_ago(oldest)}" if len(armed) > 1 else f"polled {_ago(oldest)}"
+        )
+    polled_brief = "; ".join(poll_parts)
     return Protection(
         name="reply poll",
         status=Status.ON,
@@ -1988,7 +1991,10 @@ def render_summary(report: PostureReport) -> str:
     if report.notes:
         hidden.append(_plural(len(report.notes), "note"))
     hidden.append("each row's detail, the schedule, and what this report cannot see")
-    lines.append(f"{', '.join(hidden)}: run `netkeeper posture --details`")
+    # The command leads, so wrapping never splits it across two lines.
+    lines.extend(
+        _wrapped(f"run `netkeeper posture --details` for {', '.join(hidden)}", first="", rest="")
+    )
     lines.append("")
     lines.append(verdict(report))
     return "".join(f"{line}\n" for line in lines)

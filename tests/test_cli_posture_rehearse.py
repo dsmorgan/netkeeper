@@ -122,7 +122,7 @@ def test_posture_leads_with_a_summary_and_keeps_the_details_for_the_flag(
         assert detail not in summary.output
         assert detail in details.output
     assert "hard max" not in summary.output
-    assert "run `netkeeper posture --details`" in summary.output
+    assert "run `netkeeper posture --details` for each row's detail" in summary.output
     assert len(summary.output.splitlines()) < len(details.output.splitlines())
 
 
@@ -140,6 +140,25 @@ def test_posture_shows_a_warning_in_the_summary_and_exits_the_same_either_way(
     )
     assert summary.output.rstrip().splitlines()[-1] == details.output.rstrip().splitlines()[-1]
     assert "NOT clear" in summary.output
+
+
+def test_posture_summary_shows_a_warning_on_a_row_that_is_on(
+    cli_db: sessionmaker[Session], tmp_path: Path
+) -> None:
+    """#340 review: a budget configured above the hard max is clamped, so its row
+    reads on, and its warning still prints in the summary."""
+    config = tmp_path / "340-over-max.toml"
+    config.write_text("[linkedin.budget]\nprofile_visits_per_day = 300\n", encoding="utf-8")
+
+    result = CliRunner().invoke(cli, ["--config", str(config), "posture", "--no-probe"])
+
+    assert result.exit_code == 1
+    budget_line = next(
+        line for line in result.output.splitlines() if line.startswith("budget profile_visits")
+    )
+    assert budget_line.split()[2] == "on"
+    flat = " ".join(result.output.split())
+    assert "warning: budget profile_visits: config asks for 300 a day" in flat
 
 
 def test_posture_exits_non_zero_when_anything_warned(cli_db: sessionmaker[Session]) -> None:
@@ -237,7 +256,7 @@ def test_posture_stays_clear_and_exits_zero_above_100_a_day_with_the_note_listed
     assert summary.exit_code == 0, summary.output
     assert "Profile visits are set to 101 a day" not in summary.output
     assert "(1 note)" in summary.output
-    assert "1 note, " in summary.output
+    assert "--details` for 1 note, " in summary.output
     assert "nothing is misconfigured" in summary.output
 
 
