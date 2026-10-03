@@ -54,6 +54,7 @@ from netkeeper.services.scheduler import (
     JobRegistry,
     build_scheduler,
     seed_missing_kinds,
+    stored_due,
 )
 from netkeeper.services.tasks import TaskRunner
 
@@ -244,9 +245,16 @@ def seed_served_schedule(
     (:func:`~netkeeper.services.scheduler.build_scheduler`); arming does it too, so a
     kind added after the schedule was established never waits for a restart. A kind
     that has a due time keeps it. Needs a writer session. Returns the kinds seeded.
+
+    Only an established schedule is filled in. When no served kind has a due time yet
+    (``serve`` has never run), this seeds nothing and leaves the whole schedule to
+    ``serve``'s first start: seeded here, every due time could have lapsed by then,
+    and that first start would read them as downtime and catch them all up at once.
     """
     account = find_account(session, user)
     if account is None:
+        return []
+    if all(stored_due(session, user, account.id, kind) is None for kind in SERVED_SCHEDULES):
         return []
     start, end = (time.fromisoformat(value) for value in settings.active_hours)
     seeded = seed_missing_kinds(

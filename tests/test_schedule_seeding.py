@@ -186,17 +186,46 @@ def test_a_seeded_kind_steps_clear_of_an_existing_due_time_and_never_moves_it(
     assert new - existing >= MIN_JOB_KIND_GAP
 
 
-def test_arming_seeds_every_served_kind_and_not_the_inbox_poll(
+def test_arming_before_serve_ever_ran_seeds_nothing(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """The inbox poll has no runner: ``serve`` does not schedule it, so arming leaves it
-    without a due time rather than give a job that does nothing one."""
+    """With no served kind scheduled yet, arming leaves the whole schedule to ``serve``'s
+    first start, so that start never reads due times seeded long before it as downtime
+    and catches every kind up at once."""
     with session_scope(session_factory, write=True) as session:
         user, _ = _local(session)
         arm_scheduled_runs(session, user, now=NOW)
         seeded = seed_served_schedule(session, user, SETTINGS.linkedin, now=NOW)
+    assert seeded == []
+    assert set(_dues(session_factory).values()) == {None}
 
-    assert set(seeded) == set(SERVED_SCHEDULES)
+    much_later = NOW + timedelta(days=10)  # serve first starts long after arming
+    scheduler.build_scheduler(
+        session_factory,
+        _local_accounts(session_factory),
+        schedules=SERVED_SCHEDULES,
+        rng=random.Random(2),
+        clock=_clock(much_later),
+    )
+    dues = _dues(session_factory)
+    assert dues[JobKind.ENRICH] == much_later + SERVED_SCHEDULES[JobKind.ENRICH].interval
+    assert dues[JobKind.INBOX] is None
+
+
+def test_arming_seeds_a_missing_served_kind_and_never_the_inbox_poll(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The inbox poll has no runner: ``serve`` does not schedule it, so arming leaves it
+    without a due time rather than give a job that does nothing one."""
+    one: dict[JobKind, JobSchedule] = {
+        JobKind.CONNECTIONS_INCREMENTAL: SERVED_SCHEDULES[JobKind.CONNECTIONS_INCREMENTAL]
+    }
+    _armed_with(session_factory, one)
+    with session_scope(session_factory, write=True) as session:
+        user, _ = _local(session)
+        seeded = seed_served_schedule(session, user, SETTINGS.linkedin, now=LATER)
+
+    assert set(seeded) == set(SERVED_SCHEDULES) - set(one)
     assert JobKind.INBOX not in SERVED_SCHEDULES
     dues = _dues(session_factory)
     assert dues[JobKind.INBOX] is None

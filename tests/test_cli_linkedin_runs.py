@@ -10,6 +10,7 @@ attaches to a real one and nothing leaves this machine.
 from __future__ import annotations
 
 import functools
+import random
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,7 +35,12 @@ from netkeeper.services.linkedin_accounts import (
     scheduled_runs_armed,
 )
 from netkeeper.services.linkedin_session import flag_session
-from netkeeper.services.scheduler import SERVED_SCHEDULES, JobKind, stored_due
+from netkeeper.services.scheduler import (
+    SERVED_SCHEDULES,
+    JobKind,
+    stored_due,
+    sync_account_schedule,
+)
 from netkeeper.services.settings_kv import delete_setting, set_setting
 from netkeeper.services.users import ensure_local_user
 from netkeeper.worker import BrowserWorker
@@ -124,9 +130,10 @@ def test_arming_shows_the_profile_view_notice_with_or_without_yes_and_still_arms
 
 
 def test_arming_seeds_each_served_kind_with_no_due_time(cli_db: sessionmaker[Session]) -> None:
-    """#327: arming gives each kind ``serve`` runs a due time if it has none, already
-    armed or not, and leaves one that has a due time alone. The inbox poll has no
-    runner, so it gets none."""
+    """#327: once ``serve`` has established a schedule, arming gives each kind it runs a
+    due time if it has none, already armed or not, and leaves one that has a due time
+    alone. Before that, arming seeds nothing. The inbox poll has no runner, so it never
+    gets one."""
 
     def dues() -> dict[JobKind, datetime | None]:
         with session_scope(cli_db) as session:
@@ -136,6 +143,19 @@ def test_arming_seeds_each_served_kind_with_no_due_time(cli_db: sessionmaker[Ses
 
     runner = CliRunner()
     assert runner.invoke(cli, ["linkedin", "schedule", "arm", "--yes"]).exit_code == 0
+    assert set(dues().values()) == {None}  # serve never ran: its first start seeds
+
+    with session_scope(cli_db, write=True) as session:  # what serve's start does
+        user = _user(session)
+        sync_account_schedule(
+            session,
+            user,
+            account_id_for(session, user),
+            now=datetime.now(UTC),
+            schedules=SERVED_SCHEDULES,
+            rng=random.Random(1),
+            tz=user.timezone,
+        )
     first = dues()
     assert first[JobKind.INBOX] is None
     assert all(first[kind] is not None for kind in SERVED_SCHEDULES)

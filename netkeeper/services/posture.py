@@ -196,7 +196,7 @@ SESSION_EVIDENCE_FRESH_FOR: Final = timedelta(hours=24)
 NOT_SERVED_BECAUSE: Final[dict[JobKind, str]] = {
     JobKind.INBOX: (
         "the LinkedIn inbox poll has no runner yet, so `netkeeper serve` does not schedule"
-        " it; Gmail replies are polled by the campaign engine (the reply poll row)"
+        " it; Gmail replies are polled by the campaign engine; see the reply poll row"
     ),
 }
 
@@ -210,7 +210,8 @@ MISSING_MEANS: Final[dict[JobKind, str]] = {
 #: The Gmail reply poll is late once a mailbox's last complete poll is older than this
 #: many ``[campaigns] reply_poll_minutes`` (#327). One missed poll is noise (a slow tick,
 #: a transient Gmail error the next tick retries); three in a row is a poll that is not
-#: running, and a reply it would have caught does not stop the next follow-up.
+#: running. The sender already holds follow-ups that start a new conversation past two
+#: (``campaign_replies.STALE_AFTER_POLLS``), so a late poll is a note, not a warning.
 REPLY_POLL_LATE_AFTER_POLLS: Final = 3
 
 
@@ -1327,7 +1328,11 @@ def _scheduled_jobs(scheduler: SchedulerPosture) -> Protection:
     states += [f"{kind} not applicable ({why})" for kind, why in scheduler.not_applicable]
     detail = "; ".join(states)
     if not scheduler.unscheduled:
-        dues = [due for kind, _, due in scheduler.jobs if due is not None]
+        dues = [
+            due
+            for kind, _, due in scheduler.jobs
+            if due is not None and kind in scheduler.applicable
+        ]
         soonest = f"; next {min(dues):%Y-%m-%d %H:%M UTC}" if dues else ""
         return Protection(
             name="scheduled jobs",
@@ -1369,8 +1374,11 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
     armed mailbox, armed for drafts or to send, every ``[campaigns]
     reply_poll_minutes``. ``mailboxes.replies_polled_at`` is when it last read
     everything up to then. A poll that never ran, or is over
-    :data:`REPLY_POLL_LATE_AFTER_POLLS` intervals old, warns: a reply nobody reads
-    does not stop the next follow-up.
+    :data:`REPLY_POLL_LATE_AFTER_POLLS` intervals old, gets a note, not a warning:
+    the protection still holds, because the sender holds every follow-up that starts
+    a new conversation until replies are checked again, and a ``same_thread``
+    follow-up reads its thread before it goes. The usual cause is that ``serve`` is
+    not running, which is a choice, not a fault.
     """
     minutes = max(settings.campaigns.reply_poll_minutes, 1)
     late_after = timedelta(minutes=minutes * REPLY_POLL_LATE_AFTER_POLLS)
@@ -1385,18 +1393,22 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
             status=Status.ON,
             value="no armed mailbox: no campaign email goes out, so there is no reply to poll for",
         )
+    held = (
+        "Follow-ups that start a new conversation are held until replies are checked"
+        " again; a follow-up in the same thread reads the thread before it goes."
+        " The poll runs in `netkeeper serve`"
+    )
     details: list[str] = []
-    warnings: list[str] = []
+    notes: list[str] = []
     for mailbox in armed:
         arm = mailbox.arm
         assert arm is not None  # filtered above
         polled = mailbox.replies_polled_at
         if polled is None:
             details.append(f"{mailbox.email} ({arm.value}-armed): never polled")
-            warnings.append(
-                f"{mailbox.email} is armed but has never been polled for replies, so a reply"
-                " would not stop a follow-up. The poll runs in `netkeeper serve`, every"
-                f" {minutes} min: check that serve is running"
+            notes.append(
+                f"{mailbox.email} is armed but has not been polled for replies yet. {held},"
+                f" every {minutes} min"
             )
             continue
         age = now - polled
@@ -1405,18 +1417,13 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
             f" ({_ago(age)})"
         )
         if age > late_after:
-            warnings.append(
+            notes.append(
                 f"{mailbox.email} was last polled for replies {_ago(age)}, more than"
-                f" {REPLY_POLL_LATE_AFTER_POLLS} times the {minutes} min interval, so a reply"
-                " since then has not been seen and would not stop a follow-up. Check that"
-                " `netkeeper serve` is running"
+                f" {REPLY_POLL_LATE_AFTER_POLLS} times the {minutes} min interval. {held}:"
+                " check that it is running"
             )
     value = f"every {minutes} min; " + "; ".join(details)
-    if warnings:
-        return Protection(
-            name="reply poll", status=Status.OFF, value=value, warnings=tuple(warnings)
-        )
-    return Protection(name="reply poll", status=Status.ON, value=value)
+    return Protection(name="reply poll", status=Status.ON, value=value, notes=tuple(notes))
 
 
 def _scheduled_runs_armed(session: Session, user: User, account_id: int) -> Protection:
@@ -1908,7 +1915,7 @@ def _scheduler_lines(scheduler: SchedulerPosture) -> list[str]:
             kind,
             f"every {_hours(interval)}",
             "not applicable"
-            if kind in skip and due is None
+            if kind in skip
             else "not scheduled"
             if due is None
             else f"{due:%Y-%m-%d %H:%M UTC}",
