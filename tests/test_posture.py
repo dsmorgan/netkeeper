@@ -2072,3 +2072,22 @@ def test_the_next_campaign_send_names_the_soonest_and_the_serve_reminder(
     assert row.value.startswith("'Autumn' step 1 at ")
     assert f"({soonest:%Y-%m-%d %H:%M} UTC)" in row.value
     assert "netkeeper sends only while `serve` is running and this Mac is awake." in row.value
+
+
+def test_an_overdue_next_campaign_send_shows_where_it_will_really_go(
+    writer: Session, user: User
+) -> None:
+    """#338 review, N4: a row due at 10:00 this morning, read at 14:00 New York (18:00
+    UTC): it goes at the next tick. One due yesterday at 10:00 read tonight waits for
+    10:00 tomorrow, and the row says so rather than the past due time."""
+    mailbox = make_mailbox(writer, user, email="me@example.test")
+    campaign = factories.make_campaign(writer, user, name="Autumn", mailbox_id=mailbox.id)
+    yesterday_ten = datetime(2026, 9, 22, 14, 0, tzinfo=UTC)  # 10:00 New York
+    factories.make_enrollment(
+        writer, campaign, factories.make_contact(writer, user), next_action_at=yesterday_ten
+    )
+    writer.flush()
+    tonight = datetime(2026, 9, 24, 2, 0, tzinfo=UTC)  # 22:00 New York on the 23rd
+    row = _row(_report(writer, user, now=tonight), "next campaign send")
+    assert "(2026-09-24 14:00 UTC)" in row.value, row.value  # 10:00 New York tomorrow
+    assert "Thu Sep 24, 10:00" in row.value

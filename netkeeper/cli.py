@@ -2731,7 +2731,8 @@ def campaigns_activate(
             options = campaign_service.start_options(user, settings=settings, now=now, at=starts_at)
         if gaps:
             _refuse_activation(campaign_id, gaps)
-        when = "now" if now_flag else _local_start(starts_at, timezone)
+        # A --start already past starts the campaign now, as activation records it.
+        when = "now" if now_flag or starts_at <= now else _local_start(starts_at, timezone)
         typer.echo(f"starts: {when}")
         typer.echo(options.suggestion)
         if options.warning is not None:

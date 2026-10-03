@@ -65,7 +65,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
-from netkeeper.campaigns.schedule import SERVE_REMINDER
+from netkeeper.campaigns.schedule import SERVE_REMINDER, ScheduleError, release, suggested
 from netkeeper.config import HeatSettings, LinkedInSettings, PacingSettings, Settings
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin import heat as heat_math
@@ -519,7 +519,7 @@ def posture(
         _scheduled_jobs(scheduler),
         _scheduled_runs_armed(session, user, account_id),
         _reply_poll(session, user, now=now, settings=settings),
-        _next_campaign_send(session, user, zone=zone),
+        _next_campaign_send(session, user, zone=zone, now=now, settings=settings),
         _route_changed_breaker(session, user, account_id),
         _answer_lost_limit(session, user, account_id),
         _network_aging(session, user),
@@ -1390,7 +1390,26 @@ def _scheduled_jobs(scheduler: SchedulerPosture) -> Protection:
     )
 
 
-def _next_campaign_send(session: Session, user: User, *, zone: ZoneInfo) -> Protection:
+NEXT_SEND_LOOKAHEAD: Final = 50
+"""How many upcoming rows the "next campaign send" row weighs: an overdue row can move
+later than one due after it."""
+
+
+def _effective_send(due: datetime, *, now: datetime, settings: Settings, user: User) -> datetime:
+    """When a row due at ``due`` would really go: at ``due`` when it is still ahead,
+    else where the tick's spill and off-hours rules put it, else now."""
+    if due > now:
+        return due
+    try:
+        slots = suggested(settings.campaigns, user.timezone)
+    except ScheduleError:
+        return now
+    return release(due, now, slots) or now
+
+
+def _next_campaign_send(
+    session: Session, user: User, *, zone: ZoneInfo, now: datetime, settings: Settings
+) -> Protection:
     """When the campaign engine next has a send to consider, and what it needs (#338).
 
     There is no send window: each campaign sends from its scheduled start, and only
@@ -1399,20 +1418,26 @@ def _next_campaign_send(session: Session, user: User, *, zone: ZoneInfo) -> Prot
     dashboard's own list), so it never disagrees with the campaign pages. In force
     either way: a send with nothing running to make it is a choice, not a fault.
     """
-    fires, _ = upcoming(session, user, limit=1)
+    fires, _ = upcoming(session, user, limit=NEXT_SEND_LOOKAHEAD)
     if not fires:
         return Protection(
             name="next campaign send", status=Status.ON, value="no campaign send is scheduled"
         )
-    fire = fires[0]
+    # Where each row will really go (#338 review, N4): a row already due waits for the
+    # spill and off-hours rules, or goes at the next tick. Rows are read soonest first,
+    # and the earliest effective time among them is the one shown.
+    effective = [
+        (_effective_send(fire.due, now=now, settings=settings, user=user), fire) for fire in fires
+    ]
+    when, fire = min(effective, key=lambda pair: pair[0])
     step = "" if fire.step is None else f" step {fire.step.position}"
-    local = fire.due.astimezone(zone)
+    local = when.astimezone(zone)
     return Protection(
         name="next campaign send",
         status=Status.ON,
         value=(
             f"{fire.campaign.name!r}{step} at {local:%a %b} {local.day}, {local:%H:%M}"
-            f" ({fire.due:%Y-%m-%d %H:%M UTC}). {SERVE_REMINDER}"
+            f" ({when:%Y-%m-%d %H:%M UTC}). {SERVE_REMINDER}"
         ),
     )
 
