@@ -90,7 +90,11 @@ from netkeeper.services.budgets import (
     profile_visit_week_note,
 )
 from netkeeper.services.budgets import status as budget_status
-from netkeeper.services.linkedin_accounts import find_account, scheduled_runs_armed
+from netkeeper.services.linkedin_accounts import (
+    find_account,
+    schedule_paused_at,
+    scheduled_runs_armed,
+)
 from netkeeper.services.linkedin_session import (
     SessionEvidence,
     SessionFlag,
@@ -1432,15 +1436,30 @@ def _scheduled_runs_armed(session: Session, user: User, account_id: int) -> Prot
     Disarmed is the default on every install, and it is the protection doing
     its job: the scheduler keeps due times and fires nothing, and every run is
     one a person started. Armed is a person's decision, made after a supervised
-    run (CP4), so it is in force either way and says which.
+    run (CP4), so it is in force either way and says which. A paused schedule
+    (#324) says so, and since when: armed or not, no new scheduled run starts.
     """
     account = find_account(session, user)
     armed = scheduled_runs_armed(session, user, account_id)
+    paused_at = schedule_paused_at(session, user, account_id)
+    paused = (
+        ""
+        if paused_at is None
+        else f"; paused since {paused_at:%Y-%m-%d %H:%M UTC}: no new scheduled run starts"
+        " until `netkeeper linkedin schedule unpause`"
+    )
     if not armed or account is None or account.scheduled_runs_armed_at is None:
         return Protection(
             name="scheduled runs",
             status=Status.ON,
-            value="disarmed: no LinkedIn job fires on its own; runs are the ones you start",
+            value="disarmed: no LinkedIn job fires on its own; runs are the ones you start"
+            + paused,
+        )
+    if paused:
+        return Protection(
+            name="scheduled runs",
+            status=Status.ON,
+            value=f"armed since {account.scheduled_runs_armed_at:%Y-%m-%d %H:%M UTC}" + paused,
         )
     return Protection(
         name="scheduled runs",

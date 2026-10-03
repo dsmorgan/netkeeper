@@ -75,7 +75,7 @@ from netkeeper.linkedin.enrich import (
     run_enrichment,
 )
 from netkeeper.models import JsonValue, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
-from netkeeper.services import budgets, enrich_plan, runs
+from netkeeper.services import budgets, enrich_plan, run_contacts, runs
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass, BudgetExceeded
 from netkeeper.services.linkedin_session import flag_session
@@ -397,8 +397,12 @@ async def enrich_contacts(
             # done commit together, so a resume skips exactly what was written.
             with session_scope(factory, write=True) as session:
                 user = _load_user(session, user_id)
-                mapping.apply_harvest(session, user, harvest, counts)
+                outcome = mapping.apply_harvest(session, user, harvest, counts)
                 enrich_plan.mark_completed(session, user, run_id, harvest.contact_ref)
+                # The dashboard's last few contacts (#324), in the same transaction.
+                run_contacts.record(
+                    session, user, account_id, run_id, [(harvest.contact_ref, outcome.value)]
+                )
 
         async def on_harvest(harvest: ProfileHarvest) -> None:
             await off_loop(apply_harvest, harvest)

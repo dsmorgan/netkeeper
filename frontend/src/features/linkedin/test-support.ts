@@ -23,6 +23,7 @@ export const STATUS_CLEAR: LinkedInStatus = {
   session_flagged_at: null,
   heat_tripped: false,
   armed: false,
+  schedule_paused: false,
   running_run_id: null,
   can_start_runs: true,
 }
@@ -54,6 +55,8 @@ export const BROWSER_LAUNCH: BrowserLaunch = {
 export const SCHEDULE_DISARMED: Schedule = {
   armed: false,
   armed_at: null,
+  paused: false,
+  paused_at: null,
   scheduler_running: true,
   jobs: [
     { kind: 'connections_incremental', interval_hours: 24, next_due: '2026-09-24T08:00:00Z' },
@@ -146,6 +149,7 @@ export function run(overrides: Partial<Run> = {}): Run {
     completed: null,
     aging_refused: null,
     resumed_by: null,
+    pause_requested: false,
     ...overrides,
   }
 }

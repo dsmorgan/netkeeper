@@ -108,6 +108,16 @@ handler that could not reach the browser answers
 :attr:`JobOutcome.RETRY_LATER`, and :func:`park_retry` parks one retry 20 to 50
 minutes out (spec 9.9).
 
+**Paused (#324).** A person can pause an armed schedule without disarming it
+(``netkeeper linkedin schedule pause``, ``POST /linkedin/schedule/pause``): a due
+fire is then skipped as ``"paused"``, the same way as ``"disarmed"``, and a run
+already going is not stopped. Because a skipped fire still advances the cadence,
+unpausing owes nothing: no missed fire is replayed, and each kind next fires at
+its own stored due time, at most one interval away (a first-setup kind within
+:data:`FIRST_SETUP_RETRY`). The pause is a ``settings_kv`` key, so it survives a
+restart; a restart while paused still goes through the cold path's one catch-up,
+which the gate then skips like any other fire.
+
 **The interleave gap.** Spec 9.5's last bullet: "never run enrichment and a
 message send in the same minute; the scheduler interleaves job kinds with a
 gap." Two mechanisms, one constant (:data:`MIN_JOB_KIND_GAP`).
@@ -150,7 +160,7 @@ from netkeeper.models import JsonValue, User
 from netkeeper.models.base import utcnow
 from netkeeper.services import heat as heat_service
 from netkeeper.services import route_breaker
-from netkeeper.services.linkedin_accounts import scheduled_runs_armed
+from netkeeper.services.linkedin_accounts import schedule_paused, scheduled_runs_armed
 from netkeeper.services.linkedin_session import session_flag
 from netkeeper.services.settings_kv import get_setting, set_setting
 
@@ -973,7 +983,9 @@ async def poll_and_fire(
     ``"route_changed_breaker"``, and one whose answer-lost limit is tripped
     (#199 -- three runs of one connections kind in a row ended ``answer_lost``) as
     ``"answer_lost_breaker"``; those checks are unconditional, with no
-    "disabled" escape hatch. Either way the cadence still
+    "disabled" escape hatch. While a person has paused the account's schedule
+    (#324, ``linkedin_accounts.schedule_paused``; no escape hatch either) the
+    fire is skipped as ``"paused"``, armed or not. Either way the cadence still
     advances, so the scheduler does not spin retrying the same fire on every
     heartbeat, and a skipped fire has not *run*: a ``run_on_first_setup`` kind
     keeps its first-setup standing and is offered again
@@ -1029,6 +1041,10 @@ async def poll_and_fire(
             skipped_reason: str | None = None
             if not isinstance(armed, Arming) and not armed(session, user, account_id):
                 skipped_reason = "disarmed"
+            elif schedule_paused(session, user, account_id):
+                # A person paused the schedule (#324): skipped like a disarmed fire,
+                # so the cadence moves on and unpausing owes no backlog of runs.
+                skipped_reason = "paused"
             elif session_flag(session, user) is not None:
                 # A checkpoint or a login wall: the run would refuse anyway (spec 9.7),
                 # so no run is recorded and nothing is attached (#175 review, F3).
@@ -1116,9 +1132,11 @@ async def poll_and_fire(
                 active_start=active_start,
                 active_end=active_end,
             )
-    elif skipped_reason == "disarmed":
-        # Every poll of a disarmed account lands here; it is the expected state.
-        log.debug("scheduler: %s for account %d not fired: disarmed", kind.value, account_id)
+    elif skipped_reason in ("disarmed", "paused"):
+        # Every poll of a disarmed or paused account lands here; it is the expected state.
+        log.debug(
+            "scheduler: %s for account %d not fired: %s", kind.value, account_id, skipped_reason
+        )
     else:
         log.warning(
             "scheduler: skipping %s for account %d (%s)", kind.value, account_id, skipped_reason

@@ -135,6 +135,7 @@ async def test_budget_heat_and_status_read_what_posture_reads(
         "session_flagged_at": None,
         "heat_tripped": False,
         "armed": False,
+        "schedule_paused": False,
         "running_run_id": None,
         "can_start_runs": False,  # this app was not started by `netkeeper serve`
     }

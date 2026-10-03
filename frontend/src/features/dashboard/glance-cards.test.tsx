@@ -7,7 +7,7 @@ import {
   createRoute,
   createRouter,
 } from '@tanstack/react-router'
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -282,6 +282,40 @@ describe('NextLinkedInRunCard', () => {
     })
     const body = await card('Next LinkedIn run')
     expect(await body.findByRole('alert')).toHaveTextContent('No scheduler is running')
+  })
+
+  it('says the schedule is paused instead of showing times that will not fire (#324)', async () => {
+    let paused = true
+    const { seen } = renderCard(NextLinkedInRunCard, {
+      [SCHEDULE]: () =>
+        jsonResponse(
+          schedule(paused ? { paused: true, paused_at: '2026-09-21T08:00:00Z' } : { paused }),
+        ),
+      [`${SCHEDULE}/unpause`]: () => {
+        paused = false
+        return jsonResponse(schedule({ paused: false, paused_at: null }))
+      },
+    })
+    const body = await card('Next LinkedIn run')
+    expect(await body.findByText(/no new scheduled run starts/)).toBeInTheDocument()
+    expect(body.getByText(/nothing skipped is replayed/)).toBeInTheDocument()
+    expect(body.queryByText(/2099/)).not.toBeInTheDocument()
+
+    fireEvent.click(body.getByRole('button', { name: 'Unpause schedule' }))
+    expect(await body.findByRole('button', { name: 'Pause schedule' })).toBeInTheDocument()
+    expect(seen).toContain(`${SCHEDULE}/unpause`)
+    expect((await body.findAllByRole('listitem')).length).toBe(2)
+  })
+
+  it('offers to pause an armed schedule (#324)', async () => {
+    const { seen } = renderCard(NextLinkedInRunCard, {
+      [SCHEDULE]: json(schedule({ paused: false, paused_at: null })),
+      [`${SCHEDULE}/pause`]: json(schedule({ paused: true, paused_at: '2026-09-21T08:00:00Z' })),
+    })
+    const body = await card('Next LinkedIn run')
+    fireEvent.click(await body.findByRole('button', { name: 'Pause schedule' }))
+    expect(await body.findByText(/no new scheduled run starts/)).toBeInTheDocument()
+    expect(seen).toContain(`${SCHEDULE}/pause`)
   })
 })
 

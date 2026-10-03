@@ -5,7 +5,10 @@ fire to a handler; this module is the handler ``netkeeper serve`` registers
 for each kind with a runner (``SERVED_SCHEDULES``: the two connections syncs
 and enrichment). A handler:
 
-1. records a ``scheduled`` run through :func:`netkeeper.services.runs.create_run`,
+1. records nothing while the account's schedule is paused (#324; the
+   scheduler's gate already skipped the fire, so this only closes the moment
+   between that gate and the handler), and otherwise records a ``scheduled``
+   run through :func:`netkeeper.services.runs.create_run`,
    which refuses on a disarmed account -- the scheduler's arm gate already
    skipped the fire, so reaching this refusal means something bypassed that
    gate, and it is logged as an error and nothing runs;
@@ -44,7 +47,7 @@ from netkeeper.models import SyncRunKind, SyncRunTrigger, User, UserKind
 from netkeeper.models.base import utcnow
 from netkeeper.services import runs
 from netkeeper.services.events import EventBus
-from netkeeper.services.linkedin_accounts import find_account
+from netkeeper.services.linkedin_accounts import find_account, schedule_paused
 from netkeeper.services.scheduler import (
     SERVED_SCHEDULES,
     JobContext,
@@ -112,6 +115,10 @@ def _handler(
             user = session.get(User, ctx.user_id)
             if user is None:
                 log.error("scheduled %s: no user %d", run_kind.value, ctx.user_id)
+                return None
+            if schedule_paused(session, user, ctx.account_id):
+                # Paused between the scheduler's gate and here (#324): nothing new starts.
+                log.info("scheduled %s not started: the schedule is paused", run_kind.value)
                 return None
             return runs.create_run(
                 session, user, run_kind, trigger=SyncRunTrigger.SCHEDULED, now=clock()

@@ -177,6 +177,7 @@ describe('dashboard: a fresh install with nothing imported', () => {
     const headings = main.getAllByRole('heading', { level: 2 }).map((node) => node.textContent)
     expect(headings).toEqual([
       'Start here',
+      'Live LinkedIn run',
       'Next campaign sends',
       'Next LinkedIn run',
       'LinkedIn browser',

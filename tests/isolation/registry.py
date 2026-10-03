@@ -32,6 +32,7 @@ from netkeeper.models import (
     MessageDirection,
     MessageStatus,
     RuleField,
+    SyncRun,
     SyncRunKind,
     SyncRunStatus,
     SyncRunTrigger,
@@ -42,7 +43,7 @@ from netkeeper.models import (
 from netkeeper.models.base import utcnow
 from netkeeper.scoping import scoped
 from netkeeper.services import campaigns as campaign_service
-from netkeeper.services import enrich_plan, runs
+from netkeeper.services import enrich_plan, run_contacts, runs
 from netkeeper.services import mailboxes as mailbox_service
 from netkeeper.services.linkedin_accounts import ensure_account
 from netkeeper.web.app import API_PREFIX
@@ -382,6 +383,24 @@ def _seed_runs(session: Session, user: User) -> int:
     return 2
 
 
+def _seed_run_contacts(session: Session, user: User) -> int:
+    """Two contacts ``user``'s newest run touched (#324)."""
+    run = runs.create_run(
+        session, user, SyncRunKind.ENRICH, trigger=SyncRunTrigger.MANUAL, now=SEED_AT
+    )
+    runs.finish_run(session, user, run.id, status=SyncRunStatus.COMPLETED, now=SEED_AT)
+    touched = [(factories.make_contact(session, user).id, "applied") for _ in range(2)]
+    run_contacts.record(session, user, run.linkedin_account_id, run.id, touched)
+    return 2
+
+
+def _own_run(session: Session, user: User) -> dict[str, str]:
+    """``run_id`` of the user's newest run; the placeholder points nowhere when they
+    have none, which the endpoint answers ``404``."""
+    run = session.scalars(scoped(user, SyncRun).order_by(SyncRun.id.desc())).first()
+    return {"run_id": "0" if run is None else str(run.id)}
+
+
 def _seed_pins(session: Session, user: User) -> int:
     """Two contacts of ``user`` pinned to the front of the next enrichment."""
     account = ensure_account(session, user)
@@ -553,6 +572,12 @@ REGISTRY: list[ListEndpoint] = [
     ),
     ListEndpoint(f"{API_PREFIX}/me/positions", _seed_positions, array_count),
     ListEndpoint(f"{API_PREFIX}/linkedin/runs", _seed_runs, paged_count),
+    ListEndpoint(
+        f"{API_PREFIX}/linkedin/runs/{{run_id}}/contacts",
+        _seed_run_contacts,
+        paged_count,
+        path_params=_own_run,
+    ),
     ListEndpoint(f"{API_PREFIX}/linkedin/pins", _seed_pins, array_count),
     ListEndpoint(f"{API_PREFIX}/mailboxes", _seed_mailboxes, array_count),
     ListEndpoint(f"{API_PREFIX}/campaigns", _seed_campaigns, array_count),

@@ -108,7 +108,7 @@ from netkeeper.linkedin.connections import (
 from netkeeper.linkedin.observe import ObservationFailed
 from netkeeper.linkedin.pacing import human_delay
 from netkeeper.models import JsonValue, SyncRunKind, SyncRunStatus, SyncRunTrigger, User
-from netkeeper.services import budgets, route_breaker, runs
+from netkeeper.services import budgets, route_breaker, run_contacts, runs
 from netkeeper.services import heat as heat_service
 from netkeeper.services.budgets import ActionClass, BudgetExceeded
 from netkeeper.services.linkedin_session import flag_session
@@ -355,7 +355,28 @@ async def sync_connections(
 
         def apply_page(page: ConnectionsPage) -> None:
             with session_scope(factory, write=True) as session:
-                mapping.apply_page(session, _load_user(session, user_id), page, counts)
+                user = _load_user(session, user_id)
+                created = set(counts.created_contact_ids)
+                confirmed = set(counts.confirmed_contact_ids)
+                mapping.apply_page(session, user, page, counts)
+                # The dashboard's last few contacts (#324): who this page added or
+                # confirmed, in the same transaction as the page.
+                run_contacts.record(
+                    session,
+                    user,
+                    account_id,
+                    run_id,
+                    [
+                        *(
+                            (i, run_contacts.ADDED)
+                            for i in sorted(counts.created_contact_ids - created)
+                        ),
+                        *(
+                            (i, run_contacts.CONFIRMED)
+                            for i in sorted(counts.confirmed_contact_ids - confirmed)
+                        ),
+                    ],
+                )
 
         async def on_page(page: ConnectionsPage) -> None:
             await off_loop(apply_page, page)

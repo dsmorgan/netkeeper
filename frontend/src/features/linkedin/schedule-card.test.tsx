@@ -231,4 +231,54 @@ describe('ScheduleCard', () => {
 
     expect(calls.filter((call) => call.path.endsWith('/arm'))).toHaveLength(2)
   })
+
+  it('pauses and unpauses an armed schedule without disarming it (#324)', async () => {
+    let paused = false
+    const calls: Call[] = []
+    renderCard(
+      {
+        'GET /api/v1/linkedin/schedule': () =>
+          jsonResponse(
+            paused
+              ? { ...SCHEDULE_ARMED, paused: true, paused_at: '2026-09-22T10:00:00Z' }
+              : SCHEDULE_ARMED,
+          ),
+        'POST /api/v1/linkedin/schedule/pause': () => {
+          paused = true
+          return jsonResponse({
+            ...SCHEDULE_ARMED,
+            paused: true,
+            paused_at: '2026-09-22T10:00:00Z',
+          })
+        },
+        'POST /api/v1/linkedin/schedule/unpause': () => {
+          paused = false
+          return jsonResponse(SCHEDULE_ARMED)
+        },
+      },
+      calls,
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Pause schedule' }))
+    expect(await screen.findByText(/no new scheduled run starts/)).toBeInTheDocument()
+    // Still armed: pausing is not disarming, and no confirmation was needed.
+    expect(screen.getByRole('button', { name: 'Disarm' })).toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unpause schedule' }))
+    expect(await screen.findByRole('button', { name: 'Pause schedule' })).toBeInTheDocument()
+    expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual(
+      expect.arrayContaining([
+        'POST /api/v1/linkedin/schedule/pause',
+        'POST /api/v1/linkedin/schedule/unpause',
+      ]),
+    )
+    expect(calls.some((call) => call.path.endsWith('/disarm'))).toBe(false)
+  })
+
+  it('offers no pause while disarmed', async () => {
+    renderCard()
+    await screen.findByText('Disarmed — nothing runs on its own')
+    expect(screen.queryByRole('button', { name: 'Pause schedule' })).not.toBeInTheDocument()
+  })
 })

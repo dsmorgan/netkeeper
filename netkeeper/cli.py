@@ -96,6 +96,9 @@ from netkeeper.services.linkedin_accounts import (
     disarm_scheduled_runs,
     ensure_account,
     find_account,
+    pause_schedule,
+    schedule_paused_at,
+    unpause_schedule,
 )
 from netkeeper.services.linkedin_session import (
     clear_session_flag,
@@ -1369,6 +1372,43 @@ def linkedin_cancel(run_id: Annotated[int, typer.Argument(help="The run to stop.
     typer.echo(f"asked run {run_id} to stop; it stops at its next check")
 
 
+@linkedin_app.command("pause")
+def linkedin_pause(
+    run_id: Annotated[int, typer.Argument(help="The enrichment run to pause.")],
+) -> None:
+    """Ask a running enrichment to stop at its next check and keep its place.
+
+    The run ends `aborted`, stopped by `paused`, with its plan stored;
+    `netkeeper linkedin enrich --resume <run id>` continues the rest. Only an
+    enrichment keeps a plan, so a sync cannot be paused; cancel it instead.
+    """
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            user = _local_user_or_exit(session)
+            try:
+                run = runs.request_pause(session, user, run_id, now=datetime.now(UTC))
+            except (runs.RunNotFound, runs.RunError) as exc:
+                typer.echo(f"error: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            left_behind = run.status is SyncRunStatus.FAILED
+    finally:
+        engine.dispose()
+    if left_behind:
+        typer.echo(
+            f"run {run_id} was left running by a process that is gone (nothing holds its"
+            f" browser lock); marked it failed. `netkeeper linkedin enrich --resume {run_id}`"
+            " continues its plan"
+        )
+        return
+    typer.echo(
+        f"asked run {run_id} to pause; it stops at its next check."
+        f" `netkeeper linkedin enrich --resume {run_id}` continues it"
+    )
+
+
 @schedule_app.command("status")
 def linkedin_schedule_status(ctx: typer.Context) -> None:
     """Whether scheduled LinkedIn runs are armed, the active window, and the counts that
@@ -1383,6 +1423,7 @@ def linkedin_schedule_status(ctx: typer.Context) -> None:
             account = find_account(session, user)
             armed_at = None if account is None else account.scheduled_runs_armed_at
             account_id = account_id_for(session, user)
+            paused_at = None if account is None else schedule_paused_at(session, user, account.id)
             route = route_breaker.state(session, user, account_id)
             lost = route_breaker.answer_lost_states(session, user, account_id)
     finally:
@@ -1394,6 +1435,11 @@ def linkedin_schedule_status(ctx: typer.Context) -> None:
         )
     else:
         typer.echo(f"armed since {armed_at:%Y-%m-%d %H:%M UTC}: scheduled runs fire when due")
+    if paused_at is not None:
+        typer.echo(
+            f"paused since {paused_at:%Y-%m-%d %H:%M UTC}: no new scheduled run starts until"
+            " `netkeeper linkedin schedule unpause`"
+        )
     typer.echo(describe_active_hours(settings))
     typer.echo(_streak_line("route-changed breaker", "route_changed", route))
     for kind, streak in lost.items():
@@ -1492,6 +1538,43 @@ def linkedin_schedule_disarm() -> None:
     finally:
         engine.dispose()
     typer.echo("scheduled LinkedIn runs disarmed")
+
+
+@schedule_app.command("pause")
+def linkedin_schedule_pause() -> None:
+    """Hold scheduled LinkedIn runs without disarming: no new one starts until unpaused.
+
+    A run already going is not stopped (`netkeeper linkedin cancel` does that).
+    Due runs met while paused are skipped and their cadence moves on, so
+    unpausing starts nothing at once. The pause survives a restart of `serve`.
+    """
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            pause_schedule(session, _local_user_or_exit(session), now=datetime.now(UTC))
+    finally:
+        engine.dispose()
+    typer.echo(
+        "scheduled LinkedIn runs paused; `netkeeper linkedin schedule unpause` lets them"
+        " start again"
+    )
+
+
+@schedule_app.command("unpause")
+def linkedin_schedule_unpause() -> None:
+    """Let scheduled LinkedIn runs start again. Runs skipped while paused are not replayed:
+    each kind waits for its next due time."""
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            unpause_schedule(session, _local_user_or_exit(session))
+    finally:
+        engine.dispose()
+    typer.echo("scheduled LinkedIn runs unpaused; each kind runs at its next due time")
 
 
 @schedule_app.command("reset-breaker")
