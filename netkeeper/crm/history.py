@@ -234,18 +234,7 @@ def _import_campaign(
         if contact_id is not None:
             recipient.contact_id = contact_id
         session.flush()
-        if recipient.contact_id is not None and recipient.email_out_interaction_id is None:
-            contact = resolve_survivor(session, user, recipient.contact_id)
-            interaction = add_interaction(
-                session,
-                user,
-                contact.id,
-                InteractionKind.EMAIL_OUT,
-                started_at,
-                summary=f"{HISTORY_SUMMARY}: emailed by the old mailing tool, campaign {name!r}",
-                source=HISTORY_SOURCE,
-            )
-            recipient.email_out_interaction_id = interaction.id
+        if record_email_out(session, user, recipient, name, started_at):
             out.new_interactions += 1
         if person.bounced:
             do_not_send.add(
@@ -267,11 +256,35 @@ def _match(
     if known is not None:
         # Created earlier in this run: a match for every later tab.
         return ("matched", known[1]) if known[0] == "created" else known
-    incoming = IncomingContact(
-        source=HISTORY_SOURCE,
+    found = match_address(
+        session,
+        user,
+        person.email,
         first_name=person.first_name,
         last_name=person.last_name,
-        emails=(IncomingEmail(person.email, is_primary=True),),
+        create_missing=create_missing,
+    )
+    matches[person.email] = found
+    return found
+
+
+def match_address(
+    session: Session,
+    user: User,
+    email: str,
+    *,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    create_missing: bool = False,
+) -> tuple[Match, int | None]:
+    """Which of ``user``'s contacts holds ``email``, through :func:`identity.resolve`:
+    ``matched`` (the survivor's id), ``ambiguous`` (several do), ``unmatched``, or
+    ``created`` when ``create_missing`` made one. Needs a writer session."""
+    incoming = IncomingContact(
+        source=HISTORY_SOURCE,
+        first_name=first_name,
+        last_name=last_name,
+        emails=(IncomingEmail(email, is_primary=True),),
     )
     resolution = resolve(session, user, incoming)
     found: tuple[Match, int | None]
@@ -286,8 +299,28 @@ def _match(
                 found = ("created", contact.id)
             else:
                 found = ("unmatched", None)
-    matches[person.email] = found
     return found
+
+
+def record_email_out(
+    session: Session, user: User, recipient: HistoryRecipient, campaign: str, at: datetime
+) -> bool:
+    """The recipient's imported ``email_out`` on its contact's timeline, once: False when
+    the row has no contact or already wrote one."""
+    if recipient.contact_id is None or recipient.email_out_interaction_id is not None:
+        return False
+    contact = resolve_survivor(session, user, recipient.contact_id)
+    interaction = add_interaction(
+        session,
+        user,
+        contact.id,
+        InteractionKind.EMAIL_OUT,
+        at,
+        summary=f"{HISTORY_SUMMARY}: emailed by the old mailing tool, campaign {campaign!r}",
+        source=HISTORY_SOURCE,
+    )
+    recipient.email_out_interaction_id = interaction.id
+    return True
 
 
 def campaign_start(started_on: date) -> datetime:

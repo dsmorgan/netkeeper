@@ -12,6 +12,7 @@ from email.message import EmailMessage
 
 import factories
 import pytest
+from campaign_fakes import make_mailbox
 from history_fixtures import Tab, workbook_bytes
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -435,3 +436,118 @@ def test_a_notice_naming_another_failed_recipient_is_not_this_ones_bounce() -> N
     message = fake.get_message(ref.id, purpose="test")
     assert not history_scan.names_failed_recipient(message, "eve@example.test")
     assert history_scan.names_failed_recipient(message, "zed@example.test")
+
+
+# --- the subject pass: people the workbook does not list ---------------------------------
+
+
+def _subject_scan(
+    writer: Session, user: User, gmail: FakeGmail, *, rescan: bool = False
+) -> history_scan.ScanReport:
+    read = read_gmail(
+        gmail,
+        scan_targets(writer, user, rescan=rescan),
+        history_scan.subject_targets(writer, user, rescan=rescan),
+    )
+    return apply_scan(writer, user, read, now=NOW)
+
+
+@pytest.fixture
+def answers() -> FakeGmail:
+    """Replies to "Catching up" from people the workbook does not list, and near misses."""
+    fake = FakeGmail(ME, mailbox_id=1, clock=lambda: NOW, aliases=["alias@example.test"])
+    fake.deliver(
+        _mail("Hal Abelson <hal@example.test>", "RE: Catching up", "Sounds good."), at=_at(5)
+    )
+    fake.deliver(_mail("kim@example.test", "Re: Catching up", "Please remove me."), at=_at(6))
+    # Not exactly the subject, before the start day, another of the user's mailboxes
+    # (which -from:me does not cover), and Ada,
+    # whom the workbook already lists.
+    fake.deliver(
+        _mail("ivy@example.test", "Re: Catching up on the conference", "Hello!"), at=_at(5)
+    )
+    fake.deliver(_mail("jo@example.test", "Re: Catching up", "Early."), at=_at(1))
+    fake.deliver(_mail("old@example.test", "Re: Catching up", "Note to self."), at=_at(5))
+    fake.deliver(_mail("ada@example.test", "Re: Catching up", "Listed already."), at=_at(4))
+    return fake
+
+
+def test_the_subject_pass_finds_an_unlisted_replier_and_flags_them(
+    writer: Session, user: User, people: dict[str, Contact], answers: FakeGmail
+) -> None:
+    make_mailbox(writer, user, email="old@example.test")
+    hal = factories.make_contact(writer, user, emails=["hal@example.test"])
+
+    report = _subject_scan(writer, user, answers)
+
+    spring = _row(writer, user, "ada@example.test").history_campaign_id
+    found = {
+        r.email: r
+        for r in writer.scalars(
+            scoped(user, HistoryRecipient).where(HistoryRecipient.found_by_subject.is_(True))
+        )
+    }
+    assert set(found) == {"hal@example.test", "kim@example.test"}
+    assert all(r.history_campaign_id == spring for r in found.values())
+    assert report.by_subject == {spring: 2}
+    assert sorted(report.subject_samples) == ["hal@example.test", "kim@example.test"]
+
+    # Hal: matched, emailed by the campaign, and waiting for review.
+    row = found["hal@example.test"]
+    assert (row.contact_id, row.reply_kind, row.replied_at) == (
+        hal.id,
+        HistoryReplyKind.REPLY,
+        _at(5),
+    )
+    assert hal.needs_review_at == NOW
+    kinds = sorted(
+        e.kind
+        for e in writer.scalars(scoped(user, Interaction).where(Interaction.contact_id == hal.id))
+    )
+    assert kinds == sorted([InteractionKind.EMAIL_OUT, InteractionKind.EMAIL_IN])
+    campaign = factories.make_campaign(writer, user, contacted_within_days_guard=0)
+    (verdict,) = check_enrollment(writer, user, campaign, [hal.id], now=NOW)
+    assert Reason.NEEDS_REVIEW in verdict.reasons
+
+    # Kim: no contact, asked to unsubscribe: the address is off limits anyway.
+    assert found["kim@example.test"].reply_kind is HistoryReplyKind.UNSUBSCRIBE
+    entry = do_not_send.find(writer, user, "kim@example.test")
+    assert entry is not None and entry.reason is DoNotSendReason.OPTED_OUT
+    # Ada was already listed: no second row, and the listed pass did not run here for her.
+    assert _row(writer, user, "ada@example.test").found_by_subject is False
+
+
+def test_a_re_run_of_the_subject_pass_adds_nothing(
+    writer: Session, user: User, people: dict[str, Contact], answers: FakeGmail
+) -> None:
+    _subject_scan(writer, user, answers)
+    counts = (
+        writer.scalar(scoped_count(user, HistoryRecipient)),
+        writer.scalar(scoped_count(user, Interaction)),
+    )
+
+    assert history_scan.subject_targets(writer, user) == []
+    again = _subject_scan(writer, user, answers, rescan=True)
+
+    assert again.by_subject == {}
+    assert (
+        writer.scalar(scoped_count(user, HistoryRecipient)),
+        writer.scalar(scoped_count(user, Interaction)),
+    ) == counts
+
+
+def test_subjects_compare_without_reply_prefixes_and_quotes_never_reach_the_query() -> None:
+    assert history_scan.normalize_subject("RE: Fwd:  re:Catching   UP") == "catching up"
+    assert history_scan.normalize_subject("Catching up on things") != "catching up"
+    target = history_scan.SubjectTarget(
+        campaign_id=1,
+        subject='Say "hi" \\ now',
+        starts=_at(2),
+        after=datetime(2026, 3, 1, tzinfo=UTC),
+        before=datetime(2026, 3, 2, tzinfo=UTC),
+        known=frozenset(),
+        own=frozenset(),
+    )
+    assert history_scan.subject_query(target) == (
+        'subject:"Say hi now" -from:me after:1772323200 before:1772409600'
+    )

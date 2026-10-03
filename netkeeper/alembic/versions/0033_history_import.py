@@ -2,13 +2,15 @@
 
 ``history_campaigns`` holds one row per campaign the old tool's workbook reports,
 unique per user by name and start date, with the workbook's aggregate counts and
-the digest of the file it was last imported from.
+the digest of the file it was last imported from, and when the Gmail scan last
+searched for replies by the campaign's subject.
 
 ``history_recipients`` holds one row per person the workbook names for a campaign,
 unique per user, campaign and address (stored trimmed and lowercased, so the key
 is the key on ``lower(email)``). It records the contact the address matched
 (``SET NULL`` when that contact is deleted), which of the workbook's lists named
-the person, the timeline entries the import and the Gmail scan wrote (``SET
+the person (or that the Gmail scan found them by the campaign's subject), the
+timeline entries the import and the Gmail scan wrote (``SET
 NULL`` when one is deleted), and what the scan found.
 
 No existing data changes. Both tables start empty.
@@ -48,6 +50,7 @@ def upgrade() -> None:
         sa.Column("opens_count", sa.Integer(), nullable=True),
         sa.Column("bounces_count", sa.Integer(), nullable=True),
         sa.Column("source_sha256", sa.String(length=64), nullable=False),
+        sa.Column("subject_scanned_at", sa.DateTime(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.ForeignKeyConstraint(
@@ -73,6 +76,7 @@ def upgrade() -> None:
         sa.Column("opened", sa.Boolean(), nullable=False),
         sa.Column("clicked", sa.Boolean(), nullable=False),
         sa.Column("bounce_listed", sa.Boolean(), nullable=False),
+        sa.Column("found_by_subject", sa.Boolean(), nullable=False),
         sa.Column("email_out_interaction_id", sa.Integer(), nullable=True),
         sa.Column("scanned_at", sa.DateTime(), nullable=True),
         sa.Column("reply_kind", sa.String(length=16), nullable=True),
