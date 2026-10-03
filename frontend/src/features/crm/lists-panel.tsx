@@ -281,14 +281,11 @@ function SmartListFilter({
 }
 
 function StaticListMembers({ list, onChanged }: { list: ListOut; onChanged: () => void }) {
-  const client = useQueryClient()
   const add = useMutation({
     mutationFn: (contactIds: number[]) => addMembers(list.id, contactIds),
-    onSuccess: () => {
-      // The picker's "In list" marks come from the server, so they refresh too.
-      void client.invalidateQueries({ queryKey: ['lists', list.id, 'picker'] })
-      onChanged()
-    },
+    // `onChanged` invalidates ['lists'], which is also the prefix of the
+    // picker's queries, so its "In list" marks refresh with it.
+    onSuccess: onChanged,
   })
 
   return (
@@ -303,7 +300,7 @@ function StaticListMembers({ list, onChanged }: { list: ListOut; onChanged: () =
         <ContactPicker
           listId={list.id}
           adding={add.isPending}
-          onAdd={(contactIds) => add.mutate(contactIds)}
+          onAdd={(contactIds) => add.mutateAsync(contactIds)}
         />
         {add.isError && <ErrorNote label="Could not add the contacts" error={add.error} />}
         {add.isSuccess && (

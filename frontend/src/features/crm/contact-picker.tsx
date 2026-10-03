@@ -36,9 +36,9 @@ async function searchContacts(
   text: string,
   listId: number | null,
   signal: AbortSignal,
-): Promise<PickerContact[]> {
+): Promise<PickerMatches> {
   const names = nameSearchFilter(text, SEARCH_FIELDS)
-  if (names === null) return []
+  if (names === null) return { items: [], total: 0 }
   const where: FilterNode =
     listId === null
       ? names
@@ -58,12 +58,35 @@ async function searchContacts(
       `the search could not be run (${response.status}${error === undefined ? '' : `: ${JSON.stringify(error)}`})`,
     )
   }
-  return data.items.map((row) => ({
-    id: row.id,
-    name: `${row.preferred_name ?? row.first_name ?? ''} ${row.last_name ?? ''}`.trim(),
-    company: row.current_company ?? null,
-    title: row.current_title ?? null,
-  }))
+  return {
+    total: data.total,
+    items: data.items.map((row) => ({
+      id: row.id,
+      name: displayName(row),
+      company: row.current_company ?? null,
+      title: row.current_title ?? null,
+    })),
+  }
+}
+
+interface PickerMatches {
+  items: PickerContact[]
+  total: number
+}
+
+/** "Cy (Cyrus) Dunn" when the preferred name differs from the first; an empty one is missing. */
+function displayName(row: {
+  first_name?: string | null
+  last_name?: string | null
+  preferred_name?: string | null
+}): string {
+  const first = row.first_name ?? ''
+  const preferred = row.preferred_name === '' ? null : (row.preferred_name ?? null)
+  const given =
+    preferred !== null && first !== '' && preferred !== first
+      ? `${preferred} (${first})`
+      : (preferred ?? first)
+  return `${given} ${row.last_name ?? ''}`.trim()
 }
 
 export function ContactPicker({
@@ -73,7 +96,8 @@ export function ContactPicker({
 }: {
   listId: number
   adding: boolean
-  onAdd: (contactIds: number[]) => void
+  /** Resolves once the add succeeded; a rejection keeps the picks. */
+  onAdd: (contactIds: number[]) => Promise<unknown>
 }) {
   const [text, setText] = useState('')
   const [picked, setPicked] = useState<Map<number, string>>(new Map())
@@ -92,7 +116,7 @@ export function ContactPicker({
     enabled: trimmed !== '',
     gcTime: 0,
   })
-  const memberIds = new Set((inList.data ?? []).map((row) => row.id))
+  const memberIds = new Set((inList.data?.items ?? []).map((row) => row.id))
 
   function toggle(contact: PickerContact, on: boolean) {
     setPicked((current) => {
@@ -118,12 +142,12 @@ export function ContactPicker({
       {trimmed !== '' && matches.isError && (
         <ErrorNote label="The search failed" error={matches.error} />
       )}
-      {trimmed !== '' && matches.isSuccess && matches.data.length === 0 && (
+      {trimmed !== '' && matches.isSuccess && matches.data.items.length === 0 && (
         <p className="text-sm text-muted-foreground">Nobody matches “{trimmed}”.</p>
       )}
-      {matches.isSuccess && matches.data.length > 0 && (
+      {matches.isSuccess && matches.data.items.length > 0 && (
         <ul aria-label="Matches" className="divide-y rounded-lg border text-sm">
-          {matches.data.map((row) => {
+          {matches.data.items.map((row) => {
             const member = memberIds.has(row.id)
             const detail = [row.title, row.company].filter((part) => part !== null).join(' · ')
             return (
@@ -133,7 +157,6 @@ export function ContactPicker({
                 >
                   <input
                     type="checkbox"
-                    aria-label={row.name}
                     disabled={member}
                     checked={member || picked.has(row.id)}
                     onChange={(event) => toggle(row, event.target.checked)}
@@ -151,13 +174,26 @@ export function ContactPicker({
           })}
         </ul>
       )}
+      {matches.isSuccess && matches.data.total > PICKER_LIMIT && (
+        <p className="text-xs text-muted-foreground">
+          Showing {PICKER_LIMIT} of {matches.data.total}. Type more of the name to narrow it.
+        </p>
+      )}
+      {inList.isError && (
+        <p role="alert" className="text-xs text-destructive">
+          Could not check which of these are already in the list.
+        </p>
+      )}
       <div className="flex items-center gap-2">
         <Button
           type="button"
           disabled={picked.size === 0 || adding}
           onClick={() => {
-            onAdd([...picked.keys()])
-            setPicked(new Map())
+            // The picks stay until the add succeeds; the caller shows a failure.
+            onAdd([...picked.keys()]).then(
+              () => setPicked(new Map()),
+              () => {},
+            )
           }}
         >
           Add
