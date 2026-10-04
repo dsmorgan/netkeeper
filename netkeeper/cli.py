@@ -36,6 +36,7 @@ from netkeeper.crm.exports import ExportError, ExportFormat, ExportPreset, expor
 from netkeeper.crm.filters import FilterError, FilterTree, SortKey, parse_filter, parse_sort
 from netkeeper.crm.history import ImportReport, import_workbook
 from netkeeper.crm.history_workbook import WorkbookError, read_workbook
+from netkeeper.crm.inbox_apply import clear_short_first_poll
 from netkeeper.crm.lists import ListCount, find_list, list_lists, list_views, member_counts
 from netkeeper.crm.self_contact import ensure_self_contact
 from netkeeper.crm.tags import ensure_default_rules, find_tag, list_tags, run_rules
@@ -1213,6 +1214,32 @@ def linkedin_inbox(ctx: typer.Context) -> None:
     loads no page.
     """
     _run_by_hand(ctx, SyncRunKind.INBOX)
+
+
+@linkedin_app.command("inbox-acknowledge")
+def linkedin_inbox_acknowledge(ctx: typer.Context) -> None:
+    """Clear the warning that the first inbox poll could not read back far enough.
+
+    The first poll reads up to 200 conversations to reach the earliest outreach it
+    watches for replies to. When it cannot, it counts as complete anyway and `netkeeper
+    posture` warns you to check older LinkedIn replies by hand. Run this once you have.
+    It touches no browser and visits nothing.
+    """
+    state = ctx.ensure_object(CliState)
+    _load_settings_or_exit(state)
+    engine = make_engine(database_url())
+    try:
+        factory = make_session_factory(engine)
+        install_scope_guard(factory)
+        with session_scope(factory, write=True) as session:
+            cleared = clear_short_first_poll(session, _local_user_or_exit(session))
+    finally:
+        engine.dispose()
+    typer.echo(
+        "cleared: the first inbox poll's warning is acknowledged"
+        if cleared
+        else "nothing to acknowledge: no first inbox poll fell short"
+    )
 
 
 def _run_by_hand(

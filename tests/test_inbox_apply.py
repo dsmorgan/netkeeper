@@ -37,12 +37,14 @@ from netkeeper.models import (
     Interaction,
     InteractionKind,
     LiConversation,
+    MessageDirection,
     MessageStatus,
     TemplateChannel,
     User,
 )
 from netkeeper.scoping import scoped
 from netkeeper.services import campaign_guards
+from netkeeper.services.campaign_replies import WATCH_AFTER_COMPLETED
 
 NOW = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
 THEN = datetime(2026, 9, 22, 14, 22, 10, 750_000, tzinfo=UTC)  # a fraction of a second on
@@ -507,3 +509,61 @@ def test_an_archived_invitation_is_never_taken_for_a_polled_message(
     ledger = archive_module._Interactions(writer, user)
     assert ledger.add(ben.id, InteractionKind.LI_OUT, at, f"{INVITATION_SUMMARY}: invented note")
     assert not ledger.add(ben.id, InteractionKind.LI_OUT, at, "Invented opener.")  # a message is
+
+
+def test_an_archive_row_that_already_has_a_urn_is_never_adopted(
+    writer: Session, user: User
+) -> None:
+    """An archive row another message already adopted stands for that message only."""
+    ada = _contact(writer, user, ADA)
+    add_interaction(
+        writer,
+        user,
+        ada.id,
+        InteractionKind.LI_IN,
+        THEN.replace(microsecond=0),
+        "Invented reply.",
+        source=ContactSource.ARCHIVE,
+        external_id="urn:li:msg_message:INVENTEDEARLIER",
+    )
+    other = conversation("one", ADA, [message(2, sender=ADA, at=THEN, tag="one")])
+    counts = inbox_apply.apply_delta(writer, user, delta(other), polled_at=NOW)
+    assert counts.messages_new == 1
+    assert len(_interactions(writer, user)) == 2
+
+
+def test_first_live_outreach_watches_what_the_reply_poll_watches(
+    writer: Session, user: User
+) -> None:
+    campaign = factories.make_campaign(writer, user)
+    live = factories.make_enrollment(writer, campaign, _contact(writer, user, ADA))
+    recent = factories.make_enrollment(
+        writer, campaign, _contact(writer, user, BEN), status=EnrollmentStatus.COMPLETED
+    )
+    stale = factories.make_enrollment(
+        writer,
+        campaign,
+        _contact(writer, user, profile_urn("stale")),
+        status=EnrollmentStatus.COMPLETED,
+    )
+    assert inbox_apply.first_live_outreach(writer, user, now=NOW) is None
+    factories.make_message(writer, live, sent_at=NOW - timedelta(days=5))
+    # A reply is inbound: never the start of what the poll watches.
+    factories.make_message(
+        writer,
+        live,
+        direction=MessageDirection.IN,
+        status=MessageStatus.RECEIVED,
+        sent_at=NOW - timedelta(days=50),
+    )
+    assert inbox_apply.first_live_outreach(writer, user, now=NOW) == NOW - timedelta(days=5)
+
+    # A completed enrollment whose latest send is within the window counts from its first.
+    factories.make_message(writer, recent, sent_at=NOW - timedelta(days=40))
+    factories.make_message(writer, recent, position=1, sent_at=NOW - timedelta(days=20))
+    assert inbox_apply.first_live_outreach(writer, user, now=NOW) == NOW - timedelta(days=40)
+
+    # One whose latest send is past it does not.
+    factories.make_message(writer, stale, sent_at=NOW - timedelta(days=90))
+    assert timedelta(days=30) == WATCH_AFTER_COMPLETED
+    assert inbox_apply.first_live_outreach(writer, user, now=NOW) == NOW - timedelta(days=40)

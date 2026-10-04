@@ -88,6 +88,17 @@ importer has ever written. :func:`is_invitation` is the one reader.
 """
 
 
+def summary_is_invitation(summary: str | None) -> bool:
+    """:func:`is_invitation` for a summary already loaded: the same whole-token marker.
+
+    The archive import and the inbox poll's dedupe both use it: an invitation is not a
+    message, so neither matches one against the other's messages.
+    """
+    return summary is not None and (
+        summary == INVITATION_SUMMARY or summary.startswith(f"{INVITATION_SUMMARY}:")
+    )
+
+
 def is_invitation() -> ColumnElement[bool]:
     """SQL: this interaction is an invitation rather than a message.
 

@@ -625,6 +625,7 @@ STOP_REASON_TEXT: Final[Mapping[str, str]] = {
     "answer_lost": "lost some of the page's answers",
     "inbox_read": "read the inbox back to the last complete poll",
     "inbox_incomplete": "read part of the inbox; the next poll reads it again",
+    "inbox_first_short": "the first poll could not read back to the earliest outreach",
     # what LinkedIn answered
     "throttled": "LinkedIn throttled it",
     "checkpoint": "LinkedIn showed a checkpoint",

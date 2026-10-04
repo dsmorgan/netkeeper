@@ -77,6 +77,7 @@ from netkeeper.campaigns.templates import (
     removed_field_campaigns,
 )
 from netkeeper.config import HeatSettings, LinkedInSettings, PacingSettings, Settings
+from netkeeper.crm.inbox_apply import short_first_poll
 from netkeeper.linkedin import activity_lock
 from netkeeper.linkedin import heat as heat_math
 from netkeeper.linkedin.classify import Outcome
@@ -529,6 +530,7 @@ def posture(
         _scheduled_jobs(scheduler),
         _scheduled_runs_armed(session, user, account_id),
         _reply_poll(session, user, now=now, settings=settings),
+        _linkedin_reply_poll(session, user),
         _sending_hours(session, user),
         _next_campaign_send(session, user, zone=zone, now=now, settings=settings),
         _campaign_templates(session, user),
@@ -1597,6 +1599,39 @@ def _reply_poll(session: Session, user: User, *, now: datetime, settings: Settin
         value=value,
         notes=tuple(notes),
         brief=f"every {minutes} min; {mailboxes}, {polled_brief}",
+    )
+
+
+def _linkedin_reply_poll(session: Session, user: User) -> Protection:
+    """The LinkedIn inbox poll (P4-08): its last complete poll, and a short first one.
+
+    The poll has no page source until P4-01 (#380), so it is not scheduled. A first
+    poll that could not read back to the earliest outreach it watches counted as
+    complete anyway; that stays a warning, because replies older than what it read
+    were never seen, until a later complete poll covers the date or a person
+    acknowledges it (``netkeeper linkedin inbox-acknowledge``).
+    """
+    last = latest_run(session, user, SyncRunKind.INBOX, status=SyncRunStatus.COMPLETED)
+    value = (
+        "no complete poll yet"
+        if last is None
+        else f"last complete poll {last.started_at:%Y-%m-%d %H:%M UTC}"
+    )
+    value += "; no page source yet, so `netkeeper serve` does not schedule it"
+    short_of = short_first_poll(session, user)
+    warnings: tuple[str, ...] = ()
+    if short_of is not None:
+        warnings = (
+            f"the first LinkedIn inbox poll couldn't read back to {short_of:%Y-%m-%d};"
+            " check older LinkedIn replies by hand, then run"
+            " `netkeeper linkedin inbox-acknowledge`",
+        )
+    return Protection(
+        name="linkedin reply poll",
+        status=Status.ON,
+        value=value,
+        warnings=warnings,
+        brief="no complete poll yet" if last is None else f"{last.started_at:%Y-%m-%d}",
     )
 
 
