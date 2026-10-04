@@ -170,7 +170,7 @@ describe('ruleApplies', () => {
   it('takes every other rule from the lint metadata', () => {
     const rules = Object.keys(PROMPT_RULES)
     const linkedinOnly = rules.filter((rule) => rule.startsWith('linkedin_')).length
-    expect(linkedinOnly).toBe(5)
+    expect(linkedinOnly).toBe(6)
     const shared = rules.length - 2 - linkedinOnly // missing_subject, missing_value
     expect(lintRulesFor('linkedin')).toHaveLength(shared + linkedinOnly)
     expect(lintRulesFor('email')).toHaveLength(shared + 1)

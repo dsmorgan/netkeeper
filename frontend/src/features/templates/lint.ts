@@ -49,6 +49,8 @@ export const WHY_IT_MATTERS: Readonly<Record<LintRule, string>> = {
   linkedin_subject:
     'LinkedIn messages have no subject line, so this text would never reach the person.',
   linkedin_too_long: 'LinkedIn refuses a message this long, so the prefill could never send it.',
+  linkedin_typing_time:
+    'The prefill types each character like a person would and gives up after five minutes, so a message this slow to type may never be sent.',
   linkedin_long:
     'The prefill types each character like a person would, so a long message takes minutes and may not finish.',
   linkedin_newline:
@@ -81,10 +83,13 @@ export const PROMPT_RULES: Readonly<Record<LintRule, string | null>> = {
     'Use no placeholder for a detail about me. Leave out my own name and signature: I add them myself.',
   linkedin_subject: 'LinkedIn messages have no subject line: write only the body.',
   linkedin_too_long: 'Keep each LinkedIn message under 8,000 characters.',
+  linkedin_typing_time:
+    'Keep each LinkedIn message short enough to type in four minutes, about 1,200 characters of plain text.',
   linkedin_long: 'Keep each LinkedIn message under 1,000 characters, so it can be typed in time.',
   linkedin_newline:
     'Write each LinkedIn message as one paragraph on one line, with no line breaks.',
-  linkedin_untypable: 'Use no tabs or other control characters in a LinkedIn message.',
+  linkedin_untypable:
+    'Use no tabs, control characters, or invisible formatting characters in a LinkedIn message.',
 }
 
 const LINE_PREFIX = /^line (\d+): /

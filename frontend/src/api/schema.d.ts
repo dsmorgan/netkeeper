@@ -5217,7 +5217,7 @@ export interface components {
          * LintRule
          * @enum {string}
          */
-        LintRule: "syntax" | "unsupported" | "unsafe_attribute" | "attribute_access" | "undefined_variable" | "no_contact_field" | "missing_subject" | "bad_link" | "missing_value" | "removed_field" | "linkedin_subject" | "linkedin_too_long" | "linkedin_long" | "linkedin_newline" | "linkedin_untypable";
+        LintRule: "syntax" | "unsupported" | "unsafe_attribute" | "attribute_access" | "undefined_variable" | "no_contact_field" | "missing_subject" | "bad_link" | "missing_value" | "removed_field" | "linkedin_subject" | "linkedin_too_long" | "linkedin_typing_time" | "linkedin_long" | "linkedin_newline" | "linkedin_untypable";
         /** LintStepOut */
         LintStepOut: {
             /** Errors */

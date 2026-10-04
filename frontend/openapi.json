@@ -6780,6 +6780,7 @@
           "removed_field",
           "linkedin_subject",
           "linkedin_too_long",
+          "linkedin_typing_time",
           "linkedin_long",
           "linkedin_newline",
           "linkedin_untypable"

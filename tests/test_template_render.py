@@ -18,8 +18,6 @@ from netkeeper.campaigns.render import (
     ALLOWED_NODES,
     ALLOWED_TESTS,
     CONTACT_FIELDS,
-    LINKEDIN_ALLOW_NEWLINES,
-    LINKEDIN_MESSAGE_LONG_CHARS,
     LINKEDIN_MESSAGE_MAX_CHARS,
     MAX_INT_BITS,
     MAX_LITERAL_CHARS,
@@ -41,6 +39,8 @@ from netkeeper.campaigns.render import (
     placeholder_example,
     render,
 )
+from netkeeper.linkedin import pacing
+from netkeeper.linkedin.pacing import TYPING_LINT_SECONDS, TYPING_WARN_CHARS
 from netkeeper.models import TemplateChannel
 
 EMAIL = TemplateChannel.EMAIL
@@ -936,8 +936,18 @@ def _sized(chars: int) -> str:
 
 def test_the_linkedin_limits_are_pinned() -> None:
     assert LINKEDIN_MESSAGE_MAX_CHARS == 8000
-    assert LINKEDIN_MESSAGE_LONG_CHARS == 1000
-    assert LINKEDIN_ALLOW_NEWLINES is False
+    assert TYPING_WARN_CHARS == 1000
+    assert TYPING_LINT_SECONDS == 240
+
+
+def test_lint_reads_the_newline_flag_from_the_pacing_module() -> None:
+    # The one flag P4-03 flips: lint holds no copy of its own.
+    assert (
+        vars(render_module)["SHIFT_ENTER_NEWLINES_ALLOWED"] is pacing.SHIFT_ENTER_NEWLINES_ALLOWED
+    )
+    assert pacing.SHIFT_ENTER_NEWLINES_ALLOWED is False
+    assert not hasattr(render_module, "LINKEDIN_ALLOW_NEWLINES")
+    assert not hasattr(render_module, "LINKEDIN_MESSAGE_LONG_CHARS")
 
 
 @pytest.mark.parametrize("subject", ["Hello", "", "   "])
@@ -949,13 +959,13 @@ def test_a_linkedin_template_with_a_subject_is_an_error(subject: str) -> None:
 
 
 def test_a_linkedin_body_at_the_warning_limit_is_clean() -> None:
-    body = _sized(LINKEDIN_MESSAGE_LONG_CHARS)
+    body = _sized(TYPING_WARN_CHARS)
     assert len(body) == 1000
     assert lint(LINKEDIN, None, body) == []
 
 
 def test_a_linkedin_body_over_the_warning_limit_is_a_warning() -> None:
-    issues = lint(LINKEDIN, None, _sized(LINKEDIN_MESSAGE_LONG_CHARS + 1))
+    issues = lint(LINKEDIN, None, _sized(TYPING_WARN_CHARS + 1))
     assert _lines(issues) == [(LintRule.LINKEDIN_LONG, None, 1)]
     assert issues[0].severity is Severity.WARNING
     assert issues[0].part is Part.BODY
@@ -963,12 +973,32 @@ def test_a_linkedin_body_over_the_warning_limit_is_a_warning() -> None:
     assert not has_errors(issues)
 
 
-def test_a_linkedin_body_at_the_hard_limit_is_only_long() -> None:
+def test_a_linkedin_body_too_slow_to_type_is_an_error() -> None:
+    # 1,275 characters of this shape are expected to take just over 240 seconds.
+    slow = _sized(1275)
+    assert pacing.typing_expected_seconds(slow) > TYPING_LINT_SECONDS
+    issues = lint(LINKEDIN, None, slow)
+    assert _lines(issues) == [(LintRule.LINKEDIN_TYPING_TIME, None, 1)]
+    assert issues[0].severity is Severity.ERROR
+    assert "takes about 241 seconds to type, over 240" in issues[0].message
+    just_under = _sized(1274)
+    assert pacing.typing_expected_seconds(just_under) <= TYPING_LINT_SECONDS
+    assert [i.rule for i in lint(LINKEDIN, None, just_under)] == [LintRule.LINKEDIN_LONG]
+
+
+def test_a_short_body_can_still_be_too_slow_to_type() -> None:
+    # Every sentence end adds a pause, so this is slow at well under 1,000 characters.
+    body = "Hi {{ first_name }}. " + "A. " * 320
+    assert len(body) < TYPING_WARN_CHARS
+    issues = lint(LINKEDIN, None, body)
+    assert [issue.rule for issue in issues] == [LintRule.LINKEDIN_TYPING_TIME]
+
+
+def test_a_linkedin_body_at_the_hard_limit_is_too_slow_to_type() -> None:
     body = _sized(LINKEDIN_MESSAGE_MAX_CHARS)
     assert len(body) == 8000
     issues = lint(LINKEDIN, None, body)
-    assert [issue.rule for issue in issues] == [LintRule.LINKEDIN_LONG]
-    assert not has_errors(issues)
+    assert [issue.rule for issue in issues] == [LintRule.LINKEDIN_TYPING_TIME]
 
 
 def test_a_linkedin_body_over_the_hard_limit_is_an_error() -> None:
@@ -1029,7 +1059,7 @@ def test_other_control_characters_are_always_an_error(
 ) -> None:
     body = "Hi {{ first_name }}," + char + "thanks"
     for allowed in (False, True):  # whatever the newline flag says
-        monkeypatch.setattr(render_module, "LINKEDIN_ALLOW_NEWLINES", allowed)
+        monkeypatch.setattr(render_module, "SHIFT_ENTER_NEWLINES_ALLOWED", allowed)
         issues = lint(LINKEDIN, None, body)
         assert _lines(issues) == [(LintRule.LINKEDIN_UNTYPABLE, None, 1)], allowed
         assert issues[0].severity is Severity.ERROR
@@ -1042,13 +1072,13 @@ def test_a_control_character_in_a_literal_is_an_error() -> None:
 
 
 def test_the_newline_flag_decides_only_about_cr_and_lf(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(render_module, "LINKEDIN_ALLOW_NEWLINES", True)
+    monkeypatch.setattr(render_module, "SHIFT_ENTER_NEWLINES_ALLOWED", True)
     assert lint(LINKEDIN, None, "Hi {{ first_name }},\r\nthanks\n") == []
 
 
 def test_the_line_of_a_long_body_is_where_it_passes_the_limit() -> None:
     first = "Hi {{ first_name }} " + "x" * 600
-    issues = lint(LINKEDIN, None, first + "\n" + "y" * 600)
+    issues = lint(LINKEDIN, None, first + "\n" + "y" * 500)
     assert _lines(issues) == [
         (LintRule.LINKEDIN_LONG, None, 2),
         (LintRule.LINKEDIN_NEWLINE, None, 1),
@@ -1089,7 +1119,7 @@ def test_a_merge_value_that_adds_length_fails_the_rendered_linkedin_message() ->
     body = "Hi {{ first_name }}, {{ personal_line }}"
     long = render(
         LINKEDIN, None, body,
-        MergeValues(contact={"first_name": "Bo"}, personal_line="x" * 1500),
+        MergeValues(contact={"first_name": "Bo"}, personal_line="x" * 1100),
         today=TODAY,
     )  # fmt: skip
     assert _lines(list(long.issues)) == [(LintRule.LINKEDIN_LONG, None, None)]
@@ -1101,6 +1131,13 @@ def test_a_merge_value_that_adds_length_fails_the_rendered_linkedin_message() ->
     )  # fmt: skip
     assert _lines(list(too_long.issues)) == [(LintRule.LINKEDIN_TOO_LONG, None, None)]
     assert has_errors(too_long.issues)
+    slow = render(
+        LINKEDIN, None, body,
+        MergeValues(contact={"first_name": "Bo"}, personal_line="x" * 1500),
+        today=TODAY,
+    )  # fmt: skip
+    assert _lines(list(slow.issues)) == [(LintRule.LINKEDIN_TYPING_TIME, None, None)]
+    assert "the rendered message takes about" in slow.issues[0].message
 
 
 def test_a_merge_value_with_a_control_character_fails_the_rendered_linkedin_message() -> None:
@@ -1112,11 +1149,18 @@ def test_a_merge_value_with_a_control_character_fails_the_rendered_linkedin_mess
     assert "the rendered message contains a tab" in rendered.issues[0].message
 
 
-def test_a_too_long_template_that_renders_long_gets_no_extra_long_warning() -> None:
-    body = "Hi {{ first_name }} " + "x" * 1500 + "{# " + "y" * 7000 + " #}"
+@pytest.mark.parametrize("padding", [1100, 1500], ids=["renders_long", "renders_slow"])
+def test_a_too_long_template_gets_no_second_length_finding_for_the_render(padding: int) -> None:
+    body = "Hi {{ first_name }} " + "x" * padding + "{# " + "y" * 7000 + " #}"
     rendered = render(LINKEDIN, None, body, _values(first_name="Bo"), today=TODAY)
-    assert LINKEDIN_MESSAGE_LONG_CHARS < len(rendered.body) <= LINKEDIN_MESSAGE_MAX_CHARS
+    assert TYPING_WARN_CHARS < len(rendered.body) <= LINKEDIN_MESSAGE_MAX_CHARS
     assert [issue.rule for issue in rendered.issues] == [LintRule.LINKEDIN_TOO_LONG]
+
+
+def test_a_slow_template_that_renders_long_gets_no_extra_long_warning() -> None:
+    body = "Hi {{ first_name }}. " + "A. " * 320
+    rendered = render(LINKEDIN, None, body, _values(first_name="Bo"), today=TODAY)
+    assert [issue.rule for issue in rendered.issues] == [LintRule.LINKEDIN_TYPING_TIME]
 
 
 def test_a_linkedin_finding_in_the_template_is_not_repeated_for_the_render() -> None:
