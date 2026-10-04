@@ -136,6 +136,8 @@ def test_typing_constants_are_pinned_to_the_decision() -> None:
     assert pacing.TYPING_LINT_SECONDS == 240
     # The same line breaks netkeeper.campaigns.render splits a header on.
     assert frozenset("\r\n\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029") == pacing.LINE_BREAK_CHARS
+    # The only line breaks the newline flag governs.
+    assert frozenset({"\r", "\n"}) == pacing.NEWLINE_CHARS
     # Multi-line stays refused until P4-06 (#374) shows Shift+Enter never sends.
     assert pacing.SHIFT_ENTER_NEWLINES_ALLOWED is False
 
@@ -212,15 +214,16 @@ _CONTROLS = [chr(cp) for cp in [*range(0x00, 0x20), 0x7F, *range(0x80, 0xA0)]]
 
 @pytest.mark.parametrize("char", _CONTROLS, ids=[f"U+{ord(c):04X}" for c in _CONTROLS])
 def test_every_control_character_is_refused_or_a_newline_step(char: str) -> None:
-    """Every C0 and C1 control and DEL: a line break by default raises
-    MultilineRefused; with newlines allowed it becomes a newline step; anything else
-    raises UnsupportedCharacter either way."""
+    """Every C0 and C1 control and DEL: CR or LF by default raises MultilineRefused,
+    and with newlines allowed becomes a newline step. Anything else, including the
+    other line breaks (VT, FF, FS, GS, RS, NEL), raises UnsupportedCharacter with the
+    flag on or off."""
     text = f"secret{char}body"
     with pytest.raises(TypingPlanError) as raised:
         typing_plan(text, random.Random(0))
     assert "secret" not in str(raised.value)
     assert is_untypable(char)
-    if char in pacing.LINE_BREAK_CHARS:
+    if char in {"\r", "\n"}:
         assert isinstance(raised.value, MultilineRefused)
         plan = typing_plan(text, random.Random(0), allow_newlines=True)
         assert [step.newline for step in plan].count(True) == 1
@@ -233,13 +236,16 @@ def test_every_control_character_is_refused_or_a_newline_step(char: str) -> None
 @pytest.mark.parametrize(
     "char",
     [
-        "\u2028",  # line separator: a line break
-        "\u2029",  # paragraph separator: a line break
+        "\u2028",  # line separator
+        "\u2029",  # paragraph separator
     ],
 )
-def test_unicode_separators_are_line_breaks(char: str) -> None:
-    with pytest.raises(MultilineRefused):
-        typing_plan(f"a{char}b", random.Random(0))
+@pytest.mark.parametrize("allow_newlines", [False, True])
+def test_unicode_separators_are_refused_whatever_the_flag(char: str, allow_newlines: bool) -> None:
+    assert char in pacing.LINE_BREAK_CHARS
+    assert char not in pacing.NEWLINE_CHARS
+    with pytest.raises(UnsupportedCharacter):
+        typing_plan(f"a{char}b", random.Random(0), allow_newlines=allow_newlines)
 
 
 @pytest.mark.parametrize(
